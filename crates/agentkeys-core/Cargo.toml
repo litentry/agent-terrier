@@ -1,0 +1,15 @@
+[package]
+name = "agentkeys-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agentkeys-types = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ciborium = "0.2"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
