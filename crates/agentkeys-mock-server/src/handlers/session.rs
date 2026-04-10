@@ -1,0 +1,187 @@
+use axum::{
+    extract::State,
+    http::HeaderMap,
+    Json,
+};
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::{
+    auth::{derive_pair_code_from_nonce, extract_bearer_token, generate_nonce, generate_token, generate_wallet_address, now_secs, validate_session},
+    error::{AppError, AppResult},
+    state::SharedState,
+};
+use agentkeys_types::{AuthToken, Scope};
+use ed25519_dalek::SigningKey;
+
+#[derive(Deserialize)]
+pub struct CreateSessionRequest {
+    pub auth_token: String,
+}
+
+#[derive(Serialize)]
+pub struct CreateSessionResponse {
+    pub session: String,
+    pub wallet: String,
+}
+
+pub async fn create_session(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> AppResult<Json<CreateSessionResponse>> {
+    let auth_token = body.get("auth_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("auth_token required"))?;
+
+    // Mock validation: reject obviously bad tokens
+    if auth_token.is_empty() || auth_token == "invalid" {
+        return Err(AppError::unauthorized("invalid auth token"));
+    }
+
+    let db = state.db.lock().unwrap();
+    let now = now_secs();
+
+    // Check if account with this auth_token already exists
+    let existing: Option<(String, String)> = db
+        .query_row(
+            "SELECT wallet_address, auth_token FROM accounts WHERE auth_token = ?1",
+            params![auth_token],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
+    if let Some((wallet_address, _)) = existing {
+        // Return existing session or create a new one for the existing account
+        let session_token = generate_token();
+        db.execute(
+            "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
+             VALUES (?1, ?2, NULL, NULL, ?3, ?4, 0)",
+            params![session_token, wallet_address, now, 86400u64],
+        )
+        .map_err(|e| AppError::internal(e.to_string()))?;
+        return Ok(Json(CreateSessionResponse { session: session_token, wallet: wallet_address }));
+    }
+
+    // Create new account
+    let wallet_address = generate_wallet_address();
+    let mut rng = rand::thread_rng();
+    let signing_key = SigningKey::generate(&mut rng);
+    let public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
+    let private_key_bytes = signing_key.to_bytes().to_vec();
+
+    db.execute(
+        "INSERT INTO accounts (wallet_address, auth_token, public_key, private_key, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![wallet_address, auth_token, public_key_bytes, private_key_bytes, now],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+
+    let session_token = generate_token();
+    db.execute(
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
+         VALUES (?1, ?2, NULL, NULL, ?3, ?4, 0)",
+        params![session_token, wallet_address, now, 86400u64],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+
+    Ok(Json(CreateSessionResponse { session: session_token, wallet: wallet_address }))
+}
+
+#[derive(Deserialize)]
+pub struct CreateChildSessionRequest {
+    pub scope: Scope,
+}
+
+#[derive(Serialize)]
+pub struct CreateChildSessionResponse {
+    pub session: String,
+    pub wallet: String,
+}
+
+pub async fn create_child_session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> AppResult<Json<CreateChildSessionResponse>> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer_token)
+        .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
+
+    let parent = validate_session(&state, token)?;
+
+    let scope: Scope = serde_json::from_value(
+        body.get("scope").cloned().ok_or_else(|| AppError::bad_request("scope required"))?,
+    )
+    .map_err(|e| AppError::bad_request(e.to_string()))?;
+
+    let scope_json = serde_json::to_string(&scope).map_err(|e| AppError::internal(e.to_string()))?;
+    let child_wallet = generate_wallet_address();
+    let child_token = generate_token();
+    let now = now_secs();
+
+    let db = state.db.lock().unwrap();
+
+    // Create a child account entry so child wallet can own credentials
+    // We reuse the parent's keypair for simplicity in mock
+    let (pub_key, priv_key): (Vec<u8>, Vec<u8>) = db
+        .query_row(
+            "SELECT public_key, private_key FROM accounts WHERE wallet_address = ?1",
+            params![parent.wallet_address],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| AppError::internal(e.to_string()))?;
+
+    db.execute(
+        "INSERT OR IGNORE INTO accounts (wallet_address, auth_token, public_key, private_key, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![child_wallet, format!("child:{}", child_token), pub_key, priv_key, now],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+
+    db.execute(
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        params![child_token, child_wallet, parent.token, scope_json, now, 3600u64],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+
+    Ok(Json(CreateChildSessionResponse { session: child_token, wallet: child_wallet }))
+}
+
+#[derive(Deserialize)]
+pub struct RevokeSessionRequest {
+    pub target_session: String,
+}
+
+pub async fn revoke_session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer_token)
+        .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
+
+    let _session = validate_session(&state, token)?;
+
+    let target_token = body
+        .get("target_session")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("target_session required"))?;
+
+    let db = state.db.lock().unwrap();
+    let rows_affected = db
+        .execute("UPDATE sessions SET revoked = 1 WHERE token = ?1", params![target_token])
+        .map_err(|e| AppError::internal(e.to_string()))?;
+
+    if rows_affected == 0 {
+        return Err(AppError::not_found("target session not found"));
+    }
+
+    Ok(Json(json!({ "ok": true })))
+}

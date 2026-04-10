@@ -2,3 +2,37 @@
 name = "agentkeys-mock-server"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "agentkeys-mock-server"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_mock_server"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-types = { workspace = true }
+agentkeys-core = { workspace = true }
+axum = { version = "0.7", features = ["json", "query"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower-http = { version = "0.5", features = ["cors"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+ciborium = "0.2"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+tokio = { workspace = true }
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
