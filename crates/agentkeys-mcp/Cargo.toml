@@ -2,3 +2,17 @@
 name = "agentkeys-mcp"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "agentkeys_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-types = { workspace = true }
+agentkeys-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = "0.1"

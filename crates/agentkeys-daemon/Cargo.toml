@@ -2,3 +2,32 @@
 name = "agentkeys-daemon"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "agentkeys-daemon"
+path = "src/main.rs"
+
+[dependencies]
+agentkeys-types = { workspace = true }
+agentkeys-core = { workspace = true }
+agentkeys-mcp = { path = "../agentkeys-mcp" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+agentkeys-mock-server = { path = "../agentkeys-mock-server" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tower = { version = "0.4", features = ["util"] }
+axum = { version = "0.7", features = ["json", "query"] }
+http-body-util = "0.1"
+tokio = { workspace = true }
+base64 = "0.22"
+libc = "0.2"

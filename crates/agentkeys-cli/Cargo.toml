@@ -2,3 +2,32 @@
 name = "agentkeys-cli"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "agentkeys"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_cli"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-types = { workspace = true }
+agentkeys-core = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+keyring = "2"
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+agentkeys-mock-server = { path = "../agentkeys-mock-server" }
+tokio = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+axum = { version = "0.7", features = ["json"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = { workspace = true }
