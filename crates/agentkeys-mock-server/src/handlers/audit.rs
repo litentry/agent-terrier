@@ -31,25 +31,42 @@ pub async fn query_audit(
         .and_then(extract_bearer_token)
         .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
 
-    let _session = validate_session(&state, token)?;
+    let session = validate_session(&state, token)?;
 
     let db = state.db.lock().unwrap();
 
+    // Restrict results to events where the session has access.
+    // A session may see events where:
+    //   1. owner_wallet == session.wallet (they are the owner), OR
+    //   2. owner_wallet is a direct child of session.wallet (they own the child), OR
+    //   3. agent_wallet == session.wallet (they are the agent in the event).
+    // Use ? placeholders sequentially.
     let mut sql = String::from(
-        "SELECT owner_wallet, agent_wallet, service_name, action, result, timestamp FROM audit_log WHERE 1=1",
+        "SELECT owner_wallet, agent_wallet, service_name, action, result, timestamp FROM audit_log
+         WHERE (owner_wallet = ?
+                OR owner_wallet IN (
+                    SELECT wallet_address FROM sessions
+                    WHERE parent_token IN (SELECT token FROM sessions WHERE wallet_address = ?)
+                )
+                OR agent_wallet = ?)",
     );
-    let mut bind_values: Vec<String> = Vec::new();
+    // Bind slots: session wallet (owner check), session wallet (child check), session wallet (agent check)
+    let mut bind_values: Vec<String> = vec![
+        session.wallet_address.clone(),
+        session.wallet_address.clone(),
+        session.wallet_address.clone(),
+    ];
 
     if let Some(owner) = &query.owner {
-        sql.push_str(&format!(" AND owner_wallet = ?{}", bind_values.len() + 1));
+        sql.push_str(" AND owner_wallet = ?");
         bind_values.push(owner.clone());
     }
     if let Some(agent) = &query.agent {
-        sql.push_str(&format!(" AND agent_wallet = ?{}", bind_values.len() + 1));
+        sql.push_str(" AND agent_wallet = ?");
         bind_values.push(agent.clone());
     }
     if let Some(service) = &query.service {
-        sql.push_str(&format!(" AND service_name = ?{}", bind_values.len() + 1));
+        sql.push_str(" AND service_name = ?");
         bind_values.push(service.clone());
     }
 
@@ -78,7 +95,6 @@ pub async fn query_audit(
 pub async fn shielding_key(
     State(state): State<SharedState>,
 ) -> AppResult<Json<Value>> {
-    use ed25519_dalek::VerifyingKey;
     let pub_key_bytes = state.shielding_public_key.to_bytes().to_vec();
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &pub_key_bytes);
     Ok(Json(json!({ "public_key": encoded })))

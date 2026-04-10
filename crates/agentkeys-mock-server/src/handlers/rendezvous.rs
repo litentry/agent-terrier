@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::{
-    auth::{extract_bearer_token, now_secs, validate_session},
+    auth::{extract_bearer_token, generate_token, now_secs, validate_session},
     error::{AppError, AppResult},
     state::SharedState,
 };
@@ -56,14 +56,18 @@ pub async fn register_rendezvous(
         return Err(AppError::conflict("pair code already registered"));
     }
 
+    // Generate a secret registration token distinct from the pair_code.
+    // The daemon uses this token to poll; the pair_code is the human-visible code.
+    let registration_token = generate_token();
+
     db.execute(
-        "INSERT INTO rendezvous_registrations (pair_code, daemon_pubkey, payload, delivered, created_at, ttl_seconds)
-         VALUES (?1, ?2, NULL, 0, ?3, 300)",
-        params![pair_code, daemon_pubkey, now],
+        "INSERT INTO rendezvous_registrations (pair_code, registration_token, daemon_pubkey, payload, delivered, consumed, created_at, ttl_seconds)
+         VALUES (?1, ?2, ?3, NULL, 0, 0, ?4, 300)",
+        params![pair_code, registration_token, daemon_pubkey, now],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
-    Ok(Json(json!({ "registration_token": pair_code })))
+    Ok(Json(json!({ "registration_token": registration_token })))
 }
 
 #[derive(Deserialize)]
@@ -75,7 +79,7 @@ pub async fn poll_rendezvous(
     State(state): State<SharedState>,
     Query(query): Query<PollRendezvousQuery>,
 ) -> AppResult<Json<Value>> {
-    let token = &query.token;
+    let registration_token = &query.token;
     let deadline = now_secs() + 30;
 
     loop {
@@ -87,15 +91,16 @@ pub async fn poll_rendezvous(
         let row = {
             let db = state.db.lock().unwrap();
             db.query_row(
-                "SELECT payload, delivered, created_at, ttl_seconds FROM rendezvous_registrations
-                 WHERE pair_code = ?1",
-                params![token],
+                "SELECT payload, delivered, consumed, created_at, ttl_seconds FROM rendezvous_registrations
+                 WHERE registration_token = ?1",
+                params![registration_token],
                 |row| {
                     Ok((
                         row.get::<_, Option<Vec<u8>>>(0)?,
                         row.get::<_, i64>(1)?,
-                        row.get::<_, u64>(2)?,
+                        row.get::<_, i64>(2)?,
                         row.get::<_, u64>(3)?,
+                        row.get::<_, u64>(4)?,
                     ))
                 },
             )
@@ -104,17 +109,29 @@ pub async fn poll_rendezvous(
 
         match row {
             None => return Err(AppError::not_found("registration not found")),
-            Some((_, _, created_at, ttl_seconds)) if now > created_at + ttl_seconds => {
+            Some((_, _, _, created_at, ttl_seconds)) if now > created_at + ttl_seconds => {
                 return Err(AppError::gone("registration expired"));
             }
-            Some((Some(payload), _, _, _)) => {
+            Some((_, _, consumed, _, _)) if consumed != 0 => {
+                return Err(AppError::conflict("registration already consumed"));
+            }
+            Some((Some(payload), _, _, _, _)) => {
                 let encoded = base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
                     &payload,
                 );
+                // Mark as consumed so subsequent polls get CONSUMED / NOT_FOUND
+                {
+                    let db = state.db.lock().unwrap();
+                    db.execute(
+                        "UPDATE rendezvous_registrations SET consumed = 1 WHERE registration_token = ?1",
+                        params![registration_token],
+                    )
+                    .ok();
+                }
                 return Ok(Json(json!({ "payload": encoded, "status": "delivered" })));
             }
-            Some((None, _, _, _)) => {
+            Some((None, _, _, _, _)) => {
                 // Not yet delivered, wait
                 sleep(Duration::from_millis(200)).await;
             }

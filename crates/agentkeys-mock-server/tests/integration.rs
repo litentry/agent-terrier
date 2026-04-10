@@ -338,36 +338,45 @@ async fn session_revoke_valid() {
 async fn credential_teardown() {
     use base64::Engine;
     let app = setup();
-    let (session, wallet, app) = create_test_session(app).await;
+    // Create parent session
+    let (parent_session, _parent_wallet, app) = create_test_session(app).await;
+
+    // Create a child session (the agent to teardown)
+    let (_, child_json) = post_json_auth(
+        app.clone(),
+        "/session/child",
+        &parent_session,
+        json!({ "scope": { "services": ["svc"], "read_only": false } }),
+    )
+    .await;
+    let child_wallet = child_json["wallet"].as_str().unwrap().to_string();
+
     let ct = base64::engine::general_purpose::STANDARD.encode(b"data");
 
+    // Parent stores credential for the child agent
     post_json_auth(
         app.clone(),
         "/credential/store",
-        &session,
-        json!({ "agent_id": wallet, "service": "svc", "ciphertext": ct }),
+        &parent_session,
+        json!({ "agent_id": child_wallet, "service": "svc", "ciphertext": ct }),
     )
     .await;
 
-    // Teardown agent
+    // Parent tears down the child agent
     let (status, _) = delete_json_auth(
         app.clone(),
         "/credential/teardown",
-        &session,
-        json!({ "agent_id": wallet }),
+        &parent_session,
+        json!({ "agent_id": child_wallet }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // Credential should be gone — use parent session (teardown revokes agent sessions, not caller)
-    // Create a fresh session to verify credential is gone
-    let (_, new_json) = post_json(app.clone(), "/session/create", json!({ "auth_token": "new-session-check" })).await;
-    let new_session = new_json["session"].as_str().unwrap().to_string();
-
+    // Credential should be gone — verify with parent session (parent session is not revoked)
     let (read_status, _) = get_json_auth(
         app,
-        &format!("/credential/read?agent_id={wallet}&service=svc"),
-        &new_session,
+        &format!("/credential/read?agent_id={child_wallet}&service=svc"),
+        &parent_session,
     )
     .await;
     assert_eq!(read_status, StatusCode::NOT_FOUND);
@@ -386,7 +395,7 @@ async fn rendezvous_register_poll_deliver() {
     let pubkey = make_fake_pubkey_b64();
     let pair_code = "AABB1122";
 
-    // Register
+    // Register — server now returns a secret registration_token distinct from pair_code
     let (status, json) = post_json(
         app.clone(),
         "/rendezvous/register",
@@ -394,17 +403,18 @@ async fn rendezvous_register_poll_deliver() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{json}");
+    let registration_token = json["registration_token"].as_str().unwrap().to_string();
 
     let payload_bytes = b"hello-payload";
     let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload_bytes);
 
-    // Spawn polling in background
+    // Spawn polling in background using the registration_token (not the pair_code)
     let poll_app = app.clone();
-    let poll_code = pair_code.to_string();
+    let poll_token = registration_token.clone();
     let poll_handle = tokio::spawn(async move {
         let req = Request::builder()
             .method(Method::GET)
-            .uri(format!("/rendezvous/poll?token={poll_code}"))
+            .uri(format!("/rendezvous/poll?token={poll_token}"))
             .body(Body::empty())
             .unwrap();
         let resp = poll_app.oneshot(req).await.unwrap();
@@ -539,14 +549,16 @@ async fn rendezvous_ciphertext_passthrough() {
     let pair_code = "PASSTHRU";
     let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&exact_bytes);
 
-    post_json(
+    // Register and capture the registration_token for polling
+    let (_, reg_json) = post_json(
         app.clone(),
         "/rendezvous/register",
         json!({ "daemon_pubkey": pubkey, "pair_code": pair_code }),
     )
     .await;
+    let registration_token = reg_json["registration_token"].as_str().unwrap().to_string();
 
-    // Deliver in background, poll after
+    // Deliver in background using pair_code, poll using registration_token
     let deliver_app = app.clone();
     let deliver_session = session.clone();
     let deliver_payload = payload_b64.clone();
@@ -564,7 +576,7 @@ async fn rendezvous_ciphertext_passthrough() {
 
     let req = Request::builder()
         .method(Method::GET)
-        .uri(format!("/rendezvous/poll?token={pair_code}"))
+        .uri(format!("/rendezvous/poll?token={registration_token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();

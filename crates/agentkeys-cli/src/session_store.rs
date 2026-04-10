@@ -15,23 +15,35 @@ fn fallback_path() -> PathBuf {
     path
 }
 
+/// Returns true if keyring should be skipped (tests, CI, headless).
+/// Set AGENTKEYS_SESSION_STORE=file to force file-only mode.
+fn should_skip_keyring() -> bool {
+    std::env::var("AGENTKEYS_SESSION_STORE")
+        .map(|v| v == "file")
+        .unwrap_or(false)
+}
+
 /// Save session. Tries keyring first (non-blocking attempt), falls back to ~/.agentkeys/session.json.
-/// On platforms where keyring blocks (headless macOS, CI), falls back immediately.
+/// Set AGENTKEYS_SESSION_STORE=file to skip keyring entirely (for tests/CI).
 pub fn save_session(session: &Session) -> Result<()> {
     let json = serde_json::to_string(session).context("serialize session")?;
 
-    // Try keyring with a thread-based timeout to avoid blocking indefinitely.
-    if try_keyring_save(&json) {
-        return Ok(());
+    if !should_skip_keyring() {
+        if try_keyring_save(&json) {
+            return Ok(());
+        }
     }
 
     save_to_file(&json)
 }
 
 /// Load session. Tries keyring first (non-blocking), falls back to file.
+/// Set AGENTKEYS_SESSION_STORE=file to skip keyring entirely (for tests/CI).
 pub fn load_session() -> Result<Session> {
-    if let Some(json) = try_keyring_load() {
-        return serde_json::from_str(&json).context("deserialize session from keyring");
+    if !should_skip_keyring() {
+        if let Some(json) = try_keyring_load() {
+            return serde_json::from_str(&json).context("deserialize session from keyring");
+        }
     }
     load_from_file()
 }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    auth::{extract_bearer_token, now_secs, validate_session},
+    auth::{extract_bearer_token, is_owner_of, now_secs, validate_session},
     error::{AppError, AppResult},
     state::SharedState,
 };
@@ -56,6 +56,14 @@ pub async fn store_credential(
     let now = now_secs();
     let db = state.db.lock().unwrap();
 
+    // Ownership check: caller must own or be the parent of the agent
+    if !is_owner_of(&db, &session.wallet_address, agent_id) {
+        return Err(AppError::forbidden(format!(
+            "session does not own agent {}",
+            agent_id
+        )));
+    }
+
     // Store credential owned by the agent wallet (session wallet is the owner/parent)
     db.execute(
         "INSERT INTO credentials (wallet_address, service_name, ciphertext, created_at, updated_at)
@@ -98,32 +106,31 @@ pub async fn read_credential(
     let agent_id = &query.agent_id;
     let service = &query.service;
 
-    // Scope enforcement: if session has a scope, agent can only read its own service
+    let db = state.db.lock().unwrap();
+
+    // Ownership check: caller must own or be the parent of the agent
+    if !is_owner_of(&db, &session.wallet_address, agent_id) {
+        let now = now_secs();
+        db.execute(
+            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
+             VALUES (?1, ?2, ?3, 'read', 'DENIED', ?4)",
+            params![session.wallet_address, agent_id, service, now],
+        )
+        .ok();
+        return Err(AppError::forbidden(format!(
+            "session does not own agent {}",
+            agent_id
+        )));
+    }
+
+    // Scope enforcement: if session has a scope, verify service is allowed
     if let Some(scope_json) = &session.scope_json {
         let scope: Scope = serde_json::from_str(scope_json)
             .map_err(|e| AppError::internal(e.to_string()))?;
 
-        // The session wallet must match the agent_id
-        if session.wallet_address != *agent_id {
-            let now = now_secs();
-            let db = state.db.lock().unwrap();
-            db.execute(
-                "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
-                 VALUES (?1, ?2, ?3, 'read', 'DENIED', ?4)",
-                params![session.wallet_address, agent_id, service, now],
-            )
-            .ok();
-            return Err(AppError::forbidden(format!(
-                "Agent {} is not authorized to read {}",
-                session.wallet_address, service
-            )));
-        }
-
-        // Check service is in scope
         let service_name = agentkeys_types::ServiceName(service.clone());
         if !scope.services.contains(&service_name) {
             let now = now_secs();
-            let db = state.db.lock().unwrap();
             db.execute(
                 "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
                  VALUES (?1, ?2, ?3, 'read', 'DENIED_SCOPE', ?4)",
@@ -137,7 +144,6 @@ pub async fn read_credential(
         }
     }
 
-    let db = state.db.lock().unwrap();
     let result = db.query_row(
         "SELECT ciphertext FROM credentials WHERE wallet_address = ?1 AND service_name = ?2",
         params![agent_id, service],
@@ -183,7 +189,7 @@ pub async fn teardown_agent(
         .and_then(extract_bearer_token)
         .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
 
-    let _session = validate_session(&state, token)?;
+    let session = validate_session(&state, token)?;
 
     let agent_id = body
         .get("agent_id")
@@ -191,6 +197,14 @@ pub async fn teardown_agent(
         .ok_or_else(|| AppError::bad_request("agent_id required"))?;
 
     let db = state.db.lock().unwrap();
+
+    // Ownership check: caller must own or be the parent of the agent
+    if !is_owner_of(&db, &session.wallet_address, agent_id) {
+        return Err(AppError::forbidden(format!(
+            "session does not own agent {}",
+            agent_id
+        )));
+    }
 
     // Revoke all sessions for this agent
     db.execute("UPDATE sessions SET revoked = 1 WHERE wallet_address = ?1", params![agent_id])

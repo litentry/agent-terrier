@@ -1,5 +1,5 @@
 use crate::{error::AppError, state::AppState};
-use rusqlite::params;
+use rusqlite::{Connection, params};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_secs() -> u64 {
@@ -43,6 +43,30 @@ pub fn validate_session(state: &AppState, token: &str) -> Result<ValidatedSessio
             Ok(ValidatedSession { token, wallet_address: wallet, scope_json })
         }
     }
+}
+
+/// Returns true if `caller_wallet` owns or is a parent of `agent_wallet`.
+/// Ownership means: the agent's session was created with parent_token tracing
+/// back to a session whose wallet_address == caller_wallet, OR they are the same wallet.
+pub fn is_owner_of(conn: &Connection, caller_wallet: &str, agent_wallet: &str) -> bool {
+    if caller_wallet == agent_wallet {
+        return true;
+    }
+    // Check if there exists a session for agent_wallet whose parent_token chain
+    // leads back to a session owned by caller_wallet.
+    let result: bool = conn
+        .query_row(
+            "SELECT 1 FROM sessions AS child
+             WHERE child.wallet_address = ?1
+               AND child.parent_token IN (
+                   SELECT token FROM sessions WHERE wallet_address = ?2
+               )
+             LIMIT 1",
+            params![agent_wallet, caller_wallet],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    result
 }
 
 pub fn extract_bearer_token(header: &str) -> Option<&str> {

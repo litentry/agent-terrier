@@ -45,9 +45,11 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS rendezvous_registrations (
             pair_code TEXT PRIMARY KEY,
+            registration_token TEXT NOT NULL,
             daemon_pubkey BLOB NOT NULL,
             payload BLOB,
             delivered INTEGER NOT NULL DEFAULT 0,
+            consumed INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             ttl_seconds INTEGER NOT NULL DEFAULT 300
         );

@@ -299,61 +299,293 @@ impl CredentialBackend for MockHttpClient {
         Ok(events)
     }
 
-    // Rendezvous and auth-request methods are stubs for Stage 4
-
     async fn register_rendezvous(
         &self,
-        _daemon_pubkey: &PublicKey,
-        _pair_code: &PairCode,
+        daemon_pubkey: &PublicKey,
+        pair_code: &PairCode,
     ) -> Result<RegistrationToken, BackendError> {
-        todo!("register_rendezvous: implemented in Stage 4")
+        let pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(&daemon_pubkey.0);
+
+        let resp = self
+            .client
+            .post(self.url("/rendezvous/register"))
+            .json(&json!({
+                "daemon_pubkey": pubkey_b64,
+                "pair_code": pair_code.0,
+            }))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let token = body["registration_token"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing registration_token".into()))?
+            .to_string();
+        Ok(RegistrationToken(token))
     }
 
     async fn poll_rendezvous(
         &self,
-        _token: &RegistrationToken,
+        token: &RegistrationToken,
     ) -> Result<Option<PairPayload>, BackendError> {
-        todo!("poll_rendezvous: implemented in Stage 4")
+        let url = format!("/rendezvous/poll?token={}", token.0);
+
+        let resp = self
+            .client
+            .get(self.url(&url))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let status = body["status"].as_str().unwrap_or("timeout");
+
+        if status == "delivered" {
+            let payload_b64 = body["payload"]
+                .as_str()
+                .ok_or_else(|| BackendError::Internal("missing payload".into()))?;
+            let payload_bytes = base64::engine::general_purpose::STANDARD
+                .decode(payload_b64)
+                .map_err(|e| BackendError::Internal(format!("base64 decode: {e}")))?;
+            Ok(Some(PairPayload(payload_bytes)))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn deliver_rendezvous(
         &self,
-        _session: &Session,
-        _pair_code: &PairCode,
-        _payload: &EncryptedPairPayload,
+        session: &Session,
+        pair_code: &PairCode,
+        payload: &EncryptedPairPayload,
     ) -> Result<(), BackendError> {
-        todo!("deliver_rendezvous: implemented in Stage 4")
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&payload.0);
+
+        let resp = self
+            .client
+            .post(self.url("/rendezvous/deliver"))
+            .header("authorization", format!("Bearer {}", session.token))
+            .json(&json!({
+                "pair_code": pair_code.0,
+                "payload": payload_b64,
+            }))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+        Ok(())
     }
 
     async fn open_auth_request(
         &self,
-        _child_pubkey: &PublicKey,
-        _request_type: AuthRequestType,
-        _request_details: &CanonicalBytes,
+        child_pubkey: &PublicKey,
+        request_type: AuthRequestType,
+        request_details: &CanonicalBytes,
     ) -> Result<OpenedAuthRequest, BackendError> {
-        todo!("open_auth_request: implemented in Stage 4")
+        let pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(&child_pubkey.0);
+        let details_b64 = base64::engine::general_purpose::STANDARD.encode(&request_details.0);
+        let request_type_str = match &request_type {
+            AuthRequestType::Pair { .. } => "Pair",
+            AuthRequestType::Recover { .. } => "Recover",
+            AuthRequestType::ScopeChange { .. } => "ScopeChange",
+            AuthRequestType::HighValueRelease { .. } => "HighValueRelease",
+            AuthRequestType::KeyRotate { .. } => "KeyRotate",
+        };
+
+        let resp = self
+            .client
+            .post(self.url("/auth-request/open"))
+            .json(&json!({
+                "child_pubkey": pubkey_b64,
+                "request_type": request_type_str,
+                "request_details": details_b64,
+            }))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let id_str = body["id"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing id".into()))?
+            .to_string();
+        let otp = body["otp"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing otp".into()))?
+            .to_string();
+        let pair_code_str = body["pair_code"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing pair_code".into()))?
+            .to_string();
+        let ttl_seconds = body["ttl_seconds"].as_u64().unwrap_or(60);
+        let nonce_hash_b64 = body["nonce_hash"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing nonce_hash".into()))?;
+        let nonce_hash = base64::engine::general_purpose::STANDARD
+            .decode(nonce_hash_b64)
+            .map_err(|e| BackendError::Internal(format!("base64 decode nonce_hash: {e}")))?;
+
+        Ok(OpenedAuthRequest {
+            id: AuthRequestId(id_str),
+            otp,
+            pair_code: PairCode(pair_code_str),
+            ttl_seconds,
+            nonce_hash,
+        })
     }
 
     async fn fetch_auth_request(
         &self,
-        _session: &Session,
-        _pair_code: &PairCode,
+        session: &Session,
+        pair_code: &PairCode,
     ) -> Result<AuthRequest, BackendError> {
-        todo!("fetch_auth_request: implemented in Stage 4")
+        let url = format!("/auth-request/fetch?pair_code={}", pair_code.0);
+
+        let resp = self
+            .client
+            .get(self.url(&url))
+            .header("authorization", format!("Bearer {}", session.token))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let id_str = body["id"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing id".into()))?
+            .to_string();
+        let otp = body["otp"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing otp".into()))?
+            .to_string();
+        let created_at = body["created_at"].as_u64().unwrap_or(0);
+        let child_pubkey_b64 = body["child_pubkey"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing child_pubkey".into()))?;
+        let child_pubkey_bytes = base64::engine::general_purpose::STANDARD
+            .decode(child_pubkey_b64)
+            .map_err(|e| BackendError::Internal(format!("base64 decode: {e}")))?;
+
+        let request_type_str = body["request_type"].as_str().unwrap_or("Pair");
+        let request_type = match request_type_str {
+            "Recover" => AuthRequestType::Recover {
+                agent_identity: agentkeys_types::AgentIdentity::Alias("unknown".into()),
+                new_daemon_pubkey: child_pubkey_bytes.clone(),
+            },
+            "ScopeChange" => AuthRequestType::ScopeChange {
+                agent_id: WalletAddress("unknown".into()),
+                new_scope: Scope { services: vec![], read_only: false },
+            },
+            _ => AuthRequestType::Pair {
+                requested_scope: Scope { services: vec![], read_only: false },
+            },
+        };
+
+        Ok(AuthRequest {
+            id: AuthRequestId(id_str),
+            request_type,
+            child_pubkey: PublicKey(child_pubkey_bytes),
+            otp,
+            created_at,
+        })
     }
 
     async fn approve_auth_request(
         &self,
-        _session: &Session,
-        _request_id: &AuthRequestId,
+        session: &Session,
+        request_id: &AuthRequestId,
     ) -> Result<(), BackendError> {
-        todo!("approve_auth_request: implemented in Stage 4")
+        let resp = self
+            .client
+            .post(self.url("/auth-request/approve"))
+            .header("authorization", format!("Bearer {}", session.token))
+            .json(&json!({ "request_id": request_id.0 }))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+        Ok(())
     }
 
     async fn await_auth_decision(
         &self,
-        _request_id: &AuthRequestId,
+        request_id: &AuthRequestId,
     ) -> Result<SignedAuthDecision, BackendError> {
-        todo!("await_auth_decision: implemented in Stage 4")
+        let url = format!("/auth-request/await?request_id={}", request_id.0);
+
+        let resp = self
+            .client
+            .get(self.url(&url))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let status = body["status"].as_str().unwrap_or("timeout");
+
+        if status == "timeout" {
+            return Err(BackendError::Transport("await_auth_decision timed out".into()));
+        }
+
+        if status == "consumed" || status == "consumed_awaited" {
+            return Err(BackendError::AlreadyConsumed);
+        }
+
+        let approved = body["approved"].as_bool().unwrap_or(false);
+        let sig_b64 = body["signature"].as_str().unwrap_or("");
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(sig_b64)
+            .unwrap_or_default();
+
+        let session = body["session"].as_object().map(|_| {
+            let token = body["session"]["token"].as_str().unwrap_or("").to_string();
+            let wallet = body["session"]["wallet"].as_str().unwrap_or("").to_string();
+            let ttl = body["session"]["ttl_seconds"].as_u64().unwrap_or(3600);
+            let created = body["session"]["created_at"].as_u64().unwrap_or(0);
+            Session {
+                token,
+                wallet: WalletAddress(wallet),
+                scope: None,
+                created_at: created,
+                ttl_seconds: ttl,
+            }
+        });
+
+        let wallet = body["wallet"].as_str().map(|w| WalletAddress(w.to_string()));
+
+        Ok(SignedAuthDecision {
+            request_id: request_id.clone(),
+            approved,
+            signature,
+            session,
+            wallet,
+        })
     }
 }

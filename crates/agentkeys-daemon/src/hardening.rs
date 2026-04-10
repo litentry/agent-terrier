@@ -4,7 +4,7 @@ pub struct HardeningReport {
     pub mlock: HardeningStep,
     pub dumpable: HardeningStep,
     pub no_new_privs: HardeningStep,
-    pub seccomp: HardeningStep,
+    pub seccomp_status: HardeningStep,
     pub caps_dropped: HardeningStep,
     pub landlock: HardeningStep,
 }
@@ -85,6 +85,10 @@ mod linux {
     }
 
     pub fn try_mlock() -> HardeningStep {
+        // The spec references mlock2(MLOCK_ONFAULT) which locks pages only on fault.
+        // mlockall(MCL_CURRENT | MCL_FUTURE) is a superset: it locks all current and future
+        // mappings eagerly. This is intentionally more aggressive — it prevents any page
+        // containing sensitive data from ever being swapped out, at the cost of higher RSS.
         let result =
             unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
         if result == 0 {
@@ -117,13 +121,18 @@ mod linux {
         }
     }
 
-    pub fn try_install_seccomp() -> HardeningStep {
-        // v0: check current seccomp status from /proc/self/status
-        // Full BPF filter installation is a stretch goal for v1.
-        // TODO: install a BPF filter that denies ptrace, process_vm_readv, kcmp, keyctl
+    pub fn check_seccomp_status() -> HardeningStep {
+        // Reports the kernel's seccomp mode for this process without installing a BPF filter.
+        // Seccomp field values: 0=disabled, 1=strict, 2=filter (BPF active).
+        // Note: AgentKeys v0 does not install its own BPF filter. This is a v0.1 hardening item.
         match read_proc_self_status_field("Seccomp") {
             Some(val) => {
-                tracing::info!("Seccomp status from /proc/self/status: {val}");
+                tracing::info!(
+                    "Seccomp status: {} (0=disabled, 1=strict, 2=filter). \
+                     Note: AgentKeys v0 does not install its own BPF filter. \
+                     This is a v0.1 hardening item.",
+                    val.trim()
+                );
                 HardeningStep::Ok
             }
             None => HardeningStep::Failed("could not read Seccomp from /proc/self/status".into()),
@@ -131,8 +140,24 @@ mod linux {
     }
 
     pub fn try_drop_caps() -> HardeningStep {
-        // Drop all capabilities using prctl PR_SET_SECUREBITS + cap_set
-        // For v0 we use prctl to clear the bounding set iteratively
+        // PR_CAP_AMBIENT and PR_CAP_AMBIENT_CLEAR_ALL are defined in linux/prctl.h.
+        // libc crate may not export them by name, so we use the raw integer values.
+        const PR_CAP_AMBIENT: libc::c_int = 47;
+        const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
+
+        // Attempt to clear all ambient capabilities.
+        let ambient_result = unsafe {
+            libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)
+        };
+        if ambient_result != 0 {
+            let err = io::Error::last_os_error();
+            // EINVAL means ambient caps are not supported by this kernel — not fatal.
+            if err.raw_os_error() != Some(libc::EINVAL) {
+                tracing::warn!("prctl PR_CAP_AMBIENT_CLEAR_ALL failed: {err}");
+            }
+        }
+
+        // Drop all capabilities from the bounding set iteratively.
         let cap_last_cap = read_cap_last_cap().unwrap_or(40);
         for cap in 0..=cap_last_cap {
             let result = unsafe {
@@ -140,28 +165,30 @@ mod linux {
             };
             if result != 0 {
                 let err = io::Error::last_os_error();
-                // EINVAL means we've gone past the last valid cap — stop
+                // EINVAL means we've gone past the last valid cap — stop.
                 if err.raw_os_error() == Some(libc::EINVAL) {
                     break;
                 }
-                // EPERM is OK — we may not have the cap in bounding set
+                // EPERM is expected when running without CAP_SETPCAP — acceptable.
             }
         }
 
-        // Check effective caps from /proc/self/status
+        // Verify effective caps are now zero.
         match read_proc_self_status_field("CapEff") {
             Some(val) => {
                 let trimmed = val.trim();
                 if trimmed == "0000000000000000" {
                     HardeningStep::Ok
                 } else {
-                    tracing::warn!("CapEff not zero after drop attempt: {trimmed}");
-                    // Still report Ok — we attempted the drop; privileged containers
-                    // may have caps we cannot drop without libcap
-                    HardeningStep::Ok
+                    tracing::warn!(
+                        "CapEff not zero after drop attempt: {}. \
+                         Process retains capabilities — running in a privileged context.",
+                        trimmed
+                    );
+                    HardeningStep::Failed(format!("CapEff remains non-zero: {trimmed}"))
                 }
             }
-            None => HardeningStep::Failed("could not read CapEff".into()),
+            None => HardeningStep::Failed("could not read CapEff from /proc/self/status".into()),
         }
     }
 
@@ -234,7 +261,7 @@ pub fn apply_hardening() -> anyhow::Result<HardeningReport> {
         report.mlock = linux::try_mlock();
         report.dumpable = linux::try_set_dumpable();
         report.no_new_privs = linux::try_set_no_new_privs();
-        report.seccomp = linux::try_install_seccomp();
+        report.seccomp_status = linux::check_seccomp_status();
         report.caps_dropped = linux::try_drop_caps();
         report.landlock = linux::try_landlock();
 
@@ -243,7 +270,7 @@ pub fn apply_hardening() -> anyhow::Result<HardeningReport> {
             mlock = ?report.mlock,
             dumpable = ?report.dumpable,
             no_new_privs = ?report.no_new_privs,
-            seccomp = ?report.seccomp,
+            seccomp_status = ?report.seccomp_status,
             caps_dropped = ?report.caps_dropped,
             landlock = ?report.landlock,
             "kernel hardening applied"
@@ -257,7 +284,7 @@ pub fn apply_hardening() -> anyhow::Result<HardeningReport> {
         report.mlock = HardeningStep::Skipped;
         report.dumpable = HardeningStep::Skipped;
         report.no_new_privs = HardeningStep::Skipped;
-        report.seccomp = HardeningStep::Skipped;
+        report.seccomp_status = HardeningStep::Skipped;
         report.caps_dropped = HardeningStep::Skipped;
         report.landlock = HardeningStep::Skipped;
     }

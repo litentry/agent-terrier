@@ -5,28 +5,18 @@
 
 use std::sync::Arc;
 
-use agentkeys_core::mock_client::MockHttpClient;
+use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mcp::{JsonRpcRequest, McpHandler};
-use agentkeys_types::{Scope, ServiceName, Session, WalletAddress};
+use agentkeys_mock_server::test_client::InProcessBackend;
+use agentkeys_types::{AuthToken, Scope, ServiceName, Session, WalletAddress};
 use serde_json::json;
-
-use agentkeys_mock_server::{create_router, db, state::AppState};
 
 // ---------------------------------------------------------------------------
 // Shared test helpers
 // ---------------------------------------------------------------------------
 
-async fn spawn_server() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    db::init_schema(&conn).unwrap();
-    let state = Arc::new(AppState::new(conn));
-    let router = create_router(state);
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    format!("http://{addr}")
+fn create_test_backend() -> Arc<InProcessBackend> {
+    Arc::new(InProcessBackend::new())
 }
 
 fn dummy_session(token: impl Into<String>, wallet: impl Into<String>) -> Session {
@@ -44,12 +34,9 @@ fn dummy_session(token: impl Into<String>, wallet: impl Into<String>) -> Session
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn daemon_starts_and_connects() {
-    let backend_url = spawn_server().await;
-    let client = MockHttpClient::new(backend_url);
+    let backend = create_test_backend();
 
-    use agentkeys_core::backend::CredentialBackend;
-    use agentkeys_types::AuthToken;
-    let result = client.create_session(AuthToken::Mock("test-user".into())).await;
+    let result = backend.create_session(AuthToken::Mock("test-user".into())).await;
     assert!(result.is_ok(), "daemon should connect to backend: {result:?}");
 }
 
@@ -63,9 +50,6 @@ async fn daemon_starts_and_connects() {
 fn daemon_memfd_secret_or_fallback() {
     #[cfg(target_os = "linux")]
     {
-        // memfd_secret syscall: on kernels >= 5.14 returns a valid fd.
-        // On older kernels ENOSYS triggers the mmap+mlock fallback.
-        // Either way, the result must not be HardeningStep::Failed.
         #[cfg(target_arch = "x86_64")]
         const SYS_MEMFD_SECRET: libc::c_long = 447;
 
@@ -74,13 +58,10 @@ fn daemon_memfd_secret_or_fallback() {
             let fd = unsafe { libc::syscall(SYS_MEMFD_SECRET, 0usize) };
             if fd >= 0 {
                 unsafe { libc::close(fd as libc::c_int) };
-                // memfd_secret succeeded
             } else {
                 use std::io;
                 let err = io::Error::last_os_error();
-                // ENOSYS is the acceptable fallback path
                 if err.raw_os_error() != Some(libc::ENOSYS) {
-                    // Probe mmap+mlock fallback
                     let ptr = unsafe {
                         libc::mmap(
                             std::ptr::null_mut(),
@@ -105,8 +86,6 @@ fn daemon_memfd_secret_or_fallback() {
 fn daemon_mlock_residency() {
     #[cfg(target_os = "linux")]
     {
-        // After mlockall, /proc/self/status should show VmLck > 0
-        // (only guaranteed if CAP_IPC_LOCK is available; skip silently if not)
         let result = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
         if result == 0 {
             let status = std::fs::read_to_string("/proc/self/status").unwrap();
@@ -135,7 +114,6 @@ fn daemon_dumpable_off() {
         assert_eq!(result, 0, "prctl PR_SET_DUMPABLE should succeed");
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
         let dumpable_line = status.lines().find(|l| l.starts_with("Dumpable:"));
-        // Field name may vary by kernel version — check without strict name match
         if let Some(line) = dumpable_line {
             let val: u32 = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(99);
             assert_eq!(val, 0, "Dumpable should be 0 after prctl");
@@ -166,8 +144,6 @@ fn daemon_no_new_privs() {
 fn daemon_seccomp_installed() {
     #[cfg(target_os = "linux")]
     {
-        // v0: verify Seccomp field is readable from /proc/self/status.
-        // Full BPF filter is a v1 goal.
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
         assert!(
             status.contains("Seccomp:"),
@@ -182,7 +158,6 @@ fn daemon_seccomp_installed() {
 fn daemon_caps_dropped() {
     #[cfg(target_os = "linux")]
     {
-        // Attempt to drop all capabilities from the bounding set
         let cap_last_cap: u32 = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
             .ok()
             .and_then(|s| s.trim().parse().ok())
@@ -197,8 +172,6 @@ fn daemon_caps_dropped() {
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
         let cap_eff_line = status.lines().find(|l| l.starts_with("CapEff:"));
         assert!(cap_eff_line.is_some(), "CapEff must be present in /proc/self/status");
-        // Note: CapEff may not be all-zeros if we lack the capability to drop it.
-        // We assert the field is readable (not a hard zero requirement in test sandbox).
     }
     #[cfg(not(target_os = "linux"))]
     eprintln!("daemon_caps_dropped: skipped (macOS)");
@@ -206,8 +179,6 @@ fn daemon_caps_dropped() {
 
 #[test]
 fn daemon_landlock_enosys_ok() {
-    // Landlock ENOSYS must not cause a panic — the daemon should start cleanly.
-    // We verify this by calling the syscall probe and accepting ENOSYS as a valid outcome.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
@@ -221,7 +192,6 @@ fn daemon_landlock_enosys_ok() {
         };
         if result >= 0 {
             unsafe { libc::close(result as libc::c_int) };
-            // Landlock is available — that's fine
         } else {
             let err = std::io::Error::last_os_error();
             assert!(
@@ -272,26 +242,22 @@ fn daemon_session_file_permissions() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn mcp_get_credential_valid() {
-    let backend_url = spawn_server().await;
-    let client = Arc::new(MockHttpClient::new(backend_url));
+    let backend = create_test_backend();
 
-    use agentkeys_core::backend::CredentialBackend;
-    use agentkeys_types::AuthToken;
-
-    let (master_sess, _) = client.create_session(AuthToken::Mock("test-user".into())).await.unwrap();
+    let (master_sess, _) = backend.create_session(AuthToken::Mock("test-user".into())).await.unwrap();
     let child_scope = Scope {
         services: vec![ServiceName("openrouter".into())],
         read_only: false,
     };
-    let (child_sess, _) = client.create_child_session(&master_sess, child_scope).await.unwrap();
+    let (child_sess, _) = backend.create_child_session(&master_sess, child_scope).await.unwrap();
     let child_wallet = child_sess.wallet.clone();
 
-    client
+    backend
         .store_credential(&master_sess, &child_wallet, &ServiceName("openrouter".into()), b"sk-or-v1-test-key")
         .await
         .unwrap();
 
-    let handler = McpHandler::new(client, child_sess, child_wallet);
+    let handler = McpHandler::new(backend as Arc<dyn CredentialBackend>, child_sess, child_wallet);
 
     let request = JsonRpcRequest {
         jsonrpc: "2.0".into(),
@@ -315,29 +281,25 @@ async fn mcp_get_credential_valid() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn mcp_get_credential_denied() {
-    let backend_url = spawn_server().await;
-    let client = Arc::new(MockHttpClient::new(backend_url));
+    let backend = create_test_backend();
 
-    use agentkeys_core::backend::CredentialBackend;
-    use agentkeys_types::AuthToken;
-
-    let (master_sess, _) = client.create_session(AuthToken::Mock("test-user".into())).await.unwrap();
+    let (master_sess, _) = backend.create_session(AuthToken::Mock("test-user".into())).await.unwrap();
     let child_scope = Scope {
         services: vec![ServiceName("openrouter".into())],
         read_only: false,
     };
-    let (child_sess, _) = client.create_child_session(&master_sess, child_scope).await.unwrap();
+    let (child_sess, _) = backend.create_child_session(&master_sess, child_scope).await.unwrap();
     let child_wallet = child_sess.wallet.clone();
 
-    client
+    backend
         .store_credential(&master_sess, &child_wallet, &ServiceName("openrouter".into()), b"sk-or-v1-test-key")
         .await
         .unwrap();
 
     // Revoke the child session
-    client.revoke_session(&master_sess, &child_sess).await.unwrap();
+    backend.revoke_session(&master_sess, &child_sess).await.unwrap();
 
-    let handler = McpHandler::new(client, child_sess, child_wallet);
+    let handler = McpHandler::new(backend as Arc<dyn CredentialBackend>, child_sess, child_wallet);
 
     let request = JsonRpcRequest {
         jsonrpc: "2.0".into(),
@@ -366,13 +328,9 @@ async fn mcp_get_credential_denied() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn mcp_list_credentials() {
-    let backend_url = spawn_server().await;
-    let client = Arc::new(MockHttpClient::new(backend_url));
+    let backend = create_test_backend();
 
-    use agentkeys_core::backend::CredentialBackend;
-    use agentkeys_types::AuthToken;
-
-    let (master_sess, _) = client.create_session(AuthToken::Mock("test-user".into())).await.unwrap();
+    let (master_sess, _) = backend.create_session(AuthToken::Mock("test-user".into())).await.unwrap();
     let child_scope = Scope {
         services: vec![
             ServiceName("openrouter".into()),
@@ -380,11 +338,11 @@ async fn mcp_list_credentials() {
         ],
         read_only: false,
     };
-    let (child_sess, _) = client.create_child_session(&master_sess, child_scope).await.unwrap();
+    let (child_sess, _) = backend.create_child_session(&master_sess, child_scope).await.unwrap();
     let child_wallet = child_sess.wallet.clone();
 
     for service in &["openrouter", "anthropic"] {
-        client
+        backend
             .store_credential(
                 &master_sess,
                 &child_wallet,
@@ -395,7 +353,7 @@ async fn mcp_list_credentials() {
             .unwrap();
     }
 
-    let handler = McpHandler::new(client, child_sess, child_wallet);
+    let handler = McpHandler::new(backend as Arc<dyn CredentialBackend>, child_sess, child_wallet);
 
     let request = JsonRpcRequest {
         jsonrpc: "2.0".into(),
@@ -421,12 +379,11 @@ async fn mcp_list_credentials() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn mcp_tool_discovery() {
-    let backend_url = spawn_server().await;
-    let client = Arc::new(MockHttpClient::new(backend_url));
+    let backend = create_test_backend();
 
     let sess = dummy_session("dummy-token", "0xdummy");
     let agent_id = WalletAddress("0xdummy".into());
-    let handler = McpHandler::new(client, sess, agent_id);
+    let handler = McpHandler::new(backend as Arc<dyn CredentialBackend>, sess, agent_id);
 
     let request = JsonRpcRequest {
         jsonrpc: "2.0".into(),

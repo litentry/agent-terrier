@@ -122,14 +122,14 @@ pub async fn fetch_auth_request(
         .and_then(extract_bearer_token)
         .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
 
-    let _session = validate_session(&state, token)?;
+    let session = validate_session(&state, token)?;
 
     let db = state.db.lock().unwrap();
     let now = now_secs();
 
     let row = db
         .query_row(
-            "SELECT id, request_type, request_details, child_pubkey, otp, created_at, ttl_seconds, status
+            "SELECT id, request_type, request_details, child_pubkey, otp, created_at, ttl_seconds, status, parent_wallet
              FROM auth_requests WHERE pair_code = ?1",
             params![query.pair_code],
             |row| {
@@ -142,16 +142,34 @@ pub async fn fetch_auth_request(
                     row.get::<_, u64>(5)?,
                     row.get::<_, u64>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )
         .map_err(|_| AppError::not_found("no auth request found for this pair code"))?;
 
-    let (id, request_type, request_details, child_pubkey, otp, created_at, ttl_seconds, status) =
+    let (id, request_type, request_details, child_pubkey, otp, created_at, ttl_seconds, status, parent_wallet) =
         row;
 
     if now > created_at + ttl_seconds {
         return Err(AppError::gone("auth request expired"));
+    }
+
+    // Ownership claim: if parent_wallet is unset, the first fetching session claims it.
+    // If already set, only that wallet may fetch.
+    match &parent_wallet {
+        None => {
+            // Claim ownership for this fetching session
+            db.execute(
+                "UPDATE auth_requests SET parent_wallet = ?1 WHERE pair_code = ?2",
+                params![session.wallet_address, query.pair_code],
+            )
+            .map_err(|e| AppError::internal(e.to_string()))?;
+        }
+        Some(pw) if *pw != session.wallet_address => {
+            return Err(AppError::unauthorized("this auth request is owned by a different session"));
+        }
+        Some(_) => {}
     }
 
     Ok(Json(json!({

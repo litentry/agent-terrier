@@ -2,6 +2,7 @@ use agentkeys_cli::{
     cmd_approve, cmd_feedback, cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_run, cmd_store,
     cmd_teardown, cmd_usage, CommandContext,
 };
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -114,12 +115,14 @@ enum Commands {
     },
 
     #[command(
-        about = "Approve a pairing request (Stage 4)",
-        long_about = "Approve a pending pair request by its pair code.\n\nExamples:\n  agentkeys approve PAIR-CODE-123"
+        about = "Approve a pairing request",
+        long_about = "Approve a pending pair request by its pair code.\n\nExamples:\n  agentkeys approve PAIR-CODE-123\n  agentkeys approve PAIR-CODE-123 --yes"
     )]
     Approve {
         #[arg(help = "Pair code to approve")]
         pair_code: String,
+        #[arg(long, help = "Auto-confirm without interactive prompt")]
+        yes: bool,
     },
 
     #[command(
@@ -149,7 +152,7 @@ async fn main() {
         Commands::Link { agent, alias, email } => {
             cmd_link(&ctx, agent, alias.as_deref(), email.as_deref()).await
         }
-        Commands::Approve { pair_code } => Ok(cmd_approve(pair_code)),
+        Commands::Approve { pair_code, yes } => cmd_approve(&ctx, pair_code, *yes).await,
         Commands::Feedback => Ok(cmd_feedback()),
     };
 

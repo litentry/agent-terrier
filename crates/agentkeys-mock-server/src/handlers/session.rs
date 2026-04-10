@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    auth::{derive_pair_code_from_nonce, extract_bearer_token, generate_nonce, generate_token, generate_wallet_address, now_secs, validate_session},
+    auth::{derive_pair_code_from_nonce, extract_bearer_token, generate_nonce, generate_token, generate_wallet_address, is_owner_of, now_secs, validate_session},
     error::{AppError, AppResult},
     state::SharedState,
 };
@@ -167,7 +167,7 @@ pub async fn revoke_session(
         .and_then(extract_bearer_token)
         .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
 
-    let _session = validate_session(&state, token)?;
+    let session = validate_session(&state, token)?;
 
     let target_token = body
         .get("target_session")
@@ -175,6 +175,23 @@ pub async fn revoke_session(
         .ok_or_else(|| AppError::bad_request("target_session required"))?;
 
     let db = state.db.lock().unwrap();
+
+    // Look up the target session's wallet to verify ownership
+    let target_wallet: Option<String> = db
+        .query_row(
+            "SELECT wallet_address FROM sessions WHERE token = ?1",
+            params![target_token],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let target_wallet = target_wallet.ok_or_else(|| AppError::not_found("target session not found"))?;
+
+    // Ownership check: caller must own or be parent of the target session's wallet
+    if !is_owner_of(&db, &session.wallet_address, &target_wallet) {
+        return Err(AppError::forbidden("session does not own the target session"));
+    }
+
     let rows_affected = db
         .execute("UPDATE sessions SET revoked = 1 WHERE token = ?1", params![target_token])
         .map_err(|e| AppError::internal(e.to_string()))?;
