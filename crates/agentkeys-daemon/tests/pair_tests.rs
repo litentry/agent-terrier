@@ -8,8 +8,8 @@ use std::sync::Arc;
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mock_server::test_client::InProcessBackend;
 use agentkeys_types::{
-    AuthRequestType, AuthToken, CanonicalBytes, EncryptedPairPayload, PairCode, PublicKey, Scope,
-    ServiceName, Session, WalletAddress,
+    AgentIdentity, AuthRequestType, AuthToken, CanonicalBytes, EncryptedPairPayload, PairCode,
+    PublicKey, RecoveryMethod, Scope, ServiceName, Session, WalletAddress,
 };
 
 // ---------------------------------------------------------------------------
@@ -616,4 +616,231 @@ async fn recover_credentials_intact() {
         .await
         .unwrap();
     assert_eq!(ant_cred, b"sk-ant-original", "anthropic credential should be intact after recovery");
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: recover_via_passkey
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn recover_via_passkey() {
+    use agentkeys_mock_server::{create_router, db, state::AppState};
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let state = std::sync::Arc::new(AppState::new(conn));
+    let router = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let backend_url = format!("http://{addr}");
+
+    use agentkeys_core::mock_client::MockHttpClient;
+    let client = MockHttpClient::new(&backend_url);
+
+    let (master_sess, master_wallet) = client
+        .create_session(AuthToken::Mock("passkey-user".into()))
+        .await
+        .unwrap();
+
+    // Link alias via HTTP
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/identity/link", backend_url))
+        .header("authorization", format!("Bearer {}", master_sess.token))
+        .json(&serde_json::json!({
+            "identity_type": "alias",
+            "identity_value": "my-passkey-agent",
+            "wallet_address": master_wallet.0,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "identity link should succeed");
+
+    // Recover via passkey
+    let (recovered_sess, recovered_wallet) = client
+        .recover_session(
+            &AgentIdentity::Alias("my-passkey-agent".into()),
+            &RecoveryMethod::Passkey,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recovered_wallet, master_wallet,
+        "recovered wallet should match original"
+    );
+    assert!(
+        !recovered_sess.token.is_empty(),
+        "recovered session should have a token"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: recover_via_email
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn recover_via_email() {
+    use agentkeys_mock_server::{create_router, db, state::AppState};
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let state = std::sync::Arc::new(AppState::new(conn));
+    let router = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let backend_url = format!("http://{addr}");
+
+    use agentkeys_core::mock_client::MockHttpClient;
+    let client = MockHttpClient::new(&backend_url);
+
+    let (master_sess, master_wallet) = client
+        .create_session(AuthToken::Mock("email-user".into()))
+        .await
+        .unwrap();
+
+    // Link email identity
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/identity/link", backend_url))
+        .header("authorization", format!("Bearer {}", master_sess.token))
+        .json(&serde_json::json!({
+            "identity_type": "email",
+            "identity_value": "bot@example.com",
+            "wallet_address": master_wallet.0,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let (recovered_sess, recovered_wallet) = client
+        .recover_session(
+            &AgentIdentity::Email("bot@example.com".into()),
+            &RecoveryMethod::Email,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(recovered_wallet, master_wallet);
+    assert!(!recovered_sess.token.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: recover_via_2fa_unknown_identity
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn recover_via_2fa_unknown_identity() {
+    let backend = create_test_backend();
+
+    let result = backend
+        .recover_session(
+            &AgentIdentity::Alias("nonexistent-agent".into()),
+            &RecoveryMethod::Passkey,
+        )
+        .await;
+
+    assert!(result.is_err(), "recovery of unknown identity should fail");
+    let err_str = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err_str.contains("not found") || err_str.contains("404"),
+        "error should indicate not found: {err_str}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: recover_via_2fa_credentials_intact
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn recover_via_2fa_credentials_intact() {
+    use agentkeys_mock_server::{create_router, db, state::AppState};
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let state = std::sync::Arc::new(AppState::new(conn));
+    let router = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let backend_url = format!("http://{addr}");
+
+    use agentkeys_core::mock_client::MockHttpClient;
+    let client = MockHttpClient::new(&backend_url);
+
+    // Create master + store credentials
+    let (master_sess, master_wallet) = client
+        .create_session(AuthToken::Mock("cred-intact-user".into()))
+        .await
+        .unwrap();
+
+    client
+        .store_credential(
+            &master_sess,
+            &master_wallet,
+            &ServiceName("openrouter".into()),
+            b"sk-or-v1-2fa-test",
+        )
+        .await
+        .unwrap();
+
+    client
+        .store_credential(
+            &master_sess,
+            &master_wallet,
+            &ServiceName("anthropic".into()),
+            b"sk-ant-2fa-test",
+        )
+        .await
+        .unwrap();
+
+    // Link alias
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/identity/link", backend_url))
+        .header("authorization", format!("Bearer {}", master_sess.token))
+        .json(&serde_json::json!({
+            "identity_type": "alias",
+            "identity_value": "cred-intact-agent",
+            "wallet_address": master_wallet.0,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // Recover via passkey
+    let (recovered_sess, recovered_wallet) = client
+        .recover_session(
+            &AgentIdentity::Alias("cred-intact-agent".into()),
+            &RecoveryMethod::Passkey,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(recovered_wallet, master_wallet);
+
+    // Verify credentials are still accessible with the recovered session
+    let or_cred = client
+        .read_credential(
+            &recovered_sess,
+            &recovered_wallet,
+            &ServiceName("openrouter".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        or_cred, b"sk-or-v1-2fa-test",
+        "openrouter credential should survive 2FA recovery"
+    );
+
+    let ant_cred = client
+        .read_credential(
+            &recovered_sess,
+            &recovered_wallet,
+            &ServiceName("anthropic".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ant_cred, b"sk-ant-2fa-test",
+        "anthropic credential should survive 2FA recovery"
+    );
 }

@@ -588,4 +588,52 @@ impl CredentialBackend for MockHttpClient {
             wallet,
         })
     }
+
+    async fn recover_session(
+        &self,
+        identity: &agentkeys_types::AgentIdentity,
+        method: &agentkeys_types::RecoveryMethod,
+    ) -> Result<(Session, WalletAddress), BackendError> {
+        let (identity_type, identity_value) = match identity {
+            agentkeys_types::AgentIdentity::Alias(s) => ("alias", s.clone()),
+            agentkeys_types::AgentIdentity::Email(s) => ("email", s.clone()),
+            agentkeys_types::AgentIdentity::Ens(s) => ("ens", s.clone()),
+            agentkeys_types::AgentIdentity::WalletAddress(w) => ("wallet", w.0.clone()),
+        };
+        let method_str = match method {
+            agentkeys_types::RecoveryMethod::Passkey => "passkey",
+            agentkeys_types::RecoveryMethod::Email => "email",
+            agentkeys_types::RecoveryMethod::MasterApproval => "master_approval",
+        };
+
+        let resp = self
+            .client
+            .post(self.url("/session/recover"))
+            .json(&json!({
+                "identity_type": identity_type,
+                "identity_value": identity_value,
+                "method": method_str,
+            }))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let session_token = body["session"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing session".into()))?
+            .to_string();
+        let wallet_str = body["wallet"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing wallet".into()))?
+            .to_string();
+
+        let wallet = WalletAddress(wallet_str);
+        let session = Self::session_from_token_and_wallet(session_token, wallet.clone());
+        Ok((session, wallet))
+    }
 }

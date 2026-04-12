@@ -606,4 +606,52 @@ impl CredentialBackend for InProcessBackend {
             wallet,
         })
     }
+
+    async fn recover_session(
+        &self,
+        identity: &agentkeys_types::AgentIdentity,
+        method: &agentkeys_types::RecoveryMethod,
+    ) -> Result<(Session, WalletAddress), BackendError> {
+        let (identity_type, identity_value) = match identity {
+            agentkeys_types::AgentIdentity::Alias(s) => ("alias", s.clone()),
+            agentkeys_types::AgentIdentity::Email(s) => ("email", s.clone()),
+            agentkeys_types::AgentIdentity::Ens(s) => ("ens", s.clone()),
+            agentkeys_types::AgentIdentity::WalletAddress(w) => ("wallet", w.0.clone()),
+        };
+        let method_str = match method {
+            agentkeys_types::RecoveryMethod::Passkey => "passkey",
+            agentkeys_types::RecoveryMethod::Email => "email",
+            agentkeys_types::RecoveryMethod::MasterApproval => "master_approval",
+        };
+
+        let body = self
+            .post(
+                "/session/recover",
+                json!({
+                    "identity_type": identity_type,
+                    "identity_value": identity_value,
+                    "method": method_str,
+                }),
+            )
+            .await?;
+
+        let session_token = body["session"]
+            .as_str()
+            .ok_or_else(|| BackendError::Transport("missing session".into()))?
+            .to_string();
+        let wallet_str = body["wallet"]
+            .as_str()
+            .ok_or_else(|| BackendError::Transport("missing wallet".into()))?
+            .to_string();
+
+        let wallet = WalletAddress(wallet_str);
+        let session = Session {
+            token: session_token,
+            wallet: wallet.clone(),
+            scope: None,
+            created_at: 0,
+            ttl_seconds: 86400,
+        };
+        Ok((session, wallet))
+    }
 }

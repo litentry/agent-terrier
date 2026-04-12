@@ -115,6 +115,12 @@ pub trait CredentialBackend: Send + Sync {
         &self,
         request_id: &AuthRequestId,
     ) -> Result<SignedAuthDecision, BackendError>;
+
+    async fn recover_session(
+        &self,
+        identity: &agentkeys_types::AgentIdentity,
+        method: &agentkeys_types::RecoveryMethod,
+    ) -> Result<(Session, WalletAddress), BackendError>;
 }
 
 #[cfg(test)]
@@ -241,6 +247,14 @@ mod tests {
             &self,
             _request_id: &AuthRequestId,
         ) -> Result<SignedAuthDecision, BackendError> {
+            unimplemented!()
+        }
+
+        async fn recover_session(
+            &self,
+            _identity: &agentkeys_types::AgentIdentity,
+            _method: &agentkeys_types::RecoveryMethod,
+        ) -> Result<(Session, WalletAddress), BackendError> {
             unimplemented!()
         }
     }

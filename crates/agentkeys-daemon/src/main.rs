@@ -23,6 +23,9 @@ struct Args {
     #[arg(long, help = "Recover agent by alias or wallet address (e.g. my-bot or 0x...)")]
     recover: Option<String>,
 
+    #[arg(long, help = "Recovery method: passkey or email (skips master approval)")]
+    method: Option<String>,
+
     #[arg(long)]
     stdio: bool,
 
@@ -55,13 +58,23 @@ async fn main() -> anyhow::Result<()> {
         let agent_id = WalletAddress(sess.wallet.0.clone());
         (sess, agent_id)
     } else if let Some(ref agent_identity) = args.recover {
-        // RECOVER FLOW
-        let result = pairing::run_recover_flow(&*backend, agent_identity, args.pair_timeout)
-            .await
-            .context("recover flow failed")?;
-        session::write_session_file(&result.session.token)?;
-        let agent_id = result.wallet.clone();
-        (result.session, agent_id)
+        if let Some(ref method) = args.method {
+            // RECOVER VIA 2FA (no master approval needed)
+            let result = pairing::run_recover_2fa_flow(&*backend, agent_identity, method)
+                .await
+                .context("2FA recover flow failed")?;
+            session::write_session_file(&result.session.token)?;
+            let agent_id = result.wallet.clone();
+            (result.session, agent_id)
+        } else {
+            // RECOVER VIA MASTER APPROVAL
+            let result = pairing::run_recover_flow(&*backend, agent_identity, args.pair_timeout)
+                .await
+                .context("recover flow failed")?;
+            session::write_session_file(&result.session.token)?;
+            let agent_id = result.wallet.clone();
+            (result.session, agent_id)
+        }
     } else {
         // Check for existing session file first
         match session::read_session_file() {

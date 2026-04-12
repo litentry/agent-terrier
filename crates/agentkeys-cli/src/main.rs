@@ -1,6 +1,6 @@
 use agentkeys_cli::{
-    cmd_approve, cmd_feedback, cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_run, cmd_store,
-    cmd_teardown, cmd_usage, CommandContext,
+    cmd_approve, cmd_feedback, cmd_init, cmd_link, cmd_read, cmd_recover, cmd_revoke, cmd_run,
+    cmd_store, cmd_teardown, cmd_usage, CommandContext,
 };
 
 use clap::{Parser, Subcommand};
@@ -115,6 +115,17 @@ enum Commands {
     },
 
     #[command(
+        about = "Recover a session via 2FA (passkey or email)",
+        long_about = "Recover a master or agent session using a second-factor recovery method.\n\nExamples:\n  agentkeys recover my-bot --method passkey\n  agentkeys recover bot@example.com --method email\n  agentkeys recover 0xAGENT --method passkey"
+    )]
+    Recover {
+        #[arg(help = "Agent identity (alias, email, or wallet address)")]
+        identity: String,
+        #[arg(long, help = "Recovery method: passkey or email")]
+        method: String,
+    },
+
+    #[command(
         about = "Approve a pairing request",
         long_about = "Approve a pending pair request by its pair code.\n\nExamples:\n  agentkeys approve PAIR-CODE-123\n  agentkeys approve PAIR-CODE-123 --yes"
     )]
@@ -152,6 +163,7 @@ async fn main() {
         Commands::Link { agent, alias, email } => {
             cmd_link(&ctx, agent, alias.as_deref(), email.as_deref()).await
         }
+        Commands::Recover { identity, method } => cmd_recover(&ctx, identity, method).await,
         Commands::Approve { pair_code, yes } => cmd_approve(&ctx, pair_code, *yes).await,
         Commands::Feedback => Ok(cmd_feedback()),
     };

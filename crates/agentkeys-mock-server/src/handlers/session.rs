@@ -156,6 +156,103 @@ pub struct RevokeSessionRequest {
     pub target_session: String,
 }
 
+pub async fn recover_session(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let identity_type = body
+        .get("identity_type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("identity_type required"))?;
+    let identity_value = body
+        .get("identity_value")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("identity_value required"))?;
+    let method = body
+        .get("method")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("method required"))?;
+
+    // Validate recovery method (v0.1: real WebAuthn/email verification replaces this)
+    match method {
+        "passkey" | "email" => {
+            // Mock: accept any passkey/email recovery without proof.
+            // Production (v0.1) MUST verify a real WebAuthn assertion or email magic-link
+            // token here before minting a session. This mock exists only so the CLI/daemon
+            // integration tests can exercise the 2FA recovery path end-to-end.
+        }
+        "master_approval" => {
+            return Err(AppError::bad_request(
+                "master_approval requires the pair/approve flow, not /session/recover",
+            ));
+        }
+        _ => {
+            return Err(AppError::bad_request(format!(
+                "unknown recovery method '{}'. Use 'passkey' or 'email'.",
+                method
+            )));
+        }
+    }
+
+    let db = state.db.lock().unwrap();
+
+    let wallet_address: String = if identity_type == "wallet" {
+        let exists: bool = db
+            .query_row(
+                "SELECT COUNT(*) FROM accounts WHERE wallet_address = ?1",
+                params![identity_value],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !exists {
+            return Err(AppError::not_found(format!(
+                "no account found for wallet {}",
+                identity_value
+            )));
+        }
+        identity_value.to_string()
+    } else {
+        db.query_row(
+            "SELECT wallet_address FROM identity_links WHERE identity_type = ?1 AND identity_value = ?2",
+            params![identity_type, identity_value],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            AppError::not_found(format!(
+                "no identity found for {}={}",
+                identity_type, identity_value
+            ))
+        })?
+    };
+
+    // Preserve scope from the most recent active session for this wallet
+    let scope_json: Option<String> = db
+        .query_row(
+            "SELECT scope_json FROM sessions WHERE wallet_address = ?1 AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
+            params![wallet_address],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let session_token = generate_token();
+    let now = now_secs();
+
+    db.execute(
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
+         VALUES (?1, ?2, NULL, ?3, ?4, ?5, 0)",
+        params![session_token, wallet_address, scope_json, now, 86400u64],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+
+    Ok(Json(json!({
+        "session": session_token,
+        "wallet": wallet_address,
+        "method": method,
+    })))
+}
+
 pub async fn revoke_session(
     State(state): State<SharedState>,
     headers: HeaderMap,

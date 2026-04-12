@@ -369,6 +369,37 @@ pub async fn cmd_link(
     ))
 }
 
+pub async fn cmd_recover(ctx: &CommandContext, identity: &str, method: &str) -> Result<String> {
+    let recovery_method = match method {
+        "passkey" => agentkeys_types::RecoveryMethod::Passkey,
+        "email" => agentkeys_types::RecoveryMethod::Email,
+        other => return Err(anyhow!("Unknown recovery method '{}'. Use 'passkey' or 'email'.", other)),
+    };
+
+    let agent_identity = if identity.starts_with("0x") {
+        agentkeys_types::AgentIdentity::WalletAddress(WalletAddress(identity.to_string()))
+    } else if identity.contains('@') {
+        agentkeys_types::AgentIdentity::Email(identity.to_string())
+    } else {
+        agentkeys_types::AgentIdentity::Alias(identity.to_string())
+    };
+
+    if ctx.verbose {
+        eprintln!("[verbose] POST {}/session/recover", ctx.backend_url);
+        eprintln!("[verbose] identity: {}, method: {}", identity, method);
+    }
+
+    let backend = ctx.backend();
+    let (session, wallet) = backend
+        .recover_session(&agent_identity, &recovery_method)
+        .await
+        .map_err(wrap_backend_error)?;
+
+    session_store::save_session(&session).context("save recovered session to keychain")?;
+
+    Ok(format!("Recovered. Session restored for wallet {}", wallet.0))
+}
+
 pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
 

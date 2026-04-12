@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use agentkeys_core::auth_request;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
-    AgentIdentity, AuthRequestType, PublicKey, Scope, Session, WalletAddress,
+    AgentIdentity, AuthRequestType, PublicKey, RecoveryMethod, Scope, Session, WalletAddress,
 };
 use anyhow::{anyhow, Context, Result};
 
@@ -196,6 +196,35 @@ pub async fn run_recover_flow(
 
     let session = decision.session.ok_or_else(|| anyhow!("no session in recover decision"))?;
     let wallet = decision.wallet.ok_or_else(|| anyhow!("no wallet in recover decision"))?;
+
+    println!("Recovered. Session received. Daemon ready.");
+
+    Ok(PairResult { session, wallet })
+}
+
+/// Run the recover-via-2FA flow. Returns a PairResult with the recovered session.
+/// No master approval or rendezvous needed — the backend verifies the 2FA method directly.
+pub async fn run_recover_2fa_flow(
+    backend: &dyn CredentialBackend,
+    agent_identity_str: &str,
+    method_str: &str,
+) -> Result<PairResult> {
+    let recovery_method = match method_str {
+        "passkey" => RecoveryMethod::Passkey,
+        "email" => RecoveryMethod::Email,
+        other => return Err(anyhow!("Unknown recovery method '{}'. Use 'passkey' or 'email'.", other)),
+    };
+
+    let agent_identity = if agent_identity_str.starts_with("0x") {
+        AgentIdentity::WalletAddress(WalletAddress(agent_identity_str.to_string()))
+    } else {
+        AgentIdentity::Alias(agent_identity_str.to_string())
+    };
+
+    let (session, wallet) = backend
+        .recover_session(&agent_identity, &recovery_method)
+        .await
+        .map_err(|e| anyhow!("2FA recovery failed: {e}"))?;
 
     println!("Recovered. Session received. Daemon ready.");
 

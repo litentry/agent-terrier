@@ -29,6 +29,13 @@ pub enum AuthToken {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RecoveryMethod {
+    MasterApproval,
+    Passkey,
+    Email,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairCode(pub String);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +170,15 @@ mod tests {
         let json = serde_json::to_string(&session).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(session, back);
+    }
+
+    #[test]
+    fn recovery_method_serialize_roundtrip() {
+        for method in [RecoveryMethod::MasterApproval, RecoveryMethod::Passkey, RecoveryMethod::Email] {
+            let json = serde_json::to_string(&method).unwrap();
+            let back: RecoveryMethod = serde_json::from_str(&json).unwrap();
+            assert_eq!(method, back);
+        }
     }
 
     #[test]
