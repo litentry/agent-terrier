@@ -172,7 +172,11 @@ User (Mac)              Mock Backend / Heima         Agent Sandbox
     │                          │ generate master keypair   │
     │                          │ generate mock wallet addr │
     │◄─────────────────────────│                          │
-    │ session key → OS keychain│                          │
+    │ JWT auth token → file    │  (NOTE: original spec said│
+    │ (was: session key →      │  "session key → OS        │
+    │  OS keychain; corrected  │  keychain"; corrected     │
+    │  2026-04-12 per Heima    │  after verifying Heima    │
+    │  source verification)    │  uses JWT auth tokens)    │
 ```
 
 ### Flow B — Pair a daemon (universal, works for Docker / cloud VM / cloud LLM)
