@@ -35,6 +35,12 @@ On every session start:
 - Git commits: `agentkeys: stage N -- <deliverable>`
 - Never self-grade: run `bash harness/stage-N-done.sh` to verify
 
+## Mock Server Design Principles
+The mock server mirrors Heima blockchain extrinsics. Follow these rules:
+- **Typed parameters**: Every endpoint must accept explicit typed inputs (e.g., `identity_type` + `identity_value`), never parse opaque JSON blobs to guess types at runtime. Blockchain extrinsics require typed parameters -- the mock must enforce the same contract.
+- **Shared identity resolution**: Use a single `resolve_identity(db, identity_type, identity_value) -> Result<String>` utility in `handlers/identity.rs` for all identity-to-wallet lookups. Never inline if/else chains per identity variant.
+- **Modular handlers**: Split request-type-specific logic into separate functions (e.g., `mint_pair_session()`, `mint_recover_session()`). The `approve_auth_request` handler dispatches to these, not inline everything.
+
 ## Test Commands
 ```
 cargo test -p agentkeys-types

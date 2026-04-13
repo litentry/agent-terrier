@@ -21,6 +21,45 @@ use crate::{
 use agentkeys_core::otp::derive_otp;
 use agentkeys_types::{AuthRequestType, Scope, Session, WalletAddress};
 
+fn parse_cbor_agent_identity(request_details: &[u8]) -> (Option<String>, Option<String>) {
+    let cbor_val: ciborium::Value = match ciborium::from_reader(request_details) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let map = match cbor_val {
+        ciborium::Value::Map(m) => m,
+        _ => return (None, None),
+    };
+    for (k, v) in &map {
+        let key_str = match k {
+            ciborium::Value::Text(s) => s.as_str(),
+            _ => continue,
+        };
+        if key_str != "agent_identity" {
+            continue;
+        }
+        let inner_map = match v {
+            ciborium::Value::Map(m) => m,
+            _ => return (None, None),
+        };
+        let mut id_type = None;
+        let mut id_value = None;
+        for (ik, iv) in inner_map {
+            if let ciborium::Value::Text(ik_str) = ik {
+                if let ciborium::Value::Text(iv_str) = iv {
+                    match ik_str.as_str() {
+                        "type" => id_type = Some(iv_str.clone()),
+                        "value" => id_value = Some(iv_str.clone()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        return (id_type, id_value);
+    }
+    (None, None)
+}
+
 fn ttl_for_request_type(request_type_str: &str) -> u64 {
     match request_type_str {
         "Pair" | "Recover" => 60,
@@ -320,13 +359,60 @@ pub async fn approve_auth_request(
         });
 
         (Some(session_obj.to_string()), Some(child_wallet))
+    } else if request_type == "Recover" {
+        // request_details is CBOR-encoded (canonical_bytes per spec), not JSON
+        let (identity_type, identity_value) = parse_cbor_agent_identity(&request_details);
+
+        let db = state.db.lock().unwrap();
+
+        let recovered_wallet: Option<String> = match (identity_type, identity_value) {
+            (Some(id_type), Some(id_val)) => {
+                let db_type = match id_type.as_str() {
+                    "Alias" => "alias",
+                    "Email" => "email",
+                    "Ens" => "ens",
+                    "WalletAddress" => "WalletAddress",
+                    other => other,
+                };
+                super::identity::resolve_identity_to_wallet(&db, db_type, &id_val)
+            }
+            _ => None,
+        };
+
+        if let Some(wallet) = recovered_wallet {
+            let child_token = generate_token();
+            let ttl = 3600u64;
+
+            // Preserve scope from the most recent session for this wallet
+            let scope_json: Option<String> = db
+                .query_row(
+                    "SELECT scope_json FROM sessions WHERE wallet_address = ?1 AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
+                    params![wallet],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            db.execute(
+                "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                params![child_token, wallet, token, scope_json, now, ttl],
+            )
+            .map_err(|e| AppError::internal(e.to_string()))?;
+
+            let session_obj = serde_json::json!({
+                "token": child_token,
+                "wallet": wallet,
+                "scope": null,
+                "created_at": now,
+                "ttl_seconds": ttl,
+            });
+
+            (Some(session_obj.to_string()), Some(wallet))
+        } else {
+            (None, None)
+        }
     } else if request_type == "ScopeChange" {
-        // Extract agent_id and new_scope from request, update scope in sessions
-        // For the mock, we store the new scope as session_json to indicate the update
-        // The actual scope update happens by modifying the existing session
-        // Parse the request_details (CBOR) to get agent_id and new_scope
-        // For simplicity in the mock, we'll parse from a JSON representation if available
-        // We store updated scope info in session_json of the auth_request
         (None, None)
     } else {
         (None, None)

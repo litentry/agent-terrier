@@ -58,19 +58,31 @@ pub struct ResolveIdentityQuery {
     pub identity_value: String,
 }
 
+pub fn resolve_identity_to_wallet(
+    db: &rusqlite::Connection,
+    identity_type: &str,
+    identity_value: &str,
+) -> Option<String> {
+    match identity_type {
+        "WalletAddress" | "wallet_address" => Some(identity_value.to_string()),
+        _ => db
+            .query_row(
+                "SELECT wallet_address FROM identity_links WHERE identity_type = ?1 AND identity_value = ?2",
+                params![identity_type, identity_value],
+                |row| row.get(0),
+            )
+            .ok(),
+    }
+}
+
 pub async fn resolve_identity(
     State(state): State<SharedState>,
     Query(query): Query<ResolveIdentityQuery>,
 ) -> AppResult<Json<Value>> {
     let db = state.db.lock().unwrap();
 
-    let wallet: String = db
-        .query_row(
-            "SELECT wallet_address FROM identity_links WHERE identity_type = ?1 AND identity_value = ?2",
-            params![query.identity_type, query.identity_value],
-            |row| row.get(0),
-        )
-        .map_err(|_| AppError::not_found(format!(
+    let wallet = resolve_identity_to_wallet(&db, &query.identity_type, &query.identity_value)
+        .ok_or_else(|| AppError::not_found(format!(
             "no identity found for type={} value={}",
             query.identity_type, query.identity_value
         )))?;

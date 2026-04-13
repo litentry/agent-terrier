@@ -467,8 +467,20 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
         eprintln!("[verbose] POST {}/auth-request/approve", ctx.backend_url);
     }
 
-    ctx.backend()
+    let backend = ctx.backend();
+
+    backend
         .approve_auth_request(&session, &auth_request.id)
+        .await
+        .map_err(wrap_backend_error)?;
+
+    // Deliver a rendezvous payload to unblock the daemon's poll loop.
+    // The actual session data is delivered via await_auth_decision; this
+    // payload just signals the daemon that approval happened.
+    let pair_code_obj = agentkeys_types::PairCode(pair_code.to_string());
+    let signal = agentkeys_types::EncryptedPairPayload(b"approved".to_vec());
+    backend
+        .deliver_rendezvous(&session, &pair_code_obj, &signal)
         .await
         .map_err(wrap_backend_error)?;
 
