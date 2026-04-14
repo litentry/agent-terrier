@@ -321,7 +321,7 @@ pub async fn approve_auth_request(
     let (child_session_json, child_wallet) = if request_type == "Pair" {
         let child_wallet = crate::auth::generate_wallet_address();
         let child_token = generate_token();
-        let ttl = 3600u64;
+        let ttl: u64 = 2_592_000; // 30 days per wiki/session-token.md policy
 
         // Parse scope from request_details (canonical CBOR contains it)
         // For mock: create a session with no scope restriction (full access to child wallet)
@@ -381,7 +381,7 @@ pub async fn approve_auth_request(
 
         if let Some(wallet) = recovered_wallet {
             let child_token = generate_token();
-            let ttl = 3600u64;
+            let ttl: u64 = 2_592_000; // 30 days per wiki/session-token.md policy
 
             // Preserve scope from the most recent session for this wallet
             let scope_json: Option<String> = db
