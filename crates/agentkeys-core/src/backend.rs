@@ -127,6 +127,12 @@ pub trait CredentialBackend: Send + Sync {
         identity: &agentkeys_types::AgentIdentity,
         method: &agentkeys_types::RecoveryMethod,
     ) -> Result<(Session, WalletAddress), BackendError>;
+
+    async fn list_credentials(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<Vec<ServiceName>, BackendError>;
 }
 
 #[cfg(test)]
@@ -269,6 +275,14 @@ mod tests {
             _identity: &agentkeys_types::AgentIdentity,
             _method: &agentkeys_types::RecoveryMethod,
         ) -> Result<(Session, WalletAddress), BackendError> {
+            unimplemented!()
+        }
+
+        async fn list_credentials(
+            &self,
+            _session: &Session,
+            _agent_id: &WalletAddress,
+        ) -> Result<Vec<ServiceName>, BackendError> {
             unimplemented!()
         }
     }

@@ -145,7 +145,12 @@ pub async fn cmd_read(ctx: &CommandContext, agent: &str, service: &str) -> Resul
     }
 }
 
-pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Result<String> {
+pub async fn cmd_run(
+    ctx: &CommandContext,
+    agent: &str,
+    env_overrides: &[String],
+    cmd: &[String],
+) -> Result<String> {
     if cmd.is_empty() {
         return Err(anyhow!("No command specified after --"));
     }
@@ -153,13 +158,51 @@ pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Resul
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
     let agent_id = WalletAddress(agent.to_string());
 
-    let services_to_try = if let Some(scope) = &session.scope {
-        scope.services.iter().map(|s| s.0.clone()).collect::<Vec<_>>()
+    let backend = ctx.backend();
+
+    // Pre-flight validation: reject any invalid --env entries BEFORE any credential
+    // I/O (no network round-trips or audit log entries for a partial invocation).
+    // Must run before list_credentials so a malformed override does not produce a
+    // backend round-trip / DENIED audit row on the master-session path (codex P2 v2).
+    for raw in env_overrides {
+        let eq_pos = raw.find('=').ok_or_else(|| {
+            anyhow!(
+                "Invalid --env format '{}': expected KEY=SERVICE (no '=' found)",
+                raw
+            )
+        })?;
+        if eq_pos == 0 {
+            return Err(anyhow!(
+                "Invalid --env format '{}': KEY must not be empty",
+                raw
+            ));
+        }
+        if eq_pos + 1 == raw.len() {
+            return Err(anyhow!(
+                "Invalid --env format '{}': SERVICE must not be empty",
+                raw
+            ));
+        }
+    }
+
+    let services_to_try: Vec<String> = if let Some(scope) = &session.scope {
+        scope.services.iter().map(|s| s.0.clone()).collect()
     } else {
-        vec![]
+        backend
+            .list_credentials(&session, &agent_id)
+            .await
+            .map_err(wrap_backend_error)?
+            .into_iter()
+            .map(|s| s.0)
+            .collect()
     };
 
-    let backend = ctx.backend();
+    // Track which services we've already fetched in the auto-injection pass.
+    // The --env loop below reuses these values instead of issuing a second
+    // read_credential for the same service, which would double-count audit
+    // events and rate-limit decrements (codex P2 on PR #19).
+    let mut fetched: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut env_vars: Vec<(String, String)> = Vec::new();
     let mut credential_errors: Vec<String> = Vec::new();
     for service in &services_to_try {
@@ -168,15 +211,51 @@ pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Resul
             Ok(bytes) => {
                 let value = String::from_utf8_lossy(&bytes).to_string();
                 let env_key = format!("{}_API_KEY", service.to_uppercase().replace('-', "_"));
+                fetched.insert(service.clone(), value.clone());
                 env_vars.push((env_key, value));
             }
             Err(e) => {
-                credential_errors.push(format!("Failed to read credential for service '{}': {}", service, format_backend_error(&e)));
+                credential_errors.push(format!(
+                    "Failed to read credential for service '{}': {}",
+                    service,
+                    format_backend_error(&e)
+                ));
             }
         }
     }
     if !credential_errors.is_empty() {
         return Err(anyhow!("{}", credential_errors.join("\n")));
+    }
+
+    for raw in env_overrides {
+        let eq_pos = raw.find('=').expect("pre-flight validation already rejected entries without '='");
+        let env_key = raw[..eq_pos].to_string();
+        let service = &raw[eq_pos + 1..];
+
+        // Reuse the auto-injection fetch if we already pulled this service.
+        // Only issue a fresh read_credential when --env names a service that
+        // wasn't auto-injected (typical for master sessions where scope=None
+        // → all stored services were already pulled, so fresh reads here are
+        // for the rare case of explicit --env on a service the user never
+        // stored before this run).
+        let value = if let Some(cached) = fetched.get(service) {
+            cached.clone()
+        } else {
+            let service_name = ServiceName(service.to_string());
+            let bytes = backend
+                .read_credential(&session, &agent_id, &service_name)
+                .await
+                .map_err(wrap_backend_error)?;
+            let v = String::from_utf8_lossy(&bytes).to_string();
+            fetched.insert(service.to_string(), v.clone());
+            v
+        };
+
+        if let Some(existing) = env_vars.iter_mut().find(|(k, _)| k == &env_key) {
+            existing.1 = value;
+        } else {
+            env_vars.push((env_key, value));
+        }
     }
 
     if ctx.verbose {

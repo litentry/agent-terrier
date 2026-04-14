@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use rusqlite::params;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
@@ -176,6 +176,77 @@ pub async fn read_credential(
             Ok(Json(json!({ "ciphertext": encoded })))
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct ListCredentialsQuery {
+    pub agent_id: String,
+}
+
+pub async fn list_credentials(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<ListCredentialsQuery>,
+) -> AppResult<Json<Value>> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer_token)
+        .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
+
+    let session = validate_session(&state, token)?;
+
+    let agent_id = &query.agent_id;
+
+    let db = state.db.lock().unwrap();
+
+    if !is_owner_of(&db, &session.wallet_address, agent_id) {
+        // Audit the DENIED list attempt so cross-agent probing through the
+        // new /credential/list path stays visible in the audit log — the
+        // existing read_credential audit contract guarantees DENIED rows for
+        // ownership failures, and this endpoint inherits the same use case
+        // (called from cmd_run for master sessions). Codex P2 on PR #19.
+        let now = now_secs();
+        db.execute(
+            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
+             VALUES (?1, ?2, ?3, 'list', 'DENIED', ?4)",
+            params![session.wallet_address, agent_id, "*", now],
+        )
+        .ok();
+        return Err(AppError::forbidden(format!(
+            "session does not own agent {}",
+            agent_id
+        )));
+    }
+
+    let mut stmt = db
+        .prepare(
+            "SELECT DISTINCT service_name FROM credentials \
+             WHERE wallet_address = ?1 \
+             ORDER BY service_name",
+        )
+        .map_err(|e| AppError::internal(e.to_string()))?;
+
+    let all_services: Vec<String> = stmt
+        .query_map(params![agent_id], |row| row.get::<_, String>(0))
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Scope enforcement: if the caller session has a scope, only reveal services
+    // within that scope. This matches the read_credential handler's scope gate so
+    // that a scoped child session cannot enumerate services outside its scope.
+    let services: Vec<String> = if let Some(scope_json) = &session.scope_json {
+        let scope: Scope = serde_json::from_str(scope_json)
+            .map_err(|e| AppError::internal(e.to_string()))?;
+        let allowed: std::collections::HashSet<String> =
+            scope.services.into_iter().map(|s| s.0).collect();
+        all_services.into_iter().filter(|s| allowed.contains(s)).collect()
+    } else {
+        all_services
+    };
+
+    Ok(Json(json!({ "services": services })))
 }
 
 pub async fn teardown_agent(

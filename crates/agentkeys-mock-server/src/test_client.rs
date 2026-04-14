@@ -621,6 +621,23 @@ impl CredentialBackend for InProcessBackend {
         })
     }
 
+    async fn list_credentials(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<Vec<ServiceName>, BackendError> {
+        let path = format!("/credential/list?agent_id={}", agent_id.0);
+        let body = self.get_with_session(&path, session).await?;
+
+        let services = body["services"]
+            .as_array()
+            .ok_or_else(|| BackendError::Transport("missing services".into()))?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| ServiceName(s.to_string())))
+            .collect();
+        Ok(services)
+    }
+
     async fn recover_session(
         &self,
         identity: &agentkeys_types::AgentIdentity,

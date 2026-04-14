@@ -23,6 +23,7 @@ pub fn create_router(state: SharedState) -> Router {
         // Credential
         .route("/credential/store", post(handlers::credential::store_credential))
         .route("/credential/read", get(handlers::credential::read_credential))
+        .route("/credential/list", get(handlers::credential::list_credentials))
         .route("/credential/teardown", delete(handlers::credential::teardown_agent))
         // Audit
         .route("/audit/query", get(handlers::audit::query_audit))
