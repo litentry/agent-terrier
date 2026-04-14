@@ -17,6 +17,7 @@ pub struct PairResult {
 pub async fn run_pair_flow(
     backend: &dyn CredentialBackend,
     poll_timeout_secs: u64,
+    parent_wallet: Option<&WalletAddress>,
 ) -> Result<PairResult> {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let pubkey_bytes = ed25519_dalek::VerifyingKey::from(&signing_key).to_bytes().to_vec();
@@ -28,7 +29,7 @@ pub async fn run_pair_flow(
         .map_err(|e| anyhow!("canonical_bytes failed: {e}"))?;
 
     let opened = backend
-        .open_auth_request(&child_pubkey, request_type, &request_details)
+        .open_auth_request(&child_pubkey, request_type, &request_details, parent_wallet)
         .await
         .context("open_auth_request failed")?;
 
@@ -108,6 +109,7 @@ pub async fn run_recover_flow(
     backend: &dyn CredentialBackend,
     agent_identity_str: &str,
     poll_timeout_secs: u64,
+    parent_wallet: Option<&WalletAddress>,
 ) -> Result<PairResult> {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let pubkey_bytes = ed25519_dalek::VerifyingKey::from(&signing_key).to_bytes().to_vec();
@@ -127,7 +129,7 @@ pub async fn run_recover_flow(
         .map_err(|e| anyhow!("canonical_bytes failed: {e}"))?;
 
     let opened = backend
-        .open_auth_request(&child_pubkey, request_type, &request_details)
+        .open_auth_request(&child_pubkey, request_type, &request_details, parent_wallet)
         .await
         .context("open_auth_request (recover) failed")?;
 

@@ -413,6 +413,7 @@ impl CredentialBackend for MockHttpClient {
         child_pubkey: &PublicKey,
         request_type: AuthRequestType,
         request_details: &CanonicalBytes,
+        parent_wallet: Option<&WalletAddress>,
     ) -> Result<OpenedAuthRequest, BackendError> {
         let pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(&child_pubkey.0);
         let details_b64 = base64::engine::general_purpose::STANDARD.encode(&request_details.0);
@@ -439,6 +440,12 @@ impl CredentialBackend for MockHttpClient {
             };
             request_body["identity_type"] = json!(identity_type);
             request_body["identity_value"] = json!(identity_value);
+        }
+
+        // --parent binding from the daemon's --parent flag (PR #22). Orthogonal
+        // to the Recover typed-identity fields above.
+        if let Some(pw) = parent_wallet {
+            request_body["parent_wallet"] = json!(pw.0);
         }
 
         let resp = self

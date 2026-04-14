@@ -39,6 +39,9 @@ struct Args {
         help = "Custom session namespace (default: derived from wallet address)"
     )]
     session_id: Option<String>,
+
+    #[arg(long, value_name = "ALIAS|WALLET", help = "Bind pair request to a specific master (alias or 0x... wallet)")]
+    parent: Option<String>,
 }
 
 #[tokio::main]
@@ -57,6 +60,34 @@ async fn main() -> anyhow::Result<()> {
     let _hardening_report = hardening::apply_hardening()?;
 
     let backend = Arc::new(MockHttpClient::new(&args.backend));
+
+    // Resolve optional --parent flag to a WalletAddress
+    let resolved_parent: Option<WalletAddress> = if let Some(ref parent_str) = args.parent {
+        if parent_str.starts_with("0x") {
+            Some(WalletAddress(parent_str.clone()))
+        } else {
+            // Alias: resolve via HTTP identity endpoint
+            let url = format!("{}/identity/resolve?identity_type=alias&identity_value={}", args.backend, parent_str);
+            let http_client = reqwest::Client::new();
+            let resp = http_client
+                .get(&url)
+                .send()
+                .await
+                .context("resolve parent alias: HTTP request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("could not resolve --parent alias '{}': {}", parent_str, resp.status());
+            }
+            let body: serde_json::Value = resp.json().await.context("resolve parent alias: JSON parse failed")?;
+            let wallet_str = body["wallet_address"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("resolve parent alias: missing wallet_address in response"))?
+                .to_string();
+            Some(WalletAddress(wallet_str))
+        }
+    } else {
+        None
+    };
+    let parent_wallet_ref: Option<&WalletAddress> = resolved_parent.as_ref();
 
     // 2. Determine session: env/file seam, pair flow, or recover flow
     let (sess, agent_id) = if let Some(token) = args.session {
@@ -87,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
             (result.session, agent_id)
         } else {
             // RECOVER VIA MASTER APPROVAL
-            let result = pairing::run_recover_flow(&*backend, agent_identity, args.pair_timeout)
+            let result = pairing::run_recover_flow(&*backend, agent_identity, args.pair_timeout, parent_wallet_ref)
                 .await
                 .context("recover flow failed")?;
             let agent_id = result.wallet.clone();
@@ -182,8 +213,9 @@ async fn main() -> anyhow::Result<()> {
             }
             None => {
                 // PAIR FLOW — no stored session found. Save only after pair
-                // succeeds and the wallet is known.
-                let result = pairing::run_pair_flow(&*backend, args.pair_timeout)
+                // succeeds and the wallet is known. Pass optional --parent
+                // binding so the backend refuses approval from any other master.
+                let result = pairing::run_pair_flow(&*backend, args.pair_timeout, parent_wallet_ref)
                     .await
                     .context("pair flow failed")?;
                 let agent_id = result.wallet.clone();

@@ -412,3 +412,79 @@ async fn mcp_tool_discovery() {
         assert!(tool["description"].is_string(), "tool {} must have description", tool["name"]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test 14: daemon_pair_with_parent_binds_correctly
+// Opens a pair request pre-bound to master_a; master_a can approve it.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn daemon_pair_with_parent_binds_correctly() {
+    use agentkeys_core::backend::CredentialBackend;
+    use agentkeys_types::{AuthRequestType, CanonicalBytes, PublicKey, Scope};
+
+    let backend = create_test_backend();
+
+    let (master_a_sess, master_a_wallet) = backend
+        .create_session(AuthToken::Mock("master-a".into()))
+        .await
+        .unwrap();
+
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let child_pubkey = PublicKey(ed25519_dalek::VerifyingKey::from(&signing_key).to_bytes().to_vec());
+
+    let scope = Scope { services: vec![], read_only: false };
+    let request_type = AuthRequestType::Pair { requested_scope: scope };
+    let request_details = CanonicalBytes(serde_json::to_vec(&serde_json::json!({ "Pair": { "requested_scope": { "services": [], "read_only": false } } })).unwrap());
+
+    let opened = backend
+        .open_auth_request(&child_pubkey, request_type, &request_details, Some(&master_a_wallet))
+        .await
+        .unwrap();
+
+    // master_a approves — should succeed
+    let result = backend.approve_auth_request(&master_a_sess, &opened.id).await;
+    assert!(result.is_ok(), "master_a should be able to approve its own bound request: {result:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: daemon_pair_wrong_parent_rejected
+// Opens a pair request pre-bound to master_a; master_b tries to approve → rejected.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn daemon_pair_wrong_parent_rejected() {
+    use agentkeys_core::backend::CredentialBackend;
+    use agentkeys_types::{AuthRequestType, CanonicalBytes, PublicKey, Scope};
+
+    let backend = create_test_backend();
+
+    let (_master_a_sess, master_a_wallet) = backend
+        .create_session(AuthToken::Mock("master-a-wrong".into()))
+        .await
+        .unwrap();
+
+    let (master_b_sess, _master_b_wallet) = backend
+        .create_session(AuthToken::Mock("master-b-wrong".into()))
+        .await
+        .unwrap();
+
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let child_pubkey = PublicKey(ed25519_dalek::VerifyingKey::from(&signing_key).to_bytes().to_vec());
+
+    let scope = Scope { services: vec![], read_only: false };
+    let request_type = AuthRequestType::Pair { requested_scope: scope };
+    let request_details = CanonicalBytes(serde_json::to_vec(&serde_json::json!({ "Pair": { "requested_scope": { "services": [], "read_only": false } } })).unwrap());
+
+    let opened = backend
+        .open_auth_request(&child_pubkey, request_type, &request_details, Some(&master_a_wallet))
+        .await
+        .unwrap();
+
+    // master_b tries to approve master_a's request — should be rejected
+    let result = backend.approve_auth_request(&master_b_sess, &opened.id).await;
+    assert!(result.is_err(), "master_b should not be able to approve master_a's bound request");
+    let err_str = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err_str.contains("unauthorized") || err_str.contains("401") || err_str.contains("auth") || err_str.contains("session does not own"),
+        "error should indicate unauthorized: {err_str}"
+    );
+}
