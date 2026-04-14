@@ -46,6 +46,31 @@ impl InProcessBackend {
         Self { router, state }
     }
 
+    /// Test helper: insert a row into `identity_links` without going through
+    /// `/identity/link` (which would need an HTTP call + auth). Used by
+    /// integration tests that need to simulate a pre-existing alias/email
+    /// binding before triggering a Recover flow — required after PR #21
+    /// tightened `resolve_identity_typed` to only return wallets that exist
+    /// in `identity_links`.
+    pub fn link_identity_for_tests(
+        &self,
+        identity_type: &str,
+        identity_value: &str,
+        wallet_address: &str,
+    ) {
+        let db = self.state.db.lock().unwrap();
+        db.execute(
+            "INSERT OR REPLACE INTO identity_links (wallet_address, identity_type, identity_value, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                wallet_address,
+                identity_type,
+                identity_value,
+                crate::auth::now_secs()
+            ],
+        )
+        .expect("insert identity_link");
+    }
+
     async fn do_request(
         &self,
         method: &str,

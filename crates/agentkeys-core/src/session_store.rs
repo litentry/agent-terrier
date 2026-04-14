@@ -11,7 +11,7 @@ const KEYRING_SERVICE: &str = "agentkeys";
 /// file-mode credential (codex PR #24 P2).
 const KEYRING_MARKER_FILE: &str = ".keyring_managed";
 
-fn fallback_path(session_id: &str) -> PathBuf {
+pub fn fallback_path(session_id: &str) -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());

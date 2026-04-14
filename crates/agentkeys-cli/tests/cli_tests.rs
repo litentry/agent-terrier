@@ -128,7 +128,7 @@ async fn cmd_revoke_self_clears_local_session() {
         .unwrap();
 
     // Verify session file was written
-    let session_path = session_store::fallback_path();
+    let session_path = session_store::fallback_path("master");
     assert!(session_path.exists(), "session file should exist after init");
 
     // Now self-revoke
@@ -194,7 +194,7 @@ async fn cmd_revoke_with_own_wallet_clears_local_session() {
         .await
         .unwrap();
 
-    let session_path = session_store::fallback_path();
+    let session_path = session_store::fallback_path("master");
     assert!(session_path.exists(), "session file should exist after init");
 
     // Revoke by passing OWN wallet (not None) — should still wipe local state.
@@ -247,7 +247,7 @@ async fn cmd_revoke_with_other_wallet_keeps_local_session() {
         .await
         .unwrap();
 
-    let session_path = session_store::fallback_path();
+    let session_path = session_store::fallback_path("master");
     assert!(session_path.exists(), "parent session file should exist before revoke");
 
     let context = CommandContext::new("unused", false, false)

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::mock_client::MockHttpClient;
-use agentkeys_core::session_store;
+pub use agentkeys_core::session_store;
 use agentkeys_types::{AuditEvent, AuditFilter, AuthToken, ServiceName, Session, WalletAddress};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
@@ -329,7 +329,7 @@ pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<Str
                 .revoke_session(&session, &session)
                 .await
                 .map_err(wrap_backend_error)?;
-            session_store::clear_session().context("clear local session")?;
+            session_store::clear_session(&ctx.session_id).context("clear local session")?;
             Ok(format!(
                 "Revoked current session for wallet={}. Local session wiped. Run `agentkeys init` to re-pair.",
                 wallet_display
@@ -356,7 +356,7 @@ pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<Str
             // form returned by the mock backend.
             let revoked_self = session.wallet.0.eq_ignore_ascii_case(target_wallet_str);
             if revoked_self {
-                session_store::clear_session()
+                session_store::clear_session(&ctx.session_id)
                     .context("clear local session after self-revoke")?;
                 Ok(format!(
                     "Revoked agent={} (was your own session — local state wiped, run `agentkeys init` to re-pair).",
