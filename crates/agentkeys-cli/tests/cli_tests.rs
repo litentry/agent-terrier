@@ -173,6 +173,98 @@ async fn cmd_revoke_with_agent_calls_revoke_by_wallet() {
     let _ = child_session; // child session is no longer valid
 }
 
+// Test: cmd_revoke_with_own_wallet_clears_local_session
+//
+// Regression test for codex P2 finding on PR #18: when the user passes their
+// OWN wallet to `agentkeys revoke <wallet>`, the local session file should
+// be wiped (same as the no-arg self-revoke form), so subsequent commands
+// don't load a stale revoked token.
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_revoke_with_own_wallet_clears_local_session() {
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_home = temp_dir.path().to_str().unwrap().to_string();
+    unsafe { std::env::set_var("HOME", &temp_home); }
+
+    let backend = create_test_backend();
+    let ctx_init = CommandContext::new("unused", false, false)
+        .with_backend(backend.clone() as Arc<dyn CredentialBackend>);
+    let (_, session) = cmd_init(&ctx_init, Some("self-by-wallet-token".to_string()))
+        .await
+        .unwrap();
+
+    let session_path = session_store::fallback_path();
+    assert!(session_path.exists(), "session file should exist after init");
+
+    // Revoke by passing OWN wallet (not None) — should still wipe local state.
+    let own_wallet = session.wallet.0.clone();
+    let context = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session(session);
+
+    let result = cmd_revoke(&context, Some(&own_wallet)).await;
+    assert!(result.is_ok(), "self-by-wallet revoke failed: {:?}", result.err());
+    let msg = result.unwrap();
+    assert!(
+        msg.contains("was your own session"),
+        "expected self-revoke acknowledgement, got: {msg}"
+    );
+    assert!(
+        msg.contains("agentkeys init"),
+        "expected re-pair hint, got: {msg}"
+    );
+
+    assert!(
+        !session_path.exists(),
+        "session file should be deleted after self-by-wallet revoke"
+    );
+}
+
+// Test: cmd_revoke_with_other_wallet_keeps_local_session
+//
+// Counterpart to the above: revoking SOMEONE ELSE's wallet must NOT touch
+// the caller's local session file.
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_revoke_with_other_wallet_keeps_local_session() {
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_home = temp_dir.path().to_str().unwrap().to_string();
+    unsafe { std::env::set_var("HOME", &temp_home); }
+
+    let backend = create_test_backend();
+    let ctx_init = CommandContext::new("unused", false, false)
+        .with_backend(backend.clone() as Arc<dyn CredentialBackend>);
+    let (_, parent_session) = cmd_init(&ctx_init, Some("revoke-other-token".to_string()))
+        .await
+        .unwrap();
+
+    // Spin up a child agent so we have an "other" wallet to target.
+    let child_scope = agentkeys_types::Scope { services: vec![], read_only: false };
+    let (_child_session, child_wallet) = backend
+        .create_child_session(&parent_session, child_scope)
+        .await
+        .unwrap();
+
+    let session_path = session_store::fallback_path();
+    assert!(session_path.exists(), "parent session file should exist before revoke");
+
+    let context = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session(parent_session);
+
+    let result = cmd_revoke(&context, Some(child_wallet.0.as_str())).await;
+    assert!(result.is_ok(), "revoke other wallet failed: {:?}", result.err());
+    let msg = result.unwrap();
+    assert!(!msg.contains("was your own session"), "should NOT mark as self-revoke: {msg}");
+
+    assert!(
+        session_path.exists(),
+        "parent session file should NOT be deleted when revoking a different wallet"
+    );
+}
+
 // Test: cmd_revoke_no_session_errors_cleanly
 #[tokio::test(flavor = "multi_thread")]
 async fn cmd_revoke_no_session_errors_cleanly() {

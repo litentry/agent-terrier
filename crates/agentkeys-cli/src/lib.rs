@@ -229,7 +229,27 @@ pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<Str
                 .revoke_by_wallet(&session, &target_wallet)
                 .await
                 .map_err(wrap_backend_error)?;
-            Ok(format!("Revoked agent={}", target_wallet_str))
+
+            // If the target wallet IS the caller's own wallet, the just-revoked
+            // session matches the locally-cached one. Wipe local state too so
+            // subsequent commands fail cleanly with "no session" instead of
+            // loading the stale revoked token (codex P2 from the original review,
+            // tracked at issue-17 review thread).
+            //
+            // Wallet addresses are compared case-insensitively because the EVM
+            // canonical form (EIP-55 mixed case) can differ from the lowercase
+            // form returned by the mock backend.
+            let revoked_self = session.wallet.0.eq_ignore_ascii_case(target_wallet_str);
+            if revoked_self {
+                session_store::clear_session()
+                    .context("clear local session after self-revoke")?;
+                Ok(format!(
+                    "Revoked agent={} (was your own session — local state wiped, run `agentkeys init` to re-pair).",
+                    target_wallet_str
+                ))
+            } else {
+                Ok(format!("Revoked agent={}", target_wallet_str))
+            }
         }
     }
 }
