@@ -1,9 +1,8 @@
-pub mod session_store;
-
 use std::sync::Arc;
 
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::mock_client::MockHttpClient;
+use agentkeys_core::session_store;
 use agentkeys_types::{AuditEvent, AuditFilter, AuthToken, ServiceName, Session, WalletAddress};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
@@ -37,6 +36,8 @@ pub struct CommandContext {
     pub backend_url: String,
     pub verbose: bool,
     pub json_output: bool,
+    /// Session namespace; defaults to "master". Future multi-session support uses this field.
+    pub session_id: String,
     /// When set, commands use this session directly instead of loading from keychain.
     /// Used by tests to avoid OS keychain interactions.
     pub session_override: Option<Session>,
@@ -51,6 +52,7 @@ impl CommandContext {
             backend_url: backend_url.to_string(),
             verbose,
             json_output,
+            session_id: "master".to_string(),
             session_override: None,
             backend_override: None,
         }
@@ -70,7 +72,7 @@ impl CommandContext {
         if let Some(ref s) = self.session_override {
             return Ok(s.clone());
         }
-        session_store::load_session()
+        session_store::load_session(&self.session_id)
     }
 
     fn backend(&self) -> Arc<dyn CredentialBackend> {
@@ -96,7 +98,7 @@ pub async fn cmd_init(ctx: &CommandContext, mock_token: Option<String>) -> Resul
         .await
         .map_err(wrap_backend_error)?;
 
-    session_store::save_session(&session).context("save session to keychain")?;
+    session_store::save_session(&session, "master").context("save session to keychain")?;
 
     let output = format!("Initialized. Wallet: {}", wallet.0);
     Ok((output, session))
@@ -526,7 +528,7 @@ pub async fn cmd_recover(ctx: &CommandContext, identity: &str, method: &str) -> 
         .await
         .map_err(wrap_backend_error)?;
 
-    session_store::save_session(&session).context("save recovered session to keychain")?;
+    session_store::save_session(&session, "master").context("save recovered session to keychain")?;
 
     Ok(format!("Recovered. Session restored for wallet {}", wallet.0))
 }

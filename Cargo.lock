@@ -24,7 +24,6 @@ dependencies = [
  "assert_cmd",
  "axum",
  "clap",
- "keyring",
  "predicates",
  "reqwest",
  "rusqlite",
@@ -39,15 +38,18 @@ name = "agentkeys-core"
 version = "0.1.0"
 dependencies = [
  "agentkeys-types",
+ "anyhow",
  "async-trait",
  "base64",
  "ciborium",
  "hex",
  "hmac",
+ "keyring",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

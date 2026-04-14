@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::mock_client::MockHttpClient;
+use agentkeys_core::session_store;
 use agentkeys_types::WalletAddress;
 use anyhow::Context;
 use clap::Parser;
@@ -31,6 +32,13 @@ struct Args {
 
     #[arg(long, default_value = "300", help = "Pair/recover poll timeout in seconds")]
     pair_timeout: u64,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_SESSION_ID",
+        help = "Custom session namespace (default: derived from wallet address)"
+    )]
+    session_id: Option<String>,
 }
 
 #[tokio::main]
@@ -53,9 +61,13 @@ async fn main() -> anyhow::Result<()> {
     // 2. Determine session: env/file seam, pair flow, or recover flow
     let (sess, agent_id) = if let Some(token) = args.session {
         // TEST SEAM: session injected directly (Stage 3 compatibility)
-        session::write_session_file(&token)?;
-        let sess = session::build_session_from_token(token);
+        let sess = session::build_session_from_token(token.clone());
         let agent_id = WalletAddress(sess.wallet.0.clone());
+        let sid = args
+            .session_id
+            .clone()
+            .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+        session_store::save_session(&sess, &sid).context("save injected session")?;
         (sess, agent_id)
     } else if let Some(ref agent_identity) = args.recover {
         if let Some(ref method) = args.method {
@@ -63,33 +75,59 @@ async fn main() -> anyhow::Result<()> {
             let result = pairing::run_recover_2fa_flow(&*backend, agent_identity, method)
                 .await
                 .context("2FA recover flow failed")?;
-            session::write_session_file(&result.session.token)?;
             let agent_id = result.wallet.clone();
+            let sid = args
+                .session_id
+                .clone()
+                .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+            // clean up pending entry if present
+            let _ = session_store::clear_session("daemon-pending");
+            session_store::save_session(&result.session, &sid)
+                .context("save recovered session")?;
             (result.session, agent_id)
         } else {
             // RECOVER VIA MASTER APPROVAL
             let result = pairing::run_recover_flow(&*backend, agent_identity, args.pair_timeout)
                 .await
                 .context("recover flow failed")?;
-            session::write_session_file(&result.session.token)?;
             let agent_id = result.wallet.clone();
+            let sid = args
+                .session_id
+                .clone()
+                .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+            let _ = session_store::clear_session("daemon-pending");
+            session_store::save_session(&result.session, &sid)
+                .context("save recovered session")?;
             (result.session, agent_id)
         }
     } else {
-        // Check for existing session file first
-        match session::read_session_file() {
-            Ok(token) => {
-                let sess = session::build_session_from_token(token);
+        // Try to load an existing session from a known id.
+        // If --session-id was supplied, try that first; else try "daemon-pending" as a
+        // sentinel that a prior run left before the wallet was resolved.
+        let existing_sid = args.session_id.clone().unwrap_or_else(|| "daemon-pending".to_string());
+        match session_store::load_session(&existing_sid) {
+            Ok(sess) => {
                 let agent_id = WalletAddress(sess.wallet.0.clone());
                 (sess, agent_id)
             }
             Err(_) => {
-                // PAIR FLOW: no existing session, initiate pairing
+                // PAIR FLOW: no existing session, save under pending until wallet is known
+                session_store::save_session(
+                    &session::build_session_from_token("pending".to_string()),
+                    "daemon-pending",
+                )
+                .ok();
                 let result = pairing::run_pair_flow(&*backend, args.pair_timeout)
                     .await
                     .context("pair flow failed")?;
-                session::write_session_file(&result.session.token)?;
                 let agent_id = result.wallet.clone();
+                let sid = args
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+                let _ = session_store::clear_session("daemon-pending");
+                session_store::save_session(&result.session, &sid)
+                    .context("save paired session")?;
                 (result.session, agent_id)
             }
         }
