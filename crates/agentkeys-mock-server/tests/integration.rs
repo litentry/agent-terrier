@@ -1158,7 +1158,16 @@ async fn recover_flow_e2e() {
     )
     .await;
 
-    // Open a Recover request (same as Pair for mock purposes)
+    // Link alias so the Recover request can resolve identity → wallet
+    post_json_auth(
+        app.clone(),
+        "/identity/link",
+        &orig_session,
+        json!({ "identity_type": "alias", "identity_value": "recover-user-alias", "wallet_address": orig_wallet }),
+    )
+    .await;
+
+    // Open a Recover request with required typed identity fields
     let (_, open_json) = post_json(
         app.clone(),
         "/auth-request/open",
@@ -1166,6 +1175,8 @@ async fn recover_flow_e2e() {
             "child_pubkey": make_fake_pubkey_b64(),
             "request_type": "Recover",
             "request_details": make_fake_details_b64(),
+            "identity_type": "alias",
+            "identity_value": "recover-user-alias",
             "parent_wallet": orig_wallet,
         }),
     )
@@ -1202,13 +1213,23 @@ async fn recover_wrong_session() {
 
     // User A
     let (_, ja) = post_json(app.clone(), "/session/create", json!({ "auth_token": "recover-a" })).await;
+    let session_a = ja["session"].as_str().unwrap().to_string();
     let wallet_a = ja["wallet"].as_str().unwrap().to_string();
 
     // User B
     let (_, jb) = post_json(app.clone(), "/session/create", json!({ "auth_token": "recover-b" })).await;
     let session_b = jb["session"].as_str().unwrap().to_string();
 
-    // Open Recover for wallet_a
+    // Link alias for wallet_a so the Recover request has valid typed fields
+    post_json_auth(
+        app.clone(),
+        "/identity/link",
+        &session_a,
+        json!({ "identity_type": "alias", "identity_value": "recover-a-alias", "wallet_address": wallet_a }),
+    )
+    .await;
+
+    // Open Recover for wallet_a with typed identity fields
     let (_, open_json) = post_json(
         app.clone(),
         "/auth-request/open",
@@ -1216,6 +1237,8 @@ async fn recover_wrong_session() {
             "child_pubkey": make_fake_pubkey_b64(),
             "request_type": "Recover",
             "request_details": make_fake_details_b64(),
+            "identity_type": "alias",
+            "identity_value": "recover-a-alias",
             "parent_wallet": wallet_a,
         }),
     )
@@ -1522,5 +1545,248 @@ async fn list_credentials_ownership_enforced() {
             .iter()
             .any(|e| e["action"] == "list" && e["result"] == "DENIED"),
         "expected a list/DENIED audit row after the cross-agent list attempt, got: {audit_body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #13: resolve_identity_typed + typed auth-request fields
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resolve_identity_alias_returns_wallet() {
+    let app = setup();
+    let (session, wallet, app) = create_test_session(app).await;
+
+    let (link_status, _) = post_json_auth(
+        app.clone(),
+        "/identity/link",
+        &session,
+        json!({ "identity_type": "alias", "identity_value": "my-bot", "wallet_address": wallet }),
+    )
+    .await;
+    assert_eq!(link_status, StatusCode::OK);
+
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri("/identity/resolve?identity_type=alias&identity_value=my-bot")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
+}
+
+#[tokio::test]
+async fn resolve_identity_email_returns_wallet() {
+    let app = setup();
+    let (session, wallet, app) = create_test_session(app).await;
+
+    let (link_status, _) = post_json_auth(
+        app.clone(),
+        "/identity/link",
+        &session,
+        json!({ "identity_type": "email", "identity_value": "bot@example.com", "wallet_address": wallet }),
+    )
+    .await;
+    assert_eq!(link_status, StatusCode::OK);
+
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri("/identity/resolve?identity_type=email&identity_value=bot%40example.com")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
+}
+
+#[tokio::test]
+async fn resolve_identity_wallet_passthrough() {
+    // Wallet passthrough requires the wallet to exist in `accounts` (codex P2
+    // on PR #21: prevents 500 on later FK constraint). Use a wallet created
+    // via /session/create so the accounts row is present.
+    let app = setup();
+    let (_session, wallet, app) = create_test_session(app).await;
+
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri(format!("/identity/resolve?identity_type=wallet&identity_value={wallet}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
+}
+
+#[tokio::test]
+async fn resolve_identity_not_found_errors() {
+    let app = setup();
+
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri("/identity/resolve?identity_type=alias&identity_value=nonexistent-bot")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn resolve_identity_invalid_type_errors() {
+    let app = setup();
+
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri("/identity/resolve?identity_type=unknown_type&identity_value=something")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// Codex P2 on PR #21: ENS identities must resolve through the identity_links
+// table, not silently map to "alias" / get rejected as unknown type.
+#[tokio::test]
+async fn resolve_identity_ens_returns_wallet() {
+    let app = setup();
+    let (session, wallet, app) = create_test_session(app).await;
+
+    let (link_status, _) = post_json_auth(
+        app.clone(),
+        "/identity/link",
+        &session,
+        json!({ "identity_type": "ens", "identity_value": "mybot.eth", "wallet_address": wallet }),
+    )
+    .await;
+    assert_eq!(link_status, StatusCode::OK);
+
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri("/identity/resolve?identity_type=ens&identity_value=mybot.eth")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
+}
+
+// Codex P2 on PR #21: an unknown wallet address must return 404 from
+// /identity/resolve, not flow through and 500 later on the sessions FK.
+#[tokio::test]
+async fn resolve_identity_wallet_unknown_returns_not_found() {
+    let app = setup();
+
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri("/identity/resolve?identity_type=wallet&identity_value=0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn open_auth_request_recover_requires_typed_fields() {
+    let app = setup();
+
+    let (status, json) = post_json(
+        app,
+        "/auth-request/open",
+        json!({
+            "child_pubkey": make_fake_pubkey_b64(),
+            "request_type": "Recover",
+            "request_details": make_fake_details_b64(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "Recover without typed fields should fail: {json}");
+}
+
+#[tokio::test]
+async fn open_auth_request_pair_rejects_typed_fields() {
+    let app = setup();
+
+    let (status, json) = post_json(
+        app,
+        "/auth-request/open",
+        json!({
+            "child_pubkey": make_fake_pubkey_b64(),
+            "request_type": "Pair",
+            "request_details": make_fake_details_b64(),
+            "identity_type": "alias",
+            "identity_value": "my-bot",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "Pair with identity fields should fail: {json}");
+}
+
+#[tokio::test]
+async fn approve_recover_uses_typed_fields() {
+    let app = setup();
+
+    let (session, wallet, app) = create_test_session(app).await;
+
+    // Link alias identity to the session wallet
+    let (link_status, _) = post_json_auth(
+        app.clone(),
+        "/identity/link",
+        &session,
+        json!({ "identity_type": "alias", "identity_value": "recovery-bot", "wallet_address": wallet }),
+    )
+    .await;
+    assert_eq!(link_status, StatusCode::OK);
+
+    // Open Recover request with typed fields
+    let (open_status, open_json) = post_json(
+        app.clone(),
+        "/auth-request/open",
+        json!({
+            "child_pubkey": make_fake_pubkey_b64(),
+            "request_type": "Recover",
+            "request_details": make_fake_details_b64(),
+            "identity_type": "alias",
+            "identity_value": "recovery-bot",
+            "parent_wallet": wallet,
+        }),
+    )
+    .await;
+    assert_eq!(open_status, StatusCode::OK, "open failed: {open_json}");
+    let request_id = open_json["id"].as_str().unwrap().to_string();
+
+    // Approve — reads typed columns, resolves alias → wallet, mints session
+    let (approve_status, approve_json) = post_json_auth(
+        app.clone(),
+        "/auth-request/approve",
+        &session,
+        json!({ "request_id": request_id }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK, "approve failed: {approve_json}");
+    assert!(approve_json["signature"].is_string());
+
+    // Await the decision — minted session targets the resolved wallet
+    let await_req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri(format!("/auth-request/await?request_id={request_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let await_resp = app.oneshot(await_req).await.unwrap();
+    let await_status = await_resp.status();
+    let await_json = body_json(await_resp.into_body()).await;
+    assert_eq!(await_status, StatusCode::OK, "await failed: {await_json}");
+    assert_eq!(await_json["status"].as_str().unwrap(), "approved");
+    assert_eq!(
+        await_json["wallet"].as_str().unwrap(),
+        wallet,
+        "recovered session should target the resolved wallet"
     );
 }
