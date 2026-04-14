@@ -25,11 +25,31 @@ fn should_skip_keyring() -> bool {
 /// Save session under session_id. Tries keyring first (non-blocking, 2s timeout),
 /// falls back to ~/.agentkeys/<session_id>/session.json (mode 0600).
 /// Set AGENTKEYS_SESSION_STORE=file to skip keyring entirely.
+///
+/// Also writes an empty "discovery marker" directory at
+/// ~/.agentkeys/<session_id>/ whenever the keyring path was used — this lets
+/// daemon-restart logic discover keyring-stored sessions via
+/// `list_fallback_session_ids()` (the OS keychain itself doesn't expose a
+/// prefix-scan without per-entry permission prompts).
 pub fn save_session(session: &Session, session_id: &str) -> Result<()> {
     let json = serde_json::to_string(session).context("serialize session")?;
 
     if !should_skip_keyring() {
         if try_keyring_save(&json, session_id) {
+            // Drop an empty directory so list_fallback_session_ids can find
+            // this session even though the credential itself is in the keyring.
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            let marker_dir = PathBuf::from(home).join(".agentkeys").join(session_id);
+            let _ = std::fs::create_dir_all(&marker_dir);
+            // Empty marker file so list_fallback_session_ids's session.json
+            // existence check succeeds. Content is a discovery hint only —
+            // the real credential lives in the OS keyring.
+            let _ = std::fs::write(
+                marker_dir.join("session.json"),
+                r#"{"_keyring_managed":true}"#,
+            );
             return Ok(());
         }
     }

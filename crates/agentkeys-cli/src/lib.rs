@@ -72,7 +72,10 @@ impl CommandContext {
         if let Some(ref s) = self.session_override {
             return Ok(s.clone());
         }
-        session_store::load_session(&self.session_id)
+        // Use the legacy-aware loader so pre-#12 installs (session stored
+        // under keyring account=`session` or file ~/.agentkeys/session.json)
+        // stay logged in after upgrading to the wallet-namespaced layout.
+        session_store::load_session_with_legacy_fallback(&self.session_id)
     }
 
     fn backend(&self) -> Arc<dyn CredentialBackend> {
