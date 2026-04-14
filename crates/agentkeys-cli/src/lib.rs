@@ -160,6 +160,31 @@ pub async fn cmd_run(
 
     let backend = ctx.backend();
 
+    // Pre-flight validation: reject any invalid --env entries BEFORE any credential
+    // I/O (no network round-trips or audit log entries for a partial invocation).
+    // Must run before list_credentials so a malformed override does not produce a
+    // backend round-trip / DENIED audit row on the master-session path (codex P2 v2).
+    for raw in env_overrides {
+        let eq_pos = raw.find('=').ok_or_else(|| {
+            anyhow!(
+                "Invalid --env format '{}': expected KEY=SERVICE (no '=' found)",
+                raw
+            )
+        })?;
+        if eq_pos == 0 {
+            return Err(anyhow!(
+                "Invalid --env format '{}': KEY must not be empty",
+                raw
+            ));
+        }
+        if eq_pos + 1 == raw.len() {
+            return Err(anyhow!(
+                "Invalid --env format '{}': SERVICE must not be empty",
+                raw
+            ));
+        }
+    }
+
     let services_to_try: Vec<String> = if let Some(scope) = &session.scope {
         scope.services.iter().map(|s| s.0.clone()).collect()
     } else {
@@ -171,17 +196,6 @@ pub async fn cmd_run(
             .map(|s| s.0)
             .collect()
     };
-
-    // Pre-flight validation: reject any invalid --env entries BEFORE any credential
-    // I/O (no network round-trips or audit log entries for a partial invocation).
-    for raw in env_overrides {
-        if raw.find('=').is_none() {
-            return Err(anyhow!(
-                "Invalid --env format '{}': expected KEY=SERVICE (no '=' found)",
-                raw
-            ));
-        }
-    }
 
     // Track which services we've already fetched in the auto-injection pass.
     // The --env loop below reuses these values instead of issuing a second
@@ -214,12 +228,7 @@ pub async fn cmd_run(
     }
 
     for raw in env_overrides {
-        let eq_pos = raw.find('=').ok_or_else(|| {
-            anyhow!(
-                "Invalid --env format '{}': expected KEY=SERVICE (no '=' found)",
-                raw
-            )
-        })?;
+        let eq_pos = raw.find('=').expect("pre-flight validation already rejected entries without '='");
         let env_key = raw[..eq_pos].to_string();
         let service = &raw[eq_pos + 1..];
 

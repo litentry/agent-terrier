@@ -547,3 +547,47 @@ async fn cmd_run_env_flag_invalid_format() {
         "unexpected error message: {err}"
     );
 }
+
+// Test 19 (codex P2 v2): --env with empty KEY (e.g. "=github") rejected up
+// front, no backend round-trip and no DENIED audit row.
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_run_env_flag_empty_key_rejected() {
+    let backend = create_test_backend();
+    let (wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    let result = agentkeys_cli::cmd_run(
+        &context,
+        &wallet,
+        &["=github".to_string()],
+        &["true".to_string()],
+    )
+    .await;
+    let err = result.expect_err("empty KEY must be rejected").to_string();
+    assert!(
+        err.contains("KEY must not be empty"),
+        "unexpected error: {err}"
+    );
+}
+
+// Test 20 (codex P2 v2): --env with empty SERVICE (e.g. "MY_KEY=") rejected
+// up front, no backend round-trip for an empty service name.
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_run_env_flag_empty_service_rejected() {
+    let backend = create_test_backend();
+    let (wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    let result = agentkeys_cli::cmd_run(
+        &context,
+        &wallet,
+        &["MY_KEY=".to_string()],
+        &["true".to_string()],
+    )
+    .await;
+    let err = result.expect_err("empty SERVICE must be rejected").to_string();
+    assert!(
+        err.contains("SERVICE must not be empty"),
+        "unexpected error: {err}"
+    );
+}
