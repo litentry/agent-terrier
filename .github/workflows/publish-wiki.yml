@@ -1,0 +1,32 @@
+name: Publish wiki
+
+# One-way mirror: wiki/ in this repo is the canonical source for the GitHub Wiki.
+# Every push to main that touches wiki/ copies the folder over to
+# litentry/agentKeys.wiki.git.
+#
+# Edits made directly through the GitHub Wiki web UI will be overwritten on the
+# next push to main that touches wiki/. See wiki/Home.md for the developer note.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wiki/**'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: wiki-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Publish to wiki
+        uses: Andrew-Chen-Wang/github-wiki-action@v4
+        with:
+          path: wiki/
