@@ -115,27 +115,35 @@ async fn main() -> anyhow::Result<()> {
         // loaded that fake session and skipped pairing entirely (codex P1).
         // Now: no sentinel, so a failed pair just results in a retry next
         // startup, which is what users expect.
-        let try_ids: Vec<String> = if let Some(sid) = args.session_id.clone() {
-            vec![sid]
+        let loaded = if let Some(sid) = args.session_id.clone() {
+            // Explicit --session-id / AGENTKEYS_SESSION_ID — load directly.
+            session_store::load_session(&sid).ok().map(|s| (sid, s))
         } else {
-            // Deterministic sorted list. If >1 exists, require the user to
-            // pick one via --session-id or AGENTKEYS_SESSION_ID rather than
-            // silently restoring an arbitrary wallet (codex PR #24 P1 —
-            // cross-wallet credential mix-up on multi-daemon hosts).
-            let ids = session_store::list_fallback_session_ids("daemon-");
-            if ids.len() > 1 {
-                anyhow::bail!(
-                    "multiple daemon sessions found under ~/.agentkeys ({}): pass --session-id <name> (or set AGENTKEYS_SESSION_ID) to pick one. Candidates: {}",
-                    ids.len(),
-                    ids.join(", ")
-                );
-            }
-            ids
-        };
+            // Validate candidates before raising ambiguity, so stale marker
+            // directories (e.g., keyring entry deleted out-of-band) don't
+            // block startup when exactly one real session is still loadable
+            // (codex PR #24 v4 P2). Deterministic sorted list so any
+            // ambiguity error prints candidates in stable order (codex PR
+            // #24 P1 — cross-wallet credential mix-up).
+            let candidates = session_store::list_fallback_session_ids("daemon-");
+            let loadable: Vec<(String, _)> = candidates
+                .into_iter()
+                .filter_map(|sid| session_store::load_session(&sid).ok().map(|s| (sid, s)))
+                .collect();
 
-        let loaded = try_ids
-            .into_iter()
-            .find_map(|sid| session_store::load_session(&sid).ok().map(|s| (sid, s)));
+            match loadable.len() {
+                0 => None,
+                1 => Some(loadable.into_iter().next().expect("len==1")),
+                _ => {
+                    let ids: Vec<String> = loadable.into_iter().map(|(sid, _)| sid).collect();
+                    anyhow::bail!(
+                        "multiple loadable daemon sessions found under ~/.agentkeys ({}): pass --session-id <name> (or set AGENTKEYS_SESSION_ID) to pick one. Candidates: {}",
+                        ids.len(),
+                        ids.join(", ")
+                    );
+                }
+            }
+        };
 
         match loaded {
             Some((_sid, sess)) => {

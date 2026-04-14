@@ -97,20 +97,31 @@ pub fn save_session(session: &Session, session_id: &str) -> Result<()> {
 
     if !should_skip_keyring() {
         if try_keyring_save(&json, session_id) {
+            // Marker file is best-effort: it's only required for
+            // prefix-scan discovery (daemon-restart path). Direct-load
+            // callers like `master` look up by known id, so a missing
+            // marker doesn't break them. If the marker can't land
+            // (read-only HOME, missing filesystem), the keyring entry
+            // is still the authoritative store — emit a diagnostic on
+            // stderr and return Ok (codex PR #24 v4 P2).
             let marker = marker_path(session_id);
             if let Some(parent) = marker.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("create marker dir {}", parent.display())
-                })?;
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "[agentkeys] warning: could not create marker dir {}: {e}. \
+                         Session saved in keyring; prefix-scan discovery may fail on restart.",
+                        parent.display()
+                    );
+                    return Ok(());
+                }
             }
-            // Touch the marker file — empty content, presence is the signal.
-            // Never touches session.json, so a stale file-mode credential
-            // remains intact for later fallback. Marker failure is
-            // propagated because without it the session is undiscoverable
-            // on restart (codex PR #24 v2 P2).
-            std::fs::File::create(&marker).with_context(|| {
-                format!("write keyring marker {}", marker.display())
-            })?;
+            if let Err(e) = std::fs::File::create(&marker) {
+                eprintln!(
+                    "[agentkeys] warning: could not write keyring marker {}: {e}. \
+                     Session saved in keyring; prefix-scan discovery may fail on restart.",
+                    marker.display()
+                );
+            }
             return Ok(());
         }
     }
