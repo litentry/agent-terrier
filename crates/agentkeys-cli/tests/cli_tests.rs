@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agentkeys_cli::{cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_store, cmd_teardown, cmd_usage, CommandContext};
+use agentkeys_cli::{cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_run, cmd_store, cmd_teardown, cmd_usage, CommandContext};
 use agentkeys_cli::session_store;
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mock_server::test_client::InProcessBackend;
@@ -56,8 +56,8 @@ async fn cli_store_and_read() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    cmd_store(&context, &wallet, "openrouter", "sk-test-12345").await.unwrap();
-    let read_out = cmd_read(&context, &wallet, "openrouter").await.unwrap();
+    cmd_store(&context, Some(&wallet), "openrouter", "sk-test-12345").await.unwrap();
+    let read_out = cmd_read(&context, Some(&wallet), "openrouter").await.unwrap();
     assert_eq!(read_out.trim(), "sk-test-12345");
 }
 
@@ -68,7 +68,7 @@ async fn cli_store_scope_denied() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    let result = cmd_read(&context, &wallet, "nonexistent-service").await;
+    let result = cmd_read(&context, Some(&wallet), "nonexistent-service").await;
     assert!(result.is_err(), "expected error for unstored credential");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -84,11 +84,11 @@ async fn cli_run_injects_env() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    cmd_store(&context, &wallet, "openrouter", "sk-injected-key").await.unwrap();
+    cmd_store(&context, Some(&wallet), "openrouter", "sk-injected-key").await.unwrap();
 
     // Master session has no scope, so no env vars are injected automatically.
     // Verify cmd_run can exec a simple command without error.
-    let result = agentkeys_cli::cmd_run(&context, &wallet, &[], &["true".to_string()]).await;
+    let result = cmd_run(&context, Some(&wallet), &[], &["true".to_string()]).await;
     assert!(result.is_ok(), "cmd_run failed: {:?}", result.err());
 }
 
@@ -99,13 +99,13 @@ async fn cli_revoke_then_read() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    cmd_store(&context, &wallet, "anthropic", "sk-stored").await.unwrap();
+    cmd_store(&context, Some(&wallet), "anthropic", "sk-stored").await.unwrap();
 
     // Attempt revoke with Some(wallet) — uses the revoke_by_wallet path
     let _ = cmd_revoke(&context, Some(wallet.as_str())).await;
 
     // Credential should still be accessible since revoke_by_wallet revokes sessions not creds
-    let read_result = cmd_read(&context, &wallet, "anthropic").await;
+    let read_result = cmd_read(&context, Some(&wallet), "anthropic").await;
     // Accept either success or error — just ensure no panic
     let _ = read_result;
 }
@@ -296,14 +296,14 @@ async fn cli_teardown_deletes_all() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    cmd_store(&context, &wallet, "openai", "sk-pre-teardown").await.unwrap();
+    cmd_store(&context, Some(&wallet), "openai", "sk-pre-teardown").await.unwrap();
 
-    let before = cmd_read(&context, &wallet, "openai").await.unwrap();
+    let before = cmd_read(&context, Some(&wallet), "openai").await.unwrap();
     assert_eq!(before.trim(), "sk-pre-teardown");
 
     cmd_teardown(&context, &wallet).await.unwrap();
 
-    let after = cmd_read(&context, &wallet, "openai").await;
+    let after = cmd_read(&context, Some(&wallet), "openai").await;
     assert!(after.is_err(), "expected error after teardown, got: {:?}", after.ok());
 }
 
@@ -314,8 +314,8 @@ async fn cli_usage_shows_audit() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    cmd_store(&context, &wallet, "openrouter", "sk-audit-test").await.unwrap();
-    let _ = cmd_read(&context, &wallet, "openrouter").await.unwrap();
+    cmd_store(&context, Some(&wallet), "openrouter", "sk-audit-test").await.unwrap();
+    let _ = cmd_read(&context, Some(&wallet), "openrouter").await.unwrap();
 
     let usage_out = cmd_usage(&context, Some(&wallet), false).await.unwrap();
     assert!(
@@ -380,8 +380,8 @@ async fn cli_json_output() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_json_with_session(backend, session);
 
-    cmd_store(&context, &wallet, "openrouter", "sk-json-test").await.unwrap();
-    let output = cmd_read(&context, &wallet, "openrouter").await.unwrap();
+    cmd_store(&context, Some(&wallet), "openrouter", "sk-json-test").await.unwrap();
+    let output = cmd_read(&context, Some(&wallet), "openrouter").await.unwrap();
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).expect("output is not valid JSON");
@@ -396,7 +396,7 @@ async fn cli_verbose_output() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_verbose_with_session(backend, session);
 
-    let result = cmd_store(&context, &wallet, "openrouter", "sk-verbose").await;
+    let result = cmd_store(&context, Some(&wallet), "openrouter", "sk-verbose").await;
     assert!(result.is_ok(), "verbose store failed: {:?}", result.err());
 }
 
@@ -408,7 +408,7 @@ async fn cli_error_format_denied() {
     let context = ctx_with_session(backend, session);
 
     let other_wallet = "0x000000000000000000000000000000000000dead";
-    let result = cmd_read(&context, other_wallet, "openrouter").await;
+    let result = cmd_read(&context, Some(other_wallet), "openrouter").await;
     assert!(result.is_err(), "expected error reading from unprovisioned agent");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -424,7 +424,7 @@ async fn cli_error_format_not_found() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    let result = cmd_read(&context, &wallet, "nonexistent").await;
+    let result = cmd_read(&context, Some(&wallet), "nonexistent").await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
@@ -459,11 +459,11 @@ async fn cmd_run_master_session_injects_all_credentials() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    cmd_store(&context, &wallet, "openrouter", "sk-or-test").await.unwrap();
-    cmd_store(&context, &wallet, "anthropic", "sk-ant-test").await.unwrap();
+    cmd_store(&context, Some(&wallet), "openrouter", "sk-or-test").await.unwrap();
+    cmd_store(&context, Some(&wallet), "anthropic", "sk-ant-test").await.unwrap();
 
     // `env` prints all env vars; grep for the injected keys
-    let result = agentkeys_cli::cmd_run(&context, &wallet, &[], &["env".to_string()]).await;
+    let result = cmd_run(&context, Some(&wallet), &[], &["env".to_string()]).await;
     assert!(result.is_ok(), "cmd_run failed: {:?}", result.err());
 }
 
@@ -491,14 +491,14 @@ async fn cmd_run_scoped_session_respects_scope() {
 
     // Store credentials under child_wallet using the master session (master owns the child)
     let master_ctx = ctx_with_session(backend.clone(), master_session.clone());
-    cmd_store(&master_ctx, &child_wallet.0, "openrouter", "sk-or-scoped").await.unwrap();
-    cmd_store(&master_ctx, &child_wallet.0, "anthropic", "sk-ant-scoped").await.unwrap();
+    cmd_store(&master_ctx, Some(&child_wallet.0), "openrouter", "sk-or-scoped").await.unwrap();
+    cmd_store(&master_ctx, Some(&child_wallet.0), "anthropic", "sk-ant-scoped").await.unwrap();
 
     // cmd_run with the child session: scope = ["openrouter"], so only openrouter is injected
     let child_ctx = ctx_with_session(backend, child_session);
-    let result = agentkeys_cli::cmd_run(
+    let result = cmd_run(
         &child_ctx,
-        &child_wallet.0,
+        Some(&child_wallet.0),
         &[],
         &["true".to_string()],
     )
@@ -513,12 +513,12 @@ async fn cmd_run_env_flag_overrides_default_name() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    cmd_store(&context, &wallet, "github", "ghp-token-value").await.unwrap();
+    cmd_store(&context, Some(&wallet), "github", "ghp-token-value").await.unwrap();
 
     // With --env GITHUB_TOKEN=github, the credential should be injected as GITHUB_TOKEN
-    let result = agentkeys_cli::cmd_run(
+    let result = cmd_run(
         &context,
-        &wallet,
+        Some(&wallet),
         &["GITHUB_TOKEN=github".to_string()],
         &["true".to_string()],
     )
@@ -533,9 +533,9 @@ async fn cmd_run_env_flag_invalid_format() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    let result = agentkeys_cli::cmd_run(
+    let result = cmd_run(
         &context,
-        &wallet,
+        Some(&wallet),
         &["INVALID_NO_EQUALS".to_string()],
         &["true".to_string()],
     )
@@ -556,9 +556,9 @@ async fn cmd_run_env_flag_empty_key_rejected() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    let result = agentkeys_cli::cmd_run(
+    let result = cmd_run(
         &context,
-        &wallet,
+        Some(&wallet),
         &["=github".to_string()],
         &["true".to_string()],
     )
@@ -578,9 +578,9 @@ async fn cmd_run_env_flag_empty_service_rejected() {
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
 
-    let result = agentkeys_cli::cmd_run(
+    let result = cmd_run(
         &context,
-        &wallet,
+        Some(&wallet),
         &["MY_KEY=".to_string()],
         &["true".to_string()],
     )
@@ -589,5 +589,122 @@ async fn cmd_run_env_flag_empty_service_rejected() {
     assert!(
         err.contains("SERVICE must not be empty"),
         "unexpected error: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests for wallet-optional CLI + identity aliases (issue #16)
+// ---------------------------------------------------------------------------
+
+// Test 21 (issue-16): cmd_store with None agent defaults to session wallet
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_store_defaults_to_session_wallet() {
+    let backend = create_test_backend();
+    let (_wallet, session) = init_session_direct(&backend).await;
+    let session_wallet = session.wallet.0.clone();
+    let context = ctx_with_session(backend.clone(), session.clone());
+
+    cmd_store(&context, None, "openrouter", "sk-default-wallet").await.unwrap();
+
+    // Read back explicitly with the session wallet to confirm it was stored there
+    let read_ctx = ctx_with_session(backend, session);
+    let value = cmd_read(&read_ctx, Some(&session_wallet), "openrouter").await.unwrap();
+    assert_eq!(value.trim(), "sk-default-wallet");
+}
+
+// Test 22 (issue-16): cmd_read with None agent defaults to session wallet
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_read_defaults_to_session_wallet() {
+    let backend = create_test_backend();
+    let (wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    cmd_store(&context, Some(&wallet), "anthropic", "sk-read-default").await.unwrap();
+
+    // Read back with None — should resolve to the same session wallet
+    let value = cmd_read(&context, None, "anthropic").await.unwrap();
+    assert_eq!(value.trim(), "sk-read-default");
+}
+
+// Test 23 (issue-16): cmd_run with None agent defaults to session wallet
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_run_defaults_to_session_wallet() {
+    let backend = create_test_backend();
+    let (_wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    // None agent → uses session wallet; no scope so no env vars injected, but cmd_run succeeds
+    let result = cmd_run(&context, None, &[], &["true".to_string()]).await;
+    assert!(result.is_ok(), "cmd_run with None agent failed: {:?}", result.err());
+}
+
+// Test 24 (issue-16): cmd_store with alias resolves to the linked wallet
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_store_resolves_alias() {
+    use agentkeys_mock_server::{create_router, db, state::AppState};
+    use std::sync::Arc as StdArc;
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let state = StdArc::new(AppState::new(conn));
+    let router = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+    let bare_ctx = CommandContext::new(&base_url, false, false);
+    let (output, session) = cmd_init(&bare_ctx, Some("test-token-alias".to_string())).await.unwrap();
+    let wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
+
+    let context = CommandContext::new(&base_url, false, false).with_session(session.clone());
+
+    // Link the wallet to an alias
+    cmd_link(&context, &wallet, Some("my-alias-bot"), None).await.unwrap();
+
+    // Store using the alias — should resolve to the same wallet
+    cmd_store(&context, Some("my-alias-bot"), "openrouter", "sk-via-alias").await.unwrap();
+
+    // Read back explicitly with the wallet address to confirm storage
+    let value = cmd_read(&context, Some(&wallet), "openrouter").await.unwrap();
+    assert_eq!(value.trim(), "sk-via-alias");
+}
+
+// Test 25 (issue-16): cmd_read with unknown identity returns the documented error message
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_read_unknown_identity_errors_cleanly() {
+    use agentkeys_mock_server::{create_router, db, state::AppState};
+    use std::sync::Arc as StdArc;
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let state = StdArc::new(AppState::new(conn));
+    let router = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+    let bare_ctx = CommandContext::new(&base_url, false, false);
+    let (_output, session) = cmd_init(&bare_ctx, Some("test-token-unknown".to_string())).await.unwrap();
+
+    let context = CommandContext::new(&base_url, false, false).with_session(session);
+
+    let result = cmd_read(&context, Some("no-such-alias"), "openrouter").await;
+    assert!(result.is_err(), "expected error for unknown identity");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unknown identity") && err.contains("no-such-alias"),
+        "unexpected error message: {err}"
+    );
+    assert!(
+        err.contains("agentkeys link") || err.contains("0x"),
+        "error message should mention agentkeys link: {err}"
     );
 }

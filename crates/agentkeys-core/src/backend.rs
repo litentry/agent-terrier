@@ -133,6 +133,14 @@ pub trait CredentialBackend: Send + Sync {
         session: &Session,
         agent_id: &WalletAddress,
     ) -> Result<Vec<ServiceName>, BackendError>;
+
+    /// Resolve a human-readable identity (alias or email) to a wallet address.
+    /// Returns `BackendError::NotFound` when no mapping exists.
+    async fn resolve_identity(
+        &self,
+        session: &Session,
+        identifier: &str,
+    ) -> Result<WalletAddress, BackendError>;
 }
 
 #[cfg(test)]
@@ -283,6 +291,14 @@ mod tests {
             _session: &Session,
             _agent_id: &WalletAddress,
         ) -> Result<Vec<ServiceName>, BackendError> {
+            unimplemented!()
+        }
+
+        async fn resolve_identity(
+            &self,
+            _session: &Session,
+            _identifier: &str,
+        ) -> Result<WalletAddress, BackendError> {
             unimplemented!()
         }
     }
