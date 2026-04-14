@@ -638,6 +638,42 @@ impl CredentialBackend for MockHttpClient {
         Ok(services)
     }
 
+    async fn resolve_identity(
+        &self,
+        session: &Session,
+        identifier: &str,
+    ) -> Result<WalletAddress, BackendError> {
+        let (identity_type, identity_value) = if identifier.contains('@') {
+            ("email", identifier)
+        } else {
+            ("alias", identifier)
+        };
+
+        // reqwest's .query() builder percent-encodes both parameter names and
+        // values per RFC 3986, so identities containing '+', '&', '=', '%', or
+        // spaces (e.g. plus-addressed emails like "bot+prod@example.com") are
+        // sent intact to the server.
+        let resp = self
+            .client
+            .get(self.url("/identity/resolve"))
+            .query(&[("identity_type", identity_type), ("identity_value", identity_value)])
+            .header("authorization", format!("Bearer {}", session.token))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let wallet_str = body["wallet_address"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing wallet_address".into()))?
+            .to_string();
+        Ok(WalletAddress(wallet_str))
+    }
+
     async fn recover_session(
         &self,
         identity: &agentkeys_types::AgentIdentity,

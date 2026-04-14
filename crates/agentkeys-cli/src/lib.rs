@@ -102,35 +102,62 @@ pub async fn cmd_init(ctx: &CommandContext, mock_token: Option<String>) -> Resul
     Ok((output, session))
 }
 
-pub async fn cmd_store(ctx: &CommandContext, agent: &str, service: &str, key: &str) -> Result<String> {
+/// Resolve the effective wallet address for a command.
+/// - `None`  → use the session's own wallet (default agent)
+/// - `Some("0x...")` → parse directly as wallet address
+/// - `Some(other)` → call `resolve_identity` on the backend (alias/email lookup)
+async fn resolve_agent(
+    backend: &Arc<dyn CredentialBackend>,
+    session: &Session,
+    agent: Option<&str>,
+) -> Result<WalletAddress> {
+    match agent {
+        None => Ok(session.wallet.clone()),
+        Some(arg) if arg.starts_with("0x") => Ok(WalletAddress(arg.to_string())),
+        Some(arg) => backend
+            .resolve_identity(session, arg)
+            .await
+            .map_err(|e| match e {
+                BackendError::NotFound(_) => anyhow!(
+                    "unknown identity '{}'. Use `agentkeys link` to create an alias or pass the 0x... wallet directly.",
+                    arg
+                ),
+                other => wrap_backend_error(other),
+            }),
+    }
+}
+
+pub async fn cmd_store(ctx: &CommandContext, agent: Option<&str>, service: &str, key: &str) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-    let agent_id = WalletAddress(agent.to_string());
+    let backend = ctx.backend();
+    let agent_id = resolve_agent(&backend, &session, agent).await?;
     let service_name = ServiceName(service.to_string());
 
     if ctx.verbose {
         eprintln!("[verbose] POST {}/credential/store", ctx.backend_url);
-        eprintln!("[verbose] agent: {}, service: {}", agent, service);
+        eprintln!("[verbose] agent: {}, service: {}", agent_id.0, service);
     }
 
-    ctx.backend()
+    backend
         .store_credential(&session, &agent_id, &service_name, key.as_bytes())
         .await
         .map_err(wrap_backend_error)?;
 
-    Ok(format!("Stored credential for agent={} service={}", agent, service))
+    Ok(format!("Stored credential for agent={} service={}", agent_id.0, service))
 }
 
-pub async fn cmd_read(ctx: &CommandContext, agent: &str, service: &str) -> Result<String> {
+pub async fn cmd_read(ctx: &CommandContext, agent: Option<&str>, service: &str) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-    let agent_id = WalletAddress(agent.to_string());
+    let backend = ctx.backend();
+    let agent_id = resolve_agent(&backend, &session, agent).await?;
     let service_name = ServiceName(service.to_string());
 
     if ctx.verbose {
         eprintln!("[verbose] GET {}/credential/read", ctx.backend_url);
-        eprintln!("[verbose] agent: {}, service: {}", agent, service);
+        eprintln!("[verbose] agent: {}, service: {}", agent_id.0, service);
     }
 
-    let bytes = ctx.backend()
+    let bytes = backend
         .read_credential(&session, &agent_id, &service_name)
         .await
         .map_err(wrap_backend_error)?;
@@ -138,7 +165,7 @@ pub async fn cmd_read(ctx: &CommandContext, agent: &str, service: &str) -> Resul
     let value = String::from_utf8_lossy(&bytes).to_string();
 
     if ctx.json_output {
-        let obj = json!({ "agent": agent, "service": service, "credential": value });
+        let obj = json!({ "agent": agent_id.0, "service": service, "credential": value });
         Ok(serde_json::to_string_pretty(&obj).unwrap())
     } else {
         Ok(value)
@@ -147,7 +174,7 @@ pub async fn cmd_read(ctx: &CommandContext, agent: &str, service: &str) -> Resul
 
 pub async fn cmd_run(
     ctx: &CommandContext,
-    agent: &str,
+    agent: Option<&str>,
     env_overrides: &[String],
     cmd: &[String],
 ) -> Result<String> {
@@ -156,9 +183,8 @@ pub async fn cmd_run(
     }
 
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-    let agent_id = WalletAddress(agent.to_string());
-
     let backend = ctx.backend();
+    let agent_id = resolve_agent(&backend, &session, agent).await?;
 
     // Pre-flight validation: reject any invalid --env entries BEFORE any credential
     // I/O (no network round-trips or audit log entries for a partial invocation).

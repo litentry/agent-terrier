@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
     name = "agentkeys",
     version,
     about = "Credential management for AI agents",
-    long_about = "agentkeys — secure credential storage and injection for AI agents.\n\nExamples:\n  agentkeys init --mock-token mytoken\n  agentkeys store 0xAGENT openrouter sk-or-...\n  agentkeys read 0xAGENT openrouter\n  agentkeys run 0xAGENT -- python my_agent.py\n  agentkeys usage 0xAGENT\n  agentkeys revoke 0xAGENT\n  agentkeys teardown 0xAGENT"
+    long_about = "agentkeys — secure credential storage and injection for AI agents.\n\nThe --agent flag on store/read/run accepts a 0x... wallet, a linked alias, or a linked email. Omit it to default to the current session wallet.\n\nExamples:\n  agentkeys init --mock-token mytoken\n  agentkeys store openrouter sk-or-...                    (session wallet)\n  agentkeys store --agent 0xAGENT openrouter sk-or-...    (specific wallet)\n  agentkeys read --agent my-bot openrouter                (linked alias)\n  agentkeys run -- python my_agent.py                     (session wallet)\n  agentkeys run --agent 0xAGENT -- python my_agent.py     (specific wallet)\n  agentkeys usage 0xAGENT\n  agentkeys revoke 0xAGENT\n  agentkeys teardown 0xAGENT"
 )]
 struct Cli {
     #[arg(long, default_value = "http://localhost:8090", help = "Backend URL")]
@@ -40,11 +40,11 @@ enum Commands {
 
     #[command(
         about = "Store a credential for an agent+service",
-        long_about = "Encrypt and store an API key for a given agent and service.\n\nExamples:\n  agentkeys store 0xAGENT openrouter sk-or-v1-abc123\n  agentkeys store 0xAGENT anthropic sk-ant-abc123"
+        long_about = "Encrypt and store an API key for a given agent and service.\n\nOmit --agent to default to the session wallet. --agent accepts a 0x... wallet address, a linked alias, or a linked email.\n\nNote on the --agent FLAG (vs a positional): clap does not support an optional leading positional followed by required positionals — it either panics at parse time or consumes the first required arg as the agent. An --agent flag is the only disambiguation that works without a subcommand split.\n\nExamples:\n  agentkeys store openrouter sk-or-v1-abc123                (session wallet)\n  agentkeys store --agent my-bot openrouter sk-or-v1-abc123 (resolve alias)\n  agentkeys store --agent 0xAGENT anthropic sk-ant-abc123   (literal wallet)"
     )]
     Store {
-        #[arg(help = "Agent wallet address")]
-        agent: String,
+        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        agent: Option<String>,
         #[arg(help = "Service name (e.g. openrouter, anthropic)")]
         service: String,
         #[arg(help = "API key or credential value")]
@@ -53,22 +53,22 @@ enum Commands {
 
     #[command(
         about = "Read a credential for an agent+service",
-        long_about = "Retrieve and print the stored credential.\n\nExamples:\n  agentkeys read 0xAGENT openrouter\n  agentkeys read --json 0xAGENT openrouter"
+        long_about = "Retrieve and print the stored credential. Omit --agent to default to the session wallet.\n\nExamples:\n  agentkeys read openrouter                     (session wallet)\n  agentkeys read --agent my-bot openrouter      (resolve alias)\n  agentkeys read --json --agent 0xAGENT openrouter (literal wallet)"
     )]
     Read {
-        #[arg(help = "Agent wallet address")]
-        agent: String,
+        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        agent: Option<String>,
         #[arg(help = "Service name")]
         service: String,
     },
 
     #[command(
         about = "Run a command with credentials injected as env vars",
-        long_about = "Load credentials for the agent and inject them as SERVICE_API_KEY env vars.\n\nExamples:\n  agentkeys run 0xAGENT -- python my_agent.py\n  agentkeys run 0xAGENT -- node server.js\n  agentkeys run 0xAGENT --env GITHUB_TOKEN=github -- bash deploy.sh"
+        long_about = "Load credentials for the agent and inject them as SERVICE_API_KEY env vars. Omit --agent to default to the session wallet. Use --env KEY=service to map non-standard env-var names (e.g. GITHUB_TOKEN).\n\nExamples:\n  agentkeys run -- python my_agent.py                      (session wallet)\n  agentkeys run --agent my-bot -- node server.js           (resolve alias)\n  agentkeys run --agent 0xAGENT -- node server.js          (literal wallet)\n  agentkeys run --env GITHUB_TOKEN=github -- bash deploy.sh"
     )]
     Run {
-        #[arg(help = "Agent wallet address")]
-        agent: String,
+        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        agent: Option<String>,
         #[arg(long = "env", value_name = "KEY=SERVICE", action = clap::ArgAction::Append, help = "Map env var name to service (e.g. GITHUB_TOKEN=github)")]
         env: Vec<String>,
         #[arg(last = true, help = "Command to execute")]
@@ -155,9 +155,9 @@ async fn main() {
         Commands::Init { mock_token } => {
             cmd_init(&ctx, mock_token.clone()).await.map(|(msg, _session)| msg)
         }
-        Commands::Store { agent, service, key } => cmd_store(&ctx, agent, service, key).await,
-        Commands::Read { agent, service } => cmd_read(&ctx, agent, service).await,
-        Commands::Run { agent, env, cmd } => cmd_run(&ctx, agent, env, cmd).await,
+        Commands::Store { agent, service, key } => cmd_store(&ctx, agent.as_deref(), service, key).await,
+        Commands::Read { agent, service } => cmd_read(&ctx, agent.as_deref(), service).await,
+        Commands::Run { agent, env, cmd } => cmd_run(&ctx, agent.as_deref(), env, cmd).await,
         Commands::Revoke { agent } => cmd_revoke(&ctx, agent.as_deref()).await,
         Commands::Teardown { agent } => cmd_teardown(&ctx, agent).await,
         Commands::Usage { agent, json } => {

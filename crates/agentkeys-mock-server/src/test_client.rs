@@ -17,6 +17,21 @@ use agentkeys_types::{
 
 use crate::{create_router, db, state::{AppState, SharedState}};
 
+/// Percent-encode the unreserved subset of RFC 3986 for query-string values.
+/// Used to safely interpolate user-provided identity values (aliases, emails
+/// containing '+', etc.) into the `/identity/resolve` URL.
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'~') {
+            out.push(*b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
 pub struct InProcessBackend {
     router: Router,
     state: SharedState,
@@ -636,6 +651,32 @@ impl CredentialBackend for InProcessBackend {
             .filter_map(|v| v.as_str().map(|s| ServiceName(s.to_string())))
             .collect();
         Ok(services)
+    }
+
+    async fn resolve_identity(
+        &self,
+        session: &Session,
+        identifier: &str,
+    ) -> Result<WalletAddress, BackendError> {
+        let (identity_type, identity_value) = if identifier.contains('@') {
+            ("email", identifier.to_string())
+        } else {
+            ("alias", identifier.to_string())
+        };
+        // Percent-encode the value so reserved characters ('+', '&', '=', '%',
+        // spaces, '@' when embedded in emails) travel through the query string
+        // correctly. Mirrors MockHttpClient's reqwest `.query()` builder.
+        let path = format!(
+            "/identity/resolve?identity_type={}&identity_value={}",
+            identity_type,
+            pct_encode(&identity_value),
+        );
+        let body = self.get_with_session(&path, session).await?;
+        let wallet_str = body["wallet_address"]
+            .as_str()
+            .ok_or_else(|| BackendError::Transport("missing wallet_address".into()))?
+            .to_string();
+        Ok(WalletAddress(wallet_str))
     }
 
     async fn recover_session(
