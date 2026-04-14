@@ -200,35 +200,8 @@ pub async fn recover_session(
 
     let db = state.db.lock().unwrap();
 
-    let wallet_address: String = if identity_type == "wallet" {
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM accounts WHERE wallet_address = ?1",
-                params![identity_value],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-        if !exists {
-            return Err(AppError::not_found(format!(
-                "no account found for wallet {}",
-                identity_value
-            )));
-        }
-        identity_value.to_string()
-    } else {
-        db.query_row(
-            "SELECT wallet_address FROM identity_links WHERE identity_type = ?1 AND identity_value = ?2",
-            params![identity_type, identity_value],
-            |row| row.get(0),
-        )
-        .map_err(|_| {
-            AppError::not_found(format!(
-                "no identity found for {}={}",
-                identity_type, identity_value
-            ))
-        })?
-    };
+    let wallet_address: String =
+        super::identity::resolve_identity_typed(&db, identity_type, identity_value)?;
 
     // Preserve scope from the most recent active session for this wallet
     let scope_json: Option<String> = db

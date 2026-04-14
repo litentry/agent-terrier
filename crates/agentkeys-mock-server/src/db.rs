@@ -68,7 +68,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             session_json TEXT,
             wallet_address TEXT,
             created_at INTEGER NOT NULL,
-            ttl_seconds INTEGER NOT NULL
+            ttl_seconds INTEGER NOT NULL,
+            identity_type TEXT,
+            identity_value TEXT
         );
 
         CREATE TABLE IF NOT EXISTS identity_links (

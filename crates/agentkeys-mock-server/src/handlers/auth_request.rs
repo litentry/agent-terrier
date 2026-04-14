@@ -11,53 +11,15 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::{
-    auth::{
-        derive_pair_code_from_nonce, extract_bearer_token, generate_nonce, generate_token,
-        now_secs, validate_session,
-    },
+    auth::{extract_bearer_token, generate_nonce, generate_token, now_secs, validate_session},
     error::{AppError, AppResult},
     state::SharedState,
 };
 use agentkeys_core::otp::derive_otp;
-use agentkeys_types::{AuthRequestType, Scope, Session, WalletAddress};
 
-fn parse_cbor_agent_identity(request_details: &[u8]) -> (Option<String>, Option<String>) {
-    let cbor_val: ciborium::Value = match ciborium::from_reader(request_details) {
-        Ok(v) => v,
-        Err(_) => return (None, None),
-    };
-    let map = match cbor_val {
-        ciborium::Value::Map(m) => m,
-        _ => return (None, None),
-    };
-    for (k, v) in &map {
-        let key_str = match k {
-            ciborium::Value::Text(s) => s.as_str(),
-            _ => continue,
-        };
-        if key_str != "agent_identity" {
-            continue;
-        }
-        let inner_map = match v {
-            ciborium::Value::Map(m) => m,
-            _ => return (None, None),
-        };
-        let mut id_type = None;
-        let mut id_value = None;
-        for (ik, iv) in inner_map {
-            if let ciborium::Value::Text(ik_str) = ik {
-                if let ciborium::Value::Text(iv_str) = iv {
-                    match ik_str.as_str() {
-                        "type" => id_type = Some(iv_str.clone()),
-                        "value" => id_value = Some(iv_str.clone()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        return (id_type, id_value);
-    }
-    (None, None)
+struct MintOutput {
+    session_json: Option<String>,
+    wallet: Option<String>,
 }
 
 fn ttl_for_request_type(request_type_str: &str) -> u64 {
@@ -65,6 +27,103 @@ fn ttl_for_request_type(request_type_str: &str) -> u64 {
         "Pair" | "Recover" => 60,
         _ => 300,
     }
+}
+
+fn mint_pair_session(
+    db: &rusqlite::Connection,
+    parent_wallet: &str,
+    parent_token: &str,
+    now: u64,
+) -> Result<MintOutput, AppError> {
+    let child_wallet = crate::auth::generate_wallet_address();
+    let child_token = generate_token();
+    let ttl: u64 = 2_592_000; // 30 days per wiki/session-token.md policy
+
+    let (pub_key, priv_key): (Vec<u8>, Vec<u8>) = db
+        .query_row(
+            "SELECT public_key, private_key FROM accounts WHERE wallet_address = ?1",
+            params![parent_wallet],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| AppError::internal(e.to_string()))?;
+
+    db.execute(
+        "INSERT OR IGNORE INTO accounts (wallet_address, auth_token, public_key, private_key, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![child_wallet, format!("child-pair:{child_token}"), pub_key, priv_key, now],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+
+    db.execute(
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5, 0)",
+        params![child_token, child_wallet, parent_token, now, ttl],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+
+    let session_obj = serde_json::json!({
+        "token": child_token,
+        "wallet": child_wallet,
+        "scope": null,
+        "created_at": now,
+        "ttl_seconds": ttl,
+    });
+
+    Ok(MintOutput {
+        session_json: Some(session_obj.to_string()),
+        wallet: Some(child_wallet),
+    })
+}
+
+fn mint_recover_session(
+    db: &rusqlite::Connection,
+    identity_type: &str,
+    identity_value: &str,
+    parent_token: &str,
+    now: u64,
+) -> Result<MintOutput, AppError> {
+    let wallet = super::identity::resolve_identity_typed(db, identity_type, identity_value)?;
+
+    let child_token = generate_token();
+    let ttl: u64 = 2_592_000; // 30 days per wiki/session-token.md policy
+
+    let scope_json: Option<String> = db
+        .query_row(
+            "SELECT scope_json FROM sessions WHERE wallet_address = ?1 AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
+            params![wallet],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    db.execute(
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        params![child_token, wallet, parent_token, scope_json, now, ttl],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+
+    let session_obj = serde_json::json!({
+        "token": child_token,
+        "wallet": wallet,
+        "scope": null,
+        "created_at": now,
+        "ttl_seconds": ttl,
+    });
+
+    Ok(MintOutput {
+        session_json: Some(session_obj.to_string()),
+        wallet: Some(wallet),
+    })
+}
+
+fn mint_scope_change_session(
+    _db: &rusqlite::Connection,
+    _target_wallet: &str,
+    _new_scope: Option<&str>,
+    _now: u64,
+) -> Result<MintOutput, AppError> {
+    Ok(MintOutput { session_json: None, wallet: None })
 }
 
 pub async fn open_auth_request(
@@ -84,6 +143,27 @@ pub async fn open_auth_request(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("request_details required"))?;
     let parent_wallet = body.get("parent_wallet").and_then(|v| v.as_str()).map(String::from);
+
+    let identity_type = body.get("identity_type").and_then(|v| v.as_str()).map(String::from);
+    let identity_value = body.get("identity_value").and_then(|v| v.as_str()).map(String::from);
+
+    // Typed field validation: Recover requires both; non-Recover rejects both
+    match request_type_str {
+        "Recover" => {
+            if identity_type.is_none() || identity_value.is_none() {
+                return Err(AppError::bad_request(
+                    "Recover requests require identity_type and identity_value",
+                ));
+            }
+        }
+        _ => {
+            if identity_type.is_some() || identity_value.is_some() {
+                return Err(AppError::bad_request(
+                    "identity_type and identity_value are only valid for Recover requests",
+                ));
+            }
+        }
+    }
 
     let child_pubkey = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
@@ -119,8 +199,8 @@ pub async fn open_auth_request(
     let db = state.db.lock().unwrap();
 
     db.execute(
-        "INSERT INTO auth_requests (id, pair_code, request_type, request_details, child_pubkey, parent_wallet, otp, nonce, status, created_at, ttl_seconds)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10)",
+        "INSERT INTO auth_requests (id, pair_code, request_type, request_details, child_pubkey, parent_wallet, otp, nonce, status, created_at, ttl_seconds, identity_type, identity_value)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11, ?12)",
         params![
             request_id,
             pair_code,
@@ -131,7 +211,9 @@ pub async fn open_auth_request(
             otp,
             nonce.to_vec(),
             now,
-            ttl_seconds
+            ttl_seconds,
+            identity_type,
+            identity_value
         ],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
@@ -198,7 +280,6 @@ pub async fn fetch_auth_request(
     // If already set, only that wallet may fetch.
     match &parent_wallet {
         None => {
-            // Claim ownership for this fetching session
             db.execute(
                 "UPDATE auth_requests SET parent_wallet = ?1 WHERE pair_code = ?2",
                 params![session.wallet_address, query.pair_code],
@@ -250,10 +331,12 @@ pub async fn approve_auth_request(
         created_at,
         ttl_seconds,
         status,
+        identity_type,
+        identity_value,
     ) = {
         let db = state.db.lock().unwrap();
         db.query_row(
-            "SELECT request_type, request_details, child_pubkey, parent_wallet, nonce, created_at, ttl_seconds, status
+            "SELECT request_type, request_details, child_pubkey, parent_wallet, nonce, created_at, ttl_seconds, status, identity_type, identity_value
              FROM auth_requests WHERE id = ?1",
             params![request_id],
             |row| {
@@ -266,6 +349,8 @@ pub async fn approve_auth_request(
                     row.get::<_, u64>(5)?,
                     row.get::<_, u64>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             },
         )
@@ -280,14 +365,12 @@ pub async fn approve_auth_request(
         return Err(AppError::gone("auth request expired"));
     }
 
-    // Ownership check: if parent_wallet is set, the approving session must own it
     if let Some(ref pw) = parent_wallet {
         if *pw != session.wallet_address {
             return Err(AppError::unauthorized("session does not own this auth request"));
         }
     }
 
-    // Get master private key for signing
     let private_key_bytes: Vec<u8> = {
         let db = state.db.lock().unwrap();
         db.query_row(
@@ -302,7 +385,6 @@ pub async fn approve_auth_request(
         &private_key_bytes.as_slice().try_into().map_err(|_| AppError::internal("invalid key length"))?,
     );
 
-    // Sign: SHA256("AgentKeys-v1-AuthRequest" || id || request_type || request_details || child_pubkey || parent_session || created_at || nonce)
     let mut hasher = Sha256::new();
     hasher.update(b"AgentKeys-v1-AuthRequest");
     hasher.update(request_id.as_bytes());
@@ -317,105 +399,22 @@ pub async fn approve_auth_request(
     use ed25519_dalek::Signer;
     let signature = signing_key.sign(&hash_bytes).to_bytes().to_vec();
 
-    // If Pair request type, mint a child session
-    let (child_session_json, child_wallet) = if request_type == "Pair" {
-        let child_wallet = crate::auth::generate_wallet_address();
-        let child_token = generate_token();
-        let ttl: u64 = 2_592_000; // 30 days per wiki/session-token.md policy
-
-        // Parse scope from request_details (canonical CBOR contains it)
-        // For mock: create a session with no scope restriction (full access to child wallet)
+    let mint_output = {
         let db = state.db.lock().unwrap();
-
-        // Create child account
-        let (pub_key, priv_key): (Vec<u8>, Vec<u8>) = db
-            .query_row(
-                "SELECT public_key, private_key FROM accounts WHERE wallet_address = ?1",
-                params![session.wallet_address],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|e| AppError::internal(e.to_string()))?;
-
-        db.execute(
-            "INSERT OR IGNORE INTO accounts (wallet_address, auth_token, public_key, private_key, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![child_wallet, format!("child-pair:{child_token}"), pub_key, priv_key, now],
-        )
-        .map_err(|e| AppError::internal(e.to_string()))?;
-
-        db.execute(
-            "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?5, 0)",
-            params![child_token, child_wallet, token, now, ttl],
-        )
-        .map_err(|e| AppError::internal(e.to_string()))?;
-
-        let session_obj = serde_json::json!({
-            "token": child_token,
-            "wallet": child_wallet,
-            "scope": null,
-            "created_at": now,
-            "ttl_seconds": ttl,
-        });
-
-        (Some(session_obj.to_string()), Some(child_wallet))
-    } else if request_type == "Recover" {
-        // request_details is CBOR-encoded (canonical_bytes per spec), not JSON
-        let (identity_type, identity_value) = parse_cbor_agent_identity(&request_details);
-
-        let db = state.db.lock().unwrap();
-
-        let recovered_wallet: Option<String> = match (identity_type, identity_value) {
-            (Some(id_type), Some(id_val)) => {
-                let db_type = match id_type.as_str() {
-                    "Alias" => "alias",
-                    "Email" => "email",
-                    "Ens" => "ens",
-                    "WalletAddress" => "WalletAddress",
-                    other => other,
-                };
-                super::identity::resolve_identity_to_wallet(&db, db_type, &id_val)
+        match request_type.as_str() {
+            "Pair" => mint_pair_session(&db, &session.wallet_address, token, now)?,
+            "Recover" => {
+                let id_type = identity_type.as_deref().ok_or_else(|| {
+                    AppError::bad_request("Recover request missing identity_type")
+                })?;
+                let id_value = identity_value.as_deref().ok_or_else(|| {
+                    AppError::bad_request("Recover request missing identity_value")
+                })?;
+                mint_recover_session(&db, id_type, id_value, token, now)?
             }
-            _ => None,
-        };
-
-        if let Some(wallet) = recovered_wallet {
-            let child_token = generate_token();
-            let ttl: u64 = 2_592_000; // 30 days per wiki/session-token.md policy
-
-            // Preserve scope from the most recent session for this wallet
-            let scope_json: Option<String> = db
-                .query_row(
-                    "SELECT scope_json FROM sessions WHERE wallet_address = ?1 AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
-                    params![wallet],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-
-            db.execute(
-                "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-                params![child_token, wallet, token, scope_json, now, ttl],
-            )
-            .map_err(|e| AppError::internal(e.to_string()))?;
-
-            let session_obj = serde_json::json!({
-                "token": child_token,
-                "wallet": wallet,
-                "scope": null,
-                "created_at": now,
-                "ttl_seconds": ttl,
-            });
-
-            (Some(session_obj.to_string()), Some(wallet))
-        } else {
-            (None, None)
+            "ScopeChange" => mint_scope_change_session(&db, "", None, now)?,
+            _ => MintOutput { session_json: None, wallet: None },
         }
-    } else if request_type == "ScopeChange" {
-        (None, None)
-    } else {
-        (None, None)
     };
 
     let db = state.db.lock().unwrap();
@@ -428,7 +427,7 @@ pub async fn approve_auth_request(
     db.execute(
         "UPDATE auth_requests SET status = 'consumed', signature = ?1, session_json = ?2, wallet_address = ?3
          WHERE id = ?4",
-        params![signature, child_session_json, child_wallet, request_id],
+        params![signature, mint_output.session_json, mint_output.wallet, request_id],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
@@ -493,7 +492,6 @@ pub async fn await_auth_decision(
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok());
 
-                // Mark as awaited so subsequent polls get CONSUMED
                 {
                     let db = state.db.lock().unwrap();
                     db.execute(

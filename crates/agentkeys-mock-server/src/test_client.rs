@@ -462,14 +462,27 @@ impl CredentialBackend for InProcessBackend {
             AuthRequestType::KeyRotate { .. } => "KeyRotate",
         };
 
+        let mut request_body = json!({
+            "child_pubkey": pubkey_b64,
+            "request_type": request_type_str,
+            "request_details": details_b64,
+        });
+
+        if let AuthRequestType::Recover { agent_identity, .. } = &request_type {
+            let (identity_type, identity_value) = match agent_identity {
+                agentkeys_types::AgentIdentity::Alias(s) => ("alias", s.clone()),
+                agentkeys_types::AgentIdentity::Email(s) => ("email", s.clone()),
+                agentkeys_types::AgentIdentity::Ens(s) => ("ens", s.clone()),
+                agentkeys_types::AgentIdentity::WalletAddress(w) => ("wallet", w.0.clone()),
+            };
+            request_body["identity_type"] = json!(identity_type);
+            request_body["identity_value"] = json!(identity_value);
+        }
+
         let body = self
             .post(
                 "/auth-request/open",
-                json!({
-                    "child_pubkey": pubkey_b64,
-                    "request_type": request_type_str,
-                    "request_details": details_b64,
-                }),
+                request_body,
             )
             .await?;
 
