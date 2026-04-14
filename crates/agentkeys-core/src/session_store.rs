@@ -15,9 +15,12 @@ fn fallback_path(session_id: &str) -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
+    // Route through sanitize_for_keyring so session_ids containing path
+    // separators, '..', or null bytes can't escape ~/.agentkeys (codex PR
+    // #24 v2 P2 — path traversal via --session-id).
     PathBuf::from(home)
         .join(".agentkeys")
-        .join(session_id)
+        .join(sanitize_for_keyring(session_id))
         .join("session.json")
 }
 
@@ -27,7 +30,7 @@ fn marker_path(session_id: &str) -> PathBuf {
         .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".agentkeys")
-        .join(session_id)
+        .join(sanitize_for_keyring(session_id))
         .join(KEYRING_MARKER_FILE)
 }
 
@@ -95,12 +98,18 @@ pub fn save_session(session: &Session, session_id: &str) -> Result<()> {
         if try_keyring_save(&json, session_id) {
             let marker = marker_path(session_id);
             if let Some(parent) = marker.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("create marker dir {}", parent.display())
+                })?;
             }
             // Touch the marker file — empty content, presence is the signal.
             // Never touches session.json, so a stale file-mode credential
-            // remains intact for later fallback.
-            let _ = std::fs::File::create(&marker);
+            // remains intact for later fallback. Marker failure is
+            // propagated because without it the session is undiscoverable
+            // on restart (codex PR #24 v2 P2).
+            std::fs::File::create(&marker).with_context(|| {
+                format!("write keyring marker {}", marker.display())
+            })?;
             return Ok(());
         }
     }
@@ -431,6 +440,55 @@ mod tests {
             assert!(
                 !marker.exists(),
                 "file-mode save must not write the keyring marker"
+            );
+        });
+    }
+
+    // Codex PR #24 v2 P2 — path traversal via user-supplied session_id.
+    // A session_id of `../escape` or `foo/bar` must NOT write outside
+    // ~/.agentkeys/. Sanitization folds these to a safe directory name.
+    #[test]
+    fn save_session_does_not_escape_agentkeys_dir_on_path_traversal() {
+        with_temp_home(|tmp| {
+            let session = make_session("t", "0xP");
+            // Attempt to escape via relative traversal.
+            save_session(&session, "../escape").expect("save should succeed (sanitized)");
+            // Verify NO file was written outside ~/.agentkeys/.
+            let parent = tmp.parent().expect("tmp has a parent");
+            let escape_candidates = [
+                parent.join("escape"),
+                tmp.join("escape"),
+                tmp.join("..").join("escape"),
+            ];
+            for bad in &escape_candidates {
+                assert!(
+                    !bad.exists(),
+                    "path traversal wrote outside ~/.agentkeys: {}",
+                    bad.display()
+                );
+            }
+            // Verify the actual write landed inside ~/.agentkeys/ under a
+            // sanitized directory name (contains the 8-char hash suffix).
+            let root = tmp.join(".agentkeys");
+            let any_inside = std::fs::read_dir(&root)
+                .expect("read agentkeys root")
+                .filter_map(Result::ok)
+                .any(|e| e.path().join("session.json").exists());
+            assert!(any_inside, "sanitized directory with session.json must exist inside ~/.agentkeys");
+        });
+    }
+
+    #[test]
+    fn save_session_rejects_forward_slash_in_session_id() {
+        with_temp_home(|tmp| {
+            save_session(&make_session("t", "0xS"), "foo/bar").expect("save");
+            // The separator must be normalised, so no subdir named "bar"
+            // under an intermediate "foo" dir.
+            let unwanted = tmp.join(".agentkeys").join("foo").join("bar");
+            assert!(
+                !unwanted.exists(),
+                "forward-slash session_id created nested directory: {}",
+                unwanted.display()
             );
         });
     }
