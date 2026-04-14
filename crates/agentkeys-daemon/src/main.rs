@@ -138,12 +138,22 @@ async fn main() -> anyhow::Result<()> {
                     // --session-id WORK on a previous run). Without it the
                     // daemon silently re-pairs and the user loses track of
                     // the credentials tied to the old wallet (codex PR #24
-                    // v5 P2). Empty-prefix scan returns everything; filter
-                    // out the known CLI namespaces.
+                    // v5 P2). Empty-prefix scan returns directory names;
+                    // filter out:
+                    //  - known CLI namespaces (`master`, `daemon-*`)
+                    //  - rewritten storage keys (`__agk_*`) whose original
+                    //    user-supplied ID is unknown — advertising them
+                    //    would be misleading because re-passing the
+                    //    sanitized name would re-rewrite to a different
+                    //    storage key (codex PR #24 v7 P2).
                     let all = session_store::list_fallback_session_ids("");
                     let others: Vec<String> = all
                         .into_iter()
-                        .filter(|s| !s.starts_with("daemon-") && s != "master")
+                        .filter(|s| {
+                            !s.starts_with("daemon-")
+                                && s != "master"
+                                && !s.starts_with("__agk_")
+                        })
                         .collect();
                     if !others.is_empty() {
                         eprintln!(
