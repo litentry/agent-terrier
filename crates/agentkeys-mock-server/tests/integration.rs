@@ -1419,3 +1419,91 @@ async fn revoke_by_target_wallet_none_active_is_404() {
     .await;
     assert_eq!(status2, StatusCode::NOT_FOUND, "expected 404 when no active sessions remain");
 }
+
+// ---------------------------------------------------------------------------
+// Credential list tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_credentials_returns_stored_services() {
+    use base64::Engine as _;
+    let app = setup();
+    let (session, wallet, app) = create_test_session(app).await;
+
+    let ct1 = base64::engine::general_purpose::STANDARD.encode(b"key1");
+    let ct2 = base64::engine::general_purpose::STANDARD.encode(b"key2");
+
+    let (s1, _) = post_json_auth(
+        app.clone(),
+        "/credential/store",
+        &session,
+        json!({ "agent_id": wallet, "service": "anthropic", "ciphertext": ct1 }),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+
+    let (s2, _) = post_json_auth(
+        app.clone(),
+        "/credential/store",
+        &session,
+        json!({ "agent_id": wallet, "service": "openrouter", "ciphertext": ct2 }),
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK);
+
+    let path = format!("/credential/list?agent_id={}", wallet);
+    let (status, json) = get_json_auth(app, &path, &session).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let services: Vec<&str> = json["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(services, vec!["anthropic", "openrouter"], "should be sorted");
+}
+
+#[tokio::test]
+async fn list_credentials_empty_for_unknown_agent() {
+    let app = setup();
+    let (session, wallet, app) = create_test_session(app).await;
+
+    let path = format!("/credential/list?agent_id={}", wallet);
+    let (status, json) = get_json_auth(app, &path, &session).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let services = json["services"].as_array().unwrap();
+    assert!(services.is_empty(), "should be empty for agent with no credentials");
+}
+
+#[tokio::test]
+async fn list_credentials_ownership_enforced() {
+    use base64::Engine as _;
+    let app = setup();
+    let (session_a, wallet_a, app) = create_test_session(app).await;
+
+    let ct = base64::engine::general_purpose::STANDARD.encode(b"secret");
+    let (s, _) = post_json_auth(
+        app.clone(),
+        "/credential/store",
+        &session_a,
+        json!({ "agent_id": wallet_a, "service": "github", "ciphertext": ct }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Use a distinct auth token so user B gets a different wallet from user A
+    let (status_b, json_b) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": "test-token-user-b-unique" }),
+    )
+    .await;
+    assert_eq!(status_b, StatusCode::OK);
+    let session_b = json_b["session"].as_str().unwrap().to_string();
+
+    let path = format!("/credential/list?agent_id={}", wallet_a);
+    let (status, _) = get_json_auth(app, &path, &session_b).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "user B must not list user A's credentials");
+}

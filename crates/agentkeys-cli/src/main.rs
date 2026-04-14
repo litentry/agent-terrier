@@ -3,6 +3,7 @@ use agentkeys_cli::{
     cmd_store, cmd_teardown, cmd_usage, CommandContext,
 };
 
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -63,11 +64,13 @@ enum Commands {
 
     #[command(
         about = "Run a command with credentials injected as env vars",
-        long_about = "Load credentials for the agent and inject them as SERVICE_API_KEY env vars.\n\nExamples:\n  agentkeys run 0xAGENT -- python my_agent.py\n  agentkeys run 0xAGENT -- node server.js"
+        long_about = "Load credentials for the agent and inject them as SERVICE_API_KEY env vars.\n\nExamples:\n  agentkeys run 0xAGENT -- python my_agent.py\n  agentkeys run 0xAGENT -- node server.js\n  agentkeys run 0xAGENT --env GITHUB_TOKEN=github -- bash deploy.sh"
     )]
     Run {
         #[arg(help = "Agent wallet address")]
         agent: String,
+        #[arg(long = "env", value_name = "KEY=SERVICE", action = clap::ArgAction::Append, help = "Map env var name to service (e.g. GITHUB_TOKEN=github)")]
+        env: Vec<String>,
         #[arg(last = true, help = "Command to execute")]
         cmd: Vec<String>,
     },
@@ -154,7 +157,7 @@ async fn main() {
         }
         Commands::Store { agent, service, key } => cmd_store(&ctx, agent, service, key).await,
         Commands::Read { agent, service } => cmd_read(&ctx, agent, service).await,
-        Commands::Run { agent, cmd } => cmd_run(&ctx, agent, cmd).await,
+        Commands::Run { agent, env, cmd } => cmd_run(&ctx, agent, env, cmd).await,
         Commands::Revoke { agent } => cmd_revoke(&ctx, agent.as_deref()).await,
         Commands::Teardown { agent } => cmd_teardown(&ctx, agent).await,
         Commands::Usage { agent, json } => {

@@ -609,6 +609,35 @@ impl CredentialBackend for MockHttpClient {
         })
     }
 
+    async fn list_credentials(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<Vec<ServiceName>, BackendError> {
+        let url = format!("/credential/list?agent_id={}", agent_id.0);
+
+        let resp = self
+            .client
+            .get(self.url(&url))
+            .header("authorization", format!("Bearer {}", session.token))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let services = body["services"]
+            .as_array()
+            .ok_or_else(|| BackendError::Internal("missing services".into()))?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| ServiceName(s.to_string())))
+            .collect();
+        Ok(services)
+    }
+
     async fn recover_session(
         &self,
         identity: &agentkeys_types::AgentIdentity,

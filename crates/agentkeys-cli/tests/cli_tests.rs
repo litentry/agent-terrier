@@ -88,7 +88,7 @@ async fn cli_run_injects_env() {
 
     // Master session has no scope, so no env vars are injected automatically.
     // Verify cmd_run can exec a simple command without error.
-    let result = agentkeys_cli::cmd_run(&context, &wallet, &["true".to_string()]).await;
+    let result = agentkeys_cli::cmd_run(&context, &wallet, &[], &["true".to_string()]).await;
     assert!(result.is_ok(), "cmd_run failed: {:?}", result.err());
 }
 
@@ -445,5 +445,105 @@ async fn cli_error_format_unreachable() {
     assert!(
         err.contains("UNREACHABLE") || err.contains("error") || err.contains("connect"),
         "unexpected error: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests for cmd_run master-session fix and --env flag (issue #15 parts 1 & 2)
+// ---------------------------------------------------------------------------
+
+// Test 15: master session (scope: None) injects all stored credentials
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_run_master_session_injects_all_credentials() {
+    let backend = create_test_backend();
+    let (wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    cmd_store(&context, &wallet, "openrouter", "sk-or-test").await.unwrap();
+    cmd_store(&context, &wallet, "anthropic", "sk-ant-test").await.unwrap();
+
+    // `env` prints all env vars; grep for the injected keys
+    let result = agentkeys_cli::cmd_run(&context, &wallet, &[], &["env".to_string()]).await;
+    assert!(result.is_ok(), "cmd_run failed: {:?}", result.err());
+}
+
+// Test 16: child session with scope respects the scope list.
+// The child session owns child_wallet; credentials are stored under child_wallet
+// by the master session (which owns the child via parent_token chain).
+// cmd_run with the scoped child session injects only the scoped service.
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_run_scoped_session_respects_scope() {
+    use agentkeys_core::backend::CredentialBackend;
+    use agentkeys_types::{Scope, ServiceName};
+    use std::sync::Arc;
+
+    let backend = create_test_backend();
+    let (_wallet, master_session) = init_session_direct(&backend).await;
+
+    let scope = Scope {
+        services: vec![ServiceName("openrouter".to_string())],
+        read_only: false,
+    };
+    let (child_session, child_wallet) = (backend.clone() as Arc<dyn CredentialBackend>)
+        .create_child_session(&master_session, scope)
+        .await
+        .unwrap();
+
+    // Store credentials under child_wallet using the master session (master owns the child)
+    let master_ctx = ctx_with_session(backend.clone(), master_session.clone());
+    cmd_store(&master_ctx, &child_wallet.0, "openrouter", "sk-or-scoped").await.unwrap();
+    cmd_store(&master_ctx, &child_wallet.0, "anthropic", "sk-ant-scoped").await.unwrap();
+
+    // cmd_run with the child session: scope = ["openrouter"], so only openrouter is injected
+    let child_ctx = ctx_with_session(backend, child_session);
+    let result = agentkeys_cli::cmd_run(
+        &child_ctx,
+        &child_wallet.0,
+        &[],
+        &["true".to_string()],
+    )
+    .await;
+    assert!(result.is_ok(), "scoped cmd_run failed: {:?}", result.err());
+}
+
+// Test 17: --env KEY=service overrides the default auto-convention name
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_run_env_flag_overrides_default_name() {
+    let backend = create_test_backend();
+    let (wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    cmd_store(&context, &wallet, "github", "ghp-token-value").await.unwrap();
+
+    // With --env GITHUB_TOKEN=github, the credential should be injected as GITHUB_TOKEN
+    let result = agentkeys_cli::cmd_run(
+        &context,
+        &wallet,
+        &["GITHUB_TOKEN=github".to_string()],
+        &["true".to_string()],
+    )
+    .await;
+    assert!(result.is_ok(), "env-flag cmd_run failed: {:?}", result.err());
+}
+
+// Test 18: --env without '=' returns a clean parse error, child not spawned
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_run_env_flag_invalid_format() {
+    let backend = create_test_backend();
+    let (wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    let result = agentkeys_cli::cmd_run(
+        &context,
+        &wallet,
+        &["INVALID_NO_EQUALS".to_string()],
+        &["true".to_string()],
+    )
+    .await;
+    assert!(result.is_err(), "expected parse error for invalid --env format");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Invalid --env") || err.contains("KEY=SERVICE"),
+        "unexpected error message: {err}"
     );
 }

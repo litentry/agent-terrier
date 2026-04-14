@@ -145,7 +145,12 @@ pub async fn cmd_read(ctx: &CommandContext, agent: &str, service: &str) -> Resul
     }
 }
 
-pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Result<String> {
+pub async fn cmd_run(
+    ctx: &CommandContext,
+    agent: &str,
+    env_overrides: &[String],
+    cmd: &[String],
+) -> Result<String> {
     if cmd.is_empty() {
         return Err(anyhow!("No command specified after --"));
     }
@@ -153,13 +158,31 @@ pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Resul
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
     let agent_id = WalletAddress(agent.to_string());
 
-    let services_to_try = if let Some(scope) = &session.scope {
-        scope.services.iter().map(|s| s.0.clone()).collect::<Vec<_>>()
+    let backend = ctx.backend();
+
+    let services_to_try: Vec<String> = if let Some(scope) = &session.scope {
+        scope.services.iter().map(|s| s.0.clone()).collect()
     } else {
-        vec![]
+        backend
+            .list_credentials(&session, &agent_id)
+            .await
+            .map_err(wrap_backend_error)?
+            .into_iter()
+            .map(|s| s.0)
+            .collect()
     };
 
-    let backend = ctx.backend();
+    // Pre-flight validation: reject any invalid --env entries BEFORE any credential
+    // I/O (no network round-trips or audit log entries for a partial invocation).
+    for raw in env_overrides {
+        if raw.find('=').is_none() {
+            return Err(anyhow!(
+                "Invalid --env format '{}': expected KEY=SERVICE (no '=' found)",
+                raw
+            ));
+        }
+    }
+
     let mut env_vars: Vec<(String, String)> = Vec::new();
     let mut credential_errors: Vec<String> = Vec::new();
     for service in &services_to_try {
@@ -171,12 +194,38 @@ pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Resul
                 env_vars.push((env_key, value));
             }
             Err(e) => {
-                credential_errors.push(format!("Failed to read credential for service '{}': {}", service, format_backend_error(&e)));
+                credential_errors.push(format!(
+                    "Failed to read credential for service '{}': {}",
+                    service,
+                    format_backend_error(&e)
+                ));
             }
         }
     }
     if !credential_errors.is_empty() {
         return Err(anyhow!("{}", credential_errors.join("\n")));
+    }
+
+    for raw in env_overrides {
+        let eq_pos = raw.find('=').ok_or_else(|| {
+            anyhow!(
+                "Invalid --env format '{}': expected KEY=SERVICE (no '=' found)",
+                raw
+            )
+        })?;
+        let env_key = raw[..eq_pos].to_string();
+        let service = &raw[eq_pos + 1..];
+        let service_name = ServiceName(service.to_string());
+        let bytes = backend
+            .read_credential(&session, &agent_id, &service_name)
+            .await
+            .map_err(wrap_backend_error)?;
+        let value = String::from_utf8_lossy(&bytes).to_string();
+        if let Some(existing) = env_vars.iter_mut().find(|(k, _)| k == &env_key) {
+            existing.1 = value;
+        } else {
+            env_vars.push((env_key, value));
+        }
     }
 
     if ctx.verbose {
