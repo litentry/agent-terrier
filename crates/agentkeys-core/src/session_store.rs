@@ -34,15 +34,30 @@ fn marker_path(session_id: &str) -> PathBuf {
         .join(KEYRING_MARKER_FILE)
 }
 
-/// Sanitize `session_id` for use as a keyring account name. Windows
-/// Credential Manager rejects null bytes, Linux `secret-service` rejects
-/// non-UTF8 and is quirky about shell-reserved chars, macOS is tolerant.
-/// Normalize to ASCII alnum + `-_.`; replace other chars with `_`. If the
-/// sanitized form differs from the input OR exceeds 128 chars, append an
-/// 8-char hash of the original so raw-alias collisions don't merge into
-/// the same credential entry (codex PR #24 P1 — cross-platform).
+/// Reserved prefix for rewritten session_ids. User-supplied inputs that
+/// start with this prefix are also forced through the rewrite path so
+/// collisions between rewrites and raw names are impossible (codex PR
+/// #24 v6 P2). The prefix uses only characters in the safe alphabet
+/// (`_`, ascii-alpha) so that the output remains valid as both a keyring
+/// account and a filesystem directory name on Windows / Linux / macOS.
+const REWRITE_PREFIX: &str = "__agk_";
+
+/// Sanitize `session_id` for use as a keyring account name AND filesystem
+/// directory name. Windows Credential Manager rejects null bytes, Linux
+/// `secret-service` rejects non-UTF8 and is quirky about shell-reserved
+/// chars, macOS is tolerant. Any filesystem rejects `""`, `"."`, `".."`
+/// as path components (traversal vectors).
+///
+/// Accept-as-is rule: ASCII alnum + `-_.`, unchanged, non-empty, non-reserved
+/// (not `"."` / `".."`), not starting with `REWRITE_PREFIX`, ≤128 chars.
+/// Anything failing those rules goes through the stable rewrite path:
+///   `__agk_<truncated-safe-chars>-<sha256(s)[..4] hex-lower>`
+/// SHA-256 (not `DefaultHasher`) keeps the suffix stable across Rust
+/// toolchain versions so persisted IDs remain reachable after upgrades
+/// (codex PR #24 v3 P2).
 pub(crate) fn sanitize_for_keyring(s: &str) -> String {
     const MAX: usize = 128;
+
     let safe: String = s
         .chars()
         .map(|c| {
@@ -54,24 +69,30 @@ pub(crate) fn sanitize_for_keyring(s: &str) -> String {
         })
         .collect();
 
-    if safe == s && safe.len() <= MAX {
+    // Force rewrite if the input is empty, a reserved path component, starts
+    // with the reserved rewrite prefix, exceeds the length cap, or was
+    // normalised (sanitized differs from original). Path traversal via `..`
+    // is explicitly blocked by the reserved-path check (codex PR #24 v6 P1).
+    let is_reserved = s.is_empty() || s == "." || s == "..";
+    let starts_with_prefix = s.starts_with(REWRITE_PREFIX);
+    let accepts_as_is =
+        safe == s && safe.len() <= MAX && !is_reserved && !starts_with_prefix;
+
+    if accepts_as_is {
         return safe;
     }
 
-    // SHA-256 prefix, not DefaultHasher — std's hasher is explicitly NOT
-    // stable across Rust versions, which would make sanitized session_ids
-    // unreachable after a toolchain upgrade (codex PR #24 v3 P2).
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(s.as_bytes());
     let hash = hex::encode(&digest[..4]); // 8 hex chars
-    // Reserve room for the `-<8char>` suffix.
-    let prefix_max = MAX.saturating_sub(9);
-    let prefix = if safe.len() > prefix_max {
+    // Reserve room for the prefix + '-' + 8-char suffix.
+    let prefix_max = MAX.saturating_sub(REWRITE_PREFIX.len() + 1 + 8);
+    let body = if safe.len() > prefix_max {
         &safe[..prefix_max]
     } else {
         &safe
     };
-    format!("{}-{}", prefix, hash)
+    format!("{}{}-{}", REWRITE_PREFIX, body, hash)
 }
 
 /// Returns true if keyring should be skipped (tests, CI, headless).
@@ -422,7 +443,7 @@ mod tests {
 
         let with_null = sanitize_for_keyring("alias\0null");
         assert!(!with_null.contains('\0'), "null bytes must be stripped");
-        assert!(with_null.starts_with("alias_null-"), "got: {with_null}");
+        assert!(with_null.starts_with("__agk_alias_null-"), "got: {with_null}");
     }
 
     // Codex PR #24 v3 P2 — hash must be stable across Rust/toolchain
@@ -432,7 +453,45 @@ mod tests {
     // unreachable.
     #[test]
     fn sanitize_for_keyring_uses_stable_sha256_suffix() {
-        assert_eq!(sanitize_for_keyring("foo/bar"), "foo_bar-cc5d46bd");
+        assert_eq!(sanitize_for_keyring("foo/bar"), "__agk_foo_bar-cc5d46bd");
+    }
+
+    // Codex PR #24 v6 P1 — reserved path components (".", "..", "") must
+    // never be returned as-is; they'd escape ~/.agentkeys or alias the
+    // legacy root file. Force-rewrite moves them under the __agk_ namespace.
+    #[test]
+    fn sanitize_for_keyring_rejects_reserved_path_components() {
+        let dot = sanitize_for_keyring(".");
+        let dotdot = sanitize_for_keyring("..");
+        let empty = sanitize_for_keyring("");
+        assert!(dot.starts_with("__agk_"), "got: {dot}");
+        assert!(dotdot.starts_with("__agk_"), "got: {dotdot}");
+        assert!(empty.starts_with("__agk_"), "got: {empty}");
+        // Distinct outputs — each reserved value must not alias another.
+        assert_ne!(dot, dotdot);
+        assert_ne!(dot, empty);
+        assert_ne!(dotdot, empty);
+    }
+
+    // Codex PR #24 v6 P2 — user-supplied ids starting with the reserved
+    // rewrite prefix must be pushed through the rewrite path again, so
+    // they can't collide with the deterministic output of a rewritten
+    // input.
+    #[test]
+    fn sanitize_for_keyring_rewrites_prefix_collisions() {
+        let from_unsafe = sanitize_for_keyring("foo/bar");
+        assert_eq!(from_unsafe, "__agk_foo_bar-cc5d46bd");
+
+        // User picks the exact rewritten form as their session_id.
+        let from_mimic = sanitize_for_keyring("__agk_foo_bar-cc5d46bd");
+        assert_ne!(
+            from_unsafe, from_mimic,
+            "user-supplied id starting with rewrite prefix must not alias the rewrite output"
+        );
+        assert!(
+            from_mimic.starts_with("__agk___agk_"),
+            "expected nested rewrite, got: {from_mimic}"
+        );
     }
 
     #[test]
