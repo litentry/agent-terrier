@@ -132,7 +132,27 @@ async fn main() -> anyhow::Result<()> {
                 .collect();
 
             match loadable.len() {
-                0 => None,
+                0 => {
+                    // Emit a hint if there are non-`daemon-*` sessions
+                    // stored under ~/.agentkeys (e.g., saved via
+                    // --session-id WORK on a previous run). Without it the
+                    // daemon silently re-pairs and the user loses track of
+                    // the credentials tied to the old wallet (codex PR #24
+                    // v5 P2). Empty-prefix scan returns everything; filter
+                    // out the known CLI namespaces.
+                    let all = session_store::list_fallback_session_ids("");
+                    let others: Vec<String> = all
+                        .into_iter()
+                        .filter(|s| !s.starts_with("daemon-") && s != "master")
+                        .collect();
+                    if !others.is_empty() {
+                        eprintln!(
+                            "[agentkeys-daemon] no daemon-* sessions found, but these custom session IDs exist: {}. Pass --session-id <name> to resume one instead of re-pairing.",
+                            others.join(", ")
+                        );
+                    }
+                    None
+                }
                 1 => Some(loadable.into_iter().next().expect("len==1")),
                 _ => {
                     let ids: Vec<String> = loadable.into_iter().map(|(sid, _)| sid).collect();

@@ -101,7 +101,12 @@ pub async fn cmd_init(ctx: &CommandContext, mock_token: Option<String>) -> Resul
         .await
         .map_err(wrap_backend_error)?;
 
-    session_store::save_session(&session, "master").context("save session to keychain")?;
+    // Use ctx.session_id (defaults to "master"). Honoring the field ensures
+    // that any caller overriding it sees consistent save/load round-trips
+    // instead of init landing under "master" and the next command looking
+    // in the configured namespace (codex PR #24 v5 P2).
+    session_store::save_session(&session, &ctx.session_id)
+        .context("save session to keychain")?;
 
     let output = format!("Initialized. Wallet: {}", wallet.0);
     Ok((output, session))
@@ -531,7 +536,8 @@ pub async fn cmd_recover(ctx: &CommandContext, identity: &str, method: &str) -> 
         .await
         .map_err(wrap_backend_error)?;
 
-    session_store::save_session(&session, "master").context("save recovered session to keychain")?;
+    session_store::save_session(&session, &ctx.session_id)
+        .context("save recovered session to keychain")?;
 
     Ok(format!("Recovered. Session restored for wallet {}", wallet.0))
 }
