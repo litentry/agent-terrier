@@ -151,11 +151,6 @@ pub async fn create_child_session(
     Ok(Json(CreateChildSessionResponse { session: child_token, wallet: child_wallet }))
 }
 
-#[derive(Deserialize)]
-pub struct RevokeSessionRequest {
-    pub target_session: String,
-}
-
 pub async fn recover_session(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
@@ -266,36 +261,61 @@ pub async fn revoke_session(
 
     let session = validate_session(&state, token)?;
 
-    let target_token = body
-        .get("target_session")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::bad_request("target_session required"))?;
+    let has_target_session = body.get("target_session").and_then(|v| v.as_str()).is_some();
+    let has_target_wallet = body.get("target_wallet").and_then(|v| v.as_str()).is_some();
+
+    match (has_target_session, has_target_wallet) {
+        (true, true) => return Err(AppError::bad_request("provide exactly one of target_session or target_wallet, not both")),
+        (false, false) => return Err(AppError::bad_request("one of target_session or target_wallet is required")),
+        _ => {}
+    }
 
     let db = state.db.lock().unwrap();
 
-    // Look up the target session's wallet to verify ownership
-    let target_wallet: Option<String> = db
-        .query_row(
-            "SELECT wallet_address FROM sessions WHERE token = ?1",
-            params![target_token],
-            |row| row.get(0),
-        )
-        .ok();
+    if has_target_session {
+        let target_token = body["target_session"].as_str().unwrap();
 
-    let target_wallet = target_wallet.ok_or_else(|| AppError::not_found("target session not found"))?;
+        let target_wallet: Option<String> = db
+            .query_row(
+                "SELECT wallet_address FROM sessions WHERE token = ?1",
+                params![target_token],
+                |row| row.get(0),
+            )
+            .ok();
 
-    // Ownership check: caller must own or be parent of the target session's wallet
-    if !is_owner_of(&db, &session.wallet_address, &target_wallet) {
-        return Err(AppError::forbidden("session does not own the target session"));
+        let target_wallet = target_wallet.ok_or_else(|| AppError::not_found("target session not found"))?;
+
+        if !is_owner_of(&db, &session.wallet_address, &target_wallet) {
+            return Err(AppError::forbidden("session does not own the target session"));
+        }
+
+        let rows_affected = db
+            .execute("UPDATE sessions SET revoked = 1 WHERE token = ?1", params![target_token])
+            .map_err(|e| AppError::internal(e.to_string()))?;
+
+        if rows_affected == 0 {
+            return Err(AppError::not_found("target session not found"));
+        }
+
+        Ok(Json(json!({ "ok": true })))
+    } else {
+        let target_wallet_str = body["target_wallet"].as_str().unwrap();
+
+        if !is_owner_of(&db, &session.wallet_address, target_wallet_str) {
+            return Err(AppError::forbidden("session does not own the target wallet"));
+        }
+
+        let rows_affected = db
+            .execute(
+                "UPDATE sessions SET revoked = 1 WHERE wallet_address = ?1 AND revoked = 0",
+                params![target_wallet_str],
+            )
+            .map_err(|e| AppError::internal(e.to_string()))?;
+
+        if rows_affected == 0 {
+            return Err(AppError::not_found("no active sessions found for target wallet"));
+        }
+
+        Ok(Json(json!({ "ok": true, "sessions_revoked": rows_affected })))
     }
-
-    let rows_affected = db
-        .execute("UPDATE sessions SET revoked = 1 WHERE token = ?1", params![target_token])
-        .map_err(|e| AppError::internal(e.to_string()))?;
-
-    if rows_affected == 0 {
-        return Err(AppError::not_found("target session not found"));
-    }
-
-    Ok(Json(json!({ "ok": true })))
 }

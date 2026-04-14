@@ -73,12 +73,12 @@ enum Commands {
     },
 
     #[command(
-        about = "Revoke an agent's session",
-        long_about = "Immediately invalidate an agent's session token.\n\nExamples:\n  agentkeys revoke 0xAGENT"
+        about = "Revoke a session",
+        long_about = "Revoke a session. Without arguments, revokes the current session and wipes the local keychain entry (you must run `agentkeys init` again). With a wallet address, revokes all active sessions for that child agent (ownership check enforced).\n\nExamples:\n  agentkeys revoke\n  agentkeys revoke 0xCHILD_WALLET"
     )]
     Revoke {
-        #[arg(help = "Agent wallet address or session token to revoke")]
-        agent: String,
+        #[arg(help = "Child agent wallet address to revoke (omit to revoke your own current session)", required = false)]
+        agent: Option<String>,
     },
 
     #[command(
@@ -155,7 +155,7 @@ async fn main() {
         Commands::Store { agent, service, key } => cmd_store(&ctx, agent, service, key).await,
         Commands::Read { agent, service } => cmd_read(&ctx, agent, service).await,
         Commands::Run { agent, cmd } => cmd_run(&ctx, agent, cmd).await,
-        Commands::Revoke { agent } => cmd_revoke(&ctx, agent).await,
+        Commands::Revoke { agent } => cmd_revoke(&ctx, agent.as_deref()).await,
         Commands::Teardown { agent } => cmd_teardown(&ctx, agent).await,
         Commands::Usage { agent, json } => {
             cmd_usage(&ctx, agent.as_deref(), *json).await
