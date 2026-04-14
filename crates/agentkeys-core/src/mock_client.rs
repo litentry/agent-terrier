@@ -205,6 +205,26 @@ impl CredentialBackend for MockHttpClient {
         Ok(())
     }
 
+    async fn revoke_by_wallet(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+    ) -> Result<(), BackendError> {
+        let resp = self
+            .client
+            .post(self.url("/session/revoke"))
+            .header("authorization", format!("Bearer {}", session.token))
+            .json(&json!({ "target_wallet": target_wallet.0 }))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+        Ok(())
+    }
+
     async fn teardown_agent(
         &self,
         session: &Session,

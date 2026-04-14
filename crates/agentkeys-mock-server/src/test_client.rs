@@ -255,6 +255,20 @@ impl CredentialBackend for InProcessBackend {
         Ok(())
     }
 
+    async fn revoke_by_wallet(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+    ) -> Result<(), BackendError> {
+        self.post_with_session(
+            "/session/revoke",
+            session,
+            json!({ "target_wallet": target_wallet.0 }),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn teardown_agent(
         &self,
         session: &Session,

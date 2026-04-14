@@ -200,32 +200,58 @@ pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Resul
     Ok(String::new())
 }
 
-pub async fn cmd_revoke(ctx: &CommandContext, agent: &str) -> Result<String> {
+pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-
-    let target_session = Session {
-        token: agent.to_string(),
-        wallet: WalletAddress(agent.to_string()),
-        scope: None,
-        created_at: 0,
-        ttl_seconds: 0,
-    };
 
     if ctx.verbose {
         eprintln!("[verbose] POST {}/session/revoke", ctx.backend_url);
-        eprintln!("[verbose] target: {}", agent);
     }
 
-    ctx.backend()
-        .revoke_session(&session, &target_session)
-        .await
-        .map_err(wrap_backend_error)?;
+    match agent {
+        None => {
+            let wallet_display = session.wallet.0.clone();
+            ctx.backend()
+                .revoke_session(&session, &session)
+                .await
+                .map_err(wrap_backend_error)?;
+            session_store::clear_session().context("clear local session")?;
+            Ok(format!(
+                "Revoked current session for wallet={}. Local session wiped. Run `agentkeys init` to re-pair.",
+                wallet_display
+            ))
+        }
+        Some(target_wallet_str) => {
+            if ctx.verbose {
+                eprintln!("[verbose] target wallet: {}", target_wallet_str);
+            }
+            let target_wallet = WalletAddress(target_wallet_str.to_string());
+            ctx.backend()
+                .revoke_by_wallet(&session, &target_wallet)
+                .await
+                .map_err(wrap_backend_error)?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    Ok(format!("Revoked agent={} at timestamp={}", agent, now))
+            // If the target wallet IS the caller's own wallet, the just-revoked
+            // session matches the locally-cached one. Wipe local state too so
+            // subsequent commands fail cleanly with "no session" instead of
+            // loading the stale revoked token (codex P2 from the original review,
+            // tracked at issue-17 review thread).
+            //
+            // Wallet addresses are compared case-insensitively because the EVM
+            // canonical form (EIP-55 mixed case) can differ from the lowercase
+            // form returned by the mock backend.
+            let revoked_self = session.wallet.0.eq_ignore_ascii_case(target_wallet_str);
+            if revoked_self {
+                session_store::clear_session()
+                    .context("clear local session after self-revoke")?;
+                Ok(format!(
+                    "Revoked agent={} (was your own session — local state wiped, run `agentkeys init` to re-pair).",
+                    target_wallet_str
+                ))
+            } else {
+                Ok(format!("Revoked agent={}", target_wallet_str))
+            }
+        }
+    }
 }
 
 pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {

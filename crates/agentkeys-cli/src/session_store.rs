@@ -5,7 +5,7 @@ use std::path::PathBuf;
 const KEYRING_SERVICE: &str = "agentkeys";
 const KEYRING_USER: &str = "session";
 
-fn fallback_path() -> PathBuf {
+pub fn fallback_path() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
@@ -91,3 +91,57 @@ fn load_from_file() -> Result<Session> {
         .with_context(|| format!("read session file at {}", path.display()))?;
     serde_json::from_str(&json).context("deserialize session from file")
 }
+
+/// Delete the locally stored session from both keyring and file.
+/// Best-effort: ignores "not found" errors. Returns Err only if both
+/// attempts failed with non-NotFound errors.
+///
+/// When `AGENTKEYS_SESSION_STORE=file` is set, the keyring branch is skipped
+/// entirely (no 2-second timeout, no chance of spurious keyring errors).
+pub fn clear_session() -> Result<()> {
+    let keyring_result = if should_skip_keyring() {
+        Ok(())
+    } else {
+        try_keyring_delete()
+    };
+    let file_result = delete_session_file();
+
+    match (keyring_result, file_result) {
+        (Err(ke), Err(fe)) => {
+            Err(anyhow::anyhow!("could not clear session: keyring: {}; file: {}", ke, fe))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn try_keyring_delete() -> Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
+    std::thread::spawn(move || {
+        let result = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .and_then(|e| e.delete_password().map_err(|ke| anyhow::anyhow!("{}", ke)));
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("not found") || msg.contains("no such") || msg.contains("no password") {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+fn delete_session_file() -> Result<()> {
+    let path = fallback_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("remove {}: {}", path.display(), e)),
+    }
+}
+

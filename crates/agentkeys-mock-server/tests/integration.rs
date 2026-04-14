@@ -1264,3 +1264,158 @@ async fn scope_change() {
     assert_eq!(approve_status, StatusCode::OK, "{approve_json}");
     assert!(approve_json["signature"].is_string());
 }
+
+// ---------------------------------------------------------------------------
+// Revoke handler tests (issue-17)
+// ---------------------------------------------------------------------------
+
+// Helper: create a session for a given auth token, return (session_token, wallet)
+async fn create_session_for(app: Router, auth_token: &str) -> (String, String, Router) {
+    let (status, json) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": auth_token }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create_session_for failed: {json}");
+    let session = json["session"].as_str().unwrap().to_string();
+    let wallet = json["wallet"].as_str().unwrap().to_string();
+    (session, wallet, app)
+}
+
+// Helper: create a child session under a parent, return (child_token, child_wallet)
+async fn create_child_session_for(app: Router, parent_token: &str) -> (String, String, Router) {
+    let scope = json!({ "services": [], "read_only": false });
+    let (status, json) = post_json_auth(
+        app.clone(),
+        "/session/child",
+        parent_token,
+        json!({ "scope": scope }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create_child_session failed: {json}");
+    let child_token = json["session"].as_str().unwrap().to_string();
+    let child_wallet = json["wallet"].as_str().unwrap().to_string();
+    (child_token, child_wallet, app)
+}
+
+#[tokio::test]
+async fn revoke_by_target_session_still_works() {
+    let app = setup();
+    let (session, wallet, app) = create_session_for(app, "revoke-session-test").await;
+
+    let (status, json) = post_json_auth(
+        app,
+        "/session/revoke",
+        &session,
+        json!({ "target_session": session }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "revoke by target_session failed: {json}");
+    assert_eq!(json["ok"].as_bool(), Some(true));
+    let _ = wallet;
+}
+
+#[tokio::test]
+async fn revoke_by_target_wallet_revokes_all() {
+    let app = setup();
+    // Create parent (owner) session
+    let (owner_session, _owner_wallet, app) = create_session_for(app, "owner-token-revoke-all").await;
+    // Create two child sessions under owner — both will have the same child wallet for simplicity
+    // (each child call yields a fresh wallet, so create them and collect wallets)
+    let (child_token1, child_wallet1, app) = create_child_session_for(app, &owner_session).await;
+    // Create a second child session for the same wallet by creating another child
+    // (backend creates fresh wallets per child session, so we target child_wallet1 specifically)
+    // To have 2 sessions on the same wallet we create one child then a second session for that wallet
+    // via recover (mock allows any passkey). Use direct /session/create with child_wallet1's auth_token
+    // which was set to "child:<child_token1>" by the server.
+    let child_auth_token = format!("child:{}", child_token1);
+    let (child_token2, _child_wallet2, app) = create_session_for(app, &child_auth_token).await;
+    let _ = child_token2;
+
+    // Now revoke all sessions for child_wallet1
+    let (status, json) = post_json_auth(
+        app,
+        "/session/revoke",
+        &owner_session,
+        json!({ "target_wallet": child_wallet1 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "revoke_by_wallet failed: {json}");
+    assert_eq!(json["ok"].as_bool(), Some(true));
+    let revoked = json["sessions_revoked"].as_u64().unwrap_or(0);
+    assert!(revoked >= 1, "expected at least 1 session revoked, got {revoked}");
+}
+
+#[tokio::test]
+async fn revoke_by_target_wallet_not_owned() {
+    let app = setup();
+    let (caller_session, _caller_wallet, app) = create_session_for(app, "caller-token-403").await;
+    let (_other_session, other_wallet, app) = create_session_for(app, "other-token-403").await;
+
+    let (status, _json) = post_json_auth(
+        app,
+        "/session/revoke",
+        &caller_session,
+        json!({ "target_wallet": other_wallet }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "expected 403 for unowned wallet");
+}
+
+#[tokio::test]
+async fn revoke_with_both_fields_is_400() {
+    let app = setup();
+    let (session, wallet, app) = create_session_for(app, "both-fields-token").await;
+
+    let (status, _json) = post_json_auth(
+        app,
+        "/session/revoke",
+        &session,
+        json!({ "target_session": session, "target_wallet": wallet }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400 when both fields present");
+}
+
+#[tokio::test]
+async fn revoke_with_neither_field_is_400() {
+    let app = setup();
+    let (session, _wallet, app) = create_session_for(app, "neither-fields-token").await;
+
+    let (status, _json) = post_json_auth(
+        app,
+        "/session/revoke",
+        &session,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400 when no fields present");
+}
+
+#[tokio::test]
+async fn revoke_by_target_wallet_none_active_is_404() {
+    let app = setup();
+    let (owner_session, _owner_wallet, app) = create_session_for(app, "owner-token-404").await;
+    let (_child_token, child_wallet, app) = create_child_session_for(app, &owner_session).await;
+
+    // First revoke — should succeed
+    let (status1, _) = post_json_auth(
+        app.clone(),
+        "/session/revoke",
+        &owner_session,
+        json!({ "target_wallet": child_wallet }),
+    )
+    .await;
+    assert_eq!(status1, StatusCode::OK, "first revoke should succeed");
+
+    // Second revoke — all sessions already revoked, expect 404
+    let (status2, _) = post_json_auth(
+        app,
+        "/session/revoke",
+        &owner_session,
+        json!({ "target_wallet": child_wallet }),
+    )
+    .await;
+    assert_eq!(status2, StatusCode::NOT_FOUND, "expected 404 when no active sessions remain");
+}

@@ -66,6 +66,12 @@ pub trait CredentialBackend: Send + Sync {
         target: &Session,
     ) -> Result<(), BackendError>;
 
+    async fn revoke_by_wallet(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+    ) -> Result<(), BackendError>;
+
     async fn teardown_agent(
         &self,
         session: &Session,
@@ -178,6 +184,14 @@ mod tests {
             &self,
             _session: &Session,
             _target: &Session,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+
+        async fn revoke_by_wallet(
+            &self,
+            _session: &Session,
+            _target_wallet: &WalletAddress,
         ) -> Result<(), BackendError> {
             unimplemented!()
         }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use agentkeys_cli::{cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_store, cmd_teardown, cmd_usage, CommandContext};
+use agentkeys_cli::session_store;
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mock_server::test_client::InProcessBackend;
 use agentkeys_types::Session;
@@ -91,7 +92,7 @@ async fn cli_run_injects_env() {
     assert!(result.is_ok(), "cmd_run failed: {:?}", result.err());
 }
 
-// Test 5: revoke then read — exercises the revoke path without blocking on keychain
+// Test 5: revoke child agent by wallet address
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_revoke_then_read() {
     let backend = create_test_backend();
@@ -100,13 +101,192 @@ async fn cli_revoke_then_read() {
 
     cmd_store(&context, &wallet, "anthropic", "sk-stored").await.unwrap();
 
-    // Attempt revoke (may fail since we pass wallet not a session token — that's fine)
-    let _ = cmd_revoke(&context, &wallet).await;
+    // Attempt revoke with Some(wallet) — uses the revoke_by_wallet path
+    let _ = cmd_revoke(&context, Some(wallet.as_str())).await;
 
-    // Credential should still be accessible (we revoked a fake target, not the real session)
+    // Credential should still be accessible since revoke_by_wallet revokes sessions not creds
     let read_result = cmd_read(&context, &wallet, "anthropic").await;
     // Accept either success or error — just ensure no panic
     let _ = read_result;
+}
+
+// Test: cmd_revoke_self_clears_local_session
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_revoke_self_clears_local_session() {
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_home = temp_dir.path().to_str().unwrap().to_string();
+    unsafe { std::env::set_var("HOME", &temp_home); }
+
+    let backend = create_test_backend();
+    let ctx_init = CommandContext::new("unused", false, false)
+        .with_backend(backend.clone() as Arc<dyn CredentialBackend>);
+
+    let (_, session) = cmd_init(&ctx_init, Some("selfrevoke-token".to_string()))
+        .await
+        .unwrap();
+
+    // Verify session file was written
+    let session_path = session_store::fallback_path();
+    assert!(session_path.exists(), "session file should exist after init");
+
+    // Now self-revoke
+    let context = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session(session);
+
+    let result = cmd_revoke(&context, None).await;
+    assert!(result.is_ok(), "self-revoke failed: {:?}", result.err());
+    let msg = result.unwrap();
+    assert!(msg.contains("Revoked current session"), "unexpected output: {msg}");
+    assert!(msg.contains("agentkeys init"), "missing re-pair hint: {msg}");
+
+    // Session file should be deleted
+    assert!(!session_path.exists(), "session file should be deleted after self-revoke");
+}
+
+// Test: cmd_revoke_with_agent_calls_revoke_by_wallet
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_revoke_with_agent_calls_revoke_by_wallet() {
+    let backend = create_test_backend();
+    let (_, parent_session) = init_session_direct(&backend).await;
+
+    // Create a child session so there is something to revoke by wallet
+    let child_scope = agentkeys_types::Scope { services: vec![], read_only: false };
+    let (child_session, child_wallet) = backend
+        .create_child_session(&parent_session, child_scope)
+        .await
+        .unwrap();
+
+    let context = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session(parent_session);
+
+    let result = cmd_revoke(&context, Some(child_wallet.0.as_str())).await;
+    assert!(result.is_ok(), "revoke by wallet failed: {:?}", result.err());
+    let msg = result.unwrap();
+    assert!(msg.contains("Revoked agent="), "unexpected output: {msg}");
+    assert!(msg.contains(child_wallet.0.as_str()), "output missing child wallet: {msg}");
+
+    // Child session should now be revoked — trying to use it should fail
+    let _ = child_session; // child session is no longer valid
+}
+
+// Test: cmd_revoke_with_own_wallet_clears_local_session
+//
+// Regression test for codex P2 finding on PR #18: when the user passes their
+// OWN wallet to `agentkeys revoke <wallet>`, the local session file should
+// be wiped (same as the no-arg self-revoke form), so subsequent commands
+// don't load a stale revoked token.
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_revoke_with_own_wallet_clears_local_session() {
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_home = temp_dir.path().to_str().unwrap().to_string();
+    unsafe { std::env::set_var("HOME", &temp_home); }
+
+    let backend = create_test_backend();
+    let ctx_init = CommandContext::new("unused", false, false)
+        .with_backend(backend.clone() as Arc<dyn CredentialBackend>);
+    let (_, session) = cmd_init(&ctx_init, Some("self-by-wallet-token".to_string()))
+        .await
+        .unwrap();
+
+    let session_path = session_store::fallback_path();
+    assert!(session_path.exists(), "session file should exist after init");
+
+    // Revoke by passing OWN wallet (not None) — should still wipe local state.
+    let own_wallet = session.wallet.0.clone();
+    let context = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session(session);
+
+    let result = cmd_revoke(&context, Some(&own_wallet)).await;
+    assert!(result.is_ok(), "self-by-wallet revoke failed: {:?}", result.err());
+    let msg = result.unwrap();
+    assert!(
+        msg.contains("was your own session"),
+        "expected self-revoke acknowledgement, got: {msg}"
+    );
+    assert!(
+        msg.contains("agentkeys init"),
+        "expected re-pair hint, got: {msg}"
+    );
+
+    assert!(
+        !session_path.exists(),
+        "session file should be deleted after self-by-wallet revoke"
+    );
+}
+
+// Test: cmd_revoke_with_other_wallet_keeps_local_session
+//
+// Counterpart to the above: revoking SOMEONE ELSE's wallet must NOT touch
+// the caller's local session file.
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_revoke_with_other_wallet_keeps_local_session() {
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_home = temp_dir.path().to_str().unwrap().to_string();
+    unsafe { std::env::set_var("HOME", &temp_home); }
+
+    let backend = create_test_backend();
+    let ctx_init = CommandContext::new("unused", false, false)
+        .with_backend(backend.clone() as Arc<dyn CredentialBackend>);
+    let (_, parent_session) = cmd_init(&ctx_init, Some("revoke-other-token".to_string()))
+        .await
+        .unwrap();
+
+    // Spin up a child agent so we have an "other" wallet to target.
+    let child_scope = agentkeys_types::Scope { services: vec![], read_only: false };
+    let (_child_session, child_wallet) = backend
+        .create_child_session(&parent_session, child_scope)
+        .await
+        .unwrap();
+
+    let session_path = session_store::fallback_path();
+    assert!(session_path.exists(), "parent session file should exist before revoke");
+
+    let context = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session(parent_session);
+
+    let result = cmd_revoke(&context, Some(child_wallet.0.as_str())).await;
+    assert!(result.is_ok(), "revoke other wallet failed: {:?}", result.err());
+    let msg = result.unwrap();
+    assert!(!msg.contains("was your own session"), "should NOT mark as self-revoke: {msg}");
+
+    assert!(
+        session_path.exists(),
+        "parent session file should NOT be deleted when revoking a different wallet"
+    );
+}
+
+// Test: cmd_revoke_no_session_errors_cleanly
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_revoke_no_session_errors_cleanly() {
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_home = temp_dir.path().to_str().unwrap().to_string();
+    unsafe { std::env::set_var("HOME", &temp_home); }
+
+    // No session stored — use a bare context (no session_override, no backend_override)
+    // so load_session() will fail trying to read from file
+    let backend = create_test_backend();
+    let context = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>);
+
+    let result = cmd_revoke(&context, None).await;
+    assert!(result.is_err(), "expected error when no session exists");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("load session") || err.contains("agentkeys init") || err.contains("session"),
+        "unexpected error: {err}"
+    );
 }
 
 // Test 6: teardown then read returns error
