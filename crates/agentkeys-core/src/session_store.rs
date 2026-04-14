@@ -58,11 +58,12 @@ pub(crate) fn sanitize_for_keyring(s: &str) -> String {
         return safe;
     }
 
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    let hash = format!("{:x}", h.finish());
+    // SHA-256 prefix, not DefaultHasher — std's hasher is explicitly NOT
+    // stable across Rust versions, which would make sanitized session_ids
+    // unreachable after a toolchain upgrade (codex PR #24 v3 P2).
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(s.as_bytes());
+    let hash = hex::encode(&digest[..4]); // 8 hex chars
     // Reserve room for the `-<8char>` suffix.
     let prefix_max = MAX.saturating_sub(9);
     let prefix = if safe.len() > prefix_max {
@@ -70,7 +71,7 @@ pub(crate) fn sanitize_for_keyring(s: &str) -> String {
     } else {
         &safe
     };
-    format!("{}-{}", prefix, &hash[..8])
+    format!("{}-{}", prefix, hash)
 }
 
 /// Returns true if keyring should be skipped (tests, CI, headless).
@@ -411,6 +412,16 @@ mod tests {
         let with_null = sanitize_for_keyring("alias\0null");
         assert!(!with_null.contains('\0'), "null bytes must be stripped");
         assert!(with_null.starts_with("alias_null-"), "got: {with_null}");
+    }
+
+    // Codex PR #24 v3 P2 — hash must be stable across Rust/toolchain
+    // upgrades. SHA-256 of "foo/bar" (first 4 bytes, hex-lower) is
+    // `cc5d46bd`. If this test ever fails after a dep upgrade, we lost
+    // persistence stability and any sanitized session_id would become
+    // unreachable.
+    #[test]
+    fn sanitize_for_keyring_uses_stable_sha256_suffix() {
+        assert_eq!(sanitize_for_keyring("foo/bar"), "foo_bar-cc5d46bd");
     }
 
     #[test]
