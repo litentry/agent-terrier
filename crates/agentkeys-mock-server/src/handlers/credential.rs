@@ -201,6 +201,18 @@ pub async fn list_credentials(
     let db = state.db.lock().unwrap();
 
     if !is_owner_of(&db, &session.wallet_address, agent_id) {
+        // Audit the DENIED list attempt so cross-agent probing through the
+        // new /credential/list path stays visible in the audit log — the
+        // existing read_credential audit contract guarantees DENIED rows for
+        // ownership failures, and this endpoint inherits the same use case
+        // (called from cmd_run for master sessions). Codex P2 on PR #19.
+        let now = now_secs();
+        db.execute(
+            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
+             VALUES (?1, ?2, ?3, 'list', 'DENIED', ?4)",
+            params![session.wallet_address, agent_id, "*", now],
+        )
+        .ok();
         return Err(AppError::forbidden(format!(
             "session does not own agent {}",
             agent_id

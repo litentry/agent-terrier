@@ -1504,6 +1504,23 @@ async fn list_credentials_ownership_enforced() {
     let session_b = json_b["session"].as_str().unwrap().to_string();
 
     let path = format!("/credential/list?agent_id={}", wallet_a);
-    let (status, _) = get_json_auth(app, &path, &session_b).await;
+    let (status, _) = get_json_auth(app.clone(), &path, &session_b).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "user B must not list user A's credentials");
+
+    // Codex P2 on PR #19: a denied list_credentials must also leave an audit
+    // trail so cross-agent probing through the new /credential/list endpoint
+    // is visible. Query the audit log via the existing /audit endpoint
+    // (filtered by agent=wallet_a; user A can see events where their wallet is
+    // the agent_wallet, even when owner_wallet is user B). Confirm a DENIED
+    // 'list' row appears.
+    let audit_path = format!("/audit/query?agent={}", wallet_a);
+    let (audit_status, audit_body) = get_json_auth(app, &audit_path, &session_a).await;
+    assert_eq!(audit_status, StatusCode::OK, "audit query failed: {audit_body}");
+    let events = audit_body["events"].as_array().expect("events array");
+    assert!(
+        events
+            .iter()
+            .any(|e| e["action"] == "list" && e["result"] == "DENIED"),
+        "expected a list/DENIED audit row after the cross-agent list attempt, got: {audit_body}"
+    );
 }

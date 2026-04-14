@@ -183,6 +183,12 @@ pub async fn cmd_run(
         }
     }
 
+    // Track which services we've already fetched in the auto-injection pass.
+    // The --env loop below reuses these values instead of issuing a second
+    // read_credential for the same service, which would double-count audit
+    // events and rate-limit decrements (codex P2 on PR #19).
+    let mut fetched: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut env_vars: Vec<(String, String)> = Vec::new();
     let mut credential_errors: Vec<String> = Vec::new();
     for service in &services_to_try {
@@ -191,6 +197,7 @@ pub async fn cmd_run(
             Ok(bytes) => {
                 let value = String::from_utf8_lossy(&bytes).to_string();
                 let env_key = format!("{}_API_KEY", service.to_uppercase().replace('-', "_"));
+                fetched.insert(service.clone(), value.clone());
                 env_vars.push((env_key, value));
             }
             Err(e) => {
@@ -215,12 +222,26 @@ pub async fn cmd_run(
         })?;
         let env_key = raw[..eq_pos].to_string();
         let service = &raw[eq_pos + 1..];
-        let service_name = ServiceName(service.to_string());
-        let bytes = backend
-            .read_credential(&session, &agent_id, &service_name)
-            .await
-            .map_err(wrap_backend_error)?;
-        let value = String::from_utf8_lossy(&bytes).to_string();
+
+        // Reuse the auto-injection fetch if we already pulled this service.
+        // Only issue a fresh read_credential when --env names a service that
+        // wasn't auto-injected (typical for master sessions where scope=None
+        // → all stored services were already pulled, so fresh reads here are
+        // for the rare case of explicit --env on a service the user never
+        // stored before this run).
+        let value = if let Some(cached) = fetched.get(service) {
+            cached.clone()
+        } else {
+            let service_name = ServiceName(service.to_string());
+            let bytes = backend
+                .read_credential(&session, &agent_id, &service_name)
+                .await
+                .map_err(wrap_backend_error)?;
+            let v = String::from_utf8_lossy(&bytes).to_string();
+            fetched.insert(service.to_string(), v.clone());
+            v
+        };
+
         if let Some(existing) = env_vars.iter_mut().find(|(k, _)| k == &env_key) {
             existing.1 = value;
         } else {
