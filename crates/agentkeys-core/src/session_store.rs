@@ -4,6 +4,13 @@ use std::path::PathBuf;
 
 const KEYRING_SERVICE: &str = "agentkeys";
 
+/// Marker file written alongside (but NOT overwriting) the session.json in a
+/// session's fallback directory whenever the real credential lives in the OS
+/// keyring instead of the file. Kept distinct from session.json so that
+/// switching between keyring and file modes does not destroy the real
+/// file-mode credential (codex PR #24 P2).
+const KEYRING_MARKER_FILE: &str = ".keyring_managed";
+
 fn fallback_path(session_id: &str) -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -12,6 +19,55 @@ fn fallback_path(session_id: &str) -> PathBuf {
         .join(".agentkeys")
         .join(session_id)
         .join("session.json")
+}
+
+fn marker_path(session_id: &str) -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".agentkeys")
+        .join(session_id)
+        .join(KEYRING_MARKER_FILE)
+}
+
+/// Sanitize `session_id` for use as a keyring account name. Windows
+/// Credential Manager rejects null bytes, Linux `secret-service` rejects
+/// non-UTF8 and is quirky about shell-reserved chars, macOS is tolerant.
+/// Normalize to ASCII alnum + `-_.`; replace other chars with `_`. If the
+/// sanitized form differs from the input OR exceeds 128 chars, append an
+/// 8-char hash of the original so raw-alias collisions don't merge into
+/// the same credential entry (codex PR #24 P1 — cross-platform).
+pub(crate) fn sanitize_for_keyring(s: &str) -> String {
+    const MAX: usize = 128;
+    let safe: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if safe == s && safe.len() <= MAX {
+        return safe;
+    }
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    let hash = format!("{:x}", h.finish());
+    // Reserve room for the `-<8char>` suffix.
+    let prefix_max = MAX.saturating_sub(9);
+    let prefix = if safe.len() > prefix_max {
+        &safe[..prefix_max]
+    } else {
+        &safe
+    };
+    format!("{}-{}", prefix, &hash[..8])
 }
 
 /// Returns true if keyring should be skipped (tests, CI, headless).
@@ -26,30 +82,25 @@ fn should_skip_keyring() -> bool {
 /// falls back to ~/.agentkeys/<session_id>/session.json (mode 0600).
 /// Set AGENTKEYS_SESSION_STORE=file to skip keyring entirely.
 ///
-/// Also writes an empty "discovery marker" directory at
-/// ~/.agentkeys/<session_id>/ whenever the keyring path was used — this lets
-/// daemon-restart logic discover keyring-stored sessions via
-/// `list_fallback_session_ids()` (the OS keychain itself doesn't expose a
-/// prefix-scan without per-entry permission prompts).
+/// On a successful keyring save, also drops an empty `.keyring_managed`
+/// marker file in ~/.agentkeys/<session_id>/ so `list_fallback_session_ids`
+/// can discover keyring-stored sessions (OS keychain APIs don't expose a
+/// prefix-scan without per-entry permission prompts). The marker is NEVER
+/// written over an existing session.json, so toggling between keyring and
+/// file modes doesn't destroy the real fallback (codex PR #24 P2).
 pub fn save_session(session: &Session, session_id: &str) -> Result<()> {
     let json = serde_json::to_string(session).context("serialize session")?;
 
     if !should_skip_keyring() {
         if try_keyring_save(&json, session_id) {
-            // Drop an empty directory so list_fallback_session_ids can find
-            // this session even though the credential itself is in the keyring.
-            let home = std::env::var("HOME")
-                .or_else(|_| std::env::var("USERPROFILE"))
-                .unwrap_or_else(|_| ".".to_string());
-            let marker_dir = PathBuf::from(home).join(".agentkeys").join(session_id);
-            let _ = std::fs::create_dir_all(&marker_dir);
-            // Empty marker file so list_fallback_session_ids's session.json
-            // existence check succeeds. Content is a discovery hint only —
-            // the real credential lives in the OS keyring.
-            let _ = std::fs::write(
-                marker_dir.join("session.json"),
-                r#"{"_keyring_managed":true}"#,
-            );
+            let marker = marker_path(session_id);
+            if let Some(parent) = marker.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Touch the marker file — empty content, presence is the signal.
+            // Never touches session.json, so a stale file-mode credential
+            // remains intact for later fallback.
+            let _ = std::fs::File::create(&marker);
             return Ok(());
         }
     }
@@ -68,15 +119,15 @@ pub fn load_session(session_id: &str) -> Result<Session> {
     load_from_file(session_id)
 }
 
-/// Enumerate session IDs that have a persisted fallback file under
-/// `~/.agentkeys/`. Useful for the daemon's default-startup path, which
-/// needs to find a previously-paired `daemon-<wallet>` session without
-/// knowing the wallet up front.
+/// Enumerate session IDs that have a persisted session under `~/.agentkeys/`.
+/// Looks for either a real `session.json` (file mode) or the
+/// `.keyring_managed` marker (keyring mode) in each candidate directory.
+/// Results are sorted alphabetically so daemon startup is deterministic
+/// across runs (codex PR #24 P1 — nondeterministic daemon selection).
 ///
-/// Returns IDs in filesystem order (unsorted). Keyring-only entries are
-/// NOT enumerated (most OS keychain APIs don't support prefix-scan without
-/// a wallet-wide permission prompt); this function only inspects the file
-/// fallback directory, which is sufficient for the current use case.
+/// Keyring-only entries without a marker are NOT enumerated — we rely on
+/// the marker file as the discovery signal because most OS keychain APIs
+/// don't support prefix-scan without per-entry permission prompts.
 pub fn list_fallback_session_ids(prefix: &str) -> Vec<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -91,10 +142,15 @@ pub fn list_fallback_session_ids(prefix: &str) -> Vec<String> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(prefix) && entry.path().join("session.json").exists() {
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let dir = entry.path();
+        if dir.join("session.json").exists() || dir.join(KEYRING_MARKER_FILE).exists() {
             out.push(name);
         }
     }
+    out.sort();
     out
 }
 
@@ -139,12 +195,16 @@ pub fn clear_session(session_id: &str) -> Result<()> {
         std::fs::remove_file(&path)
             .with_context(|| format!("remove session file {}", path.display()))?;
     }
+    let marker = marker_path(session_id);
+    if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+    }
     Ok(())
 }
 
 fn try_keyring_save(json: &str, session_id: &str) -> bool {
     let json_owned = json.to_string();
-    let account = session_id.to_string();
+    let account = sanitize_for_keyring(session_id);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = keyring::Entry::new(KEYRING_SERVICE, &account)
@@ -156,7 +216,7 @@ fn try_keyring_save(json: &str, session_id: &str) -> bool {
 }
 
 fn try_keyring_load(session_id: &str) -> Option<String> {
-    let account = session_id.to_string();
+    let account = sanitize_for_keyring(session_id);
     let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
     std::thread::spawn(move || {
         let result = keyring::Entry::new(KEYRING_SERVICE, &account)
@@ -171,7 +231,7 @@ fn try_keyring_load(session_id: &str) -> Option<String> {
 }
 
 fn try_keyring_delete(session_id: &str) {
-    let account = session_id.to_string();
+    let account = sanitize_for_keyring(session_id);
     std::thread::spawn(move || {
         if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &account) {
             let _ = entry.delete_password();
@@ -299,6 +359,100 @@ mod tests {
             assert_eq!(loaded.token, "tok-master");
 
             assert!(load_session("daemon-0xDAEMON").is_err());
+        });
+    }
+
+    // Codex PR #24 P1 — list_fallback_session_ids must sort deterministically.
+    #[test]
+    fn list_fallback_session_ids_is_sorted() {
+        with_temp_home(|_| {
+            // Insert in non-alphabetical order; enumerate must still return sorted.
+            save_session(&make_session("t1", "0xZ"), "daemon-0xZZZ").expect("save Z");
+            save_session(&make_session("t2", "0xA"), "daemon-0xAAA").expect("save A");
+            save_session(&make_session("t3", "0xM"), "daemon-0xMMM").expect("save M");
+
+            let ids = list_fallback_session_ids("daemon-");
+            assert_eq!(
+                ids,
+                vec![
+                    "daemon-0xAAA".to_string(),
+                    "daemon-0xMMM".to_string(),
+                    "daemon-0xZZZ".to_string(),
+                ],
+                "daemon session ids must be sorted alphabetically"
+            );
+        });
+    }
+
+    // Codex PR #24 P1 — keyring account name must be sanitized for
+    // cross-platform safety (Windows null-byte rejection, Linux non-UTF8).
+    #[test]
+    fn sanitize_for_keyring_preserves_ascii_alnum_and_safe_punctuation() {
+        assert_eq!(sanitize_for_keyring("daemon-0xABC"), "daemon-0xABC");
+        assert_eq!(sanitize_for_keyring("master"), "master");
+        assert_eq!(sanitize_for_keyring("a_b.c-d"), "a_b.c-d");
+    }
+
+    #[test]
+    fn sanitize_for_keyring_replaces_unsafe_chars_and_appends_hash() {
+        let a = sanitize_for_keyring("name/with\\slashes");
+        let b = sanitize_for_keyring("name_with_slashes");
+        assert_ne!(a, b, "inputs differing only in unsafe chars must not collide");
+
+        let with_null = sanitize_for_keyring("alias\0null");
+        assert!(!with_null.contains('\0'), "null bytes must be stripped");
+        assert!(with_null.starts_with("alias_null-"), "got: {with_null}");
+    }
+
+    #[test]
+    fn sanitize_for_keyring_truncates_oversized_input() {
+        let long = "a".repeat(500);
+        let sanitized = sanitize_for_keyring(&long);
+        assert!(sanitized.len() <= 128, "got len {}", sanitized.len());
+        // Two different long inputs with different hashes should not collide.
+        let long_b = format!("{}b", "a".repeat(499));
+        let sanitized_b = sanitize_for_keyring(&long_b);
+        assert_ne!(sanitized, sanitized_b, "long distinct inputs must not collide");
+    }
+
+    // Codex PR #24 P2 — keyring save must never overwrite the real file
+    // fallback's session.json. The marker file is a separate `.keyring_managed`.
+    // This test runs in AGENTKEYS_SESSION_STORE=file mode (no keyring), so
+    // we verify directly: save writes session.json (not the marker), and
+    // toggling back to keyring mode (if it were active) would write the
+    // marker without touching session.json.
+    #[test]
+    fn file_mode_save_writes_session_json_not_marker() {
+        with_temp_home(|tmp| {
+            save_session(&make_session("t", "0xW"), "daemon-0xWWW").expect("save");
+            let sess = tmp.join(".agentkeys").join("daemon-0xWWW").join("session.json");
+            let marker = tmp.join(".agentkeys").join("daemon-0xWWW").join(".keyring_managed");
+            assert!(sess.exists(), "session.json must exist in file mode");
+            assert!(
+                !marker.exists(),
+                "file-mode save must not write the keyring marker"
+            );
+        });
+    }
+
+    // Verifies list_fallback_session_ids discovers both a real session.json
+    // entry AND a marker-only entry (would-be keyring-managed in prod).
+    #[test]
+    fn list_fallback_session_ids_finds_marker_only_directories() {
+        with_temp_home(|tmp| {
+            save_session(&make_session("t1", "0xF"), "daemon-0xFFF").expect("save file");
+
+            // Simulate a keyring-managed session: directory with only the marker.
+            let dir = tmp.join(".agentkeys").join("daemon-0xKEY");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::File::create(dir.join(".keyring_managed")).unwrap();
+
+            let ids = list_fallback_session_ids("daemon-");
+            assert!(ids.contains(&"daemon-0xFFF".to_string()));
+            assert!(
+                ids.contains(&"daemon-0xKEY".to_string()),
+                "marker-only entries must be discoverable, got: {ids:?}"
+            );
         });
     }
 }

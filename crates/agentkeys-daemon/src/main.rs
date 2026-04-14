@@ -118,7 +118,19 @@ async fn main() -> anyhow::Result<()> {
         let try_ids: Vec<String> = if let Some(sid) = args.session_id.clone() {
             vec![sid]
         } else {
-            session_store::list_fallback_session_ids("daemon-")
+            // Deterministic sorted list. If >1 exists, require the user to
+            // pick one via --session-id or AGENTKEYS_SESSION_ID rather than
+            // silently restoring an arbitrary wallet (codex PR #24 P1 —
+            // cross-wallet credential mix-up on multi-daemon hosts).
+            let ids = session_store::list_fallback_session_ids("daemon-");
+            if ids.len() > 1 {
+                anyhow::bail!(
+                    "multiple daemon sessions found under ~/.agentkeys ({}): pass --session-id <name> (or set AGENTKEYS_SESSION_ID) to pick one. Candidates: {}",
+                    ids.len(),
+                    ids.join(", ")
+                );
+            }
+            ids
         };
 
         let loaded = try_ids
