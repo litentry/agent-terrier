@@ -101,22 +101,38 @@ async fn main() -> anyhow::Result<()> {
             (result.session, agent_id)
         }
     } else {
-        // Try to load an existing session from a known id.
-        // If --session-id was supplied, try that first; else try "daemon-pending" as a
-        // sentinel that a prior run left before the wallet was resolved.
-        let existing_sid = args.session_id.clone().unwrap_or_else(|| "daemon-pending".to_string());
-        match session_store::load_session(&existing_sid) {
-            Ok(sess) => {
+        // Default startup: find any previously-paired daemon session.
+        //
+        // Order:
+        //   1. If --session-id was supplied, try exactly that ID.
+        //   2. Else scan `daemon-*` file-fallback entries and try each until
+        //      one loads cleanly.
+        //   3. If none load, run the pair flow fresh.
+        //
+        // Note: we intentionally do NOT write a "daemon-pending" sentinel any
+        // more. The old design would save a fake session with token="pending"
+        // before pair, and if pair timed out / failed, the next startup
+        // loaded that fake session and skipped pairing entirely (codex P1).
+        // Now: no sentinel, so a failed pair just results in a retry next
+        // startup, which is what users expect.
+        let try_ids: Vec<String> = if let Some(sid) = args.session_id.clone() {
+            vec![sid]
+        } else {
+            session_store::list_fallback_session_ids("daemon-")
+        };
+
+        let loaded = try_ids
+            .into_iter()
+            .find_map(|sid| session_store::load_session(&sid).ok().map(|s| (sid, s)));
+
+        match loaded {
+            Some((_sid, sess)) => {
                 let agent_id = WalletAddress(sess.wallet.0.clone());
                 (sess, agent_id)
             }
-            Err(_) => {
-                // PAIR FLOW: no existing session, save under pending until wallet is known
-                session_store::save_session(
-                    &session::build_session_from_token("pending".to_string()),
-                    "daemon-pending",
-                )
-                .ok();
+            None => {
+                // PAIR FLOW — no stored session found. Save only after pair
+                // succeeds and the wallet is known.
                 let result = pairing::run_pair_flow(&*backend, args.pair_timeout)
                     .await
                     .context("pair flow failed")?;
@@ -125,7 +141,6 @@ async fn main() -> anyhow::Result<()> {
                     .session_id
                     .clone()
                     .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
-                let _ = session_store::clear_session("daemon-pending");
                 session_store::save_session(&result.session, &sid)
                     .context("save paired session")?;
                 (result.session, agent_id)

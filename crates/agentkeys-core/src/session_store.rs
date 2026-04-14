@@ -48,6 +48,67 @@ pub fn load_session(session_id: &str) -> Result<Session> {
     load_from_file(session_id)
 }
 
+/// Enumerate session IDs that have a persisted fallback file under
+/// `~/.agentkeys/`. Useful for the daemon's default-startup path, which
+/// needs to find a previously-paired `daemon-<wallet>` session without
+/// knowing the wallet up front.
+///
+/// Returns IDs in filesystem order (unsorted). Keyring-only entries are
+/// NOT enumerated (most OS keychain APIs don't support prefix-scan without
+/// a wallet-wide permission prompt); this function only inspects the file
+/// fallback directory, which is sufficient for the current use case.
+pub fn list_fallback_session_ids(prefix: &str) -> Vec<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let root = PathBuf::from(home).join(".agentkeys");
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(prefix) && entry.path().join("session.json").exists() {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Load a session with legacy-location fallback. Used by the master CLI
+/// (session_id = "master") after #12 namespacing — old installs have the
+/// session stored under keyring account=`session` or file
+/// `~/.agentkeys/session.json`. Try the new location first, then fall
+/// back to the legacy locations so existing users stay logged in across
+/// the upgrade.
+pub fn load_session_with_legacy_fallback(session_id: &str) -> Result<Session> {
+    if let Ok(s) = load_session(session_id) {
+        return Ok(s);
+    }
+    if session_id == "master" {
+        // Legacy keyring account: "session"
+        if !should_skip_keyring() {
+            if let Some(json) = try_keyring_load("session") {
+                return serde_json::from_str(&json)
+                    .context("deserialize legacy session from keyring");
+            }
+        }
+        // Legacy file: ~/.agentkeys/session.json
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let legacy = PathBuf::from(home).join(".agentkeys").join("session.json");
+        if let Ok(json) = std::fs::read_to_string(&legacy) {
+            return serde_json::from_str(&json)
+                .context("deserialize legacy session from file");
+        }
+    }
+    load_session(session_id)
+}
+
 /// Remove session entry for session_id only (does not affect other ids).
 pub fn clear_session(session_id: &str) -> Result<()> {
     if !should_skip_keyring() {
