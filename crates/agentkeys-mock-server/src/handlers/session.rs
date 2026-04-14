@@ -15,6 +15,15 @@ use crate::{
 use agentkeys_types::{AuthToken, Scope};
 use ed25519_dalek::SigningKey;
 
+/// Session token TTL in seconds — 30 days.
+///
+/// Canonical AgentKeys policy per `wiki/session-token.md`: the bearer token
+/// (master CLI or agent daemon) is a **30-day credential**. Agent/child
+/// sessions share the same TTL as master for v0. Shorter TTLs for agent
+/// sessions may be introduced later as a defense-in-depth tweak, but they
+/// MUST align with the policy doc before being applied here.
+const DEFAULT_SESSION_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
     pub auth_token: String,
@@ -57,7 +66,7 @@ pub async fn create_session(
         db.execute(
             "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
              VALUES (?1, ?2, NULL, NULL, ?3, ?4, 0)",
-            params![session_token, wallet_address, now, 86400u64],
+            params![session_token, wallet_address, now, DEFAULT_SESSION_TTL_SECONDS],
         )
         .map_err(|e| AppError::internal(e.to_string()))?;
         return Ok(Json(CreateSessionResponse { session: session_token, wallet: wallet_address }));
@@ -81,7 +90,7 @@ pub async fn create_session(
     db.execute(
         "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
          VALUES (?1, ?2, NULL, NULL, ?3, ?4, 0)",
-        params![session_token, wallet_address, now, 86400u64],
+        params![session_token, wallet_address, now, DEFAULT_SESSION_TTL_SECONDS],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
@@ -144,7 +153,7 @@ pub async fn create_child_session(
     db.execute(
         "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-        params![child_token, child_wallet, parent.token, scope_json, now, 3600u64],
+        params![child_token, child_wallet, parent.token, scope_json, now, DEFAULT_SESSION_TTL_SECONDS],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
@@ -242,7 +251,7 @@ pub async fn recover_session(
     db.execute(
         "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
          VALUES (?1, ?2, NULL, ?3, ?4, ?5, 0)",
-        params![session_token, wallet_address, scope_json, now, 86400u64],
+        params![session_token, wallet_address, scope_json, now, DEFAULT_SESSION_TTL_SECONDS],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 

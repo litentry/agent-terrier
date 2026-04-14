@@ -168,7 +168,7 @@ impl CredentialBackend for InProcessBackend {
             wallet: wallet.clone(),
             scope: None,
             created_at: 0,
-            ttl_seconds: 86400,
+            ttl_seconds: 2_592_000, // 30 days per wiki/session-token.md policy
         };
         Ok((session, wallet))
     }
@@ -197,7 +197,7 @@ impl CredentialBackend for InProcessBackend {
             wallet: wallet.clone(),
             scope: Some(scope),
             created_at: 0,
-            ttl_seconds: 3600,
+            ttl_seconds: 2_592_000, // 30 days per wiki/session-token.md policy
         };
         Ok((session, wallet))
     }
@@ -585,7 +585,7 @@ impl CredentialBackend for InProcessBackend {
         let session = body["session"].as_object().map(|_| {
             let token = body["session"]["token"].as_str().unwrap_or("").to_string();
             let wallet = body["session"]["wallet"].as_str().unwrap_or("").to_string();
-            let ttl = body["session"]["ttl_seconds"].as_u64().unwrap_or(3600);
+            let ttl = body["session"]["ttl_seconds"].as_u64().unwrap_or(2_592_000);
             let created = body["session"]["created_at"].as_u64().unwrap_or(0);
             Session {
                 token,
@@ -650,7 +650,7 @@ impl CredentialBackend for InProcessBackend {
             wallet: wallet.clone(),
             scope: None,
             created_at: 0,
-            ttl_seconds: 86400,
+            ttl_seconds: 2_592_000, // 30 days per wiki/session-token.md policy
         };
         Ok((session, wallet))
     }
