@@ -47,7 +47,7 @@ Cross-repo dependencies use Cargo `[dependencies] agentkeys-core = { git = "..."
 | # | Component | Where it runs | Primary job |
 |---|---|---|---|
 | 1 | `agentkeys` CLI | User's Mac/PC/Linux | `init`, `store`, `read`, `run`, `approve`, `revoke`, `teardown`, `usage`, `link`, `feedback` |
-| 2 | `agentkeys-daemon` | Inside agent sandbox (as `gem` UID on stock sandbox) | Holds session key in `memfd_secret`; exposes MCP + CLI sockets; hosts provisioner as MCP tool |
+| 2 | `agentkeys-daemon` | Inside agent sandbox (as `gem` UID on stock sandbox), also desktop / Mac mini / Raspberry Pi per [#12](https://github.com/litentry/agentKeys/issues/12) | Stores session in **OS keychain when available** (wallet-namespaced per [#12](https://github.com/litentry/agentKeys/issues/12)), file fallback (`~/.agentkeys/daemon-<wallet>/session.json`, mode 0600) in sandboxes. Runtime key copy held in `memfd_secret`. Exposes MCP + CLI sockets; hosts provisioner as MCP tool |
 | 3 | MCP adapter | Same process as #2 | Speaks MCP protocol on stdio/socket, translates to daemon internal API |
 | 4 | CLI adapter | Same process as #2 | Line-protocol on Unix socket for `agentkeys read` etc. |
 | 5 | Heima RPC client library | Linked into #1 and #2 | session-signed extrinsics over wss, scale-codec, signing |
