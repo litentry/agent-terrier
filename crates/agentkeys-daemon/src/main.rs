@@ -61,37 +61,15 @@ async fn main() -> anyhow::Result<()> {
 
     let backend = Arc::new(MockHttpClient::new(&args.backend));
 
-    // Resolve optional --parent flag to a WalletAddress
-    let resolved_parent: Option<WalletAddress> = if let Some(ref parent_str) = args.parent {
-        if parent_str.starts_with("0x") {
-            Some(WalletAddress(parent_str.clone()))
-        } else {
-            // Alias: resolve via HTTP identity endpoint
-            let url = format!("{}/identity/resolve?identity_type=alias&identity_value={}", args.backend, parent_str);
-            let http_client = reqwest::Client::new();
-            let resp = http_client
-                .get(&url)
-                .send()
-                .await
-                .context("resolve parent alias: HTTP request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("could not resolve --parent alias '{}': {}", parent_str, resp.status());
-            }
-            let body: serde_json::Value = resp.json().await.context("resolve parent alias: JSON parse failed")?;
-            let wallet_str = body["wallet_address"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("resolve parent alias: missing wallet_address in response"))?
-                .to_string();
-            Some(WalletAddress(wallet_str))
-        }
-    } else {
-        None
-    };
-    let parent_wallet_ref: Option<&WalletAddress> = resolved_parent.as_ref();
+    // --parent resolution is lazy: only the pair and master-approval recover
+    // paths use it, so resolving eagerly would crash non-pair startups when
+    // the backend is transiently down (codex PR #22 P3). Helper is called
+    // inside those branches only.
 
     // 2. Determine session: env/file seam, pair flow, or recover flow
     let (sess, agent_id) = if let Some(token) = args.session {
-        // TEST SEAM: session injected directly (Stage 3 compatibility)
+        // TEST SEAM: session injected directly (Stage 3 compatibility).
+        // --parent is irrelevant here; no resolution is performed.
         let sess = session::build_session_from_token(token.clone());
         let agent_id = WalletAddress(sess.wallet.0.clone());
         let sid = args
@@ -102,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
         (sess, agent_id)
     } else if let Some(ref agent_identity) = args.recover {
         if let Some(ref method) = args.method {
-            // RECOVER VIA 2FA (no master approval needed)
+            // RECOVER VIA 2FA — no master approval, so --parent is unused.
             let result = pairing::run_recover_2fa_flow(&*backend, agent_identity, method)
                 .await
                 .context("2FA recover flow failed")?;
@@ -117,10 +95,17 @@ async fn main() -> anyhow::Result<()> {
                 .context("save recovered session")?;
             (result.session, agent_id)
         } else {
-            // RECOVER VIA MASTER APPROVAL
-            let result = pairing::run_recover_flow(&*backend, agent_identity, args.pair_timeout, parent_wallet_ref)
-                .await
-                .context("recover flow failed")?;
+            // RECOVER VIA MASTER APPROVAL — resolve --parent here, not at
+            // startup (codex P3).
+            let parent_wallet = resolve_parent_if_set(&args.backend, args.parent.as_deref()).await?;
+            let result = pairing::run_recover_flow(
+                &*backend,
+                agent_identity,
+                args.pair_timeout,
+                parent_wallet.as_ref(),
+            )
+            .await
+            .context("recover flow failed")?;
             let agent_id = result.wallet.clone();
             let sid = args
                 .session_id
@@ -212,12 +197,19 @@ async fn main() -> anyhow::Result<()> {
                 (sess, agent_id)
             }
             None => {
-                // PAIR FLOW — no stored session found. Save only after pair
-                // succeeds and the wallet is known. Pass optional --parent
-                // binding so the backend refuses approval from any other master.
-                let result = pairing::run_pair_flow(&*backend, args.pair_timeout, parent_wallet_ref)
-                    .await
-                    .context("pair flow failed")?;
+                // PAIR FLOW — no stored session found. Resolve --parent lazily
+                // here (codex PR #22 P3) so transient backend failures on the
+                // --session / --recover --method paths don't crash startup.
+                // `--parent` binds the pair request to a specific master so
+                // the backend refuses approval from any other master.
+                let parent_wallet = resolve_parent_if_set(&args.backend, args.parent.as_deref()).await?;
+                let result = pairing::run_pair_flow(
+                    &*backend,
+                    args.pair_timeout,
+                    parent_wallet.as_ref(),
+                )
+                .await
+                .context("pair flow failed")?;
                 let agent_id = result.wallet.clone();
                 let sid = args
                     .session_id
@@ -241,4 +233,89 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// True IFF `s` is a strict `0x` + 40 hex-digit wallet literal. Aliases like
+/// `0x-office` or `0x+bar` (both legal per `cmd_link`) fail this check and
+/// go through the identity-resolution path instead (codex PR #22 P2 —
+/// 0x-prefix aliases misclassified as wallets).
+fn looks_like_raw_wallet(s: &str) -> bool {
+    s.starts_with("0x") && s.len() == 42 && s[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Resolve `--parent` to a wallet address if set, returning `Ok(None)` when
+/// the flag is absent. Uses reqwest's `.query()` builder so aliases with
+/// reserved characters (`+`, `&`, `%`, spaces) are percent-encoded per
+/// RFC 3986 (codex PR #22 P2 — URL encoding).
+async fn resolve_parent_if_set(
+    backend_url: &str,
+    parent: Option<&str>,
+) -> anyhow::Result<Option<WalletAddress>> {
+    let Some(raw) = parent else {
+        return Ok(None);
+    };
+
+    // Fast path: strict 0x + 40 hex digits = literal wallet. Skip the HTTP
+    // round-trip to avoid latency on the common case.
+    if looks_like_raw_wallet(raw) {
+        return Ok(Some(WalletAddress(raw.to_string())));
+    }
+
+    // Alias / ENS-style / `0x-office`-style value → resolve via backend.
+    let http = reqwest::Client::new();
+    let resp = http
+        .get(format!("{backend_url}/identity/resolve"))
+        .query(&[("identity_type", "alias"), ("identity_value", raw)])
+        .send()
+        .await
+        .context("resolve parent alias: HTTP request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "could not resolve --parent '{raw}': status={}",
+            resp.status()
+        );
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .context("resolve parent alias: JSON parse failed")?;
+    let wallet_str = body["wallet_address"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("resolve parent alias: missing wallet_address in response"))?
+        .to_string();
+    Ok(Some(WalletAddress(wallet_str)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_raw_wallet_accepts_canonical_hex() {
+        assert!(looks_like_raw_wallet(
+            "0x1234567890abcdef1234567890abcdef12345678"
+        ));
+        assert!(looks_like_raw_wallet(
+            "0xABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        ));
+    }
+
+    #[test]
+    fn looks_like_raw_wallet_rejects_0x_hyphen_alias() {
+        // `0x-office` is a valid alias per cmd_link; must NOT be treated as
+        // a literal wallet (codex PR #22 P2).
+        assert!(!looks_like_raw_wallet("0x-office"));
+        assert!(!looks_like_raw_wallet("0x+bar"));
+    }
+
+    #[test]
+    fn looks_like_raw_wallet_rejects_short_or_non_hex() {
+        assert!(!looks_like_raw_wallet("0xdeadbeef")); // too short
+        assert!(!looks_like_raw_wallet(
+            "0x1234567890abcdef1234567890abcdef123456789" // 41 hex chars
+        ));
+        assert!(!looks_like_raw_wallet(
+            "0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+        )); // non-hex
+    }
 }
