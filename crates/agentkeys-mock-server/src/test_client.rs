@@ -476,6 +476,7 @@ impl CredentialBackend for InProcessBackend {
         child_pubkey: &PublicKey,
         request_type: AuthRequestType,
         request_details: &CanonicalBytes,
+        parent_wallet: Option<&WalletAddress>,
     ) -> Result<OpenedAuthRequest, BackendError> {
         let pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(&child_pubkey.0);
         let details_b64 = base64::engine::general_purpose::STANDARD.encode(&request_details.0);
@@ -504,12 +505,13 @@ impl CredentialBackend for InProcessBackend {
             request_body["identity_value"] = json!(identity_value);
         }
 
-        let body = self
-            .post(
-                "/auth-request/open",
-                request_body,
-            )
-            .await?;
+        // --parent binding from PR #22 daemon flag — orthogonal to Recover
+        // typed-identity.
+        if let Some(pw) = parent_wallet {
+            request_body["parent_wallet"] = json!(pw.0);
+        }
+
+        let body = self.post("/auth-request/open", request_body).await?;
 
         let id_str = body["id"]
             .as_str()

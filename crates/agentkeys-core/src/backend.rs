@@ -103,6 +103,7 @@ pub trait CredentialBackend: Send + Sync {
         child_pubkey: &PublicKey,
         request_type: AuthRequestType,
         request_details: &CanonicalBytes,
+        parent_wallet: Option<&WalletAddress>,
     ) -> Result<OpenedAuthRequest, BackendError>;
 
     async fn fetch_auth_request(
@@ -251,6 +252,7 @@ mod tests {
             _child_pubkey: &PublicKey,
             _request_type: AuthRequestType,
             _request_details: &CanonicalBytes,
+            _parent_wallet: Option<&WalletAddress>,
         ) -> Result<OpenedAuthRequest, BackendError> {
             unimplemented!()
         }

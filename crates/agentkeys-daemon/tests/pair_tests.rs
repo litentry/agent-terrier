@@ -59,7 +59,7 @@ async fn pair_full_loop() {
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
-        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details)
+        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details, None)
         .await
         .unwrap();
 
@@ -109,7 +109,7 @@ async fn pair_otp_matches() {
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
-        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details)
+        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details, None)
         .await
         .unwrap();
 
@@ -139,7 +139,7 @@ async fn pair_timeout_retry() {
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
-        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details)
+        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details, None)
         .await
         .unwrap();
 
@@ -224,7 +224,7 @@ async fn pair_replay_resistance() {
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
-        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details)
+        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details, None)
         .await
         .unwrap();
 
@@ -339,6 +339,7 @@ async fn recover_full_loop() {
             &child_pubkey,
             AuthRequestType::Pair { requested_scope: scope.clone() },
             &request_details,
+            None,
         )
         .await
         .unwrap();
@@ -392,6 +393,7 @@ async fn recover_full_loop() {
                 new_daemon_pubkey: new_pubkey.0.clone(),
             },
             &recover_details,
+            None,
         )
         .await
         .unwrap();
@@ -451,6 +453,7 @@ async fn recover_unknown_identity() {
                 new_daemon_pubkey: new_pubkey.0.clone(),
             },
             &recover_details,
+            None,
         )
         .await
         .unwrap();
@@ -485,6 +488,7 @@ async fn recover_old_pubkey_revoked() {
             &child_pubkey,
             AuthRequestType::Pair { requested_scope: scope },
             &request_details,
+            None,
         )
         .await
         .unwrap();
@@ -553,6 +557,7 @@ async fn recover_credentials_intact() {
             &child_pubkey,
             AuthRequestType::Pair { requested_scope: scope },
             &request_details,
+            None,
         )
         .await
         .unwrap();
@@ -596,6 +601,7 @@ async fn recover_credentials_intact() {
                 new_daemon_pubkey: new_pubkey.0.clone(),
             },
             &recover_details,
+            None,
         )
         .await
         .unwrap();
