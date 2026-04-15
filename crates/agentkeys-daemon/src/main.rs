@@ -244,9 +244,18 @@ fn looks_like_raw_wallet(s: &str) -> bool {
 }
 
 /// Resolve `--parent` to a wallet address if set, returning `Ok(None)` when
-/// the flag is absent. Uses reqwest's `.query()` builder so aliases with
-/// reserved characters (`+`, `&`, `%`, spaces) are percent-encoded per
-/// RFC 3986 (codex PR #22 P2 — URL encoding).
+/// the flag is absent.
+///
+/// Uses reqwest's `.query()` builder so aliases with reserved characters
+/// (`+`, `&`, `%`, spaces) are percent-encoded per RFC 3986 (codex PR #22
+/// v1 P2 — URL encoding).
+///
+/// All inputs — raw wallets included — go through `/identity/resolve` so
+/// the backend can validate existence before the daemon opens a pair
+/// request. Raw `0x...` wallets are normalized to lowercase first, which
+/// matches the canonical form the backend stores; mixed-case checksummed
+/// addresses therefore resolve cleanly instead of timing out at approval
+/// (codex PR #22 v2 P2 — unknown wallet accepted + case mismatch).
 async fn resolve_parent_if_set(
     backend_url: &str,
     parent: Option<&str>,
@@ -255,33 +264,37 @@ async fn resolve_parent_if_set(
         return Ok(None);
     };
 
-    // Fast path: strict 0x + 40 hex digits = literal wallet. Skip the HTTP
-    // round-trip to avoid latency on the common case.
-    if looks_like_raw_wallet(raw) {
-        return Ok(Some(WalletAddress(raw.to_string())));
-    }
+    // Pick identity_type based on shape. Raw wallets get lowercased to
+    // match the backend's canonical storage form.
+    let (identity_type, identity_value) = if looks_like_raw_wallet(raw) {
+        ("wallet", raw.to_ascii_lowercase())
+    } else {
+        ("alias", raw.to_string())
+    };
 
-    // Alias / ENS-style / `0x-office`-style value → resolve via backend.
     let http = reqwest::Client::new();
     let resp = http
         .get(format!("{backend_url}/identity/resolve"))
-        .query(&[("identity_type", "alias"), ("identity_value", raw)])
+        .query(&[
+            ("identity_type", identity_type),
+            ("identity_value", identity_value.as_str()),
+        ])
         .send()
         .await
-        .context("resolve parent alias: HTTP request failed")?;
+        .context("resolve --parent: HTTP request failed")?;
     if !resp.status().is_success() {
         anyhow::bail!(
-            "could not resolve --parent '{raw}': status={}",
+            "could not resolve --parent '{raw}' (identity_type={identity_type}): status={}",
             resp.status()
         );
     }
     let body: serde_json::Value = resp
         .json()
         .await
-        .context("resolve parent alias: JSON parse failed")?;
+        .context("resolve --parent: JSON parse failed")?;
     let wallet_str = body["wallet_address"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("resolve parent alias: missing wallet_address in response"))?
+        .ok_or_else(|| anyhow::anyhow!("resolve --parent: missing wallet_address in response"))?
         .to_string();
     Ok(Some(WalletAddress(wallet_str)))
 }
