@@ -379,6 +379,11 @@ async fn recover_full_loop() {
     let new_pubkey = dummy_pubkey();
     let recover_details = recover_canonical_bytes("my-agent", &new_pubkey.0);
 
+    // Post-#13 / PR #21: Recover resolves identity through identity_links,
+    // so the alias must be linked first. Seed the link directly in the
+    // in-process backend.
+    backend.link_identity_for_tests("alias", "my-agent", &agent_wallet.0);
+
     let recover_opened = backend
         .open_auth_request(
             &new_pubkey,
@@ -579,6 +584,9 @@ async fn recover_credentials_intact() {
 
     let new_pubkey = dummy_pubkey();
     let recover_details = recover_canonical_bytes("test-agent", &new_pubkey.0);
+
+    // Post-#13 / PR #21: Recover resolves identity through identity_links.
+    backend.link_identity_for_tests("alias", "test-agent", &agent_wallet.0);
 
     let recover_opened = backend
         .open_auth_request(

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::mock_client::MockHttpClient;
+use agentkeys_core::session_store;
 use agentkeys_types::WalletAddress;
 use anyhow::Context;
 use clap::Parser;
@@ -31,6 +32,13 @@ struct Args {
 
     #[arg(long, default_value = "300", help = "Pair/recover poll timeout in seconds")]
     pair_timeout: u64,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_SESSION_ID",
+        help = "Custom session namespace (default: derived from wallet address)"
+    )]
+    session_id: Option<String>,
 }
 
 #[tokio::main]
@@ -53,9 +61,13 @@ async fn main() -> anyhow::Result<()> {
     // 2. Determine session: env/file seam, pair flow, or recover flow
     let (sess, agent_id) = if let Some(token) = args.session {
         // TEST SEAM: session injected directly (Stage 3 compatibility)
-        session::write_session_file(&token)?;
-        let sess = session::build_session_from_token(token);
+        let sess = session::build_session_from_token(token.clone());
         let agent_id = WalletAddress(sess.wallet.0.clone());
+        let sid = args
+            .session_id
+            .clone()
+            .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+        session_store::save_session(&sess, &sid).context("save injected session")?;
         (sess, agent_id)
     } else if let Some(ref agent_identity) = args.recover {
         if let Some(ref method) = args.method {
@@ -63,33 +75,124 @@ async fn main() -> anyhow::Result<()> {
             let result = pairing::run_recover_2fa_flow(&*backend, agent_identity, method)
                 .await
                 .context("2FA recover flow failed")?;
-            session::write_session_file(&result.session.token)?;
             let agent_id = result.wallet.clone();
+            let sid = args
+                .session_id
+                .clone()
+                .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+            // clean up pending entry if present
+            let _ = session_store::clear_session("daemon-pending");
+            session_store::save_session(&result.session, &sid)
+                .context("save recovered session")?;
             (result.session, agent_id)
         } else {
             // RECOVER VIA MASTER APPROVAL
             let result = pairing::run_recover_flow(&*backend, agent_identity, args.pair_timeout)
                 .await
                 .context("recover flow failed")?;
-            session::write_session_file(&result.session.token)?;
             let agent_id = result.wallet.clone();
+            let sid = args
+                .session_id
+                .clone()
+                .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+            let _ = session_store::clear_session("daemon-pending");
+            session_store::save_session(&result.session, &sid)
+                .context("save recovered session")?;
             (result.session, agent_id)
         }
     } else {
-        // Check for existing session file first
-        match session::read_session_file() {
-            Ok(token) => {
-                let sess = session::build_session_from_token(token);
+        // Default startup: find any previously-paired daemon session.
+        //
+        // Order:
+        //   1. If --session-id was supplied, try exactly that ID.
+        //   2. Else scan `daemon-*` file-fallback entries and try each until
+        //      one loads cleanly.
+        //   3. If none load, run the pair flow fresh.
+        //
+        // Note: we intentionally do NOT write a "daemon-pending" sentinel any
+        // more. The old design would save a fake session with token="pending"
+        // before pair, and if pair timed out / failed, the next startup
+        // loaded that fake session and skipped pairing entirely (codex P1).
+        // Now: no sentinel, so a failed pair just results in a retry next
+        // startup, which is what users expect.
+        let loaded = if let Some(sid) = args.session_id.clone() {
+            // Explicit --session-id / AGENTKEYS_SESSION_ID — load directly.
+            session_store::load_session(&sid).ok().map(|s| (sid, s))
+        } else {
+            // Validate candidates before raising ambiguity, so stale marker
+            // directories (e.g., keyring entry deleted out-of-band) don't
+            // block startup when exactly one real session is still loadable
+            // (codex PR #24 v4 P2). Deterministic sorted list so any
+            // ambiguity error prints candidates in stable order (codex PR
+            // #24 P1 — cross-wallet credential mix-up).
+            let candidates = session_store::list_fallback_session_ids("daemon-");
+            let loadable: Vec<(String, _)> = candidates
+                .into_iter()
+                .filter_map(|sid| session_store::load_session(&sid).ok().map(|s| (sid, s)))
+                .collect();
+
+            match loadable.len() {
+                0 => {
+                    // Emit a hint if there are non-`daemon-*` sessions
+                    // stored under ~/.agentkeys (e.g., saved via
+                    // --session-id WORK on a previous run). Without it the
+                    // daemon silently re-pairs and the user loses track of
+                    // the credentials tied to the old wallet (codex PR #24
+                    // v5 P2). Empty-prefix scan returns directory names;
+                    // filter out:
+                    //  - known CLI namespaces (`master`, `daemon-*`)
+                    //  - rewritten storage keys (`__agk_*`) whose original
+                    //    user-supplied ID is unknown — advertising them
+                    //    would be misleading because re-passing the
+                    //    sanitized name would re-rewrite to a different
+                    //    storage key (codex PR #24 v7 P2).
+                    let all = session_store::list_fallback_session_ids("");
+                    let others: Vec<String> = all
+                        .into_iter()
+                        .filter(|s| {
+                            !s.starts_with("daemon-")
+                                && s != "master"
+                                && !s.starts_with("__agk_")
+                        })
+                        .collect();
+                    if !others.is_empty() {
+                        eprintln!(
+                            "[agentkeys-daemon] no daemon-* sessions found, but these custom session IDs exist: {}. Pass --session-id <name> to resume one instead of re-pairing.",
+                            others.join(", ")
+                        );
+                    }
+                    None
+                }
+                1 => Some(loadable.into_iter().next().expect("len==1")),
+                _ => {
+                    let ids: Vec<String> = loadable.into_iter().map(|(sid, _)| sid).collect();
+                    anyhow::bail!(
+                        "multiple loadable daemon sessions found under ~/.agentkeys ({}): pass --session-id <name> (or set AGENTKEYS_SESSION_ID) to pick one. Candidates: {}",
+                        ids.len(),
+                        ids.join(", ")
+                    );
+                }
+            }
+        };
+
+        match loaded {
+            Some((_sid, sess)) => {
                 let agent_id = WalletAddress(sess.wallet.0.clone());
                 (sess, agent_id)
             }
-            Err(_) => {
-                // PAIR FLOW: no existing session, initiate pairing
+            None => {
+                // PAIR FLOW — no stored session found. Save only after pair
+                // succeeds and the wallet is known.
                 let result = pairing::run_pair_flow(&*backend, args.pair_timeout)
                     .await
                     .context("pair flow failed")?;
-                session::write_session_file(&result.session.token)?;
                 let agent_id = result.wallet.clone();
+                let sid = args
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+                session_store::save_session(&result.session, &sid)
+                    .context("save paired session")?;
                 (result.session, agent_id)
             }
         }

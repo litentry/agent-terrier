@@ -1,9 +1,8 @@
-pub mod session_store;
-
 use std::sync::Arc;
 
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::mock_client::MockHttpClient;
+pub use agentkeys_core::session_store;
 use agentkeys_types::{AuditEvent, AuditFilter, AuthToken, ServiceName, Session, WalletAddress};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
@@ -37,6 +36,8 @@ pub struct CommandContext {
     pub backend_url: String,
     pub verbose: bool,
     pub json_output: bool,
+    /// Session namespace; defaults to "master". Future multi-session support uses this field.
+    pub session_id: String,
     /// When set, commands use this session directly instead of loading from keychain.
     /// Used by tests to avoid OS keychain interactions.
     pub session_override: Option<Session>,
@@ -51,6 +52,7 @@ impl CommandContext {
             backend_url: backend_url.to_string(),
             verbose,
             json_output,
+            session_id: "master".to_string(),
             session_override: None,
             backend_override: None,
         }
@@ -70,7 +72,10 @@ impl CommandContext {
         if let Some(ref s) = self.session_override {
             return Ok(s.clone());
         }
-        session_store::load_session()
+        // Use the legacy-aware loader so pre-#12 installs (session stored
+        // under keyring account=`session` or file ~/.agentkeys/session.json)
+        // stay logged in after upgrading to the wallet-namespaced layout.
+        session_store::load_session_with_legacy_fallback(&self.session_id)
     }
 
     fn backend(&self) -> Arc<dyn CredentialBackend> {
@@ -96,7 +101,12 @@ pub async fn cmd_init(ctx: &CommandContext, mock_token: Option<String>) -> Resul
         .await
         .map_err(wrap_backend_error)?;
 
-    session_store::save_session(&session).context("save session to keychain")?;
+    // Use ctx.session_id (defaults to "master"). Honoring the field ensures
+    // that any caller overriding it sees consistent save/load round-trips
+    // instead of init landing under "master" and the next command looking
+    // in the configured namespace (codex PR #24 v5 P2).
+    session_store::save_session(&session, &ctx.session_id)
+        .context("save session to keychain")?;
 
     let output = format!("Initialized. Wallet: {}", wallet.0);
     Ok((output, session))
@@ -319,7 +329,7 @@ pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<Str
                 .revoke_session(&session, &session)
                 .await
                 .map_err(wrap_backend_error)?;
-            session_store::clear_session().context("clear local session")?;
+            session_store::clear_session(&ctx.session_id).context("clear local session")?;
             Ok(format!(
                 "Revoked current session for wallet={}. Local session wiped. Run `agentkeys init` to re-pair.",
                 wallet_display
@@ -346,7 +356,7 @@ pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<Str
             // form returned by the mock backend.
             let revoked_self = session.wallet.0.eq_ignore_ascii_case(target_wallet_str);
             if revoked_self {
-                session_store::clear_session()
+                session_store::clear_session(&ctx.session_id)
                     .context("clear local session after self-revoke")?;
                 Ok(format!(
                     "Revoked agent={} (was your own session — local state wiped, run `agentkeys init` to re-pair).",
@@ -526,7 +536,8 @@ pub async fn cmd_recover(ctx: &CommandContext, identity: &str, method: &str) -> 
         .await
         .map_err(wrap_backend_error)?;
 
-    session_store::save_session(&session).context("save recovered session to keychain")?;
+    session_store::save_session(&session, &ctx.session_id)
+        .context("save recovered session to keychain")?;
 
     Ok(format!("Recovered. Session restored for wallet {}", wallet.0))
 }

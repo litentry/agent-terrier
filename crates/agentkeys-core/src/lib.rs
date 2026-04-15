@@ -3,3 +3,4 @@ pub mod backend;
 pub mod mock_client;
 pub mod otp;
 pub mod payment;
+pub mod session_store;
