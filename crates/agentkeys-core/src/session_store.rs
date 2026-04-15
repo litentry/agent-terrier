@@ -228,9 +228,19 @@ pub fn load_session_with_legacy_fallback(session_id: &str) -> Result<Session> {
 }
 
 /// Remove session entry for session_id only (does not affect other ids).
+/// Blocks on the keyring delete (up to 2 seconds) so callers know the
+/// credential is actually gone before clear_session returns. Previously
+/// fire-and-forget, which let `cmd_revoke` report success while the
+/// keyring entry was still live — next command would load the stale
+/// session (codex PR #24 v8 P1).
 pub fn clear_session(session_id: &str) -> Result<()> {
     if !should_skip_keyring() {
-        try_keyring_delete(session_id);
+        let deleted = try_keyring_delete(session_id);
+        if !deleted {
+            return Err(anyhow::anyhow!(
+                "keyring delete failed or timed out for session_id={session_id}; local session may still be loadable on next command"
+            ));
+        }
     }
     let path = fallback_path(session_id);
     if path.exists() {
@@ -272,13 +282,31 @@ fn try_keyring_load(session_id: &str) -> Option<String> {
     }
 }
 
-fn try_keyring_delete(session_id: &str) {
+/// Synchronously delete the keyring entry for `session_id`, bounded by a
+/// 2-second timeout (same pattern as try_keyring_save/load so a hung
+/// keychain doesn't freeze the CLI). Returns true if the entry was
+/// successfully removed OR was already absent. Returns false on timeout
+/// or a real error — callers rely on this signal so `clear_session` can
+/// surface the failure instead of claiming success while a stale entry
+/// remains (codex PR #24 v8 P1).
+fn try_keyring_delete(session_id: &str) -> bool {
     let account = sanitize_for_keyring(session_id);
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
     std::thread::spawn(move || {
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &account) {
-            let _ = entry.delete_password();
-        }
+        let result = match keyring::Entry::new(KEYRING_SERVICE, &account) {
+            Ok(entry) => match entry.delete_password() {
+                Ok(()) => true,
+                // A missing entry is not a failure — the intent is
+                // "nothing of this name should remain".
+                Err(keyring::Error::NoEntry) => true,
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        let _ = tx.send(result);
     });
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or(false)
 }
 
 fn save_to_file(json: &str, session_id: &str) -> Result<()> {
@@ -570,6 +598,27 @@ mod tests {
                 !unwanted.exists(),
                 "forward-slash session_id created nested directory: {}",
                 unwanted.display()
+            );
+        });
+    }
+
+    // Codex PR #24 v8 P1 — clear_session must be synchronous.
+    // In file-mode (AGENTKEYS_SESSION_STORE=file) the keyring path is
+    // skipped entirely, so clear_session must succeed and wipe the file
+    // immediately. After it returns, load_session must not succeed.
+    #[test]
+    fn clear_session_is_synchronous_in_file_mode() {
+        with_temp_home(|_| {
+            save_session(&make_session("t", "0xC"), "daemon-0xCCC").expect("save");
+            assert!(load_session("daemon-0xCCC").is_ok(), "session loadable before clear");
+
+            clear_session("daemon-0xCCC").expect("clear");
+
+            // Immediately (no sleep) — the deletion must have happened
+            // synchronously inside clear_session, not in a detached thread.
+            assert!(
+                load_session("daemon-0xCCC").is_err(),
+                "session still loadable after clear_session returned"
             );
         });
     }
