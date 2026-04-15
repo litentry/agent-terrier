@@ -634,20 +634,20 @@ impl CredentialBackend for MockHttpClient {
         session: &Session,
         agent_id: &WalletAddress,
     ) -> Result<Vec<ServiceName>, BackendError> {
-        let url = format!("/credential/list?agent_id={}", agent_id.0);
-
+        // Use reqwest's .query() builder for RFC 3986 percent-encoding so
+        // wallet strings with reserved chars (`&`, `#`, `%`, `+`, spaces)
+        // don't smuggle extra params or break the request.
         let resp = self
             .client
-            .get(self.url(&url))
+            .get(self.url("/credential/list"))
+            .query(&[("agent_id", &agent_id.0)])
             .header("authorization", format!("Bearer {}", session.token))
             .send()
             .await
             .map_err(|e| BackendError::Transport(e.to_string()))?;
-
         if !resp.status().is_success() {
             return Err(Self::map_error(resp).await);
         }
-
         let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
         let services = body["services"]
             .as_array()
@@ -681,17 +681,74 @@ impl CredentialBackend for MockHttpClient {
             .send()
             .await
             .map_err(|e| BackendError::Transport(e.to_string()))?;
-
         if !resp.status().is_success() {
             return Err(Self::map_error(resp).await);
         }
-
         let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
         let wallet_str = body["wallet_address"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing wallet_address".into()))?
             .to_string();
         Ok(WalletAddress(wallet_str))
+    }
+
+    async fn get_scope(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+    ) -> Result<Option<Scope>, BackendError> {
+        // .query() builder percent-encodes per RFC 3986 so wallet strings
+        // with reserved chars don't break the request or smuggle params.
+        let resp = self
+            .client
+            .get(self.url("/session/scope"))
+            .query(&[("wallet", &target_wallet.0)])
+            .header("authorization", format!("Bearer {}", session.token))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        if body["services"].is_null() {
+            return Ok(None);
+        }
+        let services: Vec<ServiceName> = body["services"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| ServiceName(s.to_string()))
+            .collect();
+        let read_only = body["read_only"].as_bool().unwrap_or(false);
+        Ok(Some(Scope { services, read_only }))
+    }
+
+    async fn update_scope(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+        new_scope: &Scope,
+    ) -> Result<(), BackendError> {
+        let resp = self
+            .client
+            .put(self.url("/session/scope"))
+            .header("authorization", format!("Bearer {}", session.token))
+            .json(&serde_json::json!({
+                "target_wallet": target_wallet.0,
+                "scope": new_scope,
+            }))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+        Ok(())
     }
 
     async fn recover_session(

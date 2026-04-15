@@ -7,7 +7,7 @@ pub mod test_client;
 
 use axum::{
     Router,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use std::sync::Arc;
 
@@ -38,6 +38,9 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/auth-request/fetch", get(handlers::auth_request::fetch_auth_request))
         .route("/auth-request/approve", post(handlers::auth_request::approve_auth_request))
         .route("/auth-request/await", get(handlers::auth_request::await_auth_decision))
+        // Session scope
+        .route("/session/scope", get(handlers::session::get_session_scope))
+        .route("/session/scope", put(handlers::session::update_scope))
         // Identity
         .route("/identity/link", post(handlers::identity::link_identity))
         .route("/identity/resolve", get(handlers::identity::resolve_identity))

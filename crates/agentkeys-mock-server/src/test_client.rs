@@ -719,6 +719,58 @@ impl CredentialBackend for InProcessBackend {
         Ok(WalletAddress(wallet_str))
     }
 
+    async fn get_scope(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+    ) -> Result<Option<Scope>, BackendError> {
+        // Percent-encode the wallet — matches the `.query()` pattern in
+        // `MockHttpClient::get_scope` and the `pct_encode` usage in
+        // `resolve_identity` above. Wallet strings are hex today so this is
+        // safe in practice, but the consistency matters for the
+        // `.github/REVIEW_GUIDELINES.md` URL-encoding invariant (pattern #3).
+        let path = format!("/session/scope?wallet={}", pct_encode(&target_wallet.0));
+        let result = self.get_with_session(&path, session).await;
+        match result {
+            Err(BackendError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+            Ok(body) => {
+                if body["services"].is_null() {
+                    return Ok(None);
+                }
+                let services: Vec<ServiceName> = body["services"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| ServiceName(s.to_string()))
+                    .collect();
+                let read_only = body["read_only"].as_bool().unwrap_or(false);
+                Ok(Some(Scope { services, read_only }))
+            }
+        }
+    }
+
+    async fn update_scope(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+        new_scope: &Scope,
+    ) -> Result<(), BackendError> {
+        let auth = format!("Bearer {}", session.token);
+        self.do_request(
+            "PUT",
+            "/session/scope",
+            Some(json!({
+                "target_wallet": target_wallet.0,
+                "scope": new_scope,
+            })),
+            vec![("authorization", auth)],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn recover_session(
         &self,
         identity: &agentkeys_types::AgentIdentity,

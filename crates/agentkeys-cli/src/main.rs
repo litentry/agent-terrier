@@ -1,6 +1,6 @@
 use agentkeys_cli::{
     cmd_approve, cmd_feedback, cmd_init, cmd_link, cmd_read, cmd_recover, cmd_revoke, cmd_run,
-    cmd_store, cmd_teardown, cmd_usage, CommandContext,
+    cmd_scope, cmd_store, cmd_teardown, cmd_usage, CommandContext,
 };
 
 
@@ -140,6 +140,23 @@ enum Commands {
     },
 
     #[command(
+        about = "Edit or list the scope of a child agent",
+        long_about = "Add, remove, replace, or list the services in a child agent's scope.\n\nExamples:\n  agentkeys scope 0xAGENT --add openrouter\n  agentkeys scope 0xAGENT --remove anthropic\n  agentkeys scope 0xAGENT --set openrouter,anthropic\n  agentkeys scope 0xAGENT --list"
+    )]
+    Scope {
+        #[arg(help = "Agent wallet address, alias, or email")]
+        agent: String,
+        #[arg(long, help = "Add a service to the scope (repeatable)")]
+        add: Vec<String>,
+        #[arg(long, help = "Remove a service from the scope (repeatable)")]
+        remove: Vec<String>,
+        #[arg(long, help = "Replace the entire scope with a comma-separated list of services")]
+        set: Option<String>,
+        #[arg(long, help = "List the current scope without making changes")]
+        list: bool,
+    },
+
+    #[command(
         about = "Open the feedback forum in your browser",
         long_about = "Open https://github.com/agentkeys/agentkeys/discussions in the default browser.\n\nExamples:\n  agentkeys feedback"
     )]
@@ -168,6 +185,9 @@ async fn main() {
         }
         Commands::Recover { identity, method } => cmd_recover(&ctx, identity, method).await,
         Commands::Approve { pair_code, yes } => cmd_approve(&ctx, pair_code, *yes).await,
+        Commands::Scope { agent, add, remove, set, list } => {
+            cmd_scope(&ctx, agent, add, remove, set.as_deref(), *list).await
+        }
         Commands::Feedback => Ok(cmd_feedback()),
     };
 

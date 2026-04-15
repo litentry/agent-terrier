@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use agentkeys_cli::{cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_run, cmd_store, cmd_teardown, cmd_usage, CommandContext};
+use agentkeys_cli::{
+    cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_store, cmd_teardown,
+    cmd_usage, CommandContext,
+};
 use agentkeys_cli::session_store;
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mock_server::test_client::InProcessBackend;
@@ -706,5 +709,280 @@ async fn cmd_read_unknown_identity_errors_cleanly() {
     assert!(
         err.contains("agentkeys link") || err.contains("0x"),
         "error message should mention agentkeys link: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scope tests (15-19): require a real TCP server (cmd_scope uses reqwest)
+// ---------------------------------------------------------------------------
+
+async fn start_scope_test_server() -> (String, String, String) {
+    use agentkeys_mock_server::{create_router, db, state::AppState};
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let state = std::sync::Arc::new(AppState::new(conn));
+    let router = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+    let bare_ctx = CommandContext::new(&base_url, false, false);
+    let (output, _session) = cmd_init(&bare_ctx, Some("scope-test-unique".to_string()))
+        .await
+        .unwrap();
+    let master_wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
+
+    // Create a child session with initial scope [a, b]
+    let http_client = reqwest::Client::new();
+    let child_resp: serde_json::Value = http_client
+        .post(format!("{}/session/child", base_url))
+        .header("authorization", format!("Bearer {}", _session.token))
+        .json(&serde_json::json!({ "scope": { "services": ["a", "b"], "read_only": false } }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let child_wallet = child_resp["wallet"].as_str().unwrap().to_string();
+
+    (base_url, _session.token, child_wallet)
+}
+
+// Test 15: --add appends a service
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_add_appends_service() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token,
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(&ctx, &child_wallet, &["c".to_string()], &[], None, false).await;
+    assert!(result.is_ok(), "cmd_scope --add failed: {:?}", result.err());
+    let out = result.unwrap();
+    assert!(out.contains("c"), "output should mention new service: {out}");
+
+    // Verify scope via /session/scope
+    let http_client = reqwest::Client::new();
+    let scope_resp: serde_json::Value = http_client
+        .get(format!("{}/session/scope?wallet={}", base_url, child_wallet))
+        .header("authorization", format!("Bearer {}", ctx.load_session().unwrap().token))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let services: Vec<String> = scope_resp["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert!(services.contains(&"a".to_string()), "should still have a: {:?}", services);
+    assert!(services.contains(&"b".to_string()), "should still have b: {:?}", services);
+    assert!(services.contains(&"c".to_string()), "should have new c: {:?}", services);
+}
+
+// Test 16: --remove drops a service
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_remove_drops_service() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token,
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(&ctx, &child_wallet, &[], &["a".to_string()], None, false).await;
+    assert!(result.is_ok(), "cmd_scope --remove failed: {:?}", result.err());
+
+    let http_client = reqwest::Client::new();
+    let scope_resp: serde_json::Value = http_client
+        .get(format!("{}/session/scope?wallet={}", base_url, child_wallet))
+        .header("authorization", format!("Bearer {}", ctx.load_session().unwrap().token))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let services: Vec<String> = scope_resp["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert!(!services.contains(&"a".to_string()), "a should be removed: {:?}", services);
+    assert!(services.contains(&"b".to_string()), "b should remain: {:?}", services);
+}
+
+// Test 17: --set replaces the entire scope
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_set_replaces() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token,
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(&ctx, &child_wallet, &[], &[], Some("c,d"), false).await;
+    assert!(result.is_ok(), "cmd_scope --set failed: {:?}", result.err());
+
+    let http_client = reqwest::Client::new();
+    let scope_resp: serde_json::Value = http_client
+        .get(format!("{}/session/scope?wallet={}", base_url, child_wallet))
+        .header("authorization", format!("Bearer {}", ctx.load_session().unwrap().token))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let services: Vec<String> = scope_resp["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert_eq!(services.len(), 2, "should have exactly c and d: {:?}", services);
+    assert!(services.contains(&"c".to_string()), "should have c: {:?}", services);
+    assert!(services.contains(&"d".to_string()), "should have d: {:?}", services);
+    assert!(!services.contains(&"a".to_string()), "a should be gone: {:?}", services);
+    assert!(!services.contains(&"b".to_string()), "b should be gone: {:?}", services);
+}
+
+// Test 18: --list prints current scope and does NOT modify DB
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_list_prints_current() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token.clone(),
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(&ctx, &child_wallet, &[], &[], None, true).await;
+    assert!(result.is_ok(), "cmd_scope --list failed: {:?}", result.err());
+    let out = result.unwrap();
+    assert!(out.contains("a") && out.contains("b"), "list output missing services: {out}");
+
+    // Verify nothing changed — scope is still [a, b]
+    let http_client = reqwest::Client::new();
+    let scope_resp: serde_json::Value = http_client
+        .get(format!("{}/session/scope?wallet={}", base_url, child_wallet))
+        .header("authorization", format!("Bearer {}", master_token))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let services: Vec<String> = scope_resp["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert_eq!(services.len(), 2, "scope should be unchanged after --list: {:?}", services);
+}
+
+// Test 19: combining --add and --set returns a clear conflict error
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_add_and_set_conflict_errors() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token,
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(&ctx, &child_wallet, &["x".to_string()], &[], Some("y"), false).await;
+    assert!(result.is_err(), "expected error when --add and --set are combined");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("mutually exclusive") || err.contains("--set") || err.contains("--add"),
+        "error message should mention the conflict: {err}"
+    );
+}
+
+// Test 20: --list + --add rejected up front (claude re-review follow-up).
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_list_and_add_conflict_errors() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token,
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(&ctx, &child_wallet, &["x".to_string()], &[], None, true).await;
+    let err = result.expect_err("--list + --add must be rejected").to_string();
+    assert!(
+        err.contains("mutually exclusive"),
+        "error should flag the --list/--add combo: {err}"
+    );
+}
+
+// Test 21: --add X + --remove X overlap rejected with a clear error
+// (claude re-review follow-up on the P2 overlap guard added in v3).
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_add_remove_overlap_errors() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token,
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(
+        &ctx,
+        &child_wallet,
+        &["foo".to_string()],
+        &["foo".to_string()],
+        None,
+        false,
+    )
+    .await;
+    let err = result.expect_err("--add X + --remove X must be rejected").to_string();
+    assert!(
+        err.contains("both --add and --remove") && err.contains("foo"),
+        "error should name the overlapping service: {err}"
     );
 }

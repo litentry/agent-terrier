@@ -303,6 +303,14 @@ pub async fn fetch_auth_request(
     })))
 }
 
+// Note: the direct scope-update path lives on the backend trait as
+// `update_scope` (see agentkeys-core::backend::CredentialBackend). PR #29's
+// `cmd_scope` CLI command calls that directly via PUT /session/scope; the
+// AuthRequestType::ScopeChange approve-flow upstream of this handler is
+// not currently exercised end-to-end. The stub above returns an empty
+// MintOutput so the dispatch compiles until a full approve-flow wiring
+// lands.
+
 pub async fn approve_auth_request(
     State(state): State<SharedState>,
     headers: HeaderMap,

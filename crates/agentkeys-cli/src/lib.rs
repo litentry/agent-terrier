@@ -3,7 +3,9 @@ use std::sync::Arc;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::mock_client::MockHttpClient;
 pub use agentkeys_core::session_store;
-use agentkeys_types::{AuditEvent, AuditFilter, AuthToken, ServiceName, Session, WalletAddress};
+use agentkeys_types::{
+    AuditEvent, AuditFilter, AuthToken, Scope, ServiceName, Session, WalletAddress,
+};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 
@@ -68,7 +70,7 @@ impl CommandContext {
         self
     }
 
-    fn load_session(&self) -> Result<Session> {
+    pub fn load_session(&self) -> Result<Session> {
         if let Some(ref s) = self.session_override {
             return Ok(s.clone());
         }
@@ -627,6 +629,152 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
         .map_err(wrap_backend_error)?;
 
     Ok("Approved. Agent paired successfully.".to_string())
+}
+
+async fn resolve_agent_to_wallet(
+    ctx: &CommandContext,
+    session: &Session,
+    agent: &str,
+) -> Result<String> {
+    if agent.starts_with("0x") {
+        return Ok(agent.to_string());
+    }
+    // Resolve alias or email via /identity/resolve
+    let (identity_type, identity_value) = if agent.contains('@') {
+        ("email", agent)
+    } else {
+        ("alias", agent)
+    };
+    // reqwest's .query() builder percent-encodes per RFC 3986 so identities
+    // containing '+', '&', '=', '%', spaces (e.g. plus-addressed emails like
+    // "bot+prod@example.com") are sent intact to the server.
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .get(format!("{}/identity/resolve", ctx.backend_url))
+        .query(&[("identity_type", identity_type), ("identity_value", identity_value)])
+        .header("authorization", format!("Bearer {}", session.token))
+        .send()
+        .await
+        .context("GET /identity/resolve")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        let msg = body["message"].as_str().unwrap_or("not found");
+        return Err(anyhow!("Error: HTTP {}: {}", status, msg));
+    }
+    let body: serde_json::Value = resp.json().await.context("parse identity/resolve response")?;
+    let wallet = body["wallet_address"]
+        .as_str()
+        .ok_or_else(|| anyhow!("identity/resolve returned no wallet_address"))?
+        .to_string();
+    Ok(wallet)
+}
+
+pub async fn cmd_scope(
+    ctx: &CommandContext,
+    agent: &str,
+    add: &[String],
+    remove: &[String],
+    set: Option<&str>,
+    list: bool,
+) -> Result<String> {
+    if set.is_some() && (!add.is_empty() || !remove.is_empty()) {
+        return Err(anyhow!(
+            "Error: --set is mutually exclusive with --add and --remove. Use one or the other."
+        ));
+    }
+
+    // --list is read-only. Combining it with mutating flags would silently
+    // drop the mutation (the --list early-return happens before the update
+    // path), so reject the combo up front with a clear error.
+    if list && (set.is_some() || !add.is_empty() || !remove.is_empty()) {
+        return Err(anyhow!(
+            "Error: --list is mutually exclusive with --add, --remove, and --set. Use --list alone to read the current scope."
+        ));
+    }
+
+    // `--add foo --remove foo` would silently no-op after mutation
+    // (retain after push cancels) yet still issue a backend write with a
+    // misleading "Scope updated" message. Reject up front (codex PR #29
+    // v2 P2).
+    if !add.is_empty() && !remove.is_empty() {
+        let add_set: std::collections::HashSet<&str> = add.iter().map(|s| s.as_str()).collect();
+        let overlap: Vec<&str> = remove
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| add_set.contains(s))
+            .collect();
+        if !overlap.is_empty() {
+            return Err(anyhow!(
+                "Error: the following services appear in both --add and --remove: {}. Pass each service to only one flag.",
+                overlap.join(", ")
+            ));
+        }
+    }
+
+    if !list && set.is_none() && add.is_empty() && remove.is_empty() {
+        return Err(anyhow!(
+            "No action specified. Use --add, --remove, --set, or --list.\nRun `agentkeys scope --help` for usage."
+        ));
+    }
+
+    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let target_wallet = WalletAddress(resolve_agent_to_wallet(ctx, &session, agent).await?);
+    let backend = ctx.backend();
+
+    let current_scope = backend
+        .get_scope(&session, &target_wallet)
+        .await
+        .map_err(wrap_backend_error)?
+        .unwrap_or(Scope { services: vec![], read_only: false });
+
+    if list {
+        let service_names: Vec<&str> =
+            current_scope.services.iter().map(|s| s.0.as_str()).collect();
+        return Ok(format!(
+            "Scope for agent {}:\n  services: [{}]\n  read_only: {}",
+            target_wallet.0,
+            service_names.join(", "),
+            current_scope.read_only
+        ));
+    }
+
+    let mut new_scope = if let Some(set_val) = set {
+        let mut services: Vec<ServiceName> = set_val
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| ServiceName(s.to_string()))
+            .collect();
+        services.sort_by(|a, b| a.0.cmp(&b.0));
+        Scope { services, read_only: current_scope.read_only }
+    } else {
+        let mut services: Vec<ServiceName> = current_scope.services.clone();
+        for svc in add {
+            let name = ServiceName(svc.clone());
+            if !services.contains(&name) {
+                services.push(name);
+            }
+        }
+        services.retain(|s| !remove.contains(&s.0));
+        services.sort_by(|a, b| a.0.cmp(&b.0));
+        Scope { services, read_only: current_scope.read_only }
+    };
+
+    backend
+        .update_scope(&session, &target_wallet, &new_scope)
+        .await
+        .map_err(wrap_backend_error)?;
+
+    // `new_scope.services` is already sorted — both the --set branch
+    // (line 749) and the --add/--remove branch (line 760) sort before
+    // the update_scope call.
+    let service_names: Vec<&str> = new_scope.services.iter().map(|s| s.0.as_str()).collect();
+    Ok(format!(
+        "Scope updated for agent {}. New services: [{}]",
+        target_wallet.0,
+        service_names.join(", ")
+    ))
 }
 
 pub fn cmd_feedback() -> String {

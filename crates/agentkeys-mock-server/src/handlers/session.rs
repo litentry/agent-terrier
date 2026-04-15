@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::HeaderMap,
     Json,
 };
@@ -300,4 +300,136 @@ pub async fn revoke_session(
 
         Ok(Json(json!({ "ok": true, "sessions_revoked": rows_affected })))
     }
+}
+
+pub async fn update_scope(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer_token)
+        .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
+
+    let session = validate_session(&state, token)?;
+
+    let target_wallet = body
+        .get("target_wallet")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("target_wallet required"))?
+        .to_string();
+
+    // `agentkeys scope` is for child agents. Allowing a master session to
+    // target its own wallet would let the master accidentally restrict itself
+    // (e.g. `agentkeys scope --agent <MY-WALLET> --set openrouter` would flip
+    // the master's scope_json from NULL to ["openrouter"] and cause every
+    // subsequent `credential/read` outside that list to fail). Reject
+    // self-targeting explicitly before the ownership check. Case-insensitive
+    // so EIP-55 checksummed input matches the backend's lowercase storage.
+    if session.wallet_address.eq_ignore_ascii_case(&target_wallet) {
+        return Err(AppError::bad_request(
+            "agentkeys scope cannot target the master's own wallet — use it on child agent wallets only",
+        ));
+    }
+
+    let db = state.db.lock().unwrap();
+
+    if !is_owner_of(&db, &session.wallet_address, &target_wallet) {
+        // Mirror the read_credential / list_credentials audit contract —
+        // cross-agent probing of scope endpoints must leave a DENIED row.
+        let now = now_secs();
+        db.execute(
+            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
+             VALUES (?1, ?2, ?3, 'scope_update', 'DENIED', ?4)",
+            rusqlite::params![session.wallet_address, target_wallet, "*", now],
+        )
+        .ok();
+        return Err(AppError::forbidden("session does not own the target wallet"));
+    }
+
+    let new_scope: agentkeys_types::Scope = serde_json::from_value(
+        body.get("scope").cloned().ok_or_else(|| AppError::bad_request("scope required"))?,
+    )
+    .map_err(|e| AppError::bad_request(e.to_string()))?;
+
+    let scope_json =
+        serde_json::to_string(&new_scope).map_err(|e| AppError::internal(e.to_string()))?;
+
+    // Mutate only the most recent active session for the target wallet.
+    // read-side `get_session_scope` uses `ORDER BY created_at DESC LIMIT 1`,
+    // so blanket updates across all active sessions would drift the
+    // read/write contract on wallets that happen to have multiple active
+    // sessions (e.g. one paired + one recovered).
+    let rows_affected = db
+        .execute(
+            "UPDATE sessions SET scope_json = ?1 \
+             WHERE token = ( \
+                 SELECT token FROM sessions \
+                 WHERE wallet_address = ?2 AND revoked = 0 \
+                 ORDER BY created_at DESC LIMIT 1 \
+             )",
+            rusqlite::params![scope_json, target_wallet],
+        )
+        .map_err(|e| AppError::internal(e.to_string()))?;
+
+    if rows_affected == 0 {
+        return Err(AppError::not_found("no active sessions for target wallet"));
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true, "updated": rows_affected })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct GetSessionScopeQuery {
+    pub wallet: String,
+}
+
+pub async fn get_session_scope(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<GetSessionScopeQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer_token)
+        .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
+
+    let session = validate_session(&state, token)?;
+
+    // Only the master that owns the target wallet may query its scope.
+    let db = state.db.lock().unwrap();
+    if !is_owner_of(&db, &session.wallet_address, &query.wallet) {
+        // Audit cross-agent scope probing to match the DENIED contract on
+        // other credential-path endpoints (codex PR #29 P1).
+        let now = now_secs();
+        db.execute(
+            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
+             VALUES (?1, ?2, ?3, 'scope_read', 'DENIED', ?4)",
+            rusqlite::params![session.wallet_address, query.wallet, "*", now],
+        )
+        .ok();
+        return Err(AppError::forbidden("session does not own the target wallet"));
+    }
+
+    let scope_json: Option<String> = db
+        .query_row(
+            "SELECT scope_json FROM sessions WHERE wallet_address = ?1 AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
+            rusqlite::params![query.wallet],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let scope: agentkeys_types::Scope = match scope_json {
+        Some(ref s) => serde_json::from_str(s).unwrap_or(agentkeys_types::Scope { services: vec![], read_only: false }),
+        None => agentkeys_types::Scope { services: vec![], read_only: false },
+    };
+
+    Ok(Json(serde_json::json!({
+        "services": scope.services.iter().map(|s| &s.0).collect::<Vec<_>>(),
+        "read_only": scope.read_only,
+    })))
 }

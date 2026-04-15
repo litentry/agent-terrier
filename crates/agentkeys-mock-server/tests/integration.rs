@@ -77,6 +77,20 @@ async fn delete_json_auth(app: Router, path: &str, token: &str, body: Value) -> 
     (status, json)
 }
 
+async fn put_json_auth(app: Router, path: &str, token: &str, body: Value) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let json = body_json(resp.into_body()).await;
+    (status, json)
+}
+
 async fn create_test_session(app: Router) -> (String, String, Router) {
     let (status, json) = post_json(
         app.clone(),

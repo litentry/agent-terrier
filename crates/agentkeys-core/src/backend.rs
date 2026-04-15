@@ -142,6 +142,19 @@ pub trait CredentialBackend: Send + Sync {
         session: &Session,
         identifier: &str,
     ) -> Result<WalletAddress, BackendError>;
+
+    async fn get_scope(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+    ) -> Result<Option<Scope>, BackendError>;
+
+    async fn update_scope(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+        new_scope: &Scope,
+    ) -> Result<(), BackendError>;
 }
 
 #[cfg(test)]
@@ -301,6 +314,23 @@ mod tests {
             _session: &Session,
             _identifier: &str,
         ) -> Result<WalletAddress, BackendError> {
+            unimplemented!()
+        }
+
+        async fn get_scope(
+            &self,
+            _session: &Session,
+            _target_wallet: &WalletAddress,
+        ) -> Result<Option<Scope>, BackendError> {
+            unimplemented!()
+        }
+
+        async fn update_scope(
+            &self,
+            _session: &Session,
+            _target_wallet: &WalletAddress,
+            _new_scope: &Scope,
+        ) -> Result<(), BackendError> {
             unimplemented!()
         }
     }
