@@ -19,9 +19,11 @@ version = "0.1.0"
 dependencies = [
  "agentkeys-core",
  "agentkeys-mock-server",
+ "agentkeys-provisioner",
  "agentkeys-types",
  "anyhow",
  "assert_cmd",
+ "async-trait",
  "axum",
  "clap",
  "predicates",
@@ -85,6 +87,7 @@ name = "agentkeys-mcp"
 version = "0.1.0"
 dependencies = [
  "agentkeys-core",
+ "agentkeys-provisioner",
  "agentkeys-types",
  "anyhow",
  "async-trait",
@@ -125,6 +128,18 @@ dependencies = [
 [[package]]
 name = "agentkeys-provisioner"
 version = "0.1.0"
+dependencies = [
+ "agentkeys-core",
+ "agentkeys-types",
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "agentkeys-types"

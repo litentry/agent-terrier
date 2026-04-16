@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub mod provision;
+
+pub use provision::{ProvisionErrorCode, ProvisionEvent, TripwireKind};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct WalletAddress(pub String);
 

@@ -1,6 +1,6 @@
 use agentkeys_cli::{
-    cmd_approve, cmd_feedback, cmd_init, cmd_link, cmd_read, cmd_recover, cmd_revoke, cmd_run,
-    cmd_scope, cmd_store, cmd_teardown, cmd_usage, CommandContext,
+    cmd_approve, cmd_feedback, cmd_init, cmd_link, cmd_provision, cmd_read, cmd_recover,
+    cmd_revoke, cmd_run, cmd_scope, cmd_store, cmd_teardown, cmd_usage, CommandContext,
 };
 
 
@@ -157,6 +157,17 @@ enum Commands {
     },
 
     #[command(
+        about = "Provision (sign up and store) an API key for a service",
+        long_about = "Run the provisioner script to sign up for a service and store the credential.\n\nExamples:\n  agentkeys provision openrouter\n  agentkeys provision openrouter --force"
+    )]
+    Provision {
+        #[arg(help = "Service name to provision (e.g. openrouter)")]
+        service: String,
+        #[arg(long, help = "Re-provision even if a credential already exists")]
+        force: bool,
+    },
+
+    #[command(
         about = "Open the feedback forum in your browser",
         long_about = "Open https://github.com/agentkeys/agentkeys/discussions in the default browser.\n\nExamples:\n  agentkeys feedback"
     )]
@@ -187,6 +198,14 @@ async fn main() {
         Commands::Approve { pair_code, yes } => cmd_approve(&ctx, pair_code, *yes).await,
         Commands::Scope { agent, add, remove, set, list } => {
             cmd_scope(&ctx, agent, add, remove, set.as_deref(), *list).await
+        }
+        Commands::Provision { service, force } => {
+            cmd_provision(&ctx, service, *force, None).await.map(|out| {
+                for line in &out.stderr_lines {
+                    eprintln!("{}", line);
+                }
+                out.stdout_line
+            })
         }
         Commands::Feedback => Ok(cmd_feedback()),
     };

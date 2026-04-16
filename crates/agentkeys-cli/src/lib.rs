@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::mock_client::MockHttpClient;
 pub use agentkeys_core::session_store;
 use agentkeys_core::session_store::SessionStore;
+use agentkeys_provisioner::{run_provision, ProvisionError, Provisioner};
 use agentkeys_types::{
     AuditEvent, AuditFilter, AuthToken, Scope, ServiceName, Session, WalletAddress,
 };
@@ -769,7 +771,7 @@ pub async fn cmd_scope(
         ));
     }
 
-    let mut new_scope = if let Some(set_val) = set {
+    let new_scope = if let Some(set_val) = set {
         let mut services: Vec<ServiceName> = set_val
             .split(',')
             .map(|s| s.trim())
@@ -805,6 +807,106 @@ pub async fn cmd_scope(
         target_wallet.0,
         service_names.join(", ")
     ))
+}
+
+fn format_provision_error(err: &ProvisionError) -> String {
+    match err {
+        ProvisionError::InProgress { active_service } => format!(
+            "Problem: Another provision is running for {}.\nCause: Provisioner serializes calls per daemon.\nFix: Wait and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            active_service
+        ),
+        ProvisionError::Tripwire { kind, step, .. } => format!(
+            "Problem: A script step timed out at '{}'.\nCause: The target site's DOM may have changed (tripwire: {:?}).\nFix: Open an issue at https://github.com/litentry/agentKeys/issues with the logs.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            step, kind
+        ),
+        ProvisionError::StoreFailed { obtained_key_masked, .. } => format!(
+            "Problem: Credential provisioned but storage failed.\nCause: Backend store_credential returned an error.\nFix: Manually store the key with `agentkeys store <service> <key>`. Masked key for reference: {}.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            obtained_key_masked
+        ),
+        ProvisionError::VerificationFailed { service, reason } => format!(
+            "Problem: Key verification failed for {}.\nCause: {}.\nFix: Re-run with --force to attempt a fresh provision.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            service, reason
+        ),
+        other => format!(
+            "Problem: Provision failed.\nCause: {}.\nFix: Check logs and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            other
+        ),
+    }
+}
+
+pub struct ProvisionOutput {
+    pub stdout_line: String,
+    pub stderr_lines: Vec<String>,
+}
+
+pub async fn cmd_provision(
+    ctx: &CommandContext,
+    service: &str,
+    force: bool,
+    provisioner: Option<Arc<Provisioner>>,
+) -> Result<ProvisionOutput> {
+    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let backend = ctx.backend();
+    let agent_id = session.wallet.clone();
+
+    if force {
+        eprintln!("existing key present — re-provisioning (--force)");
+    }
+
+    let provisioner = provisioner.unwrap_or_else(|| Arc::new(Provisioner::new()));
+
+    let script_command: Vec<String> = match service {
+        "openrouter" => vec![
+            "npx".to_string(),
+            "tsx".to_string(),
+            "provisioner-scripts/src/scrapers/openrouter.ts".to_string(),
+        ],
+        other => {
+            return Err(anyhow!(
+                "Problem: Service '{}' not supported.\nCause: Only 'openrouter' is supported in Stage 5a.\nFix: Use a supported service name.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+                other
+            ));
+        }
+    };
+
+    let cmd_refs: Vec<&str> = script_command.iter().map(|s| s.as_str()).collect();
+    let repo_root = std::env::var("AGENTKEYS_REPO_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+
+    let mut stderr_lines: Vec<String> = Vec::new();
+
+    let result = run_provision(
+        &provisioner,
+        service,
+        &cmd_refs,
+        HashMap::new(),
+        Some(&repo_root),
+        backend,
+        &session,
+        &agent_id,
+        force,
+    )
+    .await;
+
+    match result {
+        Ok(success) => {
+            if !success.stored {
+                let msg = format!(
+                    "{} already provisioned, key valid (re-verify returned true)",
+                    service
+                );
+                stderr_lines.push(msg);
+            }
+            Ok(ProvisionOutput {
+                stdout_line: success.obtained_key_masked,
+                stderr_lines,
+            })
+        }
+        Err(e) => {
+            Err(anyhow!("{}", format_provision_error(&e)))
+        }
+    }
 }
 
 pub fn cmd_feedback() -> String {

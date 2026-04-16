@@ -74,18 +74,28 @@ Stage 0: Types + Core Trait
     │        │        │
     │        │        ├──► Stage 4: Pair/Approve Flow
     │        │        │        │
-    │        │        │        ├──► Stage 5: Provisioner
+    │        │        │        ├──► Stage 5a: Provisioner (deterministic + patterns)
     │        │        │        │        │
-    │        │        │        │        ├──► Stage 6: npm Package + DX Polish
-    │        │        │        │        │
-    │        │        │        │        └──► Stage 7: Full E2E
+    │        │        │        │        └──► Stage 7: Full E2E   [v0 ships here]
     │        │        │        │
     │        ├──► Stage 3: Daemon + MCP ──┘
     │
     └──► (all stages depend on Stage 0)
+
+Post-v0 (v0.1 milestone, any order or parallel):
+    Stage 7 ──► Stage 8: Production Hardening
+             ├─► Stage 5b: Agentic fallback + audit + fallback→PR + script-gen
+             └─► Stage 6:  npm Package + DX Polish
 ```
 
-**Parallelizable:** Stages 2 and 3 can run in parallel after Stage 1. **Stage 6 requires Stage 5** (not Stage 3 — the npm package ships `--recover` which depends on Stage 4's pair/approve flow, and bundles the provisioner binary from Stage 5). The Stage 6 contract confirms this: "Inputs: Stages 0-5."
+**Parallelizable:** Stages 2 and 3 can run in parallel after Stage 1. **v0 critical path terminates at Stage 7** (previously gated on Stage 6). Stages 5b, 6, and 8 all defer to the v0.1 milestone and can ship in any order or in parallel.
+
+**Stage 5/6 restructuring (2026-04-16 CEO review, SELECTIVE EXPANSION mode):** The original Stage 5 bundled deterministic scraping with agentic ambitions; the original Stage 6 gated v0 on npm packaging. Both were relaxed:
+- **Stage 5 splits into 5a and 5b.** 5a (deterministic + patterns library + mandatory post-provision verification) ships in v0. 5b (Claude-Chrome agentic fallback + audit trail + fallback→PR loop + LLM script-generator dev tool + 4 additional patterns) ships in v0.1. See the 4-tier runtime architecture in the Stage 5a section.
+- **Stage 6 postpones to v0.1.** v0 distribution uses `cargo install` and GH-release prebuilt binaries. npm packaging, install.sh, README polish, and the remaining DX docs become part of the v0.1 milestone.
+- **Rationale:** the `store`/`read`/`run`/`pair`/`recover`/`audit` loop is the actual product; provisioner is sugar and packaging is distribution. Shipping v0 on fewer dependencies (Rust only, no Node/Playwright in the critical path) reduces setup friction for the first demo while preserving the architectural substrate (Stage 5a patterns library, Stage 3 MCP infrastructure) that Stage 5b builds on.
+
+CEO plan with full decision record: `~/.gstack/projects/litentry-agentKeys/ceo-plans/2026-04-16-stage-5-hybrid-agentic.md`.
 
 ---
 
@@ -505,27 +515,46 @@ agentkeys approve WXYZ-1234
 
 ---
 
-## Stage 5: Provisioner — Agent-Driven Browser Automation
+## Stage 5a: Provisioner — Deterministic + Patterns (v0 critical path)
 
-**Goal:** An agent with browser control can call `agentkeys.provision(service: "openrouter")` via MCP, and Playwright creates a real OpenRouter account automatically.
+**Goal:** An agent with browser control can call `agentkeys.provision(service: "openrouter")` via MCP, a deterministic Playwright script (composing a reusable pattern) creates a real OpenRouter account, and a mandatory verification step confirms the returned API key actually works against the target service before the credential is stored.
+
+**Architectural context (2026-04-16 CEO review).** Stage 5 was restructured into a 4-tier runtime architecture. Stage 5a ships Tier 1 (patterns) and Tier 2 (scripts). Stage 5b ships Tier 0 (dev-time script generator) and Tier 3 (runtime agentic fallback).
+
+```
+  TIER 0 (dev tool, 5b)     LLM-generated script via agentkeys-scripts-gen
+                            ↓ produces a draft .ts file for human review
+  TIER 1 (5a)               Pattern library: signupEmailOtp (v0),
+                            OAuth-Google / OAuth-GitHub / magic-link / password+verify (5b)
+                            ↓ scripts compose patterns
+  TIER 2 (5a)               Script registry: provisioner-scripts/scrapers/*.ts
+                            ↓ runtime tries this first
+  TIER 3 (5b)               Claude-Chrome agentic fallback via MCP browser primitives
+                            ↓ engages on trip-wire (selector miss, CAPTCHA, no script)
+```
 
 ### Crates / Packages
-- `agentkeys-provisioner` — Rust library, spawns Playwright subprocess, handles IPC
+- `agentkeys-provisioner` — Rust library, spawns Playwright subprocess, handles IPC, runs verification
 - `provisioner-scripts/` — TypeScript + Playwright:
-  - `scrapers/openrouter.ts` — OpenRouter signup flow
-  - **`lib/email.ts`** — ephemeral email integration (per `architecture.md` §6 workspace layout). Reads verification codes from the chosen burner email backend (Gmail plus-addressing for v0, SimpleLogin/AnonAddy as future options). This is a **required v0 component**, not an implied dependency — `openrouter.ts` calls `email.ts` to retrieve the verification code during signup.
+  - `scrapers/openrouter.ts` — OpenRouter signup flow (composes `signup_email_otp` pattern)
+  - **`patterns/signup_email_otp.ts`** — reusable pattern: email signup with OTP verification. Takes `{ url, emailBackend, submitButton, otpSelector, successKeySelector }` and drives the flow. Extracted from the OpenRouter script so v0.1 services can compose it without reimplementing the signup-with-OTP shape.
+  - **`lib/email.ts`** — ephemeral email integration. Reads verification codes from the chosen burner email backend (Gmail plus-addressing for v0; SimpleLogin / mail.tm / AnonAddy in v0.1). Patterns call this; individual scrapers never call email directly.
+  - **`lib/verify.ts`** — post-provision credential verification helper. Takes `{ key, service }` and makes one authenticated API call against the target. Returns `true` only if the call succeeds. This is the only defense against silent-corrupt-credential (a string that looks like an API key but isn't).
 
 ### Deliverables
 - [ ] MCP tool: `agentkeys.provision(service: "openrouter")` exposed on the daemon
-- [ ] Rust orchestrator: receives MCP call → spawns `npx tsx provisioner-scripts/scrapers/openrouter.ts` → passes parameters via stdin/env → receives API key via stdout JSON → encrypts to shielding key → calls `store_credential`
-- [ ] `openrouter.ts` Playwright script: navigates openrouter.ai → creates account (with burner email via `lib/email.ts`) → generates API key → returns `{"api_key": "sk-or-v1-..."}` on stdout
-- [ ] **`lib/email.ts`** — email client module: connects to the burner email backend (IMAP for Gmail plus-addressing, or provider API for SimpleLogin), polls for a verification code matching a given subject/sender pattern, returns the code. Used by `openrouter.ts` and all future scraper scripts. Config: email backend type + credentials passed via env vars (`AGENTKEYS_EMAIL_BACKEND`, `AGENTKEYS_EMAIL_USER`, `AGENTKEYS_EMAIL_PASSWORD` or `AGENTKEYS_EMAIL_API_KEY`).
-- [ ] Error handling: if Playwright fails (DOM changes, CAPTCHA, network) or email retrieval times out, return structured error to MCP caller with what step failed
+- [ ] Rust orchestrator: receives MCP call → spawns `npx tsx provisioner-scripts/scrapers/openrouter.ts` → passes parameters via stdin/env → receives API key via stdout JSON → **calls `lib/verify.ts` to confirm the key works against the live API** → encrypts to shielding key → calls `store_credential`. If verification fails, abort with a clear error; `store_credential` is NOT called.
+- [ ] **Mandatory post-provision verification step.** Every tier's success output must be verified by one authenticated API call against the target service. This is non-negotiable: without it, script drift or LLM hallucination can return a page label or session ID that passes the "string was extracted" bar but is not a working credential. For OpenRouter: `GET https://openrouter.ai/api/v1/models` with `Authorization: Bearer <key>` → 200 is real, 401 is phantom.
+- [ ] `patterns/signup_email_otp.ts` — reusable email-signup-with-OTP pattern extracted from the OpenRouter flow. Functions over a DSL. Composition is "scripts call pattern functions with service-specific selectors."
+- [ ] `scrapers/openrouter.ts` — OpenRouter signup composes `signupEmailOtp` with OpenRouter-specific selectors + success-page key extraction.
+- [ ] `lib/email.ts` — IMAP for Gmail plus-addressing in v0. Config via env: `AGENTKEYS_EMAIL_BACKEND`, `AGENTKEYS_EMAIL_USER`, `AGENTKEYS_EMAIL_PASSWORD` or `AGENTKEYS_EMAIL_API_KEY`.
+- [ ] Structured error reporting per trip-wire type: selector timeout (15s default), unexpected navigation, HTTP 5xx from target, email timeout, verification failure. Each trip-wire reports `{ stage, trigger, service, elapsed_ms }` to the MCP caller. No generic "something failed."
+- [ ] Observability (mandatory, per Section 8 of CEO review): emit `provision_tier_used{service,tier}`, `provision_duration_seconds{service}`, `provision_trip_wire_fired{service,trip_wire}`, `provision_verification_result{service,result}` metrics per run.
 
 ### Unit Tests
 ```
-cargo test -p agentkeys-provisioner     # orchestrator IPC tests with mock subprocess
-npm test --prefix provisioner-scripts   # Playwright script unit tests
+cargo test -p agentkeys-provisioner     # orchestrator IPC + trip-wire + verification gating
+npm test --prefix provisioner-scripts   # patterns + scrapers + email + verify
 ```
 
 | Test | What it validates |
@@ -533,33 +562,274 @@ npm test --prefix provisioner-scripts   # Playwright script unit tests
 | `provisioner::spawn_and_receive` | Orchestrator spawns a mock TS subprocess, receives JSON on stdout |
 | `provisioner::subprocess_timeout` | Subprocess hangs → orchestrator times out after 120s with clear error |
 | `provisioner::subprocess_error` | Subprocess returns error JSON → orchestrator surfaces it to MCP caller |
-| `provisioner::stores_credential` | After successful provision, `read_credential` returns the obtained key |
-| `provisioner::duplicate_provision` | Provision when already provisioned → return existing credential |
-| `email::fetch_code_gmail_plus` | `lib/email.ts` connects to Gmail IMAP with plus-addressed account, sends a test email with a known code, retrieves it within 30s |
-| `email::fetch_code_timeout` | No matching email arrives → clean timeout with structured error (not a hang) |
-| `email::fetch_code_wrong_pattern` | Email arrives but doesn't match expected sender/subject → returns NOT_FOUND, not the wrong code |
-| `openrouter::smoke` | (CI weekly) Playwright script runs against live openrouter.ai, creates account (using `lib/email.ts` for verification), obtains key |
+| `provisioner::verification_failure_aborts` | Script returns a key, `lib/verify` returns false → provision aborts, `store_credential` NOT called |
+| `provisioner::stores_credential` | After successful provision + verification, `read_credential` returns the obtained key |
+| `provisioner::duplicate_provision` | Provision when already provisioned → return existing credential (no new signup) |
+| `provisioner::phantom_key_caught` | **Chaos test.** Decoy page returns a string shaped like `sk-or-v1-XXXXX` that isn't a real key → verification catches it → provision aborts with clear error |
+| `patterns::signup_email_otp_happy` | Pattern runs against HAR fixture of OpenRouter signup, completes flow, returns extracted key |
+| `patterns::signup_email_otp_selector_timeout` | Pattern hits missing selector → returns structured trip-wire error (not a hang) |
+| `email::fetch_code_gmail_plus` | `lib/email.ts` connects to Gmail IMAP with plus-addressed account, retrieves test email within 30s |
+| `email::fetch_code_timeout` | No matching email → clean timeout with structured error |
+| `email::fetch_code_wrong_pattern` | Email arrives but doesn't match sender/subject → NOT_FOUND, not the wrong code |
+| `verify::valid_key_returns_true` | Valid OpenRouter key → `GET /api/v1/models` 200 → returns true |
+| `verify::invalid_key_returns_false` | Random string → 401 → returns false |
+| `openrouter::smoke` | (CI weekly, non-blocking) Live openrouter.ai end-to-end provision with verification. Auto-files issue on failure; does not block merges. |
 
 ### Reviewer E2E Checklist
 ```bash
 # Prerequisite: Stages 0-4 complete, daemon paired and running
 
-# From an agent (or manually via MCP client):
-# Call: agentkeys.provision(service: "openrouter")
-# Expected: Playwright opens browser, creates OpenRouter account, returns success
+# Happy path:
+# Call via MCP: agentkeys.provision(service: "openrouter")
+# Expected: Playwright opens browser, creates account via signup_email_otp pattern,
+#           extracts key, verifies key against openrouter.ai/api/v1/models,
+#           stores credential. Returns success.
 # Verify: agentkeys.get_credential(service: "openrouter") → returns a real sk-or-v1-... key
 
-# Error case: disconnect internet, call provision → clear error about network failure
+# Phantom-key defense:
+# Deploy a decoy HTTP server returning a page with a fake sk-or-v1-FAKE string
+# Point the script at the decoy URL
+# Expected: script "succeeds" extracting FAKE; verification calls openrouter.ai with FAKE;
+#           gets 401; provision aborts; store_credential NOT called.
+
+# Trip-wire: selector change
+# Monkey-patch an OpenRouter selector in the script to a non-existent element
+# Expected: clean structured error within 15s, not a hang. Error reports which selector failed.
 ```
 
 ### Stage Contract
-- **Inputs:** Stages 0-4 + Node.js + Chrome/Chromium installed
-- **Outputs:** Working `agentkeys.provision` MCP tool that creates real OpenRouter accounts
-- **Done when:** Orchestrator IPC tests pass. At least one successful live provision of a real OpenRouter account (manual verification — this creates a real account).
+- **Inputs:** Stages 0-4 + Node.js + Chrome/Chromium + Gmail IMAP creds (or equivalent burner-email backend)
+- **Outputs:** Working `agentkeys.provision(openrouter)` MCP tool with pattern library (1 pattern) + mandatory verification + observability metrics
+- **Done when:** All unit tests pass (including the phantom-key chaos test). At least one successful live provision of a real OpenRouter account, with verification confirming the key works against `GET /api/v1/models`. All observability metrics emitted.
+
+### Stage 5a explicitly does NOT ship
+- Claude-Chrome agentic fallback (→ Stage 5b)
+- Fallback audit trail (→ Stage 5b)
+- LLM script-generator dev tool (→ Stage 5b)
+- Fallback→PR loop (→ Stage 5b)
+- Additional patterns beyond `signupEmailOtp` (→ Stage 5b, extracted from the 2nd/3rd service as it's added)
+
+### Open item to resolve before first live provision
+- [ ] **OpenRouter ToS check:** confirm that scripted account creation does not violate the target service's ToS. Repeat this check for every new service added to Tier 2. Noted in TODOS.md per 2026-04-16 CEO review.
+
+### CLI UX Specifications (2026-04-16 plan-design-review)
+
+User-facing surfaces for Stage 5a — decisions locked to avoid "we'll figure out the output format later":
+
+- **Success output masks the key.** Stdout on success prints exactly one line: `sk-or-v1-****...AB3F` (first 8 chars + `****...` + last 4 chars). Never the full key. Full key is retrieved via `agentkeys read <agent> openrouter` or injected into child processes via `agentkeys run`. Rationale: AgentKeys's whole pitch is "credentials don't leak" — printing a full key to stdout contradicts it (shell history, log aggregators, screen recordings all capture stdout).
+- **Progress to stderr during long-running provision.** One plain-text line per phase: `Creating account...`, `Waiting for email verification...`, `Extracting API key...`, `Verifying key against openrouter.ai...`, `Stored.` To stderr, not stdout — so piping / MCP daemon callers can ignore cleanly. No spinners, no TUI animations. Renders correctly under `agentkeys run -- ...` wrappers.
+- **Duplicate provision flow.** When a credential for the service already exists: verify the existing key with one `lib/verify.ts` call. If valid: stderr `openrouter already provisioned, key valid (provisioned <relative date>).` No re-signup, stdout prints the masked key. If invalid (revoked/expired): stderr `existing key invalid, re-provisioning...` and proceed with full flow. `--force` flag re-provisions regardless of existing.
+- **Error message format.** All new error codes (`PROVISION_IN_PROGRESS`, `TRIPWIRE_SELECTOR_TIMEOUT`, `EMAIL_TIMEOUT`, `VERIFICATION_FAILED`, `PROVISION_STORE_FAILED`, `AUDIT_DEGRADED`) follow the Stage 2 DX spec: `problem + cause + fix + docs link`. Example for `VERIFICATION_FAILED`: `Problem: Provision succeeded but the returned key did not authenticate. Cause: The target service may have rate-limited signup, or the script extracted the wrong element. Fix: Retry in 5 minutes; if persistent, file an issue at <url> with provision audit log. Docs: https://agentkeys.dev/docs/errors#verification-failed`
+
+### CLI UX Specifications for 5b (2026-04-16 plan-design-review)
+
+- **TTY detection for fallback→PR prompt.** Use `atty::is(Stream::Stdin) && atty::is(Stream::Stdout)` in Rust. Prompt only shown when BOTH are TTYs. MCP daemon context (pipes), redirected output (`> log.txt`), and scripted execution all skip the prompt automatically. No environment variable needed. This is the Rust standard for "is this interactive?"
+- **TUI prompt text (verbatim).** `Captured a new script from this fallback session. Submit as a draft PR to provisioner-scripts/? [y/N]` — default on Enter is No (capital-N convention). On `y`: write to `/tmp/agentkeys-proposed-<service>-<timestamp>.ts` and print `Draft written to <path>. Review, then run: gh pr create --title "add <service> script" --body-file <path>.md`.
+
+### Eng Review Implementation Notes (2026-04-16 plan-eng-review)
+
+Locked architectural decisions to prevent implementation drift:
+
+- **IPC contract between Rust orchestrator and TS subprocess.** Line-delimited JSON, each line tagged with `type`. Schema defined in `agentkeys-types` as `ProvisionEvent` enum. Tags: `progress` `{step}`, `tripwire` `{kind, step, elapsed_ms}`, `success` `{api_key}`, `error` `{code, details}`. TS side imports the schema via hand-sync (per CLAUDE.md typed-parameters principle — no opaque JSON parsing).
+- **Concurrency.** Daemon holds a single `Mutex<Option<ActiveProvision>>`. Second call while one in flight returns `PROVISION_IN_PROGRESS` immediately with the active service name. Mutex poisoning on panic is treated as a recoverable condition (mutex reset + log).
+- **Observability transport.** Structured JSON log lines to stderr (e.g. `{"level":"info","event":"provision_metric","name":"tier_used","service":"openrouter","tier":2}`). Prometheus/OTel exporter deferred to v0.1 hardening alongside Stage 8.
+- **HAR fixture layout.** `provisioner-scripts/tests/fixtures/<service>/<scenario>.har`. Regeneration script: `npm run record-fixtures -- --service openrouter --scenario signup_happy`. Weekly live smoke auto-regenerates on success. Each fixture directory includes a README with purpose + last-recorded date.
+- **Phantom-key chaos test implementation.** Use Playwright `page.route()` + `route.fulfill()` to mock the success-page response with a fixture HTML containing `sk-or-v1-FAKE`. Hermetic, no decoy server needed.
+- **Pattern-extraction regression seam.** Write the OpenRouter HAR-driven happy-path test BEFORE extracting `signupEmailOtp`. Commit. Extract pattern. Test must pass with identical output. Enforced at PR review; no direct commits extracting patterns without the prior test commit.
+- **Typed error surface.** Shared `ProvisionEvent` enum in `agentkeys-types` consumed by both Rust and TS. Avoids string-code drift between languages.
+- **DRY rule for patterns.** `patterns/signup_email_otp.ts` must contain zero references to "openrouter" or any service-specific string. All service-specific data flows as parameters. Trivial acceptance check: `grep -i openrouter patterns/` returns nothing.
+
+### Additional test requirements (from 2026-04-16 eng review)
+
+Added to the unit test table above:
+
+| Test | What it validates |
+|---|---|
+| `provisioner::ipc_malformed_json` | Subprocess emits an unparseable stdout line → orchestrator aborts with clear error (not a silent skip) |
+| `provisioner::concurrent_provision_rejected` | Second provision call while one in flight → returns `PROVISION_IN_PROGRESS` with active service name |
+| `provisioner::mutex_recovery_after_panic` | First provision panics → mutex reset → third call proceeds normally |
+| `provisioner::verification_endpoint_down` | Target API returns 503 → distinguish from 401 (retry with backoff vs. phantom) |
+| `provisioner::store_fails_after_verify` | Verification passes but `store_credential` fails → error response includes the obtained key so the user can recover manually |
+| `patterns::signup_email_otp_extraction_regression` | **Must-run before merge:** identical HAR fixture produces identical behavior pre- and post-pattern-extraction |
+
+---
+
+## Stage 5b: Provisioner — Agentic Fallback + Ecosystem Loop (post-v0, v0.1 milestone)
+
+**Goal:** When Stage 5a's deterministic path misses (no script for service, site updated, CAPTCHA, selector drift), the user's own Claude drives Chrome via MCP browser primitives to complete the provision. Every fallback session is audited. Successful human-driven fallbacks optionally propose a PR to seed a new script. A dev-time tool uses the patterns library + LLM to draft candidate scripts for new services.
+
+**Critical constraint — no second API key.** The agentic fallback uses the user's *native* LLM (whichever agent is already calling AgentKeys via MCP — typically Claude Code, Cursor, etc.) by exposing Playwright MCP browser primitives. AgentKeys does not embed its own LLM client or require a separate Anthropic/OpenAI API key for the fallback to function.
+
+### Crates / Packages Modified
+- `agentkeys-daemon` — add MCP browser-primitive tools (`browser_navigate`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_read_dom`) exposed over the same MCP channel as credential tools
+- `agentkeys-provisioner` — add tier dispatcher, trip-wire detection, fallback engagement, audit emission, fallback→PR draft emission
+- `provisioner-scripts/patterns/` — add `oauth_google.ts`, `oauth_github.ts`, `magic_link.ts`, `password_email_verify.ts` (4 additional patterns)
+- **New tool:** `agentkeys-scripts-gen` — dev-time script authoring aid, separate binary OR a gstack/Claude skill (decided at implementation time)
+
+### Deliverables
+- [ ] MCP browser primitives on daemon (Tier 3 exposed to user's agent via same MCP channel as existing credential tools)
+- [ ] Tier dispatcher in `agentkeys-provisioner`: attempts Tier 2 script first; engages Tier 3 fallback on trip-wire. **Each tier attempt is independent — no resume.** When Tier 2 fails at step 7 of 12, Tier 3 starts fresh from the initial URL. Trades one extra browser startup for avoiding half-created-account bugs.
+- [ ] Trip-wire detection expanded from Stage 5a: selector timeout (15s), unexpected navigation, HTTP 5xx, email timeout, missing script for service. Generic JS errors and unhandled promise rejections do NOT trigger fallback — those remain hard failures surfaced to the caller.
+- [ ] Fallback audit trail: every action (navigate, click, type, screenshot, read_dom) logged with timestamp + target + value + elapsed_ms. Written to `~/.agentkeys/logs/provision-<timestamp>.jsonl` in v0.1. Migrates to on-chain via Pattern 4 (see Stage 9 notes) when the audit submission infrastructure ships.
+- [ ] Post-fallback success handler:
+  - **Human-driven path (TUI visible):** prompt "Captured a new script from this fallback session. Submit as a PR to provisioner-scripts/? [y/N]". On "y", draft candidate script and write to `/tmp/agentkeys-proposed-<service>-<timestamp>.ts` with a followup prompt to open a PR.
+  - **Agent-driven path (no TUI, daemon-only):** never prompt, never auto-submit. Fallback session is audited and terminated cleanly. Guardrail against agents silently opening PRs on the user's behalf.
+- [ ] Fallback-session → candidate script conversion: uses the patterns library + LLM-drafted glue to produce a Playwright script composing existing patterns. Always written to a temp path for human review. Never directly committed.
+- [ ] **LLM script-generator is the `/agentkeys-record-scraper` Claude Code skill, NOT a separate binary.** Simplification from the original Stage 5b deliverable: we ship a skill, not a compiled tool. Skill location: `~/.claude/skills/agentkeys-record-scraper/SKILL.md`. The skill orchestrates Playwright codegen locally under human supervision, refactors raw codegen into pattern-composed scrapers, runs the full verification gauntlet (HAR tests, IPC contract, live key verification), fixes any code issues found during the session, and stages files for PR. See "Local harness workflow" subsection below.
+- [ ] 4 additional patterns extracted as a natural consequence of adding 3-4 more services during Stage 5b: OAuth-Google, OAuth-GitHub, magic-link, password+email-verify. Each new pattern is extracted by the `/agentkeys-record-scraper` workflow when it encounters a signup shape not covered by existing patterns.
+
+### Local harness workflow (added 2026-04-16 per `/agentkeys-record-scraper` skill)
+
+After Stage 5a ships (patterns infrastructure + OpenRouter scraper + verification), adding a new service follows a fully local, LLM-orchestrated harness:
+
+```
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  maintainer:  /agentkeys-record-scraper  in agentkeys repo      │
+  └───────────────────────┬─────────────────────────────────────────┘
+                          │
+          ┌───────────────▼───────────────┐
+          │  Phase 1: gather input         │
+          │  (slug, URL, email backend,    │
+          │   pattern match)               │
+          └───────────────┬───────────────┘
+                          │
+          ┌───────────────▼───────────────┐
+          │  Phase 2: drive session        │
+          │  playwright codegen + Claude   │
+          │  coaches the human through     │
+          │  the signup                    │
+          └───────────────┬───────────────┘
+                          │
+          ┌───────────────▼───────────────┐
+          │  Phase 3: refactor raw.ts into │
+          │  a pattern-composed scraper    │
+          │  (extract new pattern if       │
+          │   nothing fits)                │
+          └───────────────┬───────────────┘
+                          │
+          ┌───────────────▼───────────────┐
+          │  Phase 4: record HAR fixture   │
+          │  + write scrapers/<slug>.test.ts│
+          └───────────────┬───────────────┘
+                          │
+          ┌───────────────▼───────────────┐
+          │  Phase 5: verification loop    │
+          │  ts tests + cargo tests +      │
+          │  live verify(); fix root       │
+          │  causes                        │
+          └───────────────┬───────────────┘
+                          │
+          ┌───────────────▼───────────────┐
+          │  Phase 6: stage for PR        │
+          │  jj describe + optional       │
+          │  gh pr create --draft         │
+          └───────────────┬───────────────┘
+                          │
+          ┌───────────────▼───────────────┐
+          │  Phase 7: capture learnings    │
+          │  (only if non-obvious pattern) │
+          └───────────────────────────────┘
+```
+
+**Properties:**
+- **Local only.** Spawns real browsers, creates real accounts. Never runs in CI.
+- **Human in the loop.** Codegen records the human's actions; Claude coaches and refactors. No autonomous account creation.
+- **No second API key.** Uses the user's Claude Code session — the LLM doing the refactoring + coaching is the one already driving the skill.
+- **Bidirectional learning.** Sessions surface patterns library gaps (no existing pattern fits) or infrastructure bugs (`lib/email.ts` breaks on provider X). The skill fixes the root cause before staging the scraper.
+- **Pattern library compounds.** Each session either uses an existing pattern unchanged (reuse win) or extracts a new one (ecosystem growth).
+
+**Invocation:** `/agentkeys-record-scraper` in Claude Code while inside the repo. Full spec: `~/.claude/skills/agentkeys-record-scraper/SKILL.md`.
+
+**Escalation thresholds (where the skill stops):**
+- CAPTCHA on signup → skill stops, relies on Stage 5b Tier 3 runtime fallback
+- Payment-gated service → out of scope
+- No public verification API → flag TODO for manual verify flow
+- ToS ambiguity → escalate to project lead
+
+### Unit Tests
+```
+cargo test -p agentkeys-provisioner -- tier3      # dispatcher + trip-wire + fallback
+cargo test -p agentkeys-daemon     -- browser_    # MCP browser primitives
+npm test --prefix provisioner-scripts -- patterns/  # all 5 patterns against HAR fixtures
+```
+
+| Test | What it validates |
+|---|---|
+| `dispatcher::tier2_success_no_fallback` | Script succeeds → Tier 3 never engaged → audit log has no fallback section |
+| `dispatcher::tier2_selector_timeout_engages_tier3` | Script times out → dispatcher engages fallback with fresh browser starting from URL |
+| `dispatcher::tier2_unexpected_nav_engages_tier3` | Script navigates somewhere unexpected → dispatcher engages fallback |
+| `dispatcher::no_script_engages_tier3` | Provision for unknown service → dispatcher skips Tier 2, goes straight to Tier 3 |
+| `fallback::action_logged` | Every fallback action written to JSONL with timestamp + target + value |
+| `fallback::verification_still_mandatory` | Fallback returns a key → Stage 5a's `lib/verify.ts` still runs → phantom keys still caught |
+| `fallback::canned_llm_happy_path` | Fallback with pre-recorded LLM actions completes a provision end-to-end (tests dispatcher, not LLM intelligence) |
+| `fallback::canned_llm_invalid_action_aborted` | Canned LLM returns an invalid action → dispatcher aborts with clear error (no retry loop beyond 1 attempt) |
+| `fallback::pr_prompt_human_path` | Captured session + TUI attached → prompt shown → on "y", draft written to `/tmp/` |
+| `fallback::pr_prompt_agent_path_silent` | Captured session + daemon-only (no TUI) → no prompt → no auto-submit → session audited |
+| `patterns::oauth_google_happy` | Pattern runs against HAR fixture |
+| `patterns::oauth_github_happy` | Pattern runs against HAR fixture |
+| `patterns::magic_link_happy` | Pattern runs against HAR fixture |
+| `patterns::password_email_verify_happy` | Pattern runs against HAR fixture |
+| `scripts_gen::drafts_script` | `agentkeys-scripts-gen <url>` produces a syntactically valid `.ts` file composing patterns |
+
+### Reviewer E2E Checklist
+```bash
+# Prerequisite: Stages 0-5a + 7 complete (v0 shipped)
+
+# Fallback on selector drift:
+# Edit openrouter.ts to use a non-existent selector
+# Call agentkeys.provision(openrouter) via MCP
+# Expected: Tier 2 times out within 15s → Tier 3 engages with fresh browser →
+#           user's Claude drives signup → mandatory verification runs → credential stored.
+#           Full audit JSONL in ~/.agentkeys/logs/
+# Human TUI path: prompt "submit as script PR?" appears.
+# Agent daemon path: completes silently, no prompt.
+
+# Fallback on unknown service:
+# Call agentkeys.provision("some_new_service_no_script")
+# Expected: dispatcher skips Tier 2, engages Tier 3, user's Claude drives full flow
+
+# Script-generator dev tool:
+# Run: agentkeys-scripts-gen https://example.com/signup
+# Expected: Chrome opens, maintainer performs signup, tool captures DOM/actions,
+#           emits candidate script composing patterns, opens editor for review
+```
+
+### Stage Contract
+- **Inputs:** Stages 0-5a + 7 complete (v0 shipped)
+- **Outputs:** Tier 3 fallback + audit trail + fallback→PR loop (human-gated) + script-gen dev tool + 4 additional patterns
+- **Done when:** All 5b unit tests pass. Manual fallback test succeeds for one site that Tier 2 does not cover. Script-gen tool produces a working candidate for a new service in one session. Fallback audit log is human-readable (JSONL with structured fields).
+
+### Security watch-item
+Tier 3 engagement exposes the user's agent to prompt injection from hostile pages (a malicious signup page could embed instructions attempting to exfiltrate the verification code or redirect credentials). Per the 2026-04-16 CEO review, v0.1 accepts this risk with **audit trail as after-the-fact detection** rather than a consent gate. Revisit the consent model in v0.2 if fallback usage scales beyond occasional recovery, or if an incident occurs.
+
+### Eng Review Implementation Notes (2026-04-16 plan-eng-review)
+
+Locked architectural decisions for 5b:
+
+- **MCP browser primitives are provision-scoped.** `browser_navigate`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_read_dom` are dynamically added to the MCP tool list only during an active `agentkeys.provision(service)` call that has trip-wired into fallback. Before provision starts: not discoverable. After fallback completes (success OR error): tools removed from discovery. This bounds the attack surface and preserves the "agentkeys is a credential tool, not a general browser automation tool" positioning.
+- **Canned-LLM test harness for the dispatcher.** Tests replay pre-recorded `(tool_call, canned_response)` tuples. Harness feeds each canned response in order. Tests assert dispatcher behavior (correct trip-wire handling, verification still runs, audit written, PR-prompt gating). Harness does NOT test LLM intelligence.
+- **Tier-attempt independence.** Each tier runs fresh. When Tier 2 script fails at step 7, Tier 3 starts from the initial URL with a fresh browser. Avoids half-created-account bugs at the cost of one extra browser startup. This matches the Stage 5a concurrency model (single mutex) so there's never more than one browser in flight per daemon.
+- **Audit log durability.** On disk-full or write failure, fallback continues but flags the session as "AUDIT_DEGRADED" in the returned error/success payload. Don't silently drop audit events; don't block the provision on a log failure.
+- **Interrupt safety in TUI PR prompt.** Ctrl-C during the "submit as PR?" prompt exits cleanly, no draft written, no orphaned `/tmp/` files.
+
+### Additional test requirements for 5b (from 2026-04-16 eng review)
+
+| Test | What it validates |
+|---|---|
+| `mcp::browser_primitives_hidden_before_provision` | Tool list does NOT include `browser_*` tools before provision is invoked |
+| `mcp::browser_primitives_visible_during_fallback` | After a trip-wire engages Tier 3, tool list includes `browser_*` tools |
+| `mcp::browser_primitives_hidden_after_fallback` | After fallback success OR error, tool list no longer includes `browser_*` tools |
+| `dispatcher::tier3_also_fails` | Tier 2 trip-wires, Tier 3 also fails → both errors surfaced to MCP caller (no info loss) |
+| `fallback::audit_log_write_fail_degraded` | Disk full during fallback → audit flagged AUDIT_DEGRADED, provision continues |
+| `fallback::pr_prompt_ctrl_c_clean` | Ctrl-C during TUI prompt → clean exit, no `/tmp/` draft, no orphan state |
 
 ---
 
 ## Stage 6: npm Package + DX Polish
+
+> **Status (2026-04-16 CEO review): POSTPONED past v0.** v0 ships at Stage 7 with `cargo install` and GH-release prebuilt binaries as the distribution path. npm packaging, `install.sh`, README polish, and the remaining DX artifacts move to the v0.1 milestone alongside Stage 5b and Stage 8. Stage 6 content below is preserved as-is for v0.1 execution — no scope change to Stage 6 itself, only a dependency relaxation.
+>
+> **Watch-item to prevent drift:** file a v0.1 milestone with Stage 6 as a named deliverable. "Post-MVP packaging" without a milestone rots.
 
 **Goal:** Ship `@agentkeys/daemon` as an npm package for cloud LLM environments, plus all DX artifacts (README, install.sh, docs, error messages).
 
@@ -946,21 +1216,69 @@ Related issues:
 
 ## Summary
 
-| Stage | What ships | Depends on | Est. effort | Tests |
-|---|---|---|---|---|
-| 0 | Types + CredentialBackend trait | — | 2-3 days | 8 unit |
-| 1 | Mock backend (25 endpoints + identity linking) | Stage 0 | 5-7 days | **37** unit + curl smoke |
-| 2 | CLI (10 commands) | Stages 0, 1 | 4-5 days | 14 unit + E2E checklist |
-| 3 | Daemon + MCP + hardening | Stages 0, 1 | 4-5 days | 13 unit + hardening checks |
-| 4 | Pair/Approve + Recover | Stages 0-3 | 3-4 days | 11 unit + 2-terminal E2E |
-| 5 | Provisioner (OpenRouter) + email integration | Stages 0-4 | 3-4 days | 9 unit + live provision |
-| 6 | npm package + DX | Stages 0-5 | 2-3 days | 7 tests + install checks |
-| 7 | Full E2E + MCP auth demo | All | 2-3 days | 6 E2E flows + master checklist |
-| 8 | Production hardening (daemon memory hygiene + CLI defensive features) | Stages 0-7 | 4-6 days | 15 unit + 6 E2E hardening checks |
-| 9 | v0.1 Heima migration design decisions (holding pen — not a formal stage) | — | — (design notes only) | — |
-| **Total (v0 MVP, stages 0-7)** | | | **~25-34 days** | **105 tests + 6 E2E flows** |
-| **Total (with stage 8 hardening)** | | | **~29-40 days** | **120 tests + 12 E2E flows** |
+| Stage | What ships | Milestone | Depends on | Est. effort | Tests |
+|---|---|---|---|---|---|
+| 0 | Types + CredentialBackend trait | v0 | — | 2-3 days | 8 unit |
+| 1 | Mock backend (25 endpoints + identity linking) | v0 | Stage 0 | 5-7 days | **37** unit + curl smoke |
+| 2 | CLI (10 commands) | v0 | Stages 0, 1 | 4-5 days | 14 unit + E2E checklist |
+| 3 | Daemon + MCP + hardening | v0 | Stages 0, 1 | 4-5 days | 13 unit + hardening checks |
+| 4 | Pair/Approve + Recover | v0 | Stages 0-3 | 3-4 days | 11 unit + 2-terminal E2E |
+| 5a | Provisioner Tier 1+2 (OpenRouter + `signupEmailOtp` pattern + **mandatory verification**) | v0 | Stages 0-4 | 3-4 days | 15 unit + phantom-key chaos + live provision |
+| 5b | Provisioner Tier 0+3 (agentic fallback + audit trail + fallback→PR + script-gen + 4 patterns) | v0.1 | Stages 0-5a + 7 | 4-5 days | 15 unit + canned-LLM harness + manual fallback |
+| 6 | npm package + DX polish | v0.1 | Stages 0-5a + 7 | 2-3 days | 7 tests + install checks |
+| 7 | Full E2E + MCP auth demo | v0 | Stages 0-5a | 2-3 days | 6 E2E flows + master checklist |
+| 8 | Production hardening (daemon memory hygiene + CLI defensive features) | v0.1 | Stages 0-7 | 4-6 days | 15 unit + 6 E2E hardening checks |
+| 9 | v0.1 Heima migration design decisions (holding pen — not a formal stage) | v0.1 design notes | — | — | — |
+| **Total (v0 MVP: stages 0-5a, 7)** | | | | **~23-31 days** | **111 tests + 6 E2E flows** |
+| **Total (v0.1: + stages 5b, 6, 8)** | | | | **+10-14 days** | **+37 tests + 6 E2E flows** |
 
-**Parallelization opportunity:** Stages 2 and 3 can run in parallel (~4-5 days saved). Stage 6 can overlap with Stage 5. Realistic v0 timeline with one developer: **~4-5 weeks** (stages 0-7) or **~5-6 weeks** including stage 8 hardening.
+**Parallelization opportunity:**
+- Within v0: Stages 2 and 3 can run in parallel after Stage 1 (~4-5 days saved).
+- Within v0.1: Stages 5b, 6, and 8 are independent and can run in any order or in parallel. No dependency among them beyond Stage 7.
 
-**Critical path:** Stage 0 → Stage 1 → Stage 4 → Stage 7. Stage 8 is post-MVP and can ship after the v0 demo. Stage 9 is a design holding pen for v0.1 decisions, not executable work. Everything else is parallelizable around this spine.
+Realistic v0 timeline with one developer: **~4 weeks** (stages 0-5a + 7). v0.1 adds **~2-3 weeks** for 5b + 6 + 8.
+
+**Critical path for v0:** Stage 0 → Stage 1 → Stage 4 → Stage 5a → Stage 7. Stage 5b, Stage 6, and Stage 8 all defer to v0.1 per the 2026-04-16 CEO review. Stage 9 is a design holding pen, not executable work. Everything else is parallelizable around this spine.
+
+---
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 1 | CLEAR | Mode: SELECTIVE EXPANSION. 7 proposals, 5 accepted, 1 deferred, 1 rejected. 1 critical gap caught + fixed (silent-corrupt-credential → mandatory verification). |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 3 architectural decisions locked (IPC schema, concurrency, MCP scope), 5 implementation notes baked in, 11 additional tests added to 5a/5b tables, 0 unresolved. |
+| Design Review | `/plan-design-review` | UI/UX gaps | 1 | CLEAR | CLI-scoped review (no visual UI). 4 UX decisions locked: masked-key output, stderr progress, atty TTY detection, duplicate-provision verify-and-report. Score 5/10 → 9/10. |
+
+**ENG-REVIEW DECISIONS LOCKED:**
+- IPC contract: line-delimited JSON `ProvisionEvent` enum (Rust ↔ TS), shared via `agentkeys-types`
+- Concurrency: `Mutex<Option<ActiveProvision>>` with `PROVISION_IN_PROGRESS` sentinel
+- MCP browser primitives: provision-scoped dynamic visibility (5b)
+
+**DESIGN-REVIEW DECISIONS LOCKED:**
+- Success output: masked key `sk-or-v1-****...AB3F` (never full key to stdout)
+- Progress: stderr step lines during provision, no spinners
+- TTY detection: `atty::is` on both stdin and stdout for fallback→PR prompt
+- Duplicate provision: verify-and-report, `--force` flag to re-provision
+
+**VERDICT:** CEO + ENG + DESIGN CLEARED — ready to implement Stage 5a. Optional next step: `/codex review` for independent 2nd opinion on architecture before coding starts.
+
+**UNRESOLVED:** 0 decisions (all cherry-picks resolved, all gaps addressed in scope).
+
+**CHERRY-PICKS ACCEPTED (in scope):**
+- (5a) Patterns library — `signupEmailOtp` extracted as reusable function
+- (5a) Post-provision credential verification — mandatory, non-negotiable
+- (5b) Claude-Chrome agentic fallback via MCP browser primitives — uses user's native LLM
+- (5b) Fallback audit trail — local JSONL v0.1, on-chain later
+- (5b) Fallback→PR loop — human-gated TUI prompt; agent path never auto-submits
+- (5b) LLM script-generator dev tool — maintainer-facing, not runtime
+
+**CHERRY-PICKS REJECTED:**
+- Scrapers as separate OSS repo — keep in main repo for simpler v0 release engineering
+- Agentic mode consent gate — audit trail as detection instead (security watch-item)
+
+**DEFERRED TO TODOS.md:**
+- OpenRouter ToS compliance check — required before first live Stage 5a provision
+
+**CEO PLAN DOCUMENT:** `~/.gstack/projects/litentry-agentKeys/ceo-plans/2026-04-16-stage-5-hybrid-agentic.md`

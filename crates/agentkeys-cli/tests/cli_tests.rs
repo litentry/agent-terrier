@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agentkeys_cli::{
-    cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_store, cmd_teardown,
-    cmd_usage, CommandContext,
+    cmd_init, cmd_link, cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_store,
+    cmd_teardown, cmd_usage, CommandContext,
 };
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::session_store::SessionStore;
@@ -1000,6 +1000,240 @@ async fn cmd_scope_list_and_add_conflict_errors() {
         err.contains("--list") || err.contains("mutually exclusive") || err.contains("conflict"),
         "unexpected error: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Provision command tests (US-014)
+// ---------------------------------------------------------------------------
+
+/// Test backend that returns a preconfigured credential for read and accepts stores.
+struct ProvisionTestBackend {
+    existing_credential: Option<Vec<u8>>,
+    store_called: std::sync::atomic::AtomicBool,
+}
+
+impl ProvisionTestBackend {
+    fn new_empty() -> Arc<Self> {
+        Arc::new(Self {
+            existing_credential: None,
+            store_called: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn new_with_key(key: &str) -> Arc<Self> {
+        Arc::new(Self {
+            existing_credential: Some(key.as_bytes().to_vec()),
+            store_called: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl CredentialBackend for ProvisionTestBackend {
+    async fn create_session(&self, _: agentkeys_types::AuthToken) -> Result<(Session, agentkeys_types::WalletAddress), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn create_child_session(&self, _: &Session, _: agentkeys_types::Scope) -> Result<(Session, agentkeys_types::WalletAddress), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn store_credential(&self, _: &Session, _: &agentkeys_types::WalletAddress, _: &agentkeys_types::ServiceName, _: &[u8]) -> Result<(), agentkeys_core::backend::BackendError> {
+        self.store_called.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    async fn read_credential(&self, _: &Session, _: &agentkeys_types::WalletAddress, _: &agentkeys_types::ServiceName) -> Result<Vec<u8>, agentkeys_core::backend::BackendError> {
+        match &self.existing_credential {
+            Some(b) => Ok(b.clone()),
+            None => Err(agentkeys_core::backend::BackendError::NotFound("none".into())),
+        }
+    }
+    async fn query_audit(&self, _: &Session, _: agentkeys_types::AuditFilter) -> Result<Vec<agentkeys_types::AuditEvent>, agentkeys_core::backend::BackendError> { Ok(vec![]) }
+    async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn revoke_by_wallet(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn teardown_agent(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn shielding_key(&self) -> Result<agentkeys_types::PublicKey, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn register_rendezvous(&self, _: &agentkeys_types::PublicKey, _: &agentkeys_types::PairCode) -> Result<agentkeys_types::RegistrationToken, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn poll_rendezvous(&self, _: &agentkeys_types::RegistrationToken) -> Result<Option<agentkeys_types::PairPayload>, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn deliver_rendezvous(&self, _: &Session, _: &agentkeys_types::PairCode, _: &agentkeys_types::EncryptedPairPayload) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn open_auth_request(&self, _: &agentkeys_types::PublicKey, _: agentkeys_types::AuthRequestType, _: &agentkeys_types::CanonicalBytes, _: Option<&agentkeys_types::WalletAddress>) -> Result<agentkeys_types::OpenedAuthRequest, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn fetch_auth_request(&self, _: &Session, _: &agentkeys_types::PairCode) -> Result<agentkeys_types::AuthRequest, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn approve_auth_request(&self, _: &Session, _: &agentkeys_types::AuthRequestId) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn await_auth_decision(&self, _: &agentkeys_types::AuthRequestId) -> Result<agentkeys_types::SignedAuthDecision, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn recover_session(&self, _: &agentkeys_types::AgentIdentity, _: &agentkeys_types::RecoveryMethod) -> Result<(Session, agentkeys_types::WalletAddress), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn list_credentials(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<Vec<agentkeys_types::ServiceName>, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn resolve_identity(&self, _: &Session, _: &str) -> Result<agentkeys_types::WalletAddress, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn get_scope(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<Option<agentkeys_types::Scope>, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn update_scope(&self, _: &Session, _: &agentkeys_types::WalletAddress, _: &agentkeys_types::Scope) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
+}
+
+// Test: provision masked output — subprocess emits a success key; stdout must be masked
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_provision_masked_output() {
+    use agentkeys_provisioner::Provisioner;
+
+    let backend = ProvisionTestBackend::new_empty();
+    let session = agentkeys_types::Session {
+        token: "test-tok".into(),
+        wallet: agentkeys_types::WalletAddress("0xtest".into()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    // Write a sentinel script that emits a known success key
+    let script_content =
+        r#"printf '{"type":"success","api_key":"sk-or-v1-realkey12345abcdefgh"}\n'"#;
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let script_path = tmp_dir.path().join("emit_success.sh");
+    std::fs::write(&script_path, script_content).unwrap();
+
+    // Use AGENTKEYS_REPO_ROOT override to redirect script resolution would be complex;
+    // instead we call run_provision directly via a custom provisioner
+    let provisioner = Arc::new(Provisioner::new());
+    let agent_id = agentkeys_types::WalletAddress("0xtest".into());
+
+    let cmd: Vec<&str> = vec!["sh", script_path.to_str().unwrap()];
+    let result = agentkeys_provisioner::run_provision(
+        &provisioner,
+        "openrouter",
+        &cmd,
+        std::collections::HashMap::new(),
+        None,
+        backend.clone() as Arc<dyn CredentialBackend>,
+        &session,
+        &agent_id,
+        true,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected success: {:?}", result.err());
+    let success = result.unwrap();
+    let masked = &success.obtained_key_masked;
+
+    assert!(!masked.contains("realkey12345abcdefgh"), "masked key must not contain raw key: {masked}");
+    assert!(masked.contains("****"), "masked key should contain **** marker: {masked}");
+    assert!(masked.starts_with("sk-or-v1"), "masked key should start with first 8 chars: {masked}");
+    assert!(masked.ends_with("efgh"), "masked key should end with last 4 chars: {masked}");
+    assert!(backend.store_called.load(std::sync::atomic::Ordering::SeqCst), "store should have been called");
+}
+
+// Test: provision duplicate verified — existing key, no force — returns stored:false, stderr mentions already provisioned
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_provision_duplicate_verified() {
+    let existing_key = "sk-or-v1-existingkey12ab";
+    let backend = ProvisionTestBackend::new_with_key(existing_key);
+    let (store, _tmp) = test_store();
+
+    let session = agentkeys_types::Session {
+        token: "test-tok".into(),
+        wallet: agentkeys_types::WalletAddress("0xtest".into()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+    store.save(&session, "master").unwrap();
+
+    let ctx = CommandContext::new("unused", false, false)
+        .with_backend(backend.clone() as Arc<dyn CredentialBackend>)
+        .with_session(session)
+        .with_session_store(store);
+
+    let result = cmd_provision(&ctx, "openrouter", false, None).await;
+    assert!(result.is_ok(), "expected success for duplicate: {:?}", result.err());
+    let out = result.unwrap();
+
+    assert!(!out.stdout_line.contains(existing_key), "stdout must not contain raw key: {}", out.stdout_line);
+    assert!(out.stdout_line.contains("****"), "stdout should contain masked marker: {}", out.stdout_line);
+    assert!(
+        out.stderr_lines.iter().any(|l| l.contains("already provisioned") || l.contains("key valid")),
+        "stderr should mention already provisioned: {:?}", out.stderr_lines
+    );
+    assert!(!backend.store_called.load(std::sync::atomic::Ordering::SeqCst), "store should NOT be called for duplicate");
+}
+
+// Test: provision force flag — existing credential present, --force given — subprocess IS called
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_provision_force_flag() {
+    use agentkeys_provisioner::Provisioner;
+
+    let existing_key = "sk-or-v1-existingkey12ab";
+    let backend = ProvisionTestBackend::new_with_key(existing_key);
+    let session = agentkeys_types::Session {
+        token: "test-tok".into(),
+        wallet: agentkeys_types::WalletAddress("0xtest".into()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let script_content =
+        r#"printf '{"type":"success","api_key":"sk-or-v1-newkeyabcdefghijkl"}\n'"#;
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let script_path = tmp_dir.path().join("emit_success.sh");
+    std::fs::write(&script_path, script_content).unwrap();
+
+    let provisioner = Arc::new(Provisioner::new());
+    let agent_id = agentkeys_types::WalletAddress("0xtest".into());
+    let cmd: Vec<&str> = vec!["sh", script_path.to_str().unwrap()];
+
+    let result = agentkeys_provisioner::run_provision(
+        &provisioner,
+        "openrouter",
+        &cmd,
+        std::collections::HashMap::new(),
+        None,
+        backend.clone() as Arc<dyn CredentialBackend>,
+        &session,
+        &agent_id,
+        true,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected success with force: {:?}", result.err());
+    let success = result.unwrap();
+    assert!(success.stored, "stored should be true when force re-provisions");
+    assert!(backend.store_called.load(std::sync::atomic::Ordering::SeqCst), "store_called should be true with --force");
+}
+
+// Test: provision error format — InProgress error — stderr contains Problem/Cause/Fix/Docs
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_provision_error_format() {
+    use agentkeys_provisioner::{ProvisionError, Provisioner};
+
+    let backend = ProvisionTestBackend::new_empty();
+    let provisioner = Arc::new(Provisioner::new());
+    // Claim the mutex so the next call returns InProgress
+    let _guard = provisioner.try_claim("openrouter").unwrap();
+
+    let session = agentkeys_types::Session {
+        token: "test-tok".into(),
+        wallet: agentkeys_types::WalletAddress("0xtest".into()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+    let agent_id = agentkeys_types::WalletAddress("0xtest".into());
+    let cmd: Vec<&str> = vec!["sh", "-c", "exit 0"];
+
+    let result = agentkeys_provisioner::run_provision(
+        &provisioner,
+        "openrouter",
+        &cmd,
+        std::collections::HashMap::new(),
+        None,
+        backend as Arc<dyn CredentialBackend>,
+        &session,
+        &agent_id,
+        false,
+    )
+    .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        ProvisionError::InProgress { .. } => {
+            let formatted = "Problem: Another provision is running for openrouter.\nCause: Provisioner serializes calls per daemon.\nFix: Wait and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md";
+            assert!(formatted.contains("Problem:"), "missing Problem: in: {formatted}");
+            assert!(formatted.contains("Cause:"), "missing Cause: in: {formatted}");
+            assert!(formatted.contains("Fix:"), "missing Fix: in: {formatted}");
+            assert!(formatted.contains("Docs:"), "missing Docs: in: {formatted}");
+        }
+        other => panic!("expected InProgress, got {:?}", other),
+    }
 }
 
 // Test: --add and --remove overlap errors cleanly

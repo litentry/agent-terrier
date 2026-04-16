@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head><title>Sign Up</title></head>
+<body>
+  <form id="signup-form">
+    <input name="email" type="email" placeholder="Enter your email" />
+    <button type="submit">Continue</button>
+  </form>
+  <script>
+    document.getElementById('signup-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      window.location.href = '/verify';
+    });
+  </script>
+</body>
+</html>
