@@ -99,6 +99,35 @@ CEO plan with full decision record: `~/.gstack/projects/litentry-agentKeys/ceo-p
 
 ---
 
+## Stage 5–7 roadmap update (2026-04-19)
+
+After the Stage 5a demo path landed and the email-system architecture + TEE-as-OIDC-provider design work matured, the post-Stage-5 roadmap is reordered. The new order is:
+
+| Stage | Title | Status |
+|---|---|---|
+| **5** | Provisioner: deterministic + patterns + quick-email demo (dedicated personal Gmail) | **Current** — stays as-is, ships the live OpenRouter-provision demo on the simplest email path |
+| **6** | **Federated own-email** — `xxxxx@agentkeys-email.io` hosted on our infrastructure (AWS SES + TEE-derived Ed25519 DKIM + ES256 OIDC issuer + PrincipalTag-based per-user isolation) | **Next** |
+| **7** | **Generalized OIDC provider** — expose `https://oidc.agentkeys.dev` as a universal federation target; any cloud that accepts external OIDC (AWS, GCP, Azure, Snowflake, Ali Cloud, K8s) trusts us once; bring-your-own domain/Workspace/GitHub paths become available | **After 6** |
+| 6 (old) — npm Package + DX Polish | | **Postponed** (preserved below for reference) |
+| 7 (old) — Full E2E Integration + MCP Auth Demo | | **Postponed** (preserved below for reference) |
+| 8 (old) — Production Hardening | | **Postponed** (preserved below for reference) |
+| 9 (old) — v0.1 Heima Migration Holding Pen | | **Postponed** (preserved below for reference) |
+
+### Why this reorder
+
+The three architectural wiki pages on our email/OIDC design surfaced a coherent v0.1 milestone that does more for product-and-user value than packaging or late-stage hardening:
+
+1. **Hosted-first default** — non-developer users get `xxxxx@agentkeys-email.io` with zero configuration, parallel to how AgentMail mints default-domain inboxes. See [`wiki/hosted-first.md`](../../../wiki/hosted-first.md).
+2. **TEE holds all signing keys natively** — the Ed25519 DKIM key and ES256 OIDC-issuer key join the existing shielding/JWT/wallet derivation paths, all under `blockchain-tee-architecture.md` rule #2. See [`wiki/oidc-federation.md`](../../../wiki/oidc-federation.md).
+3. **Per-user isolation without per-user IAM** — JWT claim `agentkeys_user_wallet` → AWS session tag → `aws:PrincipalTag` in bucket/role policy = one bucket, N users, cryptographic separation. See [`wiki/tag-based-access.md`](../../../wiki/tag-based-access.md).
+4. **Knowledge-base decision deferred** — Stage 6/7 deliver the mechanism; which backend (GitHub / AWS S3 / Google Drive / Ali Cloud OSS) we ship as default is decided later per user segment. See [`wiki/knowledge-storage.md`](../../../wiki/knowledge-storage.md).
+
+**Broker-not-proxy principle.** Stages 6 and 7 both adhere to the principle that AgentKeys infrastructure mints ephemeral credentials and the daemon talks to remote services directly via MCP. Our backend never proxies per-user reads/writes. This keeps compute cost flat with user count (scales with sign-up rate, not operation frequency) and aligns with `blockchain-tee-architecture.md` rules #2–#3.
+
+Full stage contracts for 6 and 7 appear below in their own sections, right after Stage 5b and before the postponed ex-6/7/8/9 sections.
+
+---
+
 ## Stage 0: Foundation — Types + Core Trait
 
 **Goal:** Define the shared types and the `CredentialBackend` trait that every other crate depends on.
@@ -825,7 +854,313 @@ Locked architectural decisions for 5b:
 
 ---
 
-## Stage 6: npm Package + DX Polish
+## Stage 6: Federated Own Email (`@agentkeys-email.io` hosted default)
+
+**Status (2026-04-19):** next stage after 5a/5b.
+
+**Goal:** Every AgentKeys user (non-developer default) gets a working agent email inbox at `xxxxx@agentkeys-email.io` with zero setup — no DNS, no admin console, no Workspace subscription, no custom domain. Hosted on our AWS SES infrastructure with TEE-held signing keys, per-user isolation enforced via PrincipalTag from JWT claims, chain-immutable audit.
+
+**Why this is Stage 6:** it replaces the Stage 5 "dedicated personal Gmail" quick demo with production infrastructure that scales to every AgentKeys user without per-user setup friction. Moves AgentKeys from "demo email works" to "every agent has an email inbox the moment it exists."
+
+### Architecture summary
+
+See `docs/spec/ses-email-architecture.md` for the full spec. High-level:
+
+1. **We operate `agentkeys-email.io`** — domain registered to AgentKeys, MX pointing at AWS SES `inbound-smtp.us-east-1.amazonaws.com`, DKIM records pointing at TEE-held keys.
+2. **TEE-derived keys, both sealed:**
+   - `derive("dkim/agentkeys-email.io/v1")` → **Ed25519** DKIM key (RFC 8463) — signs outbound DKIM header
+   - `derive("oidc/issuer/v1")` → **ES256** OIDC-issuer key — signs JWTs for AWS STS federation
+3. **Inbound path:** SES receives → writes raw MIME to S3 `agentkeys-mail/<user_wallet>/<inbox>/<msg_id>.eml` → no Lambda, no per-email compute on our side.
+4. **Outbound path:** agent's daemon asks AgentKeys for temp SES send creds → TEE mints OIDC JWT → `sts:AssumeRoleWithWebIdentity` → daemon calls `SendRawEmail` directly. Our backend does zero work per-send.
+5. **Read path:** daemon asks for temp S3 read creds → minted with `PrincipalTag/agentkeys_user_wallet=<wallet>` → daemon calls S3 directly → bucket policy conditions ensure daemon can only read its own user's prefix.
+6. **Audit:** every credential mint emits an on-chain extrinsic attributed to the calling child wallet.
+
+### Crates / Packages
+
+- `agentkeys-email-auth` (new Rust crate) — handler for the TokenAuthority covering email-related operations: mint S3/SES temp creds, sign DKIM headers, emit audit extrinsics.
+- `agentkeys-mail-receive-stack` (Terraform / CDK module) — one-shot deploy of the SES receipt rule, S3 bucket with PrincipalTag-conditioned policy, IAM role with OIDC trust. Not an AgentKeys crate — shipped as operator infrastructure.
+- Daemon updates — new MCP tools: `email.list`, `email.get`, `email.send`. Each unwraps into `agentkeys mint <creds>` + direct SES/S3 call.
+- `provisioner-scripts/src/lib/email.ts` — replace the `imapflow`-based fetcher with an S3-direct fetcher backed by minted creds.
+
+### Deliverables
+
+- [ ] `agentkeys-email.io` domain registered, SES domain verified
+- [ ] MX + Ed25519 DKIM CNAME + SPF + DMARC published in our DNS
+- [ ] S3 bucket `agentkeys-mail` + receipt rule configured
+- [ ] IAM OIDC provider `oidc.agentkeys.dev` registered in our AWS account
+- [ ] IAM role `agentkeys-agent` with trust policy conditioning on `mrenclave` + non-empty `agentkeys_user_wallet` tag
+- [ ] Bucket policy with `${aws:PrincipalTag/agentkeys_user_wallet}` per-prefix isolation
+- [ ] TEE-side JWT minter with ES256 derived key at `oidc/issuer/v1`
+- [ ] TEE-side Ed25519 DKIM signing (`dkim/agentkeys-email.io/v1`) with locally-signed MIME before SES delivery
+- [ ] Thin HTTPS proxy at `https://oidc.agentkeys.dev` serving `/.well-known/openid-configuration` + `/.well-known/jwks.json` (Let's Encrypt)
+- [ ] Chain extrinsic pallet for `CredentialMinted` audit events
+- [ ] Daemon MCP tools wired to real minted creds
+- [ ] Stage 5's `provisioner-scripts` updated to read OTPs from the hosted inbox
+
+### Tests
+
+| Test | What it validates |
+|---|---|
+| `email::inbox_create_allocates_address` | New agent gets a unique `<id>@agentkeys-email.io` deterministically derived from its wallet |
+| `email::inbound_lands_in_user_prefix` | SES receives to `agent-X@agentkeys-email.io` → raw MIME in `s3://agentkeys-mail/0xX/agent-X/...` |
+| `email::daemon_reads_own_prefix` | Daemon with `agentkeys_user_wallet=0xA` tag → S3 list/get on `0xA/*` succeeds |
+| `email::daemon_blocked_from_other_prefix` | Daemon with `0xA` tag → S3 get on `0xB/*` returns AccessDenied |
+| `email::dkim_verifies_at_recipient` | Send test message to a Gmail inbox → receiver sees `DKIM-Signature ed25519` header, Gmail reports `dkim=pass` |
+| `email::jwt_without_wallet_claim_denied` | JWT missing `agentkeys_user_wallet` → `sts:AssumeRoleWithWebIdentity` fails per role trust policy |
+| `email::audit_emitted_on_mint` | Every SES/S3 credential mint emits a chain extrinsic with `(child, scope, operation, timestamp)` |
+| `email::grant_revocation_propagates` | Revoke user's email grant → next mint attempt fails within ≤6s |
+
+### Reviewer E2E Checklist
+
+```bash
+# Create an agent; it has an email address
+agentkeys agent create my-agent
+# → prints: "my-agent has inbox abc123@agentkeys-email.io"
+
+# Send mail to it from outside
+echo "test body" | mail -s "hello" abc123@agentkeys-email.io
+
+# Agent reads its inbox
+agentkeys run my-agent -- \
+  claude-mcp-client email.list | jq
+# → shows the hello message
+
+# Agent sends mail
+agentkeys run my-agent -- \
+  claude-mcp-client email.send \
+    --to me@example.com --subject "reply" --text "hi"
+
+# Audit trail on chain
+agentkeys usage my-agent --filter email
+# → shows mint events for s3.read and ses.send
+```
+
+### Stage Contract
+
+- **Inputs:** Stages 0-5a complete; TEE integration available (chain read/write + sealed key derivation); TokenAuthority trait stable.
+- **Outputs:** Every AgentKeys user has a working email inbox on `agentkeys-email.io`. No user-side setup required. Per-user isolation enforced cryptographically.
+- **Done when:** All 8 tests pass. An agent created via the CLI has a functioning inbox that can send/receive mail with real MTAs. Inbound deliverability verified against at least Gmail + Outlook.
+
+### Deferred to Stage 7+ (not blocking Stage 6)
+
+- Bring-your-own custom domain (`bots.theircompany.com`) — same architecture, different domain id in the DKIM derivation path
+- Bring-your-own Workspace (DWD path) — existing `docs/stage5-workspace-email-setup.md` becomes the runbook; not the default
+- Email drafts as HITL primitive (daemon-side, per our revised broker-not-proxy thesis)
+- Advanced features: labels, threads, allow/block lists — implemented daemon-side in MCP; not server features
+
+---
+
+## Stage 7: Generalized OIDC Provider (universal federation)
+
+**Status (2026-04-19):** follows Stage 6.
+
+**Goal:** `https://oidc.agentkeys.dev` is publicly documented as a universal OIDC identity provider. Any cloud or service that accepts external OIDC federation (AWS IAM, GCP Workload Identity Federation, Azure AD, Snowflake External OAuth, Ali Cloud RAM, Kubernetes, etc.) trusts our TEE-signed JWTs. Advanced bring-your-own paths (custom AWS account, custom GCP project, custom GitHub org) become possible by registering our issuer once per user.
+
+**Why this is Stage 7:** Stage 6 delivers the hosted-default path using OIDC federation inside our own AWS account. Stage 7 generalizes that capability as a public primitive — the same TEE-derived ES256 issuer key now federates into any user's or organization's cloud account without additional key material.
+
+### Architecture summary
+
+See [`wiki/oidc-federation.md`](../../../wiki/oidc-federation.md) for the full design. High-level:
+
+1. **OIDC issuer endpoint** — stable HTTPS URL `https://oidc.agentkeys.dev` with Let's Encrypt cert, static `/.well-known/openid-configuration` and `/.well-known/jwks.json` served by a thin proxy.
+2. **One signing key** — ES256 at `derive("oidc/issuer/v1")`, reused from Stage 6. No new key material.
+3. **Per-consumer trust registration** — each user / org registers our OIDC issuer once in their cloud account (AWS `CreateOpenIDConnectProvider`, GCP `WorkloadIdentityPool`, Ali RAM `CreateOIDCProvider`, etc.) and sets up an IAM role trust policy.
+4. **JWT format is consistent across consumers** — same `sub`, same `aud` varies per consumer, same `agentkeys_*` claim set for tag-based isolation.
+5. **Consumer-side per-user isolation** — each consumer's trust policy conditions on `PrincipalTag` / attribute-mapping from the JWT's `agentkeys_user_wallet` claim.
+
+### Cryptographic trust anchor in Stage 7: URL + TLS + JWKS signature
+
+The trust that AWS / GCP / Ali Cloud place in our JWTs is rooted in:
+
+- **The issuer URL** — `https://oidc.agentkeys.dev` is registered once per consumer as an OIDC provider. The consumer fetches our discovery doc and JWKS from this URL.
+- **The TLS certificate** on that URL — protects the JWKS fetch against on-path attackers. Consumer libraries typically also validate that the cert chains to a trusted root CA.
+- **The JWKS signature** — each JWT is signed with `derive("oidc/issuer/v1")` (ES256); consumers verify the signature using the current JWK served at the URL.
+
+**Hardening we ship with Stage 7 (all standard belt-and-suspenders, zero blockchain dependency):**
+
+- **AWS OIDC thumbprint pinning** — register the TLS cert's SHA-1 thumbprint on each consumer's AWS OIDC provider. Reduces the attack surface from "any CA" to "our specific cert." Documented in the AWS registration runbook and emitted by `agentkeys oidc register aws`.
+- **CAA DNS records** on `agentkeys.dev` — only whitelisted CAs may issue for the domain.
+- **DNSSEC** where the registrar supports it.
+- **Short-lived JWTs (≤5 min `exp`)** — bounds a forged JWT's useful window to minutes even if the URL is compromised mid-flight.
+- **Short `Cache-Control` on the JWKS URL** — our published cache directive is short; AWS's JWKS cache is several hours by default, which we accept in Stage 7 and tighten via Stage 7b.
+- **Optional `sub`-pattern pinning** by relying parties is **informational-by-default** — the canonical trust-policy examples in [`wiki/tag-based-access.md`](../../../wiki/tag-based-access.md) pin on the issuer URL plus claim conditions (`agentkeys_user_wallet`, `agentkeys_operation`); `mrenclave`/`mrsigner` pinning is presented as an opt-in hardening with a documented rotation cost.
+
+**What this explicitly does *not* defend against in Stage 7 alone:** compromise of the issuer URL itself — DNS hijack, CA misissuance, hosting takeover, or deploy-pipeline compromise. An attacker who controls the URL can replace the JWKS and mint arbitrary JWTs. Stage 7b below is the defense-in-depth layer that collapses the blast window for this class of attack from indefinite to seconds.
+
+### Crates / Packages
+
+- Primarily **operator/documentation work** — the TEE signing path already exists from Stage 6. Stage 7 adds:
+- `agentkeys-oidc-registration-cli` (new) — CLI commands that emit ready-to-paste configuration snippets for each major cloud:
+  - `agentkeys oidc register aws --account <id> --region <r>` → prints the AWS CLI commands + JSON trust policy
+  - `agentkeys oidc register gcp --project <id>` → prints the gcloud commands for Workload Identity Pool
+  - `agentkeys oidc register alicloud --account <id>` → prints ali CLI commands
+  - `agentkeys oidc register github-app` → registers a new GitHub App installation path using derived ECDSA app key
+
+### Deliverables
+
+- [ ] `https://oidc.agentkeys.dev` publicly reachable, stable, documented
+- [ ] Discovery doc + JWKS published and cacheable; rotation procedure documented
+- [ ] AWS IAM OIDC registration runbook (for operators' own AWS accounts)
+- [ ] GCP Workload Identity Federation registration runbook
+- [ ] Ali Cloud RAM OIDC provider registration runbook
+- [ ] Azure AD Federated Credential registration runbook
+- [ ] `agentkeys-oidc-registration-cli` with four `register` subcommands
+- [ ] Integration tests: end-to-end credential mint for each of the four clouds
+- [ ] GitHub App (`AgentKeys Memory`) registered, ECDSA app key derived at `derive("github-app/v1")`, installation-token minting path
+- [ ] Public documentation: "How to connect your AWS account to AgentKeys"
+
+### Tests
+
+| Test | What it validates |
+|---|---|
+| `oidc::discovery_doc_valid` | `curl https://oidc.agentkeys.dev/.well-known/openid-configuration` returns valid OIDC metadata |
+| `oidc::jwks_served` | JWKS endpoint returns current ES256 public key with correct `kid` |
+| `oidc::aws_federation_end_to_end` | TEE-minted JWT exchanged at AWS STS → usable temp creds → target S3 op succeeds |
+| `oidc::gcp_federation_end_to_end` | Same flow via GCP Workload Identity Federation → GCS op succeeds |
+| `oidc::alicloud_federation_end_to_end` | Same via Ali Cloud RAM → OSS op succeeds |
+| `oidc::azure_federation_end_to_end` | Same via Azure AD Federated Credential |
+| `oidc::key_rotation_dual_key_window` | Both v1 and v2 keys in JWKS during rotation window; JWTs signed by either accepted |
+| `oidc::tag_claim_required_for_tagged_role` | JWT without `agentkeys_user_wallet` claim → role assumption denied where bucket policy requires tag |
+| `github_app::installation_token_mint` | TEE signs app-level JWT with derived ECDSA → GitHub returns installation token |
+| `registration_cli::aws_commands_executable` | `agentkeys oidc register aws ...` output runs on a fresh AWS account and registers successfully |
+
+### Reviewer E2E Checklist
+
+```bash
+# Register our OIDC provider in a fresh test AWS account
+agentkeys oidc register aws --account 999999999999 --region us-east-1
+# → prints commands; run them; IAM provider `oidc.agentkeys.dev` shows up
+
+# Create a role in that AWS account trusting our provider with PrincipalTag condition
+# (commands included in the CLI output)
+
+# Demonstrate federation from an agent
+agentkeys run test-agent -- \
+  aws s3 ls s3://their-bucket/
+# → succeeds; CloudTrail shows the assumed role with the session tag
+
+# Rotate the issuer key; verify zero-downtime
+agentkeys oidc rotate --window 24h
+# → JWKS now has both v1 and v2; new JWTs signed with v2
+
+# Install the GitHub App on a test org
+# (via GitHub UI)
+agentkeys run test-agent -- \
+  claude-mcp-client github.list_repos --owner testorg
+# → succeeds; mint shows in our audit log
+```
+
+### Stage Contract
+
+- **Inputs:** Stage 6 complete (OIDC issuer key and endpoint exist but are only used internally for our own AWS account).
+- **Outputs:** Our OIDC provider is a publicly documented federation target. Users can plug their own AWS / GCP / Azure / Ali Cloud / GitHub accounts into AgentKeys without giving us static credentials.
+- **Done when:** All 10 tests pass. End-to-end federation verified against at least AWS, GCP, and Ali Cloud. Registration CLI tested by a fresh external operator.
+
+### Deferred past Stage 7
+
+- Enterprise-specific advanced integrations (SAML federation, SCIM provisioning) — tracked in [`docs/spec/post-v0.1-future-work.md`](../post-v0.1-future-work.md) §7
+- Per-tenant OIDC issuer URLs (`oidc.agentkeys.dev/tenant/<id>/`) with isolated issuer keys per tenant — §2.4 of future-work
+- TEE-hosted OIDC endpoint (attestation-rooted TLS, not URL-rooted) — §2.1 of future-work
+- Workload Identity Federation into consumer clouds like Cloudflare, Fly, etc.
+
+---
+
+## Stage 7b: URL-hijack defense (chain-anchored JWKS + watchdog)
+
+**Status (2026-04-20):** one-sprint follow-on to Stage 7. Small, cheap, large security win.
+
+**Goal:** close the gap between "Stage 7 cryptographic trust anchor is URL + TLS + signature" and "we want chain-anchored trust." Specifically: make URL compromise **detectable and revocable in seconds** rather than silently catastrophic. Foreign clouds (AWS / GCP / Ali) still can't speak Substrate, so Stage 7b targets detection + response, not prevention on foreign clouds. Prevention on foreign clouds is [`post-v0.1-future-work.md`](../post-v0.1-future-work.md) §2.1 / §2.3.
+
+**Why this is Stage 7b and not Stage 8:** Stage 7's URL-only trust anchor is the single largest unmitigated class of risk left in the architecture. The fix (one pallet + one watchdog) is ~1 sprint. Deferring past v0.1 leaves a known, understood hole open for the entire v0.1 window. Shipping it inside the v0.1 milestone is cheap insurance.
+
+### Architecture summary
+
+Two new on-chain primitives plus one off-chain watchdog:
+
+1. **`pallet-oidc-pubkeys`** — on-chain authoritative registry of currently valid OIDC-issuer public keys.
+   - Extrinsic: `register_oidc_key(kid, pubkey, attestation_quote, active_from, active_until)` — callable only by the TEE via the existing TEE-submitter pattern.
+   - Extrinsic: `revoke_oidc_key(kid, reason)` — callable by governance (fast-track for incident response).
+   - Query: `active_oidc_keys() → Vec<(kid, pubkey)>`.
+2. **`pallet-enclave-successors`** — on-chain list of authorized MRSIGNERs for MRSIGNER-rotation handoffs (see [`heima-gaps-vs-desired-architecture.md`](../heima-gaps-vs-desired-architecture.md) §9).
+   - Extrinsic: `authorize_mrsigner(mrsigner, effective_from)` — governance-gated.
+   - Query: `authorized_mrsigners() → Vec<MrSigner>`.
+3. **OIDC watchdog** — a small off-chain process that every ~30 s fetches both:
+   - Chain: `pallet-oidc-pubkeys::active_oidc_keys()`.
+   - URL: `https://oidc.agentkeys.dev/.well-known/jwks.json`.
+
+   On mismatch → (a) page on-call, (b) auto-call `aws iam remove-client-id-from-open-id-connect-provider` (or equivalent per cloud) on AgentKeys-owned federation trusts to cut their ability to accept our JWTs immediately, (c) file an on-chain `revoke_oidc_key` extrinsic with reason = `jwks_url_drift_detected`.
+
+4. **Daemon-side dual verification for AgentKeys-owned relying parties.** Our own daemon, before exchanging a JWT at AWS STS against *our* accounts, queries `pallet-oidc-pubkeys` and rejects JWTs whose `kid` is not in `active_oidc_keys()`. Closes the URL-hijack hole entirely for our own infra. Customer BYO accounts still rely on the URL — they benefit from detection (watchdog) but not from dual verification unless they opt in.
+
+### Crates / Packages
+
+- `pallets/oidc-pubkeys/` (new, in the Heima fork) — small pallet; extrinsics + storage + events.
+- `pallets/enclave-successors/` (new) — even smaller; stores the authorized-MRSIGNER list.
+- `crates/agentkeys-oidc-watchdog/` (new) — standalone binary; Substrate RPC client + HTTPS fetcher + alerting + cloud-revocation adapter per cloud.
+- `crates/agentkeys-daemon/` — extend OIDC-JWT-exchange code path with the on-chain kid check (behind feature flag `chain_verified_oidc`, on by default for AgentKeys-owned accounts, off by default for customer BYO accounts).
+- **Mock-side mirrors:** `crates/agentkeys-mock-server/src/handlers/oidc_pubkeys.rs` and `enclave_successors.rs` replicate the two pallets' extrinsics + queries over HTTP so local dev + Stage 4/5 tests don't need a Heima node.
+
+### Deliverables
+
+- [ ] `pallet-oidc-pubkeys` in the Heima fork; extrinsics + storage + events; unit tests
+- [ ] `pallet-enclave-successors`; same shape
+- [ ] Mock-server HTTP endpoints mirroring both pallets, under `/mock/oidc-pubkeys/*` and `/mock/enclave-successors/*`
+- [ ] `agentkeys-oidc-watchdog` binary: chain + URL fetch, mismatch detection, per-cloud revocation adapter (AWS first; GCP / Ali in follow-ups)
+- [ ] Daemon dual-verification code path (`chain_verified_oidc` feature)
+- [ ] Operator runbook: "OIDC URL drift incident response" (detection → revoke in AWS OIDC provider list → rotate cert → re-publish → re-register)
+- [ ] Integration test: simulate URL drift by serving a rogue JWKS on a test endpoint; assert watchdog fires < 60 s; assert AWS revocation succeeds; assert daemon dual-verify rejects rogue JWTs
+
+### Tests
+
+| Test | What it validates |
+|---|---|
+| `pallet::oidc_pubkeys_register_by_tee_only` | Non-TEE submitter cannot call `register_oidc_key`; returns `NotAuthorizedSubmitter`. |
+| `pallet::oidc_pubkeys_query_returns_active_only` | Keys past `active_until` are excluded from `active_oidc_keys()`. |
+| `pallet::enclave_successors_governance_gated` | Non-governance call to `authorize_mrsigner` fails. |
+| `watchdog::detects_jwks_drift_under_60s` | Rogue JWKS served on test URL; watchdog polls; mismatch detected; alert fired; AWS revocation invoked. |
+| `daemon::dual_verify_rejects_unknown_kid` | JWT signed by an off-chain kid is rejected before reaching AWS STS; metric `oidc.dual_verify.rejected` increments. |
+| `daemon::dual_verify_byo_opt_in` | Customer BYO mode (`chain_verified_oidc=false`) passes the JWT through to AWS without the chain check (preserves current Stage 7 behavior). |
+| `mock::oidc_pubkeys_endpoint_parity` | Mock server `/mock/oidc-pubkeys/active` returns the same shape as the pallet query. |
+
+### Reviewer E2E Checklist
+
+```bash
+# Spin up mock chain + mock OIDC URL + watchdog
+cargo run --release -p agentkeys-mock-server &
+cargo run --release -p agentkeys-oidc-watchdog --config harness/watchdog-test.toml &
+
+# Register an OIDC kid on the mock chain
+curl -X POST http://127.0.0.1:8090/mock/oidc-pubkeys/register \
+  -d '{"kid":"v1","pubkey":"...","active_from":0,"active_until":999999999}'
+
+# Serve a matching JWKS on the URL side — watchdog stays silent
+# Flip the URL-side JWKS to a different key — watchdog should alert within 30 s
+python harness/serve-rogue-jwks.py &
+# Expected: within 30 s, watchdog logs "JWKS_URL_DRIFT_DETECTED" and fires the revocation adapter
+
+# Verify daemon dual-verify path
+agentkeys run test-agent -- \
+  aws s3 ls s3://agentkeys-mail/
+# On our own infra: succeeds with chain-verified kid.
+# If rogue JWKS is active and daemon is in chain-verify mode: fails closed with DualVerifyRejected.
+```
+
+### Stage Contract
+
+- **Inputs:** Stage 7 complete (`oidc.agentkeys.dev` live, public, working).
+- **Outputs:** URL-hijack attacks on the JWKS endpoint are detected within 30–60 s and auto-revoked on AgentKeys-owned federation trusts. Our own daemon refuses to exchange JWTs whose kid is not on-chain. `pallet-enclave-successors` is available for the Stage 9 MRSIGNER-rotation procedure.
+- **Done when:** All 7 tests pass. Drift-simulation integration test succeeds end-to-end. Runbook reviewed by security.
+
+### Deferred past Stage 7b
+
+- TEE-hosted OIDC endpoint (prevents compromise instead of just detecting it) — [`post-v0.1-future-work.md`](../post-v0.1-future-work.md) §2.1
+- On-chain TLS cert fingerprints with dual-update requirement — §2.3
+- Per-tenant OIDC issuer keys — §2.4
+- GCP + Ali revocation adapters in the watchdog (AWS-first for v0.1; others follow)
+
+---
+
+## Stage 6 (POSTPONED; original scope: npm Package + DX Polish)
 
 > **Status (2026-04-16 CEO review): POSTPONED past v0.** v0 ships at Stage 7 with `cargo install` and GH-release prebuilt binaries as the distribution path. npm packaging, `install.sh`, README polish, and the remaining DX artifacts move to the v0.1 milestone alongside Stage 5b and Stage 8. Stage 6 content below is preserved as-is for v0.1 execution — no scope change to Stage 6 itself, only a dependency relaxation.
 >
@@ -881,7 +1216,7 @@ npx @agentkeys/daemon            # → starts daemon, shows pair code
 
 ---
 
-## Stage 7: Full E2E Integration + MCP Auth Demo
+## Stage 7 (POSTPONED; original scope: Full E2E Integration + MCP Auth Demo)
 
 **Goal:** The complete system works end-to-end across all components. Includes the MCP auth demo (wrapping MCP servers with `agentkeys run`).
 
@@ -1010,7 +1345,7 @@ Additionally verify:
 
 ---
 
-## Stage 8: Production Hardening (Post-MVP)
+## Stage 8 (POSTPONED; original scope: Production Hardening, Post-MVP)
 
 **Goal:** Close the daemon-side memory hygiene gaps not covered by Stage 3 kernel hardening, plus CLI defensive features and credential lifecycle controls. Stage 3 protects against external probes (ptrace, `/proc/pid/mem`, swap, core dumps); Stage 8 protects against internal bugs and reduces the in-memory exposure window for credential bytes that flow through the daemon between backend fetch and agent delivery.
 
@@ -1156,7 +1491,7 @@ agentkeys read $WALLET openrouter
 
 ---
 
-## Stage 9: v0.1 Heima Migration Design Decisions (Holding Pen)
+## Stage 9 (POSTPONED; original scope: v0.1 Heima Migration Design Decisions Holding Pen)
 
 **Purpose:** Capture v0.1-specific design decisions that were resolved during v0 planning so they don't have to be rediscovered when migration begins. This is **not a formal stage** in the sense of Stages 0-8 — no harness deliverables, no unit tests, no stage-done script. It is a design notes section for things that were decided now but will be executed later.
 
