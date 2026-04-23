@@ -5,6 +5,7 @@ Rust monorepo with Cargo workspace. See `docs/spec/architecture.md` for componen
 See `docs/spec/credential-backend-interface.md` for the CredentialBackend trait contract (15 methods).
 See `docs/spec/plans/development-stages.md` for the 8-stage build plan.
 See `docs/spec/plans/execution-plan.md` for the orchestration runbook (ralph, team, ultraqa).
+Do not read folder `docs/archived`
 
 ## Version Control
 Use `jj` (Jujutsu) for all version control. Never use raw `git` commands.
@@ -51,3 +52,4 @@ cargo test -p agentkeys-daemon -p agentkeys-mcp
 cargo test -p agentkeys-provisioner
 npm test --prefix provisioner-scripts
 ```
+

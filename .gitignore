@@ -11,6 +11,20 @@ AWSCLIV2.pkg
 # Local developer secrets — template is checked in as .env.example.
 agentkeys-secrets.env
 
+# Stage 6 runbook one-shot JSON artifacts. CLAUDE.md mandates the
+# `jq -n --arg` → `$(...)` pattern piped directly into the AWS CLI call
+# (no file on disk). If any of these reappear, someone reverted to the
+# heredoc anti-pattern — delete and fix the runbook usage.
+/bucket-policy*.json
+/daemon-user-inline.json
+/dns-change.json
+/probe*.mjs
+/probe*.js
+
+# tsx double-nested cwd artefact — scrapers launched from the wrong
+# working dir land here. Harmless but noisy; ignore unconditionally.
+provisioner-scripts/provisioner-scripts/
+
 # agentkeys-workflow-collection: per-run recordings (~50MB each, binary
 # trace.zips don't delta-compress). Keep locally; commit only curated
 # reference recordings via explicit negations below.
