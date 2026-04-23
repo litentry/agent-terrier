@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agentkeys_cli::{
-    cmd_init, cmd_link, cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_store,
-    cmd_teardown, cmd_usage, CommandContext,
+    cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_link, cmd_provision, cmd_read, cmd_revoke,
+    cmd_run, cmd_scope, cmd_store, cmd_teardown, cmd_usage, CommandContext,
 };
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::session_store::SessionStore;
@@ -1059,6 +1059,8 @@ impl CredentialBackend for ProvisionTestBackend {
     async fn resolve_identity(&self, _: &Session, _: &str) -> Result<agentkeys_types::WalletAddress, agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn get_scope(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<Option<agentkeys_types::Scope>, agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn update_scope(&self, _: &Session, _: &agentkeys_types::WalletAddress, _: &agentkeys_types::Scope) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn provision_inbox(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<agentkeys_types::InboxAddress, agentkeys_core::backend::BackendError> { unimplemented!() }
+    async fn list_inboxes(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<Vec<agentkeys_types::InboxAddress>, agentkeys_core::backend::BackendError> { unimplemented!() }
 }
 
 // Test: provision masked output — subprocess emits a success key; stdout must be masked
@@ -1268,4 +1270,49 @@ async fn cmd_scope_add_remove_overlap_errors() {
             || err.contains("conflict"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn inbox_provision_returns_address() {
+    let backend = create_test_backend();
+    let (store, _tmp) = test_store();
+    let (_wallet, session) = init_session_with_store(&backend, &store).await;
+    let ctx = ctx_with_session(backend, session, store);
+
+    let result = cmd_inbox_provision(&ctx, None).await.unwrap();
+    assert!(
+        result.starts_with("bot-") && result.contains('@'),
+        "expected bot-*@domain address, got: {result}"
+    );
+}
+
+#[tokio::test]
+async fn inbox_list_after_provision_returns_one_entry() {
+    let backend = create_test_backend();
+    let (store, _tmp) = test_store();
+    let (_wallet, session) = init_session_with_store(&backend, &store).await;
+    let ctx = ctx_with_session(backend, session, store);
+
+    let provisioned = cmd_inbox_provision(&ctx, None).await.unwrap();
+    let listed = cmd_inbox_list(&ctx, None).await.unwrap();
+
+    let lines: Vec<&str> = listed.lines().collect();
+    assert_eq!(lines.len(), 1, "expected 1 inbox, got: {listed}");
+    assert_eq!(lines[0], provisioned.trim(), "listed address does not match provisioned");
+}
+
+#[tokio::test]
+async fn inbox_list_accumulates_multiple_provisions() {
+    let backend = create_test_backend();
+    let (store, _tmp) = test_store();
+    let (_wallet, session) = init_session_with_store(&backend, &store).await;
+    let ctx = ctx_with_session(backend, session, store);
+
+    cmd_inbox_provision(&ctx, None).await.unwrap();
+    cmd_inbox_provision(&ctx, None).await.unwrap();
+    cmd_inbox_provision(&ctx, None).await.unwrap();
+
+    let listed = cmd_inbox_list(&ctx, None).await.unwrap();
+    let lines: Vec<&str> = listed.lines().collect();
+    assert_eq!(lines.len(), 3, "expected 3 inboxes, got: {listed}");
 }

@@ -100,6 +100,110 @@ External SMTP  →  SES MX (inbound-smtp.us-east-1.amazonaws.com)
 
 Daemon side (not our concern, but for completeness): the daemon polls its S3 prefix or subscribes to an SNS topic SES writes to; it lists/gets objects with minted creds and parses MIME locally.
 
+## 6.5 Architecture topology — singleton resources, logical per-user separation
+
+Reference for engineers reading this spec who want to know *how the AWS resources actually map to AgentKeys users at runtime*. The whole stack is **singleton on the AWS side**: one IAM user, one role, one bucket, one SES domain identity, one wildcard receipt rule. Per-user state lives in our DB / on chain (the throwaway address) and as an S3 object key (`inbound/<msg_id>.eml`). No AWS resource is ever provisioned per AgentKeys user.
+
+### Resource graph
+
+```mermaid
+graph TB
+    subgraph EXT[" External "]
+        Sender[Sender MTA]
+        Recip[Recipient MTA]
+    end
+    subgraph DNS[" Route 53 "]
+        Records["MX → SES inbound<br/>3× DKIM CNAMEs<br/>SPF + DMARC TXT"]
+    end
+    subgraph SES[" AWS SES "]
+        Inbound["Inbound endpoint<br/>+ wildcard receipt rule"]
+        Outbound["ses:SendRawEmail<br/>+ AWS-managed DKIM signing"]
+    end
+    subgraph S3[" S3 "]
+        Bucket["Singleton bucket<br/>+ bucket policy<br/>+ 30d inbound/* lifecycle"]
+    end
+    subgraph IAM[" IAM "]
+        User["Singleton user agentkeys-daemon<br/>inline: sts:AssumeRole only"]
+        Role["Singleton role agentkeys-agent<br/>inline: s3:Get/List + ses:SendRawEmail"]
+    end
+    subgraph APP[" Daemon "]
+        Daemon[provisioner-scripts ses-s3 backend]
+    end
+    Sender --> Records
+    Records -.-> Sender
+    Sender --> Inbound
+    Inbound --> Bucket
+    Daemon --> User
+    User --> Role
+    Role -.-> Daemon
+    Daemon --> Bucket
+    Daemon --> Outbound
+    Outbound --> Recip
+```
+
+### What scales how
+
+| Singleton (one per AWS account) | Per AgentKeys user (logical) |
+|---|---|
+| 1 IAM user (long-lived access keys) | N throwaway inbox addresses (DB / on-chain) |
+| 1 IAM role (1h temp creds via AssumeRole) | N raw `.eml` objects under `inbound/` (lifecycle-capped) |
+| 1 S3 bucket | |
+| 1 SES domain identity | |
+| 1 SES wildcard receipt rule | |
+
+### Why we deliberately avoid per-user IAM
+
+AWS hard quotas:
+
+| Resource | Default quota / account | What "per AgentKeys user" gives us |
+|---|---|---|
+| IAM users | 5,000 | Hard cap at 5k AgentKeys users |
+| IAM roles | 1,000 | Hard cap at 1k |
+| S3 buckets | 100 (raise to 1k) | Hard cap at 1k |
+
+Singleton design moves the bottleneck from IAM (capped) to SES inbound rate (60 msg/sec/region default, raisable). Throughput math at 10k users × 5 throwaway inboxes × 2 verification mails: ~100k objects steady-state with 30d TTL = ~500MB total = ~$0.01/month S3 storage cost. Scales to millions without IAM changes.
+
+### IAM trust chain
+
+```
+operator's long-lived AWS access keys (in 1Password)
+  ↓ injected to daemon as AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+IAM user "agentkeys-daemon"
+  ├─ inline policy: only sts:AssumeRole on the role below
+  ↓
+sts:AssumeRole → temp creds (1h, auto-refreshed)
+  ↓
+IAM role "agentkeys-agent"
+  ├─ trust policy: trusts agentkeys-daemon (the user above)
+  ├─ inline policy:
+  │   ├─ s3:ListBucket on agentkeys-mail-${ACCOUNT_ID}
+  │   ├─ s3:GetObject on agentkeys-mail-${ACCOUNT_ID}/*
+  │   └─ ses:SendRawEmail on identity/<DOMAIN>
+  ↓
+runtime API calls: GetObject (read inbound mail) + SendRawEmail (send outbound)
+```
+
+The split exists so the long-lived secret (user access key) only does ONE thing — assume the role. The role holds all real permissions and only hands them out as 1h temp creds. Compromise of the access key is bounded to "attacker can call AssumeRole on the role"; rotating the key is `aws iam create-access-key` + delete-old, no role-side change.
+
+### Stage 6 vs Stage 7 — same singleton design, different per-user isolation
+
+| | Stage 6 interim (shipped) | Stage 7 target |
+|---|---|---|
+| Bucket policy | `AllowDaemonRead`: role reads whole bucket | `AllowDaemonReadOwnPrefix`: role reads only `${aws:PrincipalTag/agentkeys_user_wallet}/*` |
+| Per-user enforcement | App-side: daemon filters by `To:` header | Cloud-side: S3 returns AccessDenied on cross-prefix reads |
+| Auth flow | `sts:AssumeRole` from IAM user (static keys) | `sts:AssumeRoleWithWebIdentity` from OIDC JWT |
+| AWS resource count | Same singletons | Same singletons (no new IAM per user) |
+| Failure mode if app has a bug | User A could read user B's mail | AccessDenied from cloud — bug caught at the boundary |
+| Where to read more | This spec + [`docs/stage6-aws-setup.md`](../stage6-aws-setup.md) | [`docs/stage7-wip.md`](../stage7-wip.md), §10.4 PrincipalTag pattern below |
+
+The migration from Stage 6 to Stage 7 is mostly a trust-policy rewrite + a `Resource`/`Condition` swap on the bucket policy (see §10.4). No new IAM resources, no per-user provisioning. Singleton stays singleton.
+
+### What this spec does NOT cover (intentionally)
+
+- **Operator setup specifics** (account ID, hosted zone ID, exact ARNs) live in [`docs/stage6-aws-setup.md`](../stage6-aws-setup.md), the operator-facing runbook. Reference that for the actual AWS CLI calls.
+- **PrincipalTag enforcement details** are in §10.4 below + [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md).
+- **OIDC issuer key derivation + JWKS** are in §10.5 + [`wiki/oidc-federation.md`](../../wiki/oidc-federation.md).
+
 ## 7. Send pipeline (outbound)
 
 Daemon mints credentials once; uses them to call SES directly. Our backend's involvement per-send: zero after the mint.

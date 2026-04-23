@@ -182,7 +182,7 @@ pub async fn open_auth_request(
 
     // Derive pair code uniquely: use nonce + request_details hash to avoid collisions
     let mut hasher = Sha256::new();
-    hasher.update(&nonce);
+    hasher.update(nonce);
     hasher.update(&request_details);
     let hash = hasher.finalize();
     let pair_code = hex::encode(&hash[..4]).to_uppercase();
@@ -193,7 +193,7 @@ pub async fn open_auth_request(
 
     // Compute nonce hash for the response
     let mut nonce_hasher = Sha256::new();
-    nonce_hasher.update(&nonce);
+    nonce_hasher.update(nonce);
     let nonce_hash = nonce_hasher.finalize().to_vec();
 
     let db = state.db.lock().unwrap();
@@ -400,7 +400,7 @@ pub async fn approve_auth_request(
     hasher.update(&request_details);
     hasher.update(&child_pubkey);
     hasher.update(session.token.as_bytes());
-    hasher.update(&created_at.to_be_bytes());
+    hasher.update(created_at.to_be_bytes());
     hasher.update(&nonce);
     let hash_bytes = hasher.finalize();
 

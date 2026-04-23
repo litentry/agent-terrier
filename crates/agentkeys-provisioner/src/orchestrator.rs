@@ -1,14 +1,14 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_types::{ProvisionEvent, ServiceName, Session, TripwireKind, WalletAddress};
 
 use crate::error::{ProvisionError, ProvisionResult};
 use crate::metrics::{self, ProvisionMetric, VerificationResultLabel};
-use crate::subprocess::{spawn_and_collect, SubprocessConfig};
+use crate::subprocess::{spawn_and_collect, SubprocessConfig, SubprocessOutcome};
 
 #[derive(Debug, Clone)]
 pub struct ActiveProvision {
@@ -84,6 +84,37 @@ impl Drop for ProvisionGuard {
             *guard = None;
         }
     }
+}
+
+/// Best-effort dump of subprocess output to `~/.agentkeys/logs/provision-<service>-<ts>.log`.
+/// Returns the file path if the write succeeded. Never errors — failure to write the log
+/// must not mask the underlying provision failure.
+fn write_provision_log(service: &str, outcome: &SubprocessOutcome) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok().map(PathBuf::from)?;
+    let dir = home.join(".agentkeys").join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let safe_service: String = service
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let path = dir.join(format!("provision-{}-{}.log", safe_service, ts));
+
+    let mut body = String::new();
+    body.push_str(&format!(
+        "service: {}\nexit_code: {:?}\nevents_emitted: {}\n\n=== subprocess stdout events ===\n",
+        service,
+        outcome.exit_code,
+        outcome.events.len()
+    ));
+    for ev in &outcome.events {
+        body.push_str(&format!("{:?}\n", ev));
+    }
+    body.push_str("\n=== subprocess stderr ===\n");
+    body.push_str(&outcome.stderr);
+
+    std::fs::write(&path, body).ok()?;
+    Some(path)
 }
 
 /// Returns first 8 chars + `****...` + last 4. For keys shorter than 12 chars returns `****`.
@@ -190,7 +221,26 @@ pub async fn run_provision(
     }
 
     let raw_key = api_key.ok_or_else(|| {
-        ProvisionError::Internal("subprocess ended without terminal event".to_string())
+        let stderr_tail: String = outcome
+            .stderr
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let log_hint = match write_provision_log(service, &outcome) {
+            Some(path) => format!("full log: {}", path.display()),
+            None => "full log: (unable to write ~/.agentkeys/logs — check HOME + permissions)".to_string(),
+        };
+        ProvisionError::Internal(format!(
+            "subprocess ended without terminal event (exit {:?}). {}. stderr tail:\n{}",
+            outcome.exit_code,
+            log_hint,
+            if stderr_tail.is_empty() { "(empty)" } else { stderr_tail.as_str() }
+        ))
     })?;
 
     let masked = mask_key(&raw_key);
@@ -338,6 +388,8 @@ mod orchestrate {
         async fn resolve_identity(&self, _: &Session, _: &str) -> Result<WalletAddress, BackendError> { unimplemented!() }
         async fn get_scope(&self, _: &Session, _: &WalletAddress) -> Result<Option<Scope>, BackendError> { unimplemented!() }
         async fn update_scope(&self, _: &Session, _: &WalletAddress, _: &Scope) -> Result<(), BackendError> { unimplemented!() }
+        async fn provision_inbox(&self, _: &Session, _: &WalletAddress) -> Result<agentkeys_types::InboxAddress, BackendError> { unimplemented!() }
+        async fn list_inboxes(&self, _: &Session, _: &WalletAddress) -> Result<Vec<agentkeys_types::InboxAddress>, BackendError> { unimplemented!() }
     }
 
     #[tokio::test]

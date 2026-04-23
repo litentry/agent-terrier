@@ -65,7 +65,7 @@ fn cbor_key_bytes(key: &Value) -> Vec<u8> {
     buf
 }
 
-fn sort_map(map: &mut Vec<(Value, Value)>) {
+fn sort_map(map: &mut [(Value, Value)]) {
     map.sort_by(|(a, _), (b, _)| {
         let a_bytes = cbor_key_bytes(a);
         let b_bytes = cbor_key_bytes(b);

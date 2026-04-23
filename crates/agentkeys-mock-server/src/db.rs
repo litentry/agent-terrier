@@ -80,6 +80,23 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             created_at INTEGER NOT NULL,
             PRIMARY KEY (wallet_address, identity_type, identity_value)
         );
+
+        CREATE TABLE IF NOT EXISTS inboxes (
+            address TEXT PRIMARY KEY,
+            agent_wallet TEXT NOT NULL REFERENCES accounts(wallet_address),
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS inbox_messages (
+            msg_id TEXT PRIMARY KEY,
+            address TEXT NOT NULL REFERENCES inboxes(address),
+            from_addr TEXT NOT NULL,
+            subject TEXT,
+            body TEXT,
+            received_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_inbox_msgs_addr_time ON inbox_messages(address, received_at DESC);
         ",
     )
 }

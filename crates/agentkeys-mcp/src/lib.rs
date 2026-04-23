@@ -345,6 +345,8 @@ mod tests {
         async fn resolve_identity(&self, _: &Session, _: &str) -> Result<WalletAddress, BackendError> { unimplemented!() }
         async fn get_scope(&self, _: &Session, _: &WalletAddress) -> Result<Option<Scope>, BackendError> { unimplemented!() }
         async fn update_scope(&self, _: &Session, _: &WalletAddress, _: &Scope) -> Result<(), BackendError> { unimplemented!() }
+        async fn provision_inbox(&self, _: &Session, _: &WalletAddress) -> Result<agentkeys_types::InboxAddress, BackendError> { unimplemented!() }
+        async fn list_inboxes(&self, _: &Session, _: &WalletAddress) -> Result<Vec<agentkeys_types::InboxAddress>, BackendError> { unimplemented!() }
     }
 
     fn test_session() -> Session {

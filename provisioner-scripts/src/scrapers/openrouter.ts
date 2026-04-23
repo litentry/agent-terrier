@@ -1,5 +1,6 @@
+import { fileURLToPath } from "url";
 import type { Browser } from "playwright";
-import { emit } from "../types.js";
+import { emit, type ProvisionEvent } from "../types.js";
 import type { VerifyResult } from "../lib/verify.js";
 import { signupEmailOtp } from "../patterns/signup_email_otp.js";
 
@@ -35,7 +36,13 @@ const EMAIL_SUBJECT_REGEX = /openrouter/i;
 const EMAIL_CODE_REGEX = /(\d{6})/;
 const EMAIL_TIMEOUT_MS = 60_000;
 
-const OPENROUTER_EMAIL = process.env["AGENTKEYS_EMAIL_USER"] ?? "user@example.com";
+// IMAP login — must be the canonical Gmail address (plus-addressing aliases
+// are not valid IMAP logins).
+const IMAP_LOGIN_EMAIL = process.env["AGENTKEYS_EMAIL_USER"] ?? "user@example.com";
+// What we type into the service's signup form. Defaults to the IMAP login but
+// can be overridden (e.g. plus-addressed `you+or-<ts>@gmail.com`) so returning
+// users can mint a fresh account per run while reusing one real inbox.
+const SIGNUP_EMAIL = process.env["AGENTKEYS_SIGNUP_EMAIL"] ?? IMAP_LOGIN_EMAIL;
 
 export async function runOpenRouterScraper(opts: OpenRouterScraperOpts): Promise<void> {
   const signupUrl =
@@ -62,7 +69,7 @@ export async function runOpenRouterScraper(opts: OpenRouterScraperOpts): Promise
         createKeyButtonSelector: CREATE_KEY_BUTTON_SELECTOR,
         keyRevealSelector: KEY_REVEAL_SELECTOR,
         emailFetcher: opts.emailFetcher,
-        emailAddress: OPENROUTER_EMAIL,
+        emailAddress: SIGNUP_EMAIL,
         emailFromRegex: EMAIL_FROM_REGEX,
         emailSubjectRegex: EMAIL_SUBJECT_REGEX,
         emailCodeRegex: EMAIL_CODE_REGEX,
@@ -108,25 +115,59 @@ export async function runOpenRouterScraper(opts: OpenRouterScraperOpts): Promise
   }
 }
 
-export default async function main(): Promise<void> {
-  const { chromium } = await import("playwright");
-  const { fetchVerificationCode } = await import("../lib/email.js");
-  const { verify } = await import("../lib/verify.js");
+// Emit a terminal event and wait for stdout to flush before exiting. Using a
+// bare `process.exit` can drop buffered writes to the parent's pipe — which is
+// exactly how the orchestrator ends up reporting "subprocess ended without
+// terminal event" when something upstream of the scraper's try/catch throws.
+function emitAndExit(event: ProvisionEvent, exitCode: number): void {
+  process.stdout.write(JSON.stringify(event) + "\n", () => process.exit(exitCode));
+}
 
-  const browser = await chromium.launch({ headless: true });
+export default async function main(): Promise<void> {
   try {
-    await runOpenRouterScraper({
-      browser,
-      emailFetcher: (from, subject, codeRegex, timeoutMs) =>
-        fetchVerificationCode({ from, subject, codeRegex, timeoutMs }),
-      verifier: verify,
-    });
+    const { chromium } = await import("playwright");
+    const { fetchVerificationCode } = await import("../lib/email.js");
+    const { verify } = await import("../lib/verify.js");
+
+    const browser = await chromium.launch({ headless: true });
+    try {
+      await runOpenRouterScraper({
+        browser,
+        emailFetcher: (from, subject, codeRegex, timeoutMs) =>
+          fetchVerificationCode({ from, subject, codeRegex, timeoutMs }),
+        verifier: verify,
+      });
+    } finally {
+      await browser.close();
+    }
   } catch (err) {
     if (err instanceof ScraperAbortError) {
-      process.exit(1);
+      // Tripwire / expected-error path: the scraper already emitted a terminal
+      // event (tripwire or error) before throwing. Just propagate the exit.
+      emitAndExit(
+        { type: "error", code: "internal", details: `abort: ${err.message}` },
+        1,
+      );
+      return;
     }
-    throw err;
-  } finally {
-    await browser.close();
+    // Unhandled path: a throw that escaped the scraper's try/catch — e.g.
+    // Playwright browser-launch failure, IMAP connection refused, dynamic
+    // import failure, unhandled rejection in the pattern. Without this
+    // catch-all the orchestrator sees a naked process exit and reports
+    // "subprocess ended without terminal event" with no cause.
+    const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    emitAndExit({ type: "error", code: "internal", details: `unhandled: ${msg}` }, 2);
   }
+}
+
+// Entry-point guard. Invoke main() only when this file is the direct script
+// target (e.g. `npx tsx src/scrapers/openrouter.ts`). When the module is
+// imported by test files that only use named exports like
+// `runOpenRouterScraper`, main() must NOT run — otherwise tests would launch
+// a real browser and hit real OpenRouter. Without this block, the provisioner
+// subprocess just loads the module, reaches EOF, and exits 0 with no events —
+// exactly the "exit_code: Some(0) / events_emitted: 0" failure mode.
+const isEntry = fileURLToPath(import.meta.url) === process.argv[1];
+if (isEntry) {
+  void main();
 }

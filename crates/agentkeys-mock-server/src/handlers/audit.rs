@@ -3,7 +3,6 @@ use axum::{
     http::HeaderMap,
     Json,
 };
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
 

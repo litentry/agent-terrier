@@ -896,6 +896,8 @@ See `docs/spec/ses-email-architecture.md` for the full spec. High-level:
 - [ ] Chain extrinsic pallet for `CredentialMinted` audit events
 - [ ] Daemon MCP tools wired to real minted creds
 - [ ] Stage 5's `provisioner-scripts` updated to read OTPs from the hosted inbox
+- [ ] **Throwaway inbox provisioning API** — on-demand mint of a fresh `<id>@agentkeys-email.io` address per caller. Acceptance: `POST /inbox/provision` (or `agentkeys inbox provision`) returns `{address, agent_wallet}` where `address` is a new locally-unique local-part under our hosted domain, Clerk-normalization-proof (distinct local-part, not plus-alias suffixes). Readable via the same `fetchVerificationCode`-style API as Stage 5, backed by the SES→S3→TEE-decrypt chain. Auto-cleanup or audit-logged revocation after the inbox is done serving signups.
+- [ ] **Stage 5b live-demo re-run against throwaway inbox** — once throwaway-inbox provisioning lands, the Stage 5b CDP scraper (`provisioner-scripts/src/scrapers/openrouter-cdp.ts`) is re-tested end-to-end: provision a throwaway `bot-N@agentkeys-email.io`, run the scraper with that as `AGENTKEYS_SIGNUP_EMAIL`, get a verified `sk-or-v1-*` key back. This closes the [`docs/manual-test-stage5.md`](../../../docs/manual-test-stage5.md) §3 pickup item. (Clerk rejects the Workspace-plus-alias flow as duplicate; only distinct local-parts work.)
 
 ### Tests
 
@@ -909,6 +911,8 @@ See `docs/spec/ses-email-architecture.md` for the full spec. High-level:
 | `email::jwt_without_wallet_claim_denied` | JWT missing `agentkeys_user_wallet` → `sts:AssumeRoleWithWebIdentity` fails per role trust policy |
 | `email::audit_emitted_on_mint` | Every SES/S3 credential mint emits a chain extrinsic with `(child, scope, operation, timestamp)` |
 | `email::grant_revocation_propagates` | Revoke user's email grant → next mint attempt fails within ≤6s |
+| `email::throwaway_inbox_provisioning` | `agentkeys inbox provision` returns a unique `<id>@agentkeys-email.io` address (distinct local-part per call, not plus-alias). A message sent to that address lands in `s3://agentkeys-mail/<wallet>/<address>/*.eml` and is readable via `fetchVerificationCode`. |
+| `email::stage5b_live_demo_rerun` | After a throwaway inbox is provisioned and set as `AGENTKEYS_SIGNUP_EMAIL`, the Stage 5b CDP scraper completes end-to-end: signup → Turnstile passes → OTP fetched → key minted → `agentkeys read openrouter` returns a `sk-or-v1-*` string → `curl /api/v1/models` returns HTTP 200. |
 
 ### Reviewer E2E Checklist
 

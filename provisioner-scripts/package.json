@@ -11,7 +11,8 @@
   "dependencies": {
     "playwright": "^1.49.0",
     "imapflow": "^1.0.190",
-    "node-html-parser": "^7.0.1"
+    "node-html-parser": "^7.0.1",
+    "@aws-sdk/client-s3": "^3.0.0"
   },
   "devDependencies": {
     "vitest": "^2.1.0",

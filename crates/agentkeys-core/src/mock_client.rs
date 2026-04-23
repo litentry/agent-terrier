@@ -4,8 +4,8 @@ use serde_json::{json, Value};
 use crate::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
     AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
-    EncryptedPairPayload, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken,
-    Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
+    EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
+    RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
 pub struct MockHttpClient {
@@ -749,6 +749,60 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
         Ok(())
+    }
+
+    async fn provision_inbox(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<InboxAddress, BackendError> {
+        let resp = self
+            .client
+            .post(self.url("/mock/inbox/provision"))
+            .header("authorization", format!("Bearer {}", session.token))
+            .json(&serde_json::json!({ "agent_id": agent_id.0 }))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let address = body["address"]
+            .as_str()
+            .ok_or_else(|| BackendError::Internal("missing address".into()))?
+            .to_string();
+        Ok(InboxAddress(address))
+    }
+
+    async fn list_inboxes(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<Vec<InboxAddress>, BackendError> {
+        let resp = self
+            .client
+            .get(self.url("/mock/inbox/list"))
+            .query(&[("agent_id", &agent_id.0)])
+            .header("authorization", format!("Bearer {}", session.token))
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_error(resp).await);
+        }
+
+        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let addresses = body
+            .as_array()
+            .ok_or_else(|| BackendError::Internal("expected array".into()))?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| InboxAddress(s.to_string())))
+            .collect();
+        Ok(addresses)
     }
 
     async fn recover_session(

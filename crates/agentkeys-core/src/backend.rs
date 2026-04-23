@@ -1,7 +1,7 @@
 use agentkeys_types::{
     AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
-    EncryptedPairPayload, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken,
-    Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
+    EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
+    RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -155,6 +155,18 @@ pub trait CredentialBackend: Send + Sync {
         target_wallet: &WalletAddress,
         new_scope: &Scope,
     ) -> Result<(), BackendError>;
+
+    async fn provision_inbox(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<InboxAddress, BackendError>;
+
+    async fn list_inboxes(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<Vec<InboxAddress>, BackendError>;
 }
 
 #[cfg(test)]
@@ -331,6 +343,22 @@ mod tests {
             _target_wallet: &WalletAddress,
             _new_scope: &Scope,
         ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+
+        async fn provision_inbox(
+            &self,
+            _session: &Session,
+            _agent_id: &WalletAddress,
+        ) -> Result<InboxAddress, BackendError> {
+            unimplemented!()
+        }
+
+        async fn list_inboxes(
+            &self,
+            _session: &Session,
+            _agent_id: &WalletAddress,
+        ) -> Result<Vec<InboxAddress>, BackendError> {
             unimplemented!()
         }
     }

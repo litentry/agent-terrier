@@ -1,18 +1,4 @@
-import { parse as parseHtml } from "node-html-parser";
-
-export interface ImapClientLike {
-  connect(): Promise<void>;
-  close(): Promise<void>;
-  mailboxOpen(name: string): Promise<void>;
-  search(query: object): Promise<number[]>;
-  fetchOne(
-    uid: number,
-    query: object
-  ): Promise<{
-    envelope: { from: Array<{ address: string }>; subject: string };
-    source: Buffer | string;
-  } | null>;
-}
+export type { ImapClientLike } from "./email-backends/gmail-imap.js";
 
 export interface FetchOpts {
   from: RegExp;
@@ -20,114 +6,43 @@ export interface FetchOpts {
   codeRegex: RegExp;
   timeoutMs: number;
   pollIntervalMs?: number;
-  imapClientFactory?: () => ImapClientLike;
+  // ses-s3 only: how many ms before poll start a message may be and still
+  // count as fresh. Default 60_000. Smaller = stricter rejection of prior-run
+  // leftovers; larger = more tolerant to clock skew / S3 delivery latency.
+  freshnessGraceMs?: number;
+  imapClientFactory?: () => import("./email-backends/gmail-imap.js").ImapClientLike;
 }
 
-interface EmailTimeoutError {
-  code: "EMAIL_TIMEOUT";
-  elapsed_ms: number;
-}
+type EmailBackend = "gmail" | "mock-inbox" | "ses-s3";
 
-interface EmailNotFoundError {
-  code: "EMAIL_NOT_FOUND";
-  elapsed_ms: number;
-}
-
-async function createDefaultImapClient(): Promise<ImapClientLike> {
-  const emailUser = process.env["AGENTKEYS_EMAIL_USER"];
-  const emailPassword = process.env["AGENTKEYS_EMAIL_PASSWORD"];
-  if (!emailUser) throw new Error("AGENTKEYS_EMAIL_USER env var is required");
-  if (!emailPassword) throw new Error("AGENTKEYS_EMAIL_PASSWORD env var is required");
-
-  const host = process.env["AGENTKEYS_EMAIL_HOST"] ?? "imap.gmail.com";
-  const port = parseInt(process.env["AGENTKEYS_EMAIL_PORT"] ?? "993", 10);
-
-  const { ImapFlow } = await import("imapflow");
-
-  return new ImapFlow({
-    host,
-    port,
-    secure: true,
-    auth: { user: emailUser, pass: emailPassword },
-    logger: false,
-  }) as unknown as ImapClientLike;
-}
-
-function extractTextFromBody(source: Buffer | string): string {
-  const raw = typeof source === "string" ? source : source.toString("utf-8");
-  if (raw.includes("<html") || raw.includes("<HTML")) {
-    const root = parseHtml(raw);
-    return root.text;
+function resolveBackend(): EmailBackend {
+  const raw = process.env["AGENTKEYS_EMAIL_BACKEND"] ?? "gmail";
+  if (raw === "gmail" || raw === "mock-inbox" || raw === "ses-s3") {
+    return raw;
   }
-  return raw;
+  throw new Error(
+    `Unknown AGENTKEYS_EMAIL_BACKEND value "${raw}". Accepted values: gmail, mock-inbox, ses-s3`
+  );
 }
 
 export async function fetchVerificationCode(opts: FetchOpts): Promise<string> {
-  const pollIntervalMs = opts.pollIntervalMs ?? 1500;
-  const startedAt = Date.now();
+  const backend = resolveBackend();
 
-  const client = opts.imapClientFactory
-    ? opts.imapClientFactory()
-    : await createDefaultImapClient();
-
-  try {
-    await client.connect();
-    await client.mailboxOpen("INBOX");
-
-    while (true) {
-      const elapsed = Date.now() - startedAt;
-
-      if (elapsed >= opts.timeoutMs) {
-        const timeoutErr: EmailTimeoutError = { code: "EMAIL_TIMEOUT", elapsed_ms: elapsed };
-        throw timeoutErr;
-      }
-
-      const uids = await client.search({ all: true });
-
-      let matchedEnvelope = false;
-
-      for (const uid of uids) {
-        const msg = await client.fetchOne(uid, { envelope: true, source: true });
-        if (!msg) continue;
-
-        const fromAddress = msg.envelope.from[0]?.address ?? "";
-        const subjectLine = msg.envelope.subject ?? "";
-
-        if (!opts.from.test(fromAddress) || !opts.subject.test(subjectLine)) {
-          continue;
-        }
-
-        matchedEnvelope = true;
-        const bodyText = extractTextFromBody(msg.source);
-        const match = opts.codeRegex.exec(bodyText);
-
-        if (match && match[1] !== undefined) {
-          return match[1];
-        }
-      }
-
-      if (matchedEnvelope) {
-        const notFoundErr: EmailNotFoundError = {
-          code: "EMAIL_NOT_FOUND",
-          elapsed_ms: Date.now() - startedAt,
-        };
-        throw notFoundErr;
-      }
-
-      const remainingMs = opts.timeoutMs - (Date.now() - startedAt);
-      if (remainingMs <= 0) {
-        const timeoutErr: EmailTimeoutError = {
-          code: "EMAIL_TIMEOUT",
-          elapsed_ms: Date.now() - startedAt,
-        };
-        throw timeoutErr;
-      }
-
-      await new Promise<void>((resolve) =>
-        setTimeout(resolve, Math.min(pollIntervalMs, remainingMs))
-      );
-    }
-  } finally {
-    await client.close();
+  if (backend === "gmail") {
+    const { fetchViaGmailImap } = await import("./email-backends/gmail-imap.js");
+    return fetchViaGmailImap(opts);
   }
+
+  if (backend === "mock-inbox") {
+    const { fetchViaMockInbox } = await import("./email-backends/mock-inbox.js");
+    return fetchViaMockInbox(opts);
+  }
+
+  if (backend === "ses-s3") {
+    const { fetchViaSesS3 } = await import("./email-backends/ses-s3.js");
+    return fetchViaSesS3(opts);
+  }
+
+  const _exhaustive: never = backend;
+  throw new Error(`Unhandled backend: ${String(_exhaustive)}`);
 }

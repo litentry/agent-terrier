@@ -11,8 +11,8 @@ use tower::ServiceExt;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
     AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
-    EncryptedPairPayload, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken,
-    Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
+    EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
+    RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
 use crate::{create_router, db, state::{AppState, SharedState}};
@@ -817,5 +817,80 @@ impl CredentialBackend for InProcessBackend {
             ttl_seconds: 2_592_000, // 30 days per wiki/session-token.md policy
         };
         Ok((session, wallet))
+    }
+
+    async fn provision_inbox(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<InboxAddress, BackendError> {
+        let body = self
+            .post_with_session(
+                "/mock/inbox/provision",
+                session,
+                json!({ "agent_id": agent_id.0 }),
+            )
+            .await?;
+        let address = body["address"]
+            .as_str()
+            .ok_or_else(|| BackendError::Transport("missing address".into()))?
+            .to_string();
+        Ok(InboxAddress(address))
+    }
+
+    async fn list_inboxes(
+        &self,
+        session: &Session,
+        agent_id: &WalletAddress,
+    ) -> Result<Vec<InboxAddress>, BackendError> {
+        let path = format!("/mock/inbox/list?agent_id={}", pct_encode(&agent_id.0));
+        let body = self.get_with_session(&path, session).await?;
+        let addresses = body
+            .as_array()
+            .ok_or_else(|| BackendError::Transport("expected array".into()))?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| InboxAddress(s.to_string())))
+            .collect();
+        Ok(addresses)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentkeys_core::backend::CredentialBackend;
+    use agentkeys_types::AuthToken;
+
+    async fn create_session_for_tests() -> (InProcessBackend, Session, WalletAddress) {
+        let backend = InProcessBackend::new();
+        let (session, wallet) = backend
+            .create_session(AuthToken::Mock("test-token".to_string()))
+            .await
+            .unwrap();
+        (backend, session, wallet)
+    }
+
+    #[tokio::test]
+    async fn provision_inbox_returns_bot_address() {
+        let (backend, session, wallet) = create_session_for_tests().await;
+        let address = backend.provision_inbox(&session, &wallet).await.unwrap();
+        assert!(
+            address.0.starts_with("bot-") && address.0.contains('@'),
+            "expected bot-*@domain address, got: {}",
+            address.0
+        );
+    }
+
+    #[tokio::test]
+    async fn list_inboxes_returns_provisioned_addresses() {
+        let (backend, session, wallet) = create_session_for_tests().await;
+
+        let addr1 = backend.provision_inbox(&session, &wallet).await.unwrap();
+        let addr2 = backend.provision_inbox(&session, &wallet).await.unwrap();
+
+        let inboxes = backend.list_inboxes(&session, &wallet).await.unwrap();
+        assert_eq!(inboxes.len(), 2, "expected 2 inboxes");
+        assert!(inboxes.contains(&addr1));
+        assert!(inboxes.contains(&addr2));
     }
 }

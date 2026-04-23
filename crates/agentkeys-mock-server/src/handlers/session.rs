@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    auth::{derive_pair_code_from_nonce, extract_bearer_token, generate_nonce, generate_token, generate_wallet_address, is_owner_of, now_secs, validate_session},
+    auth::{extract_bearer_token, generate_token, generate_wallet_address, is_owner_of, now_secs, validate_session},
     error::{AppError, AppResult},
     state::SharedState,
 };
-use agentkeys_types::{AuthToken, Scope};
+use agentkeys_types::Scope;
 use ed25519_dalek::SigningKey;
 
 /// Session token TTL in seconds — 30 days.

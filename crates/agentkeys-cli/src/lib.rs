@@ -909,6 +909,42 @@ pub async fn cmd_provision(
     }
 }
 
+pub async fn cmd_inbox_provision(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
+    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let backend = ctx.backend();
+    let agent_id = resolve_agent(&backend, &session, agent).await?;
+
+    if ctx.verbose {
+        eprintln!("[verbose] POST {}/mock/inbox/provision", ctx.backend_url);
+        eprintln!("[verbose] agent: {}", agent_id.0);
+    }
+
+    let address = backend
+        .provision_inbox(&session, &agent_id)
+        .await
+        .map_err(wrap_backend_error)?;
+
+    Ok(address.to_string())
+}
+
+pub async fn cmd_inbox_list(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
+    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let backend = ctx.backend();
+    let agent_id = resolve_agent(&backend, &session, agent).await?;
+
+    if ctx.verbose {
+        eprintln!("[verbose] GET {}/mock/inbox/list", ctx.backend_url);
+        eprintln!("[verbose] agent: {}", agent_id.0);
+    }
+
+    let addresses = backend
+        .list_inboxes(&session, &agent_id)
+        .await
+        .map_err(wrap_backend_error)?;
+
+    Ok(addresses.iter().map(|a| a.to_string()).collect::<Vec<_>>().join("\n"))
+}
+
 pub fn cmd_feedback() -> String {
     let url = "https://github.com/agentkeys/agentkeys/discussions";
     let opened = std::process::Command::new("open").arg(url).status().is_ok()

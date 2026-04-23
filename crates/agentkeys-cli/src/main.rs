@@ -1,6 +1,7 @@
 use agentkeys_cli::{
-    cmd_approve, cmd_feedback, cmd_init, cmd_link, cmd_provision, cmd_read, cmd_recover,
-    cmd_revoke, cmd_run, cmd_scope, cmd_store, cmd_teardown, cmd_usage, CommandContext,
+    cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_link,
+    cmd_provision, cmd_read, cmd_recover, cmd_revoke, cmd_run, cmd_scope, cmd_store, cmd_teardown,
+    cmd_usage, CommandContext,
 };
 
 
@@ -172,6 +173,36 @@ enum Commands {
         long_about = "Open https://github.com/agentkeys/agentkeys/discussions in the default browser.\n\nExamples:\n  agentkeys feedback"
     )]
     Feedback,
+
+    #[command(
+        about = "Manage agent inbox addresses",
+        long_about = "Provision or list inbox addresses for an agent.\n\nOmit --agent to default to the session wallet.\n\nExamples:\n  agentkeys inbox provision\n  agentkeys inbox provision --agent 0xAGENT\n  agentkeys inbox list\n  agentkeys inbox list --agent 0xAGENT"
+    )]
+    Inbox {
+        #[command(subcommand)]
+        action: InboxAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum InboxAction {
+    #[command(
+        about = "Provision a new inbox address for an agent",
+        long_about = "Provision a new inbox email address for an agent and print the address.\n\nOmit --agent to default to the session wallet.\n\nExamples:\n  agentkeys inbox provision\n  agentkeys inbox provision --agent 0xAGENT"
+    )]
+    Provision {
+        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        agent: Option<String>,
+    },
+
+    #[command(
+        about = "List inbox addresses provisioned for an agent",
+        long_about = "List all inbox email addresses provisioned for an agent, one per line.\n\nOmit --agent to default to the session wallet.\n\nExamples:\n  agentkeys inbox list\n  agentkeys inbox list --agent 0xAGENT"
+    )]
+    List {
+        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        agent: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -208,6 +239,14 @@ async fn main() {
             })
         }
         Commands::Feedback => Ok(cmd_feedback()),
+        Commands::Inbox { action } => match action {
+            InboxAction::Provision { agent } => {
+                cmd_inbox_provision(&ctx, agent.as_deref()).await
+            }
+            InboxAction::List { agent } => {
+                cmd_inbox_list(&ctx, agent.as_deref()).await
+            }
+        },
     };
 
     match result {
