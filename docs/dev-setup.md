@@ -7,6 +7,33 @@ The CDP demo path is **the only supported path** — earlier Gmail-backed varian
 
 ## 1. Prerequisites
 
+### Quick path: one-shot bootstrap (macOS + Linux)
+
+Fresh machine? Run the bootstrap script — it installs every prerequisite below, builds the workspace, and runs the smoke tests:
+
+```bash
+bash scripts/setup-dev-env.sh
+```
+
+The script is idempotent (safe to re-run), detects macOS vs Linux (apt / dnf / pacman), and handles:
+
+- Homebrew (macOS) or the system package manager (Linux)
+- `rustup` + stable toolchain
+- Node 20+ (Homebrew `node@20`, NodeSource on apt/dnf, distro package on Arch)
+- `jj` (Homebrew / pacman, or `cargo install jj-cli` as fallback) — also seeds the required `Hanwen Cheng <heawen.cheng@gmail.com>` jj identity if unset
+- `jq`
+- AWS CLI v2 (Homebrew on macOS, official zip on Linux)
+- `cargo build --workspace --release`
+- `npm install --prefix provisioner-scripts` + `playwright install chromium`
+- `cargo test --workspace` and `npm test --prefix provisioner-scripts` as a smoke gate
+
+Two things the script intentionally does **not** do:
+
+1. **Install Google Chrome.** The CDP scrapers attach to real Chrome at `localhost:9222`; install it from <https://www.google.com/chrome/>.
+2. **Touch AWS infra.** That's the one-time Stage 6 setup in §3.
+
+### Manual matrix (if you'd rather pick tools yourself)
+
 | Tool | Why | Install |
 |---|---|---|
 | Rust (stable, edition 2021+) | Workspace crates | `rustup toolchain install stable && rustup default stable` |
@@ -22,6 +49,8 @@ Optional but recommended:
 - **chrome-devtools-mcp** — auto-wired via `.mcp.json` when you open this repo in Claude Code / Cursor / Zed / Continue.dev. Gives the workflow-collection skill tool-level access to a live Chrome for diagnosing provider-side changes.
 
 ## 2. Build everything
+
+If you ran `scripts/setup-dev-env.sh` in §1, the workspace is already built and tested — skip ahead to §3. Otherwise:
 
 ```bash
 cd ~/Projects/agentkeys   # or wherever your checkout lives

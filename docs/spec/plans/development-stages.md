@@ -63,16 +63,38 @@ Today's Stage 6 still lists "interim" AWS-managed DKIM + static IAM user. To cal
 
 Expose `oidc.agentkeys.dev` as a conforming OIDC Identity Provider. Any cloud that accepts external OIDC federation (AWS, GCP, Azure, Snowflake, K8s) trusts AgentKeys once and gets per-user-wallet-tagged temp creds via standard federation. Unlocks bring-your-own-domain + per-user cloud-enforced isolation via `PrincipalTag`. Scratch notes: [`../../stage7-wip.md`](../../stage7-wip.md). Blocked on: public TLS for `oidc.agentkeys.dev`, TEE-held ES256 signer at `oidc/issuer/v1` (`heima-gaps §3`).
 
-### Stage 8 — Production hardening (Priority A only for v0.1)
+Stage 7 stops at the isolation primitive. **It does not commit a position on where credential ciphertext lives** — the previously-assumed `pallet-secrets-vault` (on-chain encrypted blob store) is superseded by Stage 8 below, per [`../threat-model-key-custody.md`](../threat-model-key-custody.md).
+
+### Stage 8 — Off-chain encrypted vault (NEW, 2026-04-26)
+
+Move credential ciphertext off the chain into S3 (initial) under per-epoch DEKs that rotate on a fixed cadence. Chain holds ownership records, audit, revocation, and ciphertext hashes — never the bytes. Composes with Stage 7 (the per-user S3 prefix is already PrincipalTag-gated). The forward-secret rotation is the property the previous design did not have: **total TEE compromise at any future point leaks at most one epoch of data, not all history.**
+
+Architectural rationale: [`../threat-model-key-custody.md`](../threat-model-key-custody.md). Operational design + runbook: [`../../stage8-wip.md`](../../stage8-wip.md).
+
+Key deliverables:
+- New on-chain pallet `pallet-vault-pointers` (replaces the deprecated `pallet-secrets-vault` design) — `(user_wallet, service, agent, epoch, blob_id, ciphertext_hash)`.
+- New `EpochDek` on-chain state — per-user wrapped DEK + epoch lifecycle.
+- New TEE-B "rotation enclave" responsibility, separate code surface from the auth/decrypt enclave (TEE-A).
+- S3 layout `s3://agentkeys-vault-<account>/<user_wallet>/<service>/<epoch>/<blob_id>.enc`.
+- Rotation runbook: weekly cadence + on-revocation; lazy re-encryption; lifecycle-driven deletion of old epochs.
+- New audit extrinsics: `BlobWritten`, `EpochRotated`, `EpochDestroyed`.
+
+Blocked on: Heima-side review of `pallet-vault-pointers` shape; decision on TEE-A/TEE-B separation (merged for v0.1, split for v0.2 acceptable). Threshold-across-heterogeneous-platforms variant is v0.2+.
+
+### Stage 9 — Production hardening (Priority A only for v0.1) — was Stage 8
+
+Renumbered 2026-04-26 to make room for Stage 8 above. Memory-hygiene work; independent of the vault refactor.
 
 - Daemon: `memfd_secret` via `SCM_RIGHTS` fd-passing for managed runtimes; credential zeroize on delivery; idle eviction.
 - CLI: `agentkeys whoami`, idempotent `init`, `zeroize` wrapping, `PR_SET_DUMPABLE=0`.
 - Optional: Touch-ID-gate master session on macOS; DEK + encrypted-file storage as cross-platform alternative.
 - Priority B/C (core pages, ptrace checks, CI checksec) deferred to post-v0.1.
 
-### Stage 9 — Heima migration holding pen
+### Stage 10 — Heima migration holding pen — was Stage 9
 
-Design notes, not executable work. Pattern 4 (TEE-as-paymaster sponsored audit) chosen for v0.1 audit submission. Rate-limit gate (100 reads/min/session) is a Stage 8 prereq. Tracked in [issues #3, #4, #5](https://github.com/litentry/agentKeys/issues/3).
+Renumbered 2026-04-26.
+
+Design notes, not executable work. Pattern 4 (TEE-as-paymaster sponsored audit) chosen for v0.1 audit submission. Rate-limit gate (100 reads/min/session) is a Stage 9 prereq. Tracked in [issues #3, #4, #5](https://github.com/litentry/agentKeys/issues/3).
 
 ### npm package + DX polish
 
@@ -98,15 +120,17 @@ New stages must extend `init.sh`, add a `stage-N-done.sh`, update `features.json
 |---|---|---|
 | Stage 5b (drift + fallback) | Telemetry from live Stage 5a usage | Stage 6 finalization, Stage 7 prep |
 | Stage 6 finalization (BYODKIM, auto-AssumeRole) | `heima-gaps §3` | Stage 7 OIDC (shared TEE signing substrate) |
-| Stage 7 (OIDC provider) | Public TLS + TEE ES256 | Stage 8 Priority A |
-| Stage 8 Priority A | Stage 4 complete (already shipped) | Anything — independent from the above |
+| Stage 7 (OIDC provider) | Public TLS + TEE ES256 | Stage 8 vault design + Stage 9 Priority A |
+| Stage 8 (off-chain vault) | Stage 7 PrincipalTag isolation; Heima-side `pallet-vault-pointers` review | Stage 9 Priority A (independent code surfaces) |
+| Stage 9 Priority A (memory hygiene) | Stage 4 complete (already shipped) | Anything |
 
-Critical path to v0.1 ship: Stage 5b telemetry → Stage 6 finalization → Stage 7 → Stage 8 Priority A. Two devs can split 5b from 6+7+8 cleanly.
+Critical path to v0.1 ship: Stage 5b telemetry → Stage 6 finalization → Stage 7 → Stage 8 vault → Stage 9 Priority A. Stage 8 and Stage 9 can run in parallel; Stage 9 has no upstream dependency on Stage 8.
 
 ---
 
 ## Change log
 
+- **2026-04-26:** Inserted new **Stage 8 — Off-chain encrypted vault** between current Stage 7 and the existing Stage 8 (now Stage 9). Renumbered Stage 9 → Stage 10. Driven by [`../threat-model-key-custody.md`](../threat-model-key-custody.md): on-chain encrypted-blob store creates an unbounded harvest-now-decrypt-later window. Operational design in [`../../stage8-wip.md`](../../stage8-wip.md).
 - **2026-04-23 (v2):** collapsed full stage-by-stage contracts into Shipped/Active/Planned; moved v1 to `docs/archived/`.
 - **2026-04-19:** Stage 5-7 reorder (old Stage 6/7/8 postponed to v0.1; hosted email + OIDC promoted).
 - **2026-04-16:** Stage 5 split into 5a (ships v0) and 5b (v0.1); Stage 6 (npm) postponed.

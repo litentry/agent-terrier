@@ -273,18 +273,20 @@ All `request_details` values MUST be serialized with **deterministic CBOR** (RFC
 
 ### Mapping to Heima Primitives
 
+> **Superseded 2026-04-26 — vault rows.** The `store_credential` / `read_credential` rows below originally pointed at `pallet-secrets-vault` (on-chain encrypted blob store). Per [`./threat-model-key-custody.md`](./threat-model-key-custody.md) and [`../stage8-wip.md`](../stage8-wip.md), the canonical v0.1 design moves ciphertext **off-chain** into S3 under per-epoch DEKs. The chain holds only `(blob_pointer, ciphertext_hash, epoch)` via `pallet-vault-pointers`. Mapping rows updated below; the on-chain encrypted vault is no longer a target.
+
 For the Heima backend implementation:
 
 | Trait Method | Heima Primitive | Notes |
 |-------------|----------------|-------|
 | `create_session` | Google OAuth → `pallet-identity-management` → `RegisterUserByOmniAccount` | Existing flow, reuse |
 | `create_child_session` | New: scoped session key minting in TEE worker (Kai Q1) | Needs to be built |
-| `store_credential` | New: `pallet-secrets-vault::write_secret` or TEE worker storage (Kai Q2) | Needs to be built |
-| `read_credential` | New: `pallet-secrets-vault::read_secret_intent` with scope enforcement (Kai Q3) | Needs to be built |
+| `store_credential` | S3 PUT under `s3://agentkeys-vault/<wallet>/<service>/<epoch>/<blob_id>.enc` + new `pallet-vault-pointers::register_blob` extrinsic | Stage 8; replaces former `pallet-secrets-vault::write_secret` |
+| `read_credential` | `pallet-vault-pointers::lookup` → S3 GET → TEE unwraps DEK + decrypts; scope check on chain | Stage 8; replaces former `pallet-secrets-vault::read_secret_intent` |
 | `query_audit` | Chain events + Subsquid/Subquery indexer | Standard Substrate dev |
 | `revoke_session` | Policy table update in TEE worker, propagates in ~1 block (~6s) (Kai Q9) | Verify with Kai |
-| `teardown_agent` | Batch: revoke sessions + delete credential blobs | Composition of above |
-| `shielding_key` | `pallet-teebag` shielding key (already public on chain) | Reuse |
+| `teardown_agent` | Batch: revoke sessions + S3 lifecycle-delete blobs + epoch-rotate user DEK | Composition of above |
+| `shielding_key` | `pallet-teebag` shielding key (already public on chain) | Reuse — used to wrap epoch DEKs, not to encrypt bulk data |
 
 ## 3. Payment Rail Abstraction
 
