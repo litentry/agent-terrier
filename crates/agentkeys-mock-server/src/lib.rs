@@ -19,6 +19,7 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/session/child", post(handlers::session::create_child_session))
         .route("/session/revoke", post(handlers::session::revoke_session))
         .route("/session/recover", post(handlers::session::recover_session))
+        .route("/session/validate", get(handlers::session::validate_session_endpoint))
         // Credential
         .route("/credential/store", post(handlers::credential::store_credential))
         .route("/credential/read", get(handlers::credential::read_credential))

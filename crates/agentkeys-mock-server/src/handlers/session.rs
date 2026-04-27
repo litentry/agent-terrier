@@ -230,6 +230,24 @@ pub async fn recover_session(
     })))
 }
 
+pub async fn validate_session_endpoint(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer_token)
+        .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
+
+    let session = validate_session(&state, token)?;
+
+    Ok(Json(json!({
+        "wallet": session.wallet_address,
+        "scope": session.scope_json,
+    })))
+}
+
 pub async fn revoke_session(
     State(state): State<SharedState>,
     headers: HeaderMap,

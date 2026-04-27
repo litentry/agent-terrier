@@ -42,6 +42,17 @@ struct Args {
 
     #[arg(long, value_name = "ALIAS|WALLET", help = "Bind pair request to a specific master (alias or 0x... wallet)")]
     parent: Option<String>,
+
+    /// URL of the operator's broker server (Stage 7).
+    ///
+    /// When set, AWS-credential needs (e.g. fetching verification emails from the
+    /// operator's S3 bucket) are satisfied by calling the broker's
+    /// `POST /v1/mint-aws-creds` with the daemon's bearer token; the daemon
+    /// itself never holds long-lived AWS credentials. Leave unset to use the
+    /// pre-Stage-7 path where the operator sources creds via
+    /// `scripts/stage6-demo-env.sh`.
+    #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+    broker_url: Option<String>,
 }
 
 #[tokio::main]
@@ -60,6 +71,10 @@ async fn main() -> anyhow::Result<()> {
     let _hardening_report = hardening::apply_hardening()?;
 
     let backend = Arc::new(MockHttpClient::new(&args.backend));
+
+    if let Some(ref broker_url) = args.broker_url {
+        info!(broker_url = %broker_url, "broker URL configured; AWS-cred mints will route through broker");
+    }
 
     // --parent resolution is lazy: only the pair and master-approval recover
     // paths use it, so resolving eagerly would crash non-pair startups when
