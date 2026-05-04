@@ -9,7 +9,7 @@ use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mock_server::test_client::InProcessBackend;
 use agentkeys_types::{
     AgentIdentity, AuthRequestType, AuthToken, CanonicalBytes, EncryptedPairPayload, PairCode,
-    PublicKey, RecoveryMethod, Scope, ServiceName, Session, WalletAddress,
+    PublicKey, RecoveryMethod, Scope, ServiceName,
 };
 
 // ---------------------------------------------------------------------------

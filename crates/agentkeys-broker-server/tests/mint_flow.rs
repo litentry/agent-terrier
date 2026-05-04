@@ -10,11 +10,13 @@ use std::sync::Arc;
 use agentkeys_broker_server::audit::{hash_token, AuditLog};
 use agentkeys_broker_server::config::BrokerConfig;
 use agentkeys_broker_server::create_router;
+use agentkeys_broker_server::oidc::OidcKeypair;
 use agentkeys_broker_server::state::AppState;
 use agentkeys_broker_server::sts::{AssumedCredentials, StsClient, StubStsClient};
 use serde_json::Value;
+use tempfile::TempDir;
 
-const STUB_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/agentkeys-agent";
+const STUB_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/agentkeys-data-role";
 
 fn stub_creds() -> AssumedCredentials {
     AssumedCredentials {
@@ -43,16 +45,26 @@ async fn spawn_broker_with_sts(
     backend_url: String,
     sts: Arc<dyn StsClient>,
 ) -> (String, Arc<AppState>) {
+    // Tempdir is leaked into the static so the keypair file outlives the
+    // tokio task spawned below; integration tests are short-lived and the
+    // OS cleans /tmp on reboot.
+    let tmp = Box::leak(Box::new(TempDir::new().unwrap()));
+    let oidc =
+        OidcKeypair::generate_and_persist(&tmp.path().join("oidc-keypair.json")).unwrap();
+
     let config = BrokerConfig {
-        daemon_access_key_id: "AKIA-fake".into(),
-        daemon_secret_access_key: "fake-secret".into(),
-        agent_role_arn: STUB_ROLE_ARN.into(),
+        daemon_access_key_id: Some("AKIA-fake".into()),
+        daemon_secret_access_key: Some("fake-secret".into()),
+        data_role_arn: STUB_ROLE_ARN.into(),
         backend_url,
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,
         backend_request_timeout_seconds: 5,
         shutdown_grace_seconds: 5,
+        oidc_issuer: "https://oidc.test.invalid".into(),
+        oidc_keypair_path: tmp.path().join("oidc-keypair.json"),
+        oidc_jwt_ttl_seconds: 300,
     };
 
     let http = reqwest::Client::builder()
@@ -65,6 +77,7 @@ async fn spawn_broker_with_sts(
         http,
         audit: AuditLog::open_in_memory().unwrap(),
         sts,
+        oidc: Arc::new(oidc),
     });
     let app = create_router(state.clone());
 

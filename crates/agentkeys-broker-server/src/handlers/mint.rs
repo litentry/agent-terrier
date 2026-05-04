@@ -59,7 +59,7 @@ pub async fn mint_aws_creds(
     match state
         .sts
         .assume_role(
-            &state.config.agent_role_arn,
+            &state.config.data_role_arn,
             &session_name,
             state.config.session_duration_seconds,
         )
@@ -73,7 +73,7 @@ pub async fn mint_aws_creds(
                 MintRecord {
                     requester_token: token,
                     requester_wallet: &session.wallet,
-                    requested_role: &state.config.agent_role_arn,
+                    requested_role: &state.config.data_role_arn,
                     session_duration_seconds: state.config.session_duration_seconds,
                     sts_session_name: &session_name,
                     outcome: MintOutcome::Ok,
@@ -120,7 +120,7 @@ fn record_outcome(
         MintRecord {
             requester_token: token,
             requester_wallet: wallet,
-            requested_role: &state.config.agent_role_arn,
+            requested_role: &state.config.data_role_arn,
             session_duration_seconds: state.config.session_duration_seconds,
             sts_session_name: session_name,
             outcome,

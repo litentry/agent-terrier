@@ -334,11 +334,40 @@ Lifecycle is ephemeral per chat session by design. Recovery flow handles re-atta
 
 **Rust: ~80% of lines, 100% of security-critical path.** TypeScript is strictly confined to: browser automation inside the agent sandbox, the npm daemon wrapper, the read-only indexer, and the Web GUI frontend. None of these touch the trust boundary.
 
-## 11. License
+## 11. Audit destination is pluggable
+
+Several earlier docs ([`threat-model-key-custody.md`](threat-model-key-custody.md), [`heima-gaps-vs-desired-architecture.md`](heima-gaps-vs-desired-architecture.md), `wiki/blockchain-tee-architecture.md`) describe audit + anchoring as Heima-pallet operations. That description is one *instance* of the architecture, not a constraint of it. The audit/anchoring layer is a pluggable backend behind a single interface: **append a tamper-evident record of who did what, when, against which agent**. Anything that satisfies that interface satisfies the architecture.
+
+Concretely, the same trait surface accommodates all of:
+
+| Backend class | Examples | Where it fits |
+|---|---|---|
+| **Federated public chain** | Heima parachain (default for v0.1+), other Substrate parachains | Production deployment with shared-validator trust assumptions. |
+| **General-purpose public chain** | Ethereum, Solana, Sui, Aptos, Cosmos chains | Operators who already have on-chain identity / accounting on a different chain and want a single audit trail. |
+| **Permissioned / consortium chain** | Hyperledger Fabric, R3 Corda, Quorum, ConsenSys Besu (IBFT), Aliyun BaaS | Enterprises in jurisdictions (China, EU regulated finance) where public-chain anchoring is non-starter for compliance reasons. |
+| **Plain backend server** | Append-only SQLite (this is what the broker ships today), Postgres + immutable WAL, S3-with-Object-Lock, Honeycomb / Datadog audit log | Self-hosted operators who want zero chain dependency. The Stage 7 broker's `~/.agentkeys/broker/audit.sqlite` IS this category — it's a complete audit destination, not a placeholder. |
+| **Sealed log services** | AWS CloudTrail with KMS-backed integrity validation, GCP Cloud Audit Logs | Cloud-native operators. |
+| **TEE-attested append-only log** | Heima TEE + sealed storage (the original v0.1 target), AWS Nitro + KMS, Azure Confidential Ledger | Operators who want hardware-backed integrity independent of any chain. |
+
+What this means concretely:
+
+1. **Stage 7 phase 2 is not gated on Heima.** The broker's SQLite audit log is a fully-functional v0.1 audit destination on the simple-server side of this table. Migration to a chain (Heima or otherwise) is a deployment-time choice, not a Stage-7 prerequisite.
+2. **`heima-gaps §3` is one path, not the path.** The TEE-derived ES256 signer is the *highest-assurance* signer for the OIDC issuer; the on-disk keypair shipped today plus the broker SQLite audit log is the *lowest-assurance-but-complete* path. v0.1 ships the lowest-assurance path; v0.2+ swaps to TEE without surface changes.
+3. **Jurisdictional swaps are configuration, not redesign.** A China-deployment operator points the audit destination at a permissioned chain; the rest of the system is unchanged.
+
+What stays load-bearing across every backend:
+
+- The audit record schema (`requester_token_hash`, `requester_wallet`, `requested_role`, `outcome`, `sts_session_name`, timestamp).
+- The promise that audit-write happens *before* credentials are returned to the caller (existing broker invariant — the credential mint with no audit row is the silent-failure mode operators defend against).
+- The promise that audit failures are surfaced loudly, never swallowed.
+
+This pluggability is what lets Stage 7 phase 2 ship as **complete** today, with the broker's local audit log, and lets Stage 8 (off-chain encrypted vault) decouple ciphertext storage from audit-anchoring without re-litigating either layer.
+
+## 12. License
 
 All AgentKeys repositories are dual-licensed under **MIT OR Apache-2.0**, at the user's choice. This applies to `agentkeys-core`, `agentkeys-cli`, `agentkeys-daemon`, `agentkeys-mock-server`, `agentkeys-provisioner`, `provisioner-scripts`, and the `@agentkeys/daemon` npm package.
 
-## 12. Cross-references
+## 13. Cross-references
 
 - **Session key storage details (kernel hardening):** see `1-step-analysis.md` SS3.3, SS3.3a
 - **Two-interface daemon design (MCP + CLI):** see `1-step-analysis.md` SS3.4

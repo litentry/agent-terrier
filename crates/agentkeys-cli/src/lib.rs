@@ -5,7 +5,26 @@ use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::mock_client::MockHttpClient;
 pub use agentkeys_core::session_store;
 use agentkeys_core::session_store::SessionStore;
-use agentkeys_provisioner::{run_provision, ProvisionError, Provisioner};
+use agentkeys_provisioner::{aws_creds::fetch_via_broker, run_provision, ProvisionError, Provisioner};
+
+/// Stage-7 phase-2 helper: when a broker URL is configured, fetch 1-hour
+/// scoped AWS creds and return them as an env-var map ready to merge into the
+/// scraper subprocess. With no broker URL, returns an empty map and the
+/// subprocess inherits whatever the operator already has in its environment
+/// (legacy `stage6-demo-env.sh` path).
+async fn broker_env_for_provision(
+    broker_url: Option<&str>,
+    session_token: &str,
+) -> Result<HashMap<String, String>> {
+    let Some(url) = broker_url else {
+        return Ok(HashMap::new());
+    };
+    let creds = fetch_via_broker(url, session_token).await?;
+    let region = std::env::var("AWS_REGION")
+        .ok()
+        .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok());
+    Ok(creds.to_env(region.as_deref()))
+}
 use agentkeys_types::{
     AuditEvent, AuditFilter, AuthToken, Scope, ServiceName, Session, WalletAddress,
 };
@@ -54,6 +73,10 @@ pub struct CommandContext {
     /// to point at a tempdir in file-only mode without mutating
     /// process-global `$HOME` / `AGENTKEYS_SESSION_STORE` (issue #34).
     pub session_store_override: Option<SessionStore>,
+    /// Stage-7 phase-2 wiring: when set, `agentkeys provision` fetches AWS
+    /// temp creds from this broker URL and injects them into the scraper
+    /// subprocess env (replacing the `stage6-demo-env.sh` sourcing pattern).
+    pub broker_url: Option<String>,
 }
 
 impl CommandContext {
@@ -66,7 +89,13 @@ impl CommandContext {
             session_override: None,
             backend_override: None,
             session_store_override: None,
+            broker_url: std::env::var("AGENTKEYS_BROKER_URL").ok().filter(|s| !s.is_empty()),
         }
+    }
+
+    pub fn with_broker_url(mut self, broker_url: Option<String>) -> Self {
+        self.broker_url = broker_url;
+        self
     }
 
     pub fn with_session(mut self, session: Session) -> Self {
@@ -876,11 +905,21 @@ pub async fn cmd_provision(
 
     let mut stderr_lines: Vec<String> = Vec::new();
 
+    let env = match broker_env_for_provision(ctx.broker_url.as_deref(), &session.token).await {
+        Ok(env) => env,
+        Err(e) => {
+            return Err(anyhow!(
+                "Problem: Could not fetch AWS credentials from broker.\nCause: {}.\nFix: Verify --broker-url / AGENTKEYS_BROKER_URL is reachable, your session token is current, and the broker's /readyz endpoint returns 200.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/operator-runbook.md",
+                e
+            ));
+        }
+    };
+
     let result = run_provision(
         &provisioner,
         service,
         &cmd_refs,
-        HashMap::new(),
+        env,
         Some(&repo_root),
         backend,
         &session,

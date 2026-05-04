@@ -242,7 +242,13 @@ async fn main() -> anyhow::Result<()> {
     // 3. Serve MCP
     if args.stdio {
         let dyn_backend: Arc<dyn CredentialBackend> = backend;
-        agentkeys_mcp::server::run_stdio(dyn_backend, sess, agent_id).await?;
+        agentkeys_mcp::server::run_stdio_with_broker(
+            dyn_backend,
+            sess,
+            agent_id,
+            args.broker_url.clone(),
+        )
+        .await?;
     } else {
         info!("no --stdio flag; daemon exiting (Unix socket mode not yet implemented)");
     }

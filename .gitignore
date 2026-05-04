@@ -8,6 +8,10 @@
 .gstack/
 AWSCLIV2.pkg
 
+# Claude Code per-workspace runtime state (lock files, scheduled-task index,
+# personal settings.local.json). Never check these in.
+.claude/
+
 # Local developer secrets — template is checked in as .env.example.
 agentkeys-secrets.env
 

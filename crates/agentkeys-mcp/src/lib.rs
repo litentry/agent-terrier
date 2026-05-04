@@ -1,5 +1,5 @@
 use agentkeys_core::backend::{BackendError, CredentialBackend};
-use agentkeys_provisioner::{run_provision, Provisioner};
+use agentkeys_provisioner::{aws_creds::fetch_via_broker, run_provision, Provisioner};
 use agentkeys_types::{AuditFilter, ServiceName, Session, WalletAddress};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -98,6 +98,11 @@ pub struct McpHandler {
     agent_id: WalletAddress,
     provisioner: Arc<Provisioner>,
     repo_root: PathBuf,
+    /// Stage-7 phase-2 wiring: when `Some`, the provision tool fetches AWS
+    /// temp creds from this broker URL and injects them into the scraper
+    /// subprocess env. When `None`, the subprocess inherits whatever `AWS_*`
+    /// vars the operator sourced manually (legacy `stage6-demo-env.sh` path).
+    broker_url: Option<String>,
 }
 
 impl McpHandler {
@@ -115,6 +120,7 @@ impl McpHandler {
             agent_id,
             provisioner: Arc::new(Provisioner::new()),
             repo_root,
+            broker_url: None,
         }
     }
 
@@ -127,7 +133,21 @@ impl McpHandler {
         let repo_root = std::env::var("AGENTKEYS_REPO_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
-        Self { backend, session, agent_id, provisioner, repo_root }
+        Self {
+            backend,
+            session,
+            agent_id,
+            provisioner,
+            repo_root,
+            broker_url: None,
+        }
+    }
+
+    /// Builder-style setter so the daemon can pass `--broker-url` through
+    /// without forcing every caller to know about it.
+    pub fn with_broker_url(mut self, broker_url: Option<String>) -> Self {
+        self.broker_url = broker_url;
+        self
     }
 
     pub async fn handle(&self, request: JsonRpcRequest) -> JsonRpcResponse {
@@ -251,11 +271,26 @@ impl McpHandler {
         let cmd_refs: Vec<&str> = script_command.iter().map(|s| s.as_str()).collect();
         let cwd = self.repo_root.clone();
 
+        let env = match self.broker_env_for_provision().await {
+            Ok(env) => env,
+            Err(e) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32603,
+                    json!({
+                        "code": "BROKER_FETCH_FAILED",
+                        "message": e.to_string()
+                    })
+                    .to_string(),
+                );
+            }
+        };
+
         let result = run_provision(
             &self.provisioner,
             &service,
             &cmd_refs,
-            HashMap::new(),
+            env,
             Some(&cwd),
             self.backend.clone(),
             &self.session,
@@ -287,6 +322,34 @@ impl McpHandler {
                 )
             }
         }
+    }
+}
+
+impl McpHandler {
+    /// Fetch AWS temp creds from the broker (if configured) and return them
+    /// as an env-var map ready to merge into the subprocess. With no broker
+    /// configured, returns an empty map and the subprocess inherits whatever
+    /// `AWS_*` vars the operator already exported (legacy path).
+    async fn broker_env_for_provision(&self) -> Result<HashMap<String, String>, BrokerEnvError> {
+        let Some(broker_url) = self.broker_url.as_deref() else {
+            return Ok(HashMap::new());
+        };
+        let creds = fetch_via_broker(broker_url, &self.session.token)
+            .await
+            .map_err(|e| BrokerEnvError(e.to_string()))?;
+        let region = std::env::var("AWS_REGION")
+            .ok()
+            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok());
+        Ok(creds.to_env(region.as_deref()))
+    }
+}
+
+#[derive(Debug)]
+struct BrokerEnvError(String);
+
+impl std::fmt::Display for BrokerEnvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "broker AWS-cred fetch failed: {}", self.0)
     }
 }
 
@@ -429,6 +492,75 @@ mod tests {
         assert!(
             error_msg.contains("PROVISION_IN_PROGRESS"),
             "expected PROVISION_IN_PROGRESS code in: {error_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn broker_env_for_provision_returns_empty_without_broker_url() {
+        let handler = make_handler();
+        let env = handler.broker_env_for_provision().await.unwrap();
+        assert!(
+            env.is_empty(),
+            "no broker_url ⇒ no AWS env injected (legacy stage6-demo path)"
+        );
+    }
+
+    #[tokio::test]
+    async fn broker_env_for_provision_injects_aws_creds_when_broker_url_set() {
+        use axum::{routing::post, Json, Router};
+
+        // Stub broker that returns canned creds; the real broker logic is
+        // covered in agentkeys-broker-server tests. Here we just verify the
+        // MCP handler hits /v1/mint-aws-creds with its session bearer and
+        // surfaces the response into the subprocess env.
+        let router = Router::new().route(
+            "/v1/mint-aws-creds",
+            post(|| async {
+                Json(json!({
+                    "access_key_id": "ASIA-mcp-test",
+                    "secret_access_key": "mcp-secret",
+                    "session_token": "mcp-token",
+                    "expiration": 9_999_999_999_i64,
+                    "wallet": "0xtest"
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let broker_url = format!("http://{}", addr);
+
+        let handler = McpHandler::new(
+            Arc::new(NoopBackend),
+            test_session(),
+            WalletAddress("0xtest".into()),
+        )
+        .with_broker_url(Some(broker_url));
+
+        let env = handler.broker_env_for_provision().await.unwrap();
+        assert_eq!(env.get("AWS_ACCESS_KEY_ID").unwrap(), "ASIA-mcp-test");
+        assert_eq!(env.get("AWS_SECRET_ACCESS_KEY").unwrap(), "mcp-secret");
+        assert_eq!(env.get("AWS_SESSION_TOKEN").unwrap(), "mcp-token");
+    }
+
+    #[tokio::test]
+    async fn broker_env_for_provision_surfaces_unreachable_broker() {
+        let handler = McpHandler::new(
+            Arc::new(NoopBackend),
+            test_session(),
+            WalletAddress("0xtest".into()),
+        )
+        .with_broker_url(Some("http://127.0.0.1:1".into()));
+
+        let err = handler
+            .broker_env_for_provision()
+            .await
+            .expect_err("unreachable broker must error");
+        assert!(
+            err.to_string().contains("broker"),
+            "error should reference the broker: {err}"
         );
     }
 

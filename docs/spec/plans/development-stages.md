@@ -19,7 +19,9 @@ If you're looking for setup / demo instructions, go to [`../../dev-setup.md`](..
 | 3 | Daemon + MCP | `agentkeys-daemon` + `agentkeys-mcp` — Unix-socket JSON-RPC, `memfd_secret`, scope enforcement, 4 MCP tools | 13/13 unit |
 | 4 | Pair / Approve / Recover | OTP-gated auth requests; 2-terminal pair flow; alias / email / ENS recovery via identity-link table | 15/11 unit + 2-terminal E2E |
 | 5a | Provisioner (deterministic) | OpenRouter + OpenAI CDP scrapers; `signupEmailOtp` pattern library; HTML-strip + label-aware OTP extractor; mandatory post-provision verify; `agentkeys provision openrouter` | 59/59 unit + live provision |
-| 6 (interim, 2026-04) | Hosted email infra | SES domain verification on `bots.litentry.org`; `agentkeys-daemon` IAM user → `agentkeys-agent` assume-role; S3 inbound bucket; `ses-s3` email backend; end-to-end demo from signup → SES receipt → S3 poll → key extraction | `scripts/stage6-demo-run.sh` prints a valid `sk-or-v1-...` key |
+| 6 (interim, 2026-04) | Hosted email infra | SES domain verification on `bots.litentry.org`; `agentkeys-daemon` IAM user → `agentkeys-data-role` assume-role; S3 inbound bucket; `ses-s3` email backend; end-to-end demo from signup → SES receipt → S3 poll → key extraction | `scripts/stage6-demo-run.sh` prints a valid `sk-or-v1-...` key |
+| 7 phase 1 (2026-04) | Broker server | `agentkeys-broker-server` axum service: bearer-gated `POST /v1/mint-aws-creds`, audit SQLite, supervisor probes; daemon `--broker-url` flag wired up | 22/22 unit + integration |
+| 7 phase 2 (2026-04) | OIDC issuer + AWS-cred wiring | OIDC discovery + JWKS + bearer-gated `POST /v1/mint-oidc-jwt` absorbed into Rust broker (TS `services/oidc-stub/` retired); CLI/MCP `provision` paths fetch AWS temp creds via the broker when `--broker-url` is set; audit destination is the broker's local SQLite per the pluggable-audit-backend framing in [`architecture.md` §11](../architecture.md) | broker integration + clippy clean; cloud federation deployment runbook in [`cloud-setup.md` §4](../../cloud-setup.md) |
 
 ### Non-stage work shipped alongside
 
@@ -61,7 +63,13 @@ Today's Stage 6 still lists "interim" AWS-managed DKIM + static IAM user. To cal
 
 ### Stage 7 — Generalized OIDC provider
 
-Expose `oidc.agentkeys.dev` as a conforming OIDC Identity Provider. Any cloud that accepts external OIDC federation (AWS, GCP, Azure, Snowflake, K8s) trusts AgentKeys once and gets per-user-wallet-tagged temp creds via standard federation. Unlocks bring-your-own-domain + per-user cloud-enforced isolation via `PrincipalTag`. Scratch notes: [`../../stage7-wip.md`](../../stage7-wip.md). Blocked on: public TLS for `oidc.agentkeys.dev`, TEE-held ES256 signer at `oidc/issuer/v1` (`heima-gaps §3`).
+Both phases shipped — see Shipped table above. Scratch notes: [`../../stage7-wip.md`](../../stage7-wip.md).
+
+**Operational follow-ups (not architectural blockers):**
+
+- Public TLS hosting of `$BROKER_OIDC_ISSUER` so `aws iam create-open-id-connect-provider` can fetch the JWKS. Per-operator deployment task; recipe in [`cloud-setup.md` §4 "OIDC federation"](../../cloud-setup.md).
+- Higher-assurance signer (TEE-derived ES256 at `oidc/issuer/v1`, blocked on `heima-gaps §3`). The on-disk keypair shipped today is a complete v0.1 signer — TEE is hardening, not a Stage-7 prerequisite.
+- Audit-destination swap (chain anchoring or sealed log service). The broker's local SQLite is one valid choice in the [pluggable audit-backend layer](../architecture.md#11-audit-destination-is-pluggable) — operators can swap per their threat model and jurisdiction.
 
 Stage 7 stops at the isolation primitive. **It does not commit a position on where credential ciphertext lives** — the previously-assumed `pallet-secrets-vault` (on-chain encrypted blob store) is superseded by Stage 8 below, per [`../threat-model-key-custody.md`](../threat-model-key-custody.md).
 

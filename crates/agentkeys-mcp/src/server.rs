@@ -11,7 +11,18 @@ pub async fn run_stdio(
     session: Session,
     agent_id: WalletAddress,
 ) -> anyhow::Result<()> {
-    let handler = McpHandler::new(backend, session, agent_id);
+    let broker_url = std::env::var("AGENTKEYS_BROKER_URL").ok();
+    run_stdio_with_broker(backend, session, agent_id, broker_url).await
+}
+
+pub async fn run_stdio_with_broker(
+    backend: Arc<dyn CredentialBackend>,
+    session: Session,
+    agent_id: WalletAddress,
+    broker_url: Option<String>,
+) -> anyhow::Result<()> {
+    let handler =
+        McpHandler::new(backend, session, agent_id).with_broker_url(broker_url);
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);

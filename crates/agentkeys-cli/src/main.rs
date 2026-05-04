@@ -24,6 +24,13 @@ struct Cli {
     #[arg(long, help = "Output machine-readable JSON where supported")]
     json: bool,
 
+    #[arg(
+        long,
+        env = "AGENTKEYS_BROKER_URL",
+        help = "Stage 7 broker URL — when set, `provision` fetches AWS temp creds from the broker (replaces stage6-demo-env.sh)"
+    )]
+    broker_url: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -208,7 +215,8 @@ enum InboxAction {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let ctx = CommandContext::new(&cli.backend, cli.verbose, cli.json);
+    let ctx = CommandContext::new(&cli.backend, cli.verbose, cli.json)
+        .with_broker_url(cli.broker_url.clone());
 
     let result: anyhow::Result<String> = match &cli.command {
         Commands::Init { mock_token } => {

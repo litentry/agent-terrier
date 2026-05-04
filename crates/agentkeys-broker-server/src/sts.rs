@@ -27,6 +27,13 @@ pub struct AwsStsClient {
 }
 
 impl AwsStsClient {
+    /// Construct a client backed by *static* IAM-user keys.
+    ///
+    /// Legacy / explicit-config path. New deployments should prefer
+    /// [`Self::with_default_chain`] so the AWS SDK can pick up credentials
+    /// from a named profile (`~/.aws/credentials` + `AWS_PROFILE`), an EC2
+    /// instance profile (IMDS), or another link in the default provider
+    /// chain — no long-lived keys in the broker's process environment.
     pub async fn from_keys(
         access_key_id: &str,
         secret_access_key: &str,
@@ -42,6 +49,22 @@ impl AwsStsClient {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(region.to_string()))
             .credentials_provider(creds)
+            .load()
+            .await;
+        Self { client: aws_sdk_sts::Client::new(&config) }
+    }
+
+    /// Construct a client using the AWS SDK's default credential provider
+    /// chain. Honors, in order: env vars (`AWS_ACCESS_KEY_ID` etc.), shared
+    /// credentials file (`~/.aws/credentials` + `AWS_PROFILE`), assume-role
+    /// chains in `~/.aws/config`, and (on EC2) IMDS instance profile.
+    ///
+    /// This is the recommended path for both local-dev (operators run
+    /// `awsp agentkeys-daemon` to set `AWS_PROFILE`, then start the broker)
+    /// and EC2 deployments (attach an instance profile, no env vars at all).
+    pub async fn with_default_chain(region: &str) -> Self {
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(region.to_string()))
             .load()
             .await;
         Self { client: aws_sdk_sts::Client::new(&config) }
