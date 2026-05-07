@@ -132,6 +132,10 @@ async fn discovery_returns_aws_compatible_shape() {
         .expect("claims_supported must be an array");
     let names: Vec<&str> = claims.iter().filter_map(|v| v.as_str()).collect();
     assert!(names.contains(&"agentkeys_user_wallet"));
+    assert!(
+        names.contains(&"https://aws.amazon.com/tags"),
+        "discovery doc must advertise the AWS tags claim so AWS IAM expects it"
+    );
     assert!(names.contains(&"sub"));
     assert!(names.contains(&"exp"));
 }
@@ -200,6 +204,22 @@ async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
     );
     assert_eq!(token_data.claims["aud"], "sts.amazonaws.com");
     assert_eq!(token_data.claims["iss"], TEST_ISSUER);
+
+    // Regression guard for the silent-Stage-7-isolation-failure bug: AWS STS
+    // populates session tags ONLY from this magic-named claim, never from
+    // arbitrary top-level claims. Without it, `${aws:PrincipalTag/...}` in
+    // bucket policies expands to empty and tenant isolation is inert.
+    let aws_tags = &token_data.claims["https://aws.amazon.com/tags"];
+    assert_eq!(
+        aws_tags["principal_tags"]["agentkeys_user_wallet"][0],
+        wallet,
+        "JWT must carry agentkeys_user_wallet as a principal_tag for STS to set the session tag"
+    );
+    assert_eq!(
+        aws_tags["transitive_tag_keys"][0],
+        "agentkeys_user_wallet",
+        "agentkeys_user_wallet must be transitive so it survives role chaining"
+    );
 
     let row = state.audit.last_row().unwrap().expect("audit row missing");
     assert_eq!(row.outcome, "ok");

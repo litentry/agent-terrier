@@ -41,6 +41,7 @@ pub async fn discovery(State(state): State<SharedState>) -> impl IntoResponse {
             "agentkeys_grant_id",
             "agentkeys_operation",
             "agentkeys_user_wallet",
+            "https://aws.amazon.com/tags",
         ],
     }))
 }
@@ -103,6 +104,13 @@ pub async fn mint_oidc_jwt(
         .unwrap_or(0);
     let exp = now + state.config.oidc_jwt_ttl_seconds as i64;
 
+    // The `https://aws.amazon.com/tags` claim is what AWS STS reads to populate
+    // session tags from the JWT. AWS does NOT auto-promote arbitrary OIDC claims
+    // — the bare `agentkeys_user_wallet` claim alone produces an untagged session,
+    // and `${aws:PrincipalTag/agentkeys_user_wallet}` in bucket policies expands
+    // to empty. `transitive_tag_keys` ensures the tag persists across role chains
+    // (e.g. assumed-role → assume-role).
+    // Spec: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html#oidc-session-tags
     let claims = json!({
         "iss": state.config.oidc_issuer,
         "sub": format!("agentkeys:agent:{}", session.wallet),
@@ -110,6 +118,12 @@ pub async fn mint_oidc_jwt(
         "iat": now,
         "exp": exp,
         "agentkeys_user_wallet": session.wallet,
+        "https://aws.amazon.com/tags": {
+            "principal_tags": {
+                "agentkeys_user_wallet": [session.wallet],
+            },
+            "transitive_tag_keys": ["agentkeys_user_wallet"],
+        },
     });
 
     let jwt = state.oidc.sign_jwt(&claims)?;
