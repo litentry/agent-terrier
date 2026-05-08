@@ -1,31 +1,46 @@
 //! AWS-cred fetch helper for the Stage 7 broker.
 //!
-//! When the daemon (or CLI) is run with `--broker-url`, the operator no longer
-//! has to source `scripts/stage6-demo-env.sh`. Instead, the provisioner asks the
-//! broker for 1-hour scoped temp credentials right before spawning a scraper
-//! subprocess, and injects them as `AWS_*` env vars into the child's environment.
+//! Two-step daemon-side mint: fetch OIDC JWT from the broker, then exchange
+//! it for short-lived AWS credentials via `AssumeRoleWithWebIdentity`
+//! client-side. The JWT authenticates the STS call, so neither the broker
+//! nor the daemon needs an IAM principal at runtime.
 //!
-//! Behavior is opt-in: pass `BrokerCreds::None` (the default when no broker URL
-//! is configured) and the subprocess inherits whatever `AWS_*` env the operator
-//! already exported manually.
+//! Issue: <https://github.com/litentry/agentKeys/issues/71> (Option A).
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aws_config::BehaviorVersion;
+use aws_sdk_sts::config::Region;
 use serde::Deserialize;
 
 use crate::error::{ProvisionError, ProvisionResult};
 
-/// Shape of the broker's `POST /v1/mint-aws-creds` response. Keep in sync with
-/// `crates/agentkeys-broker-server/src/handlers/mint.rs::MintResponse`.
+/// Broker `POST /v1/mint-oidc-jwt` response shape. Mirrors
+/// `crates/agentkeys-broker-server/src/handlers/oidc.rs::MintOidcJwtResponse`.
 #[derive(Debug, Clone, Deserialize)]
+pub struct OidcJwtResponse {
+    pub jwt: String,
+    pub wallet: String,
+    /// Unix-epoch-seconds expiration of the JWT itself, NOT the assumed-role
+    /// session. JWT TTL is short (~5 min default); the assumed-role session
+    /// has its own (1h-default) TTL set at AssumeRoleWithWebIdentity time.
+    pub expiration: i64,
+}
+
+/// Final temp-cred shape passed to the scraper subprocess. The struct fields
+/// match the broker's pre-issue-#71 `/v1/mint-aws-creds` response so callers
+/// who already consume `AwsTempCreds.to_env(...)` need no changes.
+#[derive(Debug, Clone)]
 pub struct AwsTempCreds {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub session_token: String,
-    /// Unix epoch seconds. The broker's session_duration_seconds caps this
-    /// (1h default).
+    /// Unix epoch seconds. `duration_seconds` controls this — defaults to
+    /// 3600 (1h). AWS caps the value at the role's MaxSessionDuration.
     pub expiration: i64,
+    /// Wallet that authenticates the assumed session (the
+    /// `agentkeys_user_wallet` PrincipalTag is set to this value).
     pub wallet: String,
 }
 
@@ -47,17 +62,16 @@ impl AwsTempCreds {
     }
 }
 
-/// Caller-side fetch. Bearer token is the daemon's own session token, which the
-/// broker validates against the backend's `/session/validate` endpoint before
-/// minting. Errors are mapped to `ProvisionError::Internal` because they sit
-/// upstream of the subprocess spawn — the per-step tripwire/store/error codes
-/// don't apply here.
-pub async fn fetch_via_broker(
+/// Fetch an OIDC JWT from the broker. The bearer is the daemon's own session
+/// token (validated by the broker's session backend). Pulled out of
+/// `fetch_via_broker` so unit tests can exercise the HTTP / bearer / parsing
+/// half against an axum stub without needing to mock STS.
+pub async fn fetch_oidc_jwt(
     broker_url: &str,
     session_token: &str,
-) -> ProvisionResult<AwsTempCreds> {
+) -> ProvisionResult<OidcJwtResponse> {
     let url = format!(
-        "{}/v1/mint-aws-creds",
+        "{}/v1/mint-oidc-jwt",
         broker_url.trim_end_matches('/')
     );
     let client = reqwest::Client::builder()
@@ -82,9 +96,148 @@ pub async fn fetch_via_broker(
         )));
     }
 
-    resp.json::<AwsTempCreds>()
+    resp.json::<OidcJwtResponse>()
         .await
-        .map_err(|e| ProvisionError::Internal(format!("parse broker response: {e}")))
+        .map_err(|e| ProvisionError::Internal(format!("parse broker jwt response: {e}")))
+}
+
+/// End-to-end caller: fetch the JWT from the broker, exchange it for AWS temp
+/// creds via `AssumeRoleWithWebIdentity`, return the creds.
+///
+/// `role_arn` is the federated role configured in `cloud-setup.md §4.3` (e.g.
+/// `arn:aws:iam::ACCOUNT:role/agentkeys-data-role`). The operator passes this
+/// in via daemon env — typically `AGENTKEYS_DATA_ROLE_ARN` — because each
+/// AgentKeys deployment has its own role ARN.
+///
+/// `region` is the AWS region for STS calls. STS is a global service but the
+/// SDK still wants a region for endpoint resolution. `us-east-1` is fine
+/// unless your role is region-restricted.
+///
+/// `session_duration_seconds`: caller controls the AWS-creds TTL. AWS clamps
+/// to the role's `MaxSessionDuration` (default 3600s).
+///
+/// The STS client is built with **anonymous credentials** — the JWT
+/// authenticates the call, the daemon needs zero AWS principals.
+pub async fn fetch_via_broker(
+    broker_url: &str,
+    session_token: &str,
+    role_arn: &str,
+    region: &str,
+    session_duration_seconds: i32,
+) -> ProvisionResult<AwsTempCreds> {
+    let jwt_resp = fetch_oidc_jwt(broker_url, session_token).await?;
+    assume_role_with_jwt(
+        &jwt_resp.jwt,
+        &jwt_resp.wallet,
+        role_arn,
+        region,
+        session_duration_seconds,
+    )
+    .await
+}
+
+/// Convenience overload that defaults `session_duration_seconds` to 3600 (1h).
+pub async fn fetch_via_broker_default_ttl(
+    broker_url: &str,
+    session_token: &str,
+    role_arn: &str,
+    region: &str,
+) -> ProvisionResult<AwsTempCreds> {
+    fetch_via_broker(broker_url, session_token, role_arn, region, 3600).await
+}
+
+/// Run `AssumeRoleWithWebIdentity` against the live AWS STS endpoint with the
+/// given JWT and return the temp creds. Anonymous SDK config — no AWS creds
+/// required on this side.
+async fn assume_role_with_jwt(
+    jwt: &str,
+    wallet: &str,
+    role_arn: &str,
+    region: &str,
+    session_duration_seconds: i32,
+) -> ProvisionResult<AwsTempCreds> {
+    // Anonymous SDK config — the JWT authenticates AssumeRoleWithWebIdentity.
+    // TODO: replace `AnonymousCredentials` with `.no_credentials()` once we
+    // bump aws-config to 1.5+ (the helper isn't in 1.0–1.4).
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .region(Region::new(region.to_string()))
+        .credentials_provider(AnonymousCredentials)
+        .load()
+        .await;
+    let client = aws_sdk_sts::Client::new(&config);
+
+    let session_name = build_session_name(wallet);
+    let resp = client
+        .assume_role_with_web_identity()
+        .role_arn(role_arn)
+        .role_session_name(&session_name)
+        .web_identity_token(jwt)
+        .duration_seconds(session_duration_seconds)
+        .send()
+        .await
+        .map_err(|e| {
+            ProvisionError::Internal(format!(
+                "assume_role_with_web_identity({}): {}",
+                role_arn, e
+            ))
+        })?;
+
+    let creds = resp
+        .credentials
+        .ok_or_else(|| ProvisionError::Internal("STS returned no credentials".into()))?;
+
+    Ok(AwsTempCreds {
+        access_key_id: creds.access_key_id,
+        secret_access_key: creds.secret_access_key,
+        session_token: creds.session_token,
+        expiration: creds.expiration.secs(),
+        wallet: wallet.to_lowercase(),
+    })
+}
+
+/// Wallet → STS session name (max 64 chars; alphanumeric + `=,.@-_`).
+/// **Mirrors `crates/agentkeys-broker-server/src/handlers/mint.rs::build_session_name`
+/// byte-for-byte** so audit rows + CloudTrail events line up across broker
+/// mints (`/v1/mint-aws-creds` -> `mint_v2`) and daemon-side mints (this
+/// function). The trailing micro-second timestamp gives every call a unique
+/// session name even when the same wallet mints in rapid succession; without
+/// it AWS returns the same temp creds for repeated calls within the
+/// `DurationSeconds` window (subtle caching footgun called out in critic M1).
+fn build_session_name(wallet: &str) -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs();
+    let micros = now.subsec_micros();
+    let safe_wallet: String = wallet
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '-' | '_'))
+        .take(40)
+        .collect();
+    let mut name = format!("agentkeys-{}-{}-{:06}", safe_wallet, secs, micros);
+    if name.len() > 64 {
+        name.truncate(64);
+    }
+    name
+}
+
+/// `ProvideCredentials` impl that always returns `Err(NoCredentials)`.
+/// Used by `assume_role_with_jwt` because `AssumeRoleWithWebIdentity` is
+/// JWT-authenticated and the SDK never invokes the resolver for it.
+#[derive(Debug)]
+struct AnonymousCredentials;
+
+impl aws_credential_types::provider::ProvideCredentials for AnonymousCredentials {
+    fn provide_credentials<'a>(
+        &'a self,
+    ) -> aws_credential_types::provider::future::ProvideCredentials<'a>
+    where
+        Self: 'a,
+    {
+        aws_credential_types::provider::future::ProvideCredentials::ready(Err(
+            aws_credential_types::provider::error::CredentialsError::not_loaded(
+                "anonymous (AssumeRoleWithWebIdentity uses JWT auth)",
+            ),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -121,18 +274,45 @@ mod tests {
         assert_eq!(env.get("AWS_DEFAULT_REGION").unwrap(), "us-east-1");
     }
 
+    #[test]
+    fn build_session_name_matches_broker_format() {
+        // Mirrors broker handlers/mint.rs build_session_name (critic M1).
+        let name = build_session_name("0xAbCdEf0123456789ABCDEF0123456789AbCdEf0123456789");
+        assert!(name.starts_with("agentkeys-"));
+        assert!(name.len() <= 64, "STS rejects session names >64 chars");
+        // Includes the unix-secs + micros suffix so rapid same-wallet mints
+        // get distinct session names.
+        assert!(name.matches('-').count() >= 3, "expected at least 3 dashes, got {}", name);
+    }
+
+    #[test]
+    fn build_session_name_strips_unsafe_chars() {
+        let n = build_session_name("0xABC/123 weird");
+        assert!(!n.contains('/'));
+        assert!(!n.contains(' '));
+    }
+
+    #[test]
+    fn build_session_name_handles_empty_wallet() {
+        let n = build_session_name("");
+        assert!(n.starts_with("agentkeys--"));
+    }
+
+    // ---- HTTP-side tests for fetch_oidc_jwt against an axum stub ----
+
     #[tokio::test]
-    async fn fetch_via_broker_happy_path() {
-        let server = stub_broker_server(StubResponse::Ok).await;
-        let creds = fetch_via_broker(&server.url, "session-token").await.unwrap();
-        assert_eq!(creds.access_key_id, "ASIA-stub");
-        assert_eq!(creds.wallet, "0xtest");
+    async fn fetch_oidc_jwt_happy_path() {
+        let server = stub_broker_server(StubResponse::OkJwt).await;
+        let resp = fetch_oidc_jwt(&server.url, "session-token").await.unwrap();
+        assert!(resp.jwt.starts_with("eyJ"), "expected JWT-shaped string");
+        assert_eq!(resp.wallet, "0xtest");
+        assert_eq!(resp.expiration, 9_999_999_999);
     }
 
     #[tokio::test]
-    async fn fetch_via_broker_propagates_unauthorized() {
+    async fn fetch_oidc_jwt_propagates_unauthorized() {
         let server = stub_broker_server(StubResponse::Unauthorized).await;
-        let err = fetch_via_broker(&server.url, "bogus")
+        let err = fetch_oidc_jwt(&server.url, "bogus")
             .await
             .expect_err("expected error on 401");
         let msg = err.to_string();
@@ -140,16 +320,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_via_broker_handles_unreachable_broker() {
+    async fn fetch_oidc_jwt_handles_unreachable_broker() {
         // Port 1 is reserved; nothing listens there.
-        let err = fetch_via_broker("http://127.0.0.1:1", "tok")
+        let err = fetch_oidc_jwt("http://127.0.0.1:1", "tok")
             .await
             .expect_err("expected error on unreachable broker");
         assert!(err.to_string().contains("broker request"));
     }
 
     enum StubResponse {
-        Ok,
+        OkJwt,
         Unauthorized,
     }
 
@@ -163,20 +343,18 @@ mod tests {
         use serde_json::json;
 
         let router = match response {
-            StubResponse::Ok => Router::new().route(
-                "/v1/mint-aws-creds",
+            StubResponse::OkJwt => Router::new().route(
+                "/v1/mint-oidc-jwt",
                 post(|| async {
                     Json(json!({
-                        "access_key_id": "ASIA-stub",
-                        "secret_access_key": "stub-secret",
-                        "session_token": "stub-token",
-                        "expiration": 9_999_999_999_i64,
+                        "jwt": "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJzdHViIn0.fake-sig",
                         "wallet": "0xtest",
+                        "expiration": 9_999_999_999_i64,
                     }))
                 }),
             ),
             StubResponse::Unauthorized => Router::new().route(
-                "/v1/mint-aws-creds",
+                "/v1/mint-oidc-jwt",
                 post(|| async {
                     (
                         axum::http::StatusCode::UNAUTHORIZED,

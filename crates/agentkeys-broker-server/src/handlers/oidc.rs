@@ -9,8 +9,9 @@ use axum::{
 use serde_json::json;
 
 use crate::audit::{MintOutcome, MintRecord};
-use crate::auth::{extract_bearer_token, validate_bearer_token};
+use crate::auth::extract_bearer_token;
 use crate::error::{BrokerError, BrokerResult};
+use crate::jwt::verify::verify_session_jwt;
 use crate::state::SharedState;
 
 /// `GET /.well-known/openid-configuration` — OIDC discovery doc.
@@ -58,8 +59,14 @@ pub struct MintOidcJwtResponse {
     pub expiration: i64,
 }
 
-/// `POST /v1/mint-oidc-jwt` — bearer-token in (validated against the session
-/// backend), short-lived ES256 JWT out, suitable for `sts:AssumeRoleWithWebIdentity`.
+/// `POST /v1/mint-oidc-jwt` — session-JWT in, short-lived ES256 OIDC JWT out,
+/// suitable for `sts:AssumeRoleWithWebIdentity`.
+///
+/// The bearer is a broker-signed session JWT (kid `ak-session-…`) minted by
+/// `/v1/auth/wallet/verify`, `/v1/auth/email/verify`, `/v1/auth/oauth2/callback`,
+/// or `/v1/auth/exchange`. Verified locally against the broker's session
+/// keypair — no backend round-trip — matching the path `/v1/mint-aws-creds`
+/// already takes (`handlers::mint::mint_v2`).
 ///
 /// Audited via the existing mint-audit log with a `oidc_jwt` outcome marker so
 /// operators see one ledger for AWS-cred mints and OIDC-JWT mints.
@@ -74,13 +81,13 @@ pub async fn mint_oidc_jwt(
         .and_then(extract_bearer_token)
         .ok_or_else(|| BrokerError::Unauthorized("missing Authorization header".into()))?;
 
-    let session = match validate_bearer_token(&state.http, &state.config.backend_url, token).await {
-        Ok(s) => s,
+    let session_claims = match verify_session_jwt(
+        &state.session_keypair,
+        &state.config.oidc_issuer,
+        token,
+    ) {
+        Ok(c) => c,
         Err(e) => {
-            let outcome = match &e {
-                BrokerError::Unauthorized(_) => MintOutcome::AuthFailed,
-                _ => MintOutcome::BackendError,
-            };
             let _ = state.audit.record_mint(
                 MintRecord {
                     requester_token: token,
@@ -88,7 +95,7 @@ pub async fn mint_oidc_jwt(
                     requested_role: "oidc_jwt",
                     session_duration_seconds: state.config.oidc_jwt_ttl_seconds as i32,
                     sts_session_name: "(unauthenticated)",
-                    outcome,
+                    outcome: MintOutcome::AuthFailed,
                 },
                 Some(&e.to_string()),
             );
@@ -96,42 +103,18 @@ pub async fn mint_oidc_jwt(
         }
     };
 
-    tracing::Span::current().record("wallet", session.wallet.as_str());
+    let wallet = session_claims.agentkeys.wallet_address;
+    tracing::Span::current().record("wallet", wallet.as_str());
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let exp = now + state.config.oidc_jwt_ttl_seconds as i64;
-
-    // The `https://aws.amazon.com/tags` claim is what AWS STS reads to populate
-    // session tags from the JWT. AWS does NOT auto-promote arbitrary OIDC claims
-    // — the bare `agentkeys_user_wallet` claim alone produces an untagged session,
-    // and `${aws:PrincipalTag/agentkeys_user_wallet}` in bucket policies expands
-    // to empty. `transitive_tag_keys` ensures the tag persists across role chains
-    // (e.g. assumed-role → assume-role).
-    // Spec: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html#oidc-session-tags
-    let claims = json!({
-        "iss": state.config.oidc_issuer,
-        "sub": format!("agentkeys:agent:{}", session.wallet),
-        "aud": "sts.amazonaws.com",
-        "iat": now,
-        "exp": exp,
-        "agentkeys_user_wallet": session.wallet,
-        "https://aws.amazon.com/tags": {
-            "principal_tags": {
-                "agentkeys_user_wallet": [session.wallet],
-            },
-            "transitive_tag_keys": ["agentkeys_user_wallet"],
-        },
-    });
+    let (claims, _now, exp) =
+        build_oidc_jwt_claims(&state.config.oidc_issuer, &wallet, state.config.oidc_jwt_ttl_seconds);
 
     let jwt = state.oidc.sign_jwt(&claims)?;
 
     state.audit.record_mint(
         MintRecord {
             requester_token: token,
-            requester_wallet: &session.wallet,
+            requester_wallet: &wallet,
             requested_role: "oidc_jwt",
             session_duration_seconds: state.config.oidc_jwt_ttl_seconds as i32,
             sts_session_name: &state.oidc.kid,
@@ -143,7 +126,60 @@ pub async fn mint_oidc_jwt(
 
     Ok(Json(MintOidcJwtResponse {
         jwt,
-        wallet: session.wallet,
+        wallet,
         expiration: exp,
     }))
+}
+
+/// Build the OIDC JWT claim set the broker signs for AWS STS
+/// `AssumeRoleWithWebIdentity`. Returns `(claims, iat_unix, exp_unix)` so
+/// callers can also use the timestamps for audit rows / response shaping.
+///
+/// Used by:
+/// - `mint_oidc_jwt` (handler above) — public `/v1/mint-oidc-jwt` endpoint.
+/// - `crate::handlers::mint::mint_v2` — internal JWT minted
+///   per-call so the broker can do `AssumeRoleWithWebIdentity` itself
+///   (issue #71 Option B).
+///
+/// The wallet is lowercased before being placed in the `principal_tags`
+/// claim so it matches the lowercase prefixes the bucket policy uses
+/// (`bots/${aws:PrincipalTag/agentkeys_user_wallet}/`); checksummed-mixed-
+/// case wallets going in here would never match a lowercase resource ARN.
+///
+/// The `https://aws.amazon.com/tags` claim is what AWS STS reads to
+/// populate session tags from the JWT. AWS does NOT auto-promote
+/// arbitrary OIDC claims — the bare `agentkeys_user_wallet` claim alone
+/// produces an untagged session, and
+/// `${aws:PrincipalTag/agentkeys_user_wallet}` in bucket policies expands
+/// to empty. `transitive_tag_keys` ensures the tag persists across role
+/// chains. Spec:
+/// <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html#oidc-session-tags>
+pub(crate) fn build_oidc_jwt_claims(
+    issuer: &str,
+    wallet: &str,
+    ttl_seconds: u64,
+) -> (serde_json::Value, i64, i64) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let exp = now + ttl_seconds as i64;
+    let wallet_lc = wallet.to_lowercase();
+
+    let claims = json!({
+        "iss": issuer,
+        "sub": format!("agentkeys:agent:{}", wallet_lc),
+        "aud": "sts.amazonaws.com",
+        "iat": now,
+        "exp": exp,
+        "agentkeys_user_wallet": wallet_lc,
+        "https://aws.amazon.com/tags": {
+            "principal_tags": {
+                "agentkeys_user_wallet": [wallet_lc],
+            },
+            "transitive_tag_keys": ["agentkeys_user_wallet"],
+        },
+    });
+
+    (claims, now, exp)
 }

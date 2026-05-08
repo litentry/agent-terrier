@@ -49,7 +49,10 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/mock/inbox/deliver", post(handlers::inbox::deliver_inbox))
         .route("/mock/inbox/messages", get(handlers::inbox::list_messages))
         .route("/mock/inbox/list", get(handlers::inbox::list_inboxes))
-        // Health
-        .route("/health", get(|| async { "ok" }))
+        // `/healthz` (Kubernetes convention) — what the broker's Tier-2
+        // reachability probe hits. Single endpoint, single name across the
+        // codebase. Pre-Stage-7 `/health` alias was dropped; any caller that
+        // wired itself to `/health` should curl `/healthz` instead.
+        .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }

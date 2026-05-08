@@ -500,6 +500,15 @@ impl CredentialBackend for InProcessBackend {
                 agentkeys_types::AgentIdentity::Email(s) => ("email", s.clone()),
                 agentkeys_types::AgentIdentity::Ens(s) => ("ens", s.clone()),
                 agentkeys_types::AgentIdentity::WalletAddress(w) => ("wallet", w.0.clone()),
+                agentkeys_types::AgentIdentity::OAuth2 { provider, sub } => {
+                    let it: &'static str = match provider.as_str() {
+                        "google" => "oauth2_google",
+                        "github" => "oauth2_github",
+                        "apple" => "oauth2_apple",
+                        _ => "oauth2_unknown",
+                    };
+                    (it, sub.clone())
+                }
             };
             request_body["identity_type"] = json!(identity_type);
             request_body["identity_value"] = json!(identity_value);
@@ -781,6 +790,15 @@ impl CredentialBackend for InProcessBackend {
             agentkeys_types::AgentIdentity::Email(s) => ("email", s.clone()),
             agentkeys_types::AgentIdentity::Ens(s) => ("ens", s.clone()),
             agentkeys_types::AgentIdentity::WalletAddress(w) => ("wallet", w.0.clone()),
+            agentkeys_types::AgentIdentity::OAuth2 { provider, sub } => {
+                let it: &'static str = match provider.as_str() {
+                    "google" => "oauth2_google",
+                    "github" => "oauth2_github",
+                    "apple" => "oauth2_apple",
+                    _ => "oauth2_unknown",
+                };
+                (it, sub.clone())
+            }
         };
         let method_str = match method {
             agentkeys_types::RecoveryMethod::Passkey => "passkey",

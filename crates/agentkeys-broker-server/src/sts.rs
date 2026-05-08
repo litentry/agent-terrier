@@ -10,15 +10,32 @@ pub struct AssumedCredentials {
     pub expiration_unix: i64,
 }
 
+/// STS client surface used by broker handlers.
+///
+/// Post-issue-#71 the only mint path is `AssumeRoleWithWebIdentity` — the
+/// JWT authenticates the call, the broker holds zero AWS principals at
+/// runtime for credential minting. The legacy `AssumeRole` method was
+/// removed in the OIDC-only migration; the trait now mirrors the actual
+/// behaviour of the broker mint flow + the optional startup probe.
 #[async_trait]
 pub trait StsClient: Send + Sync {
-    async fn assume_role(
+    /// `sts:AssumeRoleWithWebIdentity` — federated mint path. The JWT
+    /// (signed by the broker's OIDC keypair) authenticates the call.
+    /// AWS reads the `https://aws.amazon.com/tags` claim to populate
+    /// session PrincipalTags, which the bucket policy uses to enforce
+    /// per-user isolation.
+    async fn assume_role_with_web_identity(
         &self,
         role_arn: &str,
         session_name: &str,
+        web_identity_token: &str,
         duration_seconds: i32,
     ) -> BrokerResult<AssumedCredentials>;
 
+    /// `sts:GetCallerIdentity` — used by the optional startup probe to
+    /// confirm the SDK has *some* credentials available (so misconfigured
+    /// hosts fail fast instead of erroring on the first mint). Skip with
+    /// `--skip-startup-check` when running creds-free.
     async fn caller_identity_ok(&self) -> BrokerResult<()>;
 }
 
@@ -27,41 +44,16 @@ pub struct AwsStsClient {
 }
 
 impl AwsStsClient {
-    /// Construct a client backed by *static* IAM-user keys.
-    ///
-    /// Legacy / explicit-config path. New deployments should prefer
-    /// [`Self::with_default_chain`] so the AWS SDK can pick up credentials
-    /// from a named profile (`~/.aws/credentials` + `AWS_PROFILE`), an EC2
-    /// instance profile (IMDS), or another link in the default provider
-    /// chain — no long-lived keys in the broker's process environment.
-    pub async fn from_keys(
-        access_key_id: &str,
-        secret_access_key: &str,
-        region: &str,
-    ) -> Self {
-        let creds = aws_credential_types::Credentials::new(
-            access_key_id,
-            secret_access_key,
-            None,
-            None,
-            "agentkeys-broker-static",
-        );
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(region.to_string()))
-            .credentials_provider(creds)
-            .load()
-            .await;
-        Self { client: aws_sdk_sts::Client::new(&config) }
-    }
-
     /// Construct a client using the AWS SDK's default credential provider
     /// chain. Honors, in order: env vars (`AWS_ACCESS_KEY_ID` etc.), shared
     /// credentials file (`~/.aws/credentials` + `AWS_PROFILE`), assume-role
     /// chains in `~/.aws/config`, and (on EC2) IMDS instance profile.
     ///
-    /// This is the recommended path for both local-dev (operators run
-    /// `awsp agentkeys-daemon` to set `AWS_PROFILE`, then start the broker)
-    /// and EC2 deployments (attach an instance profile, no env vars at all).
+    /// Post-issue-#71, the broker no longer needs **any** AWS credentials
+    /// for the mint flow itself — `AssumeRoleWithWebIdentity` is
+    /// JWT-authenticated. The default chain is still consulted for the
+    /// optional `caller_identity_ok` startup probe; pass
+    /// `--skip-startup-check` if running creds-free is intentional.
     pub async fn with_default_chain(region: &str) -> Self {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(region.to_string()))
@@ -73,21 +65,25 @@ impl AwsStsClient {
 
 #[async_trait]
 impl StsClient for AwsStsClient {
-    async fn assume_role(
+    async fn assume_role_with_web_identity(
         &self,
         role_arn: &str,
         session_name: &str,
+        web_identity_token: &str,
         duration_seconds: i32,
     ) -> BrokerResult<AssumedCredentials> {
         let resp = self
             .client
-            .assume_role()
+            .assume_role_with_web_identity()
             .role_arn(role_arn)
             .role_session_name(session_name)
+            .web_identity_token(web_identity_token)
             .duration_seconds(duration_seconds)
             .send()
             .await
-            .map_err(|e| BrokerError::StsError(format!("assume_role: {}", e)))?;
+            .map_err(|e| {
+                BrokerError::StsError(format!("assume_role_with_web_identity: {}", e))
+            })?;
 
         let creds = resp
             .credentials
@@ -138,9 +134,10 @@ impl StubStsClient {
         }
     }
 
-    /// Identity check passes, but assume_role fails. Models the broker that
-    /// can introspect itself (creds valid for GetCallerIdentity) yet cannot
-    /// assume the agent role (e.g., missing IAM trust).
+    /// Identity check passes, but the assume call fails. Models the broker
+    /// whose default-chain creds work for `GetCallerIdentity` (so startup
+    /// probe passes) yet `AssumeRoleWithWebIdentity` is rejected (e.g.
+    /// JWT issuer not registered with AWS IAM, audience mismatch).
     pub fn assume_failing(message: impl Into<String>) -> Self {
         let msg = message.into();
         Self {
@@ -153,10 +150,11 @@ impl StubStsClient {
 #[cfg(any(test, feature = "test-stub"))]
 #[async_trait]
 impl StsClient for StubStsClient {
-    async fn assume_role(
+    async fn assume_role_with_web_identity(
         &self,
         _role_arn: &str,
         _session_name: &str,
+        _web_identity_token: &str,
         _duration_seconds: i32,
     ) -> BrokerResult<AssumedCredentials> {
         (self.assume)()

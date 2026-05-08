@@ -45,12 +45,13 @@ struct Args {
 
     /// URL of the operator's broker server (Stage 7).
     ///
-    /// When set, AWS-credential needs (e.g. fetching verification emails from the
-    /// operator's S3 bucket) are satisfied by calling the broker's
-    /// `POST /v1/mint-aws-creds` with the daemon's bearer token; the daemon
-    /// itself never holds long-lived AWS credentials. Leave unset to use the
-    /// pre-Stage-7 path where the operator sources creds via
-    /// `scripts/stage6-demo-env.sh`.
+    /// When set, AWS-credential needs (e.g. fetching verification emails from
+    /// the operator's S3 bucket) are satisfied by the daemon-side path: fetch
+    /// an OIDC JWT from the broker's `POST /v1/mint-oidc-jwt`, exchange it
+    /// for AWS temp creds via `AssumeRoleWithWebIdentity` client-side (issue
+    /// #71 Option A). The daemon never holds long-lived AWS credentials.
+    /// Leave unset to fall back to whatever `AWS_*` env vars the operator
+    /// pre-sourced (pre-Stage-7 path).
     #[arg(long, env = "AGENTKEYS_BROKER_URL")]
     broker_url: Option<String>,
 }

@@ -7,11 +7,14 @@
 //!   3. mint a JWT for a real session → verify ES256 signature with the JWKS
 
 use std::path::PathBuf;
+use agentkeys_broker_server::storage::{GrantStore, IdempotencyStore, IdentityLinkStore};
 use std::sync::Arc;
 
 use agentkeys_broker_server::audit::AuditLog;
 use agentkeys_broker_server::config::BrokerConfig;
 use agentkeys_broker_server::create_router;
+use agentkeys_broker_server::identity::derive_omni_account;
+use agentkeys_broker_server::jwt::issue::mint_session_jwt;
 use agentkeys_broker_server::oidc::OidcKeypair;
 use agentkeys_broker_server::state::AppState;
 use agentkeys_broker_server::sts::{AssumedCredentials, StsClient, StubStsClient};
@@ -52,8 +55,6 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
 
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
     let config = BrokerConfig {
-        daemon_access_key_id: Some("AKIA-fake".into()),
-        daemon_secret_access_key: Some("fake-secret".into()),
         data_role_arn: STUB_ROLE_ARN.into(),
         backend_url,
         audit_db_path: PathBuf::from(":memory:"),
@@ -71,12 +72,52 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
         .connect_timeout(std::time::Duration::from_millis(500))
         .build()
         .unwrap();
+    // Stage 7 stubs — these legacy integration tests pre-date the new
+    // pluggable layer and don't exercise it. Construct the minimal valid
+    // AppState by stubbing in-memory stores + a generated session keypair.
+    let session_keypair = {
+        let path = tmp.path().join("session-keypair.json");
+        agentkeys_broker_server::jwt::SessionKeypair::generate_and_persist(&path).unwrap()
+    };
+    let nonce_store = std::sync::Arc::new(
+        agentkeys_broker_server::storage::AuthNonceStore::open_in_memory().unwrap(),
+    );
+    let wallet_store = std::sync::Arc::new(
+        agentkeys_broker_server::storage::WalletStore::open_in_memory().unwrap(),
+    );
+    let sqlite_anchor: std::sync::Arc<dyn agentkeys_broker_server::plugins::audit::AuditAnchor> =
+        std::sync::Arc::new(
+            agentkeys_broker_server::plugins::audit::sqlite::SqliteAnchor::open_in_memory().unwrap(),
+        );
+    let registry = std::sync::Arc::new(agentkeys_broker_server::plugins::PluginRegistry {
+        auth: std::collections::HashMap::new(),
+        wallet: std::sync::Arc::new(
+            agentkeys_broker_server::plugins::wallet::keystore::ClientSideKeystoreProvisioner::new(
+                std::sync::Arc::clone(&wallet_store),
+            ),
+        ),
+        audit: vec![sqlite_anchor],
+    });
     let state = Arc::new(AppState {
         config,
         http,
         audit: AuditLog::open_in_memory().unwrap(),
         sts,
         oidc: Arc::new(oidc),
+        session_keypair: std::sync::Arc::new(session_keypair),
+        registry,
+        audit_policy: agentkeys_broker_server::plugins::audit::AuditPolicy::SqlitePrimary,
+        wallet_store,
+        nonce_store,
+        grant_store: Arc::new(GrantStore::open_in_memory().unwrap()),
+        identity_link_store: Arc::new(IdentityLinkStore::open_in_memory().unwrap()),
+        idempotency_store: Arc::new(IdempotencyStore::open_in_memory().unwrap()),
+        metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
+        tier2: std::sync::Arc::new(agentkeys_broker_server::state::Tier2State::default()),
+        #[cfg(feature = "auth-email-link")]
+        email_link: None,
+        #[cfg(feature = "auth-oauth2")]
+        oauth2: None,
     });
     let app = create_router(state.clone());
 
@@ -86,22 +127,6 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
         axum::serve(listener, app).await.unwrap();
     });
     (format!("http://{}", addr), state)
-}
-
-async fn mint_session_against_backend(backend_url: &str) -> (String, String) {
-    let client = reqwest::Client::new();
-    let resp: Value = client
-        .post(format!("{}/session/create", backend_url))
-        .json(&serde_json::json!({ "auth_token": "oidc-test-bearer" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let session = resp["session"].as_str().unwrap().to_string();
-    let wallet = resp["wallet"].as_str().unwrap().to_string();
-    (session, wallet)
 }
 
 #[tokio::test]
@@ -167,8 +192,25 @@ async fn jwks_returns_p256_es256_with_kid() {
 #[tokio::test]
 async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
     let backend_url = spawn_mock_backend().await;
-    let (session_token, wallet) = mint_session_against_backend(&backend_url).await;
     let (broker_url, state) = spawn_broker(backend_url).await;
+
+    // Mint a session JWT against the broker's own session keypair — the
+    // same path the SIWE wallet/email/oauth2 verify handlers take. Replaces
+    // the legacy `mint_session_against_backend` flow now that
+    // /v1/mint-oidc-jwt verifies session JWTs locally instead of round-
+    // tripping to /session/validate (parity with /v1/mint-aws-creds).
+    let wallet = "0xabcdef0123456789abcdef0123456789abcdef01".to_string();
+    let omni = derive_omni_account("evm", &wallet);
+    let session_token = mint_session_jwt(
+        &state.session_keypair,
+        TEST_ISSUER,
+        omni.as_str(),
+        &wallet,
+        "evm",
+        &wallet,
+        300,
+    )
+    .unwrap();
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/mint-oidc-jwt", broker_url))

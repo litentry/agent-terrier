@@ -44,6 +44,14 @@ fn agent_identity_to_value(identity: &AgentIdentity) -> Value {
         AgentIdentity::WalletAddress(WalletAddress(s)) => {
             ("WalletAddress", Value::Text(s.clone()))
         }
+        AgentIdentity::OAuth2 { provider, sub } => (
+            "OAuth2",
+            // Deterministic CBOR map: keys ASCII-sorted ("provider" < "sub").
+            Value::Map(vec![
+                (Value::Text("provider".into()), Value::Text(provider.clone())),
+                (Value::Text("sub".into()), Value::Text(sub.clone())),
+            ]),
+        ),
     };
     Value::Map(vec![
         (Value::Text("type".into()), Value::Text(tag.into())),

@@ -27,7 +27,7 @@ struct Cli {
     #[arg(
         long,
         env = "AGENTKEYS_BROKER_URL",
-        help = "Stage 7 broker URL — when set, `provision` fetches AWS temp creds from the broker (replaces stage6-demo-env.sh)"
+        help = "Stage 7 broker URL — when set, `provision` fetches AWS temp creds via the broker's /v1/mint-oidc-jwt + client-side AssumeRoleWithWebIdentity (issue #71 Option A)"
     )]
     broker_url: Option<String>,
 

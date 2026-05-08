@@ -62,6 +62,13 @@ pub enum AgentIdentity {
     Email(String),
     Ens(String),
     WalletAddress(WalletAddress),
+    /// OAuth2 identity from a third-party provider. `provider` is one of
+    /// `"google"`, `"github"`, `"apple"` (v0 ships only `"google"`).
+    /// `sub` is the provider's stable user id (NOT the email — emails can
+    /// migrate). Stage 7 issue #64 adds this variant; pre-existing
+    /// AgentIdentity consumers continue to work unchanged because every
+    /// other variant remains.
+    OAuth2 { provider: String, sub: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

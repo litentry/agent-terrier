@@ -9,13 +9,26 @@ use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BrokerError, BrokerResult};
+use crate::jwt::KeypairPurpose;
 
 /// Persisted on-disk shape (mode 0600). Keeping the kid + PEM lets us add
 /// rotation later (multiple kids in JWKS) without changing the file format.
+///
+/// Stage 7 adds an optional `purpose` field — see plan §3.5.6. Pre-Stage-7
+/// keypair files have no `purpose` field and are loaded with the default
+/// `KeypairPurpose::Oidc` (legacy migration). New keypairs always include
+/// the field. After one minor version, missing-purpose load becomes a hard
+/// error matching the strict `SessionKeypair::load` semantics.
 #[derive(Serialize, Deserialize)]
 struct PersistedKeypair {
     kid: String,
     private_key_pem: String,
+    #[serde(default = "default_purpose_oidc")]
+    purpose: KeypairPurpose,
+}
+
+fn default_purpose_oidc() -> KeypairPurpose {
+    KeypairPurpose::Oidc
 }
 
 /// In-memory ES256 signing keypair plus the public-key components needed to
@@ -32,7 +45,7 @@ pub struct OidcKeypair {
 impl OidcKeypair {
     /// Generate a fresh ES256 keypair and persist it at `path` (mode 0600 on Unix).
     pub fn generate_and_persist(path: &Path) -> BrokerResult<Self> {
-        let signing_key = SigningKey::random(&mut rand_core_compat::OsRngWrapper);
+        let signing_key = SigningKey::random(&mut rand_compat::OsRngWrapper);
         let verifying_key = signing_key.verifying_key();
 
         let private_key_pem = signing_key
@@ -62,6 +75,7 @@ impl OidcKeypair {
         let persisted = PersistedKeypair {
             kid: kid.clone(),
             private_key_pem: private_key_pem.clone(),
+            purpose: KeypairPurpose::Oidc,
         };
 
         if let Some(parent) = path.parent() {
@@ -72,7 +86,7 @@ impl OidcKeypair {
             .map_err(|e| BrokerError::Internal(format!("serialize keypair: {e}")))?;
         std::fs::write(path, json)
             .map_err(|e| BrokerError::Internal(format!("write keypair {path:?}: {e}")))?;
-        set_owner_only(path)?;
+        set_owner_only_inner(path)?;
 
         Ok(Self {
             kid,
@@ -82,12 +96,23 @@ impl OidcKeypair {
         })
     }
 
-    /// Load an already-persisted keypair from `path`.
+    /// Load an already-persisted keypair from `path`. Refuses to load any
+    /// keypair tagged `purpose=session` — that file belongs in the slot
+    /// managed by `crate::jwt::SessionKeypair::load`. Pre-Stage-7 keypair
+    /// files have no `purpose` field and are accepted as `oidc`.
     pub fn load(path: &Path) -> BrokerResult<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| BrokerError::Internal(format!("read keypair {path:?}: {e}")))?;
         let persisted: PersistedKeypair = serde_json::from_str(&raw)
             .map_err(|e| BrokerError::Internal(format!("parse keypair {path:?}: {e}")))?;
+
+        if persisted.purpose != KeypairPurpose::Oidc {
+            return Err(BrokerError::Internal(format!(
+                "keypair at {} has purpose {:?} but OIDC slot expects oidc",
+                path.display(),
+                persisted.purpose
+            )));
+        }
 
         let signing_key = SigningKey::from_pkcs8_pem(&persisted.private_key_pem)
             .map_err(|e| BrokerError::Internal(format!("decode pkcs8 pem: {e}")))?;
@@ -153,8 +178,11 @@ impl OidcKeypair {
     }
 }
 
+/// Internal chmod-0600 helper. `pub(crate)` so the parallel
+/// `crate::jwt::SessionKeypair` can reuse it without duplicating the
+/// platform-conditional code.
 #[cfg(unix)]
-fn set_owner_only(path: &Path) -> BrokerResult<()> {
+pub(crate) fn set_owner_only_inner(path: &Path) -> BrokerResult<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)
         .map_err(|e| BrokerError::Internal(format!("metadata {path:?}: {e}")))?
@@ -166,7 +194,7 @@ fn set_owner_only(path: &Path) -> BrokerResult<()> {
 }
 
 #[cfg(not(unix))]
-fn set_owner_only(_path: &Path) -> BrokerResult<()> {
+pub(crate) fn set_owner_only_inner(_path: &Path) -> BrokerResult<()> {
     // On non-Unix, file ACLs aren't 0600-shaped. The README warns operators
     // to run the broker on Linux; we don't fail startup on Windows just to
     // make CI green.
@@ -174,7 +202,10 @@ fn set_owner_only(_path: &Path) -> BrokerResult<()> {
 }
 
 /// Bridges `rand_core 0.6` (what `p256` 0.13 expects) to the system OS RNG.
-mod rand_core_compat {
+/// `pub` so the parallel `SessionKeypair` can reuse it AND so integration
+/// tests can construct fresh signing keys without pulling in their own
+/// rand_core wrapper.
+pub mod rand_compat {
     pub struct OsRngWrapper;
 
     impl rand_core::CryptoRng for OsRngWrapper {}

@@ -10,6 +10,12 @@ pub enum BrokerError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// Caller is authenticated but lacks permission for this specific
+    /// action — e.g. a revoked/expired/exhausted grant (Phase B). Maps
+    /// to HTTP 403 (Codex Phase A.2 round-3 Vector 4 P2 mitigation).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("backend unreachable: {0}")]
     BackendUnreachable(String),
 
@@ -30,6 +36,7 @@ impl BrokerError {
     fn status_and_kind(&self) -> (StatusCode, &'static str) {
         match self {
             BrokerError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            BrokerError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             BrokerError::BackendUnreachable(_) => (StatusCode::BAD_GATEWAY, "backend_unreachable"),
             BrokerError::StsError(_) => (StatusCode::BAD_GATEWAY, "sts_error"),
             BrokerError::AuditError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "audit_error"),

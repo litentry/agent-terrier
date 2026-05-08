@@ -5,13 +5,19 @@ use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::mock_client::MockHttpClient;
 pub use agentkeys_core::session_store;
 use agentkeys_core::session_store::SessionStore;
-use agentkeys_provisioner::{aws_creds::fetch_via_broker, run_provision, ProvisionError, Provisioner};
+use agentkeys_provisioner::{
+    aws_creds::fetch_via_broker_default_ttl, run_provision, ProvisionError, Provisioner,
+};
 
 /// Stage-7 phase-2 helper: when a broker URL is configured, fetch 1-hour
 /// scoped AWS creds and return them as an env-var map ready to merge into the
 /// scraper subprocess. With no broker URL, returns an empty map and the
 /// subprocess inherits whatever the operator already has in its environment
-/// (legacy `stage6-demo-env.sh` path).
+/// (legacy pre-Stage-7 path: operator sources AWS_* manually).
+///
+/// Issue #71 Option A: this helper does the JWT-fetch + AssumeRoleWithWebIdentity
+/// client-side. The broker holds zero AWS principals at runtime.
+/// `AGENTKEYS_DATA_ROLE_ARN` env must be set when `broker_url.is_some()`.
 async fn broker_env_for_provision(
     broker_url: Option<&str>,
     session_token: &str,
@@ -19,11 +25,17 @@ async fn broker_env_for_provision(
     let Some(url) = broker_url else {
         return Ok(HashMap::new());
     };
-    let creds = fetch_via_broker(url, session_token).await?;
+    let role_arn = std::env::var("AGENTKEYS_DATA_ROLE_ARN").map_err(|_| {
+        anyhow!(
+            "AGENTKEYS_DATA_ROLE_ARN env var must be set when --broker-url is configured (issue #71 Option A)"
+        )
+    })?;
     let region = std::env::var("AWS_REGION")
         .ok()
-        .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok());
-    Ok(creds.to_env(region.as_deref()))
+        .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+        .unwrap_or_else(|| "us-east-1".to_string());
+    let creds = fetch_via_broker_default_ttl(url, session_token, &role_arn, &region).await?;
+    Ok(creds.to_env(Some(&region)))
 }
 use agentkeys_types::{
     AuditEvent, AuditFilter, AuthToken, Scope, ServiceName, Session, WalletAddress,
@@ -75,7 +87,7 @@ pub struct CommandContext {
     pub session_store_override: Option<SessionStore>,
     /// Stage-7 phase-2 wiring: when set, `agentkeys provision` fetches AWS
     /// temp creds from this broker URL and injects them into the scraper
-    /// subprocess env (replacing the `stage6-demo-env.sh` sourcing pattern).
+    /// subprocess env (no manual `AWS_*` env wiring required).
     pub broker_url: Option<String>,
 }
 
@@ -633,6 +645,9 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
                 agentkeys_types::AgentIdentity::Email(s) => format!("email:{s}"),
                 agentkeys_types::AgentIdentity::Ens(s) => format!("ens:{s}"),
                 agentkeys_types::AgentIdentity::WalletAddress(w) => w.0.clone(),
+                agentkeys_types::AgentIdentity::OAuth2 { provider, sub } => {
+                    format!("oauth2_{provider}:{sub}")
+                }
             };
             format!("Recover agent '{identity}'")
         }

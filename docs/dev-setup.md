@@ -95,7 +95,7 @@ You're building an agent that needs OpenAI / OpenRouter / X / etc. credentials b
 - `AGENTKEYS_BROKER_URL` — e.g. `http://broker.local:8091` or `https://broker.litentry.org`.
 - `AGENTKEYS_BEARER_TOKEN` — short-lived; the operator hands these out per-developer.
 
-That's it. No AWS keys, no `aws sts assume-role`, no `stage6-demo-env.sh` sourcing.
+That's it. No AWS keys, no `aws sts assume-role`, no per-developer env scripting.
 
 ### 4.2 Run the daemon against the broker
 
@@ -111,7 +111,7 @@ When the daemon needs to access the operator's S3 vault (to read or store a cred
 
 ### 4.3 Provision a new service
 
-The provisioner scripts run unchanged from your machine. With `--broker-url` set, the daemon (or the `agentkeys` CLI directly) calls the broker's `POST /v1/mint-aws-creds` right before spawning the scraper subprocess and injects 1-hour scoped `AWS_*` env vars into the child process. **You no longer need to source `scripts/stage6-demo-env.sh`** — that path is the legacy fallback for ops who run without a broker.
+The provisioner scripts run unchanged from your machine. With `--broker-url` set, the daemon (or the `agentkeys` CLI directly) calls the broker's `/v1/mint-oidc-jwt` + `AssumeRoleWithWebIdentity` (issue #71 Option A) right before spawning the scraper subprocess, and injects 1-hour scoped `AWS_*` env vars into the child process. You don't need to set any AWS env vars yourself.
 
 ```bash
 $BIN --broker-url "$AGENTKEYS_BROKER_URL" --session "$AGENTKEYS_BEARER_TOKEN" \
@@ -234,7 +234,7 @@ The stage-done script is the authoritative evaluator — never self-grade. If it
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Cannot find package 'tsx'` | Running a scraper from repo root instead of `provisioner-scripts/` | Use `scripts/stage6-demo-run.sh`, or `cd provisioner-scripts` first |
+| `Cannot find package 'tsx'` | Running a scraper from repo root instead of `provisioner-scripts/` | `cd provisioner-scripts && npm install` first, or invoke via the daemon's `provision` subcommand which sets the cwd correctly |
 | `ExpiredToken` from broker | Broker's daemon AWS key was rotated; broker process holds the old one | Restart the broker process — the SDK re-reads `~/.aws/credentials` (or IMDS / env vars) on start |
 | `401 Unauthorized` from broker | Bearer token expired (30-day TTL), or token issued against a different backend | Re-run `agentkeys init` against the broker's `BROKER_BACKEND_URL` |
 | Scraper hangs at `waiting for Turnstile` for >2 min | Turnstile showing a visible checkbox | Click it in the Chrome window from §5.4 |
