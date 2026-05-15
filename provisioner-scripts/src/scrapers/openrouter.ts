@@ -1,3 +1,12 @@
+// KNOWN BROKEN — DOM drift on openrouter signup page.
+// Tracked: https://github.com/litentry/agentKeys/issues/83 (label: provision-fix)
+// Symptom: `agentkeys provision openrouter` exits with
+//   `trip_wire_fired ... kind:"SelectorTimeout" step:"signup_flow"`.
+// Root cause: openrouter changed the signup-page DOM since selectors below
+// were last verified. The auto-provision pipeline upstream (mint-oidc-jwt
+// + AssumeRoleWithWebIdentity + env-injection) still works — only the
+// scraper's selectors are stale. Re-record via the
+// `agentkeys-record-scraper` skill to refresh.
 import { fileURLToPath } from "url";
 import type { Browser } from "playwright";
 import { emit, type ProvisionEvent } from "../types.js";

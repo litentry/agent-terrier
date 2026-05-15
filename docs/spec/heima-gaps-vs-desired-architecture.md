@@ -2,7 +2,8 @@
 
 **Status:** living document (gap-tracking).
 **Owner:** blockchain team.
-**Last updated:** 2026-04-19.
+**Last updated:** 2026-05-09 (revised after issue #74 step 1 / PR #75
+landed the dev_key_service signer + signer-protocol contract).
 
 ## 1. Why this doc exists
 
@@ -13,14 +14,36 @@ This document is the other half. Every delta between:
 - **desired**: what the AgentKeys wiki + spec docs describe, and
 - **current**: what the upstream `litentry/heima` repo actually implements today,
 
-gets one section below. Each section has a **Current**, **Desired**, **Impact**, and **Migration path**. Gaps are closed by (a) patches landing upstream, (b) AgentKeys shipping a fork with the delta, or (c) the desired spec being revised downward — we mark which resolution a gap is taking as it lands.
+gets one section below. Each section has a **Current**, **Desired**, **Impact**, **Migration path**, and (after PR #75) a **Status** banner. Gaps are closed by (a) patches landing upstream, (b) AgentKeys shipping a fork or self-hosted equivalent with the delta, or (c) the desired spec being revised downward — we mark which resolution a gap is taking as it lands.
 
 Related docs:
 
+- [`architecture.md`](architecture.md) — canonical broker / signer / daemon / key-flow doc (post-issue-#74).
+- [`signer-protocol.md`](signer-protocol.md) — `/dev/*` wire contract.
+- [`plans/issue-74-dev-key-service-plan.md`](plans/issue-74-dev-key-service-plan.md) — dev_key_service signer landed in PR #75.
+- [`plans/issue-74-step-1c-device-key-auth.md`](plans/issue-74-step-1c-device-key-auth.md) — device-key auth on `/dev/*`, planned.
 - [`wiki/blockchain-tee-architecture.md`](../../wiki/blockchain-tee-architecture.md) — canonical desired architecture (four rules).
 - [`wiki/key-security.md`](../../wiki/key-security.md) — TEE key security model.
-- [`docs/spec/plans/development-stages.md`](./plans/development-stages.md) — stage roadmap; this gap list is the critical path for Stage 6 and Stage 7.
-- [`docs/spec/ses-email-architecture.md`](./ses-email-architecture.md) — Stage 6 email spec; depends on gaps §2, §3, §5.
+- [`plans/development-stages.md`](./plans/development-stages.md) — stage roadmap; this gap list is the critical path for Stage 6 and Stage 7.
+- [`ses-email-architecture.md`](./ses-email-architecture.md) — Stage 6 email spec; depends on gaps §2, §3, §5.
+
+## 1a. Status snapshot (added 2026-05-09)
+
+The table below is the at-a-glance answer to "where do we stand?" Per-gap detail in §2 onwards.
+
+| § | Gap | Status | Resolution path |
+|---|---|---|---|
+| 2 | HDKD master-seed key derivation | **PARTIAL — in-tree equivalent shipped** | AgentKeys' `dev_key_service` ships HKDF-from-master-secret derivation for the per-user wallet key (outside the TEE, dev-stage). Heima upstream is unchanged; full resolution waits on issue #74 step 2 (TEE worker). |
+| 3 | TEE exposes an OIDC provider | **RESOLVED IN-TREE (operator-hosted)** | The Stage 7 Rust broker (PR #61, deployed in PR #73) ships `/.well-known/openid-configuration` + JWKS + bearer-gated `mint-oidc-jwt`. The trust anchor is the on-disk ES256 keypair, not a TEE — see [`architecture.md` §3 K2 + §7 "Pluggable surfaces"](architecture.md). Heima TEE-derived issuer remains the v0.2 hardening target. |
+| 4 | BYODKIM (TEE-held DKIM keys) | **GAP — unchanged** | Stage 6 ships per-domain DKIM signing; today it's TEE-only design with no implementation. Plan unchanged. |
+| 5 | On-chain email pallets | **GAP — unchanged** | `pallet-email-grants` + `pallet-email-audit` still don't exist upstream. Stage 6 blocker per original plan. |
+| 6 | Session-tag JWT claims for AWS PrincipalTag | **RESOLVED IN-TREE** | The broker mints OIDC JWTs with `agentkeys_user_wallet` claim + `https://aws.amazon.com/tags` block; AWS STS exchanges for tagged sessions; S3 PrincipalTag policies enforce per-user isolation. Verified end-to-end in [`stage7-demo-and-verification.md` §4](../stage7-demo-and-verification.md). |
+| 7 | Attested publication of issuer pubkey | **GAP — unchanged** | Stage 7 hardening follow-up; out of scope for v0.1. |
+| 8 | `pallet-oidc-pubkeys` (URL-hijack defense) | **GAP — unchanged** | Stage 7b; depends on §3 having TEE-attested rather than on-disk keypair. |
+| 9 | `pallet-enclave-successors` (MRSIGNER governance) | **GAP — unchanged** | Required only when MRSIGNER rotation lands; not a v0.1 blocker. |
+| 10 | **(NEW)** Signer-edge contract for the per-user wallet key | **PARTIAL — wire shape pinned, dev-stage backend** | `signer-protocol.md` v0.1 ships the wire contract; `dev_key_service` is the dev-stage HKDF backend; issue #74 step 2 (TEE worker) closes the trust gap. |
+| 11 | **(NEW)** Per-request crypto auth on the signer edge | **PLANNED** | Heima's `ClientAuth::EvmSiweSigned` / `BackendSigned` tier model is the prior art. Issue #74 step 1c (device-key auth) is a strict superset — see [`plans/issue-74-step-1c-device-key-auth.md`](plans/issue-74-step-1c-device-key-auth.md). |
+| 12 | (tracking metadata) | n/a | Resolution log lives in §12 below. |
 
 ---
 
@@ -335,8 +358,178 @@ Depends on §2 (HDKD) landing first, because the rotation is only cheap under HD
 
 ---
 
-## 10. Tracking
+## 10. Gap (NEW): signer-edge contract for the per-user wallet key
 
-- Each gap is owned as a separate issue in the `litentry/agentKeys` repo (TBD — file when this doc merges).
+**Status:** PARTIAL — wire shape pinned, dev-stage backend deployed (PR #75); TEE-backed implementation tracked under issue #74 step 2.
+
+### Current (post-PR #75)
+
+The Heima TEE worker derives per-user custodial wallets internally
+inside the enclave (per `pallet-bitacross` reference in §2). Outside
+of Heima — in the AgentKeys broker / signer / daemon stack — there
+was no equivalent service for an operator authenticated via
+email/OAuth2 (no local crypto wallet) to obtain a deterministic EVM
+wallet under the operator's `omni_account`.
+
+PR #75 ([issue #74 step 1](plans/issue-74-dev-key-service-plan.md))
+ships:
+- The wire contract in [`signer-protocol.md`](signer-protocol.md):
+  `POST /dev/derive-address` and `POST /dev/sign-message` with
+  `omni_account` keying, error envelope, versioned HKDF derivation
+  byte, future TEE attestation handshake.
+- A dev-stage HKDF backend (`agentkeys-mock-server::dev_key_service`)
+  loaded from `DEV_KEY_SERVICE_MASTER_SECRET`.
+- A `SignerClient` trait + `HttpSignerClient` impl in
+  `agentkeys-core` so the daemon treats the signer as opaque RPC.
+- A TEE-stub conformance test that runs the daemon's assertions
+  against an in-memory fixture mirroring the wire contract.
+
+### Desired (Heima parity)
+
+A TEE-derived custodial wallet keyed on `omni_account`:
+- Master secret generated and sealed inside the enclave at first
+  boot.
+- Remote attestation so the daemon can verify the signer is genuine
+  before sending its first request.
+- Sealed-data persistence (no plain env-var master secret).
+- Logs every signing operation with `(omni_account, message_hash)`,
+  no secret material.
+
+### Impact
+
+- **Today's gap (post-PR #75):** the dev-stage signer's master
+  secret lives in `/etc/agentkeys/dev-key-service.env` (mode 0600).
+  Compromise of the broker host = full master-secret leak = every
+  wallet for every operator is forge-able forever. This is the
+  "DEV ONLY — replace with TEE" warning baked into the module-doc.
+- **What closing the gap unlocks:** the same threat properties Heima
+  TEE wallets have today (sealed seed, attested boot, host-root
+  insufficient for compromise) become available to AgentKeys
+  operators not authenticating against the Heima TEE. This is what
+  makes the federated-cloud-broker story production-grade.
+
+### Migration path
+
+Issue #74 step 2 (separate issue, planned). Same wire shape; only
+the backend behind `signer.<zone>` changes. Daemon, CLI, broker, and
+operator-runbook stay unchanged at the swap.
+
+The HKDF dev backend is intentionally short-lived. Production
+deployments that ship before step 2 lands MUST treat
+`DEV_KEY_SERVICE_MASTER_SECRET` as an incident-class secret and not
+as a normal config value.
+
+---
+
+## 11. Gap (NEW): per-request crypto auth on the signer edge
+
+**Status:** PLANNED — design in [`plans/issue-74-step-1c-device-key-auth.md`](plans/issue-74-step-1c-device-key-auth.md); CEO review pending.
+
+### Current
+
+PR #75 deploys `/dev/*` with no HTTP-layer auth (loopback-only, per
+`signer-protocol.md` §"What's intentionally out of scope at v0").
+Issue #74 step 1b will add bearer-JWT auth (broker mints session JWT
+→ signer verifies signature against broker pubkey + asserts
+`claim.omni_account == body.omni_account`). That is a strict
+improvement over no auth, but the broker becomes a single point of
+compromise: forge a session JWT at the broker → impersonate any
+omni at the signer.
+
+Heima already faced this design question. Its `ClientAuth` enum (in
+`tee-worker/omni-executor/primitives/src/auth.rs:212-227` per
+[`docs/research/option-a-port-dexs-backend.md`](../research/option-a-port-dexs-backend.md))
+classifies operations into three tiers:
+
+- `JwtBearer` — static long-lived TEE-RSA JWT (low-stakes reads).
+- `BackendSigned` — backend signs the userOp; TEE verifies the
+  backend ECDSA signature.
+- `EvmSiweSigned` — caller produces a fresh EIP-191 signature on the
+  request payload itself (high-stakes ops).
+
+Each variant is deployed for a different stakes tier. Heima
+recognized that bearer alone was insufficient for high-stakes
+operations.
+
+### Desired
+
+Issue #74 step 1c proposes a single auth scheme that subsumes all
+three Heima tiers:
+
+- **Init**: daemon generates a device keypair locally; identity
+  ceremony (email-link / OAuth2 / EVM-wallet / WebAuthn) binds the
+  device pubkey to the omni at the broker.
+- **Per request**: daemon signs `(omni || message_hex || nonce ||
+  timestamp)` with the device key; signer verifies the per-request
+  signature against the device pubkey extracted from the session JWT
+  claim.
+- **Trust shape**: signer never trusts the broker as a transitive
+  authenticator. Broker compromise post-init does not enable
+  forging new sign requests.
+
+This is **strictly stronger** than all three Heima `ClientAuth`
+variants:
+
+| Heima variant | Step-1c equivalent | Why stronger |
+|---|---|---|
+| `JwtBearer` | Step-1b's bearer auth (replaced by 1c) | Per-request crypto kills the replay window. |
+| `BackendSigned` | Step-1c device-key auth | The "backend" becomes the user's local device, not the broker — user-controlled key, not backend-controlled. |
+| `EvmSiweSigned` | Step-1c init binding for `evm` omnis | Same crypto guarantees, but one-shot user-key sign at init then automatic device-key signing per call (no MetaMask popup per request). |
+
+Identity-type uniform: same per-request signature shape works for
+`evm`, `email`, `oauth2_google`, `passkey` — only the init-time
+binding ceremony differs. Heima today only has the per-request crypto
+path (`EvmSiweSigned`) for EVM identities; email/OAuth2 identities
+fall back to `JwtBearer`.
+
+### Impact
+
+- **Closes the broker-as-SPOF risk on the signer call surface.**
+  Broker can be fully owned and the attacker cannot sign as any
+  user.
+- **TEE swap-ready** (gap §10). The TEE worker (issue #74 step 2)
+  inherits the device-key auth scheme without changes — the TEE
+  doesn't need to call out to the broker on every sign request.
+- **Aligned with web3 prior art:** WebAuthn / passkey, EIP-7702
+  session keys, ERC-4337 session keys all use the same primitive
+  (high-friction identity verification authorizes a low-friction
+  signing key). The pattern is well-validated outside AgentKeys.
+
+### Migration path
+
+Issue #74 step 1c (separate issue, GitHub
+[#76](https://github.com/litentry/agentKeys/issues/76)). Eleven
+implementation stages laid out in the plan doc:
+
+0. `signer-protocol.md` v0.2 — wire contract revision
+1. `agentkeys-core::device_key` module
+2-4. Broker session JWT mint + identity-ceremony device-pubkey binding
+5. dev_key_service handlers — per-request sig verification
+6. `init_flow` updates — device-key registration
+7. `HttpSignerClient` — send JWT + device sig
+8. Deprecate the bearer-JWT-only path (step 1b)
+9. TEE-stub conformance test extended
+10. Demo doc + operator runbook updated
+11. Live broker host redeploy + smoke walkthrough
+
+Rough total: ~1200 LOC + protocol-doc revision + 11 stage-gated test
+waves. Blocks the TEE worker (gap §10) because step 2's threat
+model assumes the signer can't be tricked by a compromised broker
+— exactly what step 1c delivers.
+
+---
+
+## 12. Tracking
+
+- Each gap is owned as a separate issue in the `litentry/agentKeys` repo. PR #75 / issue #76 close §10 and queue §11 respectively.
 - When a gap closes, mark the section **RESOLVED** with the merge commit(s) and the resolution path (A/B/C from §2).
 - When a new delta is discovered, append a new section here before revising the wiki, so the wiki stays "desired" and this doc stays "gap".
+
+### Resolution log
+
+| Gap | Date | Status change | Reference |
+|---|---|---|---|
+| §3 OIDC provider | 2026-04-28 | GAP → RESOLVED IN-TREE | PR #61 (broker phase 2 OIDC issuer) |
+| §6 PrincipalTag JWT claim | 2026-04-28 | GAP → RESOLVED IN-TREE | PR #61 + cloud-setup §4.4 |
+| §10 signer-edge contract | 2026-05-08 | (NEW) → PARTIAL | PR #75 (issue #74 step 1) |
+| §11 device-key auth | 2026-05-09 | (NEW) → PLANNED | issue [#76](https://github.com/litentry/agentKeys/issues/76) |

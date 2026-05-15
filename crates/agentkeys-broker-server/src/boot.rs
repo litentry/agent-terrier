@@ -370,25 +370,14 @@ fn build_registry(
             }
             #[cfg(feature = "auth-email-link")]
             "email_link" => {
-                use crate::plugins::auth::{EmailLinkAuth, StubEmailSender};
+                use crate::plugins::auth::{
+                    EmailLinkAuth, EmailSender, SesEmailSender, StubEmailSender,
+                };
                 use crate::storage::{EmailRateLimitStore, EmailTokenStore};
-                // HMAC key
-                let hmac_path = std::env::var(env::BROKER_EMAIL_HMAC_KEY_PATH).map_err(|_| {
-                    boot_fail(
-                        env::BROKER_EMAIL_HMAC_KEY_PATH,
-                        "(unset)",
-                        "required when email_link is in BROKER_AUTH_METHODS",
-                        "email-hmac-key",
-                    )
-                })?;
-                let hmac_key = std::fs::read(&hmac_path).map_err(|e| {
-                    boot_fail(
-                        env::BROKER_EMAIL_HMAC_KEY_PATH,
-                        &hmac_path,
-                        format!("read failed: {}", e),
-                        "email-hmac-key",
-                    )
-                })?;
+                // No HMAC key — magic-link is stateful (CSPRNG token →
+                // SHA256(token) keyed by request_id in EmailTokenStore →
+                // single-use within TTL). See arch.md §5a.1.M Stage 1 +
+                // EmailLinkAuth::new doc comment for the design rationale.
                 let from_address =
                     std::env::var(env::BROKER_EMAIL_FROM_ADDRESS).map_err(|_| {
                         boot_fail(
@@ -447,24 +436,62 @@ fn build_registry(
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|_| parent.clone());
                 let ses_cache_path = data_dir.join("ses-verify.json");
-                // Stub email sender for Phase A.1; real SES wiring lands
-                // as a fast-follow per V0.1-FOLLOWUPS R2-F8.
-                let sender = Arc::new(StubEmailSender::new());
+                // Email sender backend selector — `BROKER_EMAIL_SENDER` env var.
+                //   "stub" (default, in-process Vec — same as v0.1)
+                //   "ses"  (real aws-sdk-sesv2 SendEmail; requires verified FROM
+                //          identity per scripts/ses-verify-sender.sh)
+                let sender_backend = std::env::var(env::BROKER_EMAIL_SENDER)
+                    .unwrap_or_else(|_| "stub".to_string());
+                let sender: Arc<dyn EmailSender> = match sender_backend.as_str() {
+                    "stub" => {
+                        tracing::info!("email_link sender backend: stub (in-process)");
+                        Arc::new(StubEmailSender::new())
+                    }
+                    "ses" => {
+                        // SesEmailSender::new takes &SdkConfig (sync), but
+                        // aws_config::defaults().load() is async. We're in a
+                        // sync fn called from #[tokio::main] (multi-thread),
+                        // so block_in_place + block_on is the legal escape.
+                        let region = std::env::var(env::BROKER_AWS_REGION)
+                            .unwrap_or_else(|_| "us-east-1".to_string());
+                        tracing::info!(
+                            from = %from_address,
+                            region = %region,
+                            "email_link sender backend: ses (aws-sdk-sesv2)"
+                        );
+                        let sdk_config = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                aws_config::defaults(aws_config::BehaviorVersion::latest())
+                                    .region(aws_config::Region::new(region))
+                                    .load()
+                                    .await
+                            })
+                        });
+                        Arc::new(SesEmailSender::new(&sdk_config, from_address.clone()))
+                    }
+                    other => {
+                        return Err(boot_fail(
+                            env::BROKER_EMAIL_SENDER,
+                            other,
+                            "must be 'stub' or 'ses'",
+                            "email-sender-backend",
+                        ));
+                    }
+                };
                 let plugin = EmailLinkAuth::new(
                     sender,
                     Arc::clone(&token_store),
                     Arc::clone(&rl_store),
-                    from_address,
+                    from_address.clone(),
                     landing_base,
-                    hmac_key,
                     ses_cache_path,
                     per_email,
                     per_ip,
                 )
                 .map_err(|e| {
                     boot_fail(
-                        env::BROKER_EMAIL_HMAC_KEY_PATH,
-                        &hmac_path,
+                        env::BROKER_EMAIL_FROM_ADDRESS,
+                        &from_address,
                         format!("EmailLinkAuth::new: {}", e),
                         "email-link-construct",
                     )

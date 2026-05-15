@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agentkeys_core::backend::{BackendError, CredentialBackend};
+use agentkeys_core::init_flow;
 use agentkeys_core::mock_client::MockHttpClient;
 pub use agentkeys_core::session_store;
 use agentkeys_core::session_store::SessionStore;
+use agentkeys_core::signer_client::{HttpSignerClient, SignerClient, SignerClientError};
 use agentkeys_provisioner::{
     aws_creds::fetch_via_broker_default_ttl, run_provision, ProvisionError, Provisioner,
 };
@@ -110,6 +112,16 @@ impl CommandContext {
         self
     }
 
+    /// Override the session namespace. Empty strings fall back to the
+    /// `"master"` default so a forgotten `AGENTKEYS_SESSION_ID=` shell
+    /// export doesn't silently write to `~/.agentkeys//session.json`.
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        if !session_id.is_empty() {
+            self.session_id = session_id;
+        }
+        self
+    }
+
     pub fn with_session(mut self, session: Session) -> Self {
         self.session_override = Some(session);
         self
@@ -157,17 +169,97 @@ impl CommandContext {
     }
 }
 
-pub async fn cmd_init(ctx: &CommandContext, mock_token: Option<String>) -> Result<(String, Session)> {
-    let token_str = mock_token.unwrap_or_else(|| "mock-default".to_string());
+/// `agentkeys init` modes per issue #74 step 1.
+///
+/// The legacy `--mock-token` flag has been hard-cut from the CLI surface
+/// per the plan's CEO-review §8 ("no deprecation runway, clean slate this
+/// PR"). The internal mock-token path stays as `ImportLegacyMock` for unit
+/// tests only — `agentkeys-cli/src/main.rs` does NOT route to it.
+pub enum InitMode {
+    /// Email-link auth: drives `POST /v1/auth/email/request` + polls
+    /// `GET /v1/auth/email/status/<id>` until the operator clicks the
+    /// magic link. On success, derives the EVM wallet via
+    /// `POST /dev/derive-address`, links it to the email-omni via
+    /// `POST /v1/wallet/link`, runs the SIWE round-trip with the signer
+    /// signing on behalf of the email-omni, and saves the resulting
+    /// EVM-omni session JWT.
+    Email {
+        email: String,
+        broker_url: String,
+        signer_url: String,
+        chain_id: u64,
+        poll_timeout_seconds: u64,
+    },
 
+    /// OAuth2/Google auth: same chain as `Email` but bootstraps via
+    /// `POST /v1/auth/oauth2/start` + `GET /v1/auth/oauth2/status/<id>`.
+    /// The CLI prints the authorization URL — the operator opens it in a
+    /// browser, completes the flow, and the CLI's poll loop catches the
+    /// callback.
+    Oauth2Google {
+        broker_url: String,
+        signer_url: String,
+        chain_id: u64,
+        poll_timeout_seconds: u64,
+    },
+
+    /// Hermetic test seam — accepts a mock token and creates a legacy
+    /// session via the backend's `/session/create` endpoint. No CLI flag
+    /// exposes this; only `cli_tests.rs` constructs it. Production
+    /// deployments cannot use this mode at all.
+    #[doc(hidden)]
+    ImportLegacyMock(String),
+}
+
+pub async fn cmd_init(ctx: &CommandContext, mode: InitMode) -> Result<(String, Session)> {
+    match mode {
+        InitMode::ImportLegacyMock(token) => init_legacy_mock(ctx, token).await,
+        InitMode::Email {
+            email,
+            broker_url,
+            signer_url,
+            chain_id,
+            poll_timeout_seconds,
+        } => {
+            init_via_email_link(
+                ctx,
+                &email,
+                &broker_url,
+                &signer_url,
+                chain_id,
+                poll_timeout_seconds,
+            )
+            .await
+        }
+        InitMode::Oauth2Google {
+            broker_url,
+            signer_url,
+            chain_id,
+            poll_timeout_seconds,
+        } => {
+            init_via_oauth2_google(
+                ctx,
+                &broker_url,
+                &signer_url,
+                chain_id,
+                poll_timeout_seconds,
+            )
+            .await
+        }
+    }
+}
+
+/// Test-only: legacy `/session/create` path. Production cannot reach this
+/// (CLI surface drops `--mock-token`).
+async fn init_legacy_mock(ctx: &CommandContext, token: String) -> Result<(String, Session)> {
     if ctx.verbose {
         eprintln!("[verbose] POST {}/session/create", ctx.backend_url);
-        eprintln!("[verbose] auth_token: {}", token_str);
+        eprintln!("[verbose] auth_token: {}", token);
     }
 
     let backend = ctx.backend();
     let (session, wallet) = backend
-        .create_session(AuthToken::Mock(token_str))
+        .create_session(AuthToken::Mock(token))
         .await
         .map_err(wrap_backend_error)?;
 
@@ -181,6 +273,72 @@ pub async fn cmd_init(ctx: &CommandContext, mock_token: Option<String>) -> Resul
 
     let output = format!("Initialized. Wallet: {}", wallet.0);
     Ok((output, session))
+}
+
+/// Email-link bootstrap delegates to `init_flow::init_via_email_link`.
+async fn init_via_email_link(
+    ctx: &CommandContext,
+    email: &str,
+    broker_url: &str,
+    signer_url: &str,
+    chain_id: u64,
+    poll_timeout_seconds: u64,
+) -> Result<(String, Session)> {
+    eprintln!("Magic link sent to {email}. Click the link in your inbox; the CLI is polling…");
+    let result = init_flow::init_via_email_link(
+        broker_url,
+        signer_url,
+        email,
+        chain_id,
+        std::time::Duration::from_secs(poll_timeout_seconds),
+    )
+    .await
+    .map_err(|e| anyhow!("{}", e))?;
+
+    ctx.session_store()
+        .save(&result.session, &ctx.session_id)
+        .context("save EVM session to keychain")?;
+    let msg = format!(
+        "Initialized via email-link.\n  identity omni: {}\n  derived wallet: {}\n  evm omni:      {}",
+        result.identity_omni, result.derived_wallet, result.evm_omni
+    );
+    Ok((msg, result.session))
+}
+
+/// OAuth2/Google bootstrap delegates to `init_flow::start_oauth2_google` +
+/// `complete_oauth2_google`.
+async fn init_via_oauth2_google(
+    ctx: &CommandContext,
+    broker_url: &str,
+    signer_url: &str,
+    chain_id: u64,
+    poll_timeout_seconds: u64,
+) -> Result<(String, Session)> {
+    let start = init_flow::start_oauth2_google(broker_url)
+        .await
+        .map_err(|e| anyhow!("{}", e))?;
+    eprintln!("Open this URL in your browser to authenticate with Google:");
+    eprintln!("  {}", start.authorization_url);
+    eprintln!("(Polling for callback…)");
+
+    let result = init_flow::complete_oauth2_google(
+        broker_url,
+        signer_url,
+        &start.request_id,
+        chain_id,
+        std::time::Duration::from_secs(poll_timeout_seconds),
+    )
+    .await
+    .map_err(|e| anyhow!("{}", e))?;
+
+    ctx.session_store()
+        .save(&result.session, &ctx.session_id)
+        .context("save EVM session to keychain")?;
+    let msg = format!(
+        "Initialized via OAuth2-Google.\n  identity omni: {}\n  derived wallet: {}\n  evm omni:      {}",
+        result.identity_omni, result.derived_wallet, result.evm_omni
+    );
+    Ok((msg, result.session))
 }
 
 /// Resolve the effective wallet address for a command.
@@ -924,7 +1082,7 @@ pub async fn cmd_provision(
         Ok(env) => env,
         Err(e) => {
             return Err(anyhow!(
-                "Problem: Could not fetch AWS credentials from broker.\nCause: {}.\nFix: Verify --broker-url / AGENTKEYS_BROKER_URL is reachable, your session token is current, and the broker's /readyz endpoint returns 200.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/operator-runbook.md",
+                "Problem: Could not fetch AWS credentials from broker.\nCause: {}.\nFix: Verify --broker-url / AGENTKEYS_BROKER_URL is reachable, your session token is current, and the broker's /readyz endpoint returns 200.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/operator-runbook-stage7.md",
                 e
             ));
         }
@@ -997,6 +1155,180 @@ pub async fn cmd_inbox_list(ctx: &CommandContext, agent: Option<&str>) -> Result
         .map_err(wrap_backend_error)?;
 
     Ok(addresses.iter().map(|a| a.to_string()).collect::<Vec<_>>().join("\n"))
+}
+
+/// `agentkeys signer derive` — call `/dev/derive-address` on the configured
+/// signer for `omni_account` and print the derived EVM address.
+///
+/// The CLI treats the signer as opaque RPC: this command does not assume
+/// HKDF-vs-TEE; it only enforces the wire contract from
+/// `docs/spec/signer-protocol.md`. Issue #74 step 2 swaps the implementation
+/// behind `signer_url`; this command keeps working unchanged.
+///
+/// The saved session JWT is attached as a bearer token so the signer can
+/// verify the request. If no session is saved, the command fails with a
+/// clear message to run `agentkeys init` first.
+pub async fn cmd_signer_derive(
+    ctx: &CommandContext,
+    signer_url: &str,
+    omni_account: &str,
+) -> Result<String> {
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token);
+    let derived = client
+        .derive_address(omni_account)
+        .await
+        .map_err(format_signer_error)?;
+    if ctx.json_output {
+        Ok(serde_json::to_string_pretty(&json!({
+            "address":     derived.address,
+            "key_version": derived.key_version,
+        }))
+        .unwrap())
+    } else {
+        Ok(format!(
+            "address={} key_version={}",
+            derived.address, derived.key_version
+        ))
+    }
+}
+
+/// `agentkeys signer sign` — call `/dev/sign-message` on the configured
+/// signer for `omni_account || message_utf8`, returning the canonical
+/// 65-byte EIP-191 signature plus the derived address.
+///
+/// The saved session JWT is attached as a bearer token so the signer can
+/// verify the request. If no session is saved, the command fails with a
+/// clear message to run `agentkeys init` first.
+pub async fn cmd_signer_sign(
+    ctx: &CommandContext,
+    signer_url: &str,
+    omni_account: &str,
+    message: &str,
+) -> Result<String> {
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token);
+    let signed = client
+        .sign_eip191(omni_account, message.as_bytes())
+        .await
+        .map_err(format_signer_error)?;
+    if ctx.json_output {
+        Ok(serde_json::to_string_pretty(&json!({
+            "signature":   signed.signature,
+            "address":     signed.address,
+            "key_version": signed.key_version,
+        }))
+        .unwrap())
+    } else {
+        Ok(format!(
+            "signature={} address={} key_version={}",
+            signed.signature, signed.address, signed.key_version
+        ))
+    }
+}
+
+/// `agentkeys whoami` — read-only summary of the current session and the
+/// signer-derived wallet address (if a signer URL is supplied and the
+/// session carries an `omni_account` claim).
+///
+/// In v0 the legacy session does not carry an omni_account, so this command
+/// requires `--omni-account` explicitly when `--signer-url` is set. After
+/// the daemon flow lands fully (issue #74 step 1 completion), the omni
+/// will come from the session itself.
+pub async fn cmd_whoami(
+    ctx: &CommandContext,
+    signer_url: Option<&str>,
+    omni_account: Option<&str>,
+) -> Result<String> {
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
+
+    let mut out = serde_json::Map::new();
+    out.insert("session_wallet".into(), json!(session.wallet.0));
+    if let Some(scope) = &session.scope {
+        out.insert(
+            "scope_services".into(),
+            json!(scope
+                .services
+                .iter()
+                .map(|s| s.0.clone())
+                .collect::<Vec<_>>()),
+        );
+        out.insert("scope_read_only".into(), json!(scope.read_only));
+    }
+
+    if let Some(url) = signer_url {
+        let omni = omni_account.ok_or_else(|| {
+            anyhow!("--signer-url requires --omni-account (will be derived from session in a later issue-74 step)")
+        })?;
+        let client = HttpSignerClient::new(url).with_session_jwt(session.token.clone());
+        let derived = client
+            .derive_address(omni)
+            .await
+            .map_err(format_signer_error)?;
+        out.insert("omni_account".into(), json!(omni));
+        out.insert("derived_address".into(), json!(derived.address));
+        out.insert("key_version".into(), json!(derived.key_version));
+    }
+
+    if ctx.json_output {
+        Ok(serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap())
+    } else {
+        let mut lines = Vec::new();
+        lines.push(format!("session_wallet: {}", session.wallet.0));
+        if let Some(scope) = &session.scope {
+            let svc: Vec<&str> = scope.services.iter().map(|s| s.0.as_str()).collect();
+            lines.push(format!("scope: [{}] read_only={}", svc.join(", "), scope.read_only));
+        }
+        if let Some(url) = signer_url {
+            lines.push(format!("signer_url: {}", url));
+            if let Some(o) = omni_account {
+                lines.push(format!("omni_account: {}", o));
+            }
+            if let Some(v) = out.get("derived_address") {
+                lines.push(format!("derived_address: {}", v.as_str().unwrap_or("?")));
+            }
+            if let Some(v) = out.get("key_version") {
+                lines.push(format!("key_version: {}", v));
+            }
+        }
+        Ok(lines.join("\n"))
+    }
+}
+
+fn format_signer_error(e: SignerClientError) -> anyhow::Error {
+    match e {
+        SignerClientError::SignerDisabled(m) => anyhow!(
+            "Error: SIGNER_DISABLED\n  {}\n\n  Fix: set DEV_KEY_SERVICE_MASTER_SECRET on the mock-server (or attest the TEE worker once issue #74 step 2 ships).",
+            m
+        ),
+        SignerClientError::Unauthorized(m) => anyhow!(
+            "Error: SIGNER_UNAUTHORIZED\n  {}\n\n  Fix: run `agentkeys init` to obtain a fresh session JWT.",
+            m
+        ),
+        SignerClientError::InvalidOmniAccount(m) => {
+            anyhow!("Error: INVALID_OMNI_ACCOUNT\n  {}", m)
+        }
+        SignerClientError::InvalidMessageHex(m) => {
+            anyhow!("Error: INVALID_MESSAGE_HEX\n  {}", m)
+        }
+        SignerClientError::Internal(m) => anyhow!("Error: SIGNER_INTERNAL\n  {}", m),
+        SignerClientError::Transport(m) => anyhow!(
+            "Error: SIGNER_UNREACHABLE\n  {}\n\n  Fix: confirm --signer-url is reachable.",
+            m
+        ),
+        SignerClientError::Unexpected { status, error, message } => anyhow!(
+            "Error: SIGNER_UNEXPECTED\n  status={} error={:?} message={:?}",
+            status,
+            error,
+            message
+        ),
+    }
 }
 
 pub fn cmd_feedback() -> String {

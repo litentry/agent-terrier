@@ -189,7 +189,7 @@ The split exists so the long-lived secret (user access key) only does ONE thing 
 
 | | Stage 6 interim (shipped) | Stage 7 target |
 |---|---|---|
-| Bucket policy | `AllowDaemonRead`: role reads whole bucket | `AllowDaemonReadOwnPrefix`: role reads only `${aws:PrincipalTag/agentkeys_user_wallet}/*` |
+| Bucket policy | `AllowDaemonRead`: role reads whole bucket | `AllowDaemonReadOwnPrefix`: role reads only `bots/${aws:PrincipalTag/agentkeys_user_wallet}/*` (per arch.md §6 `bots/` parent namespace — see cloud-setup.md §4.4) |
 | Per-user enforcement | App-side: daemon filters by `To:` header | Cloud-side: S3 returns AccessDenied on cross-prefix reads |
 | Auth flow | `sts:AssumeRole` from IAM user (static keys) | `sts:AssumeRoleWithWebIdentity` from OIDC JWT |
 | AWS resource count | Same singletons | Same singletons (no new IAM per user) |
@@ -263,7 +263,7 @@ Higher-level concerns like drafts-with-human-approval, per-message reply/forward
 | **SES SendRawEmail** | Outbound. IAM access is via OIDC federation from the TEE — no static access keys held anywhere. See §10.5. |
 | **SES event destinations** (SNS) | Delivery / bounce / complaint notifications. Subscribed to by the daemon directly, not proxied by us. |
 | **Mail-from subdomain** (optional) | `bounce.agentkeys-email.io` for bounce handling — adds 2 records. |
-| **S3 for raw MIME** | `s3://agentkeys-mail/<user_wallet>/<inbox>/<message_id>.eml`. Bucket policy with `aws:PrincipalTag/agentkeys_user_wallet` enforces per-user isolation (§10.4). Lifecycle rule prunes > 90 days. |
+| **S3 for raw MIME** | `s3://agentkeys-mail/bots/<user_wallet>/<inbox>/<message_id>.eml`. Bucket policy with `aws:PrincipalTag/agentkeys_user_wallet` enforces per-user isolation (§10.4); `bots/` is the per-actor data namespace, sibling to SES's `inbound/` landing zone — see arch.md §6 + cloud-setup.md §4.4. Lifecycle rule prunes > 90 days. |
 
 ## 10. Domain setup (one-time per custom domain)
 
@@ -309,14 +309,14 @@ Stage 6 hosts every user's inbox in one AWS account, one S3 bucket, one IAM role
       "Principal": { "AWS": "arn:aws:iam::<acct>:role/agentkeys-data-role" },
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::agentkeys-mail",
-      "Condition": { "StringLike": { "s3:prefix": "${aws:PrincipalTag/agentkeys_user_wallet}/*" } }
+      "Condition": { "StringLike": { "s3:prefix": "bots/${aws:PrincipalTag/agentkeys_user_wallet}/*" } }
     },
     {
       "Sid": "AllowCrudOwnPrefix",
       "Effect": "Allow",
       "Principal": { "AWS": "arn:aws:iam::<acct>:role/agentkeys-data-role" },
       "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::agentkeys-mail/${aws:PrincipalTag/agentkeys_user_wallet}/*"
+      "Resource": "arn:aws:s3:::agentkeys-mail/bots/${aws:PrincipalTag/agentkeys_user_wallet}/*"
     },
     {
       "Sid": "DenyEverythingElse",

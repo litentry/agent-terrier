@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth_request;
 pub mod credential;
+pub mod dev_keys;
 pub mod identity;
 pub mod inbox;
 pub mod rendezvous;

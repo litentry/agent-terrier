@@ -249,4 +249,4 @@ These do not block adopting the position in §6 but need decisions before Stage 
 - [`docs/spec/heima-gaps-vs-desired-architecture.md`](./heima-gaps-vs-desired-architecture.md) — needs a new §5 "Off-chain ciphertext / `pallet-vault-pointers`" gap entry mirroring this doc's position.
 - [`docs/spec/ses-email-architecture.md`](./ses-email-architecture.md) §4 — the email pipeline already uses the off-chain pattern; this doc generalizes it.
 - [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md) — Stage 7 PrincipalTag isolation, unchanged by this doc; gates the per-user S3 vault prefix.
-- [`docs/contradictions.md`](../contradictions.md) — entry resolving "where does sensitive ciphertext live" added alongside this doc.
+- [`docs/archived/contradictions-stage4-2026-04.md`](../archived/contradictions-stage4-2026-04.md) — Stage-4 snapshot; entry resolving "where does sensitive ciphertext live" was added alongside this doc.

@@ -65,7 +65,6 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
             Arc::clone(&rl_store),
             "broker@example.test",
             format!("{}/auth/email/landing", TEST_ISSUER),
-            vec![0u8; 32],
             tmp.path().join("ses-verify.json"),
             5,
             30,

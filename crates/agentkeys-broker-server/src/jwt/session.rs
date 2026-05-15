@@ -11,7 +11,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use p256::ecdsa::SigningKey;
-use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BrokerError, BrokerResult};
@@ -156,6 +156,18 @@ impl SessionKeypair {
         header.kid = Some(self.kid.clone());
         encode(&header, claims, &key)
             .map_err(|e| BrokerError::Internal(format!("sign session jwt: {e}")))
+    }
+
+    /// Export the public component of this session keypair as a PEM-encoded
+    /// SubjectPublicKeyInfo (SPKI) string. The signer service reads this at
+    /// boot to verify broker session JWTs without holding the private key.
+    pub fn public_key_pem(&self) -> BrokerResult<String> {
+        let signing_key = SigningKey::from_pkcs8_pem(&self.private_key_pem)
+            .map_err(|e| BrokerError::Internal(format!("decode pkcs8 pem for pubkey export: {e}")))?;
+        let verifying_key = signing_key.verifying_key();
+        verifying_key
+            .to_public_key_pem(LineEnding::LF)
+            .map_err(|e| BrokerError::Internal(format!("encode public key pem: {e}")))
     }
 }
 

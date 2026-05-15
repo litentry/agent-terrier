@@ -137,10 +137,17 @@ pub const BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET: &str = "BROKER_EVM_PER_IDENTI
 // Email auth (Phase A.1)
 // ---------------------------------------------------------------------------
 
-/// Required when `email_link` is in `BROKER_AUTH_METHODS`. Path to a 32+ byte HMAC key file.
-pub const BROKER_EMAIL_HMAC_KEY_PATH: &str = "BROKER_EMAIL_HMAC_KEY_PATH";
 /// Required when `email_link` is in `BROKER_AUTH_METHODS`. Verified SES sender email address.
+///
+/// **No HMAC key var.** Magic-link tokens are stateful (CSPRNG → SHA256 → SQLite EmailTokenStore →
+/// single-use within TTL). See `crates/agentkeys-broker-server/src/plugins/auth/email_link.rs`
+/// `EmailLinkAuth::new` doc + `docs/spec/architecture.md` §5a.1.M Stage 1.
 pub const BROKER_EMAIL_FROM_ADDRESS: &str = "BROKER_EMAIL_FROM_ADDRESS";
+/// Optional. Email sender backend selector — `stub` (default, in-process Vec) or `ses`
+/// (real `aws-sdk-sesv2` SendEmail). When `ses`, the FROM identity must be SES-verified
+/// (see `scripts/ses-verify-sender.sh`). Picks the SES region from `BROKER_AWS_REGION`
+/// (or AWS SDK default chain).
+pub const BROKER_EMAIL_SENDER: &str = "BROKER_EMAIL_SENDER";
 /// Optional. Operator URL the broker redirects to after a successful email-link verification.
 /// If unset, the broker shows a minimal built-in "Verified — return to your terminal" page.
 pub const BROKER_EMAIL_SUCCESS_REDIRECT_URL: &str = "BROKER_EMAIL_SUCCESS_REDIRECT_URL";
@@ -243,8 +250,8 @@ pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
         (BROKER_EVM_FEE_PAYER_MIN_BALANCE, "Wei threshold below which EVM anchor → Unready.", Group::AuditEvm),
         (BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET, "Per-OmniAccount daily EVM-tx budget.", Group::AuditEvm),
         // Auth / email
-        (BROKER_EMAIL_HMAC_KEY_PATH, "Path to 32+ byte HMAC key for email tokens.", Group::AuthEmail),
         (BROKER_EMAIL_FROM_ADDRESS, "Verified SES sender email.", Group::AuthEmail),
+        (BROKER_EMAIL_SENDER, "Email backend: 'stub' (default) or 'ses' (real aws-sdk-sesv2).", Group::AuthEmail),
         (BROKER_EMAIL_SUCCESS_REDIRECT_URL, "Optional operator success-page redirect URL.", Group::AuthEmail),
         (BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY, "Per-email per-hour bucket.", Group::AuthEmail),
         (BROKER_EMAIL_RATE_LIMIT_PER_IP_MINUTELY, "Per-IP per-minute bucket.", Group::AuthEmail),

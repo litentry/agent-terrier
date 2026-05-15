@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use agentkeys_cli::{
     cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_link, cmd_provision, cmd_read, cmd_revoke,
-    cmd_run, cmd_scope, cmd_store, cmd_teardown, cmd_usage, CommandContext,
+    cmd_run, cmd_scope, cmd_store, cmd_teardown, cmd_usage, CommandContext, InitMode,
 };
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::session_store::SessionStore;
@@ -37,7 +37,7 @@ async fn init_session_with_store(
     let ctx = CommandContext::new("unused", false, false)
         .with_backend(backend.clone() as Arc<dyn CredentialBackend>)
         .with_session_store(store.clone());
-    let (output, session) = cmd_init(&ctx, Some("test-token-unique".to_string()))
+    let (output, session) = cmd_init(&ctx, InitMode::ImportLegacyMock("test-token-unique".to_string()))
         .await
         .unwrap();
     let wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
@@ -161,7 +161,7 @@ async fn cmd_revoke_self_clears_local_session() {
         .with_backend(backend.clone() as Arc<dyn CredentialBackend>)
         .with_session_store(store.clone());
 
-    let (_, session) = cmd_init(&ctx_init, Some("selfrevoke-token".to_string()))
+    let (_, session) = cmd_init(&ctx_init, InitMode::ImportLegacyMock("selfrevoke-token".to_string()))
         .await
         .unwrap();
 
@@ -227,7 +227,7 @@ async fn cmd_revoke_with_own_wallet_clears_local_session() {
     let ctx_init = CommandContext::new("unused", false, false)
         .with_backend(backend.clone() as Arc<dyn CredentialBackend>)
         .with_session_store(store.clone());
-    let (_, session) = cmd_init(&ctx_init, Some("self-by-wallet-token".to_string()))
+    let (_, session) = cmd_init(&ctx_init, InitMode::ImportLegacyMock("self-by-wallet-token".to_string()))
         .await
         .unwrap();
 
@@ -270,7 +270,7 @@ async fn cmd_revoke_with_other_wallet_keeps_local_session() {
     let ctx_init = CommandContext::new("unused", false, false)
         .with_backend(backend.clone() as Arc<dyn CredentialBackend>)
         .with_session_store(store.clone());
-    let (_, parent_session) = cmd_init(&ctx_init, Some("revoke-other-token".to_string()))
+    let (_, parent_session) = cmd_init(&ctx_init, InitMode::ImportLegacyMock("revoke-other-token".to_string()))
         .await
         .unwrap();
 
@@ -379,7 +379,7 @@ async fn cli_link_alias() {
     let (store, _tmp) = test_store();
     let bare_ctx = CommandContext::new(&base_url, false, false)
         .with_session_store(store.clone());
-    let (output, session) = cmd_init(&bare_ctx, Some("test-token-unique".to_string()))
+    let (output, session) = cmd_init(&bare_ctx, InitMode::ImportLegacyMock("test-token-unique".to_string()))
         .await
         .unwrap();
     let wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
@@ -482,7 +482,7 @@ async fn cli_error_format_unreachable() {
     // cmd_init will fail at HTTP level because the URL is unreachable.
     let context = CommandContext::new("http://127.0.0.1:19999", false, false)
         .with_session_store(store);
-    let result = cmd_init(&context, Some("test".to_string())).await;
+    let result = cmd_init(&context, InitMode::ImportLegacyMock("test".to_string())).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
@@ -710,7 +710,7 @@ async fn cmd_store_resolves_alias() {
     let (store, _tmp) = test_store();
     let bare_ctx = CommandContext::new(&base_url, false, false)
         .with_session_store(store.clone());
-    let (output, session) = cmd_init(&bare_ctx, Some("test-token-alias".to_string())).await.unwrap();
+    let (output, session) = cmd_init(&bare_ctx, InitMode::ImportLegacyMock("test-token-alias".to_string())).await.unwrap();
     let wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
 
     let context = CommandContext::new(&base_url, false, false)
@@ -748,7 +748,7 @@ async fn cmd_read_unknown_identity_errors_cleanly() {
     let (store, _tmp) = test_store();
     let bare_ctx = CommandContext::new(&base_url, false, false)
         .with_session_store(store.clone());
-    let (_output, session) = cmd_init(&bare_ctx, Some("test-token-unknown".to_string())).await.unwrap();
+    let (_output, session) = cmd_init(&bare_ctx, InitMode::ImportLegacyMock("test-token-unknown".to_string())).await.unwrap();
 
     let context = CommandContext::new(&base_url, false, false)
         .with_session(session)
@@ -788,7 +788,7 @@ async fn start_scope_test_server() -> (String, String, String, SessionStore, tem
     let (store, tmp) = test_store();
     let bare_ctx = CommandContext::new(&base_url, false, false)
         .with_session_store(store.clone());
-    let (_output, _session) = cmd_init(&bare_ctx, Some("scope-test-unique".to_string()))
+    let (_output, _session) = cmd_init(&bare_ctx, InitMode::ImportLegacyMock("scope-test-unique".to_string()))
         .await
         .unwrap();
 

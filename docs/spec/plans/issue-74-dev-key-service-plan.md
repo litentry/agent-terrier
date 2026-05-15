@@ -1,5 +1,50 @@
 # Plan — Issue #74: dev_key_service + TEE-shaped daemon migration
 
+## Status (post-PR #75) — successor steps
+
+This plan covers **issue #74 step 1**: HKDF-backed `dev_key_service`
+in `agentkeys-mock-server`, the `/dev/*` wire contract per
+[`signer-protocol.md`](../signer-protocol.md), and the daemon/CLI
+migration that consumes it. **Shipped in PR #75.**
+
+Two successor steps follow this plan and supersede portions of
+its design as they land:
+
+- **Step 1b — public signer listener + bearer-JWT auth.** Deploys
+  `signer.<zone>` as a separate listener on `:8092`; adds JWT
+  bearer verification in `/dev/*` handlers (signer reads broker's
+  session pubkey at boot from a pinned file). No SIGNER_ACCESS_TOKEN.
+  Lands as part of the same PR #75 architectural follow-up commits;
+  drops the SSH-tunnel scaffolding from the demo doc. The "private
+  network assumption" in this plan's §"Risks" is replaced by
+  "JWT-bearer-on-public-listener" assumption.
+- **Step 1c — device-key per-request authentication.** Replaces
+  bearer-JWT-only auth on `/dev/*` with a device-key signature
+  scheme: daemon generates a device keypair locally at init,
+  identity ceremony (email/OAuth2/EVM/passkey) binds the device
+  pubkey atomically with proof-of-possession, every per-request
+  signature is verified against the bound pubkey. Removes the
+  broker-as-SPOF risk. Tracked in
+  [`issue-74-step-1c-device-key-auth.md`](issue-74-step-1c-device-key-auth.md)
+  and gh issue [#76](https://github.com/litentry/agentKeys/issues/76).
+  - **v1c-interim** ships bespoke per-identity PoP shapes (`pop_sig`
+    field for email/oauth2; SIWE-payload `Device Pubkey` commit for
+    evm).
+  - **v0.2 target** collapses these into a uniform WebAuthn binding
+    ceremony for **master machines** (workstation with platform
+    authenticator: Touch ID / Hello / Android biometric) and a
+    uniform link-code binding ceremony for **agent machines** (VM /
+    Linux / CI / `agent-infra/sandbox` containers). Single source
+    of truth: [`architecture.md` §5a.1](../architecture.md).
+    Hardware-attested user presence at re-bind closes the
+    email-account-compromise → device-takeover gap (Q7). YubiKey-on-
+    Linux as a master tier is deferred to
+    [issue #79](https://github.com/litentry/agentKeys/issues/79).
+
+The architecture.md doc ([`../architecture.md`](../architecture.md))
+is the canonical source of truth post-PR-#75; this plan documents
+the original step-1 intent and is preserved for historical context.
+
 ## Goal
 
 Move the daemon off the legacy `agentkeys init --mock-token` → backend `/session/create` → opaque-bearer flow, onto an omni_account-anchored, server-derived-EVM-keypair flow, with the same wire shape a future TEE worker will use. Operator manages no local EVM keys.

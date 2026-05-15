@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use agentkeys_core::backend::CredentialBackend;
+use agentkeys_core::init_flow;
 use agentkeys_core::mock_client::MockHttpClient;
 use agentkeys_core::session_store;
 use agentkeys_types::WalletAddress;
@@ -54,6 +56,35 @@ struct Args {
     /// pre-sourced (pre-Stage-7 path).
     #[arg(long, env = "AGENTKEYS_BROKER_URL")]
     broker_url: Option<String>,
+
+    /// Issue #74 step 1: bootstrap a fresh daemon via the email-link →
+    /// dev_key_service → SIWE flow. Triggers on first start when no
+    /// `daemon-*` session is on disk; ignored if a saved session loads.
+    #[arg(long, conflicts_with = "init_oauth2_google")]
+    init_email: Option<String>,
+
+    /// Issue #74 step 1: bootstrap a fresh daemon via the OAuth2/Google →
+    /// dev_key_service → SIWE flow. Same first-start semantics as
+    /// `--init-email`.
+    #[arg(long = "init-oauth2-google", conflicts_with = "init_email")]
+    init_oauth2_google: bool,
+
+    /// URL of the dev_key_service signer (`/dev/derive-address` +
+    /// `/dev/sign-message` per docs/spec/signer-protocol.md). Required
+    /// when `--init-email` or `--init-oauth2-google` is set; defaults to
+    /// `--backend` if unset.
+    #[arg(long, env = "AGENTKEYS_SIGNER_URL")]
+    signer_url: Option<String>,
+
+    /// SIWE chain_id for the signer-flow bootstrap. Default mirrors
+    /// the broker's wallet_sig plug-in test vectors (Base Sepolia).
+    #[arg(long, default_value_t = 84532)]
+    init_chain_id: u64,
+
+    /// How long to wait for the operator to complete email-link click
+    /// or OAuth2 callback before failing init.
+    #[arg(long, default_value_t = 300)]
+    init_poll_timeout_seconds: u64,
 }
 
 #[tokio::main]
@@ -213,27 +244,58 @@ async fn main() -> anyhow::Result<()> {
                 (sess, agent_id)
             }
             None => {
-                // PAIR FLOW — no stored session found. Resolve --parent lazily
-                // here (codex PR #22 P3) so transient backend failures on the
-                // --session / --recover --method paths don't crash startup.
-                // `--parent` binds the pair request to a specific master so
-                // the backend refuses approval from any other master.
-                let parent_wallet = resolve_parent_if_set(&args.backend, args.parent.as_deref()).await?;
-                let result = pairing::run_pair_flow(
-                    &*backend,
-                    args.pair_timeout,
-                    parent_wallet.as_ref(),
-                )
-                .await
-                .context("pair flow failed")?;
-                let agent_id = result.wallet.clone();
-                let sid = args
-                    .session_id
-                    .clone()
-                    .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
-                session_store::save_session(&result.session, &sid)
-                    .context("save paired session")?;
-                (result.session, agent_id)
+                // Issue #74 step 1: signer-flow bootstrap — when --init-email
+                // or --init-oauth2-google is set AND no session is saved,
+                // run the email/OAuth2 → dev_key_service → SIWE chain.
+                // Otherwise fall through to the legacy pair flow (master/
+                // child paradigm).
+                if args.init_email.is_some() || args.init_oauth2_google {
+                    let result = run_signer_flow_init(&args).await?;
+                    let agent_id = WalletAddress(result.session.wallet.0.clone());
+                    let sid = args
+                        .session_id
+                        .clone()
+                        .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+                    session_store::save_session(&result.session, &sid)
+                        .context("save signer-flow session")?;
+                    // Audit: structured tracing log so journalctl /
+                    // log-aggregator captures the init event. The daemon
+                    // does not have a SQL audit table of its own; the
+                    // broker's audit (mint-time) and the structured log
+                    // here together cover "did the daemon ever auth?"
+                    info!(
+                        target: "agentkeys.daemon.init",
+                        identity_type = %result.identity_type,
+                        identity_value = %result.identity_value,
+                        identity_omni = %result.identity_omni,
+                        evm_omni = %result.evm_omni,
+                        derived_wallet = %result.derived_wallet,
+                        "agentkeys-daemon bootstrapped via signer flow"
+                    );
+                    (result.session, agent_id)
+                } else {
+                    // PAIR FLOW — no stored session found. Resolve --parent lazily
+                    // here (codex PR #22 P3) so transient backend failures on the
+                    // --session / --recover --method paths don't crash startup.
+                    // `--parent` binds the pair request to a specific master so
+                    // the backend refuses approval from any other master.
+                    let parent_wallet = resolve_parent_if_set(&args.backend, args.parent.as_deref()).await?;
+                    let result = pairing::run_pair_flow(
+                        &*backend,
+                        args.pair_timeout,
+                        parent_wallet.as_ref(),
+                    )
+                    .await
+                    .context("pair flow failed")?;
+                    let agent_id = result.wallet.clone();
+                    let sid = args
+                        .session_id
+                        .clone()
+                        .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
+                    session_store::save_session(&result.session, &sid)
+                        .context("save paired session")?;
+                    (result.session, agent_id)
+                }
             }
         }
     };
@@ -255,6 +317,54 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Drive the issue-#74-step-1 bootstrap chain. Reads `--init-email` /
+/// `--init-oauth2-google` / `--signer-url` / `--broker-url` /
+/// `--init-chain-id` / `--init-poll-timeout-seconds` from `args` and
+/// returns the resulting `InitResult` (session + identity provenance).
+async fn run_signer_flow_init(args: &Args) -> anyhow::Result<init_flow::InitResult> {
+    let broker_url = args.broker_url.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "agentkeys-daemon --init-email/--init-oauth2-google requires --broker-url (or AGENTKEYS_BROKER_URL)"
+        )
+    })?;
+    let signer_url = args.signer_url.clone().unwrap_or_else(|| args.backend.clone());
+    let poll_timeout = Duration::from_secs(args.init_poll_timeout_seconds);
+
+    if let Some(ref email) = args.init_email {
+        eprintln!(
+            "agentkeys-daemon: bootstrapping via email-link for {email}; click the magic link in your inbox"
+        );
+        init_flow::init_via_email_link(
+            &broker_url,
+            &signer_url,
+            email,
+            args.init_chain_id,
+            poll_timeout,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("email-link bootstrap failed: {e}"))
+    } else if args.init_oauth2_google {
+        let start = init_flow::start_oauth2_google(&broker_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("oauth2/start failed: {e}"))?;
+        eprintln!(
+            "agentkeys-daemon: open this URL in your browser to complete OAuth2/Google:\n  {}",
+            start.authorization_url
+        );
+        init_flow::complete_oauth2_google(
+            &broker_url,
+            &signer_url,
+            &start.request_id,
+            args.init_chain_id,
+            poll_timeout,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("oauth2 bootstrap failed: {e}"))
+    } else {
+        unreachable!("caller guards on init_email or init_oauth2_google being set")
+    }
 }
 
 /// True IFF `s` is a strict `0x` + 40 hex-digit wallet literal. Aliases like

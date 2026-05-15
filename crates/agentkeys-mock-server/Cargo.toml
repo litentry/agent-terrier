@@ -23,7 +23,10 @@ tower-http = { version = "0.5", features = ["cors"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 hmac = "0.12"
+hkdf = "0.12"
 sha2 = "0.10"
+sha3 = "0.10"
+k256 = { version = "0.13", features = ["ecdsa", "sha2"] }
 ciborium = "0.2"
 hex = "0.4"
 clap = { version = "4", features = ["derive"] }
@@ -33,7 +36,14 @@ base64 = "0.22"
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 async-trait = { workspace = true }
+thiserror = { workspace = true }
+jsonwebtoken = "9"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 tokio = { workspace = true }
+# Test-only: mint test JWTs against an in-test ES256 keypair so the JWT-auth
+# path (`--signer-only` mode) can be exercised hermetically.
+p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
+rand_core = { version = "0.6", features = ["std"] }
+getrandom = "0.2"

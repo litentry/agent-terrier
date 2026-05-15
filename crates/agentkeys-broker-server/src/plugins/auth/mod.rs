@@ -18,7 +18,9 @@ pub mod oauth2;
 pub mod wallet_sig;
 
 #[cfg(feature = "auth-email-link")]
-pub use email_link::{EmailLinkAuth, EmailSendError, EmailSender, SesVerifyCache, StubEmailSender};
+pub use email_link::{
+    EmailLinkAuth, EmailSendError, EmailSender, SesEmailSender, SesVerifyCache, StubEmailSender,
+};
 #[cfg(feature = "auth-oauth2")]
 pub use oauth2::{
     OAuth2Auth, OAuth2Error, OAuth2Provider, StubOAuth2Provider, TokenExchangeOutcome,

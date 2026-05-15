@@ -21,3 +21,10 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+agentkeys-mock-server = { path = "../agentkeys-mock-server" }
+axum = { version = "0.7", features = ["json"] }
+k256 = { version = "0.13", features = ["ecdsa", "sha2"] }
+sha3 = "0.10"
+rusqlite = { version = "0.31", features = ["bundled"] }
+rand_core = { version = "0.6", features = ["std"] }
+getrandom = "0.2"
