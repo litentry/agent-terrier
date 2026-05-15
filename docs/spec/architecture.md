@@ -191,6 +191,9 @@ match the canonical name in the same change.
 | `K3` (= `master_secret`)    | The 32 bytes in `/etc/agentkeys/dev-key-service.env` that every K4 is HKDF-derived from. Single per-broker-host.                                            | `DEV_KEY_SERVICE_MASTER_SECRET` (env var name), `master_secret` (signer-side log).                                                                                                                                                                                                                         |
 | `session JWT` (= K6)        | The bearer token at `~/.agentkeys/<id>/session.json` (or OS keychain). Signed by K1.                                                                        | `session_jwt` (JSON field name in broker responses), `evm_session_jwt` (init-flow internal var post-SIWE), `SESSION_JWT_A` / `SESSION_JWT_B` (demo doc shell vars).                                                                                                                                         |
 | `OIDC JWT` (= K7)           | Per-mint short-lived JWT signed by K2; consumed by `AssumeRoleWithWebIdentity`.                                                                             | `oidc_jwt`, `JWT_A` / `JWT_B` (demo doc shell vars).                                                                                                                                                                                                                                                       |
+| `vault_bucket`              | S3 bucket holding Class-B credential ciphertext (scraped API keys). Per §7a, one of N data-class buckets in a deployment; per-actor isolation via wallet prefix + PrincipalTag. | `$BUCKET` (single-bucket-today env var in demo doc + `scripts/operator-workstation.env`; will fan out to `$VAULT_BUCKET` once memory + audit buckets ship), `agentkeys-vault` (legacy §7 example name). |
+| `memory_bucket`             | S3 bucket for Class-A agent state (chat history, scratch, working memory). Not yet provisioned; reuses the `agentkeys_user_wallet` PrincipalTag policy template. | `$MEMORY_BUCKET` (forward env var name).                                                                                                                                                                                                                                                                   |
+| `audit_bucket`              | S3 bucket for append-only integrity-anchored audit log. Today shipped as SQLite at `BROKER_AUDIT_DB_PATH`; S3 row is a future swap-in target per §7 audit-destination. | `$AUDIT_BUCKET` (forward env var name).                                                                                                                                                                                                                                                                    |
 
 The most common confusion this table resolves: **`master_wallet`
 (persisted in the session JWT, used by AWS PrincipalTag) ≠
@@ -279,7 +282,44 @@ The system separates four concepts that earlier drafts collapsed:
 - Actor ≠ machine — one actor can run on many machines (master on laptop + phone); each machine has its own K10 binding under that actor's omni.
 - Master ≠ agent — same axis (actor), distinct roles. Bootstrap path, K11 ownership, and revocation authority differ.
 
-For agent-specific operator/contributor reference, see [`.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](../../.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md).
+For agent-specific operator/contributor reference, see [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](../../wiki/agent-role-and-usage-hdkd-per-agent-omni.md).
+
+---
+
+## 4b. Upstream backend classes — exercise vs distribution
+
+Per-upstream design splits into two independent security concerns. Earlier drafts collapsed them; this section pins the split so future upstream integrations pick the right pattern.
+
+| Concern | Question | Whose job |
+|---|---|---|
+| **Exercise** | On every API call, is this caller authorized to do this exact thing? | Depends on upstream's auth model |
+| **Distribution** | How does the right credential reach the right agent, and only that agent? | Always ours (the §6 STS-to-vault rail) |
+
+The §6 pipeline is the universal **distribution** rail. **Exercise** enforcement depends on which of the two classes an upstream falls into.
+
+### Class A — Per-request authorization (AWS-native)
+
+Upstream re-validates every API call independently. Examples: AWS S3, SES, KMS, future memory storage in S3.
+
+- **Exercise** is enforced by AWS itself — `aws:PrincipalTag/agentkeys_user_wallet` is checked against the resource ARN on every request by the IAM policy engine.
+- **Distribution** IS exercise — there is no separable "credential" sitting in the vault; the STS-signed request is the auth. The agent uses STS creds directly against the upstream; broker is off the hot path.
+- **Granularity ceiling:** IAM-policy expressive power (prefix gates, tag conditions, action filters, time windows). Grants project naturally into JWT claims, which become STS session tags, which IAM evaluates per request.
+- **Adding a new Class-A upstream:** define the resource, write an IAM policy gated by `agentkeys_user_wallet`, add it to the daemon's allow-list. The §6 pipeline carries it for free — no broker changes.
+
+### Class B — Bearer-token authorization
+
+Upstream issues an opaque token; subsequent API calls present the token; upstream trusts the bearer for whatever scope the token was minted with. Examples: OpenRouter, Anthropic, Groq, Brave Search, any third-party SaaS API.
+
+- **Exercise** is provider-bounded — only whatever the upstream exposes per-key (spend cap, model allowlist, rate limit, expiry). Nothing finer can be enforced at the bearer-token layer.
+- **Distribution** rides the Class-A rail: provisioner scrapes a per-grant key, deposits ciphertext at `s3://vault_bucket/<wallet>/<service>/<grant_id>/key.json`, agent fetches via the §6 pipeline, then uses the bearer **directly** against the upstream (not via any broker proxy).
+- **Granularity ceiling:** provider-side per-key settings + one-key-per-grant blast bound + grant-driven JWT scoping at vault read time. Anything finer (e.g. "only this prompt category") requires either a future broker proxy or is structurally not enforceable.
+- **Adding a new Class-B upstream:** write a Playwright scraper at [`provisioner-scripts/src/scrapers/<service>.ts`](../../provisioner-scripts/src/scrapers/) that signs up, mints an API key, and *sets provider-side caps from grant fields* before depositing ciphertext in `vault_bucket`. The scraper is the enforcement point — missing limits = compromised key has broader blast radius than the grant authorizes.
+
+### Why this split matters
+
+Operators reading §6 alone cannot tell whether the payload they retrieve from S3 *is* the action (Class A) or just *enables* an out-of-band action (Class B). The two cases have different revocation semantics, different blast radii, and different requirements on the provisioner. Pin the class for each upstream in the per-service docs.
+
+Full design rationale, granularity matrix per class, bucket-layout consequences, and the open question on broker-as-egress-proxy: [`wiki/upstream-backend-classes-exercise-vs-distribution.md`](../../wiki/upstream-backend-classes-exercise-vs-distribution.md).
 
 ---
 
@@ -535,7 +575,8 @@ has a default v0/v0.1 implementation and a documented swap-in path.
 | **Auth method** (broker-side identity verification) | `wallet_sig` (SIWE) + `email_link` + `oauth2_google` | passkey, OAuth2/Apple, OAuth2/GitHub, custom OIDC | Trait-implementing plugin in [`crates/agentkeys-broker-server/src/plugins/auth/`](../../crates/agentkeys-broker-server/src/plugins/auth/); enabled via `BROKER_AUTH_METHODS` env var |
 | **Signer backend** (`/dev/*` implementation) | `dev_key_service` HKDF (issue #74 step 1) | TEE worker (sealed master secret, attested mTLS — issue #74 step 2); future threshold-MPC | Replaces the binary behind `signer.<zone>` URL; wire shape pinned by [`signer-protocol.md`](signer-protocol.md) |
 | **Audit destination** (mint + auth audit log) | SQLite at `BROKER_AUDIT_DB_PATH` | Heima parachain, Ethereum L2, permissioned chain (Hyperledger / Quorum / Aliyun BaaS), TEE-attested append-only log, AWS CloudTrail | Trait surface in [`crates/agentkeys-broker-server/src/plugins/audit/`](../../crates/agentkeys-broker-server/src/plugins/audit/) |
-| **Vault backend** (where credential ciphertext lives — Stage 8) | `s3://agentkeys-vault/<wallet>/...` (PrincipalTag-gated) | IPFS / Filecoin / Arweave content-addressed multi-backend; on-chain pointer + hash | Per [`threat-model-key-custody.md` §4 + §9](threat-model-key-custody.md) |
+| **Vault backend** (where Class-B credential ciphertext lives — see §4b) | `s3://vault_bucket/<wallet>/<service>/<grant_id>/key.json` (PrincipalTag-gated). One of N data-class buckets — see §7a. | IPFS / Filecoin / Arweave content-addressed multi-backend; on-chain pointer + hash | Per [`threat-model-key-custody.md` §4 + §9](threat-model-key-custody.md) |
+| **Egress enforcement** (Class-B per-request gating — see §4b) | None (v0 — provider-side per-key caps only; agent calls upstream directly with the scraped bearer) | Broker-as-egress-proxy at `/v1/proxy/{service}`; agent-sandbox sidecar enforcing signed grant locally | Not yet specced — open question in [`upstream-backend-classes-exercise-vs-distribution.md`](../../wiki/upstream-backend-classes-exercise-vs-distribution.md) |
 
 **Pluggability is the point.** No single backend is load-bearing for
 the architecture; the contracts (auth-plugin trait, signer-protocol,
@@ -548,6 +589,65 @@ audit trait, vault interface) are. This is what lets:
   [§7 audit-destination row 4](#7-pluggable-surfaces)).
 - The TEE worker swap into the signer slot post-issue-#74 step 2
   with zero daemon/CLI code change.
+
+---
+
+## 7a. Bucket layout — data-class buckets, wallet prefixes
+
+Per-actor isolation lives at the **prefix** layer (wallet via PrincipalTag, per §5a.5). Per-data-class isolation lives at the **bucket** layer. The wallet does not replace the bucket; they're orthogonal axes, both required.
+
+```
+bucket  = (data class) × (operator deployment) × (environment)
+prefix  = (wallet address)            ← per-actor isolation here
+object  = the unit of data
+```
+
+### Why one bucket is not enough
+
+S3 exposes the following only at the **bucket** level — they cannot be set per-prefix. Different data classes need conflicting settings on these axes:
+
+| Setting | `vault_bucket` (Class-B creds) | `memory_bucket` (Class-A agent state) | `audit_bucket` (anchor log) |
+|---|---|---|---|
+| Versioning | Off | On (rollback) | On + MFA-delete |
+| Default encryption | SSE-KMS w/ customer-managed CMK | SSE-S3 | SSE-KMS w/ CMK |
+| Object Lock | No | No | **Compliance mode, WORM** |
+| Lifecycle | Short TTL → expire on rotate | Glacier transition after 90d | Never expire |
+| CloudTrail data events | Every Get/Put | Sampled or off | Every Get/Put + integrity check |
+| Replication | None | Cross-region for DR | Cross-region for durability |
+
+Folding these into one bucket would force the loosest setting on every dimension — e.g., the audit log loses WORM, or vault retains versions of every rotated credential. Separate buckets is the only way.
+
+### Why each bucket gets its own IAM role
+
+`agentkeys-data-role`'s policy line is `Resource: "arn:aws:s3:::${BUCKET}/<wallet>/*"`. Sharing one role across vault + memory + audit means:
+
+- A bug widening vault access widens memory + audit access too — blast radii collapse.
+- Audit's append-only property has to be expressed by IAM action filtering inside the same role — fiddly and easy to get wrong.
+- The daemon's memory R/W trust level equals its credential-vault read trust level — no least-privilege gradient.
+
+Separate buckets → separate roles → independent policy surfaces. `agentkeys-data-role` (vault, read-mostly), `agentkeys-memory-role` (memory, R/W), `agentkeys-audit-role` (audit, append-only). Each role's OIDC JWT is minted by the broker scoped to what the call actually needs.
+
+### Why `$BUCKET` is a *variable* (and will fan out)
+
+S3 bucket names are **globally unique across AWS**. Each operator account picks its own (`acme-agentkeys-vault-prod`, `litentry-agentkeys-vault-dev`, etc.). The bucket-name-as-variable absorbs global-namespace + multi-env reality, totally independent of per-actor isolation.
+
+Today the shipped code references a single `$BUCKET` env var (single data class shipped). Going forward, `scripts/operator-workstation.env` + the role-policy templates fan out:
+
+```
+VAULT_BUCKET   = <operator>-agentkeys-vault-<env>
+MEMORY_BUCKET  = <operator>-agentkeys-memory-<env>
+AUDIT_BUCKET   = <operator>-agentkeys-audit-<env>
+```
+
+The §6 STS-to-prefix pipeline carries each bucket independently — wallet-as-prefix is the same scheme in all three.
+
+### Single-bucket-today aliases
+
+| Canonical (forward) | Currently shipped as | Migration |
+|---|---|---|
+| `vault_bucket`     | `$BUCKET` (single bucket, Class-B creds at `bots/<wallet>/...`) | Rename `$BUCKET` → `$VAULT_BUCKET`; create separate `memory_bucket` + `audit_bucket` as those data classes ship |
+| `memory_bucket`    | Not yet provisioned                                              | Provision when memory storage lands; reuse `agentkeys_user_wallet` PrincipalTag policy template |
+| `audit_bucket`     | SQLite at `BROKER_AUDIT_DB_PATH` (per §7 audit-destination row 3) | Cut over when chain audit lands OR when S3-anchored audit is chosen as the swap-in target |
 
 ---
 
