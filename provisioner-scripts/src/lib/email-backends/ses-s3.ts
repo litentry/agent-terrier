@@ -97,6 +97,15 @@ export async function fetchViaSesS3(opts: FetchOpts, s3ClientOverride?: S3Client
   // "link expired". Only consider emails that arrived after the scraper
   // began polling, minus a small grace window for SES→S3 latency + clock skew.
   const freshnessThreshold = new Date(startedAt - (opts.freshnessGraceMs ?? 60_000));
+  // Issue #83 — federation-isolation rule (cloud-setup.md §4.5) denies
+  // the operator's data-role read on the shared `inbound/`. When a
+  // wallet is provided, poll the per-wallet prefix the SES routing
+  // Lambda copies into. Absent walletPrefix, fall back to `inbound/`
+  // (legacy admin-profile path used by inspect-inbound-email.sh and
+  // tests that mock the backend).
+  const prefix = opts.walletPrefix
+    ? `bots/${opts.walletPrefix.toLowerCase()}/inbound/`
+    : "inbound/";
   const seenKeys = new Set<string>();
   const reasons: Record<string, number> = {
     stale: 0,
@@ -108,7 +117,7 @@ export async function fetchViaSesS3(opts: FetchOpts, s3ClientOverride?: S3Client
   };
   const samples: Array<{ key: string; from: string; subject: string }> = [];
 
-  debug(`polling s3://${bucket}/inbound/ — from=${opts.from} subject=${opts.subject} code=${opts.codeRegex} timeout=${opts.timeoutMs}ms freshnessThreshold=${freshnessThreshold.toISOString()}`);
+  debug(`polling s3://${bucket}/${prefix} — from=${opts.from} subject=${opts.subject} code=${opts.codeRegex} timeout=${opts.timeoutMs}ms freshnessThreshold=${freshnessThreshold.toISOString()}`);
 
   while (true) {
     const elapsed = Date.now() - startedAt;
@@ -117,7 +126,7 @@ export async function fetchViaSesS3(opts: FetchOpts, s3ClientOverride?: S3Client
     }
 
     const listResponse = await s3.send(
-      new ListObjectsV2Command({ Bucket: bucket, Prefix: "inbound/" })
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix })
     );
     // Freshest-first so we prefer the most recent verification email when
     // more than one arrives (e.g. user clicked "Resend").

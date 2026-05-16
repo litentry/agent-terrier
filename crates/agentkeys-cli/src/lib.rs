@@ -1057,11 +1057,16 @@ pub async fn cmd_provision(
 
     let provisioner = provisioner.unwrap_or_else(|| Arc::new(Provisioner::new()));
 
+    // Issue #83 — non-CDP `openrouter.ts` is stale (signup_email_otp pattern
+    // against a flow that's now Clerk+password+magic-link). Route through the
+    // CDP variant which already handles the current flow. Prereq: Chrome on
+    // CDP_URL (default http://localhost:9222) — see
+    // `scripts/reset-chrome-for-recording.sh` or `agentkeys-provision-demo.sh`.
     let script_command: Vec<String> = match service {
         "openrouter" => vec![
             "npx".to_string(),
             "tsx".to_string(),
-            "provisioner-scripts/src/scrapers/openrouter.ts".to_string(),
+            "provisioner-scripts/src/scrapers/openrouter-cdp.ts".to_string(),
         ],
         other => {
             return Err(anyhow!(

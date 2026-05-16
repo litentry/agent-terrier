@@ -54,6 +54,14 @@ impl AwsTempCreds {
         m.insert("AWS_ACCESS_KEY_ID".into(), self.access_key_id.clone());
         m.insert("AWS_SECRET_ACCESS_KEY".into(), self.secret_access_key.clone());
         m.insert("AWS_SESSION_TOKEN".into(), self.session_token.clone());
+        // Issue #83 — expose the operator's wallet so the scraper can
+        // (a) build a routable signup email (`or-${wallet}-${ts}@…`)
+        //     that the SES routing Lambda will move into
+        //     `bots/${wallet}/inbound/`, and
+        // (b) tell the email backend which per-wallet prefix to poll
+        //     once the Lambda has routed.
+        // Always lowercased (matches `aws_creds.rs:194` + the S3 path).
+        m.insert("AGENTKEYS_USER_WALLET".into(), self.wallet.to_lowercase());
         if let Some(r) = region {
             m.insert("AWS_REGION".into(), r.to_string());
             m.insert("AWS_DEFAULT_REGION".into(), r.to_string());

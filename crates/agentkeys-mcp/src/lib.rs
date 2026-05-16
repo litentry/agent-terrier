@@ -275,11 +275,15 @@ impl McpHandler {
         };
         let force = arguments.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
+        // Issue #83 — non-CDP `openrouter.ts` is stale (signup_email_otp
+        // pattern against a flow that's now Clerk+password+magic-link). Route
+        // through the CDP variant which handles the current flow. Prereq:
+        // Chrome on CDP_URL (default http://localhost:9222).
         let script_command: Vec<String> = match service.as_str() {
             "openrouter" => vec![
                 "npx".to_string(),
                 "tsx".to_string(),
-                "provisioner-scripts/src/scrapers/openrouter.ts".to_string(),
+                "provisioner-scripts/src/scrapers/openrouter-cdp.ts".to_string(),
             ],
             other => {
                 return JsonRpcResponse::error(

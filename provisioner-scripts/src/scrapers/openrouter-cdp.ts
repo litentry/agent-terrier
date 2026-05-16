@@ -47,7 +47,20 @@ import {
 import { handleTurnstile } from "../lib/captcha/turnstile.js";
 
 const CDP_URL = process.env.CDP_URL ?? "http://localhost:9222";
-const SIGNUP_EMAIL = process.env.AGENTKEYS_SIGNUP_EMAIL ?? "";
+// Issue #83: when the CLI injects AGENTKEYS_USER_WALLET (lowercase hex
+// 0x-address derived from the OIDC JWT), derive a routable signup email
+// of the form `or-${wallet}-${ts}@${MAIL_DOMAIN}` so the SES routing
+// Lambda copies the verification email into `bots/${wallet}/inbound/`
+// (readable by the operator's PrincipalTag-scoped data-role). Falling
+// back to AGENTKEYS_SIGNUP_EMAIL keeps manual / pre-Lambda invocations
+// working: in that mode the email backend polls the legacy `inbound/`
+// (admin profile creds required).
+const USER_WALLET = (process.env.AGENTKEYS_USER_WALLET ?? "").toLowerCase();
+const MAIL_DOMAIN = process.env.AGENTKEYS_MAIL_DOMAIN ?? "bots.litentry.org";
+const SIGNUP_EMAIL =
+  USER_WALLET !== ""
+    ? `or-${USER_WALLET}-${Math.floor(Date.now() / 1000)}@${MAIL_DOMAIN}`
+    : (process.env.AGENTKEYS_SIGNUP_EMAIL ?? "");
 const SIGNUP_PASSWORD = process.env.AGENTKEYS_SIGNUP_PASSWORD ?? "";
 
 const SIGNUP_URL = "https://openrouter.ai/auth";
@@ -140,7 +153,7 @@ async function main(): Promise<void> {
   if (!SIGNUP_EMAIL || !SIGNUP_PASSWORD) {
     emit({
       type: "error",
-      code: "missing-env",
+      code: "internal",
       details: "AGENTKEYS_SIGNUP_EMAIL and AGENTKEYS_SIGNUP_PASSWORD required",
     });
     process.exit(1);
@@ -195,7 +208,7 @@ async function main(): Promise<void> {
       'form button[type="submit"]:not(:has-text("Google")):not(:has-text("GitHub")):not(:has-text("Apple"))',
     ]);
     if (!clickedContinue) {
-      emit({ type: "error", code: "selector-missing", details: "no visible Continue button after fill" });
+      emit({ type: "error", code: "internal", details: "no visible Continue button after fill" });
       process.exit(1);
     }
 
@@ -204,13 +217,20 @@ async function main(): Promise<void> {
     log(`turnstile: ${turnstile}`);
 
     progress("fetch-verification-email");
-    log("polling email backend for verification email");
+    log(
+      `polling email backend for verification email (walletPrefix=${USER_WALLET || "(none, legacy inbound/ poll)"})`,
+    );
     const verifyUrl = (
       await fetchVerificationCode({
         from: FROM_REGEX,
         subject: SUBJECT_REGEX,
         codeRegex: URL_REGEX,
         timeoutMs: 120_000,
+        // When the CLI injected the wallet, poll `bots/${wallet}/inbound/`
+        // (per-wallet prefix the SES routing Lambda copies into). When it
+        // didn't, the backend polls `inbound/` directly — admin profile
+        // creds required in that mode (manual / pre-Lambda flow).
+        walletPrefix: USER_WALLET || undefined,
       })
     )
       .replace(/&amp;/g, "&")
@@ -251,7 +271,7 @@ async function main(): Promise<void> {
       onBeforeIteration: (p) => dismissOpenRouterOnboardingModals(p, 200).then(() => {}),
     });
     if (!clickedCreate) {
-      emit({ type: "error", code: "selector-missing", details: "no visible Create Key button on keys page" });
+      emit({ type: "error", code: "internal", details: "no visible Create Key button on keys page" });
       process.exit(1);
     }
 
@@ -278,7 +298,7 @@ async function main(): Promise<void> {
       '[role="dialog"]:has(input#name) button:has-text("Create")',
     ]);
     if (!clickedConfirm) {
-      emit({ type: "error", code: "selector-missing", details: "no visible Create/Submit in dialog" });
+      emit({ type: "error", code: "internal", details: "no visible Create/Submit in dialog" });
       process.exit(1);
     }
 
@@ -294,7 +314,7 @@ async function main(): Promise<void> {
         : ((await keyEl.textContent()) ?? "");
     const key = raw.trim();
     if (!/^sk-[a-zA-Z0-9_-]{20,}$/.test(key)) {
-      emit({ type: "error", code: "key-format", details: `extracted value didn't match sk-*: ${key.slice(0, 40)}` });
+      emit({ type: "error", code: "store_failed", details: `key-format: extracted value didn't match sk-*: ${key.slice(0, 40)}` });
       process.exit(1);
     }
 
@@ -309,7 +329,7 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   const msg = err instanceof Error ? err.message : String(err);
-  emit({ type: "error", code: "fatal", details: msg });
+  emit({ type: "error", code: "internal", details: `fatal: ${msg}` });
   log(`FATAL: ${msg}`);
   process.exit(1);
 });

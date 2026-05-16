@@ -205,10 +205,16 @@ export async function clickOuterCreate(
     { label: '"New secret key"', filter: /^New secret key$/i },
     { label: '"Generate API Key"', filter: /^Generate API Key$/i },
     { label: '"New API Key"', filter: /^New API Key$/i },
+    // OpenRouter shipped a UI refresh in 2026-Q2 that shortened the
+    // empty-state button from "Create Key" / "New API Key" to bare
+    // "New Key" — verified live via chrome-devtools-mcp snapshot
+    // 2026-05-15 (uid=1_61 "New Key" on /workspaces/default/keys).
+    { label: '"New Key"', filter: /^New Key$/i },
     // Looser fallbacks — match variations with leading/trailing whitespace
     // or icon text nodes that break anchored filters.
     { label: 'substring "Create new secret key"', filter: /Create new secret key/i },
     { label: 'substring "Create secret key"', filter: /Create secret key/i },
+    { label: 'substring "New Key"', filter: /New Key/i },
   ];
 
   const NAME_INPUT_SEL =
