@@ -118,6 +118,50 @@ On every session start:
 4. `jj describe -m "harness: stage N complete"`
 5. `jj new` (start fresh change for next stage)
 
+## Heima EVM compatibility level — pin to `london` in foundry.toml
+
+Heima's Frontier EVM (the parachain's `pallet_evm` + `pallet_ethereum` stack) is at **London** EVM level. Pre-Merge. Verified live 2026-05-19 against `https://rpc.heima-parachain.heima.network` block header:
+
+| Field | Present? | Implication |
+|---|---|---|
+| `baseFeePerGas: 0x5d21dba00` | ✅ | EIP-1559 active → ≥ London |
+| `difficulty: 0x0`, `mixHash: null`, `prevRandao: absent` | ❌ | Pre-Paris (Merge introduced these) → < Paris |
+| `withdrawalsRoot: null` | ❌ | Pre-Shanghai |
+| `blobGasUsed`, `excessBlobGas: null` | ❌ | Pre-Cancun |
+
+**Practical consequence**: any Foundry project that deploys to Heima MUST set `evm_version = "london"` in `foundry.toml`. With `paris` or higher, `forge script ... --broadcast` errors with:
+
+```
+EVM error; header validation error: `prevrandao` not set
+```
+
+…because forge's simulator validates the chain's block header against its target EVM version before broadcasting, and a Paris-or-higher simulator requires `prevrandao` in the header.
+
+`london` also avoids the Shanghai-era PUSH0 opcode (which Heima would reject during EVM execution).
+
+Verify the live EVM version of Heima any time with:
+
+```bash
+curl -sS -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
+  https://rpc.heima-parachain.heima.network | jq '{baseFeePerGas: .result.baseFeePerGas, mixHash: .result.mixHash, withdrawalsRoot: .result.withdrawalsRoot, blobGasUsed: .result.blobGasUsed}'
+```
+
+If any of `mixHash`/`withdrawalsRoot`/`blobGasUsed` becomes non-null in the future (Heima upgrade), bump `evm_version` accordingly in `crates/agentkeys-chain/foundry.toml` AND re-read the verification check above.
+
+## Deployed contract registry
+
+Live v2 stage-1 contract addresses on each chain are kept in [`docs/spec/deployed-contracts.md`](docs/spec/deployed-contracts.md). The same addresses are also written to `scripts/operator-workstation.env` (via `env_set` in `scripts/heima-bring-up.sh` step 6) for shell-script consumption — those env-file entries are the operational source of truth and `deployed-contracts.md` is the human-readable canonical record (deployer, deploy date, block, explorer links, ABI summary).
+
+Verify all contracts are live + functional any time:
+
+```bash
+AGENTKEYS_CHAIN=heima       bash scripts/verify-heima-contracts.sh
+AGENTKEYS_CHAIN=heima-paseo bash scripts/verify-heima-contracts.sh   # when Paseo collators come back up
+```
+
+The verify script is read-only RPC (zero gas), exits 0 on all-pass / 1 on any failure. Run after every chain bring-up (`v2-stage1-demo.sh` step 9) to confirm the deploy was clean.
+
 ## Code Conventions
 - Rust: `thiserror` for library errors, `anyhow` for binary errors
 - All async: `tokio` runtime, `#[tokio::test]` for async tests

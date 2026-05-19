@@ -1,0 +1,35 @@
+{
+  "name": "base-sepolia",
+  "display_name": "Base Sepolia testnet",
+  "chain_id": 84532,
+  "chain_kind": "optimism-l2",
+  "rpc": {
+    "http": "https://sepolia.base.org",
+    "wss": "wss://base-sepolia-rpc.publicnode.com"
+  },
+  "explorer": {
+    "url": "https://sepolia.basescan.org",
+    "tx_url_template": "https://sepolia.basescan.org/tx/{tx_hash}",
+    "address_url_template": "https://sepolia.basescan.org/address/{address}"
+  },
+  "token": {
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "safe",
+    "confirmation_blocks": 0,
+    "confirmation_seconds": 600,
+    "notes": "Same finality model as Base mainnet. Faucet: https://www.coinbase.com/faucets/base-ethereum-sepolia-faucet"
+  },
+  "gas": {
+    "model": "eip1559",
+    "max_priority_fee_gwei": 1,
+    "max_fee_gwei": 50
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_BASE_SEPOLIA_DEPLOYER_KEY",
+    "foundry_chain_arg": "base-sepolia",
+    "faucet_url": "https://www.coinbase.com/faucets/base-ethereum-sepolia-faucet"
+  }
+}

@@ -22,15 +22,23 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json"] }
+# v2 stage-1 localhost proxy (US-008). axum + tower + hyper power the
+# `agentkeys-daemon proxy` subcommand (arch.md §6 + §15.1). The proxy
+# binds to a unix socket (and optionally TCP 127.0.0.1:9090 when
+# AGENTKEYS_DAEMON_TCP=1) and serves cap-token mint + cache requests.
+axum = { version = "0.7", features = ["json"] }
+tower = { version = "0.4", features = ["util"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+tower-service = "0.3"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 agentkeys-mock-server = { path = "../agentkeys-mock-server" }
 rusqlite = { version = "0.31", features = ["bundled"] }
-tower = { version = "0.4", features = ["util"] }
-axum = { version = "0.7", features = ["json", "query"] }
+# axum + tower already in runtime deps above; tests inherit them.
 http-body-util = "0.1"
 tokio = { workspace = true }
 base64 = "0.22"

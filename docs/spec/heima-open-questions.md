@@ -238,6 +238,128 @@ Mainnet readiness: _______
 
 ---
 
+## 3a. Chain backbone — EVM, Paseo, sudo (added 2026-05-18 after Heima dev info handoff)
+
+**Context for this section:** Stage 1 of v2 deploys four Solidity contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) on Heima's Frontier-EVM. Production target: **Heima mainnet** (`heima` profile, chain ID 212013, live RPC verified 2026-05-18). Development target: **Heima Paseo testnet** (`heima-paseo` profile). The Heima developer team confirmed that Paseo's runtime ships `pallet_sudo` with the sudoer set to **account Alice** — a Substrate dev convention that bears explaining.
+
+### Educational background — "what is Alice?" and "what is sudo?"
+
+**Alice is one of six well-known Substrate dev accounts.** When you run `subkey inspect //Alice` (or any Substrate node with the `--alice` flag), you get a deterministic keypair derived from this seed phrase:
+
+```
+bottom drive obey lake curtain smoke basket hold race lonely fit walk//Alice
+```
+
+The other five — Bob, Charlie, Dave, Eve, Ferdie — derive the same way with `//Bob`, `//Charlie`, etc. These keys are **intentionally public** (printed in `subkey`'s docs, baked into every Substrate dev-chain genesis) so that anyone can run a dev/test chain and immediately have funded accounts with known keys. They are **never** secure — anyone with access to a chain that recognizes Alice can sign as Alice. This is the point.
+
+Canonical Alice details (sr25519, the Substrate default):
+
+| Property | Value |
+|---|---|
+| Secret seed | `0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a` |
+| Public key (hex) | `0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d` |
+| SS58 address (generic prefix 42) | `5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY` |
+| SS58 address on Heima (prefix 31, verified live via `system_properties` 2026-05-18) | (re-encode of the same public key under prefix 31 — need to confirm with Kai) |
+
+**`pallet_sudo` is the Substrate root-authority pallet.** Runtimes that include it expose one extrinsic: `sudo.sudo(call)`. The pallet stores ONE address as the "sudo key" and lets only that address execute `sudo.sudo(...)`, which runs the wrapped call with `RawOrigin::Root` — bypassing every other origin check in every other pallet. The sudoer can:
+
+- Force-transfer balances (e.g., pre-fund any account for testing)
+- Force-set chain state (`system.setStorage`)
+- Force-run a runtime upgrade (`system.setCode`)
+- Whitelist EVM contracts for privileged paths (if the runtime exposes such hooks)
+- Reset the K3 epoch counter (in our case) without waiting for the signer-governance multisig
+
+Sudo is **standard practice on testnets** — it gives the chain operator (or anyone with the sudo key) a god-mode lever for unblocking dev workflows. It is **never** on a production chain. Either the pallet is excluded from the runtime entirely, or the sudo key is rotated to a multisig held by governance and eventually destroyed via `sudo.killSudo()`.
+
+**Why Heima Paseo's sudoer is Alice:** the public, anyone-knows-it Alice key + sudo pallet means **any developer can call sudo on Heima Paseo for free** — pre-fund a deployer wallet, force-bump the K3 epoch counter for testing, force-set an actor's scope without going through the K11/K10 ceremony. This is exactly the dev convenience the testnet exists to provide. It does NOT mean Alice owns the chain or that there's a security flaw — Paseo is a deliberately permissionless dev environment.
+
+**How AgentKeys uses (or doesn't use) sudo on Heima Paseo:**
+
+| Use case | Sudo needed? | Notes |
+|---|---|---|
+| Deploy four Solidity contracts via Foundry | No | Anyone with HEI gas can deploy. Sudo not involved. |
+| Pre-fund a hot-key deployer wallet from Alice | Yes | `sudo.sudo(balances.forceTransfer(Alice → deployer, X HEI))` saves operators from chasing faucets. |
+| Bootstrap `K3EpochCounter` to a non-1 starting epoch for testing rotation flows | Yes | `sudo.sudo(system.setStorage(K3EpochCounter::current_epoch → N))` — testnet-only. |
+| Force-register a fake `SidecarRegistry` entry for testing worker re-verification | Maybe | Could `sudo.sudo(ethereum.transact(...))` to call the contract as if msg.sender were anyone. |
+| Production `K3EpochCounter.bump_epoch` (mainnet) | **NEVER** | Production uses the signer-governance multisig directly; sudo is not in the runtime. |
+
+**Tooling note:** `sudo.sudo(...)` is a Substrate-side extrinsic, NOT an EVM transaction. Calling it requires Substrate-side signing — either via Polkadot.js Apps (Developer → Sudo tab), `subxt` (Rust), `@polkadot/api` (JS), or `subkey`. Foundry / `cast` / web3.js cannot construct sudo extrinsics because they only know Ethereum-style RLP-encoded transactions. The crossover gotcha for our use case: when we want sudo to "do something to the EVM side" (e.g., call a Solidity function as if msg.sender were the contract owner), the sudo extrinsic wraps `pallet_ethereum.transact(...)` — which is the Substrate-side primitive that submits an EVM transaction. That's the bridge.
+
+### Q13. What's the canonical Heima Paseo RPC URL? ✅ RESOLVED 2026-05-18
+
+> **Wanted:** a single HTTP + WSS endpoint that responds to both EVM JSON-RPC (`eth_chainId`, `eth_blockNumber`) and Substrate-RPC (`system_chain`, `system_properties`, `sudo_*` extrinsics via Polkadot.js Apps).
+
+**Heima dev team answer (2026-05-18 handoff):**
+
+```
+Paseo HTTP RPC URL:        https://rpc.paseo-parachain.heima.network
+Paseo WSS RPC URL:         wss://rpc.paseo-parachain.heima.network   (same host)
+Paseo Substrate WSS URL:   wss://rpc.paseo-parachain.heima.network   (same host)
+Paseo EVM chain ID:        2013  (= HEIMA_PARA_ID — mainnet's 212013
+                                  prefixes the deployment year; paseo
+                                  skips the prefix)
+Paseo SS58 prefix:         131   (NOT the 31 used by mainnet, NOT the
+                                  generic 42 — re-encode any pasted
+                                  pubkey under prefix 131 for paseo,
+                                  or use //Alice as a SURI directly)
+Paseo faucet URL:          (still pending; sudo via Alice covers most
+                            cases — see Q14 and §4.0 of the demo doc)
+Paseo block explorer URL:  https://heima-paseo.statescan.io  (per the
+                            existing profile pattern — verify once a
+                            tx is on chain)
+```
+
+**Live verification (run 2026-05-18 from operator workstation):**
+
+```
+$ curl -sS -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+    https://rpc.paseo-parachain.heima.network
+{"jsonrpc":"2.0","id":1,"result":"0x7dd"}        # 0x7dd = 2013 decimal
+
+$ curl ... method:system_chain         → "Heima-paseo"
+$ curl ... method:system_properties    → {"ss58Format":131,"tokenDecimals":18,"tokenSymbol":"HEI"}
+$ curl ... method:eth_blockNumber      → 0x2c5556  (~2.9M blocks; live chain)
+```
+
+These values landed in `crates/agentkeys-core/chain-profiles/heima-paseo.json` in the 2026-05-18 commit. The `chain_id: 0` auto-detect sentinel was retired — now hard-pinned to `2013`.
+
+### Q14. Heima Paseo sudo — confirm the sudoer + how to invoke
+
+> **Wanted:** confirmation that `pallet_sudo` is in the Heima Paseo runtime, the sudo key is the well-known Substrate dev Alice (`0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d`), and a documented recipe for calling `sudo.sudo(...)` from a typical operator workstation.
+>
+> **Why we need to know:** the v2 stage-1 demo doc covers dev bring-up against Heima Paseo. We want to document a one-line "use Alice to pre-fund your deployer" recipe so operators don't have to chase faucet tokens for every dev iteration. We also want to know whether sudo can force-bump `K3EpochCounter` for K3-rotation testing.
+
+**Kai / Heima dev answer:**
+```
+sudo pallet in paseo runtime:       [ ] yes / [ ] no
+sudoer:                              [ ] well-known Alice (sr25519) / [ ] other: _______
+sudoer's SS58 on Heima (prefix 31): _______
+Sudo via Polkadot.js Apps works:    [ ] yes / [ ] no / [ ] yes but UI path: _______
+Sudo via subkey/subxt CLI recipe:   _______
+sudo wrapping pallet_ethereum.transact:  [ ] works / [ ] doesn't / [ ] untested
+Will the sudo key rotate during the v2 dev cycle?  [ ] stable / [ ] may rotate at: _______
+```
+
+### Q15. Heima mainnet — confirm sudo is NOT in the runtime
+
+> **Wanted:** explicit confirmation that Heima mainnet (chain ID 212013) has either (a) removed `pallet_sudo` from the runtime entirely, or (b) the sudo key has been transferred to a governance multisig + the multisig threshold is high enough to be operationally meaningful. Anything less is a single-key takeover risk against the chain that hosts our contracts.
+
+**Kai / Heima dev answer:**
+```
+Heima mainnet sudo state:
+  [ ] pallet_sudo removed from runtime (best)
+  [ ] pallet_sudo retained, key is held by governance multisig
+       — Multisig address: _______
+       — Threshold / participants: _______
+  [ ] pallet_sudo retained, key is held by a single account
+       — Account: _______
+       — Plan to remove / threshold: _______
+Date sudo will be removed (if planned):  _______
+```
+
+---
+
 ## 4. The Reuse-Build-Block matrix (fill in during meeting)
 
 | # | Requirement | Status | Scope (if build) | Owner | Notes |
@@ -254,6 +376,9 @@ Mainnet readiness: _______
 | Q10 | TEE worker stability / rewrite status | ✅🛠🚫 | | | |
 | Q11 | Open-source posture of AgentKeys API | ✅🛠🚫 | | | |
 | Q12 | Rate limits, fees, testnet, mainnet | ✅🛠🚫 | | | |
+| Q13 | Canonical Heima Paseo RPC URL (HTTP + WSS) | ✅ resolved | | Heima dev | 2026-05-18: `rpc.paseo-parachain.heima.network`, chain_id 2013, ss58 prefix 131, token HEI 18 decimals. Profile updated. |
+| Q14 | Heima Paseo sudo — Alice as sudoer + invocation recipe | ✅🛠🚫 | | | added 2026-05-18; unblocks dev-bring-up pre-funding flow |
+| Q15 | Heima mainnet — sudo removed OR governance-multisig-held | ✅🛠🚫 | | | added 2026-05-18; security gate on production chain |
 
 Legend: **✅** = reuse as-is, **🛠** = build (small to medium delta), **🚫** = blocked or requires workaround.
 

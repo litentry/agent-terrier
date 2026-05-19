@@ -1,0 +1,56 @@
+{
+  "name": "heima-paseo",
+  "display_name": "Heima Paseo testnet (default development chain)",
+  "chain_id": 2013,
+  "chain_kind": "substrate-frontier",
+  "rpc": {
+    "http": "https://rpc.paseo-parachain.heima.network",
+    "wss": "wss://rpc.paseo-parachain.heima.network",
+    "substrate_wss": "wss://rpc.paseo-parachain.heima.network"
+  },
+  "explorer": {
+    "url": "https://heima-paseo.statescan.io",
+    "tx_url_template": "https://heima-paseo.statescan.io/#/extrinsics/{tx_hash}",
+    "address_url_template": "https://heima-paseo.statescan.io/#/accounts/{address}",
+    "subscan_source": {
+      "backend_repo": "https://github.com/litentry/subscan-essentials",
+      "frontend_repo": "https://github.com/litentry/subscan-essentials-ui-react",
+      "note": "Same subscan-essentials stack as Heima mainnet, deployed against Paseo."
+    }
+  },
+  "token": {
+    "symbol": "HEI",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "latest",
+    "confirmation_blocks": 1,
+    "confirmation_seconds": 6,
+    "notes": "Paseo testnet chain_id = 2013 (= HEIMA_PARA_ID; mainnet's 212013 is the deployment-year-prefixed version). Verified live 2026-05-18 against https://rpc.paseo-parachain.heima.network: eth_chainId returns 0x7dd, system_chain returns 'Heima-paseo', system_properties returns ss58Format=131 tokenSymbol=HEI tokenDecimals=18. Same host serves both EVM JSON-RPC and Substrate-RPC."
+  },
+  "gas": {
+    "model": "eip1559",
+    "max_priority_fee_gwei": 1,
+    "max_fee_gwei": 10
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_HEIMA_PASEO_DEPLOYER_KEY",
+    "foundry_chain_arg": "heima-paseo"
+  },
+  "dev_environment": {
+    "is_development_default": true,
+    "sudo": {
+      "enabled": true,
+      "sudoer_alias": "alice",
+      "sudoer_seed_phrase": "bottom drive obey lake curtain smoke basket hold race lonely fit walk//Alice",
+      "sudoer_public_key": "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
+      "sudoer_ss58_generic": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+      "sudo_via": "polkadot.js apps Developer → Sudo, OR subxt CLI, OR @polkadot/api JS — NOT Foundry/cast (sudo is a Substrate extrinsic, not an EVM tx). To wrap an EVM call: sudo.sudo(ethereum.transact(...)). See docs/spec/heima-open-questions.md §3a for full background.",
+      "warnings": [
+        "Anyone can sign as Alice — these dev keys are public. Use only on Paseo testnet, never on mainnet.",
+        "Heima Paseo uses SS58 prefix 131 (NOT the 31 used by mainnet, NOT the generic 42). Re-encode Alice's public key under prefix 131 before pasting into Polkadot.js Apps for a Paseo-specific session — or just use //Alice as the SURI and let the keyring handle it.",
+        "Sudoer-as-Alice confirmation handshake from Heima dev team still outstanding for Q14 in heima-open-questions.md — the URL + chain_id are now live (Q13 resolved 2026-05-18), but explicit sudo-recipe confirmation is the next thing to verify."
+      ]
+    }
+  }
+}

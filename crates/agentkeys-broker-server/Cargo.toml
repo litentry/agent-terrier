@@ -45,7 +45,12 @@ getrandom = "0.2"
 # optional here and hard-required by the feature in [features]. Phase 0 default
 # enables `auth-wallet-sig`, so these compile in by default.
 k256 = { version = "0.13", features = ["ecdsa", "sha2"], optional = true }
-sha3 = { version = "0.10", optional = true }
+# sha3 (Keccak256) was previously gated by `auth-wallet-sig` only — the
+# v2 stage-1 cap-mint handler in `handlers/cap.rs` now needs it
+# unconditionally (function-selector + service-name keccak), so the
+# dep is mandatory. The `auth-wallet-sig` feature still pulls it via
+# the explicit feature dep below; this just removes the optional gate.
+sha3 = "0.10"
 # OAuth2 (Phase A.2 / US-020) — state HMAC + URL building. Optional, gated
 # via `auth-oauth2`. `url` is also a transitive dep of `reqwest` so the
 # dep-graph cost is zero; declaring directly keeps the API stable.
@@ -62,7 +67,7 @@ default              = ["auth-wallet-sig", "wallet-keystore", "audit-sqlite"]
 # Auth methods. Per-method external deps land in subsequent stories:
 # US-006 adds k256+sha3 to auth-wallet-sig; Phase A.1 adds lettre+aws-sdk-sesv2
 # to auth-email-link; Phase A.2's OAuth2 reuses unconditional jsonwebtoken+reqwest.
-auth-wallet-sig      = ["dep:k256", "dep:sha3"]
+auth-wallet-sig      = ["dep:k256"]
 auth-email-link      = ["dep:aws-sdk-sesv2"]
 auth-oauth2          = ["dep:hmac", "dep:url"]
 auth-oauth2-google   = ["auth-oauth2"]

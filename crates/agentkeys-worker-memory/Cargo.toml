@@ -1,0 +1,36 @@
+[package]
+name = "agentkeys-worker-memory"
+version = "0.1.0"
+edition = "2021"
+description = "Stage-2 memory-service worker (arch.md §15.2) — per-actor S3 prefix for agent memory/state"
+
+[[bin]]
+name = "agentkeys-worker-memory"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_worker_memory"
+path = "src/lib.rs"
+
+[dependencies]
+# Reuse the shared envelope + cap-verify modules from the credentials
+# worker. Per arch.md §15.2 the memory worker has the same cap-mint /
+# AES-GCM / S3-PUT flow; only the S3 path prefix + bucket differ.
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+base64 = "0.22"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

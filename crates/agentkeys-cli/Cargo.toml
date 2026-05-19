@@ -22,6 +22,29 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 
+# Issue #85 — convert broker-minted AwsTempCreds into the SDK's canonical
+# Credentials type so we can plug them directly into S3CredentialBackend.
+aws-credential-types = "1"
+
+# K11 stub helpers (deterministic — for CI / no-authenticator environments).
+sha2 = "0.10"
+hex = "0.4"
+thiserror = { workspace = true }
+
+# Real WebAuthn ceremony (--webauthn flag on `agentkeys k11 enroll/assert`).
+# Brings up a localhost axum server that serves the JS calling
+# navigator.credentials.create/.get; macOS Touch ID via the platform
+# authenticator. Manual ceremony (no webauthn-rs) so the assert path can
+# bind to an application-level message hash as the WebAuthn challenge.
+axum = { version = "0.7", features = ["json"] }
+tower-service = "0.3"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+ciborium = "0.2"  # CBOR decode for attestationObject + COSE pubkey
+base64 = "0.22"
+p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
+rand_core = { version = "0.6", features = ["std"] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
@@ -31,7 +54,7 @@ agentkeys-types = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
-axum = { version = "0.7", features = ["json"] }
+# axum is now in runtime deps above (webauthn ceremony); tests inherit.
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = { workspace = true }
 tempfile = "3"

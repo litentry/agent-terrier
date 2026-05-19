@@ -1,0 +1,40 @@
+{
+  "name": "heima",
+  "display_name": "Heima Network (Litentry mainnet)",
+  "chain_id": 212013,
+  "chain_kind": "substrate-frontier",
+  "rpc": {
+    "http": "https://rpc.heima-parachain.heima.network",
+    "wss": "wss://rpc.heima-parachain.heima.network",
+    "substrate_wss": "wss://rpc.heima-parachain.heima.network"
+  },
+  "explorer": {
+    "url": "https://heima.statescan.io",
+    "tx_url_template": "https://heima.statescan.io/#/extrinsics/{tx_hash}",
+    "address_url_template": "https://heima.statescan.io/#/accounts/{address}",
+    "subscan_source": {
+      "backend_repo": "https://github.com/litentry/subscan-essentials",
+      "frontend_repo": "https://github.com/litentry/subscan-essentials-ui-react",
+      "note": "Litentry forks of subscan-essentials. Future agentkeys-specific indexing + UI for ScopeContract / SidecarRegistry / K3EpochCounter events lands here (per arch.md §22a integration note)."
+    }
+  },
+  "token": {
+    "symbol": "HEI",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "latest",
+    "confirmation_blocks": 1,
+    "confirmation_seconds": 6,
+    "notes": "Heima parachain uses Polkadot relay-chain GRANDPA finality; ~6s finalization per block, no reorg risk above 1 confirmation. Verified against live RPC 2026-05-18: eth_chainId returns 0x33c2d (= 212013)."
+  },
+  "gas": {
+    "model": "eip1559",
+    "max_priority_fee_gwei": 1,
+    "max_fee_gwei": 10
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_HEIMA_DEPLOYER_KEY",
+    "foundry_chain_arg": "heima"
+  }
+}

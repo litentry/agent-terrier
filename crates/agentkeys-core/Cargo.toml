@@ -19,6 +19,16 @@ tokio = { workspace = true }
 keyring = "2"
 anyhow = { workspace = true }
 
+# Issue #85 — S3CredentialBackend (client-side AES-256-GCM, OIDC-scoped writes
+# to s3://$BUCKET/bots/<wallet>/credentials/<service>.enc). Anonymous SDK
+# config: the daemon-injected AWS_* env vars carry the temp creds minted via
+# the broker (same path as agentkeys-provisioner::aws_creds).
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+aws-credential-types = "1"
+aes-gcm = "0.10"
+rand = "0.8"
+
 [dev-dependencies]
 tempfile = "3"
 agentkeys-mock-server = { path = "../agentkeys-mock-server" }
