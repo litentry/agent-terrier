@@ -1,0 +1,37 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+script = "script"
+test = "test"
+# Heima uses Frontier (EVM-compatible). Frontier's block headers do NOT
+# include the `prevrandao` field (Paris+ EVMs require it). Forge's
+# simulator validates block headers against its target EVM version
+# before broadcasting; with evm_version=paris it errors out on Heima
+# mainnet with:
+#   "EVM error; header validation error: `prevrandao` not set"
+# Drop to london (pre-Merge, pre-prevrandao). Our contracts don't use
+# any post-london features, so this is a no-op semantically; it's
+# purely about the validator's expectations.
+#
+# Also avoids the Shanghai-era PUSH0 opcode (which london doesn't emit
+# either) — keeps the bytecode forwards-compatible with older
+# Frontier nodes.
+evm_version = "london"
+solc_version = "0.8.20"
+optimizer = true
+optimizer_runs = 200
+# Match arch.md §6 — events are part of the wire contract; treat them as
+# strictly as we treat function signatures. Don't let solc silently elide
+# unused params from event topics.
+extra_output = ["storageLayout"]
+
+[profile.default.fmt]
+line_length = 100
+tab_width = 4
+bracket_spacing = true
+
+[rpc_endpoints]
+heima = "https://rpc.heima-parachain.heima.network"
+heima_paseo = "https://rpc.paseo-parachain.heima.network"
+anvil = "http://localhost:8545"

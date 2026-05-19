@@ -43,6 +43,12 @@ pub fn create_router(state: SharedState) -> Router {
         )
         .route("/.well-known/jwks.json", get(handlers::oidc::jwks))
         .route("/v1/mint-oidc-jwt", post(handlers::oidc::mint_oidc_jwt))
+        // v2 stage-1 cap-mint endpoints (arch.md §12.4 + §15.1). Workers
+        // (credentials-service per arch.md §15.1) consume these caps and
+        // independently re-verify the on-chain scope + K3 epoch before
+        // doing any AES-256-GCM encrypt/decrypt + S3 PUT/GET.
+        .route("/v1/cap/cred-store", post(handlers::cap::cap_cred_store))
+        .route("/v1/cap/cred-fetch", post(handlers::cap::cap_cred_fetch))
         // Stage 7 §3.5 — pluggable auth surface.
         .route(
             "/v1/auth/wallet/start",

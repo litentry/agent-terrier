@@ -1,8 +1,11 @@
+pub mod actor_omni;
 pub mod auth_request;
 pub mod backend;
+pub mod chain_profile;
 pub mod init_flow;
 pub mod mock_client;
 pub mod otp;
 pub mod payment;
+pub mod s3_backend;
 pub mod session_store;
 pub mod signer_client;

@@ -9,6 +9,8 @@ members = [
     "crates/agentkeys-mcp",
     "crates/agentkeys-provisioner",
     "crates/agentkeys-broker-server",
+    "crates/agentkeys-worker-creds",
+    "crates/agentkeys-worker-memory",
 ]
 
 [workspace.dependencies]

@@ -1,0 +1,35 @@
+{
+  "name": "sepolia",
+  "display_name": "Ethereum Sepolia testnet",
+  "chain_id": 11155111,
+  "chain_kind": "ethereum-l1",
+  "rpc": {
+    "http": "https://rpc.sepolia.org",
+    "wss": "wss://ethereum-sepolia-rpc.publicnode.com"
+  },
+  "explorer": {
+    "url": "https://sepolia.etherscan.io",
+    "tx_url_template": "https://sepolia.etherscan.io/tx/{tx_hash}",
+    "address_url_template": "https://sepolia.etherscan.io/address/{address}"
+  },
+  "token": {
+    "symbol": "SepoliaETH",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "finalized",
+    "confirmation_blocks": 32,
+    "confirmation_seconds": 384,
+    "notes": "Same finality model as Ethereum mainnet. Faucet: https://www.alchemy.com/faucets/ethereum-sepolia or https://sepoliafaucet.com"
+  },
+  "gas": {
+    "model": "eip1559",
+    "max_priority_fee_gwei": 1,
+    "max_fee_gwei": 30
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_SEPOLIA_DEPLOYER_KEY",
+    "foundry_chain_arg": "sepolia",
+    "faucet_url": "https://www.alchemy.com/faucets/ethereum-sepolia"
+  }
+}

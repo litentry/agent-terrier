@@ -12,13 +12,48 @@ use tracing::info;
 
 mod hardening;
 mod pairing;
+mod proxy;
 mod session;
 
 #[derive(Parser)]
 #[command(name = "agentkeys-daemon", about = "AgentKeys sandbox sidecar daemon")]
 struct Args {
+    /// v2 stage-1 cap-token proxy mode (arch.md §6 + §15.1). When set,
+    /// the daemon ignores all other args and serves the localhost cap
+    /// proxy on a Unix socket (`--proxy-listen`) instead of running
+    /// the legacy pairing/recover/MCP flows. `--proxy-broker-url` and
+    /// `--proxy-session-jwt` provide the upstream broker auth.
+    #[arg(long)]
+    proxy: bool,
+
+    /// Unix-socket path for `--proxy` mode. Default resolves to
+    /// `$XDG_RUNTIME_DIR/agentkeys-proxy.sock` or `~/.agentkeys/...`.
+    #[arg(long, env = "AGENTKEYS_PROXY_SOCKET")]
+    proxy_listen: Option<String>,
+
+    /// Optional TCP bind for `--proxy` mode (container deployments).
+    /// Default unset = unix-only. Set to e.g. `127.0.0.1:9090` to also
+    /// listen on TCP.
+    #[arg(long, env = "AGENTKEYS_PROXY_TCP")]
+    proxy_tcp: Option<String>,
+
+    /// Broker URL the proxy mints caps against.
+    #[arg(long, env = "AGENTKEYS_PROXY_BROKER_URL")]
+    proxy_broker_url: Option<String>,
+
+    /// Session JWT the proxy passes as `Authorization: Bearer ...` to
+    /// the broker for every cap-mint request.
+    #[arg(long, env = "AGENTKEYS_PROXY_SESSION_JWT")]
+    proxy_session_jwt: Option<String>,
+
+    // backend is required for all non-proxy modes (pairing, recover,
+    // MCP stdio, etc.). Proxy mode bypasses it via run_proxy_mode + the
+    // explicit `args.proxy` early-return in main(). Marking it Optional
+    // so `agentkeys-daemon --proxy ...` doesn't fail clap parsing when
+    // AGENTKEYS_BACKEND is unset; the non-proxy branches still .expect
+    // it (with a clear error message).
     #[arg(long, env = "AGENTKEYS_BACKEND")]
-    backend: String,
+    backend: Option<String>,
 
     #[arg(long, env = "AGENTKEYS_SESSION")]
     session: Option<String>,
@@ -99,10 +134,22 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
+    if args.proxy {
+        return run_proxy_mode(args).await;
+    }
+
     // 1. Apply kernel hardening
     let _hardening_report = hardening::apply_hardening()?;
 
-    let backend = Arc::new(MockHttpClient::new(&args.backend));
+    // Non-proxy modes require --backend (clap made it Optional so that
+    // --proxy doesn't need it; we re-validate here).
+    let backend_url = args.backend.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "--backend (or AGENTKEYS_BACKEND env) required for non-proxy modes \
+             (pair, recover, MCP stdio, init). For cap-token proxy mode pass --proxy."
+        )
+    })?;
+    let backend = Arc::new(MockHttpClient::new(&backend_url));
 
     if let Some(ref broker_url) = args.broker_url {
         info!(broker_url = %broker_url, "broker URL configured; AWS-cred mints will route through broker");
@@ -144,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             // RECOVER VIA MASTER APPROVAL — resolve --parent here, not at
             // startup (codex P3).
-            let parent_wallet = resolve_parent_if_set(&args.backend, args.parent.as_deref()).await?;
+            let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref()).await?;
             let result = pairing::run_recover_flow(
                 &*backend,
                 agent_identity,
@@ -279,7 +326,7 @@ async fn main() -> anyhow::Result<()> {
                     // --session / --recover --method paths don't crash startup.
                     // `--parent` binds the pair request to a specific master so
                     // the backend refuses approval from any other master.
-                    let parent_wallet = resolve_parent_if_set(&args.backend, args.parent.as_deref()).await?;
+                    let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref()).await?;
                     let result = pairing::run_pair_flow(
                         &*backend,
                         args.pair_timeout,
@@ -329,7 +376,11 @@ async fn run_signer_flow_init(args: &Args) -> anyhow::Result<init_flow::InitResu
             "agentkeys-daemon --init-email/--init-oauth2-google requires --broker-url (or AGENTKEYS_BROKER_URL)"
         )
     })?;
-    let signer_url = args.signer_url.clone().unwrap_or_else(|| args.backend.clone());
+    let signer_url = args.signer_url.clone().unwrap_or_else(|| {
+        args.backend.clone().expect(
+            "--signer-url or --backend (or AGENTKEYS_SIGNER_URL/AGENTKEYS_BACKEND env) required for signer-flow init"
+        )
+    });
     let poll_timeout = Duration::from_secs(args.init_poll_timeout_seconds);
 
     if let Some(ref email) = args.init_email {
@@ -429,6 +480,124 @@ async fn resolve_parent_if_set(
         .ok_or_else(|| anyhow::anyhow!("resolve --parent: missing wallet_address in response"))?
         .to_string();
     Ok(Some(WalletAddress(wallet_str)))
+}
+
+/// v2 stage-1 cap-token proxy mode entry point (arch.md §6 + §15.1).
+///
+/// Binds a Unix socket (always) and optionally a TCP listener; serves
+/// the axum router from `proxy::build_router`. The router caches caps
+/// for 5 min and fails closed after 60s of broker silence.
+async fn run_proxy_mode(args: Args) -> anyhow::Result<()> {
+    let broker_url = args
+        .proxy_broker_url
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!(
+            "--proxy-broker-url required in proxy mode (or set AGENTKEYS_PROXY_BROKER_URL)"
+        ))?;
+    let session_jwt = args
+        .proxy_session_jwt
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!(
+            "--proxy-session-jwt required in proxy mode (or set AGENTKEYS_PROXY_SESSION_JWT)"
+        ))?;
+
+    let socket_path = args
+        .proxy_listen
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(proxy::resolve_socket_path);
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {parent:?}"))?;
+    }
+    // Best-effort: remove a stale socket file from a prior crashed run.
+    let _ = std::fs::remove_file(&socket_path);
+
+    let state = proxy::build_state(broker_url.clone(), session_jwt);
+    let app = proxy::build_router(state.clone());
+
+    info!(
+        socket = %socket_path.display(),
+        broker_url = %broker_url,
+        "starting agentkeys-daemon in cap-proxy mode"
+    );
+
+    let unix_listener = tokio::net::UnixListener::bind(&socket_path)
+        .with_context(|| format!("bind unix socket {socket_path:?}"))?;
+    // Permission-gate to the owner uid only. Stage 2 swaps for SO_PEERCRED
+    // strict caller verification.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&socket_path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&socket_path, perms)?;
+    }
+
+    // If --proxy-tcp is set, bind that listener too and run both in parallel.
+    let app_for_unix = app.clone();
+    let unix_task = tokio::spawn(async move {
+        // axum 0.7 doesn't ship a unix-listener helper directly; build a
+        // tiny accept loop using hyper-util.
+        use hyper_util::server::conn::auto::Builder;
+        use hyper_util::rt::TokioIo;
+        use tower::Service;
+        let svc = app_for_unix.into_make_service();
+        let svc = std::sync::Arc::new(tokio::sync::Mutex::new(svc));
+        loop {
+            let (stream, _addr) = match unix_listener.accept().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(error=%e, "unix accept failed");
+                    continue;
+                }
+            };
+            let svc_clone = svc.clone();
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let mut guard = svc_clone.lock().await;
+                let tower_service = match guard.call(()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(error=%e, "make_service failed");
+                        return;
+                    }
+                };
+                drop(guard);
+                let hyper_svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let mut tower_service = tower_service.clone();
+                    async move { tower_service.call(req).await }
+                });
+                if let Err(e) = Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(io, hyper_svc)
+                    .await
+                {
+                    tracing::error!(error=%e, "unix conn serve failed");
+                }
+            });
+        }
+    });
+
+    let tcp_task = if let Some(addr) = args.proxy_tcp.as_deref() {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("bind TCP {addr}"))?;
+        let app_for_tcp = app.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app_for_tcp).await {
+                tracing::error!(error=%e, "tcp serve failed");
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Wait for whichever task ends first (typically Ctrl-C kills both).
+    tokio::select! {
+        _ = unix_task => {},
+        _ = async { if let Some(t) = tcp_task { let _ = t.await; } else { std::future::pending::<()>().await } } => {},
+    }
+    Ok(())
 }
 
 #[cfg(test)]

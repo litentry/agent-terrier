@@ -1,0 +1,34 @@
+{
+  "name": "base",
+  "display_name": "Base Mainnet (Coinbase L2)",
+  "chain_id": 8453,
+  "chain_kind": "optimism-l2",
+  "rpc": {
+    "http": "https://mainnet.base.org",
+    "wss": "wss://base-rpc.publicnode.com"
+  },
+  "explorer": {
+    "url": "https://basescan.org",
+    "tx_url_template": "https://basescan.org/tx/{tx_hash}",
+    "address_url_template": "https://basescan.org/address/{address}"
+  },
+  "token": {
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "safe",
+    "confirmation_blocks": 0,
+    "confirmation_seconds": 600,
+    "notes": "Base has tiered finality. 'latest' = sequencer block (~2s, reorg-able); 'safe' = L1 batch posted (~5-10 min); 'finalized' = Ethereum sign-off (~15-20 min). Cap-mint scope reads default to 'safe' to avoid sequencer-reorg windows; high-value payments should use 'finalized'."
+  },
+  "gas": {
+    "model": "eip1559",
+    "max_priority_fee_gwei": 1,
+    "max_fee_gwei": 50
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_BASE_DEPLOYER_KEY",
+    "foundry_chain_arg": "base"
+  }
+}

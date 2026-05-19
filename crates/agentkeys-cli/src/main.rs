@@ -1,7 +1,8 @@
 use agentkeys_cli::{
     cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_link,
     cmd_provision, cmd_read, cmd_recover, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
-    cmd_signer_sign, cmd_store, cmd_teardown, cmd_usage, cmd_whoami, CommandContext, InitMode,
+    cmd_signer_sign, cmd_store, cmd_teardown, cmd_usage, cmd_whoami, CommandContext,
+    CredentialBackendKind, EnvelopeVersionFlag, InitMode,
 };
 
 
@@ -38,6 +39,50 @@ struct Cli {
         help = "Session namespace under ~/.agentkeys/<id>/session.json. Defaults to \"master\". Use distinct ids to hold multiple concurrent sessions (e.g. --session-id=alice and --session-id=bob) without overwriting each other."
     )]
     session_id: String,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_CREDENTIAL_BACKEND",
+        default_value = "http",
+        help = "Where credential CRUD lands. 'http' (default) talks to the legacy mock-server. 's3' encrypts client-side and PUTs to s3://$AGENTKEYS_BUCKET/bots/<wallet|actor_omni>/credentials/<service>.enc, gated by the OIDC-assumed agentkeys-data-role + PrincipalTag isolation. 'sidecar' (stage-1 v2 — not yet implemented) talks to the localhost daemon proxy. The legacy backend still handles sessions, audit, identity, and scope regardless of this flag."
+    )]
+    credential_backend: String,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_ENVELOPE_VERSION",
+        default_value = "v1",
+        help = "v2 stage 1 — which envelope shape --credential-backend=s3 writes. 'v1' (default) keys S3 path + AAD off the master wallet (legacy #87 layout). 'v2' keys both off actor_omni_hex per arch.md §14.4 — stable across K3 rotation. Reads always accept BOTH formats during the migration window, so this flag only affects writes."
+    )]
+    envelope_version: String,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_CHAIN",
+        help = "v2 stage 1 — which EVM chain backbone to talk to. Built-in profiles: heima (default), heima-paseo, base, base-sepolia, ethereum, sepolia, anvil. Operator-custom chains: set $AGENTKEYS_CHAIN_PROFILE_FILE to a JSON file path. Run `agentkeys chain list` to enumerate built-ins; `agentkeys chain show <name>` to inspect one."
+    )]
+    chain: Option<String>,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_BUCKET",
+        help = "S3 bucket holding bots/<wallet>/credentials/<service>.enc. Required when --credential-backend=s3."
+    )]
+    bucket: Option<String>,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_SIGNER_URL",
+        help = "Signer base URL — when --credential-backend=s3 is set, the S3 backend calls /dev/sign-message under --omni-account to derive a deterministic per-(wallet, service) KEK for client-side AES-256-GCM."
+    )]
+    signer_url: Option<String>,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_OMNI_ACCOUNT",
+        help = "64-lowercase-hex omni_account for KEK derivation when --credential-backend=s3. Issue #74 step 2 will pull this from the session JWT automatically."
+    )]
+    omni_account: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -241,6 +286,62 @@ enum Commands {
         #[command(subcommand)]
         action: SignerAction,
     },
+
+    #[command(
+        about = "Inspect available EVM chain profiles (v2 stage 1)",
+        long_about = "AgentKeys's chain layer is pluggable per arch.md §22. Each named profile bundles chain ID, RPC endpoints, explorer URL, finality model, and gas config. Use --chain <name> on the top-level CLI to select one for any chain-aware operation (device register, scope grant, contract deploy). The 'list' subcommand prints all built-ins; 'show' dumps one profile's full JSON.\n\nOperator-custom chains: ship your own JSON and point at it via $AGENTKEYS_CHAIN_PROFILE_FILE.\n\nExamples:\n  agentkeys chain list\n  agentkeys chain show heima\n  agentkeys --chain base chain show"
+    )]
+    Chain {
+        #[command(subcommand)]
+        action: ChainAction,
+    },
+
+    #[command(
+        about = "K11 (WebAuthn) enrollment + assertion (v2 stage 1 — stub mode)",
+        long_about = "Real WebAuthn ceremony or deterministic stub.\n\nReal mode (--webauthn): opens the operator's default browser, runs the platform-authenticator ceremony (macOS: Touch ID against the Secure Enclave passkey), persists the real attested credential to ~/.agentkeys/k11/<omni>.json. The assert path binds to the application message via challenge = sha256(message), producing a real WebAuthn assertion verifiable off-chain today and on-chain after Heima ships EIP-7212 P-256 precompile.\n\nStub mode (default — for CI / non-attested envs): produces deterministic bytes that just satisfy the on-chain `k11Assertion.length != 0` gate (per arch.md §22b.1 stage-1 simplifications inventory). On mainnet (AGENTKEYS_CHAIN=heima) stub mode prints a WARN.\n\nExamples:\n  agentkeys k11 enroll  --webauthn --operator-omni 0x<64-hex>\n  agentkeys k11 assert  --webauthn --operator-omni 0x<64-hex> --message-hex 0xdeadbeef\n  agentkeys k11 enroll  --operator-omni 0x<64-hex>     # stub (CI)\n  agentkeys k11 assert  --operator-omni 0x<64-hex> --message-hex 0xdeadbeef"
+    )]
+    K11 {
+        #[command(subcommand)]
+        action: K11Action,
+    },
+}
+
+#[derive(Subcommand)]
+enum K11Action {
+    #[command(about = "Enroll a K11 credential for an operator (stub by default; --webauthn for real Touch ID ceremony)")]
+    Enroll {
+        #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
+        operator_omni: String,
+        /// Run the real WebAuthn ceremony in the operator's default browser.
+        /// macOS: triggers the Touch ID prompt against the platform passkey.
+        /// Without this flag the command writes a deterministic stub
+        /// (for CI / non-attested environments).
+        #[arg(long)]
+        webauthn: bool,
+    },
+    #[command(about = "Produce a K11 assertion over a message (stub by default; --webauthn for real Touch ID)")]
+    Assert {
+        #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
+        operator_omni: String,
+        #[arg(long, help = "Hex-encoded message to sign over (with or without 0x prefix)")]
+        message_hex: String,
+        /// Run the real WebAuthn ceremony. The application message is
+        /// SHA-256-hashed and used as the WebAuthn challenge so the
+        /// assertion is cryptographically bound to this exact message.
+        #[arg(long)]
+        webauthn: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChainAction {
+    #[command(about = "List built-in chain profile names")]
+    List,
+    #[command(about = "Print one profile's full JSON (omit name to use the resolved profile)")]
+    Show {
+        #[arg(help = "Profile name (heima | heima-paseo | base | base-sepolia | ethereum | sepolia | anvil)")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -291,12 +392,140 @@ enum InboxAction {
     },
 }
 
+async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
+    use agentkeys_core::chain_profile::ChainProfile;
+    match action {
+        ChainAction::List => Ok(ChainProfile::list_builtin_names().join("\n")),
+        ChainAction::Show { name } => {
+            let profile = match name {
+                Some(n) => ChainProfile::load_builtin(n)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+                None => ctx.chain_profile()?.clone(),
+            };
+            serde_json::to_string_pretty(&profile)
+                .map_err(|e| anyhow::anyhow!("serialize profile: {e}"))
+        }
+    }
+}
+
+/// `agentkeys k11 enroll/assert` — stage-1 stub mode by default.
+///
+/// Stage-1 simplification per arch.md §22b.1 (stage-1 simplifications
+/// inventory — K11 stub bytes; issue #90 for stage-2 hardening): deterministic stub bytes
+/// satisfy the on-chain `k11Assertion.length != 0` gate without a real
+/// WebAuthn authenticator. Stage 2 (#90) swaps in `webauthn-rs` + Touch ID.
+///
+/// Stub-mode toggle: `AGENTKEYS_K11_STUB=1` (default). Setting it to `0`
+/// errors out today — real WebAuthn is a stage-2 deliverable.
+async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
+    let stub_env = std::env::var("AGENTKEYS_K11_STUB")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+
+    // Resolve mode: --webauthn flag wins over AGENTKEYS_K11_STUB env.
+    let use_webauthn = matches!(action,
+        K11Action::Enroll { webauthn: true, .. } | K11Action::Assert { webauthn: true, .. });
+
+    if !use_webauthn && !stub_env {
+        anyhow::bail!(
+            "K11 stub mode disabled (AGENTKEYS_K11_STUB=0) and --webauthn not passed. \
+             Either pass --webauthn for the real Touch ID ceremony, or set \
+             AGENTKEYS_K11_STUB=1 to use the deterministic stub."
+        );
+    }
+
+    // Stage-1 stub-on-mainnet protection (codex audit follow-up):
+    //   chain == heima + stub mode + no explicit opt-in → HARD ERROR.
+    //   chain == heima + stub mode + AGENTKEYS_ALLOW_STAGE1_STUBS=1 → WARN.
+    //   other chains (heima-paseo, anvil, etc.) + stub mode → no message
+    //     (it's the expected dev/CI behaviour).
+    // Per arch.md §22b.1 — stage-1 simplifications inventory.
+    if !use_webauthn {
+        let chain = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+        let allow_stubs = std::env::var("AGENTKEYS_ALLOW_STAGE1_STUBS")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+        if chain == "heima" {
+            if !allow_stubs {
+                anyhow::bail!(
+                    "K11 stub mode is NOT permitted on chain=heima (mainnet). The stub \
+                     bytes only satisfy the on-chain k11Assertion.length != 0 gate — they \
+                     are not a real WebAuthn assertion and any operator who reads them \
+                     later cannot distinguish them from a real ceremony. \
+                     \n\nOptions: \
+                     \n  1. Pass --webauthn for a real Touch ID ceremony (recommended). \
+                     \n  2. Set AGENTKEYS_ALLOW_STAGE1_STUBS=1 to opt into stub mode \
+                     (emits a WARN; for staging/test runs only). \
+                     \n  3. Switch to AGENTKEYS_CHAIN=heima-paseo or anvil for dev work. \
+                     \n\nSee arch.md §22b.1 + issue #90 for stage-2 hardening."
+                );
+            }
+            eprintln!(
+                "==> ⚠️  WARN: K11 stub mode active on chain={chain} (AGENTKEYS_ALLOW_STAGE1_STUBS=1). \
+                 The bytes you're about to produce are NOT a real WebAuthn assertion. \
+                 See arch.md §22b.1 + issue #90."
+            );
+        }
+    }
+
+    match action {
+        K11Action::Enroll { operator_omni, webauthn } => {
+            if *webauthn {
+                let enrollment = agentkeys_cli::k11_webauthn::enroll_webauthn(operator_omni)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("k11 webauthn enroll: {e}"))?;
+                serde_json::to_string_pretty(&enrollment)
+                    .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+            } else {
+                let enrollment = agentkeys_cli::k11::enroll(operator_omni)
+                    .map_err(|e| anyhow::anyhow!("k11 enroll: {e}"))?;
+                serde_json::to_string_pretty(&enrollment)
+                    .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+            }
+        }
+        K11Action::Assert { operator_omni, message_hex, webauthn } => {
+            let msg = hex::decode(message_hex.trim_start_matches("0x"))
+                .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
+            if *webauthn {
+                let assertion = agentkeys_cli::k11_webauthn::assert_webauthn(operator_omni, &msg)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
+                Ok(format!("0x{}", hex::encode(assertion)))
+            } else {
+                let assertion = agentkeys_cli::k11::assert_stub(operator_omni, &msg)
+                    .map_err(|e| anyhow::anyhow!("k11 assert: {e}"))?;
+                Ok(format!("0x{}", hex::encode(assertion)))
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let cred_kind = match CredentialBackendKind::parse(&cli.credential_backend) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let envelope_version = match EnvelopeVersionFlag::parse(&cli.envelope_version) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let ctx = CommandContext::new(&cli.backend, cli.verbose, cli.json)
         .with_broker_url(cli.broker_url.clone())
-        .with_session_id(cli.session_id.clone());
+        .with_session_id(cli.session_id.clone())
+        .with_credential_backend(cred_kind)
+        .with_envelope_version(envelope_version)
+        .with_chain_profile_name(cli.chain.clone())
+        .with_data_bucket(cli.bucket.clone())
+        .with_signer_url(cli.signer_url.clone())
+        .with_omni_account(cli.omni_account.clone());
 
     let result: anyhow::Result<String> = match &cli.command {
         Commands::Init {
@@ -389,6 +618,8 @@ async fn main() {
                 cmd_signer_sign(&ctx, signer_url, omni_account, message).await
             }
         },
+        Commands::Chain { action } => cmd_chain(&ctx, action).await,
+        Commands::K11 { action } => cmd_k11(action).await,
     };
 
     match result {

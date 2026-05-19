@@ -15,6 +15,20 @@ AWSCLIV2.pkg
 # Local developer secrets — template is checked in as .env.example.
 agentkeys-secrets.env
 
+# Operator-supplied mnemonic file(s) for the chain deployer (referenced
+# by HEIMA_DEPLOYER_MNEMONIC_FILE in scripts/heima-bring-up.sh).
+# Never committed — the mnemonic IS the key.
+/test-hei
+/test-hei.*
+/.heima-mnemonic
+/*-mnemonic
+
+# Node deps for scripts/heima-paseo-sudo.mjs (installed via
+# `npm install --prefix scripts` by scripts/heima-paseo-bring-up.sh on
+# first run). scripts/package.json + scripts/package-lock.json are
+# checked in; scripts/node_modules/ is not.
+scripts/node_modules/
+
 # Stage 6 runbook one-shot JSON artifacts. CLAUDE.md mandates the
 # `jq -n --arg` → `$(...)` pattern piped directly into the AWS CLI call
 # (no file on disk). If any of these reappear, someone reverted to the

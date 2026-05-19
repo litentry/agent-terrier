@@ -82,12 +82,12 @@ Extend the existing bucket policy (already grants PrincipalTag-scoped read on `b
 
 ## Migration plan
 
-1. Land `S3CredentialBackend` alongside the existing `MockHttpClient` impl (both compile, both pass tests).
-2. Add a CLI flag `--credential-backend {http,s3}` (default still `http` for the transition window).
-3. Update §5.3 of the demo doc + cloud-setup.md to document the new backend.
-4. Once the operator-runbook docs are migrated, flip the default to `s3`.
-5. After one release with `s3` default, remove the mock-server's `/credential/*` handlers + the `agentkeys-backend.service` systemd unit (component #10 in arch.md §9 ceases to exist).
-6. Update arch.md §11: remove the "never publicly exposed" rule for :8090 entirely (the legacy backend goes away — nothing left to expose).
+1. ✅ Land `S3CredentialBackend` alongside the existing `MockHttpClient` impl (both compile, both pass tests). — `crates/agentkeys-core/src/s3_backend.rs`, 9 unit tests covering KEK determinism, AAD-binding, envelope versioning.
+2. ✅ Add a CLI flag `--credential-backend {http,s3}` (default still `http` for the transition window). — top-level flag on `agentkeys` + `AGENTKEYS_CREDENTIAL_BACKEND` env. `cmd_store` / `cmd_read` / `cmd_run` / `cmd_teardown` / `cmd_provision` now route through `ctx.credential_backend()`; every other backend method (sessions, audit, identity, scope, rendezvous, inbox) still hits `MockHttpClient`.
+3. ✅ Update §5.3 of the demo doc + cloud-setup.md to document the new backend. — cloud-setup.md §4.4 grows an `AllowDaemonPutOwnCredentials` statement (`s3:PutObject` + `s3:DeleteObject` on `bots/<wallet>/credentials/*` under the same PrincipalTag). stage7-demo-and-verification.md §5.3 documents the env-var opt-in.
+4. ⏳ Once the operator-runbook docs are migrated, flip the default to `s3`. — next PR; gated on operators running the bucket-policy update.
+5. ⏳ After one release with `s3` default, remove the mock-server's `/credential/*` handlers + the `agentkeys-backend.service` systemd unit (component #10 in arch.md §9 ceases to exist for credentials, stays for sessions+audit).
+6. ⏳ Update arch.md §11: remove the "never publicly exposed" rule for :8090 entirely (the legacy backend goes away — nothing left to expose). Blocked by sessions+audit also migrating off the mock-server (separate issues).
 
 ## Out of scope (separate issues)
 

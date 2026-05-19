@@ -1,0 +1,34 @@
+{
+  "name": "ethereum",
+  "display_name": "Ethereum Mainnet",
+  "chain_id": 1,
+  "chain_kind": "ethereum-l1",
+  "rpc": {
+    "http": "https://eth.llamarpc.com",
+    "wss": "wss://ethereum-rpc.publicnode.com"
+  },
+  "explorer": {
+    "url": "https://etherscan.io",
+    "tx_url_template": "https://etherscan.io/tx/{tx_hash}",
+    "address_url_template": "https://etherscan.io/address/{address}"
+  },
+  "token": {
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "finalized",
+    "confirmation_blocks": 32,
+    "confirmation_seconds": 384,
+    "notes": "Post-Merge: 'safe' advances after the current epoch attests (~32 slots = ~6.4 min); 'finalized' after two epochs (~12.8 min). Cap-mint uses 'finalized' by default — Ethereum mainnet gas is expensive, so any chain submission is intentional and worth waiting for finalization."
+  },
+  "gas": {
+    "model": "eip1559",
+    "max_priority_fee_gwei": 2,
+    "max_fee_gwei": 100
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_ETHEREUM_DEPLOYER_KEY",
+    "foundry_chain_arg": "mainnet"
+  }
+}

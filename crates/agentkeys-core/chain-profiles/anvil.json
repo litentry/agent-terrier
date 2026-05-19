@@ -1,0 +1,35 @@
+{
+  "name": "anvil",
+  "display_name": "Anvil local dev node",
+  "chain_id": 31337,
+  "chain_kind": "local-dev",
+  "rpc": {
+    "http": "http://localhost:8545",
+    "wss": "ws://localhost:8545"
+  },
+  "explorer": {
+    "url": "",
+    "tx_url_template": "",
+    "address_url_template": ""
+  },
+  "token": {
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "latest",
+    "confirmation_blocks": 0,
+    "confirmation_seconds": 0,
+    "notes": "Anvil produces instant-final blocks. Use this profile for unit/integration tests and demo bring-up before pointing at a live chain. Default mnemonic at http://localhost:8545 gives 10 pre-funded accounts; first deployer key is the canonical Foundry test key."
+  },
+  "gas": {
+    "model": "legacy",
+    "max_priority_fee_gwei": 0,
+    "max_fee_gwei": 0
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_ANVIL_DEPLOYER_KEY",
+    "foundry_chain_arg": "anvil",
+    "default_test_key": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+  }
+}

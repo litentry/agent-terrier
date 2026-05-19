@@ -42,6 +42,7 @@ pub async fn discovery(State(state): State<SharedState>) -> impl IntoResponse {
             "agentkeys_grant_id",
             "agentkeys_operation",
             "agentkeys_user_wallet",
+            "agentkeys_actor_omni",
             "https://aws.amazon.com/tags",
         ],
     }))
@@ -154,6 +155,15 @@ pub async fn mint_oidc_jwt(
 /// to empty. `transitive_tag_keys` ensures the tag persists across role
 /// chains. Spec:
 /// <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html#oidc-session-tags>
+///
+/// **v2 stage-1 (arch.md §14):** the JWT also carries
+/// `agentkeys_actor_omni` — the wallet-independent stable anchor
+/// `SHA256("agentkeys" || "evm" || wallet_lc)`. Both keys appear under
+/// `principal_tags` and `transitive_tag_keys` during the migration
+/// window so v1 bucket policies (keyed on `agentkeys_user_wallet`) and
+/// v2 bucket policies (keyed on `agentkeys_actor_omni`) both work. Once
+/// every cloud is migrated to v2 (per `bucket-policy-v2-migrate.sh`),
+/// v1 can be retired from the claim set.
 pub(crate) fn build_oidc_jwt_claims(
     issuer: &str,
     wallet: &str,
@@ -165,6 +175,12 @@ pub(crate) fn build_oidc_jwt_claims(
         .unwrap_or(0);
     let exp = now + ttl_seconds as i64;
     let wallet_lc = wallet.to_lowercase();
+    // v2 actor_omni = SHA256("agentkeys" || "evm" || wallet_lc). Lives in
+    // `crate::identity::omni_account::derive_omni_account` so the broker
+    // never reimplements the hash — same function the storage layer uses
+    // when keying identity-link rows on omni.
+    let actor_omni =
+        crate::identity::omni_account::derive_omni_account("evm", &wallet_lc).to_string();
 
     let claims = json!({
         "iss": issuer,
@@ -173,11 +189,16 @@ pub(crate) fn build_oidc_jwt_claims(
         "iat": now,
         "exp": exp,
         "agentkeys_user_wallet": wallet_lc,
+        "agentkeys_actor_omni": actor_omni,
         "https://aws.amazon.com/tags": {
             "principal_tags": {
                 "agentkeys_user_wallet": [wallet_lc],
+                "agentkeys_actor_omni": [actor_omni],
             },
-            "transitive_tag_keys": ["agentkeys_user_wallet"],
+            "transitive_tag_keys": [
+                "agentkeys_user_wallet",
+                "agentkeys_actor_omni",
+            ],
         },
     });
 
