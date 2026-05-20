@@ -34,12 +34,29 @@ pub enum CapOp {
     Teardown,
 }
 
+/// Data class the cap-token is bound to. Each worker MUST verify
+/// `cap.payload.data_class` matches its own class before touching S3.
+/// Without this, a cred-store cap could be submitted to /v1/memory/put
+/// (or vice versa) and pollute the wrong bucket at the cap-authz layer.
+/// The IAM PrincipalTag enforces per-actor scoping at the AWS layer
+/// (defense in depth); this binding is the cryptographic per-class gate
+/// at the cap layer (issue #90 followup, codified in CLAUDE.md).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClass {
+    Credentials,
+    Memory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapPayload {
     pub operator_omni: String,
     pub actor_omni: String,
     pub service: String,
     pub op: CapOp,
+    /// Data class the cap is bound to. REQUIRED — workers reject caps
+    /// whose data_class doesn't match the URL's bucket.
+    pub data_class: DataClass,
     pub device_key_hash: String,
     pub k3_epoch: u64,
     pub issued_at: u64,
@@ -73,6 +90,8 @@ pub enum VerifyError {
     Future { issued_at: u64, now: u64 },
     #[error("cap op {got:?} does not match endpoint {expected:?}")]
     OpMismatch { expected: CapOp, got: CapOp },
+    #[error("cap data_class {got:?} does not match endpoint {expected:?}")]
+    DataClassMismatch { expected: DataClass, got: DataClass },
     #[error("chain RPC error: {0}")]
     ChainRpc(String),
     #[error("requested service not in agent's on-chain scope")]
@@ -108,6 +127,24 @@ pub fn verify_signature(
 pub fn check_op(token: &CapToken, expected: CapOp) -> Result<(), VerifyError> {
     if token.payload.op != expected {
         return Err(VerifyError::OpMismatch { expected, got: token.payload.op });
+    }
+    Ok(())
+}
+
+/// Per-data-class isolation check (issue #90 followup). Workers reject
+/// caps whose data_class doesn't match the URL's bucket — a cred-store
+/// cap MUST NOT be honored at /v1/memory/put, even though both endpoints
+/// expect the same CapOp::Store. The data_class binding is signed into
+/// the cap payload by the broker, so it cannot be forged downstream.
+pub fn check_data_class(
+    token: &CapToken,
+    expected: DataClass,
+) -> Result<(), VerifyError> {
+    if token.payload.data_class != expected {
+        return Err(VerifyError::DataClassMismatch {
+            expected,
+            got: token.payload.data_class,
+        });
     }
     Ok(())
 }
@@ -241,17 +278,29 @@ async fn eth_call(
 
 fn parse_device_entry(raw: &str) -> Result<OnChainDevice, VerifyError> {
     let hex = raw.trim_start_matches("0x");
-    if hex.len() < 7 * 64 {
+    // DeviceEntry post codex H1 (SidecarRegistry.sol) has 11 ABI words:
+    //   word 0  operatorOmni     bytes32
+    //   word 1  actorOmni        bytes32
+    //   word 2  k11CredId        bytes32
+    //   word 3  k11RpIdHash      bytes32  (NEW, codex H1)
+    //   word 4  k11PubX          uint256  (NEW, codex H1)
+    //   word 5  k11PubY          uint256  (NEW, codex H1)
+    //   word 6  tier             uint8 (padded)
+    //   word 7  roles            uint8 (padded)
+    //   word 8  registeredAt     uint64 (padded)
+    //   word 9  lastSignCount    uint32 (padded)
+    //   word 10 revoked          bool (padded)
+    if hex.len() < 11 * 64 {
         return Err(VerifyError::ChainRpc(format!(
-            "getDevice returned {} bytes; expected ≥ 7×32",
+            "getDevice returned {} bytes; expected ≥ 11×32 (post codex H1 struct)",
             hex.len() / 2
         )));
     }
     let operator_omni = hex[0..64].to_lowercase();
     let actor_omni = hex[64..128].to_lowercase();
-    let roles = u8::from_str_radix(&hex[(4 * 64 + 62)..(4 * 64 + 64)], 16).unwrap_or(0);
-    let registered_at = u64::from_str_radix(&hex[(5 * 64 + 48)..(5 * 64 + 64)], 16).unwrap_or(0);
-    let revoked = hex[6 * 64..7 * 64].trim_start_matches('0').ends_with('1');
+    let roles = u8::from_str_radix(&hex[(7 * 64 + 62)..(7 * 64 + 64)], 16).unwrap_or(0);
+    let registered_at = u64::from_str_radix(&hex[(8 * 64 + 48)..(8 * 64 + 64)], 16).unwrap_or(0);
+    let revoked = hex[10 * 64..11 * 64].trim_start_matches('0').ends_with('1');
     Ok(OnChainDevice {
         operator_omni,
         actor_omni,
@@ -313,12 +362,17 @@ mod tests {
     use super::*;
 
     fn sample_token(op: CapOp) -> CapToken {
+        sample_token_with_class(op, DataClass::Credentials)
+    }
+
+    fn sample_token_with_class(op: CapOp, data_class: DataClass) -> CapToken {
         CapToken {
             payload: CapPayload {
                 operator_omni: format!("0x{}", "a".repeat(64)),
                 actor_omni: format!("0x{}", "b".repeat(64)),
                 service: "openrouter".into(),
                 op,
+                data_class,
                 device_key_hash: format!("0x{}", "c".repeat(64)),
                 k3_epoch: 1,
                 issued_at: 1,
@@ -326,6 +380,46 @@ mod tests {
                 nonce: "00".repeat(16),
             },
             broker_sig: "x".into(),
+        }
+    }
+
+    #[test]
+    fn data_class_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&DataClass::Credentials).unwrap(),
+            "\"credentials\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DataClass::Memory).unwrap(),
+            "\"memory\""
+        );
+    }
+
+    #[test]
+    fn check_data_class_accepts_match() {
+        let t = sample_token_with_class(CapOp::Store, DataClass::Credentials);
+        assert!(check_data_class(&t, DataClass::Credentials).is_ok());
+    }
+
+    #[test]
+    fn check_data_class_rejects_cross_class() {
+        // Cred-class cap submitted to memory worker (expected = Memory).
+        let cred_cap = sample_token_with_class(CapOp::Store, DataClass::Credentials);
+        match check_data_class(&cred_cap, DataClass::Memory) {
+            Err(VerifyError::DataClassMismatch { expected, got }) => {
+                assert_eq!(expected, DataClass::Memory);
+                assert_eq!(got, DataClass::Credentials);
+            }
+            other => panic!("expected DataClassMismatch, got {:?}", other),
+        }
+        // Memory-class cap submitted to cred worker (expected = Credentials).
+        let mem_cap = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        match check_data_class(&mem_cap, DataClass::Credentials) {
+            Err(VerifyError::DataClassMismatch { expected, got }) => {
+                assert_eq!(expected, DataClass::Credentials);
+                assert_eq!(got, DataClass::Memory);
+            }
+            other => panic!("expected DataClassMismatch, got {:?}", other),
         }
     }
 
@@ -390,14 +484,30 @@ mod tests {
 
     #[test]
     fn parse_device_entry_decodes_well_formed() {
+        // 11-word post-codex-H1 DeviceEntry layout:
+        //  word 0 operatorOmni  → "aaaa…" (64 hex)
+        //  word 1 actorOmni     → "bbbb…"
+        //  word 2 k11CredId     → 0
+        //  word 3 k11RpIdHash   → 0 (codex H1)
+        //  word 4 k11PubX       → 0 (codex H1)
+        //  word 5 k11PubY       → 0 (codex H1)
+        //  word 6 tier          → 1
+        //  word 7 roles         → 7
+        //  word 8 registeredAt  → 42
+        //  word 9 lastSignCount → 0
+        //  word 10 revoked      → 0
         let mut raw = String::from("0x");
-        raw.push_str(&"a".repeat(64));
-        raw.push_str(&"b".repeat(64));
-        raw.push_str(&"0".repeat(64));
-        raw.push_str(&format!("{:0>64x}", 1u64));
-        raw.push_str(&format!("{:0>64x}", 7u64));
-        raw.push_str(&format!("{:0>64x}", 42u64));
-        raw.push_str(&"0".repeat(64));
+        raw.push_str(&"a".repeat(64));                       // operator
+        raw.push_str(&"b".repeat(64));                       // actor
+        raw.push_str(&"0".repeat(64));                       // k11CredId
+        raw.push_str(&"0".repeat(64));                       // k11RpIdHash
+        raw.push_str(&"0".repeat(64));                       // k11PubX
+        raw.push_str(&"0".repeat(64));                       // k11PubY
+        raw.push_str(&format!("{:0>64x}", 1u64));            // tier
+        raw.push_str(&format!("{:0>64x}", 7u64));            // roles
+        raw.push_str(&format!("{:0>64x}", 42u64));           // registeredAt
+        raw.push_str(&"0".repeat(64));                       // lastSignCount
+        raw.push_str(&"0".repeat(64));                       // revoked
         let d = parse_device_entry(&raw).unwrap();
         assert_eq!(d.operator_omni, "a".repeat(64));
         assert_eq!(d.actor_omni, "b".repeat(64));

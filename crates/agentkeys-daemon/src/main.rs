@@ -10,6 +10,7 @@ use anyhow::Context;
 use clap::Parser;
 use tracing::info;
 
+mod companion;
 mod hardening;
 mod pairing;
 mod proxy;
@@ -25,6 +26,40 @@ struct Args {
     /// `--proxy-session-jwt` provide the upstream broker auth.
     #[arg(long)]
     proxy: bool,
+
+    /// v2 stage-2 master-companion mode (arch.md §10.3.1 + #90). Spins up
+    /// a SECOND daemon instance that holds a distinct K10 + K11 credential
+    /// on RP ID `companion.localhost` and serves an HTTP approval API on
+    /// `127.0.0.1:9091` (configurable via `--companion-bind`). Used as the
+    /// mobile-app alternative for M-of-N recovery quorum testing on the
+    /// same Mac.
+    #[arg(long)]
+    master_companion: bool,
+
+    /// Bind address for companion-mode HTTP server. Default 127.0.0.1:9091.
+    #[arg(long, env = "AGENTKEYS_COMPANION_BIND")]
+    companion_bind: Option<String>,
+
+    /// Operator omni (hex) the companion daemon represents. Required in
+    /// companion mode; should match the primary daemon's operator_omni.
+    #[arg(long, env = "AGENTKEYS_COMPANION_OPERATOR_OMNI")]
+    companion_operator_omni: Option<String>,
+
+    /// On-chain device_key_hash (`keccak256(D_pub_companion)`). Required in
+    /// companion mode after the operator has run `agentkeys device add` to
+    /// register this companion as a 2nd master.
+    #[arg(long, env = "AGENTKEYS_COMPANION_DEVICE_KEY_HASH")]
+    companion_device_key_hash: Option<String>,
+
+    /// K11 credential id for the companion's WebAuthn passkey (base64url or
+    /// hex). Optional — emitted by `/v1/companion/whoami` for indexer hints.
+    #[arg(long, env = "AGENTKEYS_COMPANION_K11_CRED_ID")]
+    companion_k11_cred_id: Option<String>,
+
+    /// WebAuthn RP ID the companion is bound to. Defaults to "companion.localhost".
+    /// Demo bumps to "companion-v2.localhost" when prior companion is revoked.
+    #[arg(long, env = "AGENTKEYS_COMPANION_RP_ID")]
+    companion_rp_id: Option<String>,
 
     /// Unix-socket path for `--proxy` mode. Default resolves to
     /// `$XDG_RUNTIME_DIR/agentkeys-proxy.sock` or `~/.agentkeys/...`.
@@ -133,6 +168,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    if args.master_companion {
+        return run_companion_mode(args).await;
+    }
 
     if args.proxy {
         return run_proxy_mode(args).await;
@@ -480,6 +519,28 @@ async fn resolve_parent_if_set(
         .ok_or_else(|| anyhow::anyhow!("resolve --parent: missing wallet_address in response"))?
         .to_string();
     Ok(Some(WalletAddress(wallet_str)))
+}
+
+/// v2 stage-2 master-companion mode (arch.md §10.3.1 + #90). Second
+/// daemon-as-mobile-app alternative for M-of-N recovery testing.
+async fn run_companion_mode(args: Args) -> anyhow::Result<()> {
+    let operator_omni = args.companion_operator_omni.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "--companion-operator-omni (or AGENTKEYS_COMPANION_OPERATOR_OMNI) required in master-companion mode"
+        )
+    })?;
+    let device_key_hash = args.companion_device_key_hash.clone().unwrap_or_else(|| {
+        "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+    });
+    let k11_cred_id = args.companion_k11_cred_id.clone().unwrap_or_default();
+    let companion_args = companion::CompanionArgs {
+        bind: args.companion_bind.clone(),
+        operator_omni,
+        device_key_hash,
+        k11_cred_id,
+        rp_id: args.companion_rp_id.clone(),
+    };
+    companion::run(companion_args).await
 }
 
 /// v2 stage-1 cap-token proxy mode entry point (arch.md §6 + §15.1).

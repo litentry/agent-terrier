@@ -318,6 +318,11 @@ enum K11Action {
         /// (for CI / non-attested environments).
         #[arg(long)]
         webauthn: bool,
+        /// WebAuthn RP ID. Default "localhost" (primary master). Companion
+        /// daemon mode uses "companion.localhost" so the platform keychain
+        /// creates a distinct passkey on the same Mac.
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
     },
     #[command(about = "Produce a K11 assertion over a message (stub by default; --webauthn for real Touch ID)")]
     Assert {
@@ -330,6 +335,15 @@ enum K11Action {
         /// assertion is cryptographically bound to this exact message.
         #[arg(long)]
         webauthn: bool,
+        /// WebAuthn RP ID. Must match the rp_id used at enrollment time.
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+        /// Emit the chain-ready assertion struct as JSON (r, s, pubX, pubY,
+        /// authData, clientDataJSON, challengeLocation, signCount) instead
+        /// of the raw concatenated bytes. The contract's K11Verifier needs
+        /// these fields as separate args.
+        #[arg(long)]
+        emit_chain_payload: bool,
     },
 }
 
@@ -469,11 +483,13 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
     }
 
     match action {
-        K11Action::Enroll { operator_omni, webauthn } => {
+        K11Action::Enroll { operator_omni, webauthn, rp_id } => {
             if *webauthn {
-                let enrollment = agentkeys_cli::k11_webauthn::enroll_webauthn(operator_omni)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("k11 webauthn enroll: {e}"))?;
+                let enrollment = agentkeys_cli::k11_webauthn::enroll_webauthn_with_rp(
+                    operator_omni, rp_id,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("k11 webauthn enroll: {e}"))?;
                 serde_json::to_string_pretty(&enrollment)
                     .map_err(|e| anyhow::anyhow!("serialize: {e}"))
             } else {
@@ -483,14 +499,49 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
                     .map_err(|e| anyhow::anyhow!("serialize: {e}"))
             }
         }
-        K11Action::Assert { operator_omni, message_hex, webauthn } => {
+        K11Action::Assert {
+            operator_omni,
+            message_hex,
+            webauthn,
+            rp_id,
+            emit_chain_payload,
+        } => {
             let msg = hex::decode(message_hex.trim_start_matches("0x"))
                 .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
             if *webauthn {
-                let assertion = agentkeys_cli::k11_webauthn::assert_webauthn(operator_omni, &msg)
+                if *emit_chain_payload {
+                    // The contract reconstructs `expected_challenge` from
+                    // operation params + nonce; the CLI caller passes the
+                    // exact 32 bytes via --message-hex.
+                    if msg.len() != 32 {
+                        anyhow::bail!(
+                            "--emit-chain-payload requires --message-hex to be a 32-byte challenge \
+                             (got {} bytes). The contract expects the message to BE the challenge \
+                             (operation params hashed); the WebAuthn ceremony then signs over \
+                             sha256(authData || sha256(clientDataJSON)) with clientDataJSON.challenge \
+                             = base64url(msg).",
+                            msg.len()
+                        );
+                    }
+                    let mut challenge = [0u8; 32];
+                    challenge.copy_from_slice(&msg);
+                    let payload = agentkeys_cli::k11_webauthn::assert_webauthn_for_chain(
+                        operator_omni,
+                        challenge,
+                        rp_id,
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
-                Ok(format!("0x{}", hex::encode(assertion)))
+                    serde_json::to_string_pretty(&payload)
+                        .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+                } else {
+                    let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_with_rp(
+                        operator_omni, &msg, rp_id,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
+                    Ok(format!("0x{}", hex::encode(assertion)))
+                }
             } else {
                 let assertion = agentkeys_cli::k11::assert_stub(operator_omni, &msg)
                     .map_err(|e| anyhow::anyhow!("k11 assert: {e}"))?;
