@@ -10,7 +10,9 @@ path = "src/main.rs"
 [dependencies]
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
+agentkeys-cli = { path = "../agentkeys-cli" } # K11 webauthn helpers (companion mode)
 agentkeys-mcp = { path = "../agentkeys-mcp" }
+hex = "0.4"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

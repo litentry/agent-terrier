@@ -37,6 +37,7 @@ pkcs8 = { version = "0.10", features = ["pem"] }
 # S3 PUT/GET via aws-sdk-s3 — worker uses the IAM role of the Lambda
 # / pod it runs as.
 aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
 aws-sdk-s3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 

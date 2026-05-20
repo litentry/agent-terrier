@@ -21,10 +21,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::aws_creds::{s3_for_request, OptionalStsCreds};
 use crate::envelope;
 use crate::errors::{err_400, err_403, err_500, err_502, ApiError};
 use crate::state::SharedWorkerState;
-use crate::verify::{self, CapOp, CapToken};
+use crate::verify::{self, CapOp, CapToken, DataClass};
 
 pub fn build_router(state: SharedWorkerState) -> Router {
     Router::new()
@@ -89,6 +90,7 @@ pub struct TeardownResponse {
 
 async fn cred_store(
     State(state): State<SharedWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<StoreRequest>,
 ) -> Result<Json<StoreResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Store).await?;
@@ -108,9 +110,8 @@ async fn cred_store(
         .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
-    state
-        .s3
-        .put_object()
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    s3.put_object()
         .bucket(&state.config.vault_bucket)
         .key(&key)
         .body(env_bytes.clone().into())
@@ -126,13 +127,14 @@ async fn cred_store(
 
 async fn cred_fetch(
     State(state): State<SharedWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<FetchRequest>,
 ) -> Result<Json<FetchResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Fetch).await?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
-    let resp = state
-        .s3
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let resp = s3
         .get_object()
         .bucket(&state.config.vault_bucket)
         .key(&key)
@@ -164,13 +166,14 @@ async fn cred_fetch(
 
 async fn cred_teardown(
     State(state): State<SharedWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<TeardownRequest>,
 ) -> Result<Json<TeardownResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Teardown).await?;
 
     let prefix = s3_prefix(&req.cap.payload.actor_omni);
-    let list = state
-        .s3
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let list = s3
         .list_objects_v2()
         .bucket(&state.config.vault_bucket)
         .prefix(&prefix)
@@ -184,9 +187,7 @@ async fn cred_teardown(
         .collect();
     let mut deleted = 0usize;
     for k in &keys {
-        if state
-            .s3
-            .delete_object()
+        if s3.delete_object()
             .bucket(&state.config.vault_bucket)
             .key(k)
             .send()
@@ -208,6 +209,10 @@ async fn verify_cap(
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
     verify::check_op(cap, expected_op)
         .map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
+    // Per-data-class isolation gate (issue #90 followup): a memory-class
+    // cap MUST NOT be honoured at the credentials worker.
+    verify::check_data_class(cap, DataClass::Credentials)
+        .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
     verify::check_freshness(cap)
         .map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
     verify::check_chain_device(

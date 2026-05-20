@@ -49,6 +49,11 @@ pub fn create_router(state: SharedState) -> Router {
         // doing any AES-256-GCM encrypt/decrypt + S3 PUT/GET.
         .route("/v1/cap/cred-store", post(handlers::cap::cap_cred_store))
         .route("/v1/cap/cred-fetch", post(handlers::cap::cap_cred_fetch))
+        // Per-data-class memory caps (issue #90 followup). Same shape +
+        // auth as cred caps but mints with data_class=Memory so the
+        // memory worker accepts and the cred worker rejects.
+        .route("/v1/cap/memory-put", post(handlers::cap::cap_memory_put))
+        .route("/v1/cap/memory-get", post(handlers::cap::cap_memory_get))
         // Stage 7 §3.5 — pluggable auth surface.
         .route(
             "/v1/auth/wallet/start",

@@ -99,6 +99,58 @@ Switch with `awsp <profile>`; verify with `aws sts get-caller-identity`.
 ### Caller-ARN matching in scripts must be case-insensitive
 Lowercase the caller_arn before matching, since the remote IAM user is `agentKeys-admin` (capital K) but operator scripts canonicalize on `agentkeys-admin`. Use `tr '[:upper:]' '[:lower:]'` (portable to /bin/bash 3.2) — not `${var,,}` (bash 4+).
 
+## Per-actor + per-data-class isolation invariants (issue #90)
+
+The OIDC + cap-token + IAM stack enforces a defense-in-depth chain across **four layers**. Every PR that touches storage, OIDC, the broker cap-mint flow, or the worker handlers MUST verify these invariants explicitly in a demo step. A change that doesn't add a corresponding test for the layer it touches is incomplete.
+
+| Layer | Invariant | Enforced by | Canonical test |
+|---|---|---|---|
+| **1. Broker cap-mint** | The session JWT's `agentkeys.omni_account` claim MUST match the request's `operator_omni`. Also: `device.operator_omni == session_omni`, `device.actor_omni == req.actor_omni`, `device.roles & ROLE_CAP_MINT`, `isServiceInScope(operator, actor, service) == true`. Returns `OperatorMismatch` / `DeviceBindingMismatch` / `DeviceRoleMissing` / `ServiceNotInScope` otherwise. | [`handlers/cap.rs`](crates/agentkeys-broker-server/src/handlers/cap.rs) — `mint_cap()` | [`harness/v2-stage3-demo.sh`](harness/v2-stage3-demo.sh) step 13 (NEGATIVE cap-mint with cross-actor `operator_omni` → HTTP 4xx) |
+| **2. Worker chain-verify** | Independent re-check of layer-1 invariants from the worker's perspective — defense-in-depth against broker compromise. `verify_signature` (broker cap-sig), `check_chain_device`, `check_chain_scope`, `check_chain_k3_epoch`. | [`crates/agentkeys-worker-creds/src/verify.rs`](crates/agentkeys-worker-creds/src/verify.rs) + 26 unit tests | [`harness/v2-stage3-demo.sh`](harness/v2-stage3-demo.sh) steps 11+12 (full HTTP roundtrip exercises every verify hook) |
+| **3. AWS IAM PrincipalTag scoping** | STS creds minted via `AssumeRoleWithWebIdentity` carry `PrincipalTag/agentkeys_actor_omni`. S3 resources scoped via `${aws:PrincipalTag/agentkeys_actor_omni}` resource-ARN interpolation. `s3:ListBucket` MUST carry an `s3:prefix=bots/${PrincipalTag}/<class>/*` condition (codex P2 — split-statement v3 bucket policy). | [`scripts/provision-vault-role.sh`](scripts/provision-vault-role.sh) + [`scripts/provision-memory-role.sh`](scripts/provision-memory-role.sh) + [`scripts/apply-vault-bucket-policy.sh`](scripts/apply-vault-bucket-policy.sh) + [`scripts/apply-memory-bucket-policy.sh`](scripts/apply-memory-bucket-policy.sh) | [`harness/v2-stage3-demo.sh`](harness/v2-stage3-demo.sh) steps 4-9: POSITIVE write to own prefix, NEGATIVE write + LIST to cross-actor prefix → AccessDenied |
+| **4. Per-data-class bucket separation** | Vault-role's IAM permissions MUST be scoped to the vault bucket only; memory-role to the memory bucket only. Vault creds in the wrong bucket → AccessDenied; memory creds in the vault bucket → AccessDenied. Per arch.md §17.2 ("sharing one role across data classes collapses blast radius"). | Per-data-class IAM roles (`agentkeys-vault-role`, `agentkeys-memory-role`) | [`harness/v2-stage3-demo.sh`](harness/v2-stage3-demo.sh) step 10 (vault creds → memory bucket, memory creds → vault bucket, both AccessDenied) |
+
+**Test-discipline rule**: any PR that adds a NEW worker, a NEW data class (e.g. a payments worker), or a NEW broker auth method MUST extend the stage-3 demo with negative cross-isolation tests for ALL four layers. Don't ship the feature with only POSITIVE-path tests.
+
+### Cap-tokens are data-class-explicit (issue #90 followup)
+
+The broker mints FOUR cap endpoints — two per data class — and the `data_class` is a SIGNED FIELD in the cap payload. Workers reject caps whose `data_class` doesn't match their bucket. This is the cap-layer isolation gate, symmetric with the AWS IAM cross-bucket gate (layer 4) but at the broker-signed capability layer.
+
+```
+POST /v1/cap/cred-store    → mints CapPayload { op: Store,    data_class: Credentials, ... }
+POST /v1/cap/cred-fetch    → mints CapPayload { op: Fetch,    data_class: Credentials, ... }
+POST /v1/cap/memory-put    → mints CapPayload { op: Store,    data_class: Memory,      ... }
+POST /v1/cap/memory-get    → mints CapPayload { op: Fetch,    data_class: Memory,      ... }
+```
+
+What this prevents:
+
+```bash
+# Operator A mints a credentials Store cap:
+cred_cap=$(curl -X POST $BROKER/v1/cap/cred-store -d ...)
+# → CapPayload { ..., op: store, data_class: credentials }
+
+# Tries to abuse it against the memory worker:
+curl -X POST https://memory.litentry.org/v1/memory/put -d '{"cap": '"$cred_cap"', "plaintext_b64": "..."}'
+# → HTTP 403 cap_data_class_mismatch
+#   The memory worker's verify_cap() calls check_data_class(cap, DataClass::Memory),
+#   sees cap.payload.data_class == Credentials, rejects.
+```
+
+The reverse (memory cap submitted to cred worker) is symmetrically blocked.
+
+**Why two endpoints per data class, not just one + a `data_class` query param**: by making the route the source of truth, the broker can't ever mint a `Memory` cap from a request that hit `/v1/cap/cred-*` — the variant is statically derived in `handlers/cap.rs`, not from user input. Mistakes-on-the-broker-side are impossible to construct.
+
+**Why this matters beyond the IAM layer**: AWS IAM (layer 3+4) enforces cross-actor + cross-bucket isolation at the AWS-API call site. The `data_class` cap binding enforces it at the cap-authz site — earlier in the trust chain, before the worker even calls AWS. If the AWS IAM grants were ever accidentally too broad, the cap-layer check still rejects. Defense in depth.
+
+Verified live:
+
+- `harness/v2-stage3-demo.sh` step 14 — cred-class cap → memory worker → `cap_data_class_mismatch`
+- `harness/v2-stage3-demo.sh` step 15 — memory-class cap → cred worker → `cap_data_class_mismatch`
+- Unit tests: `crates/agentkeys-worker-creds/src/verify.rs::check_data_class_rejects_cross_class` + serialization test for `DataClass`
+
+**When a third data class lands** (e.g. payments-audit per arch.md §15.6): mint two more endpoints (`/v1/cap/payaudit-store` + `/v1/cap/payaudit-fetch`), add `DataClass::PaymentsAudit` variant, plumb to the new worker. The pattern is closed-extension: existing data classes don't need to know about the new one.
+
 ## Development Workflow (Anthropic Harness Pattern)
 
 On every session start:

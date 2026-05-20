@@ -2,46 +2,47 @@
 pragma solidity ^0.8.20;
 
 import {Script, console} from "forge-std/Script.sol";
+import {P256Verifier} from "../src/P256Verifier.sol";
+import {K11Verifier} from "../src/K11Verifier.sol";
 import {SidecarRegistry} from "../src/SidecarRegistry.sol";
 import {AgentKeysScope} from "../src/AgentKeysScope.sol";
 import {K3EpochCounter} from "../src/K3EpochCounter.sol";
 import {CredentialAudit} from "../src/CredentialAudit.sol";
 
-/// @title DeployAgentKeysV1 — atomic deploy of the four v2 stage-1 contracts
+/// @title DeployAgentKeysV1 — atomic deploy of the v2 stage-2 contract set
 /// @notice Called by `scripts/heima-bring-up.sh` step 5 via:
 ///         `forge script script/DeployAgentKeysV1.s.sol --rpc-url <url>
 ///          --private-key <0x...> --broadcast`
 ///
-/// @dev    Deploy order matters: SidecarRegistry first (others reference it).
-///         AgentKeysScope's constructor takes the registry address; deploy that
-///         second. K3EpochCounter + CredentialAudit are independent — last.
+/// @dev    Deploy order: P256Verifier → K11Verifier → SidecarRegistry →
+///         AgentKeysScope → K3EpochCounter → CredentialAudit. Each downstream
+///         contract takes the prior addresses via constructor.
 ///
-///         The bring-up script parses stdout for the four "ContractName:
-///         0xAddress" lines to capture addresses; the regex is:
+///         The bring-up script parses stdout for "Name: 0xAddress" lines; regex:
 ///           grep -oE '<Name>:\s+0x[a-fA-F0-9]{40}'
-///         Keep the log shape stable.
 contract DeployAgentKeysV1 is Script {
     function run() external {
-        // Optional override; defaults to the deployer EOA (tx.origin inside the
-        // vm.startBroadcast block). Stage 2 swaps in an M-of-N multisig address.
         address signerGov = vm.envOr("SIGNER_GOVERNANCE", address(0));
 
         vm.startBroadcast();
-        // tx.origin inside a Forge broadcast IS the --private-key signer.
         if (signerGov == address(0)) {
             signerGov = tx.origin;
         }
 
-        SidecarRegistry registry = new SidecarRegistry();
-        AgentKeysScope scope = new AgentKeysScope(address(registry));
+        P256Verifier p256 = new P256Verifier();
+        K11Verifier k11 = new K11Verifier(address(p256));
+        SidecarRegistry registry = new SidecarRegistry(address(k11));
+        AgentKeysScope scope = new AgentKeysScope(address(registry), address(k11));
         K3EpochCounter epoch = new K3EpochCounter(signerGov);
-        CredentialAudit audit = new CredentialAudit();
+        // Audit appendRoot gates on operator-master via the registry (codex M1).
+        CredentialAudit audit = new CredentialAudit(address(registry));
 
         vm.stopBroadcast();
 
         console.log("Deployer:        ", tx.origin);
         console.log("SignerGovernance:", signerGov);
-        // Stable "Name: 0xAddress" log shape parsed by heima-bring-up.sh.
+        console.log("P256Verifier:    ", address(p256));
+        console.log("K11Verifier:     ", address(k11));
         console.log("AgentKeysScope:  ", address(scope));
         console.log("SidecarRegistry: ", address(registry));
         console.log("K3EpochCounter:  ", address(epoch));

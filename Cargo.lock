@@ -150,6 +150,7 @@ dependencies = [
 name = "agentkeys-daemon"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-cli",
  "agentkeys-core",
  "agentkeys-mcp",
  "agentkeys-mock-server",
@@ -159,6 +160,7 @@ dependencies = [
  "base64",
  "clap",
  "ed25519-dalek",
+ "hex",
  "http-body-util",
  "hyper 1.9.0",
  "hyper-util",
@@ -257,6 +259,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-worker-audit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha3",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentkeys-worker-creds"
 version = "0.1.0"
 dependencies = [
@@ -264,6 +284,7 @@ dependencies = [
  "agentkeys-types",
  "anyhow",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-s3",
  "axum",
  "base64",
@@ -277,6 +298,25 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sha3",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "agentkeys-worker-email"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-sdk-sesv2",
+ "axum",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

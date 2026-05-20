@@ -58,6 +58,19 @@ impl CapOp {
     }
 }
 
+/// Data class the cap-token is bound to. Mirror of
+/// `agentkeys_worker_creds::verify::DataClass`. The broker mints with
+/// the right variant for each endpoint (`/v1/cap/cred-*` → Credentials,
+/// `/v1/cap/memory-*` → Memory) and signs it into the payload; workers
+/// reject caps whose data_class doesn't match their bucket. Issue #90
+/// followup — codified in CLAUDE.md.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClass {
+    Credentials,
+    Memory,
+}
+
 /// Cap payload — the signed-over portion of a cap-token. The worker
 /// verifies `Sha256(json(payload))` against `broker_sig` using the
 /// broker's session-keypair public key before honoring the cap.
@@ -67,6 +80,9 @@ pub struct CapPayload {
     pub actor_omni: String,
     pub service: String,
     pub op: CapOp,
+    /// Data class binding (issue #90 followup). REQUIRED; workers reject
+    /// caps whose data_class doesn't match their bucket.
+    pub data_class: DataClass,
     pub device_key_hash: String,
     pub k3_epoch: u64,
     pub issued_at: u64,
@@ -158,7 +174,7 @@ pub async fn cap_cred_store(
     headers: HeaderMap,
     Json(req): Json<CapRequest>,
 ) -> Result<Json<CapToken>, CapError> {
-    mint_cap(state, headers, req, CapOp::Store).await.map(Json)
+    mint_cap(state, headers, req, CapOp::Store, DataClass::Credentials).await.map(Json)
 }
 
 pub async fn cap_cred_fetch(
@@ -166,7 +182,26 @@ pub async fn cap_cred_fetch(
     headers: HeaderMap,
     Json(req): Json<CapRequest>,
 ) -> Result<Json<CapToken>, CapError> {
-    mint_cap(state, headers, req, CapOp::Fetch).await.map(Json)
+    mint_cap(state, headers, req, CapOp::Fetch, DataClass::Credentials).await.map(Json)
+}
+
+// Memory cap-mint endpoints (issue #90 followup): per-data-class
+// explicit binding. The minted cap carries data_class=Memory; the cred
+// worker would reject it via verify::check_data_class.
+pub async fn cap_memory_put(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    mint_cap(state, headers, req, CapOp::Store, DataClass::Memory).await.map(Json)
+}
+
+pub async fn cap_memory_get(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    mint_cap(state, headers, req, CapOp::Fetch, DataClass::Memory).await.map(Json)
 }
 
 // ─── cap construction ──────────────────────────────────────────────────
@@ -176,6 +211,7 @@ async fn mint_cap(
     headers: HeaderMap,
     req: CapRequest,
     op: CapOp,
+    data_class: DataClass,
 ) -> Result<CapToken, CapError> {
     validate_hex32(&req.operator_omni, "operator_omni")?;
     validate_hex32(&req.actor_omni, "actor_omni")?;
@@ -256,6 +292,7 @@ async fn mint_cap(
         actor_omni: format!("0x{}", req_actor.clone()),
         service: req.service.to_lowercase(),
         op,
+        data_class,
         device_key_hash: format!("0x{}", strip_0x_lc(&req.device_key_hash)),
         k3_epoch,
         issued_at: now,
@@ -369,18 +406,29 @@ async fn call_get_device(
 ///   bool    revoked         (word 6, right-aligned)
 fn parse_device_entry(raw: &str) -> Result<DeviceEntry, CapError> {
     let hex = raw.trim_start_matches("0x");
-    if hex.len() < 7 * 64 {
+    // DeviceEntry post codex H1 (SidecarRegistry.sol) has 11 ABI words:
+    //   word 0  operatorOmni     bytes32
+    //   word 1  actorOmni        bytes32
+    //   word 2  k11CredId        bytes32
+    //   word 3  k11RpIdHash      bytes32  (NEW, codex H1)
+    //   word 4  k11PubX          uint256  (NEW, codex H1)
+    //   word 5  k11PubY          uint256  (NEW, codex H1)
+    //   word 6  tier             uint8 (padded)
+    //   word 7  roles            uint8 (padded)
+    //   word 8  registeredAt     uint64 (padded)
+    //   word 9  lastSignCount    uint32 (padded)
+    //   word 10 revoked          bool (padded)
+    if hex.len() < 11 * 64 {
         return Err(CapError::ChainRpc(format!(
-            "getDevice returned {} bytes; expected ≥ 7×32",
+            "getDevice returned {} bytes; expected ≥ 11×32 (post codex H1 struct)",
             hex.len() / 2
         )));
     }
     let operator_omni = hex[0..64].to_lowercase();
     let actor_omni = hex[64..128].to_lowercase();
-    // word 3 = tier (skip); word 4 = roles; word 5 = registeredAt; word 6 = revoked
-    let roles_hex = &hex[4 * 64..5 * 64];
-    let registered_hex = &hex[5 * 64..6 * 64];
-    let revoked_hex = &hex[6 * 64..7 * 64];
+    let roles_hex = &hex[7 * 64..8 * 64];
+    let registered_hex = &hex[8 * 64..9 * 64];
+    let revoked_hex = &hex[10 * 64..11 * 64];
     // Take last 2 hex chars (uint8) of the roles word.
     let roles = u8::from_str_radix(&roles_hex[62..64], 16).unwrap_or(0);
     let registered_at = u64::from_str_radix(&registered_hex[48..64], 16).unwrap_or(0);
@@ -582,17 +630,22 @@ mod tests {
 
     #[test]
     fn parse_device_entry_decodes_well_formed() {
-        // Hand-built: 7 words of 32 bytes each. operator/actor are
-        // `0xaa…` and `0xbb…`; tier=1, roles=7 (CAP_MINT|RECOVERY|SCOPE_MGMT),
+        // 11 ABI words (post codex H1): operator + actor + k11{CredId,
+        // RpIdHash, PubX, PubY} + tier + roles + registeredAt +
+        // lastSignCount + revoked. roles=7 (CAP_MINT|RECOVERY|SCOPE_MGMT),
         // registeredAt=42, revoked=false.
         let mut raw = String::from("0x");
-        raw.push_str(&"a".repeat(64)); // operatorOmni
-        raw.push_str(&"b".repeat(64)); // actorOmni
-        raw.push_str(&"0".repeat(64)); // k11CredId (zero)
-        raw.push_str(&format!("{:0>64x}", 1u64)); // tier=1
-        raw.push_str(&format!("{:0>64x}", 7u64)); // roles=7
-        raw.push_str(&format!("{:0>64x}", 42u64)); // registeredAt=42
-        raw.push_str(&"0".repeat(64)); // revoked=false
+        raw.push_str(&"a".repeat(64));               // operatorOmni
+        raw.push_str(&"b".repeat(64));               // actorOmni
+        raw.push_str(&"0".repeat(64));               // k11CredId
+        raw.push_str(&"0".repeat(64));               // k11RpIdHash
+        raw.push_str(&"0".repeat(64));               // k11PubX
+        raw.push_str(&"0".repeat(64));               // k11PubY
+        raw.push_str(&format!("{:0>64x}", 1u64));    // tier=1
+        raw.push_str(&format!("{:0>64x}", 7u64));    // roles=7
+        raw.push_str(&format!("{:0>64x}", 42u64));   // registeredAt=42
+        raw.push_str(&"0".repeat(64));               // lastSignCount=0
+        raw.push_str(&"0".repeat(64));               // revoked=false
         let entry = parse_device_entry(&raw).unwrap();
         assert_eq!(entry.operator_omni, "a".repeat(64));
         assert_eq!(entry.actor_omni, "b".repeat(64));
@@ -604,13 +657,17 @@ mod tests {
     #[test]
     fn parse_device_entry_detects_revoked() {
         let mut raw = String::from("0x");
-        raw.push_str(&"a".repeat(64));
-        raw.push_str(&"b".repeat(64));
-        raw.push_str(&"0".repeat(64));
-        raw.push_str(&format!("{:0>64x}", 1u64));
-        raw.push_str(&format!("{:0>64x}", 1u64));
-        raw.push_str(&format!("{:0>64x}", 100u64));
-        raw.push_str(&format!("{:0>64x}", 1u64)); // revoked=true
+        raw.push_str(&"a".repeat(64));               // operatorOmni
+        raw.push_str(&"b".repeat(64));               // actorOmni
+        raw.push_str(&"0".repeat(64));               // k11CredId
+        raw.push_str(&"0".repeat(64));               // k11RpIdHash
+        raw.push_str(&"0".repeat(64));               // k11PubX
+        raw.push_str(&"0".repeat(64));               // k11PubY
+        raw.push_str(&format!("{:0>64x}", 1u64));    // tier
+        raw.push_str(&format!("{:0>64x}", 1u64));    // roles
+        raw.push_str(&format!("{:0>64x}", 100u64));  // registeredAt
+        raw.push_str(&"0".repeat(64));               // lastSignCount
+        raw.push_str(&format!("{:0>64x}", 1u64));    // revoked=true
         let entry = parse_device_entry(&raw).unwrap();
         assert!(entry.revoked);
     }
@@ -628,6 +685,7 @@ mod tests {
             actor_omni: format!("0x{}", "b".repeat(64)),
             service: "openrouter".into(),
             op: CapOp::Store,
+            data_class: DataClass::Credentials,
             device_key_hash: format!("0x{}", "c".repeat(64)),
             k3_epoch: 1,
             issued_at: 1,
@@ -637,7 +695,33 @@ mod tests {
         let j = serde_json::to_string(&p).unwrap();
         assert!(j.contains("\"device_key_hash\""));
         assert!(j.contains("\"op\":\"store\""));
+        assert!(j.contains("\"data_class\":\"credentials\""));
         assert!(j.contains("\"issued_at\":1"));
+    }
+
+    #[test]
+    fn cap_payload_serializes_data_class_per_endpoint() {
+        // The data_class is what makes the cap-token data-class-explicit;
+        // cred-store endpoints mint with Credentials, memory-* with Memory.
+        for (dc, expect) in [
+            (DataClass::Credentials, "credentials"),
+            (DataClass::Memory, "memory"),
+        ] {
+            let p = CapPayload {
+                operator_omni: format!("0x{}", "a".repeat(64)),
+                actor_omni: format!("0x{}", "b".repeat(64)),
+                service: "openrouter".into(),
+                op: CapOp::Store,
+                data_class: dc,
+                device_key_hash: format!("0x{}", "c".repeat(64)),
+                k3_epoch: 1,
+                issued_at: 1,
+                expires_at: 100,
+                nonce: "00".repeat(16),
+            };
+            let j = serde_json::to_string(&p).unwrap();
+            assert!(j.contains(&format!("\"data_class\":\"{expect}\"")));
+        }
     }
 
     #[test]
