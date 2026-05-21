@@ -1,6 +1,6 @@
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_provisioner::{aws_creds::fetch_via_broker_default_ttl, run_provision, Provisioner};
-use agentkeys_types::{AuditFilter, ServiceName, Session, WalletAddress};
+use agentkeys_types::{ServiceName, Session, WalletAddress};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -246,21 +246,9 @@ impl McpHandler {
     }
 
     async fn list_credentials(&self, id: Option<Value>) -> JsonRpcResponse {
-        let filter = AuditFilter {
-            owner: None,
-            agent: Some(self.agent_id.clone()),
-            service: None,
-        };
-
-        match self.backend.query_audit(&self.session, filter).await {
-            Ok(events) => {
-                let mut services: Vec<String> = events
-                    .into_iter()
-                    .filter(|e| e.action == "store")
-                    .map(|e| e.service.0)
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
+        match self.backend.list_credentials(&self.session, &self.agent_id).await {
+            Ok(services) => {
+                let mut services: Vec<String> = services.into_iter().map(|s| s.0).collect();
                 services.sort();
                 JsonRpcResponse::success(id, json!({ "services": services }))
             }
@@ -434,7 +422,7 @@ mod tests {
     use super::*;
     use agentkeys_core::backend::BackendError;
     use agentkeys_types::{
-        AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
+        AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
         EncryptedPairPayload, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
         RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
     };
@@ -448,7 +436,6 @@ mod tests {
         async fn create_child_session(&self, _: &Session, _: Scope) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
         async fn store_credential(&self, _: &Session, _: &WalletAddress, _: &ServiceName, _: &[u8]) -> Result<(), BackendError> { Ok(()) }
         async fn read_credential(&self, _: &Session, _: &WalletAddress, _: &ServiceName) -> Result<Vec<u8>, BackendError> { Err(BackendError::NotFound("none".into())) }
-        async fn query_audit(&self, _: &Session, _: AuditFilter) -> Result<Vec<AuditEvent>, BackendError> { unimplemented!() }
         async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), BackendError> { unimplemented!() }
         async fn revoke_by_wallet(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> { unimplemented!() }
         async fn teardown_agent(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> { unimplemented!() }
@@ -462,7 +449,6 @@ mod tests {
         async fn await_auth_decision(&self, _: &AuthRequestId) -> Result<SignedAuthDecision, BackendError> { unimplemented!() }
         async fn recover_session(&self, _: &agentkeys_types::AgentIdentity, _: &agentkeys_types::RecoveryMethod) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
         async fn list_credentials(&self, _: &Session, _: &WalletAddress) -> Result<Vec<ServiceName>, BackendError> { unimplemented!() }
-        async fn resolve_identity(&self, _: &Session, _: &str) -> Result<WalletAddress, BackendError> { unimplemented!() }
         async fn get_scope(&self, _: &Session, _: &WalletAddress) -> Result<Option<Scope>, BackendError> { unimplemented!() }
         async fn update_scope(&self, _: &Session, _: &WalletAddress, _: &Scope) -> Result<(), BackendError> { unimplemented!() }
         async fn provision_inbox(&self, _: &Session, _: &WalletAddress) -> Result<agentkeys_types::InboxAddress, BackendError> { unimplemented!() }

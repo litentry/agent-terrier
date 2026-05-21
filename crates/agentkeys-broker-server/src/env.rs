@@ -43,8 +43,6 @@ pub enum Group {
 // Core
 // ---------------------------------------------------------------------------
 
-/// Required. Base URL for the legacy backend session/validate endpoint.
-pub const BROKER_BACKEND_URL: &str = "BROKER_BACKEND_URL";
 /// Required (or derive from `ACCOUNT_ID`). The role the broker assumes via STS for users.
 pub const BROKER_DATA_ROLE_ARN: &str = "BROKER_DATA_ROLE_ARN";
 /// Optional. Path to the audit-log SQLite DB. Defaults to `~/.agentkeys/broker/audit.sqlite`.
@@ -53,8 +51,6 @@ pub const BROKER_AUDIT_DB_PATH: &str = "BROKER_AUDIT_DB_PATH";
 pub const BROKER_AWS_REGION: &str = "BROKER_AWS_REGION";
 /// Optional. Lifetime in seconds of minted AWS sessions. Range \[900, 43200\]. Default 3600.
 pub const BROKER_SESSION_DURATION_SECONDS: &str = "BROKER_SESSION_DURATION_SECONDS";
-/// Optional. HTTP timeout in seconds for backend `/session/validate` calls. Default 10.
-pub const BROKER_BACKEND_TIMEOUT_SECONDS: &str = "BROKER_BACKEND_TIMEOUT_SECONDS";
 /// Optional. SIGTERM-to-exit grace window in seconds. Default 30.
 pub const BROKER_SHUTDOWN_GRACE_SECONDS: &str = "BROKER_SHUTDOWN_GRACE_SECONDS";
 /// Optional. When `true`, relaxes the HTTPS-only OIDC-issuer rule. Logged loudly. Default `false`.
@@ -215,12 +211,10 @@ pub const REGION: &str = "REGION";
 pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
     &[
         // Core
-        (BROKER_BACKEND_URL, "Base URL for legacy backend session validation.", Group::Core),
         (BROKER_DATA_ROLE_ARN, "Role the broker assumes via STS for users.", Group::Core),
         (BROKER_AUDIT_DB_PATH, "Path to audit-log SQLite DB.", Group::Core),
         (BROKER_AWS_REGION, "AWS region for STS calls.", Group::Core),
         (BROKER_SESSION_DURATION_SECONDS, "Lifetime in seconds of minted AWS sessions [900, 43200].", Group::Core),
-        (BROKER_BACKEND_TIMEOUT_SECONDS, "HTTP timeout for backend /session/validate.", Group::Core),
         (BROKER_SHUTDOWN_GRACE_SECONDS, "SIGTERM-to-exit grace window seconds.", Group::Core),
         (BROKER_DEV_MODE, "Relaxes HTTPS-only OIDC-issuer rule (logged loudly).", Group::Core),
         (BROKER_REFUSE_TO_BOOT_STRICT, "Promotes Tier-2 reachability to Tier-1 refuse-to-boot.", Group::Core),
@@ -315,7 +309,6 @@ mod tests {
     fn all_includes_required_phase0_vars() {
         let names: Vec<&str> = all().iter().map(|(n, _, _)| *n).collect();
         for required in [
-            BROKER_BACKEND_URL,
             BROKER_DATA_ROLE_ARN,
             BROKER_OIDC_ISSUER,
             BROKER_OIDC_KEYPAIR_PATH,

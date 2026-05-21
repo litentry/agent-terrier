@@ -68,7 +68,7 @@ use crate::actor_omni::actor_omni_hex;
 use crate::backend::{BackendError, CredentialBackend};
 use crate::signer_client::{SignerClient, SignerClientError};
 use agentkeys_types::{
-    AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
+    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
     EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
     RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
@@ -683,14 +683,6 @@ impl CredentialBackend for S3CredentialBackend {
         Err(unsupported("create_child_session"))
     }
 
-    async fn query_audit(
-        &self,
-        _session: &Session,
-        _filter: AuditFilter,
-    ) -> Result<Vec<AuditEvent>, BackendError> {
-        Err(unsupported("query_audit"))
-    }
-
     async fn revoke_session(
         &self,
         _session: &Session,
@@ -774,14 +766,6 @@ impl CredentialBackend for S3CredentialBackend {
         _method: &agentkeys_types::RecoveryMethod,
     ) -> Result<(Session, WalletAddress), BackendError> {
         Err(unsupported("recover_session"))
-    }
-
-    async fn resolve_identity(
-        &self,
-        _session: &Session,
-        _identifier: &str,
-    ) -> Result<WalletAddress, BackendError> {
-        Err(unsupported("resolve_identity"))
     }
 
     async fn get_scope(
@@ -1211,9 +1195,9 @@ mod tests {
 
     #[test]
     fn unsupported_helper_names_the_operation() {
-        let err = unsupported("query_audit");
+        let err = unsupported("recover_session");
         let s = err.to_string();
-        assert!(s.contains("query_audit"), "msg = {s}");
+        assert!(s.contains("recover_session"), "msg = {s}");
     }
 
     // ---- v2 migration coverage (issue-v2-stage-1-foundation) -------------

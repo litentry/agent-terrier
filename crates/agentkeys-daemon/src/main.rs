@@ -230,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             // RECOVER VIA MASTER APPROVAL — resolve --parent here, not at
             // startup (codex P3).
-            let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref()).await?;
+            let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref())?;
             let result = pairing::run_recover_flow(
                 &*backend,
                 agent_identity,
@@ -365,7 +365,7 @@ async fn main() -> anyhow::Result<()> {
                     // --session / --recover --method paths don't crash startup.
                     // `--parent` binds the pair request to a specific master so
                     // the backend refuses approval from any other master.
-                    let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref()).await?;
+                    let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref())?;
                     let result = pairing::run_pair_flow(
                         &*backend,
                         args.pair_timeout,
@@ -466,59 +466,23 @@ fn looks_like_raw_wallet(s: &str) -> bool {
 }
 
 /// Resolve `--parent` to a wallet address if set, returning `Ok(None)` when
-/// the flag is absent.
-///
-/// Uses reqwest's `.query()` builder so aliases with reserved characters
-/// (`+`, `&`, `%`, spaces) are percent-encoded per RFC 3986 (codex PR #22
-/// v1 P2 — URL encoding).
-///
-/// All inputs — raw wallets included — go through `/identity/resolve` so
-/// the backend can validate existence before the daemon opens a pair
-/// request. Raw `0x...` wallets are normalized to lowercase first, which
-/// matches the canonical form the backend stores; mixed-case checksummed
-/// addresses therefore resolve cleanly instead of timing out at approval
-/// (codex PR #22 v2 P2 — unknown wallet accepted + case mismatch).
-async fn resolve_parent_if_set(
-    backend_url: &str,
+/// the flag is absent. Only raw `0x` + 40-hex wallet literals are accepted;
+/// alias/email lookup against `/identity/resolve` was retired with issue #77.
+fn resolve_parent_if_set(
+    _backend_url: &str,
     parent: Option<&str>,
 ) -> anyhow::Result<Option<WalletAddress>> {
     let Some(raw) = parent else {
         return Ok(None);
     };
 
-    // Pick identity_type based on shape. Raw wallets get lowercased to
-    // match the backend's canonical storage form.
-    let (identity_type, identity_value) = if looks_like_raw_wallet(raw) {
-        ("wallet", raw.to_ascii_lowercase())
-    } else {
-        ("alias", raw.to_string())
-    };
-
-    let http = reqwest::Client::new();
-    let resp = http
-        .get(format!("{backend_url}/identity/resolve"))
-        .query(&[
-            ("identity_type", identity_type),
-            ("identity_value", identity_value.as_str()),
-        ])
-        .send()
-        .await
-        .context("resolve --parent: HTTP request failed")?;
-    if !resp.status().is_success() {
+    if !looks_like_raw_wallet(raw) {
         anyhow::bail!(
-            "could not resolve --parent '{raw}' (identity_type={identity_type}): status={}",
-            resp.status()
+            "--parent '{raw}' must be a raw 0x-prefixed 40-hex wallet address (alias/email lookup retired in issue #77)"
         );
     }
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .context("resolve --parent: JSON parse failed")?;
-    let wallet_str = body["wallet_address"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("resolve --parent: missing wallet_address in response"))?
-        .to_string();
-    Ok(Some(WalletAddress(wallet_str)))
+
+    Ok(Some(WalletAddress(raw.to_ascii_lowercase())))
 }
 
 /// v2 stage-2 master-companion mode (arch.md §10.3.1 + #90). Second

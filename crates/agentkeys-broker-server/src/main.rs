@@ -154,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.backend_request_timeout_seconds))
+        .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()?;
 
@@ -217,52 +217,18 @@ async fn main() -> anyhow::Result<()> {
 /// Spawn the Tier-2 reachability probes that flip the AtomicBool flags
 /// on `Tier2State` as each external dependency becomes reachable.
 ///
-/// Currently spawns the backend probe (always) and, when email-link auth
-/// is compiled in and enabled, the SES sender-verify probe that also
-/// persists `SesVerifyCache` to disk so the email-link plug-in's
-/// `Readiness::ready()` flips from `Degraded` to `Ready`. The EVM probe
-/// lands in Phase C.
+/// Currently spawns, when email-link auth is compiled in and enabled, the
+/// SES sender-verify probe that also persists `SesVerifyCache` to disk so
+/// the email-link plug-in's `Readiness::ready()` flips from `Degraded` to
+/// `Ready`. The EVM probe lands in Phase C.
 fn spawn_tier2_probes(
     state: Arc<AppState>,
     profile: agentkeys_broker_server::boot::Tier2Profile,
 ) {
-    use std::sync::atomic::Ordering;
-    let backend_url = profile.backend_url.clone();
-    let strict = profile.strict;
-
-    tokio::spawn({
-        let state = Arc::clone(&state);
-        async move {
-            loop {
-                let url = format!("{}/healthz", backend_url.trim_end_matches('/'));
-                let res = state
-                    .http
-                    .get(&url)
-                    .timeout(std::time::Duration::from_secs(3))
-                    .send()
-                    .await;
-                let ok = matches!(&res, Ok(r) if r.status().is_success());
-                state.tier2.backend_reachable.store(ok, Ordering::Relaxed);
-                if ok {
-                    tracing::info!(url = %url, "Tier-2 backend probe: reachable");
-                    break;
-                }
-                if strict {
-                    tracing::error!(url = %url, "BROKER_REFUSE_TO_BOOT_STRICT=true and backend unreachable; exiting");
-                    std::process::exit(1);
-                }
-                tracing::warn!(
-                    url = %url,
-                    "Tier-2 backend probe: unreachable; /readyz will return 503 until reachable"
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            }
-        }
-    });
-
+    let _ = (&state, &profile);
     #[cfg(feature = "auth-email-link")]
     if profile.email_link_enabled {
-        spawn_ses_verify_probe(Arc::clone(&state), strict);
+        spawn_ses_verify_probe(Arc::clone(&state), profile.strict);
     }
 }
 

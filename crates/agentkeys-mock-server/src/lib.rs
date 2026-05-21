@@ -39,8 +39,6 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/credential/read", get(handlers::credential::read_credential))
         .route("/credential/list", get(handlers::credential::list_credentials))
         .route("/credential/teardown", delete(handlers::credential::teardown_agent))
-        // Audit
-        .route("/audit/query", get(handlers::audit::query_audit))
         // Shielding key
         .route("/shielding-key", get(handlers::audit::shielding_key))
         // Rendezvous
@@ -55,9 +53,6 @@ pub fn create_router(state: SharedState) -> Router {
         // Session scope
         .route("/session/scope", get(handlers::session::get_session_scope))
         .route("/session/scope", put(handlers::session::update_scope))
-        // Identity
-        .route("/identity/link", post(handlers::identity::link_identity))
-        .route("/identity/resolve", get(handlers::identity::resolve_identity))
         // Inbox
         .route("/mock/inbox/provision", post(handlers::inbox::provision_inbox))
         .route("/mock/inbox/deliver", post(handlers::inbox::deliver_inbox))

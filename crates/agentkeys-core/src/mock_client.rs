@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use crate::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
-    AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
+    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
     EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
     RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
@@ -265,58 +265,6 @@ impl CredentialBackend for MockHttpClient {
             .decode(key_b64)
             .map_err(|e| BackendError::Internal(format!("base64 decode: {e}")))?;
         Ok(PublicKey(key_bytes))
-    }
-
-    async fn query_audit(
-        &self,
-        session: &Session,
-        filter: AuditFilter,
-    ) -> Result<Vec<AuditEvent>, BackendError> {
-        let mut params: Vec<String> = Vec::new();
-        if let Some(owner) = &filter.owner {
-            params.push(format!("owner={}", owner.0));
-        }
-        if let Some(agent) = &filter.agent {
-            params.push(format!("agent={}", agent.0));
-        }
-        if let Some(service) = &filter.service {
-            params.push(format!("service={}", service.0));
-        }
-        let path = if params.is_empty() {
-            "/audit/query".to_string()
-        } else {
-            format!("/audit/query?{}", params.join("&"))
-        };
-
-        let resp = self
-            .client
-            .get(self.url(&path))
-            .header("authorization", format!("Bearer {}", session.token))
-            .send()
-            .await
-            .map_err(|e| BackendError::Transport(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(Self::map_error(resp).await);
-        }
-
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
-        let events = body["events"]
-            .as_array()
-            .ok_or_else(|| BackendError::Internal("missing events".into()))?
-            .iter()
-            .filter_map(|e| {
-                Some(AuditEvent {
-                    owner: WalletAddress(e["owner"].as_str()?.to_string()),
-                    agent: WalletAddress(e["agent"].as_str()?.to_string()),
-                    service: ServiceName(e["service"].as_str()?.to_string()),
-                    action: e["action"].as_str()?.to_string(),
-                    result: e["result"].as_str()?.to_string(),
-                    timestamp: e["timestamp"].as_u64()?,
-                })
-            })
-            .collect();
-        Ok(events)
     }
 
     async fn register_rendezvous(
@@ -665,40 +613,6 @@ impl CredentialBackend for MockHttpClient {
             .filter_map(|v| v.as_str().map(|s| ServiceName(s.to_string())))
             .collect();
         Ok(services)
-    }
-
-    async fn resolve_identity(
-        &self,
-        session: &Session,
-        identifier: &str,
-    ) -> Result<WalletAddress, BackendError> {
-        let (identity_type, identity_value) = if identifier.contains('@') {
-            ("email", identifier)
-        } else {
-            ("alias", identifier)
-        };
-
-        // reqwest's .query() builder percent-encodes both parameter names and
-        // values per RFC 3986, so identities containing '+', '&', '=', '%', or
-        // spaces (e.g. plus-addressed emails like "bot+prod@example.com") are
-        // sent intact to the server.
-        let resp = self
-            .client
-            .get(self.url("/identity/resolve"))
-            .query(&[("identity_type", identity_type), ("identity_value", identity_value)])
-            .header("authorization", format!("Bearer {}", session.token))
-            .send()
-            .await
-            .map_err(|e| BackendError::Transport(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(Self::map_error(resp).await);
-        }
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
-        let wallet_str = body["wallet_address"]
-            .as_str()
-            .ok_or_else(|| BackendError::Internal("missing wallet_address".into()))?
-            .to_string();
-        Ok(WalletAddress(wallet_str))
     }
 
     async fn get_scope(

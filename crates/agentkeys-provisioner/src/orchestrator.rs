@@ -287,7 +287,7 @@ mod orchestrate {
     use super::*;
     use agentkeys_core::backend::BackendError;
     use agentkeys_types::{
-        AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
+        AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
         EncryptedPairPayload, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
         RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
     };
@@ -371,7 +371,6 @@ mod orchestrate {
 
         async fn create_session(&self, _: agentkeys_types::AuthToken) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
         async fn create_child_session(&self, _: &Session, _: Scope) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
-        async fn query_audit(&self, _: &Session, _: AuditFilter) -> Result<Vec<AuditEvent>, BackendError> { unimplemented!() }
         async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), BackendError> { unimplemented!() }
         async fn revoke_by_wallet(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> { unimplemented!() }
         async fn teardown_agent(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> { unimplemented!() }
@@ -385,7 +384,6 @@ mod orchestrate {
         async fn await_auth_decision(&self, _: &AuthRequestId) -> Result<SignedAuthDecision, BackendError> { unimplemented!() }
         async fn recover_session(&self, _: &agentkeys_types::AgentIdentity, _: &agentkeys_types::RecoveryMethod) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
         async fn list_credentials(&self, _: &Session, _: &WalletAddress) -> Result<Vec<ServiceName>, BackendError> { unimplemented!() }
-        async fn resolve_identity(&self, _: &Session, _: &str) -> Result<WalletAddress, BackendError> { unimplemented!() }
         async fn get_scope(&self, _: &Session, _: &WalletAddress) -> Result<Option<Scope>, BackendError> { unimplemented!() }
         async fn update_scope(&self, _: &Session, _: &WalletAddress, _: &Scope) -> Result<(), BackendError> { unimplemented!() }
         async fn provision_inbox(&self, _: &Session, _: &WalletAddress) -> Result<agentkeys_types::InboxAddress, BackendError> { unimplemented!() }

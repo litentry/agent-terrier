@@ -12,10 +12,39 @@ use tower::ServiceExt;
 // ---------------------------------------------------------------------------
 
 fn setup() -> Router {
+    let (router, _state) = setup_with_state();
+    router
+}
+
+fn setup_with_state() -> (Router, Arc<AppState>) {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
     let state = Arc::new(AppState::new(conn));
-    create_router(state)
+    (create_router(state.clone()), state)
+}
+
+/// Direct-DB identity link helper, used after the `/identity/link` endpoint
+/// was retired with issue #77. Mirrors `InProcessBackend::link_identity_for_tests`.
+fn link_identity_direct(
+    state: &Arc<AppState>,
+    identity_type: &str,
+    identity_value: &str,
+    wallet_address: &str,
+) {
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO identity_links (wallet_address, identity_type, identity_value, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                wallet_address,
+                identity_type,
+                identity_value,
+                agentkeys_mock_server::auth::now_secs()
+            ],
+        )
+        .expect("insert identity_link");
 }
 
 async fn body_json(body: axum::body::Body) -> Value {
@@ -344,7 +373,7 @@ async fn session_revoke_valid() {
     assert_eq!(revoke_status, StatusCode::OK);
 
     // Child session should now fail
-    let (status, _) = get_json_auth(app, "/audit/query", &child_session).await;
+    let (status, _) = get_json_auth(app, "/credential/list?agent_id=0xagent", &child_session).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -803,35 +832,6 @@ async fn auth_request_await_decision() {
     assert!(await_json["signature"].is_string());
 }
 
-#[tokio::test]
-async fn identity_link_and_resolve() {
-    let app = setup();
-    let (session, wallet, app) = create_test_session(app).await;
-
-    // Link identity
-    let (link_status, _) = post_json_auth(
-        app.clone(),
-        "/identity/link",
-        &session,
-        json!({ "identity_type": "email", "identity_value": "test@example.com", "wallet_address": wallet }),
-    )
-    .await;
-    assert_eq!(link_status, StatusCode::OK);
-
-    // Resolve identity
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri("/identity/resolve?identity_type=email&identity_value=test%40example.com")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let status = resp.status();
-    let json = body_json(resp.into_body()).await;
-
-    assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
-}
-
 // ---------------------------------------------------------------------------
 // Security/property tests (26-37)
 // ---------------------------------------------------------------------------
@@ -1156,7 +1156,7 @@ async fn nonce_uniqueness() {
 #[tokio::test]
 async fn recover_flow_e2e() {
     use base64::Engine;
-    let app = setup();
+    let (app, state) = setup_with_state();
 
     // Create original session and store credential
     let (_, orig_json) = post_json(app.clone(), "/session/create", json!({ "auth_token": "recover-user" })).await;
@@ -1173,13 +1173,7 @@ async fn recover_flow_e2e() {
     .await;
 
     // Link alias so the Recover request can resolve identity → wallet
-    post_json_auth(
-        app.clone(),
-        "/identity/link",
-        &orig_session,
-        json!({ "identity_type": "alias", "identity_value": "recover-user-alias", "wallet_address": orig_wallet }),
-    )
-    .await;
+    link_identity_direct(&state, "alias", "recover-user-alias", &orig_wallet);
 
     // Open a Recover request with required typed identity fields
     let (_, open_json) = post_json(
@@ -1223,7 +1217,7 @@ async fn recover_flow_e2e() {
 
 #[tokio::test]
 async fn recover_wrong_session() {
-    let app = setup();
+    let (app, state) = setup_with_state();
 
     // User A
     let (_, ja) = post_json(app.clone(), "/session/create", json!({ "auth_token": "recover-a" })).await;
@@ -1235,13 +1229,8 @@ async fn recover_wrong_session() {
     let session_b = jb["session"].as_str().unwrap().to_string();
 
     // Link alias for wallet_a so the Recover request has valid typed fields
-    post_json_auth(
-        app.clone(),
-        "/identity/link",
-        &session_a,
-        json!({ "identity_type": "alias", "identity_value": "recover-a-alias", "wallet_address": wallet_a }),
-    )
-    .await;
+    link_identity_direct(&state, "alias", "recover-a-alias", &wallet_a);
+    let _ = session_a;
 
     // Open Recover for wallet_a with typed identity fields
     let (_, open_json) = post_json(
@@ -1541,170 +1530,9 @@ async fn list_credentials_ownership_enforced() {
     let session_b = json_b["session"].as_str().unwrap().to_string();
 
     let path = format!("/credential/list?agent_id={}", wallet_a);
-    let (status, _) = get_json_auth(app.clone(), &path, &session_b).await;
+    let (status, _) = get_json_auth(app, &path, &session_b).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "user B must not list user A's credentials");
-
-    // Codex P2 on PR #19: a denied list_credentials must also leave an audit
-    // trail so cross-agent probing through the new /credential/list endpoint
-    // is visible. Query the audit log via the existing /audit endpoint
-    // (filtered by agent=wallet_a; user A can see events where their wallet is
-    // the agent_wallet, even when owner_wallet is user B). Confirm a DENIED
-    // 'list' row appears.
-    let audit_path = format!("/audit/query?agent={}", wallet_a);
-    let (audit_status, audit_body) = get_json_auth(app, &audit_path, &session_a).await;
-    assert_eq!(audit_status, StatusCode::OK, "audit query failed: {audit_body}");
-    let events = audit_body["events"].as_array().expect("events array");
-    assert!(
-        events
-            .iter()
-            .any(|e| e["action"] == "list" && e["result"] == "DENIED"),
-        "expected a list/DENIED audit row after the cross-agent list attempt, got: {audit_body}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Issue #13: resolve_identity_typed + typed auth-request fields
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn resolve_identity_alias_returns_wallet() {
-    let app = setup();
-    let (session, wallet, app) = create_test_session(app).await;
-
-    let (link_status, _) = post_json_auth(
-        app.clone(),
-        "/identity/link",
-        &session,
-        json!({ "identity_type": "alias", "identity_value": "my-bot", "wallet_address": wallet }),
-    )
-    .await;
-    assert_eq!(link_status, StatusCode::OK);
-
-    let req = axum::http::Request::builder()
-        .method(axum::http::Method::GET)
-        .uri("/identity/resolve?identity_type=alias&identity_value=my-bot")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let status = resp.status();
-    let json = body_json(resp.into_body()).await;
-    assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
-}
-
-#[tokio::test]
-async fn resolve_identity_email_returns_wallet() {
-    let app = setup();
-    let (session, wallet, app) = create_test_session(app).await;
-
-    let (link_status, _) = post_json_auth(
-        app.clone(),
-        "/identity/link",
-        &session,
-        json!({ "identity_type": "email", "identity_value": "bot@example.com", "wallet_address": wallet }),
-    )
-    .await;
-    assert_eq!(link_status, StatusCode::OK);
-
-    let req = axum::http::Request::builder()
-        .method(axum::http::Method::GET)
-        .uri("/identity/resolve?identity_type=email&identity_value=bot%40example.com")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let status = resp.status();
-    let json = body_json(resp.into_body()).await;
-    assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
-}
-
-#[tokio::test]
-async fn resolve_identity_wallet_passthrough() {
-    // Wallet passthrough requires the wallet to exist in `accounts` (codex P2
-    // on PR #21: prevents 500 on later FK constraint). Use a wallet created
-    // via /session/create so the accounts row is present.
-    let app = setup();
-    let (_session, wallet, app) = create_test_session(app).await;
-
-    let req = axum::http::Request::builder()
-        .method(axum::http::Method::GET)
-        .uri(format!("/identity/resolve?identity_type=wallet&identity_value={wallet}"))
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let status = resp.status();
-    let json = body_json(resp.into_body()).await;
-    assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
-}
-
-#[tokio::test]
-async fn resolve_identity_not_found_errors() {
-    let app = setup();
-
-    let req = axum::http::Request::builder()
-        .method(axum::http::Method::GET)
-        .uri("/identity/resolve?identity_type=alias&identity_value=nonexistent-bot")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn resolve_identity_invalid_type_errors() {
-    let app = setup();
-
-    let req = axum::http::Request::builder()
-        .method(axum::http::Method::GET)
-        .uri("/identity/resolve?identity_type=unknown_type&identity_value=something")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-// Codex P2 on PR #21: ENS identities must resolve through the identity_links
-// table, not silently map to "alias" / get rejected as unknown type.
-#[tokio::test]
-async fn resolve_identity_ens_returns_wallet() {
-    let app = setup();
-    let (session, wallet, app) = create_test_session(app).await;
-
-    let (link_status, _) = post_json_auth(
-        app.clone(),
-        "/identity/link",
-        &session,
-        json!({ "identity_type": "ens", "identity_value": "mybot.eth", "wallet_address": wallet }),
-    )
-    .await;
-    assert_eq!(link_status, StatusCode::OK);
-
-    let req = axum::http::Request::builder()
-        .method(axum::http::Method::GET)
-        .uri("/identity/resolve?identity_type=ens&identity_value=mybot.eth")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let status = resp.status();
-    let json = body_json(resp.into_body()).await;
-    assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["wallet_address"].as_str().unwrap(), wallet);
-}
-
-// Codex P2 on PR #21: an unknown wallet address must return 404 from
-// /identity/resolve, not flow through and 500 later on the sessions FK.
-#[tokio::test]
-async fn resolve_identity_wallet_unknown_returns_not_found() {
-    let app = setup();
-
-    let req = axum::http::Request::builder()
-        .method(axum::http::Method::GET)
-        .uri("/identity/resolve?identity_type=wallet&identity_value=0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let _ = session_a;
 }
 
 #[tokio::test]
@@ -1745,19 +1573,12 @@ async fn open_auth_request_pair_rejects_typed_fields() {
 
 #[tokio::test]
 async fn approve_recover_uses_typed_fields() {
-    let app = setup();
+    let (app, state) = setup_with_state();
 
     let (session, wallet, app) = create_test_session(app).await;
 
-    // Link alias identity to the session wallet
-    let (link_status, _) = post_json_auth(
-        app.clone(),
-        "/identity/link",
-        &session,
-        json!({ "identity_type": "alias", "identity_value": "recovery-bot", "wallet_address": wallet }),
-    )
-    .await;
-    assert_eq!(link_status, StatusCode::OK);
+    // Link alias identity to the session wallet (direct-DB after issue #77).
+    link_identity_direct(&state, "alias", "recovery-bot", &wallet);
 
     // Open Recover request with typed fields
     let (open_status, open_json) = post_json(

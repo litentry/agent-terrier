@@ -33,16 +33,6 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (wallet_address, service_name)
         );
 
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_wallet TEXT NOT NULL,
-            agent_wallet TEXT NOT NULL,
-            service_name TEXT NOT NULL,
-            action TEXT NOT NULL,
-            result TEXT NOT NULL,
-            timestamp INTEGER NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS rendezvous_registrations (
             pair_code TEXT PRIMARY KEY,
             registration_token TEXT NOT NULL,

@@ -1,7 +1,7 @@
 use agentkeys_cli::{
-    cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_link,
-    cmd_provision, cmd_read, cmd_recover, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
-    cmd_signer_sign, cmd_store, cmd_teardown, cmd_usage, cmd_whoami, CommandContext,
+    cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init,
+    cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
+    cmd_signer_sign, cmd_store, cmd_teardown, cmd_whoami, CommandContext,
     CredentialBackendKind, EnvelopeVersionFlag, InitMode,
 };
 
@@ -176,41 +176,6 @@ enum Commands {
     Teardown {
         #[arg(help = "Agent wallet address")]
         agent: String,
-    },
-
-    #[command(
-        about = "Show audit log for credential usage",
-        long_about = "Query the audit log for credential read/write events.\n\nExamples:\n  agentkeys usage\n  agentkeys usage 0xAGENT\n  agentkeys usage --json 0xAGENT"
-    )]
-    Usage {
-        #[arg(help = "Filter by agent wallet address (optional)")]
-        agent: Option<String>,
-        #[arg(long, help = "Output as JSON array")]
-        json: bool,
-    },
-
-    #[command(
-        about = "Link an identity (alias or email) to an agent",
-        long_about = "Associate a human-readable alias or email with an agent's wallet address.\n\nExamples:\n  agentkeys link 0xAGENT --alias my-bot\n  agentkeys link 0xAGENT --email bot@example.com"
-    )]
-    Link {
-        #[arg(help = "Agent wallet address")]
-        agent: String,
-        #[arg(long, help = "Human-readable alias")]
-        alias: Option<String>,
-        #[arg(long, help = "Email address to link")]
-        email: Option<String>,
-    },
-
-    #[command(
-        about = "Recover a session via 2FA (passkey or email)",
-        long_about = "Recover a master or agent session using a second-factor recovery method.\n\nExamples:\n  agentkeys recover my-bot --method passkey\n  agentkeys recover bot@example.com --method email\n  agentkeys recover 0xAGENT --method passkey"
-    )]
-    Recover {
-        #[arg(help = "Agent identity (alias, email, or wallet address)")]
-        identity: String,
-        #[arg(long, help = "Recovery method: passkey or email")]
-        method: String,
     },
 
     #[command(
@@ -630,13 +595,6 @@ async fn main() {
         Commands::Run { agent, env, cmd } => cmd_run(&ctx, agent.as_deref(), env, cmd).await,
         Commands::Revoke { agent } => cmd_revoke(&ctx, agent.as_deref()).await,
         Commands::Teardown { agent } => cmd_teardown(&ctx, agent).await,
-        Commands::Usage { agent, json } => {
-            cmd_usage(&ctx, agent.as_deref(), *json).await
-        }
-        Commands::Link { agent, alias, email } => {
-            cmd_link(&ctx, agent, alias.as_deref(), email.as_deref()).await
-        }
-        Commands::Recover { identity, method } => cmd_recover(&ctx, identity, method).await,
         Commands::Approve { pair_code, yes } => cmd_approve(&ctx, pair_code, *yes).await,
         Commands::Scope { agent, add, remove, set, list } => {
             cmd_scope(&ctx, agent, add, remove, set.as_deref(), *list).await

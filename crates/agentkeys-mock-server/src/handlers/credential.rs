@@ -73,14 +73,6 @@ pub async fn store_credential(
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
-    // Audit log
-    db.execute(
-        "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
-         VALUES (?1, ?2, ?3, 'store', 'ok', ?4)",
-        params![session.wallet_address, agent_id, service, now],
-    )
-    .map_err(|e| AppError::internal(e.to_string()))?;
-
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -110,13 +102,6 @@ pub async fn read_credential(
 
     // Ownership check: caller must own or be the parent of the agent
     if !is_owner_of(&db, &session.wallet_address, agent_id) {
-        let now = now_secs();
-        db.execute(
-            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
-             VALUES (?1, ?2, ?3, 'read', 'DENIED', ?4)",
-            params![session.wallet_address, agent_id, service, now],
-        )
-        .ok();
         return Err(AppError::forbidden(format!(
             "session does not own agent {}",
             agent_id
@@ -130,13 +115,6 @@ pub async fn read_credential(
 
         let service_name = agentkeys_types::ServiceName(service.clone());
         if !scope.services.contains(&service_name) {
-            let now = now_secs();
-            db.execute(
-                "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
-                 VALUES (?1, ?2, ?3, 'read', 'DENIED_SCOPE', ?4)",
-                params![session.wallet_address, agent_id, service, now],
-            )
-            .ok();
             return Err(AppError::forbidden(format!(
                 "Agent {} does not have scope for service {}",
                 session.wallet_address, service
@@ -151,24 +129,10 @@ pub async fn read_credential(
     );
 
     match result {
-        Err(_) => {
-            let now = now_secs();
-            db.execute(
-                "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
-                 VALUES (?1, ?2, ?3, 'read', 'NOT_FOUND', ?4)",
-                params![session.wallet_address, agent_id, service, now],
-            )
-            .ok();
-            Err(AppError::not_found(format!("credential not found for agent={agent_id} service={service}")))
-        }
+        Err(_) => Err(AppError::not_found(format!(
+            "credential not found for agent={agent_id} service={service}"
+        ))),
         Ok(ciphertext) => {
-            let now = now_secs();
-            db.execute(
-                "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
-                 VALUES (?1, ?2, ?3, 'read', 'ok', ?4)",
-                params![session.wallet_address, agent_id, service, now],
-            )
-            .ok();
             let encoded = base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
                 &ciphertext,
@@ -201,18 +165,6 @@ pub async fn list_credentials(
     let db = state.db.lock().unwrap();
 
     if !is_owner_of(&db, &session.wallet_address, agent_id) {
-        // Audit the DENIED list attempt so cross-agent probing through the
-        // new /credential/list path stays visible in the audit log — the
-        // existing read_credential audit contract guarantees DENIED rows for
-        // ownership failures, and this endpoint inherits the same use case
-        // (called from cmd_run for master sessions). Codex P2 on PR #19.
-        let now = now_secs();
-        db.execute(
-            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
-             VALUES (?1, ?2, ?3, 'list', 'DENIED', ?4)",
-            params![session.wallet_address, agent_id, "*", now],
-        )
-        .ok();
         return Err(AppError::forbidden(format!(
             "session does not own agent {}",
             agent_id

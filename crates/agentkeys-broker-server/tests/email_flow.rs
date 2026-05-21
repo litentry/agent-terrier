@@ -35,7 +35,6 @@ use agentkeys_broker_server::{
     sts::{AssumedCredentials, StsClient, StubStsClient},
 };
 use serde_json::Value;
-use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 
 const TEST_ISSUER: &str = "https://broker.email.test";
@@ -90,11 +89,9 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
 
     let config = BrokerConfig {
         data_role_arn: "arn:aws:iam::000:role/test".into(),
-        backend_url: "http://127.0.0.1:1".into(),
         audit_db_path: tmp.path().join("audit.sqlite"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,
-        backend_request_timeout_seconds: 5,
         shutdown_grace_seconds: 5,
         oidc_issuer: TEST_ISSUER.into(),
         oidc_keypair_path: tmp.path().join("oidc.json"),
@@ -127,7 +124,6 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         #[cfg(feature = "auth-oauth2")]
         oauth2: None,
     });
-    state.tier2.backend_reachable.store(true, Ordering::Relaxed);
 
     let app = create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

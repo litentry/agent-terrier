@@ -20,6 +20,31 @@ fn create_test_backend() -> Arc<InProcessBackend> {
     Arc::new(InProcessBackend::new())
 }
 
+/// Direct-DB identity link helper for HTTP-based tests, mirroring
+/// `InProcessBackend::link_identity_for_tests`. Used after the
+/// `/identity/link` endpoint was retired with issue #77.
+fn link_identity_direct(
+    state: &Arc<agentkeys_mock_server::state::AppState>,
+    identity_type: &str,
+    identity_value: &str,
+    wallet_address: &str,
+) {
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO identity_links (wallet_address, identity_type, identity_value, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                wallet_address,
+                identity_type,
+                identity_value,
+                agentkeys_mock_server::auth::now_secs()
+            ],
+        )
+        .expect("insert identity_link");
+}
+
 fn dummy_pubkey() -> PublicKey {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let vk = ed25519_dalek::VerifyingKey::from(&signing_key);
@@ -641,7 +666,7 @@ async fn recover_via_passkey() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
     let state = std::sync::Arc::new(AppState::new(conn));
-    let router = create_router(state);
+    let router = create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -655,20 +680,8 @@ async fn recover_via_passkey() {
         .await
         .unwrap();
 
-    // Link alias via HTTP
-    let http_client = reqwest::Client::new();
-    let resp = http_client
-        .post(format!("{}/identity/link", backend_url))
-        .header("authorization", format!("Bearer {}", master_sess.token))
-        .json(&serde_json::json!({
-            "identity_type": "alias",
-            "identity_value": "my-passkey-agent",
-            "wallet_address": master_wallet.0,
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success(), "identity link should succeed");
+    link_identity_direct(&state, "alias", "my-passkey-agent", &master_wallet.0);
+    let _ = master_sess;
 
     // Recover via passkey
     let (recovered_sess, recovered_wallet) = client
@@ -698,7 +711,7 @@ async fn recover_via_email() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
     let state = std::sync::Arc::new(AppState::new(conn));
-    let router = create_router(state);
+    let router = create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -712,20 +725,8 @@ async fn recover_via_email() {
         .await
         .unwrap();
 
-    // Link email identity
-    let http_client = reqwest::Client::new();
-    let resp = http_client
-        .post(format!("{}/identity/link", backend_url))
-        .header("authorization", format!("Bearer {}", master_sess.token))
-        .json(&serde_json::json!({
-            "identity_type": "email",
-            "identity_value": "bot@example.com",
-            "wallet_address": master_wallet.0,
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
+    link_identity_direct(&state, "email", "bot@example.com", &master_wallet.0);
+    let _ = master_sess;
 
     let (recovered_sess, recovered_wallet) = client
         .recover_session(
@@ -770,7 +771,7 @@ async fn recover_via_2fa_credentials_intact() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
     let state = std::sync::Arc::new(AppState::new(conn));
-    let router = create_router(state);
+    let router = create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -805,20 +806,7 @@ async fn recover_via_2fa_credentials_intact() {
         .await
         .unwrap();
 
-    // Link alias
-    let http_client = reqwest::Client::new();
-    let resp = http_client
-        .post(format!("{}/identity/link", backend_url))
-        .header("authorization", format!("Bearer {}", master_sess.token))
-        .json(&serde_json::json!({
-            "identity_type": "alias",
-            "identity_value": "cred-intact-agent",
-            "wallet_address": master_wallet.0,
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
+    link_identity_direct(&state, "alias", "cred-intact-agent", &master_wallet.0);
 
     // Recover via passkey
     let (recovered_sess, recovered_wallet) = client
