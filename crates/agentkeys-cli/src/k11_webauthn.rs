@@ -244,6 +244,21 @@ struct ServerCtx {
     allow_credential_b64url: Option<String>,
     /// For assert flows: the message bytes hex-encoded (display-only).
     message_hex: Option<String>,
+    /// Operator-readable description of what's about to be authorized
+    /// (e.g. `"Grant agent demo-agent access to openrouter"`,
+    /// `"Approve USDC 1000 to Uniswap v4 router"`). Rendered prominently
+    /// in the WebAuthn assert page so the operator sees WHAT they're
+    /// signing before they touch the sensor — not just the 32-byte
+    /// challenge hex. None when no intent is supplied (legacy callers).
+    /// Per arch.md §15.3a / §15.3b — closes the "agent signed
+    /// 0xdead…beef without me knowing what it was" gap at the K11 binding
+    /// site, mirroring the ERC-7730 clear-signing surface for typed-data
+    /// signs.
+    intent_text: Option<String>,
+    /// Per-field display rows shown below the intent_text — `(label,
+    /// value)` pairs. Lets the page render "Service: openrouter / Agent:
+    /// demo-agent / K3 epoch: 1" alongside the headline intent.
+    intent_fields: Vec<(String, String)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,13 +336,56 @@ pub async fn enroll_webauthn_with_rp(
     enroll_webauthn_inner(operator_omni, rp_id).await
 }
 
+/// Operator-readable intent for the K11 WebAuthn ceremony. Rendered on
+/// the localhost confirmation page that the operator clicks "Sign as
+/// <role>" on before the OS Touch ID prompt fires.
+///
+/// Why this exists: WebAuthn natively shows only "Use Touch ID for
+/// <origin>?" at the OS level — there's NO way for the platform
+/// authenticator to display application-specific text. The localhost
+/// confirmation page is the only surface where AgentKeys can render
+/// what's being authorized in human-readable form. Without this, the
+/// operator only sees the 32-byte challenge hex — and that's the same
+/// failure mode arch.md §15.3a flagged for typed-data signs.
+///
+/// Per arch.md §15.3a invariant: `intent_text` is rendered prominently
+/// on the page; `intent_fields` show the per-field detail. Both are
+/// display-only — the cryptographic binding is still `challenge =
+/// sha256(message)`, and the operator's eyes are the last line of
+/// defense between "the daemon claims this is what I'm signing" and
+/// "the wallet actually signed it."
+#[derive(Debug, Default, Clone)]
+pub struct K11IntentContext {
+    /// One-line headline (e.g. `"Grant agent demo-agent access to openrouter"`,
+    /// `"Approve USDC 1000 to Uniswap v4 router"`).
+    pub text: Option<String>,
+    /// `(label, value)` rows displayed below the headline. Common rows:
+    /// service, agent, K3 epoch, max_calls, expires_at.
+    pub fields: Vec<(String, String)>,
+}
+
+impl K11IntentContext {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && self.fields.is_empty()
+    }
+}
+
 /// Run the assert ceremony. Returns the assertion bytes
 /// (`authenticatorData || clientDataJSON || signature`).
+///
+/// **Operators see only the 32-byte challenge hex on the confirmation
+/// page.** This is the legacy entry point — prefer
+/// [`assert_webauthn_with_intent`] for new call sites so the operator can
+/// see what's being authorized in human-readable form.
 pub async fn assert_webauthn(
     operator_omni: &str,
     message: &[u8],
 ) -> Result<Vec<u8>, WebauthnError> {
-    assert_webauthn_inner(operator_omni, message, "localhost").await
+    assert_webauthn_inner(operator_omni, message, "localhost", K11IntentContext::empty()).await
 }
 
 /// Same as [`assert_webauthn`] but for the companion daemon — uses RP ID
@@ -338,7 +396,26 @@ pub async fn assert_webauthn_with_rp(
     message: &[u8],
     rp_id: &str,
 ) -> Result<Vec<u8>, WebauthnError> {
-    assert_webauthn_inner(operator_omni, message, rp_id).await
+    assert_webauthn_inner(operator_omni, message, rp_id, K11IntentContext::empty()).await
+}
+
+/// Run the assert ceremony with an operator-readable intent rendered
+/// on the localhost confirmation page. The operator sees the headline
+/// `intent.text` + per-field rows above the raw challenge hex — they
+/// know WHAT they're authorizing before they touch the sensor.
+///
+/// The cryptographic binding (`challenge = sha256(message)`) is
+/// unchanged — `intent` is display-only. The page also still shows the
+/// challenge hex collapsed beneath, so an auditor can re-derive
+/// `intent_commitment = keccak256(intent_text || 0x7c || message)` and
+/// confirm the operator saw the same text that the audit row commits to.
+pub async fn assert_webauthn_with_intent(
+    operator_omni: &str,
+    message: &[u8],
+    rp_id: &str,
+    intent: K11IntentContext,
+) -> Result<Vec<u8>, WebauthnError> {
+    assert_webauthn_inner(operator_omni, message, rp_id, intent).await
 }
 
 /// Chain-ready variant: runs the ceremony, then post-processes the result
@@ -352,8 +429,28 @@ pub async fn assert_webauthn_for_chain(
     expected_challenge: [u8; 32],
     rp_id: &str,
 ) -> Result<K11ChainAssertion, WebauthnError> {
+    assert_webauthn_for_chain_with_intent(
+        operator_omni,
+        expected_challenge,
+        rp_id,
+        K11IntentContext::empty(),
+    )
+    .await
+}
+
+/// Chain-ready variant that ALSO renders an operator-readable intent
+/// on the localhost confirmation page. Use this for every master-only
+/// mutation that has a meaningful intent string (scope grant / revoke,
+/// device add / revoke, K10 rotation, audit-row mint).
+pub async fn assert_webauthn_for_chain_with_intent(
+    operator_omni: &str,
+    expected_challenge: [u8; 32],
+    rp_id: &str,
+    intent: K11IntentContext,
+) -> Result<K11ChainAssertion, WebauthnError> {
     let enrollment = load_enrollment_with_rp(operator_omni, rp_id)?;
-    let parts = assert_webauthn_inner_parts(operator_omni, expected_challenge, rp_id).await?;
+    let parts =
+        assert_webauthn_inner_parts(operator_omni, expected_challenge, rp_id, intent).await?;
     extract_chain_assertion(&enrollment, expected_challenge, &parts)
 }
 
@@ -384,6 +481,12 @@ async fn enroll_webauthn_inner(
         challenge_b64url: challenge_b64url.clone(),
         allow_credential_b64url: None,
         message_hex: None,
+        // Enroll has no operation-specific intent — the operator is just
+        // claiming the K11 credential for their omni. The page already
+        // explains "you're enrolling a passkey for AgentKeys" in static
+        // header text; no per-call intent rendering needed.
+        intent_text: None,
+        intent_fields: Vec::new(),
     });
 
     let (tx, rx) = oneshot::channel::<EnrollPost>();
@@ -437,6 +540,7 @@ async fn assert_webauthn_inner(
     operator_omni: &str,
     message: &[u8],
     rp_id: &str,
+    intent: K11IntentContext,
 ) -> Result<Vec<u8>, WebauthnError> {
     // Legacy callers pass arbitrary-length message bytes; we sha256 them
     // to fit WebAuthn's 32-byte challenge slot. This produces an assertion
@@ -447,7 +551,7 @@ async fn assert_webauthn_inner(
     let mut h = Sha256::new();
     h.update(message);
     let challenge_bytes: [u8; 32] = h.finalize().into();
-    let parts = assert_webauthn_inner_parts(operator_omni, challenge_bytes, rp_id).await?;
+    let parts = assert_webauthn_inner_parts(operator_omni, challenge_bytes, rp_id, intent).await?;
     let mut out = Vec::with_capacity(
         parts.authenticator_data.len() + parts.client_data_json.len() + parts.signature_der.len(),
     );
@@ -461,6 +565,7 @@ async fn assert_webauthn_inner_parts(
     operator_omni: &str,
     challenge_bytes: [u8; 32],
     rp_id: &str,
+    intent: K11IntentContext,
 ) -> Result<AssertParts, WebauthnError> {
     // Load the previously-enrolled credential for THIS rp_id (primary vs
     // companion live in distinct files; see enrollment_path_with_rp).
@@ -496,6 +601,8 @@ async fn assert_webauthn_inner_parts(
         challenge_b64url: challenge_b64url.clone(),
         allow_credential_b64url: Some(enrollment.credential_id_b64url.clone()),
         message_hex: Some(hex::encode(challenge_bytes)),
+        intent_text: intent.text.clone(),
+        intent_fields: intent.fields.clone(),
     });
 
     let (tx, rx) = oneshot::channel::<AssertPost>();
@@ -1105,6 +1212,82 @@ document.getElementById('go').onclick = async () => {{
 async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
     let cred_id = ctx.allow_credential_b64url.as_deref().unwrap_or("");
     let msg_hex = ctx.message_hex.as_deref().unwrap_or("");
+
+    // Build the operator-readable intent block. When `intent_text` is None
+    // and `intent_fields` is empty, this produces an empty string and the
+    // page falls back to the legacy "challenge hex only" rendering.
+    // HTML-escape every interpolated value to prevent script injection
+    // through a malicious daemon-supplied intent string.
+    let intent_block = if ctx.intent_text.is_some() || !ctx.intent_fields.is_empty() {
+        let mut block = String::from(
+            "  <section class=\"intent\" aria-label=\"What you're about to authorize\">\n",
+        );
+        block.push_str("    <h2 class=\"intent-h\">You are about to authorize:</h2>\n");
+        if let Some(t) = &ctx.intent_text {
+            block.push_str(&format!(
+                "    <p class=\"intent-text\">{}</p>\n",
+                html_escape(t)
+            ));
+        }
+        if !ctx.intent_fields.is_empty() {
+            block.push_str("    <dl class=\"intent-fields\">\n");
+            for (label, value) in &ctx.intent_fields {
+                block.push_str(&format!(
+                    "      <dt>{}</dt><dd>{}</dd>\n",
+                    html_escape(label),
+                    html_escape(value)
+                ));
+            }
+            block.push_str("    </dl>\n");
+        }
+        block.push_str(
+            "    <p class=\"intent-warn\">Review the above BEFORE pressing Sign. \
+             The Touch ID prompt itself cannot show this text — your eyes are the \
+             last line of defense between the daemon's claim and the signature.</p>\n",
+        );
+        block.push_str("  </section>\n");
+        block
+    } else {
+        String::new()
+    };
+
+    // Build the cryptographic-primitives block — shown below the intent.
+    // Two shapes:
+    //   (a) intent present → shows ONLY the Challenge (raw) hex, since
+    //       the operator omni is already in the intent block + the RP
+    //       ID is already in the rp-callout AND in the intent's
+    //       "Asserting role" row. Repeating them three times was the
+    //       duplication the user flagged. Slim form uses the same
+    //       intent-block grid styling for visual consistency.
+    //   (b) no intent (legacy callers) → full Operator + RP ID +
+    //       Challenge rows, so callers that haven't migrated still see
+    //       every fact on the page.
+    let crypto_block = if ctx.intent_text.is_some() || !ctx.intent_fields.is_empty() {
+        format!(
+            "  <section class=\"crypto\" aria-label=\"Cryptographic primitives\">\n\
+             \x20   <h2 class=\"crypto-h\">Cryptographic primitives:</h2>\n\
+             \x20   <dl class=\"crypto-fields\">\n\
+             \x20     <dt>Challenge <span class=\"kv-meta\">(raw 32-byte commitment — what WebAuthn actually signs)</span></dt><dd><code class=\"hex msg\">0x{msg}</code></dd>\n\
+             \x20   </dl>\n\
+             \x20 </section>\n",
+            msg = html_escape(msg_hex)
+        )
+    } else {
+        format!(
+            "  <section class=\"kv\">\n\
+             \x20   <dt>Operator</dt>\n\
+             \x20   <dd><code class=\"hex\">{omni}</code></dd>\n\
+             \x20   <dt>RP ID</dt>\n\
+             \x20   <dd><code class=\"hex\">{rp_id}</code></dd>\n\
+             \x20   <dt>Challenge (raw) <span class=\"kv-meta\">32-byte commitment — what WebAuthn actually signs</span></dt>\n\
+             \x20   <dd><code class=\"hex msg\">0x{msg}</code></dd>\n\
+             \x20 </section>\n",
+            omni = html_escape(&ctx.operator_omni),
+            rp_id = html_escape(&ctx.rp_id),
+            msg = html_escape(msg_hex)
+        )
+    };
+
     // Distinguish primary from companion in the UI: the operator may be
     // about to tap Touch ID for either role and the macOS prompt itself
     // doesn't say which credential — so we surface it here loudly.
@@ -1116,6 +1299,7 @@ async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoRespon
         "Original device authorizing a master-mutation."
     };
     let role_accent = if is_companion { "#a855f7" } else { "#0a84ff" }; // purple vs blue
+    let role_accent_rgb = if is_companion { "168, 85, 247" } else { "10, 132, 255" };
     let role_emoji = if is_companion { "🛡️" } else { "🔑" };
     let html = format!(
         r##"<!DOCTYPE html>
@@ -1145,6 +1329,77 @@ async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoRespon
     .rp-callout {{ background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.1); }}
   }}
   .rp-callout strong {{ color: {role_accent}; }}
+  .intent {{
+    background: rgba({role_accent_rgb}, 0.06);
+    border: 1px solid rgba({role_accent_rgb}, 0.25);
+    border-left: 4px solid {role_accent};
+    border-radius: 8px;
+    padding: 1em 1.1em;
+    margin: 0 0 1.2em 0;
+  }}
+  .intent-h {{
+    margin: 0 0 0.4em 0;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: {role_accent};
+    font-weight: 600;
+  }}
+  .intent-text {{
+    margin: 0 0 0.8em 0;
+    font-size: 1.15em;
+    font-weight: 500;
+    line-height: 1.35;
+  }}
+  .intent-fields {{
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.3em 1em;
+    margin: 0 0 0.8em 0;
+    font-size: 0.92em;
+  }}
+  .intent-fields dt {{ font-weight: 600; opacity: 0.7; }}
+  .intent-fields dd {{ margin: 0; word-break: break-all; }}
+  .intent-warn {{
+    margin: 0;
+    font-size: 0.85em;
+    opacity: 0.75;
+    font-style: italic;
+  }}
+  /* Crypto-primitives block — neutral gray, visually subordinate to the
+     intent block but using the SAME grid layout for style consistency.
+     Shows only the cryptographic facts unique to this page (the raw
+     challenge) — Operator omni + RP ID + Asserting role are all already
+     in the intent block, so showing them again here would be the
+     duplication the user flagged. */
+  .crypto {{
+    background: rgba(0, 0, 0, 0.03);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
+    padding: 0.85em 1.1em;
+    margin: 0 0 1.2em 0;
+    font-size: 0.92em;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    .crypto {{ background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.08); }}
+  }}
+  .crypto-h {{
+    margin: 0 0 0.4em 0;
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.6;
+    font-weight: 600;
+  }}
+  .crypto-fields {{
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.3em 1em;
+    margin: 0;
+  }}
+  .crypto-fields dt {{ font-weight: 600; opacity: 0.7; }}
+  .crypto-fields dd {{ margin: 0; word-break: break-all; }}
+  .crypto-fields .kv-meta {{ opacity: 0.55; font-weight: 400; font-size: 0.9em; }}
 </style>
 </head><body>
 <main class="card">
@@ -1158,14 +1413,8 @@ async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoRespon
       cancel and check which browser tab is focused.
     </div>
   </header>
-  <section class="kv">
-    <dt>Operator</dt>
-    <dd><code class="hex">{omni}</code></dd>
-    <dt>RP ID</dt>
-    <dd><code class="hex">{rp_id_display}</code></dd>
-    <dt>Challenge <span class="kv-meta">32-byte commitment</span></dt>
-    <dd><code class="hex msg">0x{msg}</code></dd>
-  </section>
+{intent_block}
+{crypto_block}
   <p id="status" class="status">Press the button below. macOS will prompt for Touch ID.</p>
   <button id="go" class="primary">Sign as {role_label}</button>
 </main>
@@ -1222,10 +1471,8 @@ document.getElementById('go').onclick = async () => {{
 </script>
 </body></html>
 {shared_css_extra}"##,
-        omni = ctx.operator_omni,
         challenge = ctx.challenge_b64url,
         cred_id = cred_id,
-        msg = msg_hex,
         shared_css = SHARED_CSS,
         shared_css_extra = "",
         rp_id_js = ctx.rp_id,
@@ -1233,9 +1480,33 @@ document.getElementById('go').onclick = async () => {{
         role_label = role_label,
         role_tagline = role_tagline,
         role_accent = role_accent,
+        role_accent_rgb = role_accent_rgb,
         role_emoji = role_emoji,
+        intent_block = intent_block,
+        crypto_block = crypto_block,
     );
     Html(html)
+}
+
+/// HTML-escape a string for safe interpolation into the K11 confirmation
+/// page. Defends against a malicious daemon-supplied intent string
+/// injecting `<script>` into the page — the daemon controls the intent
+/// payload but the page's safety properties (the operator seeing the
+/// real intent, the localhost-only origin, the Touch ID prompt) must
+/// hold regardless.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1287,5 +1558,45 @@ mod tests {
         };
         let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post).unwrap_err();
         assert!(matches!(err, WebauthnError::OriginMismatch { .. }));
+    }
+
+    #[test]
+    fn html_escape_neutralizes_script_injection() {
+        // A malicious daemon-supplied intent string MUST be rendered as
+        // text on the page, not executed as HTML/JS. This is the load-
+        // bearing safety check for the new intent-rendering surface.
+        let evil = "<script>alert('xss')</script>";
+        let safe = html_escape(evil);
+        assert_eq!(safe, "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;");
+        assert!(!safe.contains('<'));
+        assert!(!safe.contains('>'));
+    }
+
+    #[test]
+    fn html_escape_handles_quote_chars() {
+        assert_eq!(html_escape(r#"a&b<c>d"e'f"#), "a&amp;b&lt;c&gt;d&quot;e&#x27;f");
+    }
+
+    #[test]
+    fn html_escape_passes_safe_text_through() {
+        let intent = "Approve 1000.5 USDC to 0xabcd…1234";
+        assert_eq!(html_escape(intent), intent);
+    }
+
+    #[test]
+    fn k11_intent_context_empty_is_default() {
+        let empty = K11IntentContext::empty();
+        assert!(empty.is_empty());
+        assert!(empty.text.is_none());
+        assert!(empty.fields.is_empty());
+    }
+
+    #[test]
+    fn k11_intent_context_with_text_is_not_empty() {
+        let intent = K11IntentContext {
+            text: Some("Grant agent demo-agent access".into()),
+            fields: vec![("Service".into(), "openrouter".into())],
+        };
+        assert!(!intent.is_empty());
     }
 }

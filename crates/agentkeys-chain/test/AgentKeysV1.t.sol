@@ -17,6 +17,22 @@ import {CredentialAudit} from "../src/CredentialAudit.sol";
 ///        produce the full (authData || clientDataJSON || r, s) chain bound
 ///        to a contract-computed challenge.
 contract AgentKeysV1Test is Test {
+    // Local copies of CredentialAudit V2 events so `vm.expectEmit` can
+    // match by topic+data. The event signatures MUST match
+    // `CredentialAudit.sol` exactly — drift caught by `expectEmit`.
+    event AuditAppendedV2(
+        bytes32 indexed operatorOmni,
+        bytes32 indexed actorOmni,
+        uint8   indexed opKind,
+        bytes32 envelopeHash
+    );
+    event AuditRootAppendedV2(
+        bytes32 indexed operatorOmni,
+        bytes32 indexed merkleRoot,
+        bytes32 opKindBitmap,
+        uint64  entryCount
+    );
+
     P256Verifier p256;
     K11Verifier k11;
     SidecarRegistry registry;
@@ -337,6 +353,77 @@ contract AgentKeysV1Test is Test {
             abi.encodeWithSelector(CredentialAudit.NotOperatorMaster.selector, attacker, master)
         );
         audit.appendRoot(operatorOmni, root, 1);
+    }
+
+    // ─── V2 envelope path (arch.md §15.3a, issue #97 phase C) ─────────────
+
+    function test_CredentialAudit_AppendV2_EmitsEvent() public {
+        bytes32 envelopeHash = keccak256("test-envelope");
+        uint8 opKind = 21; // SignEip712
+
+        // The event topics MUST carry operator, actor, and opKind so
+        // explorers can filter `eth_getLogs` by any of the three.
+        vm.expectEmit(true, true, true, true);
+        emit AuditAppendedV2(operatorOmni, actorOmniAgentA, opKind, envelopeHash);
+        audit.appendV2(operatorOmni, actorOmniAgentA, opKind, envelopeHash);
+    }
+
+    function test_CredentialAudit_AppendV2_AcceptsAnyOpKind() public {
+        // Per non-break invariant #1, the contract is op-kind-agnostic —
+        // any byte 0..255 must be accepted. Adding a new op_kind needs
+        // ZERO contract redeploys.
+        bytes32 envelopeHash = keccak256("future");
+        vm.expectEmit(true, true, true, true);
+        emit AuditAppendedV2(operatorOmni, actorOmniAgentA, 250, envelopeHash);
+        audit.appendV2(operatorOmni, actorOmniAgentA, 250, envelopeHash);
+    }
+
+    function test_CredentialAudit_AppendV2_OpenToAnyCaller() public {
+        // V2 `appendV2` is gated only by chain ordering + gas (same as
+        // V1 `append`). Attacker can append, but the operator can prove
+        // forgery via the indexer's view of canonical envelope hashes.
+        bytes32 envelopeHash = keccak256("attacker-claim");
+        vm.prank(attacker);
+        audit.appendV2(operatorOmni, actorOmniAgentA, 0, envelopeHash);
+        // No revert — the attacker emit is just noise the indexer filters.
+    }
+
+    function test_CredentialAudit_AppendRootV2_EmitsEvent() public {
+        _registerFirstMaster();
+        bytes32 root = keccak256("v2-root");
+        // bit 0 (CredStore) + bit 21 (SignEip712) + bit 40 (ScopeGrant)
+        bytes32 bitmap = bytes32(uint256((1 << 0) | (1 << 21) | (uint256(1) << 40)));
+
+        vm.expectEmit(true, true, true, true);
+        emit AuditRootAppendedV2(operatorOmni, root, bitmap, 3);
+        vm.prank(master);
+        audit.appendRootV2(operatorOmni, root, bitmap, 3);
+    }
+
+    function test_CredentialAudit_AppendRootV2_RejectsNonMaster() public {
+        _registerFirstMaster();
+        bytes32 root = keccak256("dummy");
+        bytes32 bitmap = bytes32(uint256(1));
+        vm.prank(attacker);
+        vm.expectRevert(
+            abi.encodeWithSelector(CredentialAudit.NotOperatorMaster.selector, attacker, master)
+        );
+        audit.appendRootV2(operatorOmni, root, bitmap, 1);
+    }
+
+    function test_CredentialAudit_V1_And_V2_Coexist() public {
+        // Both surfaces stay live during the migration cycle. The V1 emit
+        // path is observed today by the existing tier-A worker; V2 is
+        // what new emitters use. Confirm neither breaks the other.
+        bytes32 svc = keccak256("openrouter");
+        bytes32 payload = keccak256("blob-1");
+        audit.append(operatorOmni, actorOmniAgentA, svc, audit.OP_STORE(), payload);
+        assertEq(audit.entryCount(operatorOmni), 1);
+
+        bytes32 envHash = keccak256("v2-envelope");
+        audit.appendV2(operatorOmni, actorOmniAgentA, 0, envHash);
+        // V1 storage is untouched by V2 emits.
+        assertEq(audit.entryCount(operatorOmni), 1);
     }
 
     function _hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32) {

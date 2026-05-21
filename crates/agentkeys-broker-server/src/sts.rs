@@ -82,7 +82,16 @@ impl StsClient for AwsStsClient {
             .send()
             .await
             .map_err(|e| {
-                BrokerError::StsError(format!("assume_role_with_web_identity: {}", e))
+                // Flatten the SDK error's source chain — `DispatchFailure`
+                // and friends render uselessly via `{}` alone, the real
+                // cause (DNS / TCP / TLS / no-connector) is in source().
+                let mut msg = format!("assume_role_with_web_identity: {e}");
+                let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&e);
+                while let Some(next) = src {
+                    msg.push_str(&format!(" | caused by: {next}"));
+                    src = next.source();
+                }
+                BrokerError::StsError(msg)
             })?;
 
         let creds = resp

@@ -811,7 +811,10 @@ fn unsupported(op: &str) -> BackendError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signer_client::{DerivedAddress, SignedMessage, SignerClient, SignerClientError};
+    use crate::clear_signing::TypedData;
+    use crate::signer_client::{
+        DerivedAddress, SignedMessage, SignedTypedData, SignerClient, SignerClientError,
+    };
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -856,6 +859,18 @@ mod tests {
                 address: "0x0000000000000000000000000000000000000000".into(),
                 key_version: 1,
             })
+        }
+
+        async fn sign_eip712(
+            &self,
+            _omni: &str,
+            _td: &TypedData,
+        ) -> Result<SignedTypedData, SignerClientError> {
+            // S3CredentialBackend only needs the EIP-191 KEK-derivation
+            // path; this fake never sees a typed-data sign call.
+            Err(SignerClientError::Internal(
+                "FakeSigner does not implement sign_eip712".into(),
+            ))
         }
     }
 

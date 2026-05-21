@@ -64,6 +64,12 @@ pub enum SignerError {
     #[error("invalid_message_hex: {0}")]
     InvalidMessageHex(String),
 
+    /// Issue #82 — typed-data signing rejected the EIP-712 payload before
+    /// any signing happened (malformed JSON, unknown type, value out of
+    /// range for declared type).
+    #[error("invalid_typed_data: {0}")]
+    InvalidTypedData(String),
+
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -75,6 +81,7 @@ impl SignerError {
         match self {
             SignerError::InvalidOmniAccount(_) => "invalid_omni_account",
             SignerError::InvalidMessageHex(_) => "invalid_message_hex",
+            SignerError::InvalidTypedData(_) => "invalid_typed_data",
             SignerError::Internal(_) => "internal",
         }
     }
@@ -82,7 +89,9 @@ impl SignerError {
     /// HTTP status the handler should return.
     pub fn http_status(&self) -> u16 {
         match self {
-            SignerError::InvalidOmniAccount(_) | SignerError::InvalidMessageHex(_) => 400,
+            SignerError::InvalidOmniAccount(_)
+            | SignerError::InvalidMessageHex(_)
+            | SignerError::InvalidTypedData(_) => 400,
             SignerError::Internal(_) => 500,
         }
     }
@@ -212,6 +221,57 @@ impl DevKeyService {
         let signature_hex = format!("0x{}", hex::encode(&sig_bytes));
         Ok((signature_hex, address))
     }
+
+    /// **DEV ONLY.** EIP-712 typed-data sign (issue #82). Returns the
+    /// signature, the recovered address, and the digests the signer
+    /// computed internally so the caller can cross-reference against an
+    /// ERC-7730 metadata file for audit.
+    ///
+    /// The signer parses `typed_data` itself and computes the digest from
+    /// `keccak256("\x19\x01" || domain_separator || hashStruct(primaryType,
+    /// message))`. It never accepts a caller-supplied prehash — that is
+    /// what makes the signer's signature a meaningful claim about *what
+    /// was signed*, not just *that something was signed*.
+    pub fn sign_eip712(
+        &self,
+        omni_account: &str,
+        typed_data: agentkeys_core::clear_signing::TypedData,
+    ) -> Result<Eip712SignResult, SignerError> {
+        let omni_bytes = parse_omni_account(omni_account)?;
+        let sk = self.derive_signing_key(&omni_bytes)?;
+        let address = address_for_signing_key(&sk);
+
+        let digests = agentkeys_core::clear_signing::compute_digests(&typed_data)
+            .map_err(|e| SignerError::InvalidTypedData(e.to_string()))?;
+
+        let (sig, recovery_id) = sk
+            .sign_prehash_recoverable(&digests.final_digest)
+            .map_err(|e| SignerError::Internal(format!("signing failed: {e}")))?;
+
+        let mut sig_bytes = sig.to_bytes().to_vec();
+        sig_bytes.push(recovery_id.to_byte());
+        debug_assert_eq!(sig_bytes.len(), 65, "EIP-712 signature must be 65 bytes");
+
+        Ok(Eip712SignResult {
+            signature: format!("0x{}", hex::encode(&sig_bytes)),
+            address,
+            primary_type_hash: format!("0x{}", hex::encode(digests.primary_type_hash)),
+            domain_separator: format!("0x{}", hex::encode(digests.domain_separator)),
+            digest: format!("0x{}", hex::encode(digests.final_digest)),
+        })
+    }
+}
+
+/// Result of `sign_eip712`. Each digest is emitted alongside the signature
+/// so an audit trail can cross-reference against the ERC-7730 metadata
+/// file pinned to the same domain separator + primary type hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Eip712SignResult {
+    pub signature: String,
+    pub address: String,
+    pub primary_type_hash: String,
+    pub domain_separator: String,
+    pub digest: String,
 }
 
 /// Parse an `omni_account` from the wire format (64 lowercase hex chars,
@@ -405,6 +465,101 @@ mod tests {
             SignerError::InvalidMessageHex("x".into()).code(),
             "invalid_message_hex"
         );
+        assert_eq!(
+            SignerError::InvalidTypedData("x".into()).code(),
+            "invalid_typed_data"
+        );
         assert_eq!(SignerError::Internal("x".into()).code(), "internal");
+    }
+
+    /// Issue #82 — typed-data sign produces a signature that recovers to
+    /// the same address `derive_address` returns, AND emits the EIP-712
+    /// digests in the result envelope.
+    #[test]
+    fn sign_eip712_recovers_to_derived_address() {
+        use agentkeys_core::clear_signing::{TypeField, TypedData};
+        use std::collections::BTreeMap;
+
+        let s = fixed_signer();
+        let omni = fixed_omni();
+        let derived = s.derive_address(&omni).unwrap();
+
+        let mut types: BTreeMap<String, Vec<TypeField>> = BTreeMap::new();
+        types.insert(
+            "EIP712Domain".into(),
+            vec![
+                TypeField { name: "name".into(), ty: "string".into() },
+                TypeField { name: "version".into(), ty: "string".into() },
+                TypeField { name: "chainId".into(), ty: "uint256".into() },
+                TypeField { name: "verifyingContract".into(), ty: "address".into() },
+            ],
+        );
+        types.insert(
+            "Permit".into(),
+            vec![
+                TypeField { name: "owner".into(), ty: "address".into() },
+                TypeField { name: "spender".into(), ty: "address".into() },
+                TypeField { name: "value".into(), ty: "uint256".into() },
+                TypeField { name: "nonce".into(), ty: "uint256".into() },
+                TypeField { name: "deadline".into(), ty: "uint256".into() },
+            ],
+        );
+        let td = TypedData {
+            types,
+            primary_type: "Permit".into(),
+            domain: serde_json::json!({
+                "name": "USD Coin",
+                "version": "2",
+                "chainId": 1,
+                "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            }),
+            message: serde_json::json!({
+                "owner":   "0x1111111111111111111111111111111111111111",
+                "spender": "0xaaaabbbbccccddddeeeeffff0000111122223333",
+                "value":   "1500000",
+                "nonce":   "0",
+                "deadline": "1900000000",
+            }),
+        };
+
+        let result = s.sign_eip712(&omni, td).unwrap();
+        assert_eq!(result.address, derived);
+        assert!(result.signature.starts_with("0x"));
+        assert_eq!(result.signature.len(), 2 + 130);
+        assert!(result.digest.starts_with("0x"));
+        assert_eq!(result.digest.len(), 2 + 64);
+
+        // Cross-check signature recovers to derived addr via the spec digest.
+        let raw = hex::decode(result.signature.trim_start_matches("0x")).unwrap();
+        let recovery_id = RecoveryId::try_from(raw[64]).unwrap();
+        let signature = Signature::from_slice(&raw[..64]).unwrap();
+        let digest_bytes = hex::decode(result.digest.trim_start_matches("0x")).unwrap();
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&digest_bytes);
+        let vk = VerifyingKey::recover_from_prehash(&digest, &signature, recovery_id).unwrap();
+        let encoded_point = vk.to_encoded_point(false);
+        let pubkey_bytes = encoded_point.as_bytes();
+        let mut h = Keccak256::new();
+        h.update(&pubkey_bytes[1..]);
+        let pubkey_hash = h.finalize();
+        let recovered = format!("0x{}", hex::encode(&pubkey_hash[12..]));
+        assert_eq!(recovered, derived);
+    }
+
+    #[test]
+    fn sign_eip712_rejects_malformed_typed_data() {
+        use agentkeys_core::clear_signing::TypedData;
+        use std::collections::BTreeMap;
+
+        let s = fixed_signer();
+        // Missing EIP712Domain in types → invalid_typed_data.
+        let td = TypedData {
+            types: BTreeMap::new(),
+            primary_type: "Permit".into(),
+            domain: serde_json::json!({}),
+            message: serde_json::json!({}),
+        };
+        let err = s.sign_eip712(&fixed_omni(), td).unwrap_err();
+        assert!(matches!(err, SignerError::InvalidTypedData(_)));
     }
 }

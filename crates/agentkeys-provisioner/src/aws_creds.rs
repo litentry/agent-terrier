@@ -184,10 +184,19 @@ async fn assume_role_with_jwt(
         .send()
         .await
         .map_err(|e| {
-            ProvisionError::Internal(format!(
-                "assume_role_with_web_identity({}): {}",
-                role_arn, e
-            ))
+            // `aws_sdk_sts::Error`'s Display impl renders only the top-level
+            // variant — for `DispatchFailure` this is the useless literal
+            // string "dispatch failure" with no hint of WHY. The actual
+            // cause (DNS / TCP / TLS / connector-not-configured) lives in
+            // the `source()` chain. Walk it + flatten into a one-line msg
+            // so operators can act without grep'ing for SDK debug logs.
+            let mut msg = format!("assume_role_with_web_identity({role_arn}): {e}");
+            let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&e);
+            while let Some(next) = src {
+                msg.push_str(&format!(" | caused by: {next}"));
+                src = next.source();
+            }
+            ProvisionError::Internal(msg)
         })?;
 
     let creds = resp

@@ -10,12 +10,17 @@ implementation diverges, the daemon stops working.
 
 The signer is the trust boundary that owns the EVM keypair derived from a
 user's `omni_account`. The daemon never holds private key material; it asks
-the signer for two things only:
+the signer for three things only:
 
 1. The 0x-address derived from a given `omni_account` (so the daemon knows
    what to `link` against the broker).
 2. An EIP-191 ECDSA signature over an arbitrary message produced under that
    same derived key (so the daemon can complete the broker's SIWE round-trip).
+3. An EIP-712 typed-data signature over a structured data object (so agents
+   can sign Permit / Permit2 / DEX orders / EIP-4337 UserOps / Heima extrinsic
+   envelopes under their per-actor K4 wallet, with the signer parsing the
+   typed-data JSON internally — never trusting a caller-supplied prehash).
+   This endpoint is added in issue #82.
 
 Issue #74 step 1 ships an HKDF-backed implementation in `agentkeys-mock-server`
 (`/dev/*` endpoints, gated by `DEV_KEY_SERVICE_MASTER_SECRET`). Issue #74
@@ -113,6 +118,91 @@ SIWE message UTF-8-encoded as hex; the signer MUST NOT interpret content.
 |---|---|---|
 | 400 | `invalid_omni_account` | `omni_account` missing, wrong length, non-hex |
 | 400 | `invalid_message_hex`  | `message_hex` missing, non-hex, odd length |
+| 503 | `signer_disabled`      | Same as `/dev/derive-address` |
+| 500 | `internal`             | Unexpected — bug |
+
+### `POST /dev/sign-typed-data`
+
+Added in issue #82. EIP-712 v4 typed-data signing. The signer parses the
+typed-data JSON itself and computes the digest internally — it never trusts
+a caller-supplied prehash. This is what makes the signer's signature a
+meaningful claim about *what was signed*, not just *that something was
+signed*.
+
+#### Request
+
+```json
+{
+  "omni_account": "<64 lowercase hex chars>",
+  "typed_data": {
+    "domain": {
+      "name":              "<string, optional>",
+      "version":           "<string, optional>",
+      "chainId":           <number, optional>,
+      "verifyingContract": "0x<40 hex>, optional",
+      "salt":              "0x<64 hex>, optional"
+    },
+    "types": {
+      "EIP712Domain": [ { "name": "...", "type": "..." }, ... ],
+      "<primaryType>": [ { "name": "...", "type": "..." }, ... ],
+      "<dependent struct types>": [ ... ]
+    },
+    "primaryType": "<string matching a key in `types`>",
+    "message":     { /* values for primaryType fields */ }
+  }
+}
+```
+
+Type-string subset supported in v0:
+
+- `string`, `bytes`, `bool`, `address` (20 bytes)
+- `uint8` / `uint16` / `uint24` / `uint32` / `uint40` / `uint48` / `uint56` /
+  `uint64` / `uint72` / ... / `uint256` (all uint sizes in 8-bit increments)
+- `int8` ... `int256` (all int sizes in 8-bit increments)
+- `bytes1` ... `bytes32` (all fixed-byte sizes)
+- Static arrays `<type>[N]` and dynamic arrays `<type>[]` of any of the
+  above (including struct arrays)
+- Nested struct types defined in `types`
+
+`EIP712Domain` MUST be present in `types`. The fields used from `domain`
+are determined by `types.EIP712Domain` (operator may omit `chainId` if
+their domain does not include it, etc.).
+
+#### Response — 200 OK
+
+```json
+{
+  "signature":         "0x<130 lowercase hex chars>",
+  "address":           "0x<40 lowercase hex chars>",
+  "primary_type_hash": "0x<64 lowercase hex chars>",
+  "domain_separator":  "0x<64 lowercase hex chars>",
+  "digest":            "0x<64 lowercase hex chars>",
+  "key_version":       1
+}
+```
+
+* `signature` is 65 bytes encoded as `0x` + 130 hex chars: `r(32) || s(32) || v(1)`.
+  `v` is normalized to `{0, 1}` (same canonicalization as `/dev/sign-message`).
+* `address` MUST equal the address `/dev/derive-address` returned for the
+  same `omni_account`.
+* `primary_type_hash` is `keccak256(encodeType(primaryType))` — useful for
+  audit-row cross-reference against an ERC-7730 metadata file pinned to the
+  same type hash.
+* `domain_separator` is `keccak256(encodeData(EIP712Domain, domain))` — also
+  useful for audit cross-reference and for verifying that the signer parsed
+  the domain the way the caller expected.
+* `digest` is the final EIP-712 digest the signature was produced over:
+  `keccak256("\x19\x01" || domain_separator || hashStruct(primaryType, message))`.
+* `key_version` is the HKDF derivation domain (see "Versioned derivation"
+  below).
+
+#### Errors
+
+| HTTP | `error` value | Meaning |
+|---|---|---|
+| 400 | `invalid_omni_account` | `omni_account` missing, wrong length, non-hex |
+| 400 | `invalid_typed_data`   | `typed_data` malformed: missing `domain` / `types` / `primaryType` / `message`, unknown type in `types`, type field references a struct not defined in `types`, unsupported type-string subset, value out of range for declared type |
+| 401 | `unauthorized`         | Bearer JWT missing, expired, or `omni_account` mismatch (when JWT auth is enabled) |
 | 503 | `signer_disabled`      | Same as `/dev/derive-address` |
 | 500 | `internal`             | Unexpected — bug |
 
@@ -231,6 +321,6 @@ If you add a new signer backend, add it to that conformance suite.
 
 ---
 
-**Last reviewed:** issue #74 step 1, 2026-05-08.
+**Last reviewed:** issue #82 (ERC-7730 + EIP-712 endpoint), 2026-05-21.
 **Owner:** the signer-edge crate (currently `agentkeys-mock-server::dev_key_service`,
 post-step-2 `agentkeys-tee-worker`).

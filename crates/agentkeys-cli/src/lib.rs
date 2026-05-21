@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod k11;
+pub mod k11_intent;
 pub mod k11_webauthn;
 
 use agentkeys_core::actor_omni::actor_omni_hex;
@@ -1403,6 +1404,164 @@ pub async fn cmd_signer_sign(
     }
 }
 
+/// `agentkeys signer sign-typed-data` — call `/dev/sign-typed-data` on the
+/// configured signer (issue #82). Reads an EIP-712 v4 JSON file (the same
+/// shape MetaMask's `eth_signTypedData_v4` takes), forwards it to the
+/// signer, prints the signature + each digest the signer computed.
+///
+/// With `--preview-7730`, the CLI also renders the operator-facing intent
+/// text against the bundled ERC-7730 catalog (or the dir at
+/// `$AGENTKEYS_7730_DIR`) and prints it before signing — closes the "agent
+/// signed 0xdead…beef without me knowing what it was" gap that the original
+/// issue #82 calls out.
+pub async fn cmd_signer_sign_typed_data(
+    ctx: &CommandContext,
+    signer_url: &str,
+    omni_account: &str,
+    typed_data_file: &str,
+    preview_7730: bool,
+) -> Result<String> {
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
+
+    let json = std::fs::read_to_string(typed_data_file)
+        .with_context(|| format!("read typed-data file {typed_data_file}"))?;
+    let typed_data: agentkeys_core::clear_signing::TypedData =
+        serde_json::from_str(&json).context("parse typed-data JSON")?;
+
+    let mut preview_block: Option<agentkeys_core::clear_signing::ClearSigningPreview> = None;
+    if preview_7730 {
+        let catalog = load_default_catalog().context("load ERC-7730 catalog")?;
+        match agentkeys_core::clear_signing::build_preview(&catalog, typed_data.clone()) {
+            Ok(p) => preview_block = Some(p),
+            Err(e) => eprintln!(
+                "agentkeys signer sign-typed-data: ERC-7730 preview not available ({e}); signing without operator intent text"
+            ),
+        }
+    }
+
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token);
+    let signed = client
+        .sign_eip712(omni_account, &typed_data)
+        .await
+        .map_err(format_signer_error)?;
+
+    if ctx.json_output {
+        let mut body = json!({
+            "signature":          signed.signature,
+            "address":            signed.address,
+            "primary_type_hash":  signed.primary_type_hash,
+            "domain_separator":   signed.domain_separator,
+            "digest":             signed.digest,
+            "key_version":        signed.key_version,
+        });
+        if let Some(p) = preview_block.as_ref() {
+            body["intent_text"] = json!(p.intent_text);
+            body["intent_commitment"] = json!(format!("0x{}", hex::encode(p.intent_commitment)));
+        }
+        Ok(serde_json::to_string_pretty(&body).unwrap())
+    } else {
+        let mut out = String::new();
+        if let Some(p) = preview_block.as_ref() {
+            out.push_str("Operator intent (ERC-7730):\n  ");
+            out.push_str(&p.intent_text);
+            out.push_str("\n\nFields:\n");
+            for (l, v) in &p.fields {
+                out.push_str(&format!("  - {l}: {v}\n"));
+            }
+            out.push_str(&format!(
+                "\nIntent commitment: 0x{}\n\n",
+                hex::encode(p.intent_commitment)
+            ));
+        }
+        out.push_str(&format!(
+            "signature={}\naddress={}\nprimary_type_hash={}\ndomain_separator={}\ndigest={}\nkey_version={}",
+            signed.signature,
+            signed.address,
+            signed.primary_type_hash,
+            signed.domain_separator,
+            signed.digest,
+            signed.key_version,
+        ));
+        Ok(out)
+    }
+}
+
+/// `agentkeys signer preview-7730` — render the operator-facing preview for
+/// a typed-data JSON file WITHOUT signing (issue #82). Useful for dry-runs
+/// against new ERC-7730 files before plumbing them into automated agent
+/// signing.
+pub async fn cmd_signer_preview_7730(
+    ctx: &CommandContext,
+    typed_data_file: &str,
+    seven_thirty_file: Option<&str>,
+) -> Result<String> {
+    let json = std::fs::read_to_string(typed_data_file)
+        .with_context(|| format!("read typed-data file {typed_data_file}"))?;
+    let typed_data: agentkeys_core::clear_signing::TypedData =
+        serde_json::from_str(&json).context("parse typed-data JSON")?;
+
+    let catalog = match seven_thirty_file {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("read 7730 file {path}"))?;
+            let file = agentkeys_core::clear_signing::parser::parse(&raw)
+                .map_err(|e| anyhow!("parse 7730 file: {e}"))?;
+            let mut c = agentkeys_core::clear_signing::ClearSigningCatalog::empty();
+            c.push(file);
+            c
+        }
+        None => load_default_catalog().context("load default ERC-7730 catalog")?,
+    };
+
+    let preview = agentkeys_core::clear_signing::build_preview(&catalog, typed_data)
+        .map_err(|e| anyhow!("build preview: {e}"))?;
+
+    if ctx.json_output {
+        Ok(serde_json::to_string_pretty(&json!({
+            "intent_text":       preview.intent_text,
+            "intent_commitment": format!("0x{}", hex::encode(preview.intent_commitment)),
+            "domain_separator":  format!("0x{}", hex::encode(preview.digests.domain_separator)),
+            "primary_type_hash": format!("0x{}", hex::encode(preview.digests.primary_type_hash)),
+            "digest":            format!("0x{}", hex::encode(preview.digests.final_digest)),
+            "fields":            preview.fields.iter().map(|(l, v)| json!({"label": l, "value": v})).collect::<Vec<_>>(),
+        }))
+        .unwrap())
+    } else {
+        let mut out = String::new();
+        out.push_str("Operator intent (ERC-7730):\n  ");
+        out.push_str(&preview.intent_text);
+        out.push_str("\n\nFields:\n");
+        for (l, v) in &preview.fields {
+            out.push_str(&format!("  - {l}: {v}\n"));
+        }
+        out.push_str(&format!(
+            "\nDigests:\n  domain_separator:  0x{}\n  primary_type_hash: 0x{}\n  digest:            0x{}\n  intent_commitment: 0x{}",
+            hex::encode(preview.digests.domain_separator),
+            hex::encode(preview.digests.primary_type_hash),
+            hex::encode(preview.digests.final_digest),
+            hex::encode(preview.intent_commitment),
+        ));
+        Ok(out)
+    }
+}
+
+/// Load the default ERC-7730 catalog: bundled + (if `$AGENTKEYS_7730_DIR`
+/// is set) every `*.json` file in that directory. Operators ship their own
+/// curated 7730 files via the env var without needing to recompile.
+fn load_default_catalog() -> Result<agentkeys_core::clear_signing::ClearSigningCatalog> {
+    let mut catalog = agentkeys_core::clear_signing::ClearSigningCatalog::bundled();
+    if let Ok(dir) = std::env::var("AGENTKEYS_7730_DIR") {
+        if !dir.is_empty() {
+            catalog
+                .extend_from_dir(&dir)
+                .map_err(|e| anyhow!("load 7730 files from $AGENTKEYS_7730_DIR={dir}: {e}"))?;
+        }
+    }
+    Ok(catalog)
+}
+
 /// `agentkeys whoami` — read-only summary of the current session and the
 /// signer-derived wallet address (if a signer URL is supplied and the
 /// session carries an `omni_account` claim).
@@ -1496,6 +1655,12 @@ fn format_signer_error(e: SignerClientError) -> anyhow::Error {
         }
         SignerClientError::InvalidMessageHex(m) => {
             anyhow!("Error: INVALID_MESSAGE_HEX\n  {}", m)
+        }
+        SignerClientError::InvalidTypedData(m) => {
+            anyhow!(
+                "Error: INVALID_TYPED_DATA\n  {}\n\n  Fix: check the EIP-712 JSON — `types` must include `EIP712Domain`, every type referenced in `primaryType` must be declared, and field values must fit their declared type (uint8 ≤ 255, int8 ∈ [-128, 127], etc.).",
+                m
+            )
         }
         SignerClientError::Internal(m) => anyhow!("Error: SIGNER_INTERNAL\n  {}", m),
         SignerClientError::Transport(m) => anyhow!(

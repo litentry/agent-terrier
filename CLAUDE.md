@@ -80,6 +80,34 @@ Also: never gloss over a partial implementation in a demo doc or runbook. If the
 ## Remote broker host (single entry point)
 All remote-host changes (binary upgrades, systemd edits, nginx/certbot, env tweaks, mock-server redeploys) MUST go through `bash scripts/setup-broker-host.sh` — it's idempotent and auto-detects bootstrap vs upgrade. No ad-hoc `systemctl` edits or hand-built `scp`.
 
+## Heima chain (single entry point)
+All chain bring-up + per-actor binding ceremonies (contract deploy, deployer funding, master device registration, agent creation, scope grants, K11 enrollment, audit-row append, worker smoke) MUST go through `bash scripts/setup-heima.sh` — it's idempotent and orchestrates the existing per-action `heima-*.sh` helpers in order. Same posture as `setup-broker-host.sh`: one command, every step pre-checks state + short-circuits when already done. The per-action helpers stay callable directly for surgical re-runs (`bash scripts/heima-scope-set.sh ...`); `setup-heima.sh` is the end-to-end orchestrator.
+
+## Idempotent remote-setup rule (CLOUD / BLOCKCHAIN / CI / VM)
+**Every script that mutates remote state — AWS / Heima / CI runners / EC2 VMs / Cloudflare / Tencent / IAM / DNS — MUST be idempotent.** A second run with the same inputs MUST exit 0 without re-applying the mutation. This is non-negotiable because:
+
+1. **Operators re-run scripts.** Cloud setup is slow + flaky; a retry-from-the-start posture catches transient failures gracefully only when re-runs are safe.
+2. **CI / CD pipelines re-run scripts.** Every CI redeploy or VM provision invokes the same script; non-idempotent scripts double-create resources, double-fund accounts, double-bill operators.
+3. **The harness re-runs scripts.** `harness/v2-stage{1,2,3}-demo.sh` invokes every chain helper on every run. A non-idempotent helper means the harness can't be used as a regression gate.
+
+Concrete shape for idempotent scripts (per the existing `setup-broker-host.sh` / `heima-*.sh` patterns):
+
+| Mutation type | Pre-check before mutating | Short-circuit shape |
+|---|---|---|
+| Contract deploy | `cast code <addr>` — non-empty means deployed | `skip already-deployed` (log + exit 0) |
+| Chain tx (register / scope / audit append) | `cast call <view-fn>` returning canonical state | `skip already-registered` / `skip config-matches` |
+| Fund EVM account | `cast balance` ≥ requested amount | `skip already-funded` |
+| AWS resource (bucket / role / policy) | `aws s3api head-bucket` / `aws iam get-role` | `skip already-exists` + best-effort `update-*` for drift |
+| Systemd unit | Diff existing `/etc/systemd/system/<unit>` vs target | Write only if drift; `systemctl daemon-reload` only when written |
+| Env-var file | Diff existing file vs target content | Write only if drift |
+| nginx vhost | Diff existing `/etc/nginx/sites-available/<site>` vs target | Write + reload only if drift |
+| DNS A record (Route 53) | `aws route53 list-resource-record-sets` for the name | UPSERT change-batch (no-op when value matches) |
+| Key generation (keypair file) | `[ -f <path> ]` | `skip already-exists` (NEVER overwrite — would invalidate downstream encrypted blobs) |
+
+Output convention: every script logs one of three outcomes per step — `ok proceeding` (mutation applied), `skip <reason>` (no-op), or `fail <reason>` (hard error, exit non-zero). The harness reads these to compute green/red per step.
+
+If a remote-setup script you're writing CAN'T be made idempotent (e.g., one-shot CAS-burn cap-token mint, append-only audit event), explicitly call it out in the script header AND in the runbook ("step N is intentionally append-only; re-runs add a fresh row + advance entryCount"). Otherwise: idempotent or it doesn't ship.
+
 ## AWS local-profile ↔ remote-IAM mapping
 Operator workstations use lowercase AWS profile names; the access key/secret inside each profile authenticates as the corresponding remote IAM user (case differences like `agentKeys-admin` on AWS vs `agentkeys-admin` locally are cosmetic — the key is the binding, not the name). Source-of-truth (`awsp` output):
 

@@ -15,6 +15,8 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+use crate::clear_signing::TypedData;
+
 /// Wire-protocol error codes from `signer-protocol.md`. Daemon code matches
 /// on these (and the transport variants) to drive retry / surface logic.
 #[derive(Debug, Error)]
@@ -26,6 +28,12 @@ pub enum SignerClientError {
     /// 400 `invalid_message_hex` — bug in caller; not retriable.
     #[error("invalid_message_hex: {0}")]
     InvalidMessageHex(String),
+
+    /// 400 `invalid_typed_data` (issue #82) — `typed_data` payload was
+    /// rejected by the signer before any signing happened: malformed JSON,
+    /// unknown type, value out of range for declared type.
+    #[error("invalid_typed_data: {0}")]
+    InvalidTypedData(String),
 
     /// 503 `signer_disabled` — operator must set
     /// `DEV_KEY_SERVICE_MASTER_SECRET` (dev) or attest the TEE (prod).
@@ -75,7 +83,21 @@ pub struct SignedMessage {
     pub key_version: u8,
 }
 
-/// The daemon's view of the signer. Two methods, both pure RPC.
+/// Successful response from `/dev/sign-typed-data` (issue #82). Carries
+/// the signature plus every digest the signer computed internally — so the
+/// caller can cross-reference against the ERC-7730 metadata file pinned to
+/// the same domain separator / primary type hash for audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedTypedData {
+    pub signature: String,
+    pub address: String,
+    pub primary_type_hash: String,
+    pub domain_separator: String,
+    pub digest: String,
+    pub key_version: u8,
+}
+
+/// The daemon's view of the signer. Three methods, all pure RPC.
 #[async_trait]
 pub trait SignerClient: Send + Sync {
     /// Resolve `omni_account` (64 lowercase hex chars) to its derived EVM
@@ -93,6 +115,22 @@ pub trait SignerClient: Send + Sync {
         omni_account: &str,
         message_bytes: &[u8],
     ) -> Result<SignedMessage, SignerClientError>;
+
+    /// EIP-712-sign `typed_data` under the keypair derived from
+    /// `omni_account` (issue #82). The signer parses the typed-data JSON
+    /// itself and computes the digest internally — callers MUST NOT pass a
+    /// pre-hashed value.
+    ///
+    /// Returns the signature + every intermediate digest the signer
+    /// produced (`primary_type_hash`, `domain_separator`, final `digest`),
+    /// so the daemon can cross-reference against an ERC-7730 metadata file
+    /// and emit an audit row whose intent commitment binds to the same
+    /// digest the signer signed over.
+    async fn sign_eip712(
+        &self,
+        omni_account: &str,
+        typed_data: &TypedData,
+    ) -> Result<SignedTypedData, SignerClientError>;
 }
 
 /// HTTP implementation of `SignerClient` — talks to the dev_key_service
@@ -221,6 +259,52 @@ impl SignerClient for HttpSignerClient {
         }
         Err(map_error(status, &body))
     }
+
+    async fn sign_eip712(
+        &self,
+        omni_account: &str,
+        typed_data: &TypedData,
+    ) -> Result<SignedTypedData, SignerClientError> {
+        let url = format!("{}/dev/sign-typed-data", self.base_url);
+        let mut req = self.http.post(&url).json(&serde_json::json!({
+            "omni_account": omni_account,
+            "typed_data": typed_data,
+        }));
+        if let Some(jwt) = &self.session_jwt {
+            req = req.header("Authorization", format!("Bearer {jwt}"));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SignerClientError::Transport(format!("POST {url}: {e}")))?;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| SignerClientError::Transport(format!("parse JSON: {e}")))?;
+
+        if status == 200 {
+            let pick = |k: &'static str| -> Result<String, SignerClientError> {
+                body[k]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| SignerClientError::Unexpected {
+                        status,
+                        error: None,
+                        message: Some(format!("missing '{k}'")),
+                    })
+            };
+            return Ok(SignedTypedData {
+                signature: pick("signature")?,
+                address: pick("address")?,
+                primary_type_hash: pick("primary_type_hash")?,
+                domain_separator: pick("domain_separator")?,
+                digest: pick("digest")?,
+                key_version: body["key_version"].as_u64().unwrap_or(0) as u8,
+            });
+        }
+        Err(map_error(status, &body))
+    }
 }
 
 /// Translate a non-2xx response body into a typed `SignerClientError`,
@@ -231,6 +315,7 @@ fn map_error(status: u16, body: &serde_json::Value) -> SignerClientError {
     match (status, code) {
         (400, "invalid_omni_account") => SignerClientError::InvalidOmniAccount(message),
         (400, "invalid_message_hex") => SignerClientError::InvalidMessageHex(message),
+        (400, "invalid_typed_data") => SignerClientError::InvalidTypedData(message),
         (401, "unauthorized") => SignerClientError::Unauthorized(message),
         (503, "signer_disabled") => SignerClientError::SignerDisabled(message),
         (500, "internal") => SignerClientError::Internal(message),
