@@ -57,6 +57,23 @@ pub struct WhoAmIResponse {
 #[derive(Debug, Deserialize)]
 pub struct ApproveRequest {
     pub expected_challenge_hex: String,
+    /// **Preferred** — typed K11 operation intent (per
+    /// `wiki/k11-intent-conventions.md`). Deserializes into
+    /// `K11OpIntent`; rendered via the shared formatter so the
+    /// companion's K11 page is byte-for-byte uniform with the primary's
+    /// rendering of the same op. When present, this field WINS over the
+    /// raw `intent_text` + `intent_fields` below.
+    #[serde(default)]
+    pub intent_op: Option<agentkeys_cli::k11_intent::K11OpIntent>,
+    /// Legacy raw fallback — operator-readable headline + per-field
+    /// rows. Kept for back-compat with callers that haven't migrated to
+    /// `intent_op` yet; ignored when `intent_op` is set.
+    #[serde(default)]
+    pub intent_text: Option<String>,
+    /// Legacy raw fallback — `Label=Value` rows. Ignored when `intent_op`
+    /// is set.
+    #[serde(default)]
+    pub intent_fields: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,13 +143,38 @@ async fn approve(
     info!(
         operator_omni = %state.operator_omni,
         challenge = %req.expected_challenge_hex,
+        typed_op = req.intent_op.is_some(),
+        legacy_intent = ?req.intent_text,
+        legacy_field_count = req.intent_fields.len(),
         "companion received approval request; opening Touch ID prompt"
     );
 
-    let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_for_chain(
+    // Typed-intent path wins: it renders via the shared formatter so
+    // the companion's prompt is byte-for-byte uniform with the
+    // primary's rendering of the same op. Legacy raw `intent_text` +
+    // `intent_fields` are the fallback for callers that haven't
+    // migrated yet.
+    let intent = if let Some(op) = req.intent_op.as_ref() {
+        op.render()
+    } else {
+        agentkeys_cli::k11_webauthn::K11IntentContext {
+            text: req.intent_text.clone(),
+            fields: req
+                .intent_fields
+                .iter()
+                .map(|raw| match raw.split_once('=') {
+                    Some((label, value)) => (label.to_string(), value.to_string()),
+                    None => (raw.clone(), String::new()),
+                })
+                .collect(),
+        }
+    };
+
+    let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_for_chain_with_intent(
         &state.operator_omni,
         challenge,
         &state.rp_id,
+        intent,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("webauthn: {e}")))?;

@@ -262,16 +262,20 @@ dependencies = [
 name = "agentkeys-worker-audit"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-core",
  "anyhow",
  "axum",
+ "ciborium",
  "clap",
  "hex",
+ "http-body-util",
  "reqwest",
  "serde",
  "serde_json",
  "sha3",
  "thiserror",
  "tokio",
+ "tower 0.4.13",
  "tracing",
  "tracing-subscriber",
 ]

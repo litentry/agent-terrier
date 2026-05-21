@@ -465,6 +465,8 @@ Per §9 stages 0–4. Identity ceremonies vary per identity type but converge on
 
 **Q7 fix:** email-account compromise alone cannot rebind. An attacker who phished the email account can complete the identity ceremony but cannot complete the WebAuthn ceremony on the legitimate user's hardware.
 
+**Operator-readable intent on the K11 confirmation page.** WebAuthn's OS-level Touch ID prompt is fixed by the platform — it cannot display application text. AgentKeys closes that gap on the **localhost confirmation page** served before `navigator.credentials.get()` fires: every master-mutation call (scope grant/revoke, device add/revoke, K10 rotation, recovery, audit-row mint, typed-data sign) provides a `K11IntentContext { text, fields }` rendered prominently above the raw challenge hex. The cryptographic binding is unchanged (`challenge = sha256(message)`); the intent text is display-only AND populates `AuditEnvelope.intent_text` + `intent_commitment` so the chain commitment binds to what the operator actually saw. See [`wiki/k11-webauthn-intent-rendering.md`](../../wiki/k11-webauthn-intent-rendering.md) for the API + worked examples; implementation in [`crates/agentkeys-cli/src/k11_webauthn.rs`](../../crates/agentkeys-cli/src/k11_webauthn.rs) (`assert_webauthn_with_intent`, `assert_webauthn_for_chain_with_intent`).
+
 ### 10.2 Agent bootstrap (link-code only — single path)
 
 **Agents have exactly one bootstrap path:** a one-time link code minted by an authenticated master. There is no agent-runs-its-own-identity-ceremony, no agent-recovers-via-OAuth, no shared-bearer alternative. One path = one test surface, one threat model.
@@ -804,10 +806,15 @@ Callers: broker + workers only. Daemons never talk to the signer directly — al
 /derive-cred-kek {operator_omni, k3_epoch}            → KEK
 /sts-credentials {actor_omni, role_arn, ttl}          → AWS STS creds
 /sign/siwe {actor_omni, siwe_message}                 → EIP-191 sig
+/sign/typed-data {actor_omni, typed_data}             → EIP-712 sig + digest + type_hash + domain_sep (issue #82)
 /sign/audit-row {actor_omni, audit_row}               → audit-chain sig
 /verify/k10-sig {device_pubkey, payload, sig}         → bool
 /verify/k11-assertion {cred_id, payload, assertion}   → bool
 ```
+
+The mock-server backend exposes `/sign/typed-data` under the legacy
+`/dev/sign-typed-data` path alongside `/dev/sign-message`. TEE-worker
+swap-in MUST preserve both shapes; see [`signer-protocol.md`](signer-protocol.md).
 
 ### 14.3 K3 rotation handling
 
@@ -866,6 +873,255 @@ Three tiers, operator-selected per deployment.
 V2 default: tier C. Tier A is the gas-subsidy escape hatch. Tier B is for operators who want self-sovereignty without `current_master_wallet` exposure.
 
 The audit-service worker is stateless for tier C (every event independently signed); maintains a relay batcher for tiers A/B that drains to chain at configurable cadence (default 1 minute or 256 events, whichever first).
+
+**Audit-row schema with intent commitment (issue #82).** Each audit row carries two optional fields when the underlying event was a typed-data sign (`/sign/typed-data` on the signer):
+
+| Field | Type | Source | Use |
+|---|---|---|---|
+| `signed_intent_text` | string | rendered ERC-7730 `interpolatedIntent` (e.g. `"Approve USDC 1000.00 to Uniswap v4 router"`) | Operator-readable record of *what was authorized*, not just *that something was signed* |
+| `signed_intent_hash` | 32-byte hex | `keccak256(intent_text || "\|" || digest)` | Cryptographically commits the rendered intent to the EIP-712 digest the signer produced. Auditors verifying a sign event re-render the intent from the same ERC-7730 file and check the commitment matches. |
+
+Backward compatible: pre-#82 audit rows have these fields absent; tier C
+chain events keep their current shape (the commitment is stored in
+`signed_intent_hash` only — the rendered text is off-chain in the worker's
+S3 row). A future contract revision will extend `CredentialAudit.append`
+to take the commitment hash as a 33rd byte; until then, tier C chain
+events index the audit-row by `signed_intent_hash` via S3 path.
+
+### 15.3a Unified audit envelope — `AuditEnvelope v1`
+
+The schema documented above (`signed_intent_text` + `signed_intent_hash`) is
+specific to **typed-data signs**. The rest of the audit surface today
+carries only the narrow `(actor_omni, service_hash, op_type ∈ {0,1,2}, payload_hash)`
+shape that [`CredentialAudit.sol`](../../crates/agentkeys-chain/src/CredentialAudit.sol)
+takes — sufficient for credentials CRUD, useless for sign events, scope
+mutations, device mutations, payments, memory ops, or email. An external
+explorer (e.g. [`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials)
+per §22a.6) wanting to render a uniform timeline across all audit-producing
+surfaces has to know N different shapes today.
+
+`AuditEnvelope v1` is the canonical abstract format that every audit-producing
+surface MUST emit going forward, and that the chain + explorer + indexer
+consume.
+
+#### Wire shape (off-chain, served by `agentkeys-worker-audit`)
+
+```
+AuditEnvelope {
+  version:          u8,                // = 1
+  ts_unix:          u64,               // server-side at queue time
+  actor_omni:       [u8; 32],          // who performed the op
+  operator_omni:    [u8; 32],          // whose data-class boundary it touched
+  op_kind:          u8,                // see canonical table below
+  op_body:          CBOR_bytes,        // op-kind-specific (opaque to chain + old indexers)
+  result:           u8,                // 0=Success, 1=Failure, 2=NotPermitted
+  intent_text:      Option<String>,    // operator-readable (PR #95)
+  intent_commitment: Option<[u8; 32]>, // keccak256(intent_text || 0x7c || op_payload_digest)
+}
+```
+
+Encoded canonically as deterministic CBOR (CTAP2 / RFC 8949 §4.2.1). The
+worker computes `envelope_hash = keccak256(canonical_cbor(envelope))` and
+exposes:
+
+- `POST /v1/audit/append` — accept envelope, queue, return `envelope_hash`.
+- `GET /v1/audit/envelope/<hash>` — return the full envelope (used by the
+  explorer to fetch the body after seeing the on-chain hash).
+
+#### On-chain commitment
+
+`CredentialAudit.appendV2(operatorOmni, actorOmni, opKind, envelopeHash)`
+lands alongside the v1 `append` shape (additive — no break). For tier A
+(Merkle batched), `appendRootV2(operatorOmni, merkleRoot, opKindBitmap)`
+carries an `opKindBitmap` (`bytes32`, each bit indexes one of 256 possible
+op_kinds present in the batch) so explorers can filter without fetching
+every leaf.
+
+Events:
+
+```
+event AuditAppendedV2(
+  bytes32 indexed operatorOmni,
+  bytes32 indexed actorOmni,
+  uint8   indexed opKind,
+  bytes32 envelopeHash
+);
+
+event AuditRootAppendedV2(
+  bytes32 indexed operatorOmni,
+  bytes32 indexed merkleRoot,
+  bytes32 opKindBitmap,
+  uint64  entryCount
+);
+```
+
+V2 is event-only — no on-chain storage of entries or roots. The chain's
+canonical history is the indexed event log; indexers reconstruct the
+per-operator timeline by filtering `AuditAppendedV2` topics. Position
+within the operator's stream (an `entryIndex` analog) is derivable from
+block number + log index pairs, so the contract doesn't need to carry it
+explicitly.
+
+The `indexed opKind` topic lets the explorer query "show all this operator's
+typed-data signs in chain history" with a single `eth_getLogs` filter,
+without scanning every audit row.
+
+#### Canonical `op_kind` byte assignments
+
+PRs adding new op_kinds MUST append a row here; **numbers are never reused
+and never reordered**. Grouped by 10s leaves room for related ops.
+
+| Kind | Byte | `op_body` schema | Worker that emits |
+|---|---|---|---|
+| `CredStore` | 0 | `{service: string, payload_hash: [u8;32]}` | credentials-service |
+| `CredFetch` | 1 | `{service: string, cap_hash: [u8;32]}` | credentials-service |
+| `CredTeardown` | 2 | `{actor_target: [u8;32]}` | credentials-service |
+| `MemoryPut` | 10 | `{key: string, payload_hash: [u8;32]}` | memory-service |
+| `MemoryGet` | 11 | `{key: string, cap_hash: [u8;32]}` | memory-service |
+| `MemoryTeardown` | 12 | `{actor_target: [u8;32]}` | memory-service |
+| `SignEip191` | 20 | `{message_digest: [u8;32], wallet: [u8;20]}` | signer (via daemon callback) |
+| `SignEip712` | 21 | `{chain_id: u64, verifying_contract: [u8;20], primary_type: string, type_hash: [u8;32], domain_separator: [u8;32], digest: [u8;32]}` | signer (via daemon callback) |
+| `PaymentEscrowRedeem` | 30 | `{escrow_addr: [u8;20], amount: U256, recipient: [u8;20], chain_id: u64}` | payment-service (P-2 mode) |
+| `PaymentDirect` | 31 | `{rail: enum, ref: string, amount_minor: u64, currency: string}` | payment-service (P-1/P-3) |
+| `ScopeGrant` | 40 | `{agent_omni: [u8;32], service: string, max_calls: u32, max_amount: U256}` | broker (via callback) |
+| `ScopeRevoke` | 41 | `{agent_omni: [u8;32], service: string}` | broker (via callback) |
+| `DeviceAdd` | 50 | `{device_key_hash: [u8;32], role_bits: u8, attestation_hash: [u8;32]}` | SidecarRegistry hook |
+| `DeviceRevoke` | 51 | `{device_key_hash: [u8;32]}` | SidecarRegistry hook |
+| `K10Rotate` | 52 | `{old_device_key_hash: [u8;32], new_device_key_hash: [u8;32]}` | SidecarRegistry hook |
+| `EmailSend` | 60 | `{to_hash: [u8;32], subject_hash: [u8;32], message_id: string}` | email-service |
+| `EmailReceive` | 61 | `{from_hash: [u8;32], message_id: string, payload_hash: [u8;32]}` | email-service |
+| `K3EpochAdvance` | 70 | `{old_epoch: u64, new_epoch: u64, gov_tx: [u8;32]}` | K3EpochCounter hook |
+
+Byte ranges `8-9`, `13-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `80-255` are reserved for future extensions in the same family.
+
+#### Forward-compat / non-break design
+
+The trade-off when a new op_kind lands is **"uglier UI temporarily for old
+explorers" — never "broken explorer / dropped event"**. Eight design
+invariants make this work:
+
+1. **`op_kind` is a `u8`, not a sealed enum.** Indexers/explorers MUST treat
+   unknown values as `Unknown(byte)` with a generic fallback renderer.
+   Panicking, dropping, or 5xx-ing on an unknown op_kind is a bug, not
+   correct behavior.
+
+2. **Envelope-level fields are stable across all op_kinds.** CBOR-decoding
+   `(version, ts_unix, actor_omni, operator_omni, op_kind, intent_text,
+   intent_commitment, result)` works for **any** op_kind. Only `op_body` is
+   op-kind-specific. The explorer can ALWAYS render a meaningful row from
+   envelope-level fields, even if it can't decode the body.
+
+3. **`version` is gated on envelope-level breakage only.** Bump `version`
+   when the top-level fields change (adding a required field, removing
+   one). Adding a new op_kind does NOT bump version. Old indexers seeing
+   `version: 1` keep working; `version: 2` they skip with a "needs
+   upgrade" log line.
+
+4. **Explorer ships a generic fallback renderer.** Default UI for unknown
+   op_kind: shows the op_kind byte + actor + operator + timestamp +
+   `intent_text` (if present) + a "raw body" expander. New op_kinds never
+   break the timeline page — they just look generic until the explorer
+   ships a kind-specific renderer.
+
+5. **Worker passes through opaque `op_body` bytes.** Older workers that
+   don't recognize a new op_kind variant still know to forward the CBOR
+   blob untouched in `GET /v1/audit/envelope`. Indexers consuming the
+   JSON get `op_body` as base64-encoded opaque bytes (with `intent_text`
+   + `intent_commitment` still readable from envelope level).
+
+6. **Chain contract is op_kind-agnostic.** `appendV2` takes `opKind` as
+   `uint8` and `envelopeHash` as `bytes32`. No on-chain decode of
+   `op_body`. New op_kinds need ZERO contract redeploys.
+
+7. **Canonical op_kind table lives in arch.md.** PRs adding new op_kinds
+   MUST append a row to the table above. Numbers never reused and never
+   reordered. Reviewer can grep arch.md for the new byte to confirm it's
+   not a collision before merging.
+
+8. **Test contract per new op_kind.** Every PR adding an op_kind ships
+   THREE tests minimum:
+   - **Worker**: CBOR encode + decode roundtrip on canonical fixtures.
+   - **Explorer**: "old explorer + envelope with new op_kind →
+     graceful unknown render, no crash, no dropped event."
+   - **Doc**: arch.md table row appended; no number collision.
+
+#### Migration sequencing
+
+| Phase | Where | What lands | Backwards-compat property |
+|---|---|---|---|
+| A | `arch.md` (this section) | The schema + table + non-break invariants. **Lands in PR #95.** | None — doc only. |
+| B | `agentkeys-worker-audit` + `agentkeys-core` | New `AuditEnvelope` struct; existing call sites migrated to emit it; `/v1/audit/envelope/<hash>` endpoint; old `AuditEvent` retained for one cycle. | Old indexers using `/v1/audit/append` v1 shape keep working; envelope-level fields readable from the new endpoint. |
+| C | `crates/agentkeys-chain/src/CredentialAudit.sol` | `appendV2(operatorOmni, actorOmni, opKind, envelopeHash)` + `appendRootV2(... opKindBitmap)` + the two events. Contract redeploy on Heima Mainnet. **Old `append` and `appendRoot` retained on the same contract**, so existing indexers keep working until they migrate. | Old `AuditAppended` event still emitted by `append` callers; new indexers watch `AuditAppendedV2`. |
+| D | [`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials) — tracked as [subscan-essentials#12](https://github.com/litentry/subscan-essentials/issues/12) | Decoder for `AuditAppendedV2` + `AuditRootAppendedV2` events; HTTP client to fetch `GET /v1/audit/envelope/<hash>` from the worker; per-op_kind renderer plug-in interface. | Old `AuditAppended` decoder retained. |
+| E | [`litentry/subscan-essentials-ui-react`](https://github.com/litentry/subscan-essentials-ui-react) | Per-op_kind renderer components + the generic `Unknown(byte)` fallback. Routes `/agentkeys/audit/<operator_omni>` use the V2 envelope feed. | Old route shapes preserved. |
+| F | Sign / scope / device / payment / email / K3 worker call sites | Each emits its own op_kind via `AuditEnvelope`; the bytes are claimed via PRs that each touch the table in arch.md exactly once. | None — each row is additive. |
+
+Phases B / C / F are tracked at [agentKeys#97](https://github.com/litentry/agentKeys/issues/97).
+Phases D / E are tracked at [subscan-essentials#12](https://github.com/litentry/subscan-essentials/issues/12).
+
+Phases B-E are **independent** once A lands — they can ship in parallel
+across the three repos. Phase A is the lock-in moment; everything else
+follows the canonical table.
+
+### 15.3b How to add a new op_kind — the 5-step ritual
+
+Adding a new audit op_kind (e.g. a new worker emits something the
+canonical table doesn't yet cover) is a deliberately small + repeatable
+change. Per the non-break invariants above, each new op_kind costs at
+most "uglier UI temporarily for old explorers" — never "broken explorer
+/ dropped event." Five steps, in this exact order:
+
+1. **Pick the byte.** Claim the next unused byte in the appropriate
+   family range from the canonical table in §15.3a (creds 0-9,
+   memory 10-19, signs 20-29, payments 30-39, scope 40-49, device
+   50-59, email 60-69, K3 70-79). If your op is in a NEW family,
+   claim the next unused 10-block (80-89, 90-99, …). Never reuse a
+   number; never reorder existing rows.
+
+2. **Append a row to §15.3a canonical op_kind table.** Format:
+   `\| KindName \| Byte \| {field: type, …} schema \| Worker that emits \|`.
+   The schema lists every field in the typed `op_body` — exactly the
+   shape the corresponding `XxxBody` struct in
+   [`agentkeys-core::audit::bodies`](../../crates/agentkeys-core/src/audit/bodies.rs)
+   serializes to.
+
+3. **Add the Rust variant.** Three files in
+   [`crates/agentkeys-core/src/audit/`](../../crates/agentkeys-core/src/audit/):
+   - `op_kind.rs`: new variant in the `AuditOpKind` enum at the byte
+     you claimed + arm in `from_u8` + arm in `label`.
+   - `bodies.rs`: new `XxxBody` struct with serde derives, fields
+     matching the arch.md table row.
+   - `mod.rs`: new variant in the `TypedAuditBody` enum + arm in
+     `TypedAuditBody::from_envelope`.
+
+4. **Wire the emit site.** The component that performs the op
+   (credentials-service / memory-service / signer / broker / payment-
+   service / email-service / SidecarRegistry hook / K3EpochCounter
+   hook) calls
+   [`agentkeys_core::audit::envelope_for(...)`](../../crates/agentkeys-core/src/audit/client.rs)
+   to build the envelope, then `AuditClient::append(...)` to emit it
+   to the audit-service worker. The worker stores the envelope by hash
+   and (separately, batched) commits the hash on-chain via
+   `CredentialAudit.appendV2(...)` (after Phase C redeploy).
+
+5. **Ship the three required tests.** Each new op_kind PR MUST ship:
+   - **Worker test**: CBOR encode + decode roundtrip on a canonical
+     fixture for the new body shape.
+   - **Explorer test**: old explorer + envelope with the new op_kind
+     → graceful `Unknown(byte)` fallback render, no crash, no dropped
+     event. Lives in [`subscan-essentials`](https://github.com/litentry/subscan-essentials).
+   - **Doc test / lint**: the new arch.md row's `Byte` is unique
+     across the table (the existing
+     [`audit::op_kind::tests::all_byte_values_unique`](../../crates/agentkeys-core/src/audit/op_kind.rs)
+     enforces this from the Rust side — keep the doc + code in sync).
+
+**Critically:** never bump `ENVELOPE_VERSION` for a new op_kind. The
+version field is reserved for envelope-level changes (adding /
+removing top-level fields). Adding a new op_kind goes through this
+ritual at v1 — that's the whole point of the open-enum design.
+
+**Operator-facing detailed guide:** see [`wiki/audit-envelope-add-op-kind.md`](../../wiki/audit-envelope-add-op-kind.md)
+for a worked example + the full PR checklist.
 
 ### 15.4 email-service
 
@@ -1364,6 +1620,7 @@ The architecture is intentionally pluggable on six axes. Each axis has a default
 | **Chain layer** | Litentry/Heima parachain (built-in profile `heima`, chain ID 212013) | Any EVM-compatible chain (Base, Ethereum, Optimism, Arbitrum, Moonbeam, Astar, permissioned substrates like Aliyun BaaS / Hyperledger / Quorum) | **Named chain profiles** — `crates/agentkeys-core/src/chain_profile.rs` ships 7 built-ins (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil); operator-custom chains via `$AGENTKEYS_CHAIN_PROFILE_FILE` JSON. CLI `--chain <name>`; daemon / broker / workers all read the same profile. See §22a below. |
 | **Worker runtime** | AWS Lambda + API Gateway | axum microservice (vendor-neutral); Cloudflare Worker (edge); Tencent SCF (China) | Worker shape per §15 is uniform across runtimes |
 | **Payment rail** | Per mode: P-1 service-pool / P-2 escrow / P-3 direct | Mode + upstream (Stripe, USDC, SOL, fiat) | Per-mode plugins layer on the §15.5 wire shape |
+| **Clear-signing metadata** (issue #82) | Bundled ERC-7730 v2 set under `agentkeys-core::clear_signing::fixtures/` (USDC permit + curated DEX routers + permit2) | Registry fetch from `github.com/ethereum/clear-signing-erc7730-registry` at daemon startup; on-chain registry / IPFS-pinned + signature-verified | `ClearSigningCatalog` trait in [`crates/agentkeys-core/src/clear_signing/`](../../crates/agentkeys-core/src/clear_signing/); bundled → registry-cached → on-chain progression. Operator-custom files via `$AGENTKEYS_7730_DIR` env var |
 
 **Pluggability is the point.** No single backend is load-bearing for the architecture; the contracts (auth-plugin trait, signer-protocol, audit trait, worker shape, chain ABI) are. This is what lets:
 

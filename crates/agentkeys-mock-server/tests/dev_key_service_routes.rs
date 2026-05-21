@@ -466,3 +466,199 @@ async fn signer_only_session_endpoint_absent() {
     // signer-only router has no /session route → 404
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ── /dev/sign-typed-data tests (issue #82) ────────────────────────────────
+
+fn usdc_permit_typed_data(value: &str) -> Value {
+    json!({
+        "domain": {
+            "name": "USD Coin",
+            "version": "2",
+            "chainId": 1,
+            "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "types": {
+            "EIP712Domain": [
+                { "name": "name",              "type": "string"  },
+                { "name": "version",           "type": "string"  },
+                { "name": "chainId",           "type": "uint256" },
+                { "name": "verifyingContract", "type": "address" }
+            ],
+            "Permit": [
+                { "name": "owner",    "type": "address" },
+                { "name": "spender",  "type": "address" },
+                { "name": "value",    "type": "uint256" },
+                { "name": "nonce",    "type": "uint256" },
+                { "name": "deadline", "type": "uint256" }
+            ]
+        },
+        "primaryType": "Permit",
+        "message": {
+            "owner":   "0x1111111111111111111111111111111111111111",
+            "spender": "0xaaaabbbbccccddddeeeeffff0000111122223333",
+            "value":   value,
+            "nonce":   "0",
+            "deadline": "1900000000"
+        }
+    })
+}
+
+#[tokio::test]
+async fn sign_typed_data_returns_signature_address_digests() {
+    let master = [0x44u8; 32];
+    let omni = fixed_omni();
+
+    let (status, body) = post_json(
+        router_with_signer(master),
+        "/dev/sign-typed-data",
+        json!({
+            "omni_account": omni,
+            "typed_data": usdc_permit_typed_data("1500000"),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sig = body["signature"].as_str().unwrap();
+    assert!(sig.starts_with("0x"));
+    assert_eq!(sig.len(), 2 + 130, "signature must be 65 bytes hex");
+
+    let address = body["address"].as_str().unwrap();
+    assert!(address.starts_with("0x"));
+    assert_eq!(address.len(), 42);
+
+    for k in ["primary_type_hash", "domain_separator", "digest"] {
+        let h = body[k].as_str().unwrap_or_else(|| panic!("missing {k}"));
+        assert!(h.starts_with("0x"));
+        assert_eq!(h.len(), 2 + 64, "{k} must be 32 bytes hex");
+    }
+    assert_eq!(body["key_version"], 1);
+}
+
+#[tokio::test]
+async fn sign_typed_data_address_matches_derive_response() {
+    let master = [0x44u8; 32];
+    let omni = fixed_omni();
+
+    let (s1, derive) = post_json(
+        router_with_signer(master),
+        "/dev/derive-address",
+        json!({ "omni_account": omni }),
+    )
+    .await;
+    let (s2, sign) = post_json(
+        router_with_signer(master),
+        "/dev/sign-typed-data",
+        json!({
+            "omni_account": omni,
+            "typed_data": usdc_permit_typed_data("1500000"),
+        }),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(derive["address"], sign["address"]);
+}
+
+#[tokio::test]
+async fn sign_typed_data_rejects_unknown_primary_type() {
+    let master = [0u8; 32];
+    let mut td = usdc_permit_typed_data("1500000");
+    td["primaryType"] = json!("NoSuchType");
+    let (status, body) = post_json(
+        router_with_signer(master),
+        "/dev/sign-typed-data",
+        json!({
+            "omni_account": fixed_omni(),
+            "typed_data":   td,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_typed_data");
+}
+
+#[tokio::test]
+async fn sign_typed_data_rejects_out_of_range_uint() {
+    let master = [0u8; 32];
+    let mut td = usdc_permit_typed_data("1500000");
+    // Change `value` field to `uint8` so the actual value (1_500_000) overflows.
+    td["types"]["Permit"][2]["type"] = json!("uint8");
+    let (status, body) = post_json(
+        router_with_signer(master),
+        "/dev/sign-typed-data",
+        json!({
+            "omni_account": fixed_omni(),
+            "typed_data":   td,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_typed_data");
+}
+
+#[tokio::test]
+async fn sign_typed_data_returns_503_when_signer_disabled() {
+    let app = router_without_signer();
+    let (status, body) = post_json(
+        app,
+        "/dev/sign-typed-data",
+        json!({
+            "omni_account": fixed_omni(),
+            "typed_data":   usdc_permit_typed_data("1500000"),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "signer_disabled");
+}
+
+#[tokio::test]
+async fn sign_typed_data_recovers_to_derived_address() {
+    use sha3::{Digest, Keccak256};
+
+    let master = [0x55u8; 32];
+    let omni = fixed_omni();
+
+    let (_, derive) = post_json(
+        router_with_signer(master),
+        "/dev/derive-address",
+        json!({ "omni_account": omni }),
+    )
+    .await;
+    let derived = derive["address"].as_str().unwrap().to_string();
+
+    let (status, sign) = post_json(
+        router_with_signer(master),
+        "/dev/sign-typed-data",
+        json!({
+            "omni_account": omni,
+            "typed_data":   usdc_permit_typed_data("42"),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Recover the signing public key from the signature + digest the signer
+    // emitted, and assert it derives to the same address.
+    let sig_bytes =
+        hex::decode(sign["signature"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let digest_bytes =
+        hex::decode(sign["digest"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+
+    let recovery_id = k256::ecdsa::RecoveryId::try_from(sig_bytes[64]).unwrap();
+    let signature = k256::ecdsa::Signature::from_slice(&sig_bytes[..64]).unwrap();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&digest_bytes);
+    let vk =
+        k256::ecdsa::VerifyingKey::recover_from_prehash(&digest, &signature, recovery_id).unwrap();
+
+    let encoded_point = vk.to_encoded_point(false);
+    let pubkey_bytes = encoded_point.as_bytes();
+    let mut h = Keccak256::new();
+    h.update(&pubkey_bytes[1..]);
+    let pubkey_hash = h.finalize();
+    let recovered = format!("0x{}", hex::encode(&pubkey_hash[12..]));
+
+    assert_eq!(recovered, derived);
+}

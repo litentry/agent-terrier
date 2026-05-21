@@ -74,6 +74,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/audit/flush/:operator_omni", post(handlers::flush_one))
         .route("/v1/audit/flush-all", post(handlers::flush_all))
         .route("/v1/audit/queue-size/:operator_omni", get(handlers::queue_size))
+        // V2 endpoints (arch.md §15.3a, issue #97 phase B). V1 stays so
+        // existing callers keep working during the migration cycle.
+        .route("/v1/audit/append/v2", post(handlers::append_v2))
+        .route("/v1/audit/envelope/:hash", get(handlers::get_envelope))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&args.bind).await?;

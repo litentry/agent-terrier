@@ -38,11 +38,42 @@ pub struct State {
     queues: Mutex<HashMap<String, Vec<AuditEvent>>>,
     /// Where to drop a leaves-jsonl file per flush. Defaults to /tmp.
     pub leaves_dir: String,
+    /// `envelope_hash` (lowercased 0x-hex) → canonical CBOR bytes.
+    /// Populated by `POST /v1/audit/append/v2`; read by `GET
+    /// /v1/audit/envelope/<hash>`. Per arch.md §15.3a issue #97 phase B.
+    ///
+    /// In-memory for v0 — the chain commitment is the durability
+    /// mechanism; if the worker restarts before a chain `appendV2` lands,
+    /// callers re-emit. Persistent storage (e.g., S3
+    /// `s3://<vault>/audit/envelopes/<hash>.cbor`) is tracked as a
+    /// follow-up alongside the contract redeploy.
+    envelopes: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl State {
     pub fn new(leaves_dir: String) -> Self {
-        Self { queues: Mutex::new(HashMap::new()), leaves_dir }
+        Self {
+            queues: Mutex::new(HashMap::new()),
+            leaves_dir,
+            envelopes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Store a canonical-CBOR-encoded `AuditEnvelope` keyed by its
+    /// `envelope_hash`. The hash format is lowercased 0x-hex (matches the
+    /// `GET` endpoint's path-arg shape).
+    pub async fn store_envelope(&self, envelope_hash_hex: String, cbor: Vec<u8>) {
+        let mut e = self.envelopes.lock().await;
+        e.insert(envelope_hash_hex, cbor);
+    }
+
+    /// Retrieve a canonical-CBOR envelope by `envelope_hash` (lowercased
+    /// 0x-hex). Returns `None` if the hash is unknown to this worker (it
+    /// was committed on chain by another worker instance, or never
+    /// emitted, or the worker restarted).
+    pub async fn get_envelope(&self, envelope_hash_hex: &str) -> Option<Vec<u8>> {
+        let e = self.envelopes.lock().await;
+        e.get(envelope_hash_hex).cloned()
     }
 
     /// Append a single event. Returns the new queue length for this operator.

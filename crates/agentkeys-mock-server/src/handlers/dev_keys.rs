@@ -30,6 +30,14 @@ pub struct SignMessageRequest {
     pub message_hex: String,
 }
 
+/// Issue #82 — typed-data sign request. `typed_data` carries the canonical
+/// EIP-712 v4 JSON shape (matches MetaMask `eth_signTypedData_v4`).
+#[derive(Deserialize)]
+pub struct SignTypedDataRequest {
+    pub omni_account: String,
+    pub typed_data: agentkeys_core::clear_signing::TypedData,
+}
+
 /// Minimal JWT claims we care about for verification.
 #[derive(Debug, Serialize, Deserialize)]
 struct SessionClaims {
@@ -161,6 +169,39 @@ pub async fn sign_message(
                 "signature":   signature,
                 "address":     address,
                 "key_version": KEY_VERSION,
+            })),
+        )
+            .into_response(),
+        Err(e) => signer_error(e).into_response(),
+    }
+}
+
+/// Issue #82 — typed-data sign handler. Mirrors `sign_message` for the JWT
+/// auth + signer-disabled paths; on success returns the signature + every
+/// digest the signer computed internally (so the caller can cross-reference
+/// against an ERC-7730 metadata file for audit).
+pub async fn sign_typed_data(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<SignTypedDataRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = verify_session_jwt(&state, &headers, &body.omni_account) {
+        return e.into_response();
+    }
+    let Some(signer) = state.dev_signer.as_ref() else {
+        return signer_disabled().into_response();
+    };
+
+    match signer.sign_eip712(&body.omni_account, body.typed_data) {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({
+                "signature":         result.signature,
+                "address":           result.address,
+                "primary_type_hash": result.primary_type_hash,
+                "domain_separator":  result.domain_separator,
+                "digest":            result.digest,
+                "key_version":       KEY_VERSION,
             })),
         )
             .into_response(),

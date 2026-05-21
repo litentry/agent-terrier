@@ -22,6 +22,10 @@ pub fn create_signer_router(state: SharedState) -> Router {
     Router::new()
         .route("/dev/derive-address", post(handlers::dev_keys::derive_address))
         .route("/dev/sign-message", post(handlers::dev_keys::sign_message))
+        // Issue #82 — EIP-712 typed-data signing. Same JWT auth path as
+        // `/dev/sign-message`; signer parses typed_data itself + emits
+        // digests alongside the signature.
+        .route("/dev/sign-typed-data", post(handlers::dev_keys::sign_typed_data))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }
@@ -63,6 +67,9 @@ pub fn create_router(state: SharedState) -> Router {
         // Issue #74 step 2 replaces this with a TEE worker; wire shape stays.
         .route("/dev/derive-address", post(handlers::dev_keys::derive_address))
         .route("/dev/sign-message", post(handlers::dev_keys::sign_message))
+        // Issue #82 — EIP-712 typed-data sign endpoint. Documented in
+        // `signer-protocol.md`. TEE-worker swap-in preserves the same path.
+        .route("/dev/sign-typed-data", post(handlers::dev_keys::sign_typed_data))
         // `/healthz` (Kubernetes convention) — what the broker's Tier-2
         // reachability probe hits. Single endpoint, single name across the
         // codebase. Pre-Stage-7 `/health` alias was dropped; any caller that

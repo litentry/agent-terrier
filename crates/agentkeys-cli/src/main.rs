@@ -1,7 +1,8 @@
 use agentkeys_cli::{
     cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init,
     cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
-    cmd_signer_sign, cmd_store, cmd_teardown, cmd_whoami, CommandContext,
+    cmd_signer_preview_7730, cmd_signer_sign, cmd_signer_sign_typed_data, cmd_store, cmd_teardown,
+    cmd_whoami, CommandContext,
     CredentialBackendKind, EnvelopeVersionFlag, InitMode,
 };
 
@@ -309,6 +310,46 @@ enum K11Action {
         /// these fields as separate args.
         #[arg(long)]
         emit_chain_payload: bool,
+        /// **Operator-readable description** of what's about to be authorized,
+        /// rendered prominently on the WebAuthn confirmation page so the
+        /// operator sees the intent in plain English before pressing Touch ID
+        /// (otherwise they only see the raw 32-byte challenge hex). Only
+        /// applies with `--webauthn`; ignored in stub mode.
+        ///
+        /// Examples:
+        ///   --intent-text "Grant agent demo-agent access to openrouter"
+        ///   --intent-text "Revoke companion master device 0xabcd…1234"
+        #[arg(long, help = "Operator-readable intent shown on the WebAuthn confirmation page (with --webauthn)")]
+        intent_text: Option<String>,
+        /// Per-field detail rows rendered under the headline `--intent-text`,
+        /// repeatable. Each value is `Label=Value`. Common rows: service,
+        /// agent, K3 epoch, max_calls, expires_at.
+        ///
+        /// Examples:
+        ///   --intent-field "Service=openrouter"
+        ///   --intent-field "Max calls / hour=100"
+        ///   --intent-field "K3 epoch=1"
+        #[arg(long = "intent-field", help = "Repeatable per-field detail row as `Label=Value` (with --webauthn)")]
+        intent_fields: Vec<String>,
+        /// Typed K11 operation intent (preferred over `--intent-text` +
+        /// `--intent-field`). One JSON blob describing the operation; the
+        /// CLI renders it to a uniform K11IntentContext via the shared
+        /// [`k11_intent`] module, so role bitfields become readable
+        /// permission names ("CAP_MINT | RECOVERY"), 0-means-unlimited
+        /// amounts render as "unlimited", hashes are truncated for the
+        /// prompt, and chain IDs get human-readable labels — all
+        /// without per-script string surgery.
+        ///
+        /// When BOTH `--intent-op-json` and `--intent-text` are passed,
+        /// the typed JSON wins (single source of truth).
+        ///
+        /// Examples:
+        ///   --intent-op-json '{"kind":"set_recovery_threshold","operator_omni":"0x…","new_threshold":2,"chain_id":212013,"operator_nonce":4,"asserting":{"kind":"primary","device_key_hash":"0x…"}}'
+        #[arg(
+            long = "intent-op-json",
+            help = "Typed K11 operation intent as JSON (preferred over --intent-text + --intent-field)"
+        )]
+        intent_op_json: Option<String>,
     },
 }
 
@@ -347,6 +388,43 @@ enum SignerAction {
         omni_account: String,
         #[arg(long, help = "Message to sign (sent as UTF-8 bytes)")]
         message: String,
+    },
+
+    #[command(
+        name = "sign-typed-data",
+        about = "EIP-712 typed-data sign (issue #82)",
+        long_about = "Calls /dev/sign-typed-data on the configured signer. The file at --typed-data-file is an EIP-712 v4 JSON object (matches MetaMask `eth_signTypedData_v4`).\n\nThe signer parses the typed-data internally and computes the digest — callers MUST NOT pass a pre-hashed value.\n\nWith --preview-7730, the CLI also renders the operator-facing intent text against the bundled ERC-7730 catalog (override the dir via $AGENTKEYS_7730_DIR) and prints it before signing.\n\nExamples:\n  agentkeys signer sign-typed-data --signer-url http://localhost:8090 --omni-account <64hex> --typed-data-file ./permit.json\n  agentkeys signer sign-typed-data ... --preview-7730"
+    )]
+    SignTypedData {
+        #[arg(long, env = "AGENTKEYS_SIGNER_URL", help = "URL of the signer service")]
+        signer_url: String,
+        #[arg(long, help = "OmniAccount (64-hex-char SHA256 digest)")]
+        omni_account: String,
+        #[arg(long, help = "Path to a JSON file containing the EIP-712 v4 typed-data")]
+        typed_data_file: String,
+        /// Render the operator-facing intent text + per-field preview against
+        /// the bundled ERC-7730 catalog (override via $AGENTKEYS_7730_DIR).
+        #[arg(long)]
+        preview_7730: bool,
+    },
+
+    #[command(
+        name = "preview-7730",
+        about = "Render the ERC-7730 preview for a typed-data file WITHOUT signing (issue #82)",
+        long_about = "Useful for dry-runs against new ERC-7730 files before plumbing them into automated agent signing. Loads the bundled catalog (and $AGENTKEYS_7730_DIR if set) by default; --7730-file pins a single file.\n\nExamples:\n  agentkeys signer preview-7730 --typed-data-file ./permit.json\n  agentkeys signer preview-7730 --typed-data-file ./permit.json --7730-file ./erc20-permit-usdc.json"
+    )]
+    Preview7730 {
+        #[arg(long, help = "Path to a JSON file containing the EIP-712 v4 typed-data")]
+        typed_data_file: String,
+        // Explicit `long = "7730-file"` because clap derives the flag
+        // name from the Rust field ident, which would yield
+        // `--seven-thirty-file`. The docs + long_about advertise
+        // `--7730-file`; this override matches. Codex P2 finding on PR #95.
+        #[arg(
+            long = "7730-file",
+            help = "Optional: pin to a single ERC-7730 file instead of the bundled catalog"
+        )]
+        seven_thirty_file: Option<String>,
     },
 }
 
@@ -470,9 +548,45 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
             webauthn,
             rp_id,
             emit_chain_payload,
+            intent_text,
+            intent_fields,
+            intent_op_json,
         } => {
             let msg = hex::decode(message_hex.trim_start_matches("0x"))
                 .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
+            // Typed-intent path takes precedence over the raw flags. When
+            // `--intent-op-json` is passed, parse to K11OpIntent + render
+            // via the shared formatter. Otherwise fall back to the legacy
+            // `--intent-text` + `--intent-field` raw path.
+            let intent_ctx = if let Some(json) = intent_op_json.as_deref() {
+                let op = agentkeys_cli::k11_intent::K11OpIntent::from_json(json)
+                    .map_err(|e| anyhow::anyhow!("--intent-op-json: {e}"))?;
+                op.render()
+            } else {
+                // Parse repeatable `Label=Value` rows into a K11IntentContext.
+                // Split on the FIRST `=` so values may contain `=`. Rows
+                // without `=` are rejected with a clear error so the
+                // operator doesn't silently get a mis-rendered intent field.
+                let mut k11_fields: Vec<(String, String)> =
+                    Vec::with_capacity(intent_fields.len());
+                for raw in intent_fields {
+                    let (label, value) = match raw.split_once('=') {
+                        Some((l, v)) => (l.trim().to_string(), v.trim().to_string()),
+                        None => anyhow::bail!(
+                            "--intent-field must be `Label=Value` (no `=` found in {raw:?})"
+                        ),
+                    };
+                    if label.is_empty() {
+                        anyhow::bail!("--intent-field has empty label (in {raw:?})");
+                    }
+                    k11_fields.push((label, value));
+                }
+                agentkeys_cli::k11_webauthn::K11IntentContext {
+                    text: intent_text.clone(),
+                    fields: k11_fields,
+                }
+            };
+
             if *webauthn {
                 if *emit_chain_payload {
                     // The contract reconstructs `expected_challenge` from
@@ -490,24 +604,31 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
                     }
                     let mut challenge = [0u8; 32];
                     challenge.copy_from_slice(&msg);
-                    let payload = agentkeys_cli::k11_webauthn::assert_webauthn_for_chain(
-                        operator_omni,
-                        challenge,
-                        rp_id,
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
+                    let payload =
+                        agentkeys_cli::k11_webauthn::assert_webauthn_for_chain_with_intent(
+                            operator_omni,
+                            challenge,
+                            rp_id,
+                            intent_ctx,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
                     serde_json::to_string_pretty(&payload)
                         .map_err(|e| anyhow::anyhow!("serialize: {e}"))
                 } else {
-                    let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_with_rp(
-                        operator_omni, &msg, rp_id,
+                    let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_with_intent(
+                        operator_omni,
+                        &msg,
+                        rp_id,
+                        intent_ctx,
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
                     Ok(format!("0x{}", hex::encode(assertion)))
                 }
             } else {
+                // Stub mode ignores intent (no UI to render it on).
+                let _ = intent_ctx;
                 let assertion = agentkeys_cli::k11::assert_stub(operator_omni, &msg)
                     .map_err(|e| anyhow::anyhow!("k11 assert: {e}"))?;
                 Ok(format!("0x{}", hex::encode(assertion)))
@@ -625,6 +746,24 @@ async fn main() {
             }
             SignerAction::Sign { signer_url, omni_account, message } => {
                 cmd_signer_sign(&ctx, signer_url, omni_account, message).await
+            }
+            SignerAction::SignTypedData {
+                signer_url,
+                omni_account,
+                typed_data_file,
+                preview_7730,
+            } => {
+                cmd_signer_sign_typed_data(
+                    &ctx,
+                    signer_url,
+                    omni_account,
+                    typed_data_file,
+                    *preview_7730,
+                )
+                .await
+            }
+            SignerAction::Preview7730 { typed_data_file, seven_thirty_file } => {
+                cmd_signer_preview_7730(&ctx, typed_data_file, seven_thirty_file.as_deref()).await
             }
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,

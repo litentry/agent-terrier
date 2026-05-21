@@ -1,7 +1,9 @@
 pub mod actor_omni;
+pub mod audit;
 pub mod auth_request;
 pub mod backend;
 pub mod chain_profile;
+pub mod clear_signing;
 pub mod init_flow;
 pub mod mock_client;
 pub mod otp;
