@@ -46,7 +46,7 @@ async fn broker_env_for_provision(
     Ok(creds.to_env(Some(&region)))
 }
 use agentkeys_types::{
-    AuditEvent, AuditFilter, AuthToken, Scope, ServiceName, Session, WalletAddress,
+    AuthToken, Scope, ServiceName, Session, WalletAddress,
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
@@ -642,25 +642,19 @@ async fn init_via_oauth2_google(
 /// Resolve the effective wallet address for a command.
 /// - `None`  → use the session's own wallet (default agent)
 /// - `Some("0x...")` → parse directly as wallet address
-/// - `Some(other)` → call `resolve_identity` on the backend (alias/email lookup)
-async fn resolve_agent(
-    backend: &Arc<dyn CredentialBackend>,
+/// - anything else errors; alias/email lookup retired in issue #77.
+fn resolve_agent(
+    _backend: &Arc<dyn CredentialBackend>,
     session: &Session,
     agent: Option<&str>,
 ) -> Result<WalletAddress> {
     match agent {
         None => Ok(session.wallet.clone()),
         Some(arg) if arg.starts_with("0x") => Ok(WalletAddress(arg.to_string())),
-        Some(arg) => backend
-            .resolve_identity(session, arg)
-            .await
-            .map_err(|e| match e {
-                BackendError::NotFound(_) => anyhow!(
-                    "unknown identity '{}'. Use `agentkeys link` to create an alias or pass the 0x... wallet directly.",
-                    arg
-                ),
-                other => wrap_backend_error(other),
-            }),
+        Some(arg) => Err(anyhow!(
+            "unknown identity '{}'. Pass a raw 0x... wallet address (alias/email lookup retired in issue #77).",
+            arg
+        )),
     }
 }
 
@@ -669,7 +663,7 @@ pub async fn cmd_store(ctx: &CommandContext, agent: Option<&str>, service: &str,
     // Identity resolution (alias / email → wallet) always goes through the
     // legacy backend — issue #85's S3 path only handles credential CRUD.
     let id_backend = ctx.backend();
-    let agent_id = resolve_agent(&id_backend, &session, agent).await?;
+    let agent_id = resolve_agent(&id_backend, &session, agent)?;
     let service_name = ServiceName(service.to_string());
     let cred_backend = ctx.credential_backend().await?;
 
@@ -709,7 +703,7 @@ pub async fn cmd_store(ctx: &CommandContext, agent: Option<&str>, service: &str,
 pub async fn cmd_read(ctx: &CommandContext, agent: Option<&str>, service: &str) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
     let id_backend = ctx.backend();
-    let agent_id = resolve_agent(&id_backend, &session, agent).await?;
+    let agent_id = resolve_agent(&id_backend, &session, agent)?;
     let service_name = ServiceName(service.to_string());
     let cred_backend = ctx.credential_backend().await?;
 
@@ -764,7 +758,7 @@ pub async fn cmd_run(
 
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
     let id_backend = ctx.backend();
-    let agent_id = resolve_agent(&id_backend, &session, agent).await?;
+    let agent_id = resolve_agent(&id_backend, &session, agent)?;
     let backend = ctx.credential_backend().await?;
 
     // Pre-flight validation: reject any invalid --env entries BEFORE any credential
@@ -977,163 +971,6 @@ pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
     Ok(format!("Torn down agent={}", agent))
 }
 
-pub async fn cmd_usage(ctx: &CommandContext, agent: Option<&str>, json_flag: bool) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-
-    let filter = AuditFilter {
-        owner: None,
-        agent: agent.map(|a| WalletAddress(a.to_string())),
-        service: None,
-    };
-
-    if ctx.verbose {
-        eprintln!("[verbose] GET {}/audit/query", ctx.backend_url);
-    }
-
-    let events = ctx.backend()
-        .query_audit(&session, filter)
-        .await
-        .map_err(wrap_backend_error)?;
-
-    if json_flag || ctx.json_output {
-        let arr: Vec<serde_json::Value> = events.iter().map(audit_event_to_json).collect();
-        Ok(serde_json::to_string_pretty(&arr).unwrap())
-    } else {
-        Ok(format_audit_table(&events))
-    }
-}
-
-fn audit_event_to_json(e: &AuditEvent) -> serde_json::Value {
-    json!({
-        "timestamp": e.timestamp,
-        "agent": e.agent.0,
-        "service": e.service.0,
-        "action": e.action,
-        "result": e.result,
-    })
-}
-
-fn format_audit_table(events: &[AuditEvent]) -> String {
-    if events.is_empty() {
-        return "No audit events found.".to_string();
-    }
-    let header = format!(
-        "{:<12} {:<20} {:<20} {:<12} {:<10}",
-        "timestamp", "agent", "service", "action", "result"
-    );
-    let rows: Vec<String> = events
-        .iter()
-        .map(|e| {
-            format!(
-                "{:<12} {:<20} {:<20} {:<12} {:<10}",
-                e.timestamp,
-                truncate(&e.agent.0, 20),
-                truncate(&e.service.0, 20),
-                truncate(&e.action, 12),
-                truncate(&e.result, 10),
-            )
-        })
-        .collect();
-    format!("{}\n{}", header, rows.join("\n"))
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
-}
-
-pub async fn cmd_link(
-    ctx: &CommandContext,
-    agent: &str,
-    alias: Option<&str>,
-    email: Option<&str>,
-) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-
-    let (identity_type, identity_value) = if let Some(a) = alias {
-        ("alias", a)
-    } else if let Some(e) = email {
-        ("email", e)
-    } else {
-        return Err(anyhow!("Provide --alias or --email"));
-    };
-
-    if ctx.verbose {
-        eprintln!("[verbose] POST {}/identity/link", ctx.backend_url);
-        eprintln!(
-            "[verbose] agent: {}, type: {}, value: {}",
-            agent, identity_type, identity_value
-        );
-    }
-
-    // cmd_link uses the /identity/link endpoint which is not part of the CredentialBackend
-    // trait (identity linking is an extra endpoint). We route via HTTP using backend_url
-    // from the context. When backend_override is set, the caller must also set backend_url
-    // to a valid URL that serves the identity/link endpoint.
-    // Note: adding link_identity to CredentialBackend trait is a v0.1 item.
-    let http_client = reqwest::Client::new();
-    let url = format!("{}/identity/link", ctx.backend_url);
-    let resp = http_client
-        .post(&url)
-        .header("authorization", format!("Bearer {}", session.token))
-        .json(&json!({
-            "identity_type": identity_type,
-            "identity_value": identity_value,
-            "wallet_address": agent,
-        }))
-        .send()
-        .await
-        .context("POST /identity/link")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
-        let msg = body["message"].as_str().unwrap_or("unknown error");
-        return Err(anyhow!("Error: HTTP {}: {}", status, msg));
-    }
-
-    Ok(format!(
-        "Linked agent={} {}={}",
-        agent, identity_type, identity_value
-    ))
-}
-
-pub async fn cmd_recover(ctx: &CommandContext, identity: &str, method: &str) -> Result<String> {
-    let recovery_method = match method {
-        "passkey" => agentkeys_types::RecoveryMethod::Passkey,
-        "email" => agentkeys_types::RecoveryMethod::Email,
-        other => return Err(anyhow!("Unknown recovery method '{}'. Use 'passkey' or 'email'.", other)),
-    };
-
-    let agent_identity = if identity.starts_with("0x") {
-        agentkeys_types::AgentIdentity::WalletAddress(WalletAddress(identity.to_string()))
-    } else if identity.contains('@') {
-        agentkeys_types::AgentIdentity::Email(identity.to_string())
-    } else {
-        agentkeys_types::AgentIdentity::Alias(identity.to_string())
-    };
-
-    if ctx.verbose {
-        eprintln!("[verbose] POST {}/session/recover", ctx.backend_url);
-        eprintln!("[verbose] identity: {}, method: {}", identity, method);
-    }
-
-    let backend = ctx.backend();
-    let (session, wallet) = backend
-        .recover_session(&agent_identity, &recovery_method)
-        .await
-        .map_err(wrap_backend_error)?;
-
-    ctx.session_store()
-        .save(&session, &ctx.session_id)
-        .context("save recovered session to keychain")?;
-
-    Ok(format!("Recovered. Session restored for wallet {}", wallet.0))
-}
-
 pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
 
@@ -1224,43 +1061,14 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
     Ok("Approved. Agent paired successfully.".to_string())
 }
 
-async fn resolve_agent_to_wallet(
-    ctx: &CommandContext,
-    session: &Session,
-    agent: &str,
-) -> Result<String> {
+fn resolve_agent_to_wallet(_ctx: &CommandContext, _session: &Session, agent: &str) -> Result<String> {
     if agent.starts_with("0x") {
-        return Ok(agent.to_string());
-    }
-    // Resolve alias or email via /identity/resolve
-    let (identity_type, identity_value) = if agent.contains('@') {
-        ("email", agent)
+        Ok(agent.to_string())
     } else {
-        ("alias", agent)
-    };
-    // reqwest's .query() builder percent-encodes per RFC 3986 so identities
-    // containing '+', '&', '=', '%', spaces (e.g. plus-addressed emails like
-    // "bot+prod@example.com") are sent intact to the server.
-    let http_client = reqwest::Client::new();
-    let resp = http_client
-        .get(format!("{}/identity/resolve", ctx.backend_url))
-        .query(&[("identity_type", identity_type), ("identity_value", identity_value)])
-        .header("authorization", format!("Bearer {}", session.token))
-        .send()
-        .await
-        .context("GET /identity/resolve")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
-        let msg = body["message"].as_str().unwrap_or("not found");
-        return Err(anyhow!("Error: HTTP {}: {}", status, msg));
+        Err(anyhow!(
+            "Agent must be a raw 0x wallet address. Alias/email lookup is no longer supported."
+        ))
     }
-    let body: serde_json::Value = resp.json().await.context("parse identity/resolve response")?;
-    let wallet = body["wallet_address"]
-        .as_str()
-        .ok_or_else(|| anyhow!("identity/resolve returned no wallet_address"))?
-        .to_string();
-    Ok(wallet)
 }
 
 pub async fn cmd_scope(
@@ -1312,7 +1120,7 @@ pub async fn cmd_scope(
     }
 
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-    let target_wallet = WalletAddress(resolve_agent_to_wallet(ctx, &session, agent).await?);
+    let target_wallet = WalletAddress(resolve_agent_to_wallet(ctx, &session, agent)?);
     let backend = ctx.backend();
 
     let current_scope = backend
@@ -1488,7 +1296,7 @@ pub async fn cmd_provision(
 pub async fn cmd_inbox_provision(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
     let backend = ctx.backend();
-    let agent_id = resolve_agent(&backend, &session, agent).await?;
+    let agent_id = resolve_agent(&backend, &session, agent)?;
 
     if ctx.verbose {
         eprintln!("[verbose] POST {}/mock/inbox/provision", ctx.backend_url);
@@ -1506,7 +1314,7 @@ pub async fn cmd_inbox_provision(ctx: &CommandContext, agent: Option<&str>) -> R
 pub async fn cmd_inbox_list(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
     let backend = ctx.backend();
-    let agent_id = resolve_agent(&backend, &session, agent).await?;
+    let agent_id = resolve_agent(&backend, &session, agent)?;
 
     if ctx.verbose {
         eprintln!("[verbose] GET {}/mock/inbox/list", ctx.backend_url);

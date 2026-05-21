@@ -260,11 +260,10 @@ pub struct Tier2Profile {
     pub strict: bool,
     pub email_link_enabled: bool,
     pub audit_evm_enabled: bool,
-    pub backend_url: String,
 }
 
 impl Tier2Profile {
-    pub fn from_config(config: &BrokerConfig) -> Self {
+    pub fn from_config(_config: &BrokerConfig) -> Self {
         let strict = std::env::var(env::BROKER_REFUSE_TO_BOOT_STRICT)
             .map(|v| v == "true")
             .unwrap_or(false);
@@ -276,7 +275,6 @@ impl Tier2Profile {
             strict,
             email_link_enabled: methods.split(',').any(|m| m.trim() == "email_link"),
             audit_evm_enabled: anchors.split(',').any(|a| a.trim() == "evm_testnet"),
-            backend_url: config.backend_url.clone(),
         }
     }
 }
@@ -755,11 +753,9 @@ mod tests {
     fn config_with(audit_db: PathBuf, oidc_issuer: &str, oidc_kp_path: PathBuf) -> BrokerConfig {
         BrokerConfig {
             data_role_arn: "arn:aws:iam::000:role/test".into(),
-            backend_url: "http://localhost:8080".into(),
             audit_db_path: audit_db,
             aws_region: "us-east-1".into(),
             session_duration_seconds: 3600,
-            backend_request_timeout_seconds: 10,
             shutdown_grace_seconds: 30,
             oidc_issuer: oidc_issuer.to_string(),
             oidc_keypair_path: oidc_kp_path,

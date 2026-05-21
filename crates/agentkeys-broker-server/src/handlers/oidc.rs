@@ -64,10 +64,9 @@ pub struct MintOidcJwtResponse {
 /// suitable for `sts:AssumeRoleWithWebIdentity`.
 ///
 /// The bearer is a broker-signed session JWT (kid `ak-session-…`) minted by
-/// `/v1/auth/wallet/verify`, `/v1/auth/email/verify`, `/v1/auth/oauth2/callback`,
-/// or `/v1/auth/exchange`. Verified locally against the broker's session
-/// keypair — no backend round-trip — matching the path `/v1/mint-aws-creds`
-/// already takes (`handlers::mint::mint_v2`).
+/// `/v1/auth/wallet/verify`, `/v1/auth/email/verify`, or
+/// `/v1/auth/oauth2/callback`. Verified locally against the broker's session
+/// keypair — no backend round-trip.
 ///
 /// Audited via the existing mint-audit log with a `oidc_jwt` outcome marker so
 /// operators see one ledger for AWS-cred mints and OIDC-JWT mints.
@@ -136,11 +135,7 @@ pub async fn mint_oidc_jwt(
 /// `AssumeRoleWithWebIdentity`. Returns `(claims, iat_unix, exp_unix)` so
 /// callers can also use the timestamps for audit rows / response shaping.
 ///
-/// Used by:
-/// - `mint_oidc_jwt` (handler above) — public `/v1/mint-oidc-jwt` endpoint.
-/// - `crate::handlers::mint::mint_v2` — internal JWT minted
-///   per-call so the broker can do `AssumeRoleWithWebIdentity` itself
-///   (issue #71 Option B).
+/// Used by `mint_oidc_jwt` (handler above) — public `/v1/mint-oidc-jwt` endpoint.
 ///
 /// The wallet is lowercased before being placed in the `principal_tags`
 /// claim so it matches the lowercase prefixes the bucket policy uses

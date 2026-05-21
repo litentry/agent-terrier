@@ -2,10 +2,7 @@
 //!
 //! - `POST /v1/auth/wallet/start` — SIWE challenge.
 //! - `POST /v1/auth/wallet/verify` — SIWE verify → session JWT.
-//! - `POST /v1/auth/exchange` — backward-compat shim that exchanges a
-//!   legacy backend-validated bearer for a new session JWT.
 
-pub mod exchange;
 #[cfg(feature = "auth-email-link")]
 pub mod email_landing;
 #[cfg(feature = "auth-email-link")]

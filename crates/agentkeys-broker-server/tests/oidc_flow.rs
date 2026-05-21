@@ -34,21 +34,7 @@ fn stub_creds() -> AssumedCredentials {
     }
 }
 
-async fn spawn_mock_backend() -> String {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    agentkeys_mock_server::db::init_schema(&conn).unwrap();
-    let state = Arc::new(agentkeys_mock_server::state::AppState::new(conn));
-    let app = agentkeys_mock_server::create_router(state);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{}", addr)
-}
-
-async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
+async fn spawn_broker() -> (String, Arc<AppState>) {
     let tmp = Box::leak(Box::new(TempDir::new().unwrap()));
     let keypair_path = tmp.path().join("oidc-keypair.json");
     let oidc = OidcKeypair::generate_and_persist(&keypair_path).unwrap();
@@ -56,11 +42,9 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
     let config = BrokerConfig {
         data_role_arn: STUB_ROLE_ARN.into(),
-        backend_url,
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,
-        backend_request_timeout_seconds: 5,
         shutdown_grace_seconds: 5,
         oidc_issuer: TEST_ISSUER.into(),
         oidc_keypair_path: keypair_path,
@@ -131,8 +115,8 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
 
 #[tokio::test]
 async fn discovery_returns_aws_compatible_shape() {
-    let backend_url = spawn_mock_backend().await;
-    let (broker_url, _) = spawn_broker(backend_url).await;
+    
+    let (broker_url, _) = spawn_broker().await;
 
     let resp: Value = reqwest::Client::new()
         .get(format!("{}/.well-known/openid-configuration", broker_url))
@@ -167,8 +151,8 @@ async fn discovery_returns_aws_compatible_shape() {
 
 #[tokio::test]
 async fn jwks_returns_p256_es256_with_kid() {
-    let backend_url = spawn_mock_backend().await;
-    let (broker_url, state) = spawn_broker(backend_url).await;
+    
+    let (broker_url, state) = spawn_broker().await;
 
     let resp: Value = reqwest::Client::new()
         .get(format!("{}/.well-known/jwks.json", broker_url))
@@ -191,8 +175,8 @@ async fn jwks_returns_p256_es256_with_kid() {
 
 #[tokio::test]
 async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
-    let backend_url = spawn_mock_backend().await;
-    let (broker_url, state) = spawn_broker(backend_url).await;
+    
+    let (broker_url, state) = spawn_broker().await;
 
     // Mint a session JWT against the broker's own session keypair — the
     // same path the SIWE wallet/email/oauth2 verify handlers take. Replaces
@@ -271,8 +255,8 @@ async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
 
 #[tokio::test]
 async fn mint_oidc_jwt_rejects_missing_bearer() {
-    let backend_url = spawn_mock_backend().await;
-    let (broker_url, _) = spawn_broker(backend_url).await;
+    
+    let (broker_url, _) = spawn_broker().await;
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/mint-oidc-jwt", broker_url))
@@ -285,8 +269,8 @@ async fn mint_oidc_jwt_rejects_missing_bearer() {
 
 #[tokio::test]
 async fn mint_oidc_jwt_rejects_invalid_bearer_and_audits_auth_failed() {
-    let backend_url = spawn_mock_backend().await;
-    let (broker_url, state) = spawn_broker(backend_url).await;
+    
+    let (broker_url, state) = spawn_broker().await;
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/mint-oidc-jwt", broker_url))

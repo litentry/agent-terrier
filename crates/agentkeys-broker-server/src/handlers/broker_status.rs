@@ -39,7 +39,6 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
     let (overall_plugin_state, plugin_checks) = state.registry.aggregate_readiness();
 
     // Tier-2 reachability flags (set by spawn_tier2_probes in main.rs).
-    let backend_reachable = state.tier2.backend_reachable.load(Ordering::Relaxed);
     let ses_verified = state.tier2.ses_verified.load(Ordering::Relaxed);
     let evm_rpc_reachable = state.tier2.evm_rpc_reachable.load(Ordering::Relaxed);
     let evm_fee_payer_funded = state.tier2.evm_fee_payer_funded.load(Ordering::Relaxed);
@@ -67,20 +66,6 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
                 checks.push(entry);
             }
         }
-    }
-
-    // Tier-2 backend probe (always relevant — the broker calls
-    // BROKER_BACKEND_URL/session/validate during legacy auth).
-    if backend_reachable {
-        ready_names.push("tier2/backend".into());
-    } else {
-        unready = true;
-        checks.push(json!({
-            "name": "tier2/backend",
-            "status": "unready",
-            "reason": "BROKER_BACKEND_URL/healthz not yet reachable since boot",
-            "docs": runbook_anchor("backend-reachability"),
-        }));
     }
 
     // Tier-2 SES probe — only reported when email-link auth is enabled.

@@ -79,11 +79,9 @@ async fn spawn_broker_with_wallet_sig() -> (String, Arc<AppState>) {
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
     let config = BrokerConfig {
         data_role_arn: "arn:aws:iam::000:role/test".into(),
-        backend_url: "http://localhost:65535".into(), // never reached
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,
-        backend_request_timeout_seconds: 5,
         shutdown_grace_seconds: 5,
         oidc_issuer: TEST_ISSUER.into(),
         oidc_keypair_path: oidc_kp_path,

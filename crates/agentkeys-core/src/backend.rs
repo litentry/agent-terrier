@@ -1,5 +1,5 @@
 use agentkeys_types::{
-    AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
+    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
     EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
     RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
@@ -53,12 +53,6 @@ pub trait CredentialBackend: Send + Sync {
         agent_id: &WalletAddress,
         service: &ServiceName,
     ) -> Result<Vec<u8>, BackendError>;
-
-    async fn query_audit(
-        &self,
-        session: &Session,
-        filter: AuditFilter,
-    ) -> Result<Vec<AuditEvent>, BackendError>;
 
     async fn revoke_session(
         &self,
@@ -135,14 +129,6 @@ pub trait CredentialBackend: Send + Sync {
         agent_id: &WalletAddress,
     ) -> Result<Vec<ServiceName>, BackendError>;
 
-    /// Resolve a human-readable identity (alias or email) to a wallet address.
-    /// Returns `BackendError::NotFound` when no mapping exists.
-    async fn resolve_identity(
-        &self,
-        session: &Session,
-        identifier: &str,
-    ) -> Result<WalletAddress, BackendError>;
-
     async fn get_scope(
         &self,
         session: &Session,
@@ -209,14 +195,6 @@ mod tests {
             _agent_id: &WalletAddress,
             _service: &ServiceName,
         ) -> Result<Vec<u8>, BackendError> {
-            unimplemented!()
-        }
-
-        async fn query_audit(
-            &self,
-            _session: &Session,
-            _filter: AuditFilter,
-        ) -> Result<Vec<AuditEvent>, BackendError> {
             unimplemented!()
         }
 
@@ -318,14 +296,6 @@ mod tests {
             _session: &Session,
             _agent_id: &WalletAddress,
         ) -> Result<Vec<ServiceName>, BackendError> {
-            unimplemented!()
-        }
-
-        async fn resolve_identity(
-            &self,
-            _session: &Session,
-            _identifier: &str,
-        ) -> Result<WalletAddress, BackendError> {
             unimplemented!()
         }
 

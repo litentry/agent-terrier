@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agentkeys_cli::{
-    cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_link, cmd_provision, cmd_read, cmd_revoke,
-    cmd_run, cmd_scope, cmd_store, cmd_teardown, cmd_usage, CommandContext, InitMode,
+    cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_provision, cmd_read, cmd_revoke,
+    cmd_run, cmd_scope, cmd_store, cmd_teardown, CommandContext, InitMode,
 };
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::session_store::SessionStore;
@@ -340,60 +340,6 @@ async fn cli_teardown_deletes_all() {
     assert!(after.is_err(), "expected error after teardown, got: {:?}", after.ok());
 }
 
-// Test 7: usage shows audit events after store+read
-#[tokio::test(flavor = "multi_thread")]
-async fn cli_usage_shows_audit() {
-    let (store, _tmp) = test_store();
-    let backend = create_test_backend();
-    let (wallet, session) = init_session_with_store(&backend, &store).await;
-    let context = ctx_with_session(backend, session, store);
-
-    cmd_store(&context, Some(&wallet), "openrouter", "sk-audit-test").await.unwrap();
-    let _ = cmd_read(&context, Some(&wallet), "openrouter").await.unwrap();
-
-    let usage_out = cmd_usage(&context, Some(&wallet), false).await.unwrap();
-    assert!(
-        usage_out.contains("openrouter") || usage_out.contains("timestamp"),
-        "usage output missing expected content: {usage_out}"
-    );
-}
-
-// Test 8: link alias succeeds — uses a real TCP server since cmd_link uses reqwest
-#[tokio::test(flavor = "multi_thread")]
-async fn cli_link_alias() {
-    use agentkeys_mock_server::{create_router, db, state::AppState};
-    use std::sync::Arc as StdArc;
-
-    // Start a real TCP server for this test since cmd_link uses reqwest
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    db::init_schema(&conn).unwrap();
-    let state = StdArc::new(AppState::new(conn));
-    let router = create_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    let base_url = format!("http://127.0.0.1:{}", addr.port());
-
-    let (store, _tmp) = test_store();
-    let bare_ctx = CommandContext::new(&base_url, false, false)
-        .with_session_store(store.clone());
-    let (output, session) = cmd_init(&bare_ctx, InitMode::ImportLegacyMock("test-token-unique".to_string()))
-        .await
-        .unwrap();
-    let wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
-
-    let context = CommandContext::new(&base_url, false, false)
-        .with_session(session)
-        .with_session_store(store);
-    let result = cmd_link(&context, &wallet, Some("my-test-bot"), None).await;
-    assert!(result.is_ok(), "link failed: {:?}", result.err());
-    let out = result.unwrap();
-    assert!(out.contains("Linked"), "unexpected output: {out}");
-    assert!(out.contains("alias"), "missing alias in output: {out}");
-}
-
 // Test 9: --help output contains expected content
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_help_has_examples() {
@@ -688,44 +634,6 @@ async fn cmd_run_defaults_to_session_wallet() {
     // None agent → uses session wallet; no scope so no env vars injected, but cmd_run succeeds
     let result = cmd_run(&context, None, &[], &["true".to_string()]).await;
     assert!(result.is_ok(), "cmd_run with None agent failed: {:?}", result.err());
-}
-
-// Test 24 (issue-16): cmd_store with alias resolves to the linked wallet
-#[tokio::test(flavor = "multi_thread")]
-async fn cmd_store_resolves_alias() {
-    use agentkeys_mock_server::{create_router, db, state::AppState};
-    use std::sync::Arc as StdArc;
-
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    db::init_schema(&conn).unwrap();
-    let state = StdArc::new(AppState::new(conn));
-    let router = create_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    let base_url = format!("http://127.0.0.1:{}", addr.port());
-
-    let (store, _tmp) = test_store();
-    let bare_ctx = CommandContext::new(&base_url, false, false)
-        .with_session_store(store.clone());
-    let (output, session) = cmd_init(&bare_ctx, InitMode::ImportLegacyMock("test-token-alias".to_string())).await.unwrap();
-    let wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
-
-    let context = CommandContext::new(&base_url, false, false)
-        .with_session(session.clone())
-        .with_session_store(store);
-
-    // Link the wallet to an alias
-    cmd_link(&context, &wallet, Some("my-alias-bot"), None).await.unwrap();
-
-    // Store using the alias — should resolve to the same wallet
-    cmd_store(&context, Some("my-alias-bot"), "openrouter", "sk-via-alias").await.unwrap();
-
-    // Read back explicitly with the wallet address to confirm storage
-    let value = cmd_read(&context, Some(&wallet), "openrouter").await.unwrap();
-    assert_eq!(value.trim(), "sk-via-alias");
 }
 
 // Test 25 (issue-16): cmd_read with unknown identity returns the documented error message
@@ -1042,7 +950,6 @@ impl CredentialBackend for ProvisionTestBackend {
             None => Err(agentkeys_core::backend::BackendError::NotFound("none".into())),
         }
     }
-    async fn query_audit(&self, _: &Session, _: agentkeys_types::AuditFilter) -> Result<Vec<agentkeys_types::AuditEvent>, agentkeys_core::backend::BackendError> { Ok(vec![]) }
     async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn revoke_by_wallet(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn teardown_agent(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
@@ -1056,7 +963,6 @@ impl CredentialBackend for ProvisionTestBackend {
     async fn await_auth_decision(&self, _: &agentkeys_types::AuthRequestId) -> Result<agentkeys_types::SignedAuthDecision, agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn recover_session(&self, _: &agentkeys_types::AgentIdentity, _: &agentkeys_types::RecoveryMethod) -> Result<(Session, agentkeys_types::WalletAddress), agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn list_credentials(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<Vec<agentkeys_types::ServiceName>, agentkeys_core::backend::BackendError> { unimplemented!() }
-    async fn resolve_identity(&self, _: &Session, _: &str) -> Result<agentkeys_types::WalletAddress, agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn get_scope(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<Option<agentkeys_types::Scope>, agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn update_scope(&self, _: &Session, _: &agentkeys_types::WalletAddress, _: &agentkeys_types::Scope) -> Result<(), agentkeys_core::backend::BackendError> { unimplemented!() }
     async fn provision_inbox(&self, _: &Session, _: &agentkeys_types::WalletAddress) -> Result<agentkeys_types::InboxAddress, agentkeys_core::backend::BackendError> { unimplemented!() }

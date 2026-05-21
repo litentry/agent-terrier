@@ -36,7 +36,6 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/healthz", get(handlers::broker_status::healthz))
         .route("/readyz", get(handlers::broker_status::readyz))
         .route("/metrics", get(handlers::metrics::metrics_handler))
-        .route("/v1/mint-aws-creds", post(handlers::mint::mint_aws_creds))
         .route(
             "/.well-known/openid-configuration",
             get(handlers::oidc::discovery),
@@ -63,7 +62,6 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/auth/wallet/verify",
             post(handlers::auth::wallet_verify::wallet_verify),
         )
-        .route("/v1/auth/exchange", post(handlers::auth::exchange::exchange))
         // Phase B grant endpoints (US-026).
         .route(
             "/v1/grant/create",

@@ -5,12 +5,9 @@ use crate::env;
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
     pub data_role_arn: String,
-    pub backend_url: String,
     pub audit_db_path: PathBuf,
     pub aws_region: String,
     pub session_duration_seconds: i32,
-    /// Timeout for HTTP calls to the backend's /session/validate.
-    pub backend_request_timeout_seconds: u64,
     /// Hard cap on graceful-shutdown drain time.
     pub shutdown_grace_seconds: u64,
     /// Public URL the broker advertises as the OIDC issuer.
@@ -45,8 +42,6 @@ impl BrokerConfig {
                 env::ACCOUNT_ID,
             ))?;
 
-        let backend_url = required_env(env::BROKER_BACKEND_URL)?;
-
         let audit_db_path = std::env::var(env::BROKER_AUDIT_DB_PATH)
             .ok()
             .map(PathBuf::from)
@@ -67,11 +62,6 @@ impl BrokerConfig {
                 session_duration_seconds
             );
         }
-
-        let backend_request_timeout_seconds = parse_int_env_with_default(
-            env::BROKER_BACKEND_TIMEOUT_SECONDS,
-            10u64,
-        )?;
 
         let shutdown_grace_seconds = parse_int_env_with_default(
             env::BROKER_SHUTDOWN_GRACE_SECONDS,
@@ -98,11 +88,9 @@ impl BrokerConfig {
 
         Ok(Self {
             data_role_arn,
-            backend_url,
             audit_db_path,
             aws_region,
             session_duration_seconds,
-            backend_request_timeout_seconds,
             shutdown_grace_seconds,
             oidc_issuer,
             oidc_keypair_path,

@@ -10,7 +10,7 @@ use tower::ServiceExt;
 
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
-    AuditEvent, AuditFilter, AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
+    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
     EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
     RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
@@ -18,8 +18,6 @@ use agentkeys_types::{
 use crate::{create_router, db, state::{AppState, SharedState}};
 
 /// Percent-encode the unreserved subset of RFC 3986 for query-string values.
-/// Used to safely interpolate user-provided identity values (aliases, emails
-/// containing '+', etc.) into the `/identity/resolve` URL.
 fn pct_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -335,78 +333,6 @@ impl CredentialBackend for InProcessBackend {
         Ok(PublicKey(key_bytes))
     }
 
-    async fn query_audit(
-        &self,
-        session: &Session,
-        filter: AuditFilter,
-    ) -> Result<Vec<AuditEvent>, BackendError> {
-        // Query the DB directly so that a child/agent session can see audit events
-        // about itself even when those events were recorded by the parent session.
-        // The HTTP handler's SQL only shows events where owner_wallet belongs to the
-        // caller, which excludes events stored by a parent on behalf of a child agent.
-        // Direct DB access gives us the full picture while staying within the crate.
-        let db = self.state.db.lock().unwrap();
-        let session_wallet = &session.token;
-
-        // Resolve the wallet address from the session token.
-        let wallet_address: String = db
-            .query_row(
-                "SELECT wallet_address FROM sessions WHERE token = ?1 AND revoked = 0",
-                rusqlite::params![session_wallet],
-                |row| row.get(0),
-            )
-            .map_err(|e| BackendError::AuthFailed(format!("session not found: {e}")))?;
-
-        let mut sql = String::from(
-            "SELECT owner_wallet, agent_wallet, service_name, action, result, timestamp FROM audit_log \
-             WHERE (owner_wallet = ? \
-                    OR owner_wallet IN ( \
-                        SELECT wallet_address FROM sessions \
-                        WHERE parent_token IN (SELECT token FROM sessions WHERE wallet_address = ?) \
-                    ) \
-                    OR agent_wallet = ?)",
-        );
-        let mut bind_values: Vec<String> = vec![
-            wallet_address.clone(),
-            wallet_address.clone(),
-            wallet_address.clone(),
-        ];
-
-        if let Some(owner) = &filter.owner {
-            sql.push_str(" AND owner_wallet = ?");
-            bind_values.push(owner.0.clone());
-        }
-        if let Some(agent) = &filter.agent {
-            sql.push_str(" AND agent_wallet = ?");
-            bind_values.push(agent.0.clone());
-        }
-        if let Some(service) = &filter.service {
-            sql.push_str(" AND service_name = ?");
-            bind_values.push(service.0.clone());
-        }
-        sql.push_str(" ORDER BY timestamp DESC");
-
-        let mut stmt = db.prepare(&sql)
-            .map_err(|e| BackendError::Transport(format!("prepare: {e}")))?;
-
-        let events: Vec<AuditEvent> = stmt
-            .query_map(rusqlite::params_from_iter(bind_values.iter()), |row| {
-                Ok(AuditEvent {
-                    owner: WalletAddress(row.get::<_, String>(0)?),
-                    agent: WalletAddress(row.get::<_, String>(1)?),
-                    service: ServiceName(row.get::<_, String>(2)?),
-                    action: row.get::<_, String>(3)?,
-                    result: row.get::<_, String>(4)?,
-                    timestamp: row.get::<_, u64>(5)?,
-                })
-            })
-            .map_err(|e| BackendError::Transport(format!("query: {e}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        Ok(events)
-    }
-
     async fn register_rendezvous(
         &self,
         daemon_pubkey: &PublicKey,
@@ -702,40 +628,13 @@ impl CredentialBackend for InProcessBackend {
         Ok(services)
     }
 
-    async fn resolve_identity(
-        &self,
-        session: &Session,
-        identifier: &str,
-    ) -> Result<WalletAddress, BackendError> {
-        let (identity_type, identity_value) = if identifier.contains('@') {
-            ("email", identifier.to_string())
-        } else {
-            ("alias", identifier.to_string())
-        };
-        // Percent-encode the value so reserved characters ('+', '&', '=', '%',
-        // spaces, '@' when embedded in emails) travel through the query string
-        // correctly. Mirrors MockHttpClient's reqwest `.query()` builder.
-        let path = format!(
-            "/identity/resolve?identity_type={}&identity_value={}",
-            identity_type,
-            pct_encode(&identity_value),
-        );
-        let body = self.get_with_session(&path, session).await?;
-        let wallet_str = body["wallet_address"]
-            .as_str()
-            .ok_or_else(|| BackendError::Transport("missing wallet_address".into()))?
-            .to_string();
-        Ok(WalletAddress(wallet_str))
-    }
-
     async fn get_scope(
         &self,
         session: &Session,
         target_wallet: &WalletAddress,
     ) -> Result<Option<Scope>, BackendError> {
         // Percent-encode the wallet — matches the `.query()` pattern in
-        // `MockHttpClient::get_scope` and the `pct_encode` usage in
-        // `resolve_identity` above. Wallet strings are hex today so this is
+        // `MockHttpClient::get_scope`. Wallet strings are hex today so this is
         // safe in practice, but the consistency matters for the
         // `.github/REVIEW_GUIDELINES.md` URL-encoding invariant (pattern #3).
         let path = format!("/session/scope?wallet={}", pct_encode(&target_wallet.0));
