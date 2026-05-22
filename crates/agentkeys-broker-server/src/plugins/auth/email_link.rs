@@ -318,7 +318,7 @@ pub struct EmailLinkAuth {
 impl EmailLinkAuth {
     /// Construct from already-loaded dependencies.
     ///
-    /// **No HMAC key.** Per `docs/spec/architecture.md` §5a.1.M Stage 1
+    /// **No HMAC key.** Per `docs/arch.md` §5a.1.M Stage 1
     /// and the K1–K11 inventory in §3, the magic-link is stateful:
     /// the token is generated CSPRNG, `SHA256(token)` is keyed by
     /// `request_id` in `EmailTokenStore`, and the broker confirms

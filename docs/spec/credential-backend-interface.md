@@ -446,7 +446,7 @@ The Kai meeting questions are now reframed around the trait interface:
 ## 6. Cross-References
 
 - CEO plan: [`./ceo-plan.md`](projects/idea/agentkeys/plans/ceo-plan.md)
-- Architecture (13 components): [`./architecture.md`](./architecture.md)
+- Architecture (13 components): [`../arch.md`](../arch.md)
 - Auth-layer analysis: [`./1-step-analysis.md`](./1-step-analysis.md)
 - Kai meeting agenda: [`./heima-open-questions.md`](./heima-open-questions.md)
 - Open-source posture: [`./open-source-posture.md`](./open-source-posture.md)

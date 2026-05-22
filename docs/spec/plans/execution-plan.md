@@ -20,10 +20,10 @@ cd ~/Projects/agentkeys
 git init
 
 # Copy spec docs so agents have them without leaving the repo
-mkdir -p docs/spec/plans docs/spec/aiosandbox
+mkdir -p docs/spec/plans docs/research/aiosandbox
 cp ~/Projects/project-life/projects/idea/agentkeys/v2/*.md docs/spec/
 cp ~/Projects/project-life/projects/idea/agentkeys/v2/plans/*.md docs/spec/plans/
-cp ~/Projects/project-life/projects/idea/agentkeys/v2/aiosandbox/*.md docs/spec/aiosandbox/
+cp ~/Projects/project-life/projects/idea/agentkeys/v2/aiosandbox/*.md docs/research/aiosandbox/
 
 git add -A && git commit -m "docs: seed spec documents from project-life"
 ```

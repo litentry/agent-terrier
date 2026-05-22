@@ -11,7 +11,7 @@ Status: pre-v0. Stage 5 in progress (see `harness/progress.json`).
 - **Provisioner** (`agentkeys-provisioner` + `provisioner-scripts`) — Rust orchestrator drives TypeScript/Playwright scrapers to sign up for services and hand the resulting API key back through the trust boundary.
 - **Mock backend** (`agentkeys-mock-server`) — v0-only; mirrors the Heima parachain API so we can build end-to-end before the chain integration lands.
 
-Architecture, language choices, trust boundaries: [`docs/spec/architecture.md`](docs/spec/architecture.md).
+Architecture, language choices, trust boundaries: [`docs/arch.md`](docs/arch.md).
 
 ## Workspace layout
 

@@ -1,6 +1,6 @@
 //! `actor_omni` — the durable per-actor cryptographic anchor.
 //!
-//! Per `docs/spec/architecture.md` §14 (credential storage v2):
+//! Per `docs/arch.md` §14 (credential storage v2):
 //!
 //! ```text
 //! actor_omni = SHA256("agentkeys" || "evm" || initial_master_wallet_K3_v1)

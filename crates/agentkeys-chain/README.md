@@ -1,7 +1,7 @@
 # agentkeys-chain — v2 stage-1 Solidity contracts
 
 Foundry project for the four contracts that anchor AgentKeys v2 on-chain
-state per `docs/spec/architecture.md`:
+state per `docs/arch.md`:
 
 | Contract | Source | Purpose |
 |---|---|---|

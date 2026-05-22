@@ -25,7 +25,7 @@
 //! row carries this hash, so later auditors verifying a sign event can
 //! re-render the intent from the same 7730 file and check the commitment
 //! matches. This closes the "agent-A signed `0xdead…beef`" failure mode
-//! that arch.md §15.3 calls out. See [`docs/spec/architecture.md`].
+//! that arch.md §15.3 calls out. See [`docs/arch.md`].
 
 pub mod binding;
 pub mod catalog;

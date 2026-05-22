@@ -178,7 +178,7 @@ For the automated remote-host bootstrap, see [`scripts/setup-broker-host.sh`](..
 
 ### 5.3 Hand off bearer tokens to your developers
 
-For v0.1 each developer gets a session token by running `agentkeys init` against your mock backend (or the real chain backend). The token they receive is what they paste into `AGENTKEYS_BEARER_TOKEN` per §4.1. Token TTL is 30 days per [`wiki/session-token.md`](../wiki/session-token.md).
+For v0.1 each developer gets a session token by running `agentkeys init` against your mock backend (or the real chain backend). The token they receive is what they paste into `AGENTKEYS_BEARER_TOKEN` per §4.1. Token TTL is 30 days per [`wiki/session-token.md`](wiki/session-token.md).
 
 ### 5.4 Solo-dev mock-backend loop
 
@@ -260,6 +260,6 @@ The longer-term plan (Stage 5b) is to detect drift automatically from telemetry 
 - [`spec/credential-backend-interface.md`](./spec/credential-backend-interface.md) — 15-method trait contract
 - [`spec/ses-email-architecture.md`](./spec/ses-email-architecture.md) — Stage 6 email pipeline deep-dive
 - [`spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) — what the broker is defending against
-- `.omc/wiki/email-system.md`, `oidc-federation.md`, `hosted-first.md` — architecture wiki
+- `docs/wiki/email-system.md`, `docs/wiki/oidc-federation.md`, `docs/wiki/hosted-first.md` — architecture wiki
 - [PR #52](https://github.com/litentry/agentKeys/pull/52) — merged Stage 5 + 6 completion (foundation for this guide)
 - [`archived/`](./archived/) — prior-snapshot docs; read-only reference, not a setup path

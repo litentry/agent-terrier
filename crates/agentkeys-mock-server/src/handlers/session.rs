@@ -17,7 +17,7 @@ use ed25519_dalek::SigningKey;
 
 /// Session token TTL in seconds — 30 days.
 ///
-/// Canonical AgentKeys policy per `wiki/session-token.md`: the bearer token
+/// Canonical AgentKeys policy per `docs/wiki/session-token.md`: the bearer token
 /// (master CLI or agent daemon) is a **30-day credential**. Agent/child
 /// sessions share the same TTL as master for v0. Shorter TTLs for agent
 /// sessions may be introduced later as a defense-in-depth tweak, but they

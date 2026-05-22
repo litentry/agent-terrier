@@ -1,14 +1,22 @@
 # AgentKeys
 
 ## Architecture
-Rust monorepo with Cargo workspace. See `docs/spec/architecture.md` for component inventory.
+Rust monorepo with Cargo workspace. See `docs/arch.md` for component inventory.
 See `docs/spec/credential-backend-interface.md` for the CredentialBackend trait contract (15 methods).
 See `docs/spec/plans/development-stages.md` for the 8-stage build plan.
 See `docs/spec/plans/execution-plan.md` for the orchestration runbook (ralph, team, ultraqa).
 Do not read folder `docs/archived`
 
+## Docs layout (lean)
+`docs/arch.md` is the single source of truth — brief, indexes every detail via outward links. Five sub-folders, each one audience:
+- `docs/spec/` — developers + coordinating colleagues (cloud, CI, blockchain, signer-protocol, threats).
+- `docs/plan/` — agent-authored plans BEFORE code lands; promote to `spec/` when shipped, else archive.
+- `docs/research/` — third-party context (Heima, EIP-191/712, aiosandbox, agent memory).
+- `docs/wiki/` — end users + hardware integrators; mirrored to GitHub Wiki by [`publish-wiki.yml`](.github/workflows/publish-wiki.yml).
+- `docs/archived/` — superseded files; never linked from arch.md, never read in normal dev. Move stale files here, don't delete. Run the `agentkeys-docs` skill to audit + compact.
+
 ## Architecture-as-source-of-truth policy
-[`docs/spec/architecture.md`](docs/spec/architecture.md) is the **single source of truth** for component inventory, key inventory (K1–K11), trust boundaries, identity model (HDKD actor tree), and per-actor binding ceremonies. **After editing any architectural doc** (broker plans, signer-protocol, demo doc, runbooks, plan files in `docs/spec/plans/`, heima-gaps), re-open `architecture.md` and verify it still matches; if it diverges, update arch.md in the same change. If the per-doc detail outgrows arch.md, link from arch.md outward — never duplicate. The wiki page at [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](wiki/agent-role-and-usage-hdkd-per-agent-omni.md) is a focused operator reference for the agent role; it defers to arch.md.
+[`docs/arch.md`](docs/arch.md) is the **single source of truth** for component inventory, key inventory (K1–K11), trust boundaries, identity model (HDKD actor tree), and per-actor binding ceremonies. **After editing any architectural doc** (broker plans, signer-protocol, demo doc, runbooks, plan files in `docs/spec/plans/`, heima-gaps), re-open `arch.md` and verify it still matches; if it diverges, update arch.md in the same change. If the per-doc detail outgrows arch.md, link from arch.md outward — never duplicate. The wiki page at [`docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md) is a focused operator reference for the agent role; it defers to arch.md.
 
 ## `/create-pr` policy
 When the `/create-pr` skill is invoked from a Claude Code worktree at `.claude/worktrees/<name>`, the worktree is a *git worktree* under the main repo — `jj` cannot colocate there (`jj git init --colocate` fails with "Cannot create a colocated jj repo inside a Git worktree"). Use this hybrid workflow so the jj-only rule is preserved everywhere it can be:
@@ -20,7 +28,7 @@ When the `/create-pr` skill is invoked from a Claude Code worktree at `.claude/w
 Outside Claude Code worktrees (i.e. directly in the main repo), the whole flow is jj per the standard "use `jj`, never raw `git`" rule from this file.
 
 ## Wiki-location policy
-**All project wiki pages live under [`./wiki/`](wiki/) — never under `.omc/wiki/` or anywhere else.** `./wiki/` is the canonical, version-controlled wiki source (auto-published to the GitHub wiki on every push to `main`); `.omc/` is git-ignored per-session scratch and must not hold durable knowledge. When you create a new wiki page, write it directly to `./wiki/<page-name>.md` with the Write tool — do NOT use `wiki_add` / `wiki_ingest` (those tools default to `.omc/wiki/` and will hide the page from operators + lose it to gitignore). When you find an existing page under `.omc/wiki/`, move it to `./wiki/` in the same change and update all references; leave `.omc/wiki/` empty going forward. New `./wiki/` pages should follow the existing-page style: no YAML frontmatter, plain markdown, relative links to other wiki pages with `./other-page.md` and to repo files with `../path/to/file`.
+**All project wiki pages live under [`./docs/wiki/`](docs/wiki/) — never under `.omc/wiki/`, the root-level `./wiki/`, or anywhere else.** `./docs/wiki/` is the canonical, version-controlled wiki source (auto-published to the GitHub wiki on every push to `main` by [`.github/workflows/publish-wiki.yml`](.github/workflows/publish-wiki.yml)); `.omc/` is git-ignored per-session scratch and must not hold durable knowledge. When you create a new wiki page, write it directly to `./docs/wiki/<page-name>.md` with the Write tool — do NOT use `wiki_add` / `wiki_ingest` (those tools default to `.omc/wiki/` and will hide the page from operators + lose it to gitignore). When you find an existing page under `.omc/wiki/` or root-level `./wiki/`, move it to `./docs/wiki/` in the same change and update all references; leave the old locations empty going forward. New `./docs/wiki/` pages should follow the existing-page style: no YAML frontmatter, plain markdown, relative links to other wiki pages with `./other-page.md` and to repo files with `../../path/to/file`.
 
 ### Terminology-source-of-truth rule
 **Never invent a new name for a concept that arch.md already names.** When a doc, runbook, CLI output, or commit message needs to refer to a wallet / omni / key / endpoint that exists in arch.md, use the arch.md spelling verbatim. If a component currently emits a different label (e.g. `agentkeys whoami` prints `session_wallet:` while arch.md / the OIDC JWT call the same field `agentkeys_user_wallet` / `JWT.agentkeys.wallet_address`), either (a) align the component to the arch.md name OR (b) document the alias in arch.md's "Canonical names" section as an explicit synonym — never let the divergence silently persist. Drift is auditable only if it's explicit.
