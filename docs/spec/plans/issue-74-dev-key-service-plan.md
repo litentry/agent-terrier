@@ -35,13 +35,13 @@ its design as they land:
     authenticator: Touch ID / Hello / Android biometric) and a
     uniform link-code binding ceremony for **agent machines** (VM /
     Linux / CI / `agent-infra/sandbox` containers). Single source
-    of truth: [`architecture.md` §5a.1](../architecture.md).
+    of truth: [`architecture.md` §5a.1](../../arch.md).
     Hardware-attested user presence at re-bind closes the
     email-account-compromise → device-takeover gap (Q7). YubiKey-on-
     Linux as a master tier is deferred to
     [issue #79](https://github.com/litentry/agentKeys/issues/79).
 
-The architecture.md doc ([`../architecture.md`](../architecture.md))
+The architecture.md doc ([`../../arch.md`](../../arch.md))
 is the canonical source of truth post-PR-#75; this plan documents
 the original step-1 intent and is preserved for historical context.
 

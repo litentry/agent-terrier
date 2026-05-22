@@ -137,7 +137,7 @@ pub const BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET: &str = "BROKER_EVM_PER_IDENTI
 ///
 /// **No HMAC key var.** Magic-link tokens are stateful (CSPRNG → SHA256 → SQLite EmailTokenStore →
 /// single-use within TTL). See `crates/agentkeys-broker-server/src/plugins/auth/email_link.rs`
-/// `EmailLinkAuth::new` doc + `docs/spec/architecture.md` §5a.1.M Stage 1.
+/// `EmailLinkAuth::new` doc + `docs/arch.md` §5a.1.M Stage 1.
 pub const BROKER_EMAIL_FROM_ADDRESS: &str = "BROKER_EMAIL_FROM_ADDRESS";
 /// Optional. Email sender backend selector — `stub` (default, in-process Vec) or `ses`
 /// (real `aws-sdk-sesv2` SendEmail). When `ses`, the FROM identity must be SES-verified

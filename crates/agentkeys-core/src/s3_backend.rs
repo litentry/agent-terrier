@@ -76,7 +76,7 @@ use agentkeys_types::{
 /// AEAD wire-format version byte. v1 (wallet-keyed AAD) is the original
 /// envelope shipped by PR #87. v2 (actor_omni-keyed AAD + `bots/<actor_omni>/`
 /// path) is the stage 1 target — stable across K3 rotation per
-/// docs/spec/architecture.md §14.4. The backend reads BOTH formats during
+/// docs/arch.md §14.4. The backend reads BOTH formats during
 /// the migration window (see `read_credential`), but writes only v2 when
 /// `WriteEnvelope::V2` is selected.
 const ENVELOPE_VERSION_V1: u8 = 0x01;
@@ -199,7 +199,7 @@ impl S3CredentialBackend {
     }
 
     /// v2 path — `bots/<actor_omni_hex>/credentials/<service>.enc` per
-    /// docs/spec/architecture.md §14.5. Stable across K3 rotation,
+    /// docs/arch.md §14.5. Stable across K3 rotation,
     /// matched by the new `agentkeys_actor_omni` PrincipalTag rule.
     fn object_key_v2(wallet: &WalletAddress, service: &ServiceName) -> String {
         format!(
@@ -466,7 +466,7 @@ fn aad_for_v1(wallet: &WalletAddress, service: &ServiceName) -> Vec<u8> {
 }
 
 /// v2 AAD: `agentkeys.cred.aad.v2|<actor_omni_hex>|<service>` per
-/// docs/spec/architecture.md §14.4. Binds the blob to its stable
+/// docs/arch.md §14.4. Binds the blob to its stable
 /// actor_omni-keyed location instead of the rotation-volatile wallet.
 fn aad_for_v2(wallet: &WalletAddress, service: &ServiceName) -> Vec<u8> {
     let omni = actor_omni_hex(wallet);

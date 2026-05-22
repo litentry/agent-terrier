@@ -37,7 +37,7 @@ fn mint_pair_session(
 ) -> Result<MintOutput, AppError> {
     let child_wallet = crate::auth::generate_wallet_address();
     let child_token = generate_token();
-    let ttl: u64 = 2_592_000; // 30 days per wiki/session-token.md policy
+    let ttl: u64 = 2_592_000; // 30 days per docs/wiki/session-token.md policy
 
     let (pub_key, priv_key): (Vec<u8>, Vec<u8>) = db
         .query_row(
@@ -85,7 +85,7 @@ fn mint_recover_session(
     let wallet = super::identity::resolve_identity_typed(db, identity_type, identity_value)?;
 
     let child_token = generate_token();
-    let ttl: u64 = 2_592_000; // 30 days per wiki/session-token.md policy
+    let ttl: u64 = 2_592_000; // 30 days per docs/wiki/session-token.md policy
 
     let scope_json: Option<String> = db
         .query_row(

@@ -12,12 +12,12 @@ This doc supersedes the pre-v2 architecture revision (which described a single-b
 
 **Companion docs** (canonical for their narrow surface; this doc links to them rather than duplicating):
 
-- [`signer-protocol.md`](signer-protocol.md) — typed RPC over mTLS to the signer
-- [`threat-model-key-custody.md`](threat-model-key-custody.md) — retroactive-confidentiality + key custody position
-- [`credential-backend-interface.md`](credential-backend-interface.md) — `CredentialBackend` trait surface (now backed by the sidecar)
-- [`plans/v2-issues/issue-v2-stage-1-foundation.md`](plans/v2-issues/issue-v2-stage-1-foundation.md) — stage 1 deliverable inventory (shipped)
-- [`plans/v2-issues/issue-v2-stage-2-hardening.md`](plans/v2-issues/issue-v2-stage-2-hardening.md) — stage 2 deliverable inventory (shipped)
-- [`plans/v2-issues/issue-payment-service-deferred.md`](plans/v2-issues/issue-payment-service-deferred.md) — payment-service design (shipped per modes P-1/P-2/P-3)
+- [`signer-protocol.md`](spec/signer-protocol.md) — typed RPC over mTLS to the signer
+- [`threat-model-key-custody.md`](spec/threat-model-key-custody.md) — retroactive-confidentiality + key custody position
+- [`credential-backend-interface.md`](spec/credential-backend-interface.md) — `CredentialBackend` trait surface (now backed by the sidecar)
+- [`spec/plans/v2-issues/issue-v2-stage-1-foundation.md`](spec/plans/v2-issues/issue-v2-stage-1-foundation.md) — stage 1 deliverable inventory (shipped)
+- [`spec/plans/v2-issues/issue-v2-stage-2-hardening.md`](spec/plans/v2-issues/issue-v2-stage-2-hardening.md) — stage 2 deliverable inventory (shipped)
+- [`spec/plans/v2-issues/issue-payment-service-deferred.md`](spec/plans/v2-issues/issue-payment-service-deferred.md) — payment-service design (shipped per modes P-1/P-2/P-3)
 
 ---
 
@@ -320,7 +320,7 @@ Hard derivation (`//N`) — child secret cannot be computed without the parent's
 - Actor ≠ machine — one actor can run on many machines (master on laptop + phone); each machine has its own K10 under that actor's omni.
 - Master ≠ agent — same axis (actor), distinct roles. Bootstrap path, K11 ownership, and revocation authority differ.
 
-For agent-specific operator reference, see [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](../../wiki/agent-role-and-usage-hdkd-per-agent-omni.md).
+For agent-specific operator reference, see [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](wiki/agent-role-and-usage-hdkd-per-agent-omni.md).
 
 ---
 
@@ -349,7 +349,7 @@ Upstream issues an opaque token; subsequent API calls present the token; upstrea
 - **Exercise** is provider-bounded — only what the upstream exposes per-key (spend cap, model allowlist, rate limit, expiry).
 - **Distribution** rides the sidecar: provisioner scrapes a per-grant key; credentials-service worker encrypts and stores at `s3://$VAULT_BUCKET/bots/<actor_omni>/credentials/<service>.enc`; daemon fetches via cap-token, decrypts at the worker, injects at the localhost proxy.
 - **Granularity ceiling:** provider-side per-key settings + one-key-per-grant blast bound + host-local sidecar policy (method/path/spend) gating at injection time.
-- **Adding a new Class-B upstream:** write a Playwright scraper at [`provisioner-scripts/src/scrapers/<service>.ts`](../../provisioner-scripts/src/scrapers/) that signs up, mints an API key, sets provider-side caps from scope fields. Scraper is the enforcement point — missing limits = leaked key has broader blast radius than scope authorizes.
+- **Adding a new Class-B upstream:** write a Playwright scraper at [`provisioner-scripts/src/scrapers/<service>.ts`](../provisioner-scripts/src/scrapers/) that signs up, mints an API key, sets provider-side caps from scope fields. Scraper is the enforcement point — missing limits = leaked key has broader blast radius than scope authorizes.
 
 ### 7.3 Class C — On-chain / payment-rail operations (irreversible)
 
@@ -363,7 +363,7 @@ Operations whose upstream effect cannot be reversed. Example: USDC transfer, Str
 
 Operators reading the §15 worker design alone cannot tell whether the payload they retrieve from S3 *is* the action (Class A) or *enables* an out-of-band action (Class B) or is *irreversible on commit* (Class C). The three cases have different revocation semantics, different blast radii, different requirements on the provisioner / worker. Pin the class per upstream in the per-service docs.
 
-Full design rationale, granularity matrix per class, bucket-layout consequences: [`wiki/upstream-backend-classes-exercise-vs-distribution.md`](../../wiki/upstream-backend-classes-exercise-vs-distribution.md).
+Full design rationale, granularity matrix per class, bucket-layout consequences: [`wiki/upstream-backend-classes-exercise-vs-distribution.md`](wiki/upstream-backend-classes-exercise-vs-distribution.md).
 
 ---
 
@@ -465,7 +465,7 @@ Per §9 stages 0–4. Identity ceremonies vary per identity type but converge on
 
 **Q7 fix:** email-account compromise alone cannot rebind. An attacker who phished the email account can complete the identity ceremony but cannot complete the WebAuthn ceremony on the legitimate user's hardware.
 
-**Operator-readable intent on the K11 confirmation page.** WebAuthn's OS-level Touch ID prompt is fixed by the platform — it cannot display application text. AgentKeys closes that gap on the **localhost confirmation page** served before `navigator.credentials.get()` fires: every master-mutation call (scope grant/revoke, device add/revoke, K10 rotation, recovery, audit-row mint, typed-data sign) provides a `K11IntentContext { text, fields }` rendered prominently above the raw challenge hex. The cryptographic binding is unchanged (`challenge = sha256(message)`); the intent text is display-only AND populates `AuditEnvelope.intent_text` + `intent_commitment` so the chain commitment binds to what the operator actually saw. See [`wiki/k11-webauthn-intent-rendering.md`](../../wiki/k11-webauthn-intent-rendering.md) for the API + worked examples; implementation in [`crates/agentkeys-cli/src/k11_webauthn.rs`](../../crates/agentkeys-cli/src/k11_webauthn.rs) (`assert_webauthn_with_intent`, `assert_webauthn_for_chain_with_intent`).
+**Operator-readable intent on the K11 confirmation page.** WebAuthn's OS-level Touch ID prompt is fixed by the platform — it cannot display application text. AgentKeys closes that gap on the **localhost confirmation page** served before `navigator.credentials.get()` fires: every master-mutation call (scope grant/revoke, device add/revoke, K10 rotation, recovery, audit-row mint, typed-data sign) provides a `K11IntentContext { text, fields }` rendered prominently above the raw challenge hex. The cryptographic binding is unchanged (`challenge = sha256(message)`); the intent text is display-only AND populates `AuditEnvelope.intent_text` + `intent_commitment` so the chain commitment binds to what the operator actually saw. See [`wiki/k11-webauthn-intent-rendering.md`](wiki/k11-webauthn-intent-rendering.md) for the API + worked examples; implementation in [`crates/agentkeys-cli/src/k11_webauthn.rs`](../crates/agentkeys-cli/src/k11_webauthn.rs) (`assert_webauthn_with_intent`, `assert_webauthn_for_chain_with_intent`).
 
 ### 10.2 Agent bootstrap (link-code only — single path)
 
@@ -814,7 +814,7 @@ Callers: broker + workers only. Daemons never talk to the signer directly — al
 
 The mock-server backend exposes `/sign/typed-data` under the legacy
 `/dev/sign-typed-data` path alongside `/dev/sign-message`. TEE-worker
-swap-in MUST preserve both shapes; see [`signer-protocol.md`](signer-protocol.md).
+swap-in MUST preserve both shapes; see [`signer-protocol.md`](spec/signer-protocol.md).
 
 ### 14.3 K3 rotation handling
 
@@ -893,7 +893,7 @@ events index the audit-row by `signed_intent_hash` via S3 path.
 The schema documented above (`signed_intent_text` + `signed_intent_hash`) is
 specific to **typed-data signs**. The rest of the audit surface today
 carries only the narrow `(actor_omni, service_hash, op_type ∈ {0,1,2}, payload_hash)`
-shape that [`CredentialAudit.sol`](../../crates/agentkeys-chain/src/CredentialAudit.sol)
+shape that [`CredentialAudit.sol`](../crates/agentkeys-chain/src/CredentialAudit.sol)
 takes — sufficient for credentials CRUD, useless for sign events, scope
 mutations, device mutations, payments, memory ops, or email. An external
 explorer (e.g. [`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials)
@@ -1082,11 +1082,11 @@ most "uglier UI temporarily for old explorers" — never "broken explorer
    `\| KindName \| Byte \| {field: type, …} schema \| Worker that emits \|`.
    The schema lists every field in the typed `op_body` — exactly the
    shape the corresponding `XxxBody` struct in
-   [`agentkeys-core::audit::bodies`](../../crates/agentkeys-core/src/audit/bodies.rs)
+   [`agentkeys-core::audit::bodies`](../crates/agentkeys-core/src/audit/bodies.rs)
    serializes to.
 
 3. **Add the Rust variant.** Three files in
-   [`crates/agentkeys-core/src/audit/`](../../crates/agentkeys-core/src/audit/):
+   [`crates/agentkeys-core/src/audit/`](../crates/agentkeys-core/src/audit/):
    - `op_kind.rs`: new variant in the `AuditOpKind` enum at the byte
      you claimed + arm in `from_u8` + arm in `label`.
    - `bodies.rs`: new `XxxBody` struct with serde derives, fields
@@ -1098,7 +1098,7 @@ most "uglier UI temporarily for old explorers" — never "broken explorer
    (credentials-service / memory-service / signer / broker / payment-
    service / email-service / SidecarRegistry hook / K3EpochCounter
    hook) calls
-   [`agentkeys_core::audit::envelope_for(...)`](../../crates/agentkeys-core/src/audit/client.rs)
+   [`agentkeys_core::audit::envelope_for(...)`](../crates/agentkeys-core/src/audit/client.rs)
    to build the envelope, then `AuditClient::append(...)` to emit it
    to the audit-service worker. The worker stores the envelope by hash
    and (separately, batched) commits the hash on-chain via
@@ -1112,7 +1112,7 @@ most "uglier UI temporarily for old explorers" — never "broken explorer
      event. Lives in [`subscan-essentials`](https://github.com/litentry/subscan-essentials).
    - **Doc test / lint**: the new arch.md row's `Byte` is unique
      across the table (the existing
-     [`audit::op_kind::tests::all_byte_values_unique`](../../crates/agentkeys-core/src/audit/op_kind.rs)
+     [`audit::op_kind::tests::all_byte_values_unique`](../crates/agentkeys-core/src/audit/op_kind.rs)
      enforces this from the Rust side — keep the doc + code in sync).
 
 **Critically:** never bump `ENVELOPE_VERSION` for a new op_kind. The
@@ -1120,7 +1120,7 @@ version field is reserved for envelope-level changes (adding /
 removing top-level fields). Adding a new op_kind goes through this
 ritual at v1 — that's the whole point of the open-enum design.
 
-**Operator-facing detailed guide:** see [`wiki/audit-envelope-add-op-kind.md`](../../wiki/audit-envelope-add-op-kind.md)
+**Operator-facing detailed guide:** see [`wiki/audit-envelope-add-op-kind.md`](wiki/audit-envelope-add-op-kind.md)
 for a worked example + the full PR checklist.
 
 ### 15.4 email-service
@@ -1614,13 +1614,13 @@ The architecture is intentionally pluggable on six axes. Each axis has a default
 
 | Axis | v2 default | Future swap | Swap mechanism |
 |---|---|---|---|
-| **Auth method** | `email-link` + `oauth2_google` + `wallet_sig` (SIWE) | passkey-as-identity, OAuth2/Apple, OAuth2/GitHub, custom OIDC | Trait-implementing plugin in [`crates/agentkeys-broker-server/src/plugins/auth/`](../../crates/agentkeys-broker-server/src/plugins/auth/); enabled via `BROKER_AUTH_METHODS` env var |
-| **Signer backend** | TEE worker (AMD SEV-SNP / Intel TDX / AWS Nitro) with attested mTLS | Threshold-MPC signer; HSM-backed; FROST | Replaces the binary behind `signer.<zone>` URL; wire shape pinned by [`signer-protocol.md`](signer-protocol.md) |
+| **Auth method** | `email-link` + `oauth2_google` + `wallet_sig` (SIWE) | passkey-as-identity, OAuth2/Apple, OAuth2/GitHub, custom OIDC | Trait-implementing plugin in [`crates/agentkeys-broker-server/src/plugins/auth/`](../crates/agentkeys-broker-server/src/plugins/auth/); enabled via `BROKER_AUTH_METHODS` env var |
+| **Signer backend** | TEE worker (AMD SEV-SNP / Intel TDX / AWS Nitro) with attested mTLS | Threshold-MPC signer; HSM-backed; FROST | Replaces the binary behind `signer.<zone>` URL; wire shape pinned by [`signer-protocol.md`](spec/signer-protocol.md) |
 | **Audit destination** | Tier C direct-write (default) / Tier A hosted relay / Tier B self-hosted relay | TEE-attested append-only log; AWS CloudTrail | Trait surface in audit-service worker; per-operator config |
 | **Chain layer** | Litentry/Heima parachain (built-in profile `heima`, chain ID 212013) | Any EVM-compatible chain (Base, Ethereum, Optimism, Arbitrum, Moonbeam, Astar, permissioned substrates like Aliyun BaaS / Hyperledger / Quorum) | **Named chain profiles** — `crates/agentkeys-core/src/chain_profile.rs` ships 7 built-ins (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil); operator-custom chains via `$AGENTKEYS_CHAIN_PROFILE_FILE` JSON. CLI `--chain <name>`; daemon / broker / workers all read the same profile. See §22a below. |
 | **Worker runtime** | AWS Lambda + API Gateway | axum microservice (vendor-neutral); Cloudflare Worker (edge); Tencent SCF (China) | Worker shape per §15 is uniform across runtimes |
 | **Payment rail** | Per mode: P-1 service-pool / P-2 escrow / P-3 direct | Mode + upstream (Stripe, USDC, SOL, fiat) | Per-mode plugins layer on the §15.5 wire shape |
-| **Clear-signing metadata** (issue #82) | Bundled ERC-7730 v2 set under `agentkeys-core::clear_signing::fixtures/` (USDC permit + curated DEX routers + permit2) | Registry fetch from `github.com/ethereum/clear-signing-erc7730-registry` at daemon startup; on-chain registry / IPFS-pinned + signature-verified | `ClearSigningCatalog` trait in [`crates/agentkeys-core/src/clear_signing/`](../../crates/agentkeys-core/src/clear_signing/); bundled → registry-cached → on-chain progression. Operator-custom files via `$AGENTKEYS_7730_DIR` env var |
+| **Clear-signing metadata** (issue #82) | Bundled ERC-7730 v2 set under `agentkeys-core::clear_signing::fixtures/` (USDC permit + curated DEX routers + permit2) | Registry fetch from `github.com/ethereum/clear-signing-erc7730-registry` at daemon startup; on-chain registry / IPFS-pinned + signature-verified | `ClearSigningCatalog` trait in [`crates/agentkeys-core/src/clear_signing/`](../crates/agentkeys-core/src/clear_signing/); bundled → registry-cached → on-chain progression. Operator-custom files via `$AGENTKEYS_7730_DIR` env var |
 
 **Pluggability is the point.** No single backend is load-bearing for the architecture; the contracts (auth-plugin trait, signer-protocol, audit trait, worker shape, chain ABI) are. This is what lets:
 
@@ -1755,13 +1755,13 @@ Alice's well-known dev key (subkey docs):
 
 **What Alice + sudo do NOT do:**
 
-- They do NOT run on Heima mainnet (`heima` profile). Production has no sudo — confirmed absent or held by a governance multisig (pending [heima-open-questions.md Q15](plans/v2-issues/../../spec/heima-open-questions.md#q15-heima-mainnet--confirm-sudo-is-not-in-the-runtime)).
+- They do NOT run on Heima mainnet (`heima` profile). Production has no sudo — confirmed absent or held by a governance multisig (pending [heima-open-questions.md Q15](spec/spec/heima-open-questions.md#q15-heima-mainnet--confirm-sudo-is-not-in-the-runtime)).
 - They do NOT replace AgentKeys's K10 / K11 ceremonies. `agentkeys device register`, `agentkeys scope add`, etc. still go through the normal cap-mint + on-chain ceremony on Paseo too. Sudo is a Substrate root-bypass, not an AgentKeys auth path.
 - They do NOT work via Foundry / `cast` / web3.js. Sudo is a Substrate extrinsic; only Substrate-aware toolchains (Polkadot.js Apps, subxt, @polkadot/api, subkey) can construct it.
 
 **The Substrate↔EVM bridge for sudo:** when you want sudo to call an EVM contract function (e.g., bootstrap `SidecarRegistry` from Alice as if msg.sender were the runtime root), the sudo extrinsic wraps `pallet_ethereum.transact(...)` — the Substrate-side primitive that submits an EVM transaction. This is the only mechanism that lets a Substrate root sign bypass interact with the Frontier EVM side.
 
-Full background (educational + open questions for the Heima dev team) lives in [heima-open-questions.md §3a](heima-open-questions.md#3a-chain-backbone--evm-paseo-sudo-added-2026-05-18-after-heima-dev-info-handoff).
+Full background (educational + open questions for the Heima dev team) lives in [heima-open-questions.md §3a](spec/heima-open-questions.md#3a-chain-backbone--evm-paseo-sudo-added-2026-05-18-after-heima-dev-info-handoff).
 
 ### 22a.6 Explorer integration target
 
@@ -1986,23 +1986,23 @@ flowchart TB
 - Signer host is TEE-attested. Brokers and workers pin the signer's attestation hash; mTLS handshake fails if measurement drifts.
 - Daemons reach broker + workers over public TLS. Caller authentication at workers is by cap-token, not by IP.
 
-The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../../scripts/setup-broker-host.sh) (idempotent). Operator-facing commentary in [`operator-runbook.md`](../operator-runbook.md).
+The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent). Operator-facing commentary in [`operator-runbook.md`](operator-runbook-stage7.md).
 
 ---
 
 ## 25. Cross-references
 
-- **Typed signer RPC** — [`signer-protocol.md`](signer-protocol.md)
-- **K3 threat model + TEE attestation** — [`threat-model-key-custody.md`](threat-model-key-custody.md)
-- **CredentialBackend trait surface** — [`credential-backend-interface.md`](credential-backend-interface.md)
-- **Stage 1 deliverable inventory** — [`plans/v2-issues/issue-v2-stage-1-foundation.md`](plans/v2-issues/issue-v2-stage-1-foundation.md)
-- **Stage 2 deliverable inventory** — [`plans/v2-issues/issue-v2-stage-2-hardening.md`](plans/v2-issues/issue-v2-stage-2-hardening.md)
-- **Payment-service design** — [`plans/v2-issues/issue-payment-service-deferred.md`](plans/v2-issues/issue-payment-service-deferred.md)
+- **Typed signer RPC** — [`signer-protocol.md`](spec/signer-protocol.md)
+- **K3 threat model + TEE attestation** — [`threat-model-key-custody.md`](spec/threat-model-key-custody.md)
+- **CredentialBackend trait surface** — [`credential-backend-interface.md`](spec/credential-backend-interface.md)
+- **Stage 1 deliverable inventory** — [`spec/plans/v2-issues/issue-v2-stage-1-foundation.md`](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
+- **Stage 2 deliverable inventory** — [`spec/plans/v2-issues/issue-v2-stage-2-hardening.md`](spec/plans/v2-issues/issue-v2-stage-2-hardening.md)
+- **Payment-service design** — [`spec/plans/v2-issues/issue-payment-service-deferred.md`](spec/plans/v2-issues/issue-payment-service-deferred.md)
 - **Migration from pre-v2** — [`v2-stage1-migration-and-demo.md`](../v2-stage1-migration-and-demo.md) (historical; the migration window closed when stage 1 shipped)
-- **Operator runbook** — [`../operator-runbook.md`](../operator-runbook.md)
+- **Operator runbook** — [`operator-runbook-stage7.md`](operator-runbook-stage7.md)
 - **Cloud-side IAM + DNS + cert** — [`../cloud-setup.md`](../cloud-setup.md)
-- **Per-actor reference (agent role)** — [`../../wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](../../wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
-- **Upstream backend classes (per-upstream design)** — [`../../wiki/upstream-backend-classes-exercise-vs-distribution.md`](../../wiki/upstream-backend-classes-exercise-vs-distribution.md)
+- **Per-actor reference (agent role)** — [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
+- **Upstream backend classes (per-upstream design)** — [`wiki/upstream-backend-classes-exercise-vs-distribution.md`](wiki/upstream-backend-classes-exercise-vs-distribution.md)
 
 ---
 
@@ -2030,10 +2030,10 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../../script
 
 ## 27. What's NOT in this doc
 
-- **Per-endpoint request/response shapes.** Each endpoint surface has its own canonical doc — broker endpoints in `plans/v2-issues/issue-v2-stage-1-foundation.md`; signer in `signer-protocol.md`; workers in per-worker READMEs under each crate.
+- **Per-endpoint request/response shapes.** Each endpoint surface has its own canonical doc — broker endpoints in `spec/plans/v2-issues/issue-v2-stage-1-foundation.md`; signer in `signer-protocol.md`; workers in per-worker READMEs under each crate.
 - **Per-step environment-variable inventory.** That's `operator-runbook.md`.
 - **Detailed threat model for K3 retroactive confidentiality.** That's `threat-model-key-custody.md`.
-- **Stage-by-stage build progression history.** That's `plans/development-stages.md` + `plans/v2-issues/`.
+- **Stage-by-stage build progression history.** That's `plans/development-stages.md` + `spec/plans/v2-issues/`.
 - **MetaMask / Foundry tooling instructions.** Retired in v2 — operators no longer hold local EVM keys unless they want to (`identity_type = evm` is supported but not required).
 - **v3+ hardening** (per-(user, service) KEK, wrap-and-rewrap, ZK-proven cap minting, threshold-MPC signer, per-operator K3) — tracked separately as v3+ issues. v2 ships the design described here.
 

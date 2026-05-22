@@ -27,7 +27,7 @@ collapse:
    Q7 email-account-compromise → device-takeover gap by requiring
    hardware-attested user presence at re-bind time.
 
-[`docs/spec/architecture.md`](../architecture.md) §4 (HDKD actor
+[`docs/arch.md`](../../arch.md) §4 (HDKD actor
 tree), §4a (mental model), and §5a (per-actor binding ceremonies)
 are the **single source of truth** for the v0.2 target. The
 per-identity-type sections in this plan are the v1c wire-shape
@@ -39,7 +39,7 @@ lets a Linux box act as a master without a built-in platform
 authenticator) is deferred — see
 [issue #79](https://github.com/litentry/agentKeys/issues/79).
 The agent-role/usage operator reference lives at
-[`.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](../../.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md).
+[`docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](../../../docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md).
 
 ## Goal
 
@@ -177,7 +177,7 @@ listener / DNS / nginx work.
 > describe the **v1c-interim** bespoke PoP shapes. The v0.2 target
 > collapses these into a uniform WebAuthn binding ceremony for
 > masters plus a uniform link-code binding ceremony for agents —
-> see [`architecture.md` §5a.1](../architecture.md). The
+> see [`architecture.md` §5a.1](../../arch.md). The
 > identity-source half (email click / OAuth callback / EVM SIWE
 > identity verification) survives unchanged in v0.2; only the
 > device-pubkey-commit half collapses.
@@ -427,7 +427,7 @@ Step 1c is **strictly stronger** than all three Heima variants:
   timestamp window is ±60s.
 
 - **Device key persistence on a fresh sandbox VM.** **RESOLVED** (Q8) —
-  decision recorded in [`architecture.md` §5a.4](../architecture.md).
+  decision recorded in [`architecture.md` §5a.4](../../arch.md).
   Stock `agent-infra/sandbox` does not expose the host's OS keychain;
   `keyring-rs` falls back to a file-backend at
   `~/.agentkeys/daemon-<wallet>/session.json` (mode 0600), which

@@ -38,7 +38,7 @@
 //! 8. Every new op_kind ships 3 tests: CBOR roundtrip + unknown-body
 //!    tolerance + arch.md row.
 //!
-//! See [`docs/spec/architecture.md`](../../../../docs/spec/architecture.md)
+//! See [`docs/arch.md`](../../../../docs/arch.md)
 //! §15.3a for the canonical schema.
 
 pub mod bodies;

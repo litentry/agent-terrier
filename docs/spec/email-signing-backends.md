@@ -4,8 +4,8 @@
 **Status:** Design
 **Stage:** 5a (alternative backend) → v0.1 (canonical)
 **Related:** [#11 biometric gate](https://github.com/litentry/agentKeys/issues/11),
-`docs/spec/credential-backend-interface.md`, `wiki/session-token.md`,
-`wiki/blockchain-tee-architecture.md`, `docs/stage5-workspace-email-setup.md`
+`docs/spec/credential-backend-interface.md`, `docs/docs/wiki/session-token.md`,
+`docs/wiki/blockchain-tee-architecture.md`, `docs/stage5-workspace-email-setup.md`
 
 ---
 
@@ -35,7 +35,7 @@ spec already supports `MockBackend` (v0), `HeimaBackend` (v0.1), and
 ## 2. Why an abstraction is required, not optional
 
 AgentKeys already has a clear architectural rule about credential signing
-(`wiki/blockchain-tee-architecture.md` §6 rule #2):
+(`docs/wiki/blockchain-tee-architecture.md` §6 rule #2):
 
 > **The TEE holds all private keys and does all computation.** The TEE holds the
 > shielding key, the RSA JWT signing key, and per-user custodial wallet keys
@@ -65,7 +65,7 @@ pub enum AuthRequestType {
 
     /// Grant a child the ability to read/write mail on a set of Workspace
     /// users. Biometric-gated on the master CLI (see §7). TTL = 30 days to
-    /// match the AgentKeys session-key policy (wiki/session-token.md §1).
+    /// match the AgentKeys session-key policy (docs/wiki/session-token.md §1).
     EmailImpersonate {
         user_pattern: EmailUserPattern, // exact, prefix, or /Automation OU
         scopes: Vec<EmailScope>,        // Read, Modify, Send
@@ -189,7 +189,7 @@ trait.
 - **Immutable audit** — GCP audit logs are strong, but they're operator-
   controlled (Google is the operator). They're not chain-immutable. This is the
   same "operator-verifiable vs publicly verifiable" tradeoff described in
-  `wiki/blockchain-tee-architecture.md` §5 under the pure-TEE-backend column.
+  `docs/wiki/blockchain-tee-architecture.md` §5 under the pure-TEE-backend column.
 - **"Leak of agent@wildmeta.ai is fully bounded"** — if `agent@wildmeta.ai`'s
   OAuth refresh token is stolen, the attacker can mint JWTs for any
   `wildmeta.ai` user (within the DWD scopes) for the token's lifetime. We
@@ -201,7 +201,7 @@ trait.
 
 ### What the TEE holds
 
-Same shape as the existing TEE-held primitives (`wiki/blockchain-tee-architecture.md` §1):
+Same shape as the existing TEE-held primitives (`docs/wiki/blockchain-tee-architecture.md` §1):
 
 - **RSA signing key for DWD JWTs** — generated inside the TEE, sealed storage,
   never extractable. Distinct from the TEE's JWT *session-token* signing key
@@ -347,7 +347,7 @@ biometric-gated. New backend, same rule.
 
 ## 8. The 30-day constraint — how it maps
 
-`wiki/session-token.md` §1: *AgentKeys policy: 30-day TTL for session/bearer
+`docs/docs/wiki/session-token.md` §1: *AgentKeys policy: 30-day TTL for session/bearer
 tokens.* The constraint here maps to **the grant**, not to the email access
 token. Three nested lifetimes:
 
@@ -508,13 +508,13 @@ now ──────────────── Stage 5 ──────�
 - `docs/spec/credential-backend-interface.md` — the existing trait we're
   extending. §3's `AuthRequestType` and the replay-resistance invariants
   apply here unchanged.
-- `wiki/blockchain-tee-architecture.md` §5 — the same
+- `docs/wiki/blockchain-tee-architecture.md` §5 — the same
   "stateless-TEE-plus-chain vs pure-TEE-backend" tradeoff, one layer down.
   Backend B is the stateless-TEE-plus-chain choice; Backend A is the pure-
   operator-backed choice.
-- `wiki/session-token.md` §1 — 30-day TTL policy this spec inherits for
+- `docs/docs/wiki/session-token.md` §1 — 30-day TTL policy this spec inherits for
   grants.
-- `wiki/key-security.md` §1 — two-tier storage model; the `EmailAccessToken`
+- `docs/wiki/key-security.md` §1 — two-tier storage model; the `EmailAccessToken`
   returned by `mint_email_access_token` is tier-1 (ephemeral bearer, handled
   like a session token in memory) and `EmailImpersonate` grants are tier-2
   analog (long-lived, persisted).

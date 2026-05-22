@@ -6,8 +6,8 @@
 **Related:**
 - `docs/spec/email-signing-backends.md` — generalized backend comparison
 - `docs/spec/credential-backend-interface.md` — the trait we're extending
-- `wiki/email-system.md` — high-level wrap-up + usage isolation rules
-- `wiki/blockchain-tee-architecture.md` §5 — audit model this spec inherits
+- `docs/wiki/email-system.md` — high-level wrap-up + usage isolation rules
+- `docs/wiki/blockchain-tee-architecture.md` §5 — audit model this spec inherits
 - Issue [#11](https://github.com/litentry/agentKeys/issues/11) — biometric gate
 
 ---
@@ -22,7 +22,7 @@ Email is the **dominant human-in-the-loop channel** every external API signup, O
 4. **Cheap to scale** — thousands of throwaway inboxes per month without a seat-license model.
 5. **No foreign admin-console step per inbox** — one-time domain onboarding only.
 6. **Zero user setup in the default path** — Stage 6 target is "inbox exists the moment the agent is created; no DNS, no admin console, no Workspace subscription on the user side."
-7. **Broker-not-proxy** — our backend mints credentials; the daemon calls SES and S3 directly via MCP. Per-operation compute on our side is zero. See [`wiki/hosted-first.md`](../../wiki/hosted-first.md) for the user-segmentation framework and [`wiki/knowledge-storage.md`](../../wiki/knowledge-storage.md) for the parallel deferred decision on knowledge storage.
+7. **Broker-not-proxy** — our backend mints credentials; the daemon calls SES and S3 directly via MCP. Per-operation compute on our side is zero. See [`docs/wiki/hosted-first.md`](../wiki/hosted-first.md) for the user-segmentation framework and [`docs/wiki/knowledge-storage.md`](../wiki/knowledge-storage.md) for the parallel deferred decision on knowledge storage.
 
 Gmail Workspace with DWD satisfies 1 but fails 2–7. AgentMail (SaaS) satisfies 1, 3, 4, 6 but fails 2 and adds vendor lock. **AWS SES with our own thin inbox-abstraction layer satisfies all seven.** This spec defines that layer.
 
@@ -30,7 +30,7 @@ Gmail Workspace with DWD satisfies 1 but fails 2–7. AgentMail (SaaS) satisfies
 
 AgentMail is a SaaS built on AWS SES; verified by DNS (`agentmail.to` MX → `inbound-smtp.us-east-1.amazonaws.com`) and by their open Zod schemas exposing `dkim_signing_type: 'AWS_SES' | 'BYODKIM'`. They **proxy** per-operation on the user's behalf: their servers parse MIME, compute threads, manage drafts/labels/webhooks. Compute cost scales with operation frequency.
 
-We use the same SES primitives (inbound-to-S3, `SendRawEmail`, domain DKIM/MX/SPF) but **do not adopt the SaaS feature surface**. Per the broker-not-proxy principle (rule #4 in `wiki/blockchain-tee-architecture.md`), threading, labels, drafts, allow/block lists, webhook fan-out, and per-operation events live daemon-side (via MCP) or are absent until a real use case forces them in. Our backend is a credential broker + audit layer. Per-operation compute on our side is zero.
+We use the same SES primitives (inbound-to-S3, `SendRawEmail`, domain DKIM/MX/SPF) but **do not adopt the SaaS feature surface**. Per the broker-not-proxy principle (rule #4 in `docs/wiki/blockchain-tee-architecture.md`), threading, labels, drafts, allow/block lists, webhook fan-out, and per-operation events live daemon-side (via MCP) or are absent until a real use case forces them in. Our backend is a credential broker + audit layer. Per-operation compute on our side is zero.
 
 **One shape we kept:** `inbox_id` IS the email-address string (`abc123@agentkeys-email.io`), not an opaque uuid. Saves an ID↔address lookup on every call. That's it — everything else from AgentMail's model stays in AgentMail's backend.
 
@@ -201,8 +201,8 @@ The migration from Stage 6 to Stage 7 is mostly a trust-policy rewrite + a `Reso
 ### What this spec does NOT cover (intentionally)
 
 - **Operator setup specifics** (account ID, hosted zone ID, exact ARNs) live in [`docs/cloud-setup.md`](../cloud-setup.md), the operator-facing runbook. Reference that for the actual AWS CLI calls.
-- **PrincipalTag enforcement details** are in §10.4 below + [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md).
-- **OIDC issuer key derivation + JWKS** are in §10.5 + [`wiki/oidc-federation.md`](../../wiki/oidc-federation.md).
+- **PrincipalTag enforcement details** are in §10.4 below + [`docs/wiki/tag-based-access.md`](../wiki/tag-based-access.md).
+- **OIDC issuer key derivation + JWKS** are in §10.5 + [`docs/wiki/oidc-federation.md`](../wiki/oidc-federation.md).
 
 ## 7. Send pipeline (outbound)
 
@@ -291,7 +291,7 @@ We **deliver these records as a BIND zone file download** (same UX as AgentMail)
 
 ## 10.4. Per-user isolation on the shared `agentkeys-mail` bucket — PrincipalTag pattern
 
-Stage 6 hosts every user's inbox in one AWS account, one S3 bucket, one IAM role. Per-user isolation is cryptographically enforced by AWS using the **PrincipalTag-from-JWT-claim** pattern. See [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md) for the full mechanics.
+Stage 6 hosts every user's inbox in one AWS account, one S3 bucket, one IAM role. Per-user isolation is cryptographically enforced by AWS using the **PrincipalTag-from-JWT-claim** pattern. See [`docs/wiki/tag-based-access.md`](../wiki/tag-based-access.md) for the full mechanics.
 
 ### Summary of the mechanism
 
@@ -372,7 +372,7 @@ AWS SES API calls require IAM authentication. Rather than seal a long-lived IAM 
 
 Net: **no static AWS credentials at rest anywhere in AgentKeys.** TEE compromise = all federated creds compromised (same as before). Anything short of TEE compromise = zero blast radius.
 
-The same OIDC provider federates into GCP Workload Identity, Azure AD, Snowflake, Kubernetes, and any other external-OIDC consumer. One issuer, N clouds. See [`wiki/oidc-federation.md`](../../wiki/oidc-federation.md) for the generalization.
+The same OIDC provider federates into GCP Workload Identity, Azure AD, Snowflake, Kubernetes, and any other external-OIDC consumer. One issuer, N clouds. See [`docs/wiki/oidc-federation.md`](../wiki/oidc-federation.md) for the generalization.
 
 ## 11. How this plugs into the three-layer abstraction
 
@@ -456,19 +456,19 @@ Total: ~2 weeks. No Lambda, no DynamoDB, no server-side MIME parsing — the bro
 
 8. **Disaster recovery.** S3 is durable; chain state is self-healing; TEE master seed is the root of all derived keys. No stateful middle tier to back up — the broker-not-proxy shape eliminates the mid-write-crash recovery problem entirely.
 
-7. **User's personal Gmail integration.** Confirmed: we **do not** OAuth into users' Gmail. User's Gmail is a send-only target from our SES for identity + notifications + optional 2FA approvals. See `wiki/email-system.md` §usage-isolation.
+7. **User's personal Gmail integration.** Confirmed: we **do not** OAuth into users' Gmail. User's Gmail is a send-only target from our SES for identity + notifications + optional 2FA approvals. See `docs/wiki/email-system.md` §usage-isolation.
 
 ## 16. Cross-references
 
-- **[`wiki/oidc-federation.md`](../../wiki/oidc-federation.md)** — the generalized OIDC-provider design that §10.5 references; explains how the same ES256 key federates into AWS, GCP, Azure, Snowflake, K8s
+- **[`docs/wiki/oidc-federation.md`](../wiki/oidc-federation.md)** — the generalized OIDC-provider design that §10.5 references; explains how the same ES256 key federates into AWS, GCP, Azure, Snowflake, K8s
 - **[`docs/spec/threat-model-key-custody.md`](./threat-model-key-custody.md)** — generalizes this spec's "raw MIME in S3, metadata on chain" pattern to credential ciphertext too. The email pipeline is the precedent; Stage 8 generalizes it.
 - **[`docs/stage8-wip.md`](../stage8-wip.md)** — the off-chain encrypted vault. Reuses this spec's S3 bucket pattern under a different prefix (`agentkeys-vault/<wallet>/...`).
 - `docs/spec/email-signing-backends.md` — the generalized trait (needs an SES section added; this spec supplies the content)
 - `docs/spec/credential-backend-interface.md` — the parent trait this extends
 - `docs/stage5-workspace-email-setup.md` — alternative: Google DWD operator runbook (preserved for enterprise deployments)
 - `docs/manual-test-stage5.md` §1 — demo path (currently uses dedicated personal Gmail; will migrate to SES once built)
-- `wiki/email-system.md` — high-level architecture wrap-up + usage isolation
-- `wiki/blockchain-tee-architecture.md` §5 — stateless-TEE-plus-chain rationale
-- `wiki/session-token.md` §1 — 30-day TTL policy
+- `docs/wiki/email-system.md` — high-level architecture wrap-up + usage isolation
+- `docs/wiki/blockchain-tee-architecture.md` §5 — stateless-TEE-plus-chain rationale
+- `docs/wiki/session-token.md` §1 — 30-day TTL policy
 - Issue [#11](https://github.com/litentry/agentKeys/issues/11) — biometric gate
 - AWS docs consulted for §10.5: [`IAM OIDC provider`](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html), [`AssumeRoleWithWebIdentity`](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html) — signing algorithm list (RSA + ECDSA only) verified verbatim

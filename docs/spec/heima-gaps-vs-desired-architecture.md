@@ -7,7 +7,7 @@ landed the dev_key_service signer + signer-protocol contract).
 
 ## 1. Why this doc exists
 
-The [wiki](../../wiki/) always describes the **desired** architecture — the shape AgentKeys v0.1 is targeting, not the shape the upstream `litentry/heima` chain ships today. That's the right default for a design wiki: specs should describe where we're going, not where we happened to be when they were written.
+The [wiki](../wiki/) always describes the **desired** architecture — the shape AgentKeys v0.1 is targeting, not the shape the upstream `litentry/heima` chain ships today. That's the right default for a design wiki: specs should describe where we're going, not where we happened to be when they were written.
 
 This document is the other half. Every delta between:
 
@@ -22,8 +22,8 @@ Related docs:
 - [`signer-protocol.md`](signer-protocol.md) — `/dev/*` wire contract.
 - [`plans/issue-74-dev-key-service-plan.md`](plans/issue-74-dev-key-service-plan.md) — dev_key_service signer landed in PR #75.
 - [`plans/issue-74-step-1c-device-key-auth.md`](plans/issue-74-step-1c-device-key-auth.md) — device-key auth on `/dev/*`, planned.
-- [`wiki/blockchain-tee-architecture.md`](../../wiki/blockchain-tee-architecture.md) — canonical desired architecture (four rules).
-- [`wiki/key-security.md`](../../wiki/key-security.md) — TEE key security model.
+- [`docs/wiki/blockchain-tee-architecture.md`](../wiki/blockchain-tee-architecture.md) — canonical desired architecture (four rules).
+- [`docs/wiki/key-security.md`](../wiki/key-security.md) — TEE key security model.
 - [`plans/development-stages.md`](./plans/development-stages.md) — stage roadmap; this gap list is the critical path for Stage 6 and Stage 7.
 - [`ses-email-architecture.md`](./ses-email-architecture.md) — Stage 6 email spec; depends on gaps §2, §3, §5.
 
@@ -105,7 +105,7 @@ The TEE's **OIDC-issuer signing key** (derivation path `oidc/issuer/v1`, alg **E
 - `iss = https://oidc.agentkeys.dev` (or per-tenant subdomain).
 - `/.well-known/openid-configuration` served from a plain HTTPS endpoint (static file, no compute; just publishes the issuer URL, JWKS URL, supported algs).
 - `/.well-known/jwks.json` serves the ES256 public key as a JWK.
-- JWT claims include the user's OmniAccount wallet as a custom claim (`agentkeys_user_wallet`) so relying parties can gate access via `sts:TagSession` / `aws:PrincipalTag` conditions (see [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md)).
+- JWT claims include the user's OmniAccount wallet as a custom claim (`agentkeys_user_wallet`) so relying parties can gate access via `sts:TagSession` / `aws:PrincipalTag` conditions (see [`docs/wiki/tag-based-access.md`](../wiki/tag-based-access.md)).
 
 ### Impact
 
@@ -183,7 +183,7 @@ The TEE mints JWTs with standard claims (`sub`, `typ`, `exp`, `aud`). There is n
 
 The JWT the TEE mints carries `agentkeys_user_wallet = <child_wallet_address>` as a claim. The claim name is historical (from early design when the only identity was the user's OmniAccount); the value is the **child/agent wallet** so that per-agent compromise bounds the blast radius to that one agent's prefix rather than the whole user. When a client does `sts:AssumeRoleWithWebIdentity` with that JWT, STS extracts the claim and attaches it as a session tag. Downstream bucket policies and KMS policies pattern-match on `aws:PrincipalTag/agentkeys_user_wallet = ${aws:SourceIdentity}` or similar, giving us per-user (per-agent) isolation on shared cloud resources **without** per-user IAM roles.
 
-See [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md) for the full pattern.
+See [`docs/wiki/tag-based-access.md`](../wiki/tag-based-access.md) for the full pattern.
 
 ### Impact
 

@@ -89,7 +89,7 @@ Our own AWS/GCP/Ali accounts are managed by IaC. A GitHub Action can watch `pall
 
 ## 4. Hardening follow-ups to the daemon credential lifecycle
 
-From [`wiki/key-security.md`](../../wiki/key-security.md) §9 "Daemon Priority C" — items explicitly tagged as v0.2+.
+From [`wiki/key-security.md`](../wiki/key-security.md) §9 "Daemon Priority C" — items explicitly tagged as v0.2+.
 
 ### 4.1 Landlock / Pledge-style syscall containment for the daemon
 
@@ -107,7 +107,7 @@ Deterministic builds so that `mrenclave`-style equivalent applies to the daemon:
 
 ## 5. Knowledge-base backend expansions
 
-See [`wiki/knowledge-storage.md`](../../wiki/knowledge-storage.md) for the current four-candidate matrix (GitHub / AWS S3 / Google Drive / Ali Cloud OSS).
+See [`wiki/knowledge-storage.md`](../wiki/knowledge-storage.md) for the current four-candidate matrix (GitHub / AWS S3 / Google Drive / Ali Cloud OSS).
 
 ### 5.1 Dropbox / Box / OneDrive as additional non-dev backends
 
@@ -125,7 +125,7 @@ User switches from hosted S3 to BYO GitHub — we need an export/import utility 
 
 ## 6. Email system (beyond Stage 6+7)
 
-From [`wiki/email-system.md`](../../wiki/email-system.md) §"Open items / follow-ups".
+From [`wiki/email-system.md`](../wiki/email-system.md) §"Open items / follow-ups".
 
 ### 6.1 `docs/spec/token-authority-model.md` — the generalized three-layer spec
 
@@ -183,5 +183,5 @@ Items we discussed and decided not to pursue. Listed here so we don't re-litigat
 
 - **AgentMail as a first-party email backend.** Their infra is AWS SES underneath; our SES impl gives us the things their SaaS does not (chain audit, per-child isolation via grants, no static cloud creds, broker-not-proxy). The three-layer abstraction still allows a customer to plug `AgentMailAuthority` if they want — we just don't ship it.
 - **Static IAM access keys inside the TEE for AWS/GCP.** Superseded by OIDC federation; violates "no long-lived cloud credentials at rest."
-- **Per-user IAM roles on AWS.** Doesn't scale past a few thousand users; superseded by PrincipalTag-via-JWT-claim (see [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md)).
-- **Reading the user's personal Gmail for OTPs.** Collapses agent-mail and identity-mail into one inbox; fragile against Google's policy changes; see [`wiki/email-system.md`](../../wiki/email-system.md) §"What this rules out."
+- **Per-user IAM roles on AWS.** Doesn't scale past a few thousand users; superseded by PrincipalTag-via-JWT-claim (see [`wiki/tag-based-access.md`](../wiki/tag-based-access.md)).
+- **Reading the user's personal Gmail for OTPs.** Collapses agent-mail and identity-mail into one inbox; fragile against Google's policy changes; see [`wiki/email-system.md`](../wiki/email-system.md) §"What this rules out."

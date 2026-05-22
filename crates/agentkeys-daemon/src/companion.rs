@@ -58,7 +58,7 @@ pub struct WhoAmIResponse {
 pub struct ApproveRequest {
     pub expected_challenge_hex: String,
     /// **Preferred** — typed K11 operation intent (per
-    /// `wiki/k11-intent-conventions.md`). Deserializes into
+    /// `docs/wiki/k11-intent-conventions.md`). Deserializes into
     /// `K11OpIntent`; rendered via the shared formatter so the
     /// companion's K11 page is byte-for-byte uniform with the primary's
     /// rendering of the same op. When present, this field WINS over the

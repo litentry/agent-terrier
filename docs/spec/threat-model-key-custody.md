@@ -1,7 +1,7 @@
 # Threat Model: Key Custody and Sensitive-Data Storage
 
 **Date:** 2026-04-26
-**Status:** Design — supersedes the on-chain encrypted-vault assumption that runs through wiki/blockchain-tee-architecture.md, wiki/data-classification.md, wiki/key-security.md, and docs/spec/credential-backend-interface.md.
+**Status:** Design — supersedes the on-chain encrypted-vault assumption that runs through docs/wiki/blockchain-tee-architecture.md, docs/wiki/data-classification.md, docs/wiki/key-security.md, and docs/spec/credential-backend-interface.md.
 **Related issues:** [#57](https://github.com/litentry/agentKeys/issues/57) (this doc — security finding), [#9](https://github.com/litentry/agentKeys/issues/9) (master-seed HDKD), [`docs/spec/heima-gaps-vs-desired-architecture.md`](./heima-gaps-vs-desired-architecture.md), [`docs/stage8-wip.md`](../stage8-wip.md)
 
 This doc defines the canonical security position for **where sensitive ciphertext lives** and **how decryption keys are managed**. Earlier docs assume an on-chain encrypted vault (`pallet-secrets-vault`); this doc replaces that assumption with off-chain ciphertext + on-chain hash + forward-secret epoch rotation, and explains why.
@@ -29,7 +29,7 @@ The current AgentKeys spec is strong on (1) and (2). It is silent on (3) and (4)
 
 ## 2. Restating the current Stage 7 stance (what we are revising)
 
-Stage 7 as currently specified ([`wiki/blockchain-tee-architecture.md`](../../wiki/blockchain-tee-architecture.md), [`wiki/key-security.md`](../../wiki/key-security.md), [`docs/spec/credential-backend-interface.md`](./credential-backend-interface.md)) takes these positions:
+Stage 7 as currently specified ([`docs/docs/wiki/blockchain-tee-architecture.md`](../docs/wiki/blockchain-tee-architecture.md), [`docs/docs/wiki/key-security.md`](../docs/wiki/key-security.md), [`docs/spec/credential-backend-interface.md`](./credential-backend-interface.md)) takes these positions:
 
 1. **Credential ciphertext lives on chain** in a new `pallet-secrets-vault`, encrypted to the TEE shielding key.
 2. **Shielding key sealed in TEE**, derived from the master seed via SLIP-0010 at path `shielding/v1`.
@@ -234,9 +234,9 @@ These do not block adopting the position in §6 but need decisions before Stage 
 
 | Doc / claim | Current text says | After this doc |
 |---|---|---|
-| [`wiki/blockchain-tee-architecture.md`](../../wiki/blockchain-tee-architecture.md) §1 table row "Credential blobs" | "Encrypted ciphertext, on chain in `pallet-secrets-vault`" | Banner pointing here; row updated to "Pointer + ciphertext hash on chain; ciphertext off-chain (S3)" |
-| [`wiki/data-classification.md`](../../wiki/data-classification.md) §1 row "Credential blobs" | "On chain: Encrypted (ciphertext)" | "On chain: Hash + pointer; In TEE: per-request decrypt only; Off-chain S3: ciphertext under per-epoch DEK" |
-| [`wiki/key-security.md`](../../wiki/key-security.md) §1 table | "v0.1 Heima: Encrypted blob in Heima TEE (`pallet-secrets-vault`)" | "v0.1 (Stage 8): off-chain S3 ciphertext under per-epoch DEK; chain holds pointer + hash" |
+| [`docs/docs/wiki/blockchain-tee-architecture.md`](../docs/wiki/blockchain-tee-architecture.md) §1 table row "Credential blobs" | "Encrypted ciphertext, on chain in `pallet-secrets-vault`" | Banner pointing here; row updated to "Pointer + ciphertext hash on chain; ciphertext off-chain (S3)" |
+| [`docs/docs/wiki/data-classification.md`](../docs/wiki/data-classification.md) §1 row "Credential blobs" | "On chain: Encrypted (ciphertext)" | "On chain: Hash + pointer; In TEE: per-request decrypt only; Off-chain S3: ciphertext under per-epoch DEK" |
+| [`docs/docs/wiki/key-security.md`](../docs/wiki/key-security.md) §1 table | "v0.1 Heima: Encrypted blob in Heima TEE (`pallet-secrets-vault`)" | "v0.1 (Stage 8): off-chain S3 ciphertext under per-epoch DEK; chain holds pointer + hash" |
 | [`docs/spec/credential-backend-interface.md`](./credential-backend-interface.md) §"Mapping to Heima Primitives" | `store_credential` → `pallet-secrets-vault::write_secret` | `store_credential` → S3 write + on-chain `pallet-vault-pointers` extrinsic |
 | [`docs/spec/plans/development-stages.md`](./plans/development-stages.md) Stage 8 (current) | "Production hardening — memory hygiene" | Renumbered to **Stage 9**; new **Stage 8 = off-chain encrypted vault** (this doc's position) |
 | [`docs/spec/plans/development-stages.md`](./plans/development-stages.md) Stage 9 (current) | "Heima migration holding pen" | Renumbered to **Stage 10** |
@@ -248,5 +248,5 @@ These do not block adopting the position in §6 but need decisions before Stage 
 - [`docs/stage8-wip.md`](../stage8-wip.md) — operational design for the off-chain vault (storage layout, rotation runbook, encryption-center responsibilities).
 - [`docs/spec/heima-gaps-vs-desired-architecture.md`](./heima-gaps-vs-desired-architecture.md) — needs a new §5 "Off-chain ciphertext / `pallet-vault-pointers`" gap entry mirroring this doc's position.
 - [`docs/spec/ses-email-architecture.md`](./ses-email-architecture.md) §4 — the email pipeline already uses the off-chain pattern; this doc generalizes it.
-- [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md) — Stage 7 PrincipalTag isolation, unchanged by this doc; gates the per-user S3 vault prefix.
+- [`docs/wiki/tag-based-access.md`](../wiki/tag-based-access.md) — Stage 7 PrincipalTag isolation, unchanged by this doc; gates the per-user S3 vault prefix.
 - [`docs/archived/contradictions-stage4-2026-04.md`](../archived/contradictions-stage4-2026-04.md) — Stage-4 snapshot; entry resolving "where does sensitive ciphertext live" was added alongside this doc.
