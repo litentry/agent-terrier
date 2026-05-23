@@ -21,7 +21,8 @@ pub enum Group {
     Core,
     /// OIDC issuer keypair + JWT TTL (used by AWS STS AssumeRoleWithWebIdentity).
     Oidc,
-    /// Session JWT keypair + TTL (broker-internal, used by /v1/mint-aws-creds).
+    /// Session JWT keypair + TTL (broker-internal; minted by the
+    /// email-link / OAuth2 auth flows, consumed by /v1/mint-oidc-jwt).
     SessionJwt,
     /// Audit storage policy (anchor selection, multi-anchor strategy).
     Audit,

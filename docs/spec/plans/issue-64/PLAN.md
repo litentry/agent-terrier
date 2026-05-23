@@ -8,6 +8,24 @@
 
 ---
 
+> **RETIREMENT NOTICE (2026-05-24, issue #72 / PR #96).** Substantial portions of this
+> plan describe the `POST /v1/mint-aws-creds` server-side aggregator, its
+> session-JWT + per-call EIP-191 signature wire format, Phase B grant `try_consume`
+> enforcement, and Idempotency-Key dedup. **All of those surfaces were deleted**
+> in PR #96 (closes issue #72) — the route, [`crates/agentkeys-broker-server/src/handlers/mint.rs`](../../../crates/agentkeys-broker-server/src/handlers/mint.rs)
+> (which no longer exists), and [`crates/agentkeys-broker-server/tests/mint_v2_flow.rs`](../../../crates/agentkeys-broker-server/tests/mint_v2_flow.rs)
+> (also gone). The current mint flow is `/v1/mint-oidc-jwt` (JWT signer only) +
+> client-side `sts:AssumeRoleWithWebIdentity`; isolation rides on AWS
+> CloudTrail + PrincipalTag/bucket policy per [`docs/arch.md`](../../arch.md) §17.2.
+>
+> Read the rest of this doc as **historical record of the pre-#96 design**, not as
+> a description of the current system. The `prd.json` in this directory has
+> matching stale acceptance criteria — same caveat applies. For the current
+> mint + isolation contract see [`docs/arch.md`](../../arch.md) and the surviving
+> tests under [`crates/agentkeys-broker-server/tests/`](../../../crates/agentkeys-broker-server/tests/).
+
+---
+
 ## 0. Context — why this plan exists
 
 PR #61 (broker phase 2 — OIDC issuer + AWS-cred wiring) merged to main. The broker today exposes 6 routes: `/healthz`, `/readyz`, `/v1/mint-aws-creds`, `/.well-known/openid-configuration`, `/.well-known/jwks.json`, `/v1/mint-oidc-jwt`. Auth is a bearer token validated by an HTTP call to `BROKER_BACKEND_URL/session/validate`. Audit is local SQLite. Wallet provisioning, user-identity verification, and chain anchoring are all implicit / external today.

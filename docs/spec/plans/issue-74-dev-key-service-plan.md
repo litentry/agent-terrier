@@ -78,9 +78,11 @@ Move the daemon off the legacy `agentkeys init --mock-token` → backend `/sessi
                 └────┬───────────────────┬─────┘                       └────────────────────┘
                      │ ① email/OAuth2    │ ③ /v1/wallet/link
                      │   auth flows      │ ④ /v1/auth/wallet/{start,verify}
-                     │ ④ /v1/mint-oidc-jwt   ④ /v1/mint-aws-creds
-                     ▼                   ▼
+                     │ ④ /v1/mint-oidc-jwt
+                     ▼
                   Broker (stateless minter, no key material from this flow)
+                  (/v1/mint-aws-creds retired in PR #96 / issue #72 —
+                   daemons now do client-side AssumeRoleWithWebIdentity)
 ```
 
 The backend → broker path doesn't change. The dev_key_service is a **new** edge: daemon → backend (signer), parallel to the existing daemon → backend (credential vault). When TEE lands, this edge re-routes to the TEE worker; daemon code doesn't change.

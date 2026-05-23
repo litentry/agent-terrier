@@ -29,8 +29,10 @@ pub struct OidcJwtResponse {
 }
 
 /// Final temp-cred shape passed to the scraper subprocess. The struct fields
-/// match the broker's pre-issue-#71 `/v1/mint-aws-creds` response so callers
-/// who already consume `AwsTempCreds.to_env(...)` need no changes.
+/// match the response shape of the legacy `/v1/mint-aws-creds` route (deleted
+/// in PR #96 / issue #72) so callers that already consume
+/// `AwsTempCreds.to_env(...)` need no changes during the migration to the
+/// daemon-side mint path.
 #[derive(Debug, Clone)]
 pub struct AwsTempCreds {
     pub access_key_id: String,
@@ -212,12 +214,11 @@ async fn assume_role_with_jwt(
 }
 
 /// Wallet → STS session name (max 64 chars; alphanumeric + `=,.@-_`).
-/// **Mirrors `crates/agentkeys-broker-server/src/handlers/mint.rs::build_session_name`
-/// byte-for-byte** so audit rows + CloudTrail events line up across broker
-/// mints (`/v1/mint-aws-creds` -> `mint_v2`) and daemon-side mints (this
-/// function). The trailing micro-second timestamp gives every call a unique
-/// session name even when the same wallet mints in rapid succession; without
-/// it AWS returns the same temp creds for repeated calls within the
+/// Daemon-side STS calls only — the server-side mint path was deleted in
+/// PR #96 (issue #72), so this is the sole producer of STS session names
+/// in the system. The trailing micro-second timestamp gives every call a
+/// unique session name even when the same wallet mints in rapid succession;
+/// without it AWS returns the same temp creds for repeated calls within the
 /// `DurationSeconds` window (subtle caching footgun called out in critic M1).
 fn build_session_name(wallet: &str) -> String {
     let now = SystemTime::now()
@@ -294,7 +295,8 @@ mod tests {
 
     #[test]
     fn build_session_name_matches_broker_format() {
-        // Mirrors broker handlers/mint.rs build_session_name (critic M1).
+        // STS session-name format invariant — daemon-side only since PR #96
+        // deleted the broker's handlers/mint.rs (issue #72) (critic M1).
         let name = build_session_name("0xAbCdEf0123456789ABCDEF0123456789AbCdEf0123456789");
         assert!(name.starts_with("agentkeys-"));
         assert!(name.len() <= 64, "STS rejects session names >64 chars");
