@@ -34,7 +34,10 @@ use agentkeys_broker_server::{
         PluginRegistry,
     },
     state::{AppState, Tier2State},
-    storage::{AuthNonceStore, EmailRateLimitStore, OAuth2PendingStore, GrantStore, IdempotencyStore, IdentityLinkStore, WalletStore},
+    storage::{
+        AuthNonceStore, EmailRateLimitStore, GrantStore, IdempotencyStore, IdentityLinkStore,
+        OAuth2PendingStore, WalletStore,
+    },
     sts::{AssumedCredentials, StsClient, StubStsClient},
 };
 use serde_json::Value;
@@ -79,8 +82,10 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
         .unwrap(),
     );
 
-    let mut auth_map: HashMap<String, Arc<dyn agentkeys_broker_server::plugins::auth::UserAuthMethod>> =
-        HashMap::new();
+    let mut auth_map: HashMap<
+        String,
+        Arc<dyn agentkeys_broker_server::plugins::auth::UserAuthMethod>,
+    > = HashMap::new();
     auth_map.insert("oauth2_google".into(), plugin.clone() as _);
 
     let wallet_store = Arc::new(WalletStore::open_in_memory().unwrap());
@@ -89,7 +94,9 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
 
     let registry = Arc::new(PluginRegistry {
         auth: auth_map,
-        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(&wallet_store))),
+        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(
+            &wallet_store,
+        ))),
         audit: vec![sqlite_anchor],
     });
 
@@ -200,14 +207,14 @@ async fn start_returns_authorization_url_and_pending_status() {
     assert!(auth_url.contains("state="));
     assert!(auth_url.contains("nonce="));
     assert!(auth_url.contains("challenge=") || auth_url.contains("code_challenge="));
-    assert!(body["poll_url"]
-        .as_str()
-        .unwrap()
-        .contains(&request_id));
+    assert!(body["poll_url"].as_str().unwrap().contains(&request_id));
 
     // Poll status before callback → pending.
     let st = client
-        .get(format!("{}/v1/auth/oauth2/status/{}", broker_url, request_id))
+        .get(format!(
+            "{}/v1/auth/oauth2/status/{}",
+            broker_url, request_id
+        ))
         .send()
         .await
         .unwrap();
@@ -245,12 +252,19 @@ async fn full_flow_callback_then_cli_poll_returns_session_jwt() {
         .unwrap();
     assert_eq!(cb.status(), 200);
     let html = cb.text().await.unwrap();
-    assert!(html.contains("Verified"), "expected verified body, got: {}", html);
+    assert!(
+        html.contains("Verified"),
+        "expected verified body, got: {}",
+        html
+    );
 
     // Headers — security posture.
     // (We re-request to inspect headers explicitly.)
     let cb2 = client
-        .get(format!("{}/auth/oauth2/callback?code=ignored&state=invalid", broker_url))
+        .get(format!(
+            "{}/auth/oauth2/callback?code=ignored&state=invalid",
+            broker_url
+        ))
         .send()
         .await
         .unwrap();
@@ -258,7 +272,10 @@ async fn full_flow_callback_then_cli_poll_returns_session_jwt() {
 
     // CLI poll — verified.
     let st = client
-        .get(format!("{}/v1/auth/oauth2/status/{}", broker_url, request_id))
+        .get(format!(
+            "{}/v1/auth/oauth2/status/{}",
+            broker_url, request_id
+        ))
         .send()
         .await
         .unwrap();
@@ -268,10 +285,7 @@ async fn full_flow_callback_then_cli_poll_returns_session_jwt() {
     assert!(st_body["session_jwt"].as_str().unwrap().starts_with("eyJ"));
     assert_eq!(st_body["identity_type"], "oauth2_google");
     assert_eq!(st_body["identity_value"], "stub-sub-12345");
-    assert!(!st_body["omni_account"]
-        .as_str()
-        .unwrap()
-        .is_empty());
+    assert!(!st_body["omni_account"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -340,7 +354,10 @@ async fn callback_propagates_provider_error_to_status() {
     assert!(html.contains("cancelled"), "got: {}", html);
 
     let st = client
-        .get(format!("{}/v1/auth/oauth2/status/{}", broker_url, request_id))
+        .get(format!(
+            "{}/v1/auth/oauth2/status/{}",
+            broker_url, request_id
+        ))
         .send()
         .await
         .unwrap();
@@ -409,13 +426,20 @@ async fn callback_propagates_expired_id_token_as_failed_status() {
 
     // CLI poll should see `failed` so the user-facing error is structured.
     let st = client
-        .get(format!("{}/v1/auth/oauth2/status/{}", broker_url, request_id))
+        .get(format!(
+            "{}/v1/auth/oauth2/status/{}",
+            broker_url, request_id
+        ))
         .send()
         .await
         .unwrap();
     let st_body: Value = st.json().await.unwrap();
     assert_eq!(st_body["status"], "failed");
-    assert!(st_body["reason"].as_str().unwrap().to_lowercase().contains("expired"));
+    assert!(st_body["reason"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("expired"));
 }
 
 #[tokio::test]
@@ -448,7 +472,10 @@ async fn callback_propagates_wrong_aud_as_failed_status() {
         .unwrap();
 
     let st = client
-        .get(format!("{}/v1/auth/oauth2/status/{}", broker_url, request_id))
+        .get(format!(
+            "{}/v1/auth/oauth2/status/{}",
+            broker_url, request_id
+        ))
         .send()
         .await
         .unwrap();
@@ -521,12 +548,7 @@ async fn unknown_provider_returns_bad_request() {
 fn urlencoding_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
-        if (b as char).is_ascii_alphanumeric()
-            || b == b'-'
-            || b == b'.'
-            || b == b'_'
-            || b == b'~'
-        {
+        if (b as char).is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_' || b == b'~' {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{:02X}", b));

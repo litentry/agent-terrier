@@ -1,11 +1,11 @@
 //! HTTP surface for the email-service worker.
 
+use aws_sdk_sesv2::types::{Body, Content, Destination, EmailContent, Message};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use aws_sdk_sesv2::types::{Body, Content, Destination, EmailContent, Message};
 use serde::{Deserialize, Serialize};
 
 use crate::state::SharedState;
@@ -37,20 +37,42 @@ pub async fn send(
 ) -> Result<Json<SendResponse>, (StatusCode, String)> {
     let body = if let Some(html) = req.body_html {
         Body::builder()
-            .text(Content::builder().data(req.body_text).build().map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?)
-            .html(Content::builder().data(html).build().map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?)
+            .text(
+                Content::builder()
+                    .data(req.body_text)
+                    .build()
+                    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?,
+            )
+            .html(
+                Content::builder()
+                    .data(html)
+                    .build()
+                    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?,
+            )
             .build()
     } else {
         Body::builder()
-            .text(Content::builder().data(req.body_text).build().map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?)
+            .text(
+                Content::builder()
+                    .data(req.body_text)
+                    .build()
+                    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?,
+            )
             .build()
     };
     let message = Message::builder()
-        .subject(Content::builder().data(req.subject).build().map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?)
+        .subject(
+            Content::builder()
+                .data(req.subject)
+                .build()
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?,
+        )
         .body(body)
         .build();
     let content = EmailContent::builder().simple(message).build();
-    let destination = Destination::builder().set_to_addresses(Some(req.to)).build();
+    let destination = Destination::builder()
+        .set_to_addresses(Some(req.to))
+        .build();
 
     let out = state
         .ses
@@ -60,10 +82,18 @@ pub async fn send(
         .content(content)
         .send()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("SES SendEmail: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("SES SendEmail: {e}"),
+            )
+        })?;
 
     let message_id = out.message_id().unwrap_or_default().to_string();
-    Ok(Json(SendResponse { ok: true, message_id }))
+    Ok(Json(SendResponse {
+        ok: true,
+        message_id,
+    }))
 }
 
 #[derive(Serialize)]
@@ -107,7 +137,12 @@ pub async fn inbox(
         .prefix(&prefix)
         .send()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("S3 ListObjects: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("S3 ListObjects: {e}"),
+            )
+        })?;
 
     let entries: Vec<InboxEntry> = out
         .contents()

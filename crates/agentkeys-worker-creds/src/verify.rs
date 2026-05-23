@@ -106,27 +106,28 @@ pub enum VerifyError {
     K3Mismatch { expected: u64, got: u64 },
 }
 
-pub fn verify_signature(
-    pubkey_pem: &str,
-    token: &CapToken,
-) -> Result<(), VerifyError> {
-    let canonical = serde_json::to_vec(&token.payload)
-        .map_err(|e| VerifyError::Encode(e.to_string()))?;
+pub fn verify_signature(pubkey_pem: &str, token: &CapToken) -> Result<(), VerifyError> {
+    let canonical =
+        serde_json::to_vec(&token.payload).map_err(|e| VerifyError::Encode(e.to_string()))?;
     let mut h = Sha256::new();
     h.update(&canonical);
     let digest = h.finalize();
     let sig_bytes = URL_SAFE_NO_PAD
         .decode(&token.broker_sig)
         .map_err(|e| VerifyError::SigDecode(e.to_string()))?;
-    let sig = Signature::from_slice(&sig_bytes)
-        .map_err(|e| VerifyError::SigParse(e.to_string()))?;
+    let sig =
+        Signature::from_slice(&sig_bytes).map_err(|e| VerifyError::SigParse(e.to_string()))?;
     let vk = parse_p256_pubkey_pem(pubkey_pem)?;
-    vk.verify(&digest, &sig).map_err(|_| VerifyError::SigInvalid)
+    vk.verify(&digest, &sig)
+        .map_err(|_| VerifyError::SigInvalid)
 }
 
 pub fn check_op(token: &CapToken, expected: CapOp) -> Result<(), VerifyError> {
     if token.payload.op != expected {
-        return Err(VerifyError::OpMismatch { expected, got: token.payload.op });
+        return Err(VerifyError::OpMismatch {
+            expected,
+            got: token.payload.op,
+        });
     }
     Ok(())
 }
@@ -136,10 +137,7 @@ pub fn check_op(token: &CapToken, expected: CapOp) -> Result<(), VerifyError> {
 /// cap MUST NOT be honored at /v1/memory/put, even though both endpoints
 /// expect the same CapOp::Store. The data_class binding is signed into
 /// the cap payload by the broker, so it cannot be forged downstream.
-pub fn check_data_class(
-    token: &CapToken,
-    expected: DataClass,
-) -> Result<(), VerifyError> {
+pub fn check_data_class(token: &CapToken, expected: DataClass) -> Result<(), VerifyError> {
     if token.payload.data_class != expected {
         return Err(VerifyError::DataClassMismatch {
             expected,
@@ -196,10 +194,14 @@ pub async fn check_chain_device(
     let req_operator = strip_0x_lc(&token.payload.operator_omni);
     let req_actor = strip_0x_lc(&token.payload.actor_omni);
     if device.operator_omni != req_operator {
-        return Err(VerifyError::DeviceMismatch { field: "operator_omni" });
+        return Err(VerifyError::DeviceMismatch {
+            field: "operator_omni",
+        });
     }
     if device.actor_omni != req_actor {
-        return Err(VerifyError::DeviceMismatch { field: "actor_omni" });
+        return Err(VerifyError::DeviceMismatch {
+            field: "actor_omni",
+        });
     }
     if (device.roles & ROLE_CAP_MINT) == 0 {
         return Err(VerifyError::DeviceRoleMissing { got: device.roles });
@@ -318,8 +320,7 @@ fn parse_bool(raw: &str) -> bool {
 
 fn parse_u64(raw: &str) -> Result<u64, VerifyError> {
     let stripped = raw.trim_start_matches("0x");
-    u64::from_str_radix(stripped, 16)
-        .map_err(|e| VerifyError::ChainRpc(format!("u64 parse: {e}")))
+    u64::from_str_radix(stripped, 16).map_err(|e| VerifyError::ChainRpc(format!("u64 parse: {e}")))
 }
 
 fn parse_p256_pubkey_pem(pem: &str) -> Result<VerifyingKey, VerifyError> {
@@ -427,23 +428,35 @@ mod tests {
     fn cap_op_serializes_snake_case() {
         assert_eq!(serde_json::to_string(&CapOp::Store).unwrap(), "\"store\"");
         assert_eq!(serde_json::to_string(&CapOp::Fetch).unwrap(), "\"fetch\"");
-        assert_eq!(serde_json::to_string(&CapOp::Teardown).unwrap(), "\"teardown\"");
+        assert_eq!(
+            serde_json::to_string(&CapOp::Teardown).unwrap(),
+            "\"teardown\""
+        );
     }
 
     #[test]
     fn function_selector_matches_known_signatures() {
-        assert_eq!(function_selector("isServiceInScope(bytes32,bytes32,bytes32)"), "13337240");
+        assert_eq!(
+            function_selector("isServiceInScope(bytes32,bytes32,bytes32)"),
+            "13337240"
+        );
         assert_eq!(function_selector("currentEpoch()"), "76671808");
     }
 
     #[test]
     fn keccak_service_lowercases() {
-        assert_eq!(keccak_lc_service("OpenRouter"), keccak_lc_service("openrouter"));
+        assert_eq!(
+            keccak_lc_service("OpenRouter"),
+            keccak_lc_service("openrouter")
+        );
     }
 
     #[test]
     fn pad32_accepts_with_or_without_0x() {
-        assert_eq!(pad32(&format!("0x{}", "a".repeat(64))).unwrap(), "a".repeat(64));
+        assert_eq!(
+            pad32(&format!("0x{}", "a".repeat(64))).unwrap(),
+            "a".repeat(64)
+        );
         assert_eq!(pad32(&"b".repeat(64)).unwrap(), "b".repeat(64));
     }
 
@@ -456,7 +469,10 @@ mod tests {
     fn check_freshness_rejects_past() {
         let mut t = sample_token(CapOp::Fetch);
         t.payload.expires_at = 1;
-        assert!(matches!(check_freshness(&t), Err(VerifyError::Expired { .. })));
+        assert!(matches!(
+            check_freshness(&t),
+            Err(VerifyError::Expired { .. })
+        ));
     }
 
     #[test]
@@ -464,7 +480,10 @@ mod tests {
         let mut t = sample_token(CapOp::Fetch);
         t.payload.issued_at = u64::MAX / 2; // well past now+60s
         t.payload.expires_at = u64::MAX;
-        assert!(matches!(check_freshness(&t), Err(VerifyError::Future { .. })));
+        assert!(matches!(
+            check_freshness(&t),
+            Err(VerifyError::Future { .. })
+        ));
     }
 
     #[test]
@@ -472,7 +491,10 @@ mod tests {
         let t = sample_token(CapOp::Store);
         assert!(matches!(
             check_op(&t, CapOp::Fetch),
-            Err(VerifyError::OpMismatch { expected: CapOp::Fetch, got: CapOp::Store })
+            Err(VerifyError::OpMismatch {
+                expected: CapOp::Fetch,
+                got: CapOp::Store
+            })
         ));
     }
 
@@ -497,17 +519,17 @@ mod tests {
         //  word 9 lastSignCount → 0
         //  word 10 revoked      → 0
         let mut raw = String::from("0x");
-        raw.push_str(&"a".repeat(64));                       // operator
-        raw.push_str(&"b".repeat(64));                       // actor
-        raw.push_str(&"0".repeat(64));                       // k11CredId
-        raw.push_str(&"0".repeat(64));                       // k11RpIdHash
-        raw.push_str(&"0".repeat(64));                       // k11PubX
-        raw.push_str(&"0".repeat(64));                       // k11PubY
-        raw.push_str(&format!("{:0>64x}", 1u64));            // tier
-        raw.push_str(&format!("{:0>64x}", 7u64));            // roles
-        raw.push_str(&format!("{:0>64x}", 42u64));           // registeredAt
-        raw.push_str(&"0".repeat(64));                       // lastSignCount
-        raw.push_str(&"0".repeat(64));                       // revoked
+        raw.push_str(&"a".repeat(64)); // operator
+        raw.push_str(&"b".repeat(64)); // actor
+        raw.push_str(&"0".repeat(64)); // k11CredId
+        raw.push_str(&"0".repeat(64)); // k11RpIdHash
+        raw.push_str(&"0".repeat(64)); // k11PubX
+        raw.push_str(&"0".repeat(64)); // k11PubY
+        raw.push_str(&format!("{:0>64x}", 1u64)); // tier
+        raw.push_str(&format!("{:0>64x}", 7u64)); // roles
+        raw.push_str(&format!("{:0>64x}", 42u64)); // registeredAt
+        raw.push_str(&"0".repeat(64)); // lastSignCount
+        raw.push_str(&"0".repeat(64)); // revoked
         let d = parse_device_entry(&raw).unwrap();
         assert_eq!(d.operator_omni, "a".repeat(64));
         assert_eq!(d.actor_omni, "b".repeat(64));

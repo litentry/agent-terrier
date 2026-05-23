@@ -6,8 +6,8 @@
 //! one of these MUST match, all set fields MUST match. Unset fields in the
 //! 7730 file are wildcards.
 
-use super::parser::{Erc7730Eip712Domain, Erc7730File};
 use super::eip712::TypedData;
+use super::parser::{Erc7730Eip712Domain, Erc7730File};
 
 /// Look up the ERC-7730 file whose `context.eip712.domain` matches the
 /// typed-data `domain`. Returns `None` if no file in the catalog matches.
@@ -26,16 +26,18 @@ pub fn match_file<'a>(
     None
 }
 
-pub(crate) fn parse_typed_data_domain(
-    domain: &serde_json::Value,
-) -> Option<Erc7730Eip712Domain> {
+pub(crate) fn parse_typed_data_domain(domain: &serde_json::Value) -> Option<Erc7730Eip712Domain> {
     let obj = domain.as_object()?;
     Some(Erc7730Eip712Domain {
         name: obj.get("name").and_then(|v| v.as_str()).map(str::to_string),
-        version: obj.get("version").and_then(|v| v.as_str()).map(str::to_string),
-        chain_id: obj
-            .get("chainId")
-            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))),
+        version: obj
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        chain_id: obj.get("chainId").and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        }),
         verifying_contract: obj
             .get("verifyingContract")
             .and_then(|v| v.as_str())
@@ -126,7 +128,10 @@ mod tests {
     fn mismatched_chain_id_fails() {
         let files = vec![usdc_permit_file()];
         let mut td = permit_td("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
-        td.domain.as_object_mut().unwrap().insert("chainId".into(), json!(137));
+        td.domain
+            .as_object_mut()
+            .unwrap()
+            .insert("chainId".into(), json!(137));
         assert!(match_file(&files, &td).is_none());
     }
 

@@ -59,7 +59,9 @@ impl AwsStsClient {
             .region(aws_config::Region::new(region.to_string()))
             .load()
             .await;
-        Self { client: aws_sdk_sts::Client::new(&config) }
+        Self {
+            client: aws_sdk_sts::Client::new(&config),
+        }
     }
 }
 

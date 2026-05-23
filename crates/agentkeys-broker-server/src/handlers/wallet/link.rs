@@ -66,12 +66,7 @@ pub async fn wallet_link(
         .unwrap_or(0);
     state
         .identity_link_store
-        .link(
-            &master,
-            &body.identity_type,
-            &body.identity_value,
-            now,
-        )
+        .link(&master, &body.identity_type, &body.identity_value, now)
         .map_err(|e| BrokerError::Internal(format!("link: {}", e)))?;
 
     Ok((

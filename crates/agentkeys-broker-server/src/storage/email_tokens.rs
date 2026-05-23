@@ -65,7 +65,9 @@ impl EmailTokenStore {
         }
         let conn = Connection::open(path)
             .map_err(|e| AuthError::Internal(format!("open email tokens db: {}", e)))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -73,7 +75,9 @@ impl EmailTokenStore {
     pub fn open_in_memory() -> Result<Self, AuthError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| AuthError::Internal(format!("open in-memory email tokens db: {}", e)))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -137,7 +141,8 @@ impl EmailTokenStore {
         let conn = self.lock()?;
 
         // Both rows must land or neither — wrap in a transaction.
-        let tx = conn.unchecked_transaction()
+        let tx = conn
+            .unchecked_transaction()
             .map_err(|e| AuthError::Internal(format!("begin tx: {}", e)))?;
         tx.execute(
             "INSERT INTO email_tokens (token_hash, request_id, email, issued_at, expires_at, consumed_at)
@@ -158,11 +163,7 @@ impl EmailTokenStore {
 
     /// Atomically consume a token by raw value. Internally hashes and
     /// runs `WHERE consumed_at IS NULL` conditional UPDATE.
-    pub fn consume_token(
-        &self,
-        token: &str,
-        now: i64,
-    ) -> Result<EmailConsumeOutcome, AuthError> {
+    pub fn consume_token(&self, token: &str, now: i64) -> Result<EmailConsumeOutcome, AuthError> {
         let token_hash = Self::hash_token(token);
         let conn = self.lock()?;
 
@@ -334,14 +335,16 @@ mod tests {
     #[test]
     fn issue_creates_pending_row_and_token() {
         let s = store();
-        s.issue("tok-abc", "req-1", "alice@x.com", 100, 700).unwrap();
+        s.issue("tok-abc", "req-1", "alice@x.com", 100, 700)
+            .unwrap();
         assert_eq!(s.peek_status("req-1").unwrap(), EmailRequestStatus::Pending);
     }
 
     #[test]
     fn consume_then_mark_verified_round_trip() {
         let s = store();
-        s.issue("tok-abc", "req-1", "alice@x.com", 100, 700).unwrap();
+        s.issue("tok-abc", "req-1", "alice@x.com", 100, 700)
+            .unwrap();
         let outcome = s.consume_token("tok-abc", 200).unwrap();
         assert_eq!(
             outcome,
@@ -369,7 +372,8 @@ mod tests {
     #[test]
     fn replay_token_returns_not_found_or_consumed() {
         let s = store();
-        s.issue("tok-abc", "req-1", "alice@x.com", 100, 700).unwrap();
+        s.issue("tok-abc", "req-1", "alice@x.com", 100, 700)
+            .unwrap();
         let _ = s.consume_token("tok-abc", 200).unwrap();
         let replay = s.consume_token("tok-abc", 250).unwrap();
         assert_eq!(replay, EmailConsumeOutcome::NotFoundOrConsumed);
@@ -378,7 +382,8 @@ mod tests {
     #[test]
     fn expired_token_is_not_consumable() {
         let s = store();
-        s.issue("tok-old", "req-1", "alice@x.com", 100, 200).unwrap();
+        s.issue("tok-old", "req-1", "alice@x.com", 100, 200)
+            .unwrap();
         // now > expires_at
         let r = s.consume_token("tok-old", 9999).unwrap();
         assert_eq!(r, EmailConsumeOutcome::Expired);
@@ -387,9 +392,12 @@ mod tests {
     #[test]
     fn issue_rejects_duplicate_request_id() {
         let s = store();
-        s.issue("tok-1", "req-dup", "alice@x.com", 100, 700).unwrap();
+        s.issue("tok-1", "req-dup", "alice@x.com", 100, 700)
+            .unwrap();
         // Different token but duplicate request_id: rejected by UNIQUE constraint.
-        assert!(s.issue("tok-2", "req-dup", "alice@x.com", 100, 700).is_err());
+        assert!(s
+            .issue("tok-2", "req-dup", "alice@x.com", 100, 700)
+            .is_err());
     }
 
     #[test]

@@ -147,9 +147,18 @@ mod tests {
 
     #[test]
     fn audit_policy_parse_round_trip() {
-        assert_eq!(AuditPolicy::parse("dual_strict").unwrap(), AuditPolicy::DualStrict);
-        assert_eq!(AuditPolicy::parse("sqlite_primary").unwrap(), AuditPolicy::SqlitePrimary);
-        assert_eq!(AuditPolicy::parse("evm_primary").unwrap(), AuditPolicy::EvmPrimary);
+        assert_eq!(
+            AuditPolicy::parse("dual_strict").unwrap(),
+            AuditPolicy::DualStrict
+        );
+        assert_eq!(
+            AuditPolicy::parse("sqlite_primary").unwrap(),
+            AuditPolicy::SqlitePrimary
+        );
+        assert_eq!(
+            AuditPolicy::parse("evm_primary").unwrap(),
+            AuditPolicy::EvmPrimary
+        );
         assert!(AuditPolicy::parse("nonsense").is_err());
     }
 

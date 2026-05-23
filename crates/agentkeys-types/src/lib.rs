@@ -68,16 +68,34 @@ pub enum AgentIdentity {
     /// migrate). Stage 7 issue #64 adds this variant; pre-existing
     /// AgentIdentity consumers continue to work unchanged because every
     /// other variant remains.
-    OAuth2 { provider: String, sub: String },
+    OAuth2 {
+        provider: String,
+        sub: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuthRequestType {
-    Pair { requested_scope: Scope },
-    Recover { agent_identity: AgentIdentity, new_daemon_pubkey: Vec<u8> },
-    ScopeChange { agent_id: WalletAddress, new_scope: Scope },
-    HighValueRelease { agent_id: WalletAddress, service: ServiceName, estimated_cost_cents: u64 },
-    KeyRotate { agent_id: WalletAddress, new_pubkey: Vec<u8> },
+    Pair {
+        requested_scope: Scope,
+    },
+    Recover {
+        agent_identity: AgentIdentity,
+        new_daemon_pubkey: Vec<u8>,
+    },
+    ScopeChange {
+        agent_id: WalletAddress,
+        new_scope: Scope,
+    },
+    HighValueRelease {
+        agent_id: WalletAddress,
+        service: ServiceName,
+        estimated_cost_cents: u64,
+    },
+    KeyRotate {
+        agent_id: WalletAddress,
+        new_pubkey: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,7 +214,11 @@ mod tests {
 
     #[test]
     fn recovery_method_serialize_roundtrip() {
-        for method in [RecoveryMethod::MasterApproval, RecoveryMethod::Passkey, RecoveryMethod::Email] {
+        for method in [
+            RecoveryMethod::MasterApproval,
+            RecoveryMethod::Passkey,
+            RecoveryMethod::Email,
+        ] {
             let json = serde_json::to_string(&method).unwrap();
             let back: RecoveryMethod = serde_json::from_str(&json).unwrap();
             assert_eq!(method, back);

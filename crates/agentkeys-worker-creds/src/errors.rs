@@ -15,20 +15,41 @@ pub struct ErrorBody {
 pub type ApiError = (StatusCode, Json<ErrorBody>);
 
 pub fn err_400(msg: impl Into<String>, reason: &'static str) -> ApiError {
-    (StatusCode::BAD_REQUEST, Json(ErrorBody { error: msg.into(), reason }))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorBody {
+            error: msg.into(),
+            reason,
+        }),
+    )
 }
 
 pub fn err_403(msg: impl Into<String>, reason: &'static str) -> ApiError {
-    (StatusCode::FORBIDDEN, Json(ErrorBody { error: msg.into(), reason }))
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorBody {
+            error: msg.into(),
+            reason,
+        }),
+    )
 }
 
 pub fn err_500(msg: impl Into<String>, reason: &'static str) -> ApiError {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorBody { error: msg.into(), reason }),
+        Json(ErrorBody {
+            error: msg.into(),
+            reason,
+        }),
     )
 }
 
 pub fn err_502(msg: impl Into<String>, reason: &'static str) -> ApiError {
-    (StatusCode::BAD_GATEWAY, Json(ErrorBody { error: msg.into(), reason }))
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(ErrorBody {
+            error: msg.into(),
+            reason,
+        }),
+    )
 }

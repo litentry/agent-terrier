@@ -35,9 +35,8 @@ pub struct IdempotencyStore {
 impl IdempotencyStore {
     pub fn open(path: &Path) -> Result<Self, AuthError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AuthError::Internal(format!("create idempotency dir: {}", e))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| AuthError::Internal(format!("create idempotency dir: {}", e)))?;
         }
         let conn = Connection::open(path)
             .map_err(|e| AuthError::Internal(format!("open idempotency db: {}", e)))?;
@@ -194,7 +193,8 @@ mod tests {
     #[test]
     fn store_then_check_returns_replay() {
         let s = store();
-        s.store("k1", "abc", r#"{"creds":"..."}"#, 100, 1000).unwrap();
+        s.store("k1", "abc", r#"{"creds":"..."}"#, 100, 1000)
+            .unwrap();
         let r = s.check("k1", "abc", 200).unwrap();
         match r {
             IdempotencyOutcome::Replay { response_body } => {

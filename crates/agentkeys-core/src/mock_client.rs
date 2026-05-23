@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 
 use crate::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
-    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
-    EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
-    RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
+    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
+    InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope,
+    ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
 pub struct MockHttpClient {
@@ -15,7 +15,10 @@ pub struct MockHttpClient {
 
 impl MockHttpClient {
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self { base_url: base_url.into(), client: reqwest::Client::new() }
+        Self {
+            base_url: base_url.into(),
+            client: reqwest::Client::new(),
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -25,7 +28,10 @@ impl MockHttpClient {
     async fn map_error(resp: reqwest::Response) -> BackendError {
         let status = resp.status();
         let body: Value = resp.json().await.unwrap_or(Value::Null);
-        let msg = body["message"].as_str().unwrap_or("unknown error").to_string();
+        let msg = body["message"]
+            .as_str()
+            .unwrap_or("unknown error")
+            .to_string();
         match status.as_u16() {
             401 => BackendError::AuthFailed(msg),
             403 => BackendError::PermissionDenied(msg),
@@ -57,7 +63,9 @@ impl CredentialBackend for MockHttpClient {
             agentkeys_types::AuthToken::Mock(s) => s.clone(),
             agentkeys_types::AuthToken::GoogleOAuth(s) => s.clone(),
             agentkeys_types::AuthToken::Passkey(_) => {
-                return Err(BackendError::Internal("Passkey auth not supported by mock".into()));
+                return Err(BackendError::Internal(
+                    "Passkey auth not supported by mock".into(),
+                ));
             }
         };
 
@@ -73,7 +81,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let session_token = body["session"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing session".into()))?
@@ -106,7 +117,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let session_token = body["session"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing session".into()))?
@@ -161,7 +175,10 @@ impl CredentialBackend for MockHttpClient {
         agent_id: &WalletAddress,
         service: &ServiceName,
     ) -> Result<Vec<u8>, BackendError> {
-        let url = format!("/credential/read?agent_id={}&service={}", agent_id.0, service.0);
+        let url = format!(
+            "/credential/read?agent_id={}&service={}",
+            agent_id.0, service.0
+        );
 
         let resp = self
             .client
@@ -175,7 +192,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let ct_b64 = body["ciphertext"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing ciphertext".into()))?;
@@ -257,7 +277,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let key_b64 = body["public_key"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing public_key".into()))?;
@@ -289,7 +312,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let token = body["registration_token"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing registration_token".into()))?
@@ -314,7 +340,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let status = body["status"].as_str().unwrap_or("timeout");
 
         if status == "delivered" {
@@ -417,7 +446,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let id_str = body["id"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing id".into()))?
@@ -466,7 +498,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let id_str = body["id"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing id".into()))?
@@ -491,10 +526,16 @@ impl CredentialBackend for MockHttpClient {
             },
             "ScopeChange" => AuthRequestType::ScopeChange {
                 agent_id: WalletAddress("unknown".into()),
-                new_scope: Scope { services: vec![], read_only: false },
+                new_scope: Scope {
+                    services: vec![],
+                    read_only: false,
+                },
             },
             _ => AuthRequestType::Pair {
-                requested_scope: Scope { services: vec![], read_only: false },
+                requested_scope: Scope {
+                    services: vec![],
+                    read_only: false,
+                },
             },
         };
 
@@ -544,11 +585,16 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let status = body["status"].as_str().unwrap_or("timeout");
 
         if status == "timeout" {
-            return Err(BackendError::Transport("await_auth_decision timed out".into()));
+            return Err(BackendError::Transport(
+                "await_auth_decision timed out".into(),
+            ));
         }
 
         if status == "consumed" || status == "consumed_awaited" {
@@ -575,7 +621,9 @@ impl CredentialBackend for MockHttpClient {
             }
         });
 
-        let wallet = body["wallet"].as_str().map(|w| WalletAddress(w.to_string()));
+        let wallet = body["wallet"]
+            .as_str()
+            .map(|w| WalletAddress(w.to_string()));
 
         Ok(SignedAuthDecision {
             request_id: request_id.clone(),
@@ -605,7 +653,10 @@ impl CredentialBackend for MockHttpClient {
         if !resp.status().is_success() {
             return Err(Self::map_error(resp).await);
         }
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let services = body["services"]
             .as_array()
             .ok_or_else(|| BackendError::Internal("missing services".into()))?
@@ -636,7 +687,10 @@ impl CredentialBackend for MockHttpClient {
         if !resp.status().is_success() {
             return Err(Self::map_error(resp).await);
         }
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         if body["services"].is_null() {
             return Ok(None);
         }
@@ -648,7 +702,10 @@ impl CredentialBackend for MockHttpClient {
             .map(|s| ServiceName(s.to_string()))
             .collect();
         let read_only = body["read_only"].as_bool().unwrap_or(false);
-        Ok(Some(Scope { services, read_only }))
+        Ok(Some(Scope {
+            services,
+            read_only,
+        }))
     }
 
     async fn update_scope(
@@ -692,7 +749,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let address = body["address"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing address".into()))?
@@ -718,7 +778,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let addresses = body
             .as_array()
             .ok_or_else(|| BackendError::Internal("expected array".into()))?
@@ -770,7 +833,10 @@ impl CredentialBackend for MockHttpClient {
             return Err(Self::map_error(resp).await);
         }
 
-        let body: Value = resp.json().await.map_err(|e| BackendError::Transport(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
         let session_token = body["session"]
             .as_str()
             .ok_or_else(|| BackendError::Internal("missing session".into()))?

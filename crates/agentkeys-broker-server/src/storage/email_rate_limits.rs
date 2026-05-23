@@ -34,15 +34,20 @@ impl EmailRateLimitStore {
         }
         let conn = Connection::open(path)
             .map_err(|e| AuthError::Internal(format!("open email rate limits db: {}", e)))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init_schema()?;
         Ok(store)
     }
 
     pub fn open_in_memory() -> Result<Self, AuthError> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| AuthError::Internal(format!("open in-memory email rate limits db: {}", e)))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let conn = Connection::open_in_memory().map_err(|e| {
+            AuthError::Internal(format!("open in-memory email rate limits db: {}", e))
+        })?;
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -185,9 +190,13 @@ mod tests {
             assert!(matches!(r, RateLimitOutcome::Allowed { .. }), "iter {}", i);
         }
         // 6th request is denied.
-        let r = s.check_and_increment("email:a@b.com", 1010, 3600, 5).unwrap();
+        let r = s
+            .check_and_increment("email:a@b.com", 1010, 3600, 5)
+            .unwrap();
         match r {
-            RateLimitOutcome::Denied { retry_after_seconds } => {
+            RateLimitOutcome::Denied {
+                retry_after_seconds,
+            } => {
                 assert!(retry_after_seconds > 0 && retry_after_seconds <= 3600);
             }
             _ => panic!("expected Denied"),

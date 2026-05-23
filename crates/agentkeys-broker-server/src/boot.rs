@@ -29,7 +29,9 @@ use crate::jwt::SessionKeypair;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::{AuditAnchor, AuditPolicy};
 use crate::plugins::PluginRegistry;
-use crate::storage::{AuthNonceStore, GrantStore, IdempotencyStore, IdentityLinkStore, WalletStore};
+use crate::storage::{
+    AuthNonceStore, GrantStore, IdempotencyStore, IdentityLinkStore, WalletStore,
+};
 
 /// Outcome of the synchronous Tier-1 boot phase.
 pub struct BootArtifacts {
@@ -63,7 +65,12 @@ pub struct BootArtifacts {
 
 /// Format and emit a `BOOT_FAIL: …` error to stderr-bound logs and return
 /// the same anyhow::Error so main can `?` it cleanly.
-fn boot_fail(var: &str, value: &str, reason: impl std::fmt::Display, anchor: &str) -> anyhow::Error {
+fn boot_fail(
+    var: &str,
+    value: &str,
+    reason: impl std::fmt::Display,
+    anchor: &str,
+) -> anyhow::Error {
     let msg = format!(
         "BOOT_FAIL: {}={:?}: {}; see runbook §{}",
         var, value, reason, anchor
@@ -153,26 +160,22 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
             )
         })?,
     );
-    let wallet_store = Arc::new(
-        WalletStore::open(&wallets_path(config)).map_err(|e| {
-            boot_fail(
-                env::BROKER_AUDIT_DB_PATH,
-                &config.audit_db_path.display().to_string(),
-                format!("WalletStore: {}", e),
-                "wallets-db",
-            )
-        })?,
-    );
-    let grant_store = Arc::new(
-        GrantStore::open(&grants_path(config)).map_err(|e| {
-            boot_fail(
-                env::BROKER_AUDIT_DB_PATH,
-                &config.audit_db_path.display().to_string(),
-                format!("GrantStore: {}", e),
-                "grants-db",
-            )
-        })?,
-    );
+    let wallet_store = Arc::new(WalletStore::open(&wallets_path(config)).map_err(|e| {
+        boot_fail(
+            env::BROKER_AUDIT_DB_PATH,
+            &config.audit_db_path.display().to_string(),
+            format!("WalletStore: {}", e),
+            "wallets-db",
+        )
+    })?);
+    let grant_store = Arc::new(GrantStore::open(&grants_path(config)).map_err(|e| {
+        boot_fail(
+            env::BROKER_AUDIT_DB_PATH,
+            &config.audit_db_path.display().to_string(),
+            format!("GrantStore: {}", e),
+            "grants-db",
+        )
+    })?);
     let identity_link_store = Arc::new(
         IdentityLinkStore::open(&identity_links_path(config)).map_err(|e| {
             boot_fail(
@@ -183,30 +186,30 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
             )
         })?,
     );
-    let idempotency_store = Arc::new(
-        IdempotencyStore::open(&idempotency_path(config)).map_err(|e| {
+    let idempotency_store = Arc::new(IdempotencyStore::open(&idempotency_path(config)).map_err(
+        |e| {
             boot_fail(
                 env::BROKER_AUDIT_DB_PATH,
                 &config.audit_db_path.display().to_string(),
                 format!("IdempotencyStore: {}", e),
                 "idempotency-db",
             )
-        })?,
-    );
+        },
+    )?);
 
     // 5. Validate + parse plugin selection env vars. Every name in each
     //    list must resolve at compile time (i.e. the corresponding
     //    feature must be enabled).
-    let auth_methods_raw = std::env::var(env::BROKER_AUTH_METHODS)
-        .unwrap_or_else(|_| "wallet_sig".to_string());
-    let audit_anchors_raw = std::env::var(env::BROKER_AUDIT_ANCHORS)
-        .unwrap_or_else(|_| "sqlite".to_string());
+    let auth_methods_raw =
+        std::env::var(env::BROKER_AUTH_METHODS).unwrap_or_else(|_| "wallet_sig".to_string());
+    let audit_anchors_raw =
+        std::env::var(env::BROKER_AUDIT_ANCHORS).unwrap_or_else(|_| "sqlite".to_string());
     let wallet_provisioner_name = std::env::var(env::BROKER_WALLET_PROVISIONER)
         .unwrap_or_else(|_| "client_keystore".to_string());
 
     // 6. Audit policy.
-    let audit_policy_raw = std::env::var(env::BROKER_AUDIT_POLICY)
-        .unwrap_or_else(|_| "dual_strict".to_string());
+    let audit_policy_raw =
+        std::env::var(env::BROKER_AUDIT_POLICY).unwrap_or_else(|_| "dual_strict".to_string());
     let audit_policy = AuditPolicy::parse(&audit_policy_raw).map_err(|e| {
         boot_fail(
             env::BROKER_AUDIT_POLICY,
@@ -267,10 +270,10 @@ impl Tier2Profile {
         let strict = std::env::var(env::BROKER_REFUSE_TO_BOOT_STRICT)
             .map(|v| v == "true")
             .unwrap_or(false);
-        let methods = std::env::var(env::BROKER_AUTH_METHODS)
-            .unwrap_or_else(|_| "wallet_sig".to_string());
-        let anchors = std::env::var(env::BROKER_AUDIT_ANCHORS)
-            .unwrap_or_else(|_| "sqlite".to_string());
+        let methods =
+            std::env::var(env::BROKER_AUTH_METHODS).unwrap_or_else(|_| "wallet_sig".to_string());
+        let anchors =
+            std::env::var(env::BROKER_AUDIT_ANCHORS).unwrap_or_else(|_| "sqlite".to_string());
         Self {
             strict,
             email_link_enabled: methods.split(',').any(|m| m.trim() == "email_link"),
@@ -320,9 +323,7 @@ fn idempotency_path(config: &BrokerConfig) -> std::path::PathBuf {
 }
 
 #[cfg(feature = "audit-sqlite")]
-fn open_sqlite_anchor(
-    config: &BrokerConfig,
-) -> Result<Arc<dyn AuditAnchor>, anyhow::Error> {
+fn open_sqlite_anchor(config: &BrokerConfig) -> Result<Arc<dyn AuditAnchor>, anyhow::Error> {
     use crate::plugins::audit::sqlite::SqliteAnchor;
     let anchor = SqliteAnchor::open(&config.audit_db_path).map_err(|e| {
         boot_fail(
@@ -376,15 +377,14 @@ fn build_registry(
                 // SHA256(token) keyed by request_id in EmailTokenStore →
                 // single-use within TTL). See arch.md §5a.1.M Stage 1 +
                 // EmailLinkAuth::new doc comment for the design rationale.
-                let from_address =
-                    std::env::var(env::BROKER_EMAIL_FROM_ADDRESS).map_err(|_| {
-                        boot_fail(
-                            env::BROKER_EMAIL_FROM_ADDRESS,
-                            "(unset)",
-                            "required when email_link is in BROKER_AUTH_METHODS",
-                            "email-from-address",
-                        )
-                    })?;
+                let from_address = std::env::var(env::BROKER_EMAIL_FROM_ADDRESS).map_err(|_| {
+                    boot_fail(
+                        env::BROKER_EMAIL_FROM_ADDRESS,
+                        "(unset)",
+                        "required when email_link is in BROKER_AUTH_METHODS",
+                        "email-from-address",
+                    )
+                })?;
                 // Stores: SQLite files under config.audit_db_path's parent dir.
                 let parent = config
                     .audit_db_path
@@ -402,15 +402,16 @@ fn build_registry(
                     })?,
                 );
                 let rl_store = Arc::new(
-                    EmailRateLimitStore::open(&parent.join("email_rate_limits.sqlite"))
-                        .map_err(|e| {
+                    EmailRateLimitStore::open(&parent.join("email_rate_limits.sqlite")).map_err(
+                        |e| {
                             boot_fail(
                                 env::BROKER_AUDIT_DB_PATH,
                                 &parent.display().to_string(),
                                 format!("EmailRateLimitStore: {}", e),
                                 "email-rate-limits-db",
                             )
-                        })?,
+                        },
+                    )?,
                 );
                 // Rate-limit defaults.
                 let per_email = std::env::var(env::BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY)
@@ -438,8 +439,8 @@ fn build_registry(
                 //   "stub" (default, in-process Vec — same as v0.1)
                 //   "ses"  (real aws-sdk-sesv2 SendEmail; requires verified FROM
                 //          identity per scripts/ses-verify-sender.sh)
-                let sender_backend = std::env::var(env::BROKER_EMAIL_SENDER)
-                    .unwrap_or_else(|_| "stub".to_string());
+                let sender_backend =
+                    std::env::var(env::BROKER_EMAIL_SENDER).unwrap_or_else(|_| "stub".to_string());
                 let sender: Arc<dyn EmailSender> = match sender_backend.as_str() {
                     "stub" => {
                         tracing::info!("email_link sender backend: stub (in-process)");
@@ -515,17 +516,15 @@ fn build_registry(
                             "oauth2-google-client-id",
                         )
                     })?;
-                let client_secret_path = std::env::var(
-                    env::BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE,
-                )
-                .map_err(|_| {
-                    boot_fail(
-                        env::BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE,
-                        "(unset)",
-                        "required when oauth2_google is in BROKER_AUTH_METHODS",
-                        "oauth2-google-client-secret-file",
-                    )
-                })?;
+                let client_secret_path =
+                    std::env::var(env::BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE).map_err(|_| {
+                        boot_fail(
+                            env::BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE,
+                            "(unset)",
+                            "required when oauth2_google is in BROKER_AUTH_METHODS",
+                            "oauth2-google-client-secret-file",
+                        )
+                    })?;
                 let client_secret = std::fs::read_to_string(&client_secret_path)
                     .map_err(|e| {
                         boot_fail(
@@ -571,12 +570,11 @@ fn build_registry(
                             "oauth2-redirect-uri",
                         )
                     })?;
-                let start_rate_limit = std::env::var(
-                    env::BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY,
-                )
-                .ok()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(30);
+                let start_rate_limit =
+                    std::env::var(env::BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY)
+                        .ok()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(30);
                 let jwks_ttl = std::env::var(env::BROKER_OAUTH2_JWKS_TTL_SECONDS)
                     .ok()
                     .and_then(|s| s.parse::<i64>().ok())
@@ -603,15 +601,16 @@ fn build_registry(
                 // Phase A.1's email_rate_limits.sqlite is generic-by-bucket-id;
                 // we use a separate file to keep operator visibility clean.
                 let rl_store = Arc::new(
-                    EmailRateLimitStore::open(&parent.join("oauth2_rate_limits.sqlite"))
-                        .map_err(|e| {
+                    EmailRateLimitStore::open(&parent.join("oauth2_rate_limits.sqlite")).map_err(
+                        |e| {
                             boot_fail(
                                 env::BROKER_AUDIT_DB_PATH,
                                 &parent.display().to_string(),
                                 format!("OAuth2 rate-limit store: {}", e),
                                 "oauth2-rate-limits-db",
                             )
-                        })?,
+                        },
+                    )?,
                 );
 
                 let provider =
@@ -665,7 +664,9 @@ fn build_registry(
         #[cfg(feature = "wallet-keystore")]
         "client_keystore" => {
             use crate::plugins::wallet::keystore::ClientSideKeystoreProvisioner;
-            Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(&wallet_store)))
+            Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(
+                &wallet_store,
+            )))
         }
         other => {
             return Err(boot_fail(
@@ -807,7 +808,10 @@ mod tests {
 
     #[test]
     fn url_host_extracts_correctly() {
-        assert_eq!(url_host("https://broker.example.com/v1"), "broker.example.com");
+        assert_eq!(
+            url_host("https://broker.example.com/v1"),
+            "broker.example.com"
+        );
         assert_eq!(url_host("http://localhost:8080"), "localhost:8080");
         assert_eq!(url_host("broker.example.com"), "broker.example.com");
     }

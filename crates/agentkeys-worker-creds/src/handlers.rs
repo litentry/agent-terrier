@@ -187,7 +187,8 @@ async fn cred_teardown(
         .collect();
     let mut deleted = 0usize;
     for k in &keys {
-        if s3.delete_object()
+        if s3
+            .delete_object()
             .bucket(&state.config.vault_bucket)
             .key(k)
             .send()
@@ -197,7 +198,10 @@ async fn cred_teardown(
             deleted += 1;
         }
     }
-    Ok(Json(TeardownResponse { ok: true, keys_deleted: deleted }))
+    Ok(Json(TeardownResponse {
+        ok: true,
+        keys_deleted: deleted,
+    }))
 }
 
 async fn verify_cap(
@@ -207,14 +211,12 @@ async fn verify_cap(
 ) -> Result<(), ApiError> {
     verify::verify_signature(&state.config.broker_pubkey_pem, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
-    verify::check_op(cap, expected_op)
-        .map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
+    verify::check_op(cap, expected_op).map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
     // Per-data-class isolation gate (issue #90 followup): a memory-class
     // cap MUST NOT be honoured at the credentials worker.
     verify::check_data_class(cap, DataClass::Credentials)
         .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
-    verify::check_freshness(cap)
-        .map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
+    verify::check_freshness(cap).map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
     verify::check_chain_device(
         &state.http,
         &state.config.chain_rpc_http,

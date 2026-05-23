@@ -149,6 +149,9 @@ mod tests {
 
     #[test]
     fn rejects_malformed_json() {
-        assert!(matches!(parse("{not json"), Err(Erc7730Error::Malformed(_))));
+        assert!(matches!(
+            parse("{not json"),
+            Err(Erc7730Error::Malformed(_))
+        ));
     }
 }

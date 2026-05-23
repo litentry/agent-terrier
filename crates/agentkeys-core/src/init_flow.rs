@@ -90,14 +90,8 @@ pub async fn init_via_email_link(
     let request_id = string_field(&req, "/v1/auth/email/request", "request_id")?;
 
     // 2. Poll until verified.
-    let (identity_session_jwt, identity_omni) = poll_auth_status(
-        &http,
-        broker,
-        "email",
-        &request_id,
-        poll_timeout,
-    )
-    .await?;
+    let (identity_session_jwt, identity_omni) =
+        poll_auth_status(&http, broker, "email", &request_id, poll_timeout).await?;
 
     // 3-5. Derive + link + SIWE round-trip.
     let result = finish_init(
@@ -229,10 +223,8 @@ async fn poll_auth_status(
             .map_err(|e| InitFlowError::Transport(format!("parse JSON: {e}")))?;
         match body["status"].as_str() {
             Some("verified") => {
-                let session_jwt =
-                    string_field(&body, "/v1/auth/{provider}/status", "session_jwt")?;
-                let omni =
-                    string_field(&body, "/v1/auth/{provider}/status", "omni_account")?;
+                let session_jwt = string_field(&body, "/v1/auth/{provider}/status", "session_jwt")?;
+                let omni = string_field(&body, "/v1/auth/{provider}/status", "omni_account")?;
                 return Ok((session_jwt, omni));
             }
             Some("expired") | Some("rejected") => {

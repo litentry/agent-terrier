@@ -75,7 +75,11 @@ struct PendingChallenge {
 }
 
 impl SiweWalletAuth {
-    pub fn new(nonce_store: Arc<AuthNonceStore>, domain: impl Into<String>, uri: impl Into<String>) -> Self {
+    pub fn new(
+        nonce_store: Arc<AuthNonceStore>,
+        domain: impl Into<String>,
+        uri: impl Into<String>,
+    ) -> Self {
         Self {
             nonce_store,
             domain: domain.into(),
@@ -101,17 +105,27 @@ impl UserAuthMethod for SiweWalletAuth {
 
     async fn challenge(&self, params: ChallengeParams) -> Result<AuthChallenge, AuthError> {
         // Inputs: address (required), chain_id (required, integer).
-        let address = params.extras.get("address")
+        let address = params
+            .extras
+            .get("address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AuthError::InvalidRequest("missing field: address".into()))?
             .to_lowercase();
         if address.len() != 42 || !address.starts_with("0x") {
-            return Err(AuthError::InvalidRequest(format!("malformed address: {}", address)));
+            return Err(AuthError::InvalidRequest(format!(
+                "malformed address: {}",
+                address
+            )));
         }
         if !address[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(AuthError::InvalidRequest(format!("malformed address: {}", address)));
+            return Err(AuthError::InvalidRequest(format!(
+                "malformed address: {}",
+                address
+            )));
         }
-        let chain_id = params.extras.get("chain_id")
+        let chain_id = params
+            .extras
+            .get("chain_id")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| AuthError::InvalidRequest("missing field: chain_id".into()))?;
 
@@ -177,7 +191,9 @@ impl UserAuthMethod for SiweWalletAuth {
 
     async fn verify(&self, response: AuthResponse) -> Result<VerifiedIdentity, AuthError> {
         // Extract the submitted signature.
-        let signature_hex = response.extras.get("signature")
+        let signature_hex = response
+            .extras
+            .get("signature")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AuthError::InvalidRequest("missing field: signature".into()))?;
 
@@ -186,17 +202,21 @@ impl UserAuthMethod for SiweWalletAuth {
         // single-use is in `auth_nonces`).
         let pending = {
             let mut map = self.pending.lock().await;
-            map.remove(&response.request_id)
-                .ok_or_else(|| AuthError::Unauthorized(format!(
+            map.remove(&response.request_id).ok_or_else(|| {
+                AuthError::Unauthorized(format!(
                     "no pending wallet-sig challenge for request_id: {}",
                     response.request_id
-                )))?
+                ))
+            })?
         };
 
         // Atomically consume the nonce.
         let now = unix_now()?;
         match self.nonce_store.consume(&pending.nonce, now)? {
-            ConsumeOutcome::Consumed { address: stored_address, .. } => {
+            ConsumeOutcome::Consumed {
+                address: stored_address,
+                ..
+            } => {
                 if stored_address != pending.address {
                     return Err(AuthError::Internal(format!(
                         "nonce->address mismatch: stored={}, pending={}",
@@ -521,9 +541,7 @@ mod tests {
         hasher.update(message.as_bytes());
         let digest = hasher.finalize();
 
-        let (sig, recovery_id) = signing_key
-            .sign_prehash_recoverable(&digest)
-            .unwrap();
+        let (sig, recovery_id) = signing_key.sign_prehash_recoverable(&digest).unwrap();
         let mut sig_bytes = sig.to_bytes().to_vec();
         sig_bytes.push(recovery_id.to_byte());
         let sig_hex = format!("0x{}", hex::encode(&sig_bytes));

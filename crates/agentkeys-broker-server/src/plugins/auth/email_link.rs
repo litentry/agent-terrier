@@ -36,8 +36,7 @@ use crate::plugins::auth::{
 };
 use crate::plugins::Readiness;
 use crate::storage::{
-    EmailConsumeOutcome, EmailRateLimitStore, EmailRequestStatus, EmailTokenStore,
-    RateLimitOutcome,
+    EmailConsumeOutcome, EmailRateLimitStore, EmailRequestStatus, EmailTokenStore, RateLimitOutcome,
 };
 
 const PLUGIN_NAME: &str = "email_link";
@@ -117,7 +116,9 @@ impl EmailSender for StubEmailSender {
 
     async fn verify_sender_ready(&self) -> Result<(), EmailSendError> {
         if self.fail_verify {
-            return Err(EmailSendError::Verify("stub configured to fail verify".into()));
+            return Err(EmailSendError::Verify(
+                "stub configured to fail verify".into(),
+            ));
         }
         Ok(())
     }
@@ -434,7 +435,9 @@ impl UserAuthMethod for EmailLinkAuth {
             self.per_email_hourly_limit,
         )? {
             RateLimitOutcome::Allowed { .. } => {}
-            RateLimitOutcome::Denied { retry_after_seconds } => {
+            RateLimitOutcome::Denied {
+                retry_after_seconds,
+            } => {
                 return Err(AuthError::RateLimited(format!(
                     "per-email rate limit exceeded; retry in {}s",
                     retry_after_seconds
@@ -443,10 +446,14 @@ impl UserAuthMethod for EmailLinkAuth {
         }
         if let Some(ip) = params.source_ip.as_deref() {
             let ip_bucket = format!("ip:{}", ip);
-            if let RateLimitOutcome::Denied { retry_after_seconds } = self
-                .rate_limit_store
-                .check_and_increment(&ip_bucket, now, 60, self.per_ip_minutely_limit)?
-            {
+            if let RateLimitOutcome::Denied {
+                retry_after_seconds,
+            } = self.rate_limit_store.check_and_increment(
+                &ip_bucket,
+                now,
+                60,
+                self.per_ip_minutely_limit,
+            )? {
                 return Err(AuthError::RateLimited(format!(
                     "per-IP rate limit exceeded; retry in {}s",
                     retry_after_seconds
@@ -503,9 +510,10 @@ impl UserAuthMethod for EmailLinkAuth {
                     identity_value: omni_account,
                 })
             }
-            EmailRequestStatus::Failed { reason } => {
-                Err(AuthError::Unauthorized(format!("email verify failed: {}", reason)))
-            }
+            EmailRequestStatus::Failed { reason } => Err(AuthError::Unauthorized(format!(
+                "email verify failed: {}",
+                reason
+            ))),
             EmailRequestStatus::Unknown => Err(AuthError::InvalidRequest(format!(
                 "unknown request_id: {}",
                 response.request_id
@@ -759,7 +767,10 @@ mod tests {
     fn ses_text_body_contains_landing_url() {
         let url = "https://broker.example/auth/email/landing#t=ABC.DEF";
         let body = ses_body_text(url);
-        assert!(body.contains(url), "text body must contain landing URL: {body}");
+        assert!(
+            body.contains(url),
+            "text body must contain landing URL: {body}"
+        );
         assert!(
             body.contains("AgentKeys") || body.contains("agentkeys"),
             "text body should mention the product"

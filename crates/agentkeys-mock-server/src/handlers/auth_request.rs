@@ -123,7 +123,10 @@ fn mint_scope_change_session(
     _new_scope: Option<&str>,
     _now: u64,
 ) -> Result<MintOutput, AppError> {
-    Ok(MintOutput { session_json: None, wallet: None })
+    Ok(MintOutput {
+        session_json: None,
+        wallet: None,
+    })
 }
 
 pub async fn open_auth_request(
@@ -142,10 +145,19 @@ pub async fn open_auth_request(
         .get("request_details")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("request_details required"))?;
-    let parent_wallet = body.get("parent_wallet").and_then(|v| v.as_str()).map(String::from);
+    let parent_wallet = body
+        .get("parent_wallet")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
-    let identity_type = body.get("identity_type").and_then(|v| v.as_str()).map(String::from);
-    let identity_value = body.get("identity_value").and_then(|v| v.as_str()).map(String::from);
+    let identity_type = body
+        .get("identity_type")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let identity_value = body
+        .get("identity_value")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     // Typed field validation: Recover requires both; non-Recover rejects both
     match request_type_str {
@@ -165,11 +177,9 @@ pub async fn open_auth_request(
         }
     }
 
-    let child_pubkey = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        child_pubkey_b64,
-    )
-    .map_err(|e| AppError::bad_request(format!("invalid base64 child_pubkey: {e}")))?;
+    let child_pubkey =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, child_pubkey_b64)
+            .map_err(|e| AppError::bad_request(format!("invalid base64 child_pubkey: {e}")))?;
 
     let request_details = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
@@ -269,8 +279,17 @@ pub async fn fetch_auth_request(
         )
         .map_err(|_| AppError::not_found("no auth request found for this pair code"))?;
 
-    let (id, request_type, request_details, child_pubkey, otp, created_at, ttl_seconds, status, parent_wallet) =
-        row;
+    let (
+        id,
+        request_type,
+        request_details,
+        child_pubkey,
+        otp,
+        created_at,
+        ttl_seconds,
+        status,
+        parent_wallet,
+    ) = row;
 
     if now > created_at + ttl_seconds {
         return Err(AppError::gone("auth request expired"));
@@ -287,7 +306,9 @@ pub async fn fetch_auth_request(
             .map_err(|e| AppError::internal(e.to_string()))?;
         }
         Some(pw) if *pw != session.wallet_address => {
-            return Err(AppError::unauthorized("this auth request is owned by a different session"));
+            return Err(AppError::unauthorized(
+                "this auth request is owned by a different session",
+            ));
         }
         Some(_) => {}
     }
@@ -375,7 +396,9 @@ pub async fn approve_auth_request(
 
     if let Some(ref pw) = parent_wallet {
         if *pw != session.wallet_address {
-            return Err(AppError::unauthorized("session does not own this auth request"));
+            return Err(AppError::unauthorized(
+                "session does not own this auth request",
+            ));
         }
     }
 
@@ -390,7 +413,10 @@ pub async fn approve_auth_request(
     };
 
     let signing_key = ed25519_dalek::SigningKey::from_bytes(
-        &private_key_bytes.as_slice().try_into().map_err(|_| AppError::internal("invalid key length"))?,
+        &private_key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| AppError::internal("invalid key length"))?,
     );
 
     let mut hasher = Sha256::new();
@@ -421,16 +447,17 @@ pub async fn approve_auth_request(
                 mint_recover_session(&db, id_type, id_value, token, now)?
             }
             "ScopeChange" => mint_scope_change_session(&db, "", None, now)?,
-            _ => MintOutput { session_json: None, wallet: None },
+            _ => MintOutput {
+                session_json: None,
+                wallet: None,
+            },
         }
     };
 
     let db = state.db.lock().unwrap();
 
-    let sig_encoded = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &signature,
-    );
+    let sig_encoded =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &signature);
 
     db.execute(
         "UPDATE auth_requests SET status = 'consumed', signature = ?1, session_json = ?2, wallet_address = ?3
@@ -482,7 +509,9 @@ pub async fn await_auth_decision(
 
         match row {
             None => return Err(AppError::not_found("auth request not found")),
-            Some((status, _, _, _, created_at, ttl_seconds)) if status == "pending" && now > created_at + ttl_seconds => {
+            Some((status, _, _, _, created_at, ttl_seconds))
+                if status == "pending" && now > created_at + ttl_seconds =>
+            {
                 return Err(AppError::gone("auth request expired"));
             }
             Some((status, _, _, _, _, _)) if status == "consumed_awaited" => {
@@ -491,10 +520,8 @@ pub async fn await_auth_decision(
             Some((status, Some(signature), session_json, wallet_address, _, _))
                 if status == "consumed" =>
             {
-                let sig_encoded = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &signature,
-                );
+                let sig_encoded =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &signature);
 
                 let session_val: Option<Value> = session_json
                     .as_deref()

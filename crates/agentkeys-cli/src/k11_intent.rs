@@ -60,12 +60,8 @@ use crate::k11_webauthn::K11IntentContext;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AssertingRole {
-    Primary {
-        device_key_hash: String,
-    },
-    Companion {
-        device_key_hash: String,
-    },
+    Primary { device_key_hash: String },
+    Companion { device_key_hash: String },
 }
 
 impl AssertingRole {
@@ -544,7 +540,10 @@ mod tests {
         assert_eq!(format_roles(0b010), "RECOVERY (raw 2)");
         assert_eq!(format_roles(0b100), "SCOPE_MGMT (raw 4)");
         assert_eq!(format_roles(0b011), "CAP_MINT | RECOVERY (raw 3)");
-        assert_eq!(format_roles(0b111), "CAP_MINT | RECOVERY | SCOPE_MGMT (raw 7)");
+        assert_eq!(
+            format_roles(0b111),
+            "CAP_MINT | RECOVERY | SCOPE_MGMT (raw 7)"
+        );
         // The user's specific complaint — `Role bitfield = 3` should
         // render as a readable permission list.
         let formatted = format_roles(3);
@@ -555,10 +554,7 @@ mod tests {
 
     #[test]
     fn roles_surface_unknown_future_bits() {
-        assert_eq!(
-            format_roles(0b1000),
-            "bit3(unknown) (raw 8)"
-        );
+        assert_eq!(format_roles(0b1000), "bit3(unknown) (raw 8)");
         // 0b1111 = CAP_MINT | RECOVERY | SCOPE_MGMT | bit3 unknown.
         let formatted = format_roles(0b1111);
         assert!(formatted.contains("CAP_MINT"));
@@ -665,11 +661,7 @@ mod tests {
         }"#;
         let op = K11OpIntent::from_json(json).expect("valid JSON parses");
         let ctx = op.render();
-        let (_, perms) = ctx
-            .fields
-            .iter()
-            .find(|(l, _)| l == "Permissions")
-            .unwrap();
+        let (_, perms) = ctx.fields.iter().find(|(l, _)| l == "Permissions").unwrap();
         assert_eq!(perms, "CAP_MINT | RECOVERY (raw 3)");
     }
 
@@ -692,9 +684,12 @@ mod tests {
                 }}"#
             )
         };
-        let primary = K11OpIntent::from_json(&make("primary", "0xprimaryhash0000000000000000000000000000000000000000000000000000"))
-            .unwrap()
-            .render();
+        let primary = K11OpIntent::from_json(&make(
+            "primary",
+            "0xprimaryhash0000000000000000000000000000000000000000000000000000",
+        ))
+        .unwrap()
+        .render();
         let companion = K11OpIntent::from_json(&make(
             "companion",
             "0xcompanionhash000000000000000000000000000000000000000000000000000",
@@ -713,8 +708,16 @@ mod tests {
             .filter(|(l, _)| l != "Asserting role")
             .collect();
         assert_eq!(prim_non_role, comp_non_role);
-        let prim_role = primary.fields.iter().find(|(l, _)| l == "Asserting role").unwrap();
-        let comp_role = companion.fields.iter().find(|(l, _)| l == "Asserting role").unwrap();
+        let prim_role = primary
+            .fields
+            .iter()
+            .find(|(l, _)| l == "Asserting role")
+            .unwrap();
+        let comp_role = companion
+            .fields
+            .iter()
+            .find(|(l, _)| l == "Asserting role")
+            .unwrap();
         assert!(prim_role.1.starts_with("PRIMARY"));
         assert!(comp_role.1.starts_with("COMPANION"));
     }

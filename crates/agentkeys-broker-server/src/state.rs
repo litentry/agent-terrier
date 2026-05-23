@@ -3,10 +3,10 @@ use std::sync::Arc;
 use crate::audit::AuditLog;
 use crate::config::BrokerConfig;
 use crate::jwt::SessionKeypair;
+use crate::metrics::Metrics;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::AuditPolicy;
 use crate::plugins::PluginRegistry;
-use crate::metrics::Metrics;
 use crate::storage::{
     AuthNonceStore, GrantStore, IdempotencyStore, IdentityLinkStore, WalletStore,
 };

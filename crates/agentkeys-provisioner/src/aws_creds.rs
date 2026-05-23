@@ -52,7 +52,10 @@ impl AwsTempCreds {
     pub fn to_env(&self, region: Option<&str>) -> HashMap<String, String> {
         let mut m = HashMap::new();
         m.insert("AWS_ACCESS_KEY_ID".into(), self.access_key_id.clone());
-        m.insert("AWS_SECRET_ACCESS_KEY".into(), self.secret_access_key.clone());
+        m.insert(
+            "AWS_SECRET_ACCESS_KEY".into(),
+            self.secret_access_key.clone(),
+        );
         m.insert("AWS_SESSION_TOKEN".into(), self.session_token.clone());
         // Issue #83 — expose the operator's wallet so the scraper can
         // (a) build a routable signup email (`or-${wallet}-${ts}@…`)
@@ -78,10 +81,7 @@ pub async fn fetch_oidc_jwt(
     broker_url: &str,
     session_token: &str,
 ) -> ProvisionResult<OidcJwtResponse> {
-    let url = format!(
-        "{}/v1/mint-oidc-jwt",
-        broker_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/mint-oidc-jwt", broker_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(5))
@@ -99,8 +99,7 @@ pub async fn fetch_oidc_jwt(
         let body = resp.text().await.unwrap_or_default();
         return Err(ProvisionError::Internal(format!(
             "broker {url} returned HTTP {}: {}",
-            status,
-            body
+            status, body
         )));
     }
 
@@ -221,7 +220,9 @@ async fn assume_role_with_jwt(
 /// it AWS returns the same temp creds for repeated calls within the
 /// `DurationSeconds` window (subtle caching footgun called out in critic M1).
 fn build_session_name(wallet: &str) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = now.as_secs();
     let micros = now.subsec_micros();
     let safe_wallet: String = wallet
@@ -299,7 +300,11 @@ mod tests {
         assert!(name.len() <= 64, "STS rejects session names >64 chars");
         // Includes the unix-secs + micros suffix so rapid same-wallet mints
         // get distinct session names.
-        assert!(name.matches('-').count() >= 3, "expected at least 3 dashes, got {}", name);
+        assert!(
+            name.matches('-').count() >= 3,
+            "expected at least 3 dashes, got {}",
+            name
+        );
     }
 
     #[test]
@@ -333,7 +338,10 @@ mod tests {
             .await
             .expect_err("expected error on 401");
         let msg = err.to_string();
-        assert!(msg.contains("401") || msg.contains("Unauthorized"), "msg = {msg}");
+        assert!(
+            msg.contains("401") || msg.contains("Unauthorized"),
+            "msg = {msg}"
+        );
     }
 
     #[tokio::test]

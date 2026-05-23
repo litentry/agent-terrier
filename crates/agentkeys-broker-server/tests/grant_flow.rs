@@ -69,7 +69,9 @@ async fn spawn_broker() -> Harness {
 
     let registry = Arc::new(PluginRegistry {
         auth: auth_map,
-        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(&wallet_store))),
+        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(
+            &wallet_store,
+        ))),
         audit: vec![sqlite_anchor],
     });
 

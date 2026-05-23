@@ -174,7 +174,9 @@ pub async fn cap_cred_store(
     headers: HeaderMap,
     Json(req): Json<CapRequest>,
 ) -> Result<Json<CapToken>, CapError> {
-    mint_cap(state, headers, req, CapOp::Store, DataClass::Credentials).await.map(Json)
+    mint_cap(state, headers, req, CapOp::Store, DataClass::Credentials)
+        .await
+        .map(Json)
 }
 
 pub async fn cap_cred_fetch(
@@ -182,7 +184,9 @@ pub async fn cap_cred_fetch(
     headers: HeaderMap,
     Json(req): Json<CapRequest>,
 ) -> Result<Json<CapToken>, CapError> {
-    mint_cap(state, headers, req, CapOp::Fetch, DataClass::Credentials).await.map(Json)
+    mint_cap(state, headers, req, CapOp::Fetch, DataClass::Credentials)
+        .await
+        .map(Json)
 }
 
 // Memory cap-mint endpoints (issue #90 followup): per-data-class
@@ -193,7 +197,9 @@ pub async fn cap_memory_put(
     headers: HeaderMap,
     Json(req): Json<CapRequest>,
 ) -> Result<Json<CapToken>, CapError> {
-    mint_cap(state, headers, req, CapOp::Store, DataClass::Memory).await.map(Json)
+    mint_cap(state, headers, req, CapOp::Store, DataClass::Memory)
+        .await
+        .map(Json)
 }
 
 pub async fn cap_memory_get(
@@ -201,7 +207,9 @@ pub async fn cap_memory_get(
     headers: HeaderMap,
     Json(req): Json<CapRequest>,
 ) -> Result<Json<CapToken>, CapError> {
-    mint_cap(state, headers, req, CapOp::Fetch, DataClass::Memory).await.map(Json)
+    mint_cap(state, headers, req, CapOp::Fetch, DataClass::Memory)
+        .await
+        .map(Json)
 }
 
 // ─── cap construction ──────────────────────────────────────────────────
@@ -217,18 +225,16 @@ async fn mint_cap(
     validate_hex32(&req.actor_omni, "actor_omni")?;
     validate_hex32(&req.device_key_hash, "device_key_hash")?;
     if req.service.is_empty() || req.service.len() > 64 {
-        return Err(CapError::InvalidInput("service must be 1..=64 chars".into()));
+        return Err(CapError::InvalidInput(
+            "service must be 1..=64 chars".into(),
+        ));
     }
     let ttl = req.ttl_seconds.clamp(60, 1800);
 
     // 0. Session JWT auth — caller must hold the operator session.
     let bearer = extract_bearer(&headers)?;
-    let claims = verify_session_jwt(
-        &state.session_keypair,
-        &state.config.oidc_issuer,
-        &bearer,
-    )
-    .map_err(|e| CapError::Unauthorized(format!("session jwt verify: {e}")))?;
+    let claims = verify_session_jwt(&state.session_keypair, &state.config.oidc_issuer, &bearer)
+        .map_err(|e| CapError::Unauthorized(format!("session jwt verify: {e}")))?;
 
     let session_omni = normalize_hex32(&claims.agentkeys.omni_account)
         .map_err(|e| CapError::InvalidInput(format!("session omni invalid: {e}")))?;
@@ -241,7 +247,13 @@ async fn mint_cap(
     let chain = ChainContracts::from_state(&state)?;
 
     // 1. SidecarRegistry.getDevice(deviceKeyHash) — full decode.
-    let device = call_get_device(&state.http, &chain.rpc_url, &chain.registry, &req.device_key_hash).await?;
+    let device = call_get_device(
+        &state.http,
+        &chain.rpc_url,
+        &chain.registry,
+        &req.device_key_hash,
+    )
+    .await?;
     if device.registered_at == 0 {
         return Err(CapError::DeviceNotActive);
     }
@@ -300,7 +312,10 @@ async fn mint_cap(
         nonce,
     };
     let broker_sig = sign_cap_payload(&state.session_keypair.private_key_pem, &payload)?;
-    Ok(CapToken { payload, broker_sig })
+    Ok(CapToken {
+        payload,
+        broker_sig,
+    })
 }
 
 // ─── on-chain reads (raw eth_call over reqwest) ────────────────────────
@@ -333,7 +348,12 @@ impl ChainContracts {
         let registry = profile_env(&profile_uc, "SIDECAR_REGISTRY_ADDRESS")?;
         let scope = profile_env(&profile_uc, "SCOPE_CONTRACT_ADDRESS")?;
         let epoch = profile_env(&profile_uc, "K3_EPOCH_COUNTER_ADDRESS")?;
-        Ok(ChainContracts { rpc_url, registry, scope, epoch })
+        Ok(ChainContracts {
+            rpc_url,
+            registry,
+            scope,
+            epoch,
+        })
     }
 }
 
@@ -485,7 +505,9 @@ fn extract_bearer(headers: &HeaderMap) -> Result<String, CapError> {
 
 fn validate_hex32(s: &str, field: &str) -> Result<(), CapError> {
     if !s.starts_with("0x") {
-        return Err(CapError::InvalidInput(format!("{field} must start with 0x")));
+        return Err(CapError::InvalidInput(format!(
+            "{field} must start with 0x"
+        )));
     }
     if s.len() != 66 {
         return Err(CapError::InvalidInput(format!(
@@ -517,7 +539,9 @@ fn strip_0x_lc(s: &str) -> String {
 }
 
 fn parse_bool_result(s: &str) -> bool {
-    s.trim_start_matches("0x").trim_start_matches('0').ends_with('1')
+    s.trim_start_matches("0x")
+        .trim_start_matches('0')
+        .ends_with('1')
 }
 
 fn parse_u64_result(s: &str) -> Result<u64, CapError> {
@@ -573,7 +597,10 @@ mod tests {
     fn cap_op_serializes_snake_case() {
         assert_eq!(serde_json::to_string(&CapOp::Store).unwrap(), "\"store\"");
         assert_eq!(serde_json::to_string(&CapOp::Fetch).unwrap(), "\"fetch\"");
-        assert_eq!(serde_json::to_string(&CapOp::Teardown).unwrap(), "\"teardown\"");
+        assert_eq!(
+            serde_json::to_string(&CapOp::Teardown).unwrap(),
+            "\"teardown\""
+        );
     }
 
     #[test]
@@ -585,7 +612,10 @@ mod tests {
 
     #[test]
     fn function_selector_matches_known_signatures() {
-        assert_eq!(function_selector("isServiceInScope(bytes32,bytes32,bytes32)"), "13337240");
+        assert_eq!(
+            function_selector("isServiceInScope(bytes32,bytes32,bytes32)"),
+            "13337240"
+        );
         assert_eq!(function_selector("currentEpoch()"), "76671808");
         // getDevice selector is the one we actually call now.
         assert!(!function_selector("getDevice(bytes32)").is_empty());
@@ -607,7 +637,10 @@ mod tests {
     #[test]
     fn validate_hex32_rejects_short() {
         let invalid = "0x".to_string() + &"a".repeat(63);
-        assert!(matches!(validate_hex32(&invalid, "x"), Err(CapError::InvalidInput(_))));
+        assert!(matches!(
+            validate_hex32(&invalid, "x"),
+            Err(CapError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -623,7 +656,8 @@ mod tests {
     #[test]
     fn parse_u64_result_decodes_hex() {
         assert_eq!(
-            parse_u64_result("0x0000000000000000000000000000000000000000000000000000000000000001").unwrap(),
+            parse_u64_result("0x0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap(),
             1
         );
     }
@@ -635,17 +669,17 @@ mod tests {
         // lastSignCount + revoked. roles=7 (CAP_MINT|RECOVERY|SCOPE_MGMT),
         // registeredAt=42, revoked=false.
         let mut raw = String::from("0x");
-        raw.push_str(&"a".repeat(64));               // operatorOmni
-        raw.push_str(&"b".repeat(64));               // actorOmni
-        raw.push_str(&"0".repeat(64));               // k11CredId
-        raw.push_str(&"0".repeat(64));               // k11RpIdHash
-        raw.push_str(&"0".repeat(64));               // k11PubX
-        raw.push_str(&"0".repeat(64));               // k11PubY
-        raw.push_str(&format!("{:0>64x}", 1u64));    // tier=1
-        raw.push_str(&format!("{:0>64x}", 7u64));    // roles=7
-        raw.push_str(&format!("{:0>64x}", 42u64));   // registeredAt=42
-        raw.push_str(&"0".repeat(64));               // lastSignCount=0
-        raw.push_str(&"0".repeat(64));               // revoked=false
+        raw.push_str(&"a".repeat(64)); // operatorOmni
+        raw.push_str(&"b".repeat(64)); // actorOmni
+        raw.push_str(&"0".repeat(64)); // k11CredId
+        raw.push_str(&"0".repeat(64)); // k11RpIdHash
+        raw.push_str(&"0".repeat(64)); // k11PubX
+        raw.push_str(&"0".repeat(64)); // k11PubY
+        raw.push_str(&format!("{:0>64x}", 1u64)); // tier=1
+        raw.push_str(&format!("{:0>64x}", 7u64)); // roles=7
+        raw.push_str(&format!("{:0>64x}", 42u64)); // registeredAt=42
+        raw.push_str(&"0".repeat(64)); // lastSignCount=0
+        raw.push_str(&"0".repeat(64)); // revoked=false
         let entry = parse_device_entry(&raw).unwrap();
         assert_eq!(entry.operator_omni, "a".repeat(64));
         assert_eq!(entry.actor_omni, "b".repeat(64));
@@ -657,17 +691,17 @@ mod tests {
     #[test]
     fn parse_device_entry_detects_revoked() {
         let mut raw = String::from("0x");
-        raw.push_str(&"a".repeat(64));               // operatorOmni
-        raw.push_str(&"b".repeat(64));               // actorOmni
-        raw.push_str(&"0".repeat(64));               // k11CredId
-        raw.push_str(&"0".repeat(64));               // k11RpIdHash
-        raw.push_str(&"0".repeat(64));               // k11PubX
-        raw.push_str(&"0".repeat(64));               // k11PubY
-        raw.push_str(&format!("{:0>64x}", 1u64));    // tier
-        raw.push_str(&format!("{:0>64x}", 1u64));    // roles
-        raw.push_str(&format!("{:0>64x}", 100u64));  // registeredAt
-        raw.push_str(&"0".repeat(64));               // lastSignCount
-        raw.push_str(&format!("{:0>64x}", 1u64));    // revoked=true
+        raw.push_str(&"a".repeat(64)); // operatorOmni
+        raw.push_str(&"b".repeat(64)); // actorOmni
+        raw.push_str(&"0".repeat(64)); // k11CredId
+        raw.push_str(&"0".repeat(64)); // k11RpIdHash
+        raw.push_str(&"0".repeat(64)); // k11PubX
+        raw.push_str(&"0".repeat(64)); // k11PubY
+        raw.push_str(&format!("{:0>64x}", 1u64)); // tier
+        raw.push_str(&format!("{:0>64x}", 1u64)); // roles
+        raw.push_str(&format!("{:0>64x}", 100u64)); // registeredAt
+        raw.push_str(&"0".repeat(64)); // lastSignCount
+        raw.push_str(&format!("{:0>64x}", 1u64)); // revoked=true
         let entry = parse_device_entry(&raw).unwrap();
         assert!(entry.revoked);
     }
@@ -743,7 +777,10 @@ mod tests {
     #[test]
     fn extract_bearer_rejects_non_bearer() {
         let mut h = HeaderMap::new();
-        h.insert(axum::http::header::AUTHORIZATION, "Basic abc".parse().unwrap());
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic abc".parse().unwrap(),
+        );
         assert!(matches!(extract_bearer(&h), Err(CapError::Unauthorized(_))));
     }
 

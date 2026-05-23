@@ -34,8 +34,9 @@ impl SqliteAnchor {
     /// boot path can refuse-to-boot per plan §6 Tier-1.
     pub fn open(path: &Path) -> Result<Self, AuditError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AuditError::Storage(format!("create audit dir {:?}: {}", parent, e)))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AuditError::Storage(format!("create audit dir {:?}: {}", parent, e))
+            })?;
         }
         let conn = Connection::open(path)
             .map_err(|e| AuditError::Storage(format!("open audit db {:?}: {}", path, e)))?;
@@ -196,10 +197,7 @@ impl SqliteAnchor {
     /// before submitting the EVM tx. Caller MUST follow up with either
     /// `promote_to_confirmed` (after EVM receipt) or `promote_to_quarantined`
     /// (after EVM failure).
-    pub async fn anchor_pending(
-        &self,
-        record: &AuditRecord,
-    ) -> Result<AnchorReceipt, AuditError> {
+    pub async fn anchor_pending(&self, record: &AuditRecord) -> Result<AnchorReceipt, AuditError> {
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO plugin_mint_log
@@ -250,11 +248,7 @@ impl SqliteAnchor {
     /// Atomically transition `pending` → `quarantined`. Caller is the
     /// reconciler when the EVM anchor returned an error after the SQLite
     /// row was inserted as `pending`. Returns true if the row transitioned.
-    pub fn promote_to_quarantined(
-        &self,
-        id: &str,
-        reason: &str,
-    ) -> Result<bool, AuditError> {
+    pub fn promote_to_quarantined(&self, id: &str, reason: &str) -> Result<bool, AuditError> {
         let conn = self.lock()?;
         let n = conn
             .execute(
@@ -270,10 +264,7 @@ impl SqliteAnchor {
     /// List rows still in `pending` state older than `cutoff_secs`. The
     /// reconciler uses this to find rows where the EVM anchor never
     /// reported back (broker crashed mid-flight).
-    pub fn list_pending_older_than(
-        &self,
-        cutoff_secs: i64,
-    ) -> Result<Vec<String>, AuditError> {
+    pub fn list_pending_older_than(&self, cutoff_secs: i64) -> Result<Vec<String>, AuditError> {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
@@ -455,12 +446,11 @@ mod tests {
         let a = SqliteAnchor::open_in_memory().unwrap();
         let r = record("01HP4", "hh");
         a.anchor_pending(&r).await.unwrap();
-        let did = a.promote_to_quarantined("01HP4", "RPC unreachable").unwrap();
+        let did = a
+            .promote_to_quarantined("01HP4", "RPC unreachable")
+            .unwrap();
         assert!(did);
-        assert_eq!(
-            a.status("01HP4").unwrap().as_deref(),
-            Some("quarantined")
-        );
+        assert_eq!(a.status("01HP4").unwrap().as_deref(), Some("quarantined"));
     }
 
     #[tokio::test]

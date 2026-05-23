@@ -1,7 +1,17 @@
+// Pre-existing drift caught by the clippy 1.95 stable lint set (unused
+// imports/vars, dead test helpers, assert-on-constant guards). Out of scope
+// for PR #98 (CI activation); these are integration-test mechanics that
+// should be cleaned up in a focused follow-up, not bundled into a CI PR.
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(clippy::assertions_on_constants)]
+#![allow(clippy::needless_borrows_for_generic_args)]
+
 use agentkeys_mock_server::{create_router, db, state::AppState};
-use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode, Method};
+use axum::http::{Method, Request, StatusCode};
+use axum::Router;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -92,7 +102,12 @@ async fn get_json_auth(app: Router, path: &str, token: &str) -> (StatusCode, Val
     (status, json)
 }
 
-async fn delete_json_auth(app: Router, path: &str, token: &str, body: Value) -> (StatusCode, Value) {
+async fn delete_json_auth(
+    app: Router,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(Method::DELETE)
         .uri(path)
@@ -150,7 +165,12 @@ fn make_fake_details_b64() -> String {
 #[tokio::test]
 async fn session_create_valid() {
     let app = setup();
-    let (status, json) = post_json(app, "/session/create", json!({ "auth_token": "valid-token" })).await;
+    let (status, json) = post_json(
+        app,
+        "/session/create",
+        json!({ "auth_token": "valid-token" }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(json["session"].is_string());
     assert!(json["wallet"].is_string());
@@ -169,15 +189,28 @@ async fn session_create_invalid_token() {
 #[tokio::test]
 async fn session_create_existing() {
     let app = setup();
-    let (status1, json1) = post_json(app.clone(), "/session/create", json!({ "auth_token": "same-token" })).await;
+    let (status1, json1) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": "same-token" }),
+    )
+    .await;
     assert_eq!(status1, StatusCode::OK);
     let wallet1 = json1["wallet"].as_str().unwrap().to_string();
 
-    let (status2, json2) = post_json(app, "/session/create", json!({ "auth_token": "same-token" })).await;
+    let (status2, json2) = post_json(
+        app,
+        "/session/create",
+        json!({ "auth_token": "same-token" }),
+    )
+    .await;
     assert_eq!(status2, StatusCode::OK);
     let wallet2 = json2["wallet"].as_str().unwrap().to_string();
 
-    assert_eq!(wallet1, wallet2, "same auth_token should resolve to same wallet");
+    assert_eq!(
+        wallet1, wallet2,
+        "same auth_token should resolve to same wallet"
+    );
 }
 
 #[tokio::test]
@@ -282,7 +315,9 @@ async fn credential_read_valid() {
     .await;
     assert_eq!(status, StatusCode::OK, "{json}");
     let returned_ct = json["ciphertext"].as_str().unwrap();
-    let decoded = base64::engine::general_purpose::STANDARD.decode(returned_ct).unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(returned_ct)
+        .unwrap();
     assert_eq!(decoded, original);
 }
 
@@ -292,7 +327,12 @@ async fn credential_read_wrong_agent() {
     let app = setup();
 
     // Create agent A session
-    let (status_a, json_a) = post_json(app.clone(), "/session/create", json!({ "auth_token": "agent-a" })).await;
+    let (status_a, json_a) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": "agent-a" }),
+    )
+    .await;
     assert_eq!(status_a, StatusCode::OK);
     let session_a = json_a["session"].as_str().unwrap().to_string();
     let wallet_a = json_a["wallet"].as_str().unwrap().to_string();
@@ -556,7 +596,11 @@ async fn rendezvous_deliver_twice() {
         json!({ "pair_code": pair_code, "payload": payload_b64 }),
     )
     .await;
-    assert_eq!(s2, StatusCode::CONFLICT, "second deliver should return 409: {json2}");
+    assert_eq!(
+        s2,
+        StatusCode::CONFLICT,
+        "second deliver should return 409: {json2}"
+    );
 }
 
 #[tokio::test]
@@ -628,7 +672,10 @@ async fn rendezvous_ciphertext_passthrough() {
     let returned = base64::engine::general_purpose::STANDARD
         .decode(poll_json["payload"].as_str().unwrap())
         .unwrap();
-    assert_eq!(returned, exact_bytes, "payload bytes must pass through unchanged");
+    assert_eq!(
+        returned, exact_bytes,
+        "payload bytes must pass through unchanged"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +769,11 @@ async fn auth_request_approve_already_consumed() {
         json!({ "request_id": request_id }),
     )
     .await;
-    assert_eq!(s2, StatusCode::CONFLICT, "second approve should return 409: {json2}");
+    assert_eq!(
+        s2,
+        StatusCode::CONFLICT,
+        "second approve should return 409: {json2}"
+    );
 }
 
 #[tokio::test]
@@ -749,12 +800,22 @@ async fn auth_request_approve_wrong_session() {
     let app = setup();
 
     // User A creates session
-    let (_, json_a) = post_json(app.clone(), "/session/create", json!({ "auth_token": "user-a-req" })).await;
+    let (_, json_a) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": "user-a-req" }),
+    )
+    .await;
     let session_a = json_a["session"].as_str().unwrap().to_string();
     let wallet_a = json_a["wallet"].as_str().unwrap().to_string();
 
     // User B creates session
-    let (_, json_b) = post_json(app.clone(), "/session/create", json!({ "auth_token": "user-b-req" })).await;
+    let (_, json_b) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": "user-b-req" }),
+    )
+    .await;
     let session_b = json_b["session"].as_str().unwrap().to_string();
 
     // Open request owned by wallet_a
@@ -779,7 +840,11 @@ async fn auth_request_approve_wrong_session() {
         json!({ "request_id": request_id }),
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "B should not approve A's request: {json}");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "B should not approve A's request: {json}"
+    );
 }
 
 #[tokio::test]
@@ -888,7 +953,10 @@ async fn ciphertext_tamper_detection() {
     let returned = base64::engine::general_purpose::STANDARD
         .decode(json["ciphertext"].as_str().unwrap())
         .unwrap();
-    assert_eq!(returned, original, "stored bytes must be returned unchanged");
+    assert_eq!(
+        returned, original,
+        "stored bytes must be returned unchanged"
+    );
 }
 
 #[tokio::test]
@@ -966,7 +1034,10 @@ async fn cbor_round_trip() {
     let returned_details = base64::engine::general_purpose::STANDARD
         .decode(returned_details_b64)
         .unwrap();
-    assert_eq!(returned_details, original_details, "request_details must round-trip unchanged");
+    assert_eq!(
+        returned_details, original_details,
+        "request_details must round-trip unchanged"
+    );
 }
 
 #[tokio::test]
@@ -1040,7 +1111,9 @@ async fn tamper_detection() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let sig_b64 = approve_json["signature"].as_str().unwrap();
-    let sig_bytes = base64::engine::general_purpose::STANDARD.decode(sig_b64).unwrap();
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64)
+        .unwrap();
     assert_eq!(sig_bytes.len(), 64, "ed25519 signature should be 64 bytes");
 }
 
@@ -1088,7 +1161,11 @@ async fn await_after_consumption() {
         "unused",
     )
     .await;
-    assert_eq!(s2, StatusCode::CONFLICT, "second await should be consumed: {j2}");
+    assert_eq!(
+        s2,
+        StatusCode::CONFLICT,
+        "second await should be consumed: {j2}"
+    );
 }
 
 #[tokio::test]
@@ -1150,7 +1227,11 @@ async fn nonce_uniqueness() {
         let nonce_hash = json["nonce_hash"].as_str().unwrap().to_string();
         nonce_hashes.insert(nonce_hash);
     }
-    assert_eq!(nonce_hashes.len(), 100, "all 100 nonce hashes must be unique");
+    assert_eq!(
+        nonce_hashes.len(),
+        100,
+        "all 100 nonce hashes must be unique"
+    );
 }
 
 #[tokio::test]
@@ -1159,7 +1240,12 @@ async fn recover_flow_e2e() {
     let (app, state) = setup_with_state();
 
     // Create original session and store credential
-    let (_, orig_json) = post_json(app.clone(), "/session/create", json!({ "auth_token": "recover-user" })).await;
+    let (_, orig_json) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": "recover-user" }),
+    )
+    .await;
     let orig_session = orig_json["session"].as_str().unwrap().to_string();
     let orig_wallet = orig_json["wallet"].as_str().unwrap().to_string();
 
@@ -1220,12 +1306,22 @@ async fn recover_wrong_session() {
     let (app, state) = setup_with_state();
 
     // User A
-    let (_, ja) = post_json(app.clone(), "/session/create", json!({ "auth_token": "recover-a" })).await;
+    let (_, ja) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": "recover-a" }),
+    )
+    .await;
     let session_a = ja["session"].as_str().unwrap().to_string();
     let wallet_a = ja["wallet"].as_str().unwrap().to_string();
 
     // User B
-    let (_, jb) = post_json(app.clone(), "/session/create", json!({ "auth_token": "recover-b" })).await;
+    let (_, jb) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({ "auth_token": "recover-b" }),
+    )
+    .await;
     let session_b = jb["session"].as_str().unwrap().to_string();
 
     // Link alias for wallet_a so the Recover request has valid typed fields
@@ -1256,7 +1352,11 @@ async fn recover_wrong_session() {
         json!({ "request_id": request_id }),
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "B must not approve A's Recover: {json}");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "B must not approve A's Recover: {json}"
+    );
 }
 
 #[tokio::test]
@@ -1319,7 +1419,11 @@ async fn create_child_session_for(app: Router, parent_token: &str) -> (String, S
         json!({ "scope": scope }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "create_child_session failed: {json}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create_child_session failed: {json}"
+    );
     let child_token = json["session"].as_str().unwrap().to_string();
     let child_wallet = json["wallet"].as_str().unwrap().to_string();
     (child_token, child_wallet, app)
@@ -1337,7 +1441,11 @@ async fn revoke_by_target_session_still_works() {
         json!({ "target_session": session }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "revoke by target_session failed: {json}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "revoke by target_session failed: {json}"
+    );
     assert_eq!(json["ok"].as_bool(), Some(true));
     let _ = wallet;
 }
@@ -1346,7 +1454,8 @@ async fn revoke_by_target_session_still_works() {
 async fn revoke_by_target_wallet_revokes_all() {
     let app = setup();
     // Create parent (owner) session
-    let (owner_session, _owner_wallet, app) = create_session_for(app, "owner-token-revoke-all").await;
+    let (owner_session, _owner_wallet, app) =
+        create_session_for(app, "owner-token-revoke-all").await;
     // Create two child sessions under owner — both will have the same child wallet for simplicity
     // (each child call yields a fresh wallet, so create them and collect wallets)
     let (child_token1, child_wallet1, app) = create_child_session_for(app, &owner_session).await;
@@ -1370,7 +1479,10 @@ async fn revoke_by_target_wallet_revokes_all() {
     assert_eq!(status, StatusCode::OK, "revoke_by_wallet failed: {json}");
     assert_eq!(json["ok"].as_bool(), Some(true));
     let revoked = json["sessions_revoked"].as_u64().unwrap_or(0);
-    assert!(revoked >= 1, "expected at least 1 session revoked, got {revoked}");
+    assert!(
+        revoked >= 1,
+        "expected at least 1 session revoked, got {revoked}"
+    );
 }
 
 #[tokio::test]
@@ -1386,7 +1498,11 @@ async fn revoke_by_target_wallet_not_owned() {
         json!({ "target_wallet": other_wallet }),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "expected 403 for unowned wallet");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "expected 403 for unowned wallet"
+    );
 }
 
 #[tokio::test]
@@ -1401,7 +1517,11 @@ async fn revoke_with_both_fields_is_400() {
         json!({ "target_session": session, "target_wallet": wallet }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400 when both fields present");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "expected 400 when both fields present"
+    );
 }
 
 #[tokio::test]
@@ -1409,14 +1529,12 @@ async fn revoke_with_neither_field_is_400() {
     let app = setup();
     let (session, _wallet, app) = create_session_for(app, "neither-fields-token").await;
 
-    let (status, _json) = post_json_auth(
-        app,
-        "/session/revoke",
-        &session,
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400 when no fields present");
+    let (status, _json) = post_json_auth(app, "/session/revoke", &session, json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "expected 400 when no fields present"
+    );
 }
 
 #[tokio::test]
@@ -1443,7 +1561,11 @@ async fn revoke_by_target_wallet_none_active_is_404() {
         json!({ "target_wallet": child_wallet }),
     )
     .await;
-    assert_eq!(status2, StatusCode::NOT_FOUND, "expected 404 when no active sessions remain");
+    assert_eq!(
+        status2,
+        StatusCode::NOT_FOUND,
+        "expected 404 when no active sessions remain"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,7 +1609,11 @@ async fn list_credentials_returns_stored_services() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(services, vec!["anthropic", "openrouter"], "should be sorted");
+    assert_eq!(
+        services,
+        vec!["anthropic", "openrouter"],
+        "should be sorted"
+    );
 }
 
 #[tokio::test]
@@ -1500,7 +1626,10 @@ async fn list_credentials_empty_for_unknown_agent() {
     assert_eq!(status, StatusCode::OK, "{json}");
 
     let services = json["services"].as_array().unwrap();
-    assert!(services.is_empty(), "should be empty for agent with no credentials");
+    assert!(
+        services.is_empty(),
+        "should be empty for agent with no credentials"
+    );
 }
 
 #[tokio::test]
@@ -1531,7 +1660,11 @@ async fn list_credentials_ownership_enforced() {
 
     let path = format!("/credential/list?agent_id={}", wallet_a);
     let (status, _) = get_json_auth(app, &path, &session_b).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "user B must not list user A's credentials");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "user B must not list user A's credentials"
+    );
     let _ = session_a;
 }
 
@@ -1549,7 +1682,11 @@ async fn open_auth_request_recover_requires_typed_fields() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "Recover without typed fields should fail: {json}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Recover without typed fields should fail: {json}"
+    );
 }
 
 #[tokio::test]
@@ -1568,7 +1705,11 @@ async fn open_auth_request_pair_rejects_typed_fields() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "Pair with identity fields should fail: {json}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Pair with identity fields should fail: {json}"
+    );
 }
 
 #[tokio::test]
@@ -1605,7 +1746,11 @@ async fn approve_recover_uses_typed_fields() {
         json!({ "request_id": request_id }),
     )
     .await;
-    assert_eq!(approve_status, StatusCode::OK, "approve failed: {approve_json}");
+    assert_eq!(
+        approve_status,
+        StatusCode::OK,
+        "approve failed: {approve_json}"
+    );
     assert!(approve_json["signature"].is_string());
 
     // Await the decision — minted session targets the resolved wallet

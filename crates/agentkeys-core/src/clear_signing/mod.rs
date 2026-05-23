@@ -37,7 +37,7 @@ use sha3::{Digest, Keccak256};
 use thiserror::Error;
 
 pub use catalog::ClearSigningCatalog;
-pub use eip712::{compute_digests, Eip712Digests, Eip712Error, TypedData, TypeField};
+pub use eip712::{compute_digests, Eip712Digests, Eip712Error, TypeField, TypedData};
 pub use format::{interpolate_intent, RenderedFields};
 pub use parser::{Erc7730Error, Erc7730File};
 
@@ -86,13 +86,15 @@ pub fn build_preview(
     typed_data: TypedData,
 ) -> Result<ClearSigningPreview, ClearSigningError> {
     let digests = compute_digests(&typed_data)?;
-    let file = binding::match_file(catalog.iter(), &typed_data)
-        .ok_or(ClearSigningError::NoMatch)?;
+    let file =
+        binding::match_file(catalog.iter(), &typed_data).ok_or(ClearSigningError::NoMatch)?;
     let format = file
         .display
         .formats
         .get(&typed_data.primary_type)
-        .ok_or_else(|| ClearSigningError::NoFormatForPrimaryType(typed_data.primary_type.clone()))?;
+        .ok_or_else(|| {
+            ClearSigningError::NoFormatForPrimaryType(typed_data.primary_type.clone())
+        })?;
     let intent_template = format
         .intent
         .as_deref()
@@ -138,9 +140,18 @@ mod tests {
         types.insert(
             "EIP712Domain".into(),
             vec![
-                TypeField { name: "name".into(), ty: "string".into() },
-                TypeField { name: "version".into(), ty: "string".into() },
-                TypeField { name: "chainId".into(), ty: "uint256".into() },
+                TypeField {
+                    name: "name".into(),
+                    ty: "string".into(),
+                },
+                TypeField {
+                    name: "version".into(),
+                    ty: "string".into(),
+                },
+                TypeField {
+                    name: "chainId".into(),
+                    ty: "uint256".into(),
+                },
                 TypeField {
                     name: "verifyingContract".into(),
                     ty: "address".into(),
@@ -150,11 +161,26 @@ mod tests {
         types.insert(
             "Permit".into(),
             vec![
-                TypeField { name: "owner".into(), ty: "address".into() },
-                TypeField { name: "spender".into(), ty: "address".into() },
-                TypeField { name: "value".into(), ty: "uint256".into() },
-                TypeField { name: "nonce".into(), ty: "uint256".into() },
-                TypeField { name: "deadline".into(), ty: "uint256".into() },
+                TypeField {
+                    name: "owner".into(),
+                    ty: "address".into(),
+                },
+                TypeField {
+                    name: "spender".into(),
+                    ty: "address".into(),
+                },
+                TypeField {
+                    name: "value".into(),
+                    ty: "uint256".into(),
+                },
+                TypeField {
+                    name: "nonce".into(),
+                    ty: "uint256".into(),
+                },
+                TypeField {
+                    name: "deadline".into(),
+                    ty: "uint256".into(),
+                },
             ],
         );
         TypedData {

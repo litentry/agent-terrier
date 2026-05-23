@@ -68,13 +68,31 @@ pub fn encode_canonical(env: &AuditEnvelope) -> Result<Vec<u8>, AuditError> {
     // CBOR-encoded-byte ordering before encoding. This way the top-level
     // and nested encoders share the same sort routine; can't drift.
     let map = Value::Map(vec![
-        (Value::Text("version".into()), Value::Integer(env.version.into())),
-        (Value::Text("ts_unix".into()), Value::Integer(env.ts_unix.into())),
-        (Value::Text("actor_omni".into()), Value::Bytes(env.actor_omni.to_vec())),
-        (Value::Text("operator_omni".into()), Value::Bytes(env.operator_omni.to_vec())),
-        (Value::Text("op_kind".into()), Value::Integer(env.op_kind.into())),
+        (
+            Value::Text("version".into()),
+            Value::Integer(env.version.into()),
+        ),
+        (
+            Value::Text("ts_unix".into()),
+            Value::Integer(env.ts_unix.into()),
+        ),
+        (
+            Value::Text("actor_omni".into()),
+            Value::Bytes(env.actor_omni.to_vec()),
+        ),
+        (
+            Value::Text("operator_omni".into()),
+            Value::Bytes(env.operator_omni.to_vec()),
+        ),
+        (
+            Value::Text("op_kind".into()),
+            Value::Integer(env.op_kind.into()),
+        ),
         (Value::Text("op_body".into()), env.op_body.clone()),
-        (Value::Text("result".into()), Value::Integer((env.result as u8).into())),
+        (
+            Value::Text("result".into()),
+            Value::Integer((env.result as u8).into()),
+        ),
         (
             Value::Text("intent_text".into()),
             match &env.intent_text {
@@ -130,12 +148,16 @@ fn canonicalize(v: Value) -> Value {
 }
 
 pub fn decode_canonical(bytes: &[u8]) -> Result<AuditEnvelope, AuditError> {
-    let value: Value = ciborium::from_reader(bytes)
-        .map_err(|e| AuditError::Cbor(format!("decode: {e}")))?;
+    let value: Value =
+        ciborium::from_reader(bytes).map_err(|e| AuditError::Cbor(format!("decode: {e}")))?;
 
     let map = match value {
         Value::Map(m) => m,
-        other => return Err(AuditError::Invalid(format!("expected CBOR map, got {other:?}"))),
+        other => {
+            return Err(AuditError::Invalid(format!(
+                "expected CBOR map, got {other:?}"
+            )))
+        }
     };
 
     let mut actor_omni: Option<[u8; 32]> = None;
@@ -151,7 +173,11 @@ pub fn decode_canonical(bytes: &[u8]) -> Result<AuditEnvelope, AuditError> {
     for (k, v) in map {
         let key = match k {
             Value::Text(s) => s,
-            other => return Err(AuditError::Invalid(format!("map key must be text, got {other:?}"))),
+            other => {
+                return Err(AuditError::Invalid(format!(
+                    "map key must be text, got {other:?}"
+                )))
+            }
         };
         match key.as_str() {
             "actor_omni" => actor_omni = Some(bytes_32(&v, "actor_omni")?),
@@ -402,7 +428,10 @@ mod tests {
             "operator_omni",
             "intent_commitment",
         ];
-        assert_eq!(keys, expected, "top-level keys must be in canonical CBOR encoded-byte order");
+        assert_eq!(
+            keys, expected,
+            "top-level keys must be in canonical CBOR encoded-byte order"
+        );
     }
 
     /// op_body inner maps are canonicalized recursively — two envelopes
@@ -441,7 +470,10 @@ mod tests {
         let bytes_a = encode_canonical(&env_a).unwrap();
         let bytes_b = encode_canonical(&env_b).unwrap();
         assert_eq!(bytes_a, bytes_b);
-        assert_eq!(env_a.envelope_hash().unwrap(), env_b.envelope_hash().unwrap());
+        assert_eq!(
+            env_a.envelope_hash().unwrap(),
+            env_b.envelope_hash().unwrap()
+        );
     }
 
     /// Nested op_body maps also get canonical-sorted (recursion check).

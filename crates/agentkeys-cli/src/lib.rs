@@ -46,9 +46,7 @@ async fn broker_env_for_provision(
     let creds = fetch_via_broker_default_ttl(url, session_token, &role_arn, &region).await?;
     Ok(creds.to_env(Some(&region)))
 }
-use agentkeys_types::{
-    AuthToken, Scope, ServiceName, Session, WalletAddress,
-};
+use agentkeys_types::{AuthToken, Scope, ServiceName, Session, WalletAddress};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 
@@ -206,15 +204,23 @@ impl CommandContext {
             session_override: None,
             backend_override: None,
             session_store_override: None,
-            broker_url: std::env::var("AGENTKEYS_BROKER_URL").ok().filter(|s| !s.is_empty()),
+            broker_url: std::env::var("AGENTKEYS_BROKER_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
             credential_backend: CredentialBackendKind::Http,
-            data_bucket: std::env::var("AGENTKEYS_BUCKET").ok().filter(|s| !s.is_empty()),
+            data_bucket: std::env::var("AGENTKEYS_BUCKET")
+                .ok()
+                .filter(|s| !s.is_empty()),
             data_region: std::env::var("AWS_REGION")
                 .ok()
                 .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
                 .filter(|s| !s.is_empty()),
-            signer_url: std::env::var("AGENTKEYS_SIGNER_URL").ok().filter(|s| !s.is_empty()),
-            omni_account: std::env::var("AGENTKEYS_OMNI_ACCOUNT").ok().filter(|s| !s.is_empty()),
+            signer_url: std::env::var("AGENTKEYS_SIGNER_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            omni_account: std::env::var("AGENTKEYS_OMNI_ACCOUNT")
+                .ok()
+                .filter(|s| !s.is_empty()),
             envelope_version: EnvelopeVersionFlag::V1,
             chain_profile_cli_name: None,
             cached_chain_profile: std::sync::OnceLock::new(),
@@ -659,8 +665,15 @@ fn resolve_agent(
     }
 }
 
-pub async fn cmd_store(ctx: &CommandContext, agent: Option<&str>, service: &str, key: &str) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+pub async fn cmd_store(
+    ctx: &CommandContext,
+    agent: Option<&str>,
+    service: &str,
+    key: &str,
+) -> Result<String> {
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
     // Identity resolution (alias / email → wallet) always goes through the
     // legacy backend — issue #85's S3 path only handles credential CRUD.
     let id_backend = ctx.backend();
@@ -698,11 +711,16 @@ pub async fn cmd_store(ctx: &CommandContext, agent: Option<&str>, service: &str,
         .await
         .map_err(wrap_backend_error)?;
 
-    Ok(format!("Stored credential for agent={} service={}", agent_id.0, service))
+    Ok(format!(
+        "Stored credential for agent={} service={}",
+        agent_id.0, service
+    ))
 }
 
 pub async fn cmd_read(ctx: &CommandContext, agent: Option<&str>, service: &str) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
     let id_backend = ctx.backend();
     let agent_id = resolve_agent(&id_backend, &session, agent)?;
     let service_name = ServiceName(service.to_string());
@@ -757,7 +775,9 @@ pub async fn cmd_run(
         return Err(anyhow!("No command specified after --"));
     }
 
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
     let id_backend = ctx.backend();
     let agent_id = resolve_agent(&id_backend, &session, agent)?;
     let backend = ctx.credential_backend().await?;
@@ -803,13 +823,15 @@ pub async fn cmd_run(
     // The --env loop below reuses these values instead of issuing a second
     // read_credential for the same service, which would double-count audit
     // events and rate-limit decrements (codex P2 on PR #19).
-    let mut fetched: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut fetched: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut env_vars: Vec<(String, String)> = Vec::new();
     let mut credential_errors: Vec<String> = Vec::new();
     for service in &services_to_try {
         let service_name = ServiceName(service.clone());
-        match backend.read_credential(&session, &agent_id, &service_name).await {
+        match backend
+            .read_credential(&session, &agent_id, &service_name)
+            .await
+        {
             Ok(bytes) => {
                 let value = String::from_utf8_lossy(&bytes).to_string();
                 let env_key = format!("{}_API_KEY", service.to_uppercase().replace('-', "_"));
@@ -830,7 +852,9 @@ pub async fn cmd_run(
     }
 
     for raw in env_overrides {
-        let eq_pos = raw.find('=').expect("pre-flight validation already rejected entries without '='");
+        let eq_pos = raw
+            .find('=')
+            .expect("pre-flight validation already rejected entries without '='");
         let env_key = raw[..eq_pos].to_string();
         let service = &raw[eq_pos + 1..];
 
@@ -882,7 +906,9 @@ pub async fn cmd_run(
 }
 
 pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
 
     if ctx.verbose {
         eprintln!("[verbose] POST {}/session/revoke", ctx.backend_url);
@@ -939,7 +965,9 @@ pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<Str
 }
 
 pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
     let agent_id = WalletAddress(agent.to_string());
 
     if ctx.verbose {
@@ -973,13 +1001,19 @@ pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
 }
 
 pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
 
     if ctx.verbose {
-        eprintln!("[verbose] GET {}/auth-request/fetch?pair_code={}", ctx.backend_url, pair_code);
+        eprintln!(
+            "[verbose] GET {}/auth-request/fetch?pair_code={}",
+            ctx.backend_url, pair_code
+        );
     }
 
-    let auth_request = ctx.backend()
+    let auth_request = ctx
+        .backend()
         .fetch_auth_request(&session, &agentkeys_types::PairCode(pair_code.to_string()))
         .await
         .map_err(wrap_backend_error)?;
@@ -989,8 +1023,11 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
             if requested_scope.services.is_empty() {
                 "Pair new agent (all services)".to_string()
             } else {
-                let services: Vec<&str> =
-                    requested_scope.services.iter().map(|s| s.0.as_str()).collect();
+                let services: Vec<&str> = requested_scope
+                    .services
+                    .iter()
+                    .map(|s| s.0.as_str())
+                    .collect();
                 format!("Pair new agent (services: {})", services.join(", "))
             }
         }
@@ -1009,8 +1046,13 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
         agentkeys_types::AuthRequestType::ScopeChange { agent_id, .. } => {
             format!("Scope change for agent {}", agent_id.0)
         }
-        agentkeys_types::AuthRequestType::HighValueRelease { agent_id, service, .. } => {
-            format!("High-value release: agent {} service {}", agent_id.0, service.0)
+        agentkeys_types::AuthRequestType::HighValueRelease {
+            agent_id, service, ..
+        } => {
+            format!(
+                "High-value release: agent {} service {}",
+                agent_id.0, service.0
+            )
         }
         agentkeys_types::AuthRequestType::KeyRotate { agent_id, .. } => {
             format!("Key rotation for agent {}", agent_id.0)
@@ -1062,7 +1104,11 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
     Ok("Approved. Agent paired successfully.".to_string())
 }
 
-fn resolve_agent_to_wallet(_ctx: &CommandContext, _session: &Session, agent: &str) -> Result<String> {
+fn resolve_agent_to_wallet(
+    _ctx: &CommandContext,
+    _session: &Session,
+    agent: &str,
+) -> Result<String> {
     if agent.starts_with("0x") {
         Ok(agent.to_string())
     } else {
@@ -1120,7 +1166,9 @@ pub async fn cmd_scope(
         ));
     }
 
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
     let target_wallet = WalletAddress(resolve_agent_to_wallet(ctx, &session, agent)?);
     let backend = ctx.backend();
 
@@ -1128,11 +1176,17 @@ pub async fn cmd_scope(
         .get_scope(&session, &target_wallet)
         .await
         .map_err(wrap_backend_error)?
-        .unwrap_or(Scope { services: vec![], read_only: false });
+        .unwrap_or(Scope {
+            services: vec![],
+            read_only: false,
+        });
 
     if list {
-        let service_names: Vec<&str> =
-            current_scope.services.iter().map(|s| s.0.as_str()).collect();
+        let service_names: Vec<&str> = current_scope
+            .services
+            .iter()
+            .map(|s| s.0.as_str())
+            .collect();
         return Ok(format!(
             "Scope for agent {}:\n  services: [{}]\n  read_only: {}",
             target_wallet.0,
@@ -1149,7 +1203,10 @@ pub async fn cmd_scope(
             .map(|s| ServiceName(s.to_string()))
             .collect();
         services.sort_by(|a, b| a.0.cmp(&b.0));
-        Scope { services, read_only: current_scope.read_only }
+        Scope {
+            services,
+            read_only: current_scope.read_only,
+        }
     } else {
         let mut services: Vec<ServiceName> = current_scope.services.clone();
         for svc in add {
@@ -1160,7 +1217,10 @@ pub async fn cmd_scope(
         }
         services.retain(|s| !remove.contains(&s.0));
         services.sort_by(|a, b| a.0.cmp(&b.0));
-        Scope { services, read_only: current_scope.read_only }
+        Scope {
+            services,
+            read_only: current_scope.read_only,
+        }
     };
 
     backend
@@ -1215,7 +1275,9 @@ pub async fn cmd_provision(
     force: bool,
     provisioner: Option<Arc<Provisioner>>,
 ) -> Result<ProvisionOutput> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
     let backend = ctx.credential_backend().await?;
     let agent_id = session.wallet.clone();
 
@@ -1288,14 +1350,14 @@ pub async fn cmd_provision(
                 stderr_lines,
             })
         }
-        Err(e) => {
-            Err(anyhow!("{}", format_provision_error(&e)))
-        }
+        Err(e) => Err(anyhow!("{}", format_provision_error(&e))),
     }
 }
 
 pub async fn cmd_inbox_provision(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
     let backend = ctx.backend();
     let agent_id = resolve_agent(&backend, &session, agent)?;
 
@@ -1313,7 +1375,9 @@ pub async fn cmd_inbox_provision(ctx: &CommandContext, agent: Option<&str>) -> R
 }
 
 pub async fn cmd_inbox_list(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
-    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
     let backend = ctx.backend();
     let agent_id = resolve_agent(&backend, &session, agent)?;
 
@@ -1327,7 +1391,11 @@ pub async fn cmd_inbox_list(ctx: &CommandContext, agent: Option<&str>) -> Result
         .await
         .map_err(wrap_backend_error)?;
 
-    Ok(addresses.iter().map(|a| a.to_string()).collect::<Vec<_>>().join("\n"))
+    Ok(addresses
+        .iter()
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// `agentkeys signer derive` — call `/dev/derive-address` on the configured
@@ -1504,8 +1572,8 @@ pub async fn cmd_signer_preview_7730(
 
     let catalog = match seven_thirty_file {
         Some(path) => {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("read 7730 file {path}"))?;
+            let raw =
+                std::fs::read_to_string(path).with_context(|| format!("read 7730 file {path}"))?;
             let file = agentkeys_core::clear_signing::parser::parse(&raw)
                 .map_err(|e| anyhow!("parse 7730 file: {e}"))?;
             let mut c = agentkeys_core::clear_signing::ClearSigningCatalog::empty();
@@ -1622,7 +1690,11 @@ pub async fn cmd_whoami(
         lines.push(format!("agentkeys_actor_omni: {}", actor_omni));
         if let Some(scope) = &session.scope {
             let svc: Vec<&str> = scope.services.iter().map(|s| s.0.as_str()).collect();
-            lines.push(format!("scope: [{}] read_only={}", svc.join(", "), scope.read_only));
+            lines.push(format!(
+                "scope: [{}] read_only={}",
+                svc.join(", "),
+                scope.read_only
+            ));
         }
         if let Some(url) = signer_url {
             lines.push(format!("signer_url: {}", url));
@@ -1679,8 +1751,14 @@ fn format_signer_error(e: SignerClientError) -> anyhow::Error {
 pub fn cmd_feedback() -> String {
     let url = "https://github.com/agentkeys/agentkeys/discussions";
     let opened = std::process::Command::new("open").arg(url).status().is_ok()
-        || std::process::Command::new("xdg-open").arg(url).status().is_ok()
-        || std::process::Command::new("start").arg(url).status().is_ok();
+        || std::process::Command::new("xdg-open")
+            .arg(url)
+            .status()
+            .is_ok()
+        || std::process::Command::new("start")
+            .arg(url)
+            .status()
+            .is_ok();
     if opened {
         format!("Opening {} in your browser", url)
     } else {

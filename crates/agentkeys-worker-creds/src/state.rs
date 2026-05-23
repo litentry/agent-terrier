@@ -32,8 +32,7 @@ impl WorkerConfig {
             std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".to_string());
         let profile_uc = chain_profile.to_uppercase().replace('-', "_");
 
-        let vault_bucket = std::env::var("VAULT_BUCKET")
-            .context("VAULT_BUCKET must be set")?;
+        let vault_bucket = std::env::var("VAULT_BUCKET").context("VAULT_BUCKET must be set")?;
         let region = std::env::var("AWS_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".into());

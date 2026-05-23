@@ -31,8 +31,8 @@ impl MemoryWorkerConfig {
         let region = std::env::var("AWS_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".into());
-        let broker_pubkey_pem = std::env::var("BROKER_CAP_PUBKEY_PEM")
-            .context("BROKER_CAP_PUBKEY_PEM must be set")?;
+        let broker_pubkey_pem =
+            std::env::var("BROKER_CAP_PUBKEY_PEM").context("BROKER_CAP_PUBKEY_PEM must be set")?;
         let chain_rpc_http = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
             .or_else(|_| std::env::var(format!("CHAIN_RPC_HTTP_{profile_uc}")))
             .or_else(|_| std::env::var("HEIMA_RPC_HTTP"))
@@ -106,6 +106,10 @@ impl MemoryWorkerState {
             .load()
             .await;
         let s3 = S3Client::new(&sdk_config);
-        Ok(MemoryWorkerState { config, s3, http: reqwest::Client::new() })
+        Ok(MemoryWorkerState {
+            config,
+            s3,
+            http: reqwest::Client::new(),
+        })
     }
 }

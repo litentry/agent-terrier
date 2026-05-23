@@ -12,13 +12,7 @@ use agentkeys_core::signer_client::{HttpSignerClient, SignerClient, SignerClient
 use agentkeys_mock_server::{
     create_router as mock_router, db, dev_key_service::DevKeyService, state::AppState,
 };
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -166,9 +160,7 @@ async fn tee_sign(
     h.update(prefix.as_bytes());
     h.update(&message_bytes);
     let digest = h.finalize();
-    let (sig, recovery_id) = sk
-        .sign_prehash_recoverable(&digest)
-        .expect("tee-stub sign");
+    let (sig, recovery_id) = sk.sign_prehash_recoverable(&digest).expect("tee-stub sign");
     let mut sig_bytes = sig.to_bytes().to_vec();
     sig_bytes.push(recovery_id.to_byte());
     let signature = format!("0x{}", hex::encode(&sig_bytes));
@@ -224,7 +216,10 @@ async fn assert_address_determinism(client: &dyn SignerClient) {
 async fn assert_sign_address_matches_derive(client: &dyn SignerClient) {
     let omni = "ab".repeat(32);
     let derived = client.derive_address(&omni).await.unwrap();
-    let signed = client.sign_eip191(&omni, b"siwe-test-message").await.unwrap();
+    let signed = client
+        .sign_eip191(&omni, b"siwe-test-message")
+        .await
+        .unwrap();
     assert_eq!(derived.address, signed.address);
     assert_eq!(derived.key_version, signed.key_version);
 }

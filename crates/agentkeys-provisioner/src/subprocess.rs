@@ -17,7 +17,9 @@ pub struct SubprocessConfig {
 
 impl Default for SubprocessConfig {
     fn default() -> Self {
-        Self { wall_clock_secs: 120 }
+        Self {
+            wall_clock_secs: 120,
+        }
     }
 }
 
@@ -100,9 +102,7 @@ pub async fn spawn_and_collect(
         Err(_elapsed) => {
             // kill the child; best-effort cleanup
             let _ = child.kill().await;
-            return Err(ProvisionError::Timeout {
-                timeout_secs,
-            });
+            return Err(ProvisionError::Timeout { timeout_secs });
         }
     };
 
@@ -149,10 +149,9 @@ printf '{"type":"progress","step":"waiting_for_email"}\n'
 printf '{"type":"success","api_key":"sk-or-v1-real12345"}\n'
 "#;
         let cmd = shell_command(script);
-        let outcome =
-            spawn_and_collect(&cmd, HashMap::new(), None, SubprocessConfig::default())
-                .await
-                .expect("subprocess should succeed");
+        let outcome = spawn_and_collect(&cmd, HashMap::new(), None, SubprocessConfig::default())
+            .await
+            .expect("subprocess should succeed");
         assert_eq!(outcome.events.len(), 3);
         matches!(outcome.events.last(), Some(ProvisionEvent::Success { .. }));
     }
@@ -197,10 +196,9 @@ printf '{"type":"error","code":"store_failed","details":"backend 500"}\n'
 exit 0
 "#;
         let cmd = shell_command(script);
-        let outcome =
-            spawn_and_collect(&cmd, HashMap::new(), None, SubprocessConfig::default())
-                .await
-                .expect("exit 0 with error event is a valid subprocess outcome");
+        let outcome = spawn_and_collect(&cmd, HashMap::new(), None, SubprocessConfig::default())
+            .await
+            .expect("exit 0 with error event is a valid subprocess outcome");
         assert!(outcome
             .events
             .iter()

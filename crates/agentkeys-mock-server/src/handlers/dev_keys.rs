@@ -220,8 +220,7 @@ fn signer_disabled() -> (StatusCode, Json<Value>) {
 }
 
 fn signer_error(e: SignerError) -> (StatusCode, Json<Value>) {
-    let status =
-        StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (
         status,
         Json(json!({

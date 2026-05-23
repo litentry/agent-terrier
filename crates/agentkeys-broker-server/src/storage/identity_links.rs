@@ -35,9 +35,8 @@ pub struct IdentityLinkStore {
 impl IdentityLinkStore {
     pub fn open(path: &Path) -> Result<Self, AuthError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AuthError::Internal(format!("create identity_links dir: {}", e))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| AuthError::Internal(format!("create identity_links dir: {}", e)))?;
         }
         let conn = Connection::open(path)
             .map_err(|e| AuthError::Internal(format!("open identity_links db: {}", e)))?;
@@ -49,9 +48,8 @@ impl IdentityLinkStore {
     }
 
     pub fn open_in_memory() -> Result<Self, AuthError> {
-        let conn = Connection::open_in_memory().map_err(|e| {
-            AuthError::Internal(format!("open in-memory identity_links db: {}", e))
-        })?;
+        let conn = Connection::open_in_memory()
+            .map_err(|e| AuthError::Internal(format!("open in-memory identity_links db: {}", e)))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -221,7 +219,8 @@ mod tests {
     fn list_for_master_orders_newest_first() {
         let s = store();
         s.link("0xom", "email", "a@b.com", 100).unwrap();
-        s.link("0xom", "oauth2_google", "google-sub-1", 200).unwrap();
+        s.link("0xom", "oauth2_google", "google-sub-1", 200)
+            .unwrap();
         s.link("0xom", "evm", "0xsecondwallet", 150).unwrap();
         let all = s.list_for_master("0xom").unwrap();
         assert_eq!(all.len(), 3);

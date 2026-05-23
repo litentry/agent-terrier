@@ -70,9 +70,15 @@ const LANDING_HTML: &str = r#"<!doctype html>
 
 pub async fn email_landing() -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    headers.insert("content-type", HeaderValue::from_static("text/html; charset=utf-8"));
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
     headers.insert("cache-control", HeaderValue::from_static("no-store"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
     (StatusCode::OK, headers, LANDING_HTML)
 }

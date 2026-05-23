@@ -93,16 +93,26 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_SESSION")]
     session: Option<String>,
 
-    #[arg(long, help = "Recover agent by alias or wallet address (e.g. my-bot or 0x...)")]
+    #[arg(
+        long,
+        help = "Recover agent by alias or wallet address (e.g. my-bot or 0x...)"
+    )]
     recover: Option<String>,
 
-    #[arg(long, help = "Recovery method: passkey or email (skips master approval)")]
+    #[arg(
+        long,
+        help = "Recovery method: passkey or email (skips master approval)"
+    )]
     method: Option<String>,
 
     #[arg(long)]
     stdio: bool,
 
-    #[arg(long, default_value = "300", help = "Pair/recover poll timeout in seconds")]
+    #[arg(
+        long,
+        default_value = "300",
+        help = "Pair/recover poll timeout in seconds"
+    )]
     pair_timeout: u64,
 
     #[arg(
@@ -112,7 +122,11 @@ struct Args {
     )]
     session_id: Option<String>,
 
-    #[arg(long, value_name = "ALIAS|WALLET", help = "Bind pair request to a specific master (alias or 0x... wallet)")]
+    #[arg(
+        long,
+        value_name = "ALIAS|WALLET",
+        help = "Bind pair request to a specific master (alias or 0x... wallet)"
+    )]
     parent: Option<String>,
 
     /// URL of the operator's broker server (Stage 7).
@@ -224,8 +238,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
             // clean up pending entry if present
             let _ = session_store::clear_session("daemon-pending");
-            session_store::save_session(&result.session, &sid)
-                .context("save recovered session")?;
+            session_store::save_session(&result.session, &sid).context("save recovered session")?;
             (result.session, agent_id)
         } else {
             // RECOVER VIA MASTER APPROVAL — resolve --parent here, not at
@@ -245,8 +258,7 @@ async fn main() -> anyhow::Result<()> {
                 .clone()
                 .unwrap_or_else(|| format!("daemon-{}", agent_id.0));
             let _ = session_store::clear_session("daemon-pending");
-            session_store::save_session(&result.session, &sid)
-                .context("save recovered session")?;
+            session_store::save_session(&result.session, &sid).context("save recovered session")?;
             (result.session, agent_id)
         }
     } else {
@@ -299,9 +311,7 @@ async fn main() -> anyhow::Result<()> {
                     let others: Vec<String> = all
                         .into_iter()
                         .filter(|s| {
-                            !s.starts_with("daemon-")
-                                && s != "master"
-                                && !s.starts_with("__agk_")
+                            !s.starts_with("daemon-") && s != "master" && !s.starts_with("__agk_")
                         })
                         .collect();
                     if !others.is_empty() {
@@ -365,7 +375,8 @@ async fn main() -> anyhow::Result<()> {
                     // --session / --recover --method paths don't crash startup.
                     // `--parent` binds the pair request to a specific master so
                     // the backend refuses approval from any other master.
-                    let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref())?;
+                    let parent_wallet =
+                        resolve_parent_if_set(&backend_url, args.parent.as_deref())?;
                     let result = pairing::run_pair_flow(
                         &*backend,
                         args.pair_timeout,
@@ -513,18 +524,16 @@ async fn run_companion_mode(args: Args) -> anyhow::Result<()> {
 /// the axum router from `proxy::build_router`. The router caches caps
 /// for 5 min and fails closed after 60s of broker silence.
 async fn run_proxy_mode(args: Args) -> anyhow::Result<()> {
-    let broker_url = args
-        .proxy_broker_url
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!(
+    let broker_url = args.proxy_broker_url.clone().ok_or_else(|| {
+        anyhow::anyhow!(
             "--proxy-broker-url required in proxy mode (or set AGENTKEYS_PROXY_BROKER_URL)"
-        ))?;
-    let session_jwt = args
-        .proxy_session_jwt
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!(
+        )
+    })?;
+    let session_jwt = args.proxy_session_jwt.clone().ok_or_else(|| {
+        anyhow::anyhow!(
             "--proxy-session-jwt required in proxy mode (or set AGENTKEYS_PROXY_SESSION_JWT)"
-        ))?;
+        )
+    })?;
 
     let socket_path = args
         .proxy_listen
@@ -532,8 +541,7 @@ async fn run_proxy_mode(args: Args) -> anyhow::Result<()> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(proxy::resolve_socket_path);
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {parent:?}"))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
     }
     // Best-effort: remove a stale socket file from a prior crashed run.
     let _ = std::fs::remove_file(&socket_path);
@@ -564,8 +572,8 @@ async fn run_proxy_mode(args: Args) -> anyhow::Result<()> {
     let unix_task = tokio::spawn(async move {
         // axum 0.7 doesn't ship a unix-listener helper directly; build a
         // tiny accept loop using hyper-util.
-        use hyper_util::server::conn::auto::Builder;
         use hyper_util::rt::TokioIo;
+        use hyper_util::server::conn::auto::Builder;
         use tower::Service;
         let svc = app_for_unix.into_make_service();
         let svc = std::sync::Arc::new(tokio::sync::Mutex::new(svc));
@@ -589,10 +597,12 @@ async fn run_proxy_mode(args: Args) -> anyhow::Result<()> {
                     }
                 };
                 drop(guard);
-                let hyper_svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                    let mut tower_service = tower_service.clone();
-                    async move { tower_service.call(req).await }
-                });
+                let hyper_svc = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        let mut tower_service = tower_service.clone();
+                        async move { tower_service.call(req).await }
+                    },
+                );
                 if let Err(e) = Builder::new(hyper_util::rt::TokioExecutor::new())
                     .serve_connection(io, hyper_svc)
                     .await

@@ -1,11 +1,9 @@
 use agentkeys_cli::{
-    cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init,
-    cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
-    cmd_signer_preview_7730, cmd_signer_sign, cmd_signer_sign_typed_data, cmd_store, cmd_teardown,
-    cmd_whoami, CommandContext,
-    CredentialBackendKind, EnvelopeVersionFlag, InitMode,
+    cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_provision,
+    cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive, cmd_signer_preview_7730,
+    cmd_signer_sign, cmd_signer_sign_typed_data, cmd_store, cmd_teardown, cmd_whoami,
+    CommandContext, CredentialBackendKind, EnvelopeVersionFlag, InitMode,
 };
-
 
 use clap::{Parser, Subcommand};
 
@@ -129,7 +127,10 @@ enum Commands {
         long_about = "Encrypt and store an API key for a given agent and service.\n\nOmit --agent to default to the session wallet. --agent accepts a 0x... wallet address, a linked alias, or a linked email.\n\nNote on the --agent FLAG (vs a positional): clap does not support an optional leading positional followed by required positionals — it either panics at parse time or consumes the first required arg as the agent. An --agent flag is the only disambiguation that works without a subcommand split.\n\nExamples:\n  agentkeys store openrouter sk-or-v1-abc123                (session wallet)\n  agentkeys store --agent my-bot openrouter sk-or-v1-abc123 (resolve alias)\n  agentkeys store --agent 0xAGENT anthropic sk-ant-abc123   (literal wallet)"
     )]
     Store {
-        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
         agent: Option<String>,
         #[arg(help = "Service name (e.g. openrouter, anthropic)")]
         service: String,
@@ -142,7 +143,10 @@ enum Commands {
         long_about = "Retrieve and print the stored credential. Omit --agent to default to the session wallet.\n\nExamples:\n  agentkeys read openrouter                     (session wallet)\n  agentkeys read --agent my-bot openrouter      (resolve alias)\n  agentkeys read --json --agent 0xAGENT openrouter (literal wallet)"
     )]
     Read {
-        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
         agent: Option<String>,
         #[arg(help = "Service name")]
         service: String,
@@ -153,7 +157,10 @@ enum Commands {
         long_about = "Load credentials for the agent and inject them as SERVICE_API_KEY env vars. Omit --agent to default to the session wallet. Use --env KEY=service to map non-standard env-var names (e.g. GITHUB_TOKEN).\n\nExamples:\n  agentkeys run -- python my_agent.py                      (session wallet)\n  agentkeys run --agent my-bot -- node server.js           (resolve alias)\n  agentkeys run --agent 0xAGENT -- node server.js          (literal wallet)\n  agentkeys run --env GITHUB_TOKEN=github -- bash deploy.sh"
     )]
     Run {
-        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
         agent: Option<String>,
         #[arg(long = "env", value_name = "KEY=SERVICE", action = clap::ArgAction::Append, help = "Map env var name to service (e.g. GITHUB_TOKEN=github)")]
         env: Vec<String>,
@@ -166,7 +173,10 @@ enum Commands {
         long_about = "Revoke a session. Without arguments, revokes the current session and wipes the local keychain entry (you must run `agentkeys init` again). With a wallet address, revokes all active sessions for that child agent (ownership check enforced).\n\nExamples:\n  agentkeys revoke\n  agentkeys revoke 0xCHILD_WALLET"
     )]
     Revoke {
-        #[arg(help = "Child agent wallet address to revoke (omit to revoke your own current session)", required = false)]
+        #[arg(
+            help = "Child agent wallet address to revoke (omit to revoke your own current session)",
+            required = false
+        )]
         agent: Option<String>,
     },
 
@@ -201,7 +211,10 @@ enum Commands {
         add: Vec<String>,
         #[arg(long, help = "Remove a service from the scope (repeatable)")]
         remove: Vec<String>,
-        #[arg(long, help = "Replace the entire scope with a comma-separated list of services")]
+        #[arg(
+            long,
+            help = "Replace the entire scope with a comma-separated list of services"
+        )]
         set: Option<String>,
         #[arg(long, help = "List the current scope without making changes")]
         list: bool,
@@ -238,9 +251,16 @@ enum Commands {
         long_about = "Read-only summary of the current session.\n\nWith --signer-url and --omni-account, also calls the signer to print the derived EVM address. Useful for verifying the signer wire is reachable and the omni→address mapping is what you expect.\n\nExamples:\n  agentkeys whoami\n  agentkeys whoami --signer-url http://localhost:8090 --omni-account <64hex>"
     )]
     Whoami {
-        #[arg(long, env = "AGENTKEYS_SIGNER_URL", help = "URL of the signer service (dev_key_service or TEE worker)")]
+        #[arg(
+            long,
+            env = "AGENTKEYS_SIGNER_URL",
+            help = "URL of the signer service (dev_key_service or TEE worker)"
+        )]
         signer_url: Option<String>,
-        #[arg(long, help = "OmniAccount (64-hex-char SHA256 digest) to resolve via the signer")]
+        #[arg(
+            long,
+            help = "OmniAccount (64-hex-char SHA256 digest) to resolve via the signer"
+        )]
         omni_account: Option<String>,
     },
 
@@ -274,7 +294,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum K11Action {
-    #[command(about = "Enroll a K11 credential for an operator (stub by default; --webauthn for real Touch ID ceremony)")]
+    #[command(
+        about = "Enroll a K11 credential for an operator (stub by default; --webauthn for real Touch ID ceremony)"
+    )]
     Enroll {
         #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
         operator_omni: String,
@@ -290,11 +312,16 @@ enum K11Action {
         #[arg(long, default_value = "localhost")]
         rp_id: String,
     },
-    #[command(about = "Produce a K11 assertion over a message (stub by default; --webauthn for real Touch ID)")]
+    #[command(
+        about = "Produce a K11 assertion over a message (stub by default; --webauthn for real Touch ID)"
+    )]
     Assert {
         #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
         operator_omni: String,
-        #[arg(long, help = "Hex-encoded message to sign over (with or without 0x prefix)")]
+        #[arg(
+            long,
+            help = "Hex-encoded message to sign over (with or without 0x prefix)"
+        )]
         message_hex: String,
         /// Run the real WebAuthn ceremony. The application message is
         /// SHA-256-hashed and used as the WebAuthn challenge so the
@@ -319,7 +346,10 @@ enum K11Action {
         /// Examples:
         ///   --intent-text "Grant agent demo-agent access to openrouter"
         ///   --intent-text "Revoke companion master device 0xabcd…1234"
-        #[arg(long, help = "Operator-readable intent shown on the WebAuthn confirmation page (with --webauthn)")]
+        #[arg(
+            long,
+            help = "Operator-readable intent shown on the WebAuthn confirmation page (with --webauthn)"
+        )]
         intent_text: Option<String>,
         /// Per-field detail rows rendered under the headline `--intent-text`,
         /// repeatable. Each value is `Label=Value`. Common rows: service,
@@ -329,7 +359,10 @@ enum K11Action {
         ///   --intent-field "Service=openrouter"
         ///   --intent-field "Max calls / hour=100"
         ///   --intent-field "K3 epoch=1"
-        #[arg(long = "intent-field", help = "Repeatable per-field detail row as `Label=Value` (with --webauthn)")]
+        #[arg(
+            long = "intent-field",
+            help = "Repeatable per-field detail row as `Label=Value` (with --webauthn)"
+        )]
         intent_fields: Vec<String>,
         /// Typed K11 operation intent (preferred over `--intent-text` +
         /// `--intent-field`). One JSON blob describing the operation; the
@@ -359,7 +392,9 @@ enum ChainAction {
     List,
     #[command(about = "Print one profile's full JSON (omit name to use the resolved profile)")]
     Show {
-        #[arg(help = "Profile name (heima | heima-paseo | base | base-sepolia | ethereum | sepolia | anvil)")]
+        #[arg(
+            help = "Profile name (heima | heima-paseo | base | base-sepolia | ethereum | sepolia | anvil)"
+        )]
         name: Option<String>,
     },
 }
@@ -400,7 +435,10 @@ enum SignerAction {
         signer_url: String,
         #[arg(long, help = "OmniAccount (64-hex-char SHA256 digest)")]
         omni_account: String,
-        #[arg(long, help = "Path to a JSON file containing the EIP-712 v4 typed-data")]
+        #[arg(
+            long,
+            help = "Path to a JSON file containing the EIP-712 v4 typed-data"
+        )]
         typed_data_file: String,
         /// Render the operator-facing intent text + per-field preview against
         /// the bundled ERC-7730 catalog (override via $AGENTKEYS_7730_DIR).
@@ -414,7 +452,10 @@ enum SignerAction {
         long_about = "Useful for dry-runs against new ERC-7730 files before plumbing them into automated agent signing. Loads the bundled catalog (and $AGENTKEYS_7730_DIR if set) by default; --7730-file pins a single file.\n\nExamples:\n  agentkeys signer preview-7730 --typed-data-file ./permit.json\n  agentkeys signer preview-7730 --typed-data-file ./permit.json --7730-file ./erc20-permit-usdc.json"
     )]
     Preview7730 {
-        #[arg(long, help = "Path to a JSON file containing the EIP-712 v4 typed-data")]
+        #[arg(
+            long,
+            help = "Path to a JSON file containing the EIP-712 v4 typed-data"
+        )]
         typed_data_file: String,
         // Explicit `long = "7730-file"` because clap derives the flag
         // name from the Rust field ident, which would yield
@@ -435,7 +476,10 @@ enum InboxAction {
         long_about = "Provision a new inbox email address for an agent and print the address.\n\nOmit --agent to default to the session wallet.\n\nExamples:\n  agentkeys inbox provision\n  agentkeys inbox provision --agent 0xAGENT"
     )]
     Provision {
-        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
         agent: Option<String>,
     },
 
@@ -444,7 +488,10 @@ enum InboxAction {
         long_about = "List all inbox email addresses provisioned for an agent, one per line.\n\nOmit --agent to default to the session wallet.\n\nExamples:\n  agentkeys inbox list\n  agentkeys inbox list --agent 0xAGENT"
     )]
     List {
-        #[arg(long, help = "Agent wallet address, alias, or email (defaults to session wallet)")]
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
         agent: Option<String>,
     },
 }
@@ -455,8 +502,7 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
         ChainAction::List => Ok(ChainProfile::list_builtin_names().join("\n")),
         ChainAction::Show { name } => {
             let profile = match name {
-                Some(n) => ChainProfile::load_builtin(n)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+                Some(n) => ChainProfile::load_builtin(n).map_err(|e| anyhow::anyhow!("{e}"))?,
                 None => ctx.chain_profile()?.clone(),
             };
             serde_json::to_string_pretty(&profile)
@@ -480,8 +526,10 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
         .unwrap_or(true);
 
     // Resolve mode: --webauthn flag wins over AGENTKEYS_K11_STUB env.
-    let use_webauthn = matches!(action,
-        K11Action::Enroll { webauthn: true, .. } | K11Action::Assert { webauthn: true, .. });
+    let use_webauthn = matches!(
+        action,
+        K11Action::Enroll { webauthn: true, .. } | K11Action::Assert { webauthn: true, .. }
+    );
 
     if !use_webauthn && !stub_env {
         anyhow::bail!(
@@ -526,13 +574,16 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
     }
 
     match action {
-        K11Action::Enroll { operator_omni, webauthn, rp_id } => {
+        K11Action::Enroll {
+            operator_omni,
+            webauthn,
+            rp_id,
+        } => {
             if *webauthn {
-                let enrollment = agentkeys_cli::k11_webauthn::enroll_webauthn_with_rp(
-                    operator_omni, rp_id,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("k11 webauthn enroll: {e}"))?;
+                let enrollment =
+                    agentkeys_cli::k11_webauthn::enroll_webauthn_with_rp(operator_omni, rp_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("k11 webauthn enroll: {e}"))?;
                 serde_json::to_string_pretty(&enrollment)
                     .map_err(|e| anyhow::anyhow!("serialize: {e}"))
             } else {
@@ -567,8 +618,7 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
                 // Split on the FIRST `=` so values may contain `=`. Rows
                 // without `=` are rejected with a clear error so the
                 // operator doesn't silently get a mis-rendered intent field.
-                let mut k11_fields: Vec<(String, String)> =
-                    Vec::with_capacity(intent_fields.len());
+                let mut k11_fields: Vec<(String, String)> = Vec::with_capacity(intent_fields.len());
                 for raw in intent_fields {
                     let (label, value) = match raw.split_once('=') {
                         Some((l, v)) => (l.trim().to_string(), v.trim().to_string()),
@@ -674,7 +724,9 @@ async fn main() {
             poll_timeout_seconds,
         } => {
             let broker_opt = broker_url.clone().or_else(|| ctx.broker_url.clone());
-            let signer = signer_url.clone().unwrap_or_else(|| ctx.backend_url.clone());
+            let signer = signer_url
+                .clone()
+                .unwrap_or_else(|| ctx.backend_url.clone());
             let mode_result: anyhow::Result<InitMode> = match (email, *oauth2_google) {
                 (Some(addr), false) => broker_opt
                     .ok_or_else(|| {
@@ -711,15 +763,23 @@ async fn main() {
                 Err(e) => Err(e),
             }
         }
-        Commands::Store { agent, service, key } => cmd_store(&ctx, agent.as_deref(), service, key).await,
+        Commands::Store {
+            agent,
+            service,
+            key,
+        } => cmd_store(&ctx, agent.as_deref(), service, key).await,
         Commands::Read { agent, service } => cmd_read(&ctx, agent.as_deref(), service).await,
         Commands::Run { agent, env, cmd } => cmd_run(&ctx, agent.as_deref(), env, cmd).await,
         Commands::Revoke { agent } => cmd_revoke(&ctx, agent.as_deref()).await,
         Commands::Teardown { agent } => cmd_teardown(&ctx, agent).await,
         Commands::Approve { pair_code, yes } => cmd_approve(&ctx, pair_code, *yes).await,
-        Commands::Scope { agent, add, remove, set, list } => {
-            cmd_scope(&ctx, agent, add, remove, set.as_deref(), *list).await
-        }
+        Commands::Scope {
+            agent,
+            add,
+            remove,
+            set,
+            list,
+        } => cmd_scope(&ctx, agent, add, remove, set.as_deref(), *list).await,
         Commands::Provision { service, force } => {
             cmd_provision(&ctx, service, *force, None).await.map(|out| {
                 for line in &out.stderr_lines {
@@ -730,23 +790,23 @@ async fn main() {
         }
         Commands::Feedback => Ok(cmd_feedback()),
         Commands::Inbox { action } => match action {
-            InboxAction::Provision { agent } => {
-                cmd_inbox_provision(&ctx, agent.as_deref()).await
-            }
-            InboxAction::List { agent } => {
-                cmd_inbox_list(&ctx, agent.as_deref()).await
-            }
+            InboxAction::Provision { agent } => cmd_inbox_provision(&ctx, agent.as_deref()).await,
+            InboxAction::List { agent } => cmd_inbox_list(&ctx, agent.as_deref()).await,
         },
-        Commands::Whoami { signer_url, omni_account } => {
-            cmd_whoami(&ctx, signer_url.as_deref(), omni_account.as_deref()).await
-        }
+        Commands::Whoami {
+            signer_url,
+            omni_account,
+        } => cmd_whoami(&ctx, signer_url.as_deref(), omni_account.as_deref()).await,
         Commands::Signer { action } => match action {
-            SignerAction::Derive { signer_url, omni_account } => {
-                cmd_signer_derive(&ctx, signer_url, omni_account).await
-            }
-            SignerAction::Sign { signer_url, omni_account, message } => {
-                cmd_signer_sign(&ctx, signer_url, omni_account, message).await
-            }
+            SignerAction::Derive {
+                signer_url,
+                omni_account,
+            } => cmd_signer_derive(&ctx, signer_url, omni_account).await,
+            SignerAction::Sign {
+                signer_url,
+                omni_account,
+                message,
+            } => cmd_signer_sign(&ctx, signer_url, omni_account, message).await,
             SignerAction::SignTypedData {
                 signer_url,
                 omni_account,
@@ -762,9 +822,10 @@ async fn main() {
                 )
                 .await
             }
-            SignerAction::Preview7730 { typed_data_file, seven_thirty_file } => {
-                cmd_signer_preview_7730(&ctx, typed_data_file, seven_thirty_file.as_deref()).await
-            }
+            SignerAction::Preview7730 {
+                typed_data_file,
+                seven_thirty_file,
+            } => cmd_signer_preview_7730(&ctx, typed_data_file, seven_thirty_file.as_deref()).await,
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
         Commands::K11 { action } => cmd_k11(action).await,

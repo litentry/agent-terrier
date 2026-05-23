@@ -116,6 +116,5 @@ async fn main() {
 /// Load a PEM-encoded EC public key for use as a JWT decoding key.
 fn load_broker_pubkey(path: &PathBuf) -> Result<DecodingKey, String> {
     let pem = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    DecodingKey::from_ec_pem(&pem)
-        .map_err(|e| format!("parse EC PEM from {}: {e}", path.display()))
+    DecodingKey::from_ec_pem(&pem).map_err(|e| format!("parse EC PEM from {}: {e}", path.display()))
 }

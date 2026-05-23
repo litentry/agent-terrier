@@ -31,7 +31,10 @@ use agentkeys_broker_server::{
         PluginRegistry,
     },
     state::{AppState, Tier2State},
-    storage::{AuthNonceStore, EmailRateLimitStore, EmailTokenStore, GrantStore, IdempotencyStore, IdentityLinkStore, WalletStore},
+    storage::{
+        AuthNonceStore, EmailRateLimitStore, EmailTokenStore, GrantStore, IdempotencyStore,
+        IdentityLinkStore, WalletStore,
+    },
     sts::{AssumedCredentials, StsClient, StubStsClient},
 };
 use serde_json::Value;
@@ -51,7 +54,8 @@ fn stub_creds() -> AssumedCredentials {
 async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
     let tmp = Box::leak(Box::new(TempDir::new().unwrap()));
     let oidc = OidcKeypair::generate_and_persist(&tmp.path().join("oidc.json")).unwrap();
-    let session_kp = SessionKeypair::generate_and_persist(&tmp.path().join("session.json")).unwrap();
+    let session_kp =
+        SessionKeypair::generate_and_persist(&tmp.path().join("session.json")).unwrap();
 
     let token_store = Arc::new(EmailTokenStore::open_in_memory().unwrap());
     let rl_store = Arc::new(EmailRateLimitStore::open_in_memory().unwrap());
@@ -71,8 +75,10 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         .unwrap(),
     );
 
-    let mut auth_map: HashMap<String, Arc<dyn agentkeys_broker_server::plugins::auth::UserAuthMethod>> =
-        HashMap::new();
+    let mut auth_map: HashMap<
+        String,
+        Arc<dyn agentkeys_broker_server::plugins::auth::UserAuthMethod>,
+    > = HashMap::new();
     auth_map.insert("email_link".into(), plugin.clone() as _);
 
     let wallet_store = Arc::new(WalletStore::open_in_memory().unwrap());
@@ -81,7 +87,9 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
 
     let registry = Arc::new(PluginRegistry {
         auth: auth_map,
-        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(&wallet_store))),
+        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(
+            &wallet_store,
+        ))),
         audit: vec![sqlite_anchor],
     });
 
@@ -160,7 +168,10 @@ async fn email_request_returns_request_id_and_polls_pending() {
 
     // Poll status before the link is clicked → pending.
     let st = client
-        .get(format!("{}/v1/auth/email/status/{}", broker_url, request_id))
+        .get(format!(
+            "{}/v1/auth/email/status/{}",
+            broker_url, request_id
+        ))
         .send()
         .await
         .unwrap();
@@ -216,7 +227,10 @@ async fn full_flow_browser_verify_then_cli_poll_returns_session_jwt() {
 
     // CLI polls — now verified, response carries session JWT.
     let st = client
-        .get(format!("{}/v1/auth/email/status/{}", broker_url, request_id))
+        .get(format!(
+            "{}/v1/auth/email/status/{}",
+            broker_url, request_id
+        ))
         .send()
         .await
         .unwrap();
@@ -334,7 +348,10 @@ async fn unknown_request_id_returns_400() {
     let (broker_url, _state, _sender) = spawn_broker().await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/v1/auth/email/status/req-never-existed", broker_url))
+        .get(format!(
+            "{}/v1/auth/email/status/req-never-existed",
+            broker_url
+        ))
         .send()
         .await
         .unwrap();

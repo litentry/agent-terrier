@@ -66,7 +66,13 @@ pub fn encrypt(
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&kek));
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ct = cipher
-        .encrypt(&nonce, Payload { msg: plaintext, aad: aad_bytes })
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad: aad_bytes,
+            },
+        )
         .map_err(|e| EnvelopeError::Encrypt(e.to_string()))?;
     let mut out = Vec::with_capacity(1 + NONCE_LEN + ct.len());
     out.push(ENVELOPE_VERSION_V2);
@@ -75,11 +81,7 @@ pub fn encrypt(
     Ok(out)
 }
 
-pub fn decrypt(
-    kek_hex: &str,
-    envelope: &[u8],
-    aad_bytes: &[u8],
-) -> Result<Vec<u8>, EnvelopeError> {
+pub fn decrypt(kek_hex: &str, envelope: &[u8], aad_bytes: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
     if envelope.len() < 1 + NONCE_LEN + 16 {
         return Err(EnvelopeError::Truncated(envelope.len()));
     }
@@ -91,7 +93,13 @@ pub fn decrypt(
     let nonce = Nonce::from_slice(&envelope[1..1 + NONCE_LEN]);
     let ct = &envelope[1 + NONCE_LEN..];
     cipher
-        .decrypt(nonce, Payload { msg: ct, aad: aad_bytes })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ct,
+                aad: aad_bytes,
+            },
+        )
         .map_err(|e| EnvelopeError::Decrypt(e.to_string()))
 }
 
@@ -121,7 +129,11 @@ mod tests {
         let a = aad("ignored", &actor, "openrouter", 999);
         assert_eq!(
             a,
-            format!("agentkeys.cred.aad.v2|{}|openrouter", "abcdef12".to_string() + &"0".repeat(56)).as_bytes()
+            format!(
+                "agentkeys.cred.aad.v2|{}|openrouter",
+                "abcdef12".to_string() + &"0".repeat(56)
+            )
+            .as_bytes()
         );
     }
 
@@ -139,7 +151,10 @@ mod tests {
         // Test would FAIL if we accidentally lowercased here.
         let upper = aad("x", "0xabc", "OpenRouter", 1);
         let lower = aad("x", "0xabc", "openrouter", 1);
-        assert_ne!(upper, lower, "AAD must preserve service casing (CLI compat)");
+        assert_ne!(
+            upper, lower,
+            "AAD must preserve service casing (CLI compat)"
+        );
     }
 
     #[test]
@@ -158,7 +173,10 @@ mod tests {
         let aad1 = aad("x", "0xab", "svc-a", 1);
         let aad2 = aad("x", "0xab", "svc-b", 1);
         let env = encrypt(&kek, b"x", &aad1).unwrap();
-        assert!(decrypt(&kek, &env, &aad2).is_err(), "AAD tamper must fail decrypt");
+        assert!(
+            decrypt(&kek, &env, &aad2).is_err(),
+            "AAD tamper must fail decrypt"
+        );
     }
 
     #[test]

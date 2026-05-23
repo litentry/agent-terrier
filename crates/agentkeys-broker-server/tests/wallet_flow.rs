@@ -62,7 +62,9 @@ async fn spawn_broker() -> Harness {
 
     let registry = Arc::new(PluginRegistry {
         auth: auth_map,
-        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(&wallet_store))),
+        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(
+            &wallet_store,
+        ))),
         audit: vec![sqlite_anchor],
     });
 
@@ -162,7 +164,10 @@ async fn link_then_list_round_trip() {
     let links = body["links"].as_array().unwrap();
     assert_eq!(links.len(), 1);
     assert_eq!(links[0]["identity_type"].as_str().unwrap(), "email");
-    assert_eq!(links[0]["identity_value"].as_str().unwrap(), "alice@example.com");
+    assert_eq!(
+        links[0]["identity_value"].as_str().unwrap(),
+        "alice@example.com"
+    );
 }
 
 #[tokio::test]
@@ -260,7 +265,10 @@ async fn recover_lookup_finds_master() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["linked"], true);
-    assert_eq!(body["omni_account"].as_str().unwrap(), "0xomni-recovery-master");
+    assert_eq!(
+        body["omni_account"].as_str().unwrap(),
+        "0xomni-recovery-master"
+    );
 }
 
 #[tokio::test]

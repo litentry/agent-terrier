@@ -47,13 +47,10 @@ impl MintRateLimiter {
 
     /// Check + increment per-OmniAccount mint rate. Plan default 30/hour.
     /// Returns `Allowed` with remaining count or `Denied` with retry-after.
-    pub fn check_mint(
-        &self,
-        omni_account: &str,
-        now: i64,
-    ) -> Result<RateLimitOutcome, AuthError> {
+    pub fn check_mint(&self, omni_account: &str, now: i64) -> Result<RateLimitOutcome, AuthError> {
         let bucket = format!("{}{}", MINT_BUCKET_PREFIX, omni_account);
-        self.store.check_and_increment(&bucket, now, HOUR_SECONDS, self.mints_per_hour)
+        self.store
+            .check_and_increment(&bucket, now, HOUR_SECONDS, self.mints_per_hour)
     }
 
     /// Check + increment per-OmniAccount daily EVM-tx budget. Plan default
@@ -67,7 +64,8 @@ impl MintRateLimiter {
         now: i64,
     ) -> Result<RateLimitOutcome, AuthError> {
         let bucket = format!("{}{}", EVM_TX_BUCKET_PREFIX, omni_account);
-        self.store.check_and_increment(&bucket, now, DAY_SECONDS, self.evm_tx_per_day)
+        self.store
+            .check_and_increment(&bucket, now, DAY_SECONDS, self.evm_tx_per_day)
     }
 }
 

@@ -46,7 +46,11 @@ impl std::fmt::Debug for StsCreds {
         // anyway via CloudTrail). Fully redact secret + session token.
         let aki_len = self.access_key_id.len();
         let aki_preview = if aki_len > 8 {
-            format!("{}...{}", &self.access_key_id[..4], &self.access_key_id[aki_len - 4..])
+            format!(
+                "{}...{}",
+                &self.access_key_id[..4],
+                &self.access_key_id[aki_len - 4..]
+            )
         } else {
             "<short>".to_string()
         };
@@ -63,14 +67,29 @@ impl StsCreds {
     /// are missing (partial passthrough is an error — refuse to mint a
     /// half-authed S3 client).
     pub fn from_headers(headers: &HeaderMap) -> Option<Self> {
-        let access_key_id = headers.get("x-aws-access-key-id")?.to_str().ok()?.to_string();
-        let secret_access_key =
-            headers.get("x-aws-secret-access-key")?.to_str().ok()?.to_string();
-        let session_token = headers.get("x-aws-session-token")?.to_str().ok()?.to_string();
+        let access_key_id = headers
+            .get("x-aws-access-key-id")?
+            .to_str()
+            .ok()?
+            .to_string();
+        let secret_access_key = headers
+            .get("x-aws-secret-access-key")?
+            .to_str()
+            .ok()?
+            .to_string();
+        let session_token = headers
+            .get("x-aws-session-token")?
+            .to_str()
+            .ok()?
+            .to_string();
         if access_key_id.is_empty() || secret_access_key.is_empty() || session_token.is_empty() {
             return None;
         }
-        Some(StsCreds { access_key_id, secret_access_key, session_token })
+        Some(StsCreds {
+            access_key_id,
+            secret_access_key,
+            session_token,
+        })
     }
 
     /// Build a per-request S3 client using these creds in the given region.
@@ -176,7 +195,10 @@ mod tests {
     fn all_three_headers_parse() {
         let mut h = HeaderMap::new();
         h.insert("x-aws-access-key-id", HeaderValue::from_static("AKIA..."));
-        h.insert("x-aws-secret-access-key", HeaderValue::from_static("secret"));
+        h.insert(
+            "x-aws-secret-access-key",
+            HeaderValue::from_static("secret"),
+        );
         h.insert("x-aws-session-token", HeaderValue::from_static("token"));
         let c = StsCreds::from_headers(&h).unwrap();
         assert_eq!(c.access_key_id, "AKIA...");
@@ -202,11 +224,23 @@ mod tests {
             session_token: "FwoGZXIvYXdzEEEa...".to_string(),
         };
         let dbg = format!("{:?}", c);
-        assert!(!dbg.contains("VERY-SECRET-DO-NOT-LOG"), "Debug leaked secret_access_key");
-        assert!(!dbg.contains("FwoGZXIvYXdzEEEa"), "Debug leaked session_token");
-        assert!(dbg.contains("<redacted>"), "Debug missing <redacted> marker");
+        assert!(
+            !dbg.contains("VERY-SECRET-DO-NOT-LOG"),
+            "Debug leaked secret_access_key"
+        );
+        assert!(
+            !dbg.contains("FwoGZXIvYXdzEEEa"),
+            "Debug leaked session_token"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug missing <redacted> marker"
+        );
         // Access key prefix is OK (it's logged by AWS CloudTrail anyway).
-        assert!(dbg.contains("ASIA"), "Debug should show access_key_id prefix");
+        assert!(
+            dbg.contains("ASIA"),
+            "Debug should show access_key_id prefix"
+        );
     }
 
     // codex P2: extractor enforcement tests. We can't easily mock

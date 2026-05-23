@@ -42,7 +42,10 @@ pub async fn append(
     Json(req): Json<AppendRequest>,
 ) -> Result<Json<AppendResponse>, (StatusCode, String)> {
     let size = state.append(req.operator_omni, req.event).await;
-    Ok(Json(AppendResponse { ok: true, queue_size: size }))
+    Ok(Json(AppendResponse {
+        ok: true,
+        queue_size: size,
+    }))
 }
 
 #[derive(Serialize)]
@@ -72,7 +75,10 @@ pub async fn flush_all(
         .flush_all()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(FlushResponse { ok: true, flushed: r }))
+    Ok(Json(FlushResponse {
+        ok: true,
+        flushed: r,
+    }))
 }
 
 #[derive(Serialize)]
@@ -204,10 +210,7 @@ pub async fn append_v2(
 ///
 /// Response is `application/cbor` so explorers can verify the hash
 /// matches by re-running `keccak256(body)`.
-pub async fn get_envelope(
-    State(state): State<SharedState>,
-    Path(hash): Path<String>,
-) -> Response {
+pub async fn get_envelope(State(state): State<SharedState>, Path(hash): Path<String>) -> Response {
     let key = hash.to_lowercase();
     match state.get_envelope(&key).await {
         Some(cbor) => Response::builder()

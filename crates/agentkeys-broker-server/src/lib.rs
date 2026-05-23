@@ -73,10 +73,7 @@ pub fn create_router(state: SharedState) -> Router {
         )
         .route("/v1/grant/list", get(handlers::grant::list::grant_list))
         // Phase B wallet endpoints (US-028).
-        .route(
-            "/v1/wallet/link",
-            post(handlers::wallet::link::wallet_link),
-        )
+        .route("/v1/wallet/link", post(handlers::wallet::link::wallet_link))
         .route(
             "/v1/wallet/links",
             get(handlers::wallet::links_list::wallet_links_list),

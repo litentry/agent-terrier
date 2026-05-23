@@ -28,10 +28,7 @@ pub struct RenderedFields {
 }
 
 impl RenderedFields {
-    pub fn render(
-        message: &serde_json::Value,
-        format: &Erc7730Format,
-    ) -> Self {
+    pub fn render(message: &serde_json::Value, format: &Erc7730Format) -> Self {
         let mut by_path = BTreeMap::new();
         let mut by_leaf = BTreeMap::new();
         for field in &format.fields {
@@ -60,11 +57,7 @@ impl RenderedFields {
     ) -> impl Iterator<Item = (&'a str, &'a str)> {
         format.fields.iter().map(|f| {
             let label = f.label.as_deref().unwrap_or(&f.path);
-            let rendered = self
-                .by_path
-                .get(&f.path)
-                .map(String::as_str)
-                .unwrap_or("?");
+            let rendered = self.by_path.get(&f.path).map(String::as_str).unwrap_or("?");
             (label, rendered)
         })
     }
@@ -110,7 +103,7 @@ fn render_field(field: &Erc7730Field, raw: Option<&serde_json::Value>) -> String
         "integer" => render_integer(raw),
         "date" => render_date(raw),
         "bool" => render_bool(raw),
-        "raw" | _ => render_raw(raw),
+        _ => render_raw(raw),
     }
 }
 
@@ -155,7 +148,11 @@ fn render_token_amount(raw: &serde_json::Value, params: &serde_json::Value) -> S
         }
     };
 
-    let with_sign = if neg { format!("-{formatted}") } else { formatted };
+    let with_sign = if neg {
+        format!("-{formatted}")
+    } else {
+        formatted
+    };
     if ticker.is_empty() {
         with_sign
     } else {
@@ -310,7 +307,8 @@ mod tests {
                 },
             ],
         };
-        let msg = json!({"value": "1000000", "spender": "0xaaaabbbbccccddddeeeeffff0000111122223333"});
+        let msg =
+            json!({"value": "1000000", "spender": "0xaaaabbbbccccddddeeeeffff0000111122223333"});
         let rendered = RenderedFields::render(&msg, &format);
         let s = interpolate_intent("Approve {value} to {spender} maybe {unknown}", &rendered);
         assert_eq!(s, "Approve 1 USDC to 0xaaaa…3333 maybe {unknown}");

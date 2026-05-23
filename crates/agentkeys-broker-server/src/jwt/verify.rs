@@ -40,8 +40,9 @@ pub fn verify_session_jwt(
     issuer: &str,
     token: &str,
 ) -> BrokerResult<SessionClaims> {
-    let decoding_key = DecodingKey::from_ec_components(&keypair.public_x_b64, &keypair.public_y_b64)
-        .map_err(|e| BrokerError::Unauthorized(format!("decoding key construction: {e}")))?;
+    let decoding_key =
+        DecodingKey::from_ec_components(&keypair.public_x_b64, &keypair.public_y_b64)
+            .map_err(|e| BrokerError::Unauthorized(format!("decoding key construction: {e}")))?;
     let mut validation = Validation::new(Algorithm::ES256);
     validation.set_audience(&["agentkeys:broker"]);
     validation.set_issuer(&[issuer]);
@@ -80,8 +81,7 @@ mod tests {
     fn round_trip_mint_then_verify() {
         let (_tmp, kp) = keypair();
         let issuer = "https://broker.example.com";
-        let token =
-            mint_session_jwt(&kp, issuer, "0x7f", "0xabc", "evm", "0xabc", 300).unwrap();
+        let token = mint_session_jwt(&kp, issuer, "0x7f", "0xabc", "evm", "0xabc", 300).unwrap();
         let claims = verify_session_jwt(&kp, issuer, &token).unwrap();
         assert_eq!(claims.aud, "agentkeys:broker");
         assert_eq!(claims.iss, issuer);
@@ -136,9 +136,16 @@ mod tests {
     #[test]
     fn verify_rejects_wrong_issuer() {
         let (_tmp, kp) = keypair();
-        let token =
-            mint_session_jwt(&kp, "https://broker.example.com", "0x7f", "0xabc", "evm", "0xabc", 300)
-                .unwrap();
+        let token = mint_session_jwt(
+            &kp,
+            "https://broker.example.com",
+            "0x7f",
+            "0xabc",
+            "evm",
+            "0xabc",
+            300,
+        )
+        .unwrap();
         let err = verify_session_jwt(&kp, "https://different-broker.example.com", &token);
         assert!(err.is_err(), "must reject wrong issuer");
     }

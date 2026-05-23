@@ -64,7 +64,11 @@ pub fn merkle_root(raw_leaves: &[Bytes32]) -> Bytes32 {
         let mut i = 0;
         while i < level.len() {
             let left = level[i];
-            let right = if i + 1 < level.len() { level[i + 1] } else { level[i] };
+            let right = if i + 1 < level.len() {
+                level[i + 1]
+            } else {
+                level[i]
+            };
             next.push(hash_pair(left, right));
             i += 2;
         }
@@ -85,8 +89,12 @@ pub fn merkle_proof(raw_leaves: &[Bytes32], index: usize) -> Vec<Bytes32> {
     let mut idx = index;
     let mut level: Vec<Bytes32> = raw_leaves.iter().copied().map(leaf_prefix).collect();
     while level.len() > 1 {
-        let sibling = if idx % 2 == 0 {
-            if idx + 1 < level.len() { level[idx + 1] } else { level[idx] }
+        let sibling = if idx.is_multiple_of(2) {
+            if idx + 1 < level.len() {
+                level[idx + 1]
+            } else {
+                level[idx]
+            }
         } else {
             level[idx - 1]
         };
@@ -96,7 +104,11 @@ pub fn merkle_proof(raw_leaves: &[Bytes32], index: usize) -> Vec<Bytes32> {
         let mut i = 0;
         while i < level.len() {
             let left = level[i];
-            let right = if i + 1 < level.len() { level[i + 1] } else { level[i] };
+            let right = if i + 1 < level.len() {
+                level[i + 1]
+            } else {
+                level[i]
+            };
             next.push(hash_pair(left, right));
             i += 2;
         }

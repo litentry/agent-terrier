@@ -105,7 +105,11 @@ async fn memory_put(
         .send()
         .await
         .map_err(|e| err_502(e.to_string(), "s3_put"))?;
-    Ok(Json(PutResponse { ok: true, s3_key: key, envelope_size: env_bytes.len() }))
+    Ok(Json(PutResponse {
+        ok: true,
+        s3_key: key,
+        envelope_size: env_bytes.len(),
+    }))
 }
 
 async fn memory_get(
@@ -141,7 +145,10 @@ async fn memory_get(
         .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))?;
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    Ok(Json(GetResponse { ok: true, plaintext_b64: STANDARD.encode(&plaintext) }))
+    Ok(Json(GetResponse {
+        ok: true,
+        plaintext_b64: STANDARD.encode(&plaintext),
+    }))
 }
 
 async fn memory_teardown(
@@ -167,7 +174,8 @@ async fn memory_teardown(
         .collect();
     let mut deleted = 0usize;
     for k in &keys {
-        if s3.delete_object()
+        if s3
+            .delete_object()
             .bucket(&state.config.memory_bucket)
             .key(k)
             .send()
@@ -177,7 +185,10 @@ async fn memory_teardown(
             deleted += 1;
         }
     }
-    Ok(Json(TeardownResponse { ok: true, keys_deleted: deleted }))
+    Ok(Json(TeardownResponse {
+        ok: true,
+        keys_deleted: deleted,
+    }))
 }
 
 async fn verify_cap(
@@ -187,15 +198,13 @@ async fn verify_cap(
 ) -> Result<(), ApiError> {
     verify::verify_signature(&state.config.broker_pubkey_pem, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
-    verify::check_op(cap, expected_op)
-        .map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
+    verify::check_op(cap, expected_op).map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
     // Per-data-class isolation gate (issue #90 followup): a credentials-class
     // cap MUST NOT be honoured at the memory worker. Symmetric with the cred
     // worker's check, defended in both directions.
     verify::check_data_class(cap, DataClass::Memory)
         .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
-    verify::check_freshness(cap)
-        .map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
+    verify::check_freshness(cap).map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
     verify::check_chain_device(
         &state.http,
         &state.config.chain_rpc_http,
