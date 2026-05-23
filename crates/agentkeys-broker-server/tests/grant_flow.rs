@@ -4,9 +4,9 @@
 //! - `POST /v1/grant/create` (master JWT) → 200, returns grant_id +
 //!   audit_proof (compact JWS).
 //! - `GET /v1/grant/list` → 200, returns the just-created grant.
-//! - `POST /v1/grant/revoke` → 200, instant revoke. Mint after revoke
-//!   would 403 (covered in `mint_v2_flow` separately when grant store is
-//!   wired into the mint endpoint — Phase B US-027).
+//! - `POST /v1/grant/revoke` → 200, instant revoke. Mint-time enforcement
+//!   of revoked grants was retired with mint_v2 in PR #96 (issue #72);
+//!   today /v1/grant/* is CRUD-only (no consume point).
 //! - Re-revoke is idempotent at storage level (caller sees 400 because
 //!   revoke() returns false).
 //! - Cross-master revoke (different OmniAccount tries to revoke a grant

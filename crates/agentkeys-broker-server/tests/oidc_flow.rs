@@ -180,7 +180,7 @@ async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
     // same path the SIWE wallet/email/oauth2 verify handlers take. Replaces
     // the legacy `mint_session_against_backend` flow now that
     // /v1/mint-oidc-jwt verifies session JWTs locally instead of round-
-    // tripping to /session/validate (parity with /v1/mint-aws-creds).
+    // tripping to /session/validate.
     let wallet = "0xabcdef0123456789abcdef0123456789abcdef01".to_string();
     let omni = derive_omni_account("evm", &wallet);
     let session_token = mint_session_jwt(

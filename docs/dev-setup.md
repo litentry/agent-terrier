@@ -107,7 +107,7 @@ BIN=$(pwd)/target/release/agentkeys-daemon
 $BIN --broker-url "$AGENTKEYS_BROKER_URL" --session "$AGENTKEYS_BEARER_TOKEN" --stdio
 ```
 
-When the daemon needs to access the operator's S3 vault (to read or store a credential), it calls the broker's `POST /v1/mint-aws-creds` with the bearer token. The broker exchanges it for a 1-hour scoped AWS session and hands it back — you never touch the long-lived daemon AWS key.
+When the daemon needs to access the operator's S3 vault (to read or store a credential), it calls the broker's `POST /v1/mint-oidc-jwt` with the bearer token, then exchanges the JWT for a 1-hour scoped AWS session via client-side `sts:AssumeRoleWithWebIdentity` (issue #71 / PR #96). The broker no longer holds any AWS principal — you never touch the long-lived daemon AWS key, and the broker can't either.
 
 ### 4.3 Provision a new service
 
