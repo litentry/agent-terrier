@@ -1,4 +1,6 @@
-use agentkeys_types::{Amount, PaymentLayer, SpendEvent, SpendFilter, TransactionReceipt, WalletAddress};
+use agentkeys_types::{
+    Amount, PaymentLayer, SpendEvent, SpendFilter, TransactionReceipt, WalletAddress,
+};
 use async_trait::async_trait;
 
 use crate::backend::BackendError;

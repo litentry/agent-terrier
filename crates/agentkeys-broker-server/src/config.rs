@@ -51,10 +51,8 @@ impl BrokerConfig {
         let aws_region = first_env(&[env::BROKER_AWS_REGION, env::REGION])
             .unwrap_or_else(|| "us-east-1".to_string());
 
-        let session_duration_seconds = parse_int_env_with_default(
-            env::BROKER_SESSION_DURATION_SECONDS,
-            3600,
-        )?;
+        let session_duration_seconds =
+            parse_int_env_with_default(env::BROKER_SESSION_DURATION_SECONDS, 3600)?;
         if !(900..=43_200).contains(&session_duration_seconds) {
             anyhow::bail!(
                 "{} must be between 900 and 43200, got {}",
@@ -63,10 +61,8 @@ impl BrokerConfig {
             );
         }
 
-        let shutdown_grace_seconds = parse_int_env_with_default(
-            env::BROKER_SHUTDOWN_GRACE_SECONDS,
-            30u64,
-        )?;
+        let shutdown_grace_seconds =
+            parse_int_env_with_default(env::BROKER_SHUTDOWN_GRACE_SECONDS, 30u64)?;
 
         let oidc_issuer = required_env(env::BROKER_OIDC_ISSUER)?;
         let oidc_keypair_path = std::env::var(env::BROKER_OIDC_KEYPAIR_PATH)
@@ -74,10 +70,8 @@ impl BrokerConfig {
             .map(PathBuf::from)
             .unwrap_or_else(crate::oidc::OidcKeypair::default_path);
 
-        let oidc_jwt_ttl_seconds = parse_int_env_with_default(
-            env::BROKER_OIDC_JWT_TTL_SECONDS,
-            300u64,
-        )?;
+        let oidc_jwt_ttl_seconds =
+            parse_int_env_with_default(env::BROKER_OIDC_JWT_TTL_SECONDS, 300u64)?;
         if !(60..=3_600).contains(&oidc_jwt_ttl_seconds) {
             anyhow::bail!(
                 "{} must be between 60 and 3600, got {}",
@@ -122,14 +116,17 @@ where
     <T as std::str::FromStr>::Err: std::fmt::Display,
 {
     match std::env::var(name) {
-        Ok(s) => s.parse::<T>().map_err(|e| {
-            anyhow::anyhow!("{}={:?} could not be parsed: {}", name, s, e)
-        }),
+        Ok(s) => s
+            .parse::<T>()
+            .map_err(|e| anyhow::anyhow!("{}={:?} could not be parsed: {}", name, s, e)),
         Err(_) => Ok(default),
     }
 }
 
 fn default_audit_db_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".agentkeys").join("broker").join("audit.sqlite")
+    PathBuf::from(home)
+        .join(".agentkeys")
+        .join("broker")
+        .join("audit.sqlite")
 }

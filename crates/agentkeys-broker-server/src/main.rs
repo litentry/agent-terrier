@@ -15,7 +15,10 @@ use agentkeys_broker_server::{
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(name = "agentkeys-broker-server", about = "AgentKeys credential broker")]
+#[command(
+    name = "agentkeys-broker-server",
+    about = "AgentKeys credential broker"
+)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -221,10 +224,7 @@ async fn main() -> anyhow::Result<()> {
 /// SES sender-verify probe that also persists `SesVerifyCache` to disk so
 /// the email-link plug-in's `Readiness::ready()` flips from `Degraded` to
 /// `Ready`. The EVM probe lands in Phase C.
-fn spawn_tier2_probes(
-    state: Arc<AppState>,
-    profile: agentkeys_broker_server::boot::Tier2Profile,
-) {
+fn spawn_tier2_probes(state: Arc<AppState>, profile: agentkeys_broker_server::boot::Tier2Profile) {
     let _ = (&state, &profile);
     #[cfg(feature = "auth-email-link")]
     if profile.email_link_enabled {
@@ -315,7 +315,9 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler — running in a sandbox that blocks signals?");
+            .expect(
+                "failed to register SIGTERM handler — running in a sandbox that blocks signals?",
+            );
         sig.recv().await;
     };
     #[cfg(not(unix))]

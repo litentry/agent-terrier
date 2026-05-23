@@ -60,7 +60,9 @@ impl AuditLog {
         }
         let conn = Connection::open(path)
             .map_err(|e| BrokerError::AuditError(format!("open audit db: {}", e)))?;
-        let log = Self { conn: Mutex::new(conn) };
+        let log = Self {
+            conn: Mutex::new(conn),
+        };
         log.init_schema()?;
         Ok(log)
     }
@@ -68,7 +70,9 @@ impl AuditLog {
     pub fn open_in_memory() -> BrokerResult<Self> {
         let conn = Connection::open_in_memory()
             .map_err(|e| BrokerError::AuditError(format!("open in-memory audit db: {}", e)))?;
-        let log = Self { conn: Mutex::new(conn) };
+        let log = Self {
+            conn: Mutex::new(conn),
+        };
         log.init_schema()?;
         Ok(log)
     }
@@ -239,6 +243,9 @@ mod tests {
         .unwrap();
         let row = log.last_row().unwrap().unwrap();
         assert_eq!(row.outcome, "auth_failed");
-        assert_eq!(row.outcome_detail.as_deref(), Some("bearer rejected by backend"));
+        assert_eq!(
+            row.outcome_detail.as_deref(),
+            Some("bearer rejected by backend")
+        );
     }
 }

@@ -175,7 +175,8 @@ impl DevKeyService {
         }
 
         Err(SignerError::Internal(
-            "HKDF output rejected as secp256k1 scalar after 16 retries (vanishingly rare; bug?)".into(),
+            "HKDF output rejected as secp256k1 scalar after 16 retries (vanishingly rare; bug?)"
+                .into(),
         ))
     }
 
@@ -298,7 +299,11 @@ fn address_for_signing_key(sk: &SigningKey) -> String {
     let vk = sk.verifying_key();
     let encoded_point = vk.to_encoded_point(false);
     let pubkey_bytes = encoded_point.as_bytes();
-    debug_assert_eq!(pubkey_bytes.len(), 65, "uncompressed secp256k1 pubkey is 65 bytes");
+    debug_assert_eq!(
+        pubkey_bytes.len(),
+        65,
+        "uncompressed secp256k1 pubkey is 65 bytes"
+    );
     debug_assert_eq!(pubkey_bytes[0], 0x04, "uncompressed marker");
 
     let mut hasher = Keccak256::new();
@@ -488,20 +493,47 @@ mod tests {
         types.insert(
             "EIP712Domain".into(),
             vec![
-                TypeField { name: "name".into(), ty: "string".into() },
-                TypeField { name: "version".into(), ty: "string".into() },
-                TypeField { name: "chainId".into(), ty: "uint256".into() },
-                TypeField { name: "verifyingContract".into(), ty: "address".into() },
+                TypeField {
+                    name: "name".into(),
+                    ty: "string".into(),
+                },
+                TypeField {
+                    name: "version".into(),
+                    ty: "string".into(),
+                },
+                TypeField {
+                    name: "chainId".into(),
+                    ty: "uint256".into(),
+                },
+                TypeField {
+                    name: "verifyingContract".into(),
+                    ty: "address".into(),
+                },
             ],
         );
         types.insert(
             "Permit".into(),
             vec![
-                TypeField { name: "owner".into(), ty: "address".into() },
-                TypeField { name: "spender".into(), ty: "address".into() },
-                TypeField { name: "value".into(), ty: "uint256".into() },
-                TypeField { name: "nonce".into(), ty: "uint256".into() },
-                TypeField { name: "deadline".into(), ty: "uint256".into() },
+                TypeField {
+                    name: "owner".into(),
+                    ty: "address".into(),
+                },
+                TypeField {
+                    name: "spender".into(),
+                    ty: "address".into(),
+                },
+                TypeField {
+                    name: "value".into(),
+                    ty: "uint256".into(),
+                },
+                TypeField {
+                    name: "nonce".into(),
+                    ty: "uint256".into(),
+                },
+                TypeField {
+                    name: "deadline".into(),
+                    ty: "uint256".into(),
+                },
             ],
         );
         let td = TypedData {

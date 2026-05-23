@@ -235,8 +235,7 @@ impl SessionStore {
             // Legacy file: <base_dir>/.agentkeys/session.json
             let legacy = self.base_dir.join(AGENTKEYS_DIR).join(SESSION_FILE);
             if let Ok(json) = std::fs::read_to_string(&legacy) {
-                return serde_json::from_str(&json)
-                    .context("deserialize legacy session from file");
+                return serde_json::from_str(&json).context("deserialize legacy session from file");
             }
         }
         anyhow::bail!(
@@ -404,7 +403,7 @@ pub(crate) fn sanitize_for_keyring(s: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(s.as_bytes());
     let hash = hex::encode(&digest[..4]); // 8 hex chars
-    // Reserve room for the prefix + '-' + 8-char suffix.
+                                          // Reserve room for the prefix + '-' + 8-char suffix.
     let prefix_max = MAX.saturating_sub(REWRITE_PREFIX.len() + 1 + 8);
     let body = if safe.len() > prefix_max {
         &safe[..prefix_max]
@@ -540,7 +539,9 @@ mod tests {
         let sess_master = make_session("tok-master", "0xMASTER");
         let sess_daemon = make_session("tok-daemon", "0xDAEMON");
         store.save(&sess_master, "master").expect("save master");
-        store.save(&sess_daemon, "daemon-0xDAEMON").expect("save daemon");
+        store
+            .save(&sess_daemon, "daemon-0xDAEMON")
+            .expect("save daemon");
 
         store.clear("daemon-0xDAEMON").expect("clear daemon");
 
@@ -555,9 +556,15 @@ mod tests {
     fn list_ids_is_sorted() {
         let (store, _tmp) = test_store();
         // Insert in non-alphabetical order; enumerate must still return sorted.
-        store.save(&make_session("t1", "0xZ"), "daemon-0xZZZ").expect("save Z");
-        store.save(&make_session("t2", "0xA"), "daemon-0xAAA").expect("save A");
-        store.save(&make_session("t3", "0xM"), "daemon-0xMMM").expect("save M");
+        store
+            .save(&make_session("t1", "0xZ"), "daemon-0xZZZ")
+            .expect("save Z");
+        store
+            .save(&make_session("t2", "0xA"), "daemon-0xAAA")
+            .expect("save A");
+        store
+            .save(&make_session("t3", "0xM"), "daemon-0xMMM")
+            .expect("save M");
 
         let ids = store.list_ids("daemon-");
         assert_eq!(
@@ -584,11 +591,17 @@ mod tests {
     fn sanitize_for_keyring_replaces_unsafe_chars_and_appends_hash() {
         let a = sanitize_for_keyring("name/with\\slashes");
         let b = sanitize_for_keyring("name_with_slashes");
-        assert_ne!(a, b, "inputs differing only in unsafe chars must not collide");
+        assert_ne!(
+            a, b,
+            "inputs differing only in unsafe chars must not collide"
+        );
 
         let with_null = sanitize_for_keyring("alias\0null");
         assert!(!with_null.contains('\0'), "null bytes must be stripped");
-        assert!(with_null.starts_with("__agk_alias_null-"), "got: {with_null}");
+        assert!(
+            with_null.starts_with("__agk_alias_null-"),
+            "got: {with_null}"
+        );
     }
 
     // Codex PR #24 v3 P2 — hash must be stable across Rust/toolchain
@@ -647,7 +660,10 @@ mod tests {
         // Two different long inputs with different hashes should not collide.
         let long_b = format!("{}b", "a".repeat(499));
         let sanitized_b = sanitize_for_keyring(&long_b);
-        assert_ne!(sanitized, sanitized_b, "long distinct inputs must not collide");
+        assert_ne!(
+            sanitized, sanitized_b,
+            "long distinct inputs must not collide"
+        );
     }
 
     // Codex PR #24 P2 — keyring save must never overwrite the real file
@@ -659,9 +675,19 @@ mod tests {
     #[test]
     fn file_mode_save_writes_session_json_not_marker() {
         let (store, tmp) = test_store();
-        store.save(&make_session("t", "0xW"), "daemon-0xWWW").expect("save");
-        let sess = tmp.path().join(AGENTKEYS_DIR).join("daemon-0xWWW").join(SESSION_FILE);
-        let marker = tmp.path().join(AGENTKEYS_DIR).join("daemon-0xWWW").join(KEYRING_MARKER_FILE);
+        store
+            .save(&make_session("t", "0xW"), "daemon-0xWWW")
+            .expect("save");
+        let sess = tmp
+            .path()
+            .join(AGENTKEYS_DIR)
+            .join("daemon-0xWWW")
+            .join(SESSION_FILE);
+        let marker = tmp
+            .path()
+            .join(AGENTKEYS_DIR)
+            .join("daemon-0xWWW")
+            .join(KEYRING_MARKER_FILE);
         assert!(sess.exists(), "session.json must exist in file mode");
         assert!(
             !marker.exists(),
@@ -677,7 +703,9 @@ mod tests {
         let (store, tmp) = test_store();
         let session = make_session("t", "0xP");
         // Attempt to escape via relative traversal.
-        store.save(&session, "../escape").expect("save should succeed (sanitized)");
+        store
+            .save(&session, "../escape")
+            .expect("save should succeed (sanitized)");
         // Verify NO file was written outside the tempdir's .agentkeys/.
         let parent = tmp.path().parent().expect("tmp has a parent");
         let escape_candidates = [
@@ -699,13 +727,18 @@ mod tests {
             .expect("read agentkeys root")
             .filter_map(Result::ok)
             .any(|e| e.path().join(SESSION_FILE).exists());
-        assert!(any_inside, "sanitized directory with session.json must exist inside ~/.agentkeys");
+        assert!(
+            any_inside,
+            "sanitized directory with session.json must exist inside ~/.agentkeys"
+        );
     }
 
     #[test]
     fn save_session_rejects_forward_slash_in_session_id() {
         let (store, tmp) = test_store();
-        store.save(&make_session("t", "0xS"), "foo/bar").expect("save");
+        store
+            .save(&make_session("t", "0xS"), "foo/bar")
+            .expect("save");
         // The separator must be normalised, so no subdir named "bar"
         // under an intermediate "foo" dir.
         let unwanted = tmp.path().join(AGENTKEYS_DIR).join("foo").join("bar");
@@ -723,8 +756,13 @@ mod tests {
     #[test]
     fn clear_session_is_synchronous_in_file_mode() {
         let (store, _tmp) = test_store();
-        store.save(&make_session("t", "0xC"), "daemon-0xCCC").expect("save");
-        assert!(store.load("daemon-0xCCC").is_ok(), "session loadable before clear");
+        store
+            .save(&make_session("t", "0xC"), "daemon-0xCCC")
+            .expect("save");
+        assert!(
+            store.load("daemon-0xCCC").is_ok(),
+            "session loadable before clear"
+        );
 
         store.clear("daemon-0xCCC").expect("clear");
 
@@ -741,7 +779,9 @@ mod tests {
     #[test]
     fn list_ids_finds_marker_only_directories() {
         let (store, tmp) = test_store();
-        store.save(&make_session("t1", "0xF"), "daemon-0xFFF").expect("save file");
+        store
+            .save(&make_session("t1", "0xF"), "daemon-0xFFF")
+            .expect("save file");
 
         // Simulate a keyring-managed session: directory with only the marker.
         let dir = tmp.path().join(AGENTKEYS_DIR).join("daemon-0xKEY");

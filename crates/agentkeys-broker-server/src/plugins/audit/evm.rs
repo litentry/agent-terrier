@@ -260,7 +260,10 @@ mod tests {
             receipt: json!({}),
             anchored_at: 0,
         };
-        assert!(matches!(a.verify(&r, &receipt).await, Err(AuditError::NotFound)));
+        assert!(matches!(
+            a.verify(&r, &receipt).await,
+            Err(AuditError::NotFound)
+        ));
     }
 
     #[tokio::test]

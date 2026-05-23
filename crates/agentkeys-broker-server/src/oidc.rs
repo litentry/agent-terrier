@@ -173,8 +173,7 @@ impl OidcKeypair {
             .map_err(|e| BrokerError::Internal(format!("load signing key: {e}")))?;
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(self.kid.clone());
-        encode(&header, claims, &key)
-            .map_err(|e| BrokerError::Internal(format!("sign jwt: {e}")))
+        encode(&header, claims, &key).map_err(|e| BrokerError::Internal(format!("sign jwt: {e}")))
     }
 }
 
@@ -225,7 +224,8 @@ pub mod rand_compat {
             getrandom::getrandom(dest).expect("OS RNG failed");
         }
         fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-            getrandom::getrandom(dest).map_err(|_| rand_core::Error::from(core::num::NonZeroU32::new(1).unwrap()))
+            getrandom::getrandom(dest)
+                .map_err(|_| rand_core::Error::from(core::num::NonZeroU32::new(1).unwrap()))
         }
     }
 }
@@ -260,7 +260,10 @@ mod tests {
 
         let kp1 = OidcKeypair::load_or_generate(&path).unwrap();
         let kp2 = OidcKeypair::load_or_generate(&path).unwrap();
-        assert_eq!(kp1.kid, kp2.kid, "second call must reuse the persisted keypair");
+        assert_eq!(
+            kp1.kid, kp2.kid,
+            "second call must reuse the persisted keypair"
+        );
     }
 
     #[test]

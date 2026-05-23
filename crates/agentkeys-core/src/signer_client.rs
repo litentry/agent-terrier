@@ -102,7 +102,8 @@ pub struct SignedTypedData {
 pub trait SignerClient: Send + Sync {
     /// Resolve `omni_account` (64 lowercase hex chars) to its derived EVM
     /// address. Idempotent and side-effect-free.
-    async fn derive_address(&self, omni_account: &str) -> Result<DerivedAddress, SignerClientError>;
+    async fn derive_address(&self, omni_account: &str)
+        -> Result<DerivedAddress, SignerClientError>;
 
     /// EIP-191-sign `message_bytes` under the keypair derived from
     /// `omni_account`. Returns the canonical 65-byte signature.
@@ -177,7 +178,10 @@ impl HttpSignerClient {
 
 #[async_trait]
 impl SignerClient for HttpSignerClient {
-    async fn derive_address(&self, omni_account: &str) -> Result<DerivedAddress, SignerClientError> {
+    async fn derive_address(
+        &self,
+        omni_account: &str,
+    ) -> Result<DerivedAddress, SignerClientError> {
         let url = format!("{}/dev/derive-address", self.base_url);
         let mut req = self
             .http
@@ -206,7 +210,10 @@ impl SignerClient for HttpSignerClient {
                 })?
                 .to_string();
             let key_version = body["key_version"].as_u64().unwrap_or(0) as u8;
-            return Ok(DerivedAddress { address, key_version });
+            return Ok(DerivedAddress {
+                address,
+                key_version,
+            });
         }
         Err(map_error(status, &body))
     }
@@ -217,13 +224,10 @@ impl SignerClient for HttpSignerClient {
         message_bytes: &[u8],
     ) -> Result<SignedMessage, SignerClientError> {
         let url = format!("{}/dev/sign-message", self.base_url);
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({
-                "omni_account": omni_account,
-                "message_hex":  hex::encode(message_bytes),
-            }));
+        let mut req = self.http.post(&url).json(&serde_json::json!({
+            "omni_account": omni_account,
+            "message_hex":  hex::encode(message_bytes),
+        }));
         if let Some(jwt) = &self.session_jwt {
             req = req.header("Authorization", format!("Bearer {jwt}"));
         }
@@ -255,7 +259,11 @@ impl SignerClient for HttpSignerClient {
                 })?
                 .to_string();
             let key_version = body["key_version"].as_u64().unwrap_or(0) as u8;
-            return Ok(SignedMessage { signature, address, key_version });
+            return Ok(SignedMessage {
+                signature,
+                address,
+                key_version,
+            });
         }
         Err(map_error(status, &body))
     }
@@ -321,8 +329,16 @@ fn map_error(status: u16, body: &serde_json::Value) -> SignerClientError {
         (500, "internal") => SignerClientError::Internal(message),
         _ => SignerClientError::Unexpected {
             status,
-            error: if code.is_empty() { None } else { Some(code.to_string()) },
-            message: if message.is_empty() { None } else { Some(message) },
+            error: if code.is_empty() {
+                None
+            } else {
+                Some(code.to_string())
+            },
+            message: if message.is_empty() {
+                None
+            } else {
+                Some(message)
+            },
         },
     }
 }
@@ -353,7 +369,11 @@ mod tests {
     fn map_error_falls_back_for_unknown_codes() {
         let body = serde_json::json!({"error":"weird","message":"???"});
         match map_error(418, &body) {
-            SignerClientError::Unexpected { status, error, message } => {
+            SignerClientError::Unexpected {
+                status,
+                error,
+                message,
+            } => {
                 assert_eq!(status, 418);
                 assert_eq!(error.as_deref(), Some("weird"));
                 assert_eq!(message.as_deref(), Some("???"));

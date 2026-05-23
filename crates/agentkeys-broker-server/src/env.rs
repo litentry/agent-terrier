@@ -148,7 +148,8 @@ pub const BROKER_EMAIL_SENDER: &str = "BROKER_EMAIL_SENDER";
 /// If unset, the broker shows a minimal built-in "Verified — return to your terminal" page.
 pub const BROKER_EMAIL_SUCCESS_REDIRECT_URL: &str = "BROKER_EMAIL_SUCCESS_REDIRECT_URL";
 /// Optional. Per-email per-hour bucket size. Default 5.
-pub const BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY: &str = "BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY";
+pub const BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY: &str =
+    "BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY";
 /// Optional. Per-source-IP per-minute bucket size. Default 30.
 pub const BROKER_EMAIL_RATE_LIMIT_PER_IP_MINUTELY: &str = "BROKER_EMAIL_RATE_LIMIT_PER_IP_MINUTELY";
 
@@ -169,16 +170,19 @@ pub const BROKER_OAUTH2_STATE_HMAC_KEY_PATH: &str = "BROKER_OAUTH2_STATE_HMAC_KE
 /// Optional. JWKS cache TTL in seconds. Default 3600.
 pub const BROKER_OAUTH2_JWKS_TTL_SECONDS: &str = "BROKER_OAUTH2_JWKS_TTL_SECONDS";
 /// Optional. Per-IP per-minute rate on `/v1/auth/oauth2/start`. Default 30.
-pub const BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY: &str = "BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY";
+pub const BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY: &str =
+    "BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY";
 
 // ---------------------------------------------------------------------------
 // Per-identity / per-IP rate limits (Phase C gas-drain mitigations)
 // ---------------------------------------------------------------------------
 
 /// Optional. Maximum mints per OmniAccount per hour. Default 30.
-pub const BROKER_RATE_LIMIT_MINTS_PER_HOUR_PER_OMNI: &str = "BROKER_RATE_LIMIT_MINTS_PER_HOUR_PER_OMNI";
+pub const BROKER_RATE_LIMIT_MINTS_PER_HOUR_PER_OMNI: &str =
+    "BROKER_RATE_LIMIT_MINTS_PER_HOUR_PER_OMNI";
 /// Optional. Maximum auth-challenge requests per source-IP per hour. Default 60.
-pub const BROKER_RATE_LIMIT_CHALLENGES_PER_HOUR_PER_IP: &str = "BROKER_RATE_LIMIT_CHALLENGES_PER_HOUR_PER_IP";
+pub const BROKER_RATE_LIMIT_CHALLENGES_PER_HOUR_PER_IP: &str =
+    "BROKER_RATE_LIMIT_CHALLENGES_PER_HOUR_PER_IP";
 
 // ---------------------------------------------------------------------------
 // Recovery (Phase B)
@@ -211,60 +215,220 @@ pub const REGION: &str = "REGION";
 pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
     &[
         // Core
-        (BROKER_DATA_ROLE_ARN, "Role the broker assumes via STS for users.", Group::Core),
-        (BROKER_AUDIT_DB_PATH, "Path to audit-log SQLite DB.", Group::Core),
+        (
+            BROKER_DATA_ROLE_ARN,
+            "Role the broker assumes via STS for users.",
+            Group::Core,
+        ),
+        (
+            BROKER_AUDIT_DB_PATH,
+            "Path to audit-log SQLite DB.",
+            Group::Core,
+        ),
         (BROKER_AWS_REGION, "AWS region for STS calls.", Group::Core),
-        (BROKER_SESSION_DURATION_SECONDS, "Lifetime in seconds of minted AWS sessions [900, 43200].", Group::Core),
-        (BROKER_SHUTDOWN_GRACE_SECONDS, "SIGTERM-to-exit grace window seconds.", Group::Core),
-        (BROKER_DEV_MODE, "Relaxes HTTPS-only OIDC-issuer rule (logged loudly).", Group::Core),
-        (BROKER_REFUSE_TO_BOOT_STRICT, "Promotes Tier-2 reachability to Tier-1 refuse-to-boot.", Group::Core),
-        (BROKER_DATA_DIR, "Directory for persistent runtime caches.", Group::Core),
-        (BROKER_REQUEST_BODY_LIMIT_BYTES, "Maximum HTTP request body size in bytes.", Group::Core),
-        (BROKER_NTP_MAX_SKEW_SECONDS, "Maximum tolerated NTP skew for SIWE timestamps.", Group::Core),
-        (BROKER_METRICS_ENABLED, "Enable Prometheus /metrics endpoint.", Group::Core),
+        (
+            BROKER_SESSION_DURATION_SECONDS,
+            "Lifetime in seconds of minted AWS sessions [900, 43200].",
+            Group::Core,
+        ),
+        (
+            BROKER_SHUTDOWN_GRACE_SECONDS,
+            "SIGTERM-to-exit grace window seconds.",
+            Group::Core,
+        ),
+        (
+            BROKER_DEV_MODE,
+            "Relaxes HTTPS-only OIDC-issuer rule (logged loudly).",
+            Group::Core,
+        ),
+        (
+            BROKER_REFUSE_TO_BOOT_STRICT,
+            "Promotes Tier-2 reachability to Tier-1 refuse-to-boot.",
+            Group::Core,
+        ),
+        (
+            BROKER_DATA_DIR,
+            "Directory for persistent runtime caches.",
+            Group::Core,
+        ),
+        (
+            BROKER_REQUEST_BODY_LIMIT_BYTES,
+            "Maximum HTTP request body size in bytes.",
+            Group::Core,
+        ),
+        (
+            BROKER_NTP_MAX_SKEW_SECONDS,
+            "Maximum tolerated NTP skew for SIWE timestamps.",
+            Group::Core,
+        ),
+        (
+            BROKER_METRICS_ENABLED,
+            "Enable Prometheus /metrics endpoint.",
+            Group::Core,
+        ),
         // OIDC
         (BROKER_OIDC_ISSUER, "Public HTTPS issuer URL.", Group::Oidc),
-        (BROKER_OIDC_KEYPAIR_PATH, "Path to the persisted OIDC ES256 keypair (purpose=oidc).", Group::Oidc),
-        (BROKER_OIDC_JWT_TTL_SECONDS, "TTL of OIDC JWTs minted for STS [60, 3600].", Group::Oidc),
+        (
+            BROKER_OIDC_KEYPAIR_PATH,
+            "Path to the persisted OIDC ES256 keypair (purpose=oidc).",
+            Group::Oidc,
+        ),
+        (
+            BROKER_OIDC_JWT_TTL_SECONDS,
+            "TTL of OIDC JWTs minted for STS [60, 3600].",
+            Group::Oidc,
+        ),
         // Session JWT
-        (BROKER_SESSION_KEYPAIR_PATH, "Path to the persisted session ES256 keypair (purpose=session).", Group::SessionJwt),
-        (BROKER_SESSION_JWT_TTL_SECONDS, "TTL of session JWTs [60, 86400].", Group::SessionJwt),
+        (
+            BROKER_SESSION_KEYPAIR_PATH,
+            "Path to the persisted session ES256 keypair (purpose=session).",
+            Group::SessionJwt,
+        ),
+        (
+            BROKER_SESSION_JWT_TTL_SECONDS,
+            "TTL of session JWTs [60, 86400].",
+            Group::SessionJwt,
+        ),
         // Auth method selection
-        (BROKER_AUTH_METHODS, "Comma list of enabled auth methods.", Group::Auth),
-        (BROKER_WALLET_PROVISIONER, "Wallet provisioner plug-in name.", Group::Auth),
+        (
+            BROKER_AUTH_METHODS,
+            "Comma list of enabled auth methods.",
+            Group::Auth,
+        ),
+        (
+            BROKER_WALLET_PROVISIONER,
+            "Wallet provisioner plug-in name.",
+            Group::Auth,
+        ),
         // Audit
-        (BROKER_AUDIT_ANCHORS, "Comma list of enabled audit anchors.", Group::Audit),
-        (BROKER_AUDIT_POLICY, "Multi-anchor write policy.", Group::Audit),
+        (
+            BROKER_AUDIT_ANCHORS,
+            "Comma list of enabled audit anchors.",
+            Group::Audit,
+        ),
+        (
+            BROKER_AUDIT_POLICY,
+            "Multi-anchor write policy.",
+            Group::Audit,
+        ),
         // Audit / EVM
         (BROKER_EVM_RPC_URL, "EVM JSON-RPC URL.", Group::AuditEvm),
         (BROKER_EVM_CHAIN_ID, "EVM chain ID.", Group::AuditEvm),
-        (BROKER_EVM_CONTRACT_ADDRESS, "Deployed AgentKeysAudit contract address.", Group::AuditEvm),
-        (BROKER_EVM_FEE_PAYER_KEYSTORE, "Path to encrypted fee-payer keystore JSON.", Group::AuditEvm),
-        (BROKER_EVM_FEE_PAYER_PASSWORD_FILE, "Path to fee-payer keystore password file (mode 0600).", Group::AuditEvm),
-        (BROKER_EVM_FEE_PAYER_MIN_BALANCE, "Wei threshold below which EVM anchor → Unready.", Group::AuditEvm),
-        (BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET, "Per-OmniAccount daily EVM-tx budget.", Group::AuditEvm),
+        (
+            BROKER_EVM_CONTRACT_ADDRESS,
+            "Deployed AgentKeysAudit contract address.",
+            Group::AuditEvm,
+        ),
+        (
+            BROKER_EVM_FEE_PAYER_KEYSTORE,
+            "Path to encrypted fee-payer keystore JSON.",
+            Group::AuditEvm,
+        ),
+        (
+            BROKER_EVM_FEE_PAYER_PASSWORD_FILE,
+            "Path to fee-payer keystore password file (mode 0600).",
+            Group::AuditEvm,
+        ),
+        (
+            BROKER_EVM_FEE_PAYER_MIN_BALANCE,
+            "Wei threshold below which EVM anchor → Unready.",
+            Group::AuditEvm,
+        ),
+        (
+            BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET,
+            "Per-OmniAccount daily EVM-tx budget.",
+            Group::AuditEvm,
+        ),
         // Auth / email
-        (BROKER_EMAIL_FROM_ADDRESS, "Verified SES sender email.", Group::AuthEmail),
-        (BROKER_EMAIL_SENDER, "Email backend: 'stub' (default) or 'ses' (real aws-sdk-sesv2).", Group::AuthEmail),
-        (BROKER_EMAIL_SUCCESS_REDIRECT_URL, "Optional operator success-page redirect URL.", Group::AuthEmail),
-        (BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY, "Per-email per-hour bucket.", Group::AuthEmail),
-        (BROKER_EMAIL_RATE_LIMIT_PER_IP_MINUTELY, "Per-IP per-minute bucket.", Group::AuthEmail),
+        (
+            BROKER_EMAIL_FROM_ADDRESS,
+            "Verified SES sender email.",
+            Group::AuthEmail,
+        ),
+        (
+            BROKER_EMAIL_SENDER,
+            "Email backend: 'stub' (default) or 'ses' (real aws-sdk-sesv2).",
+            Group::AuthEmail,
+        ),
+        (
+            BROKER_EMAIL_SUCCESS_REDIRECT_URL,
+            "Optional operator success-page redirect URL.",
+            Group::AuthEmail,
+        ),
+        (
+            BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY,
+            "Per-email per-hour bucket.",
+            Group::AuthEmail,
+        ),
+        (
+            BROKER_EMAIL_RATE_LIMIT_PER_IP_MINUTELY,
+            "Per-IP per-minute bucket.",
+            Group::AuthEmail,
+        ),
         // Auth / OAuth2
-        (BROKER_OAUTH2_PROVIDERS, "Comma list of enabled providers (v0: google).", Group::AuthOAuth2),
-        (BROKER_OAUTH2_REDIRECT_URI, "Public callback URL.", Group::AuthOAuth2),
-        (BROKER_OAUTH2_GOOGLE_CLIENT_ID, "Google OAuth client ID.", Group::AuthOAuth2),
-        (BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE, "Path to Google client secret file (mode 0600).", Group::AuthOAuth2),
-        (BROKER_OAUTH2_STATE_HMAC_KEY_PATH, "Path to 32-byte file for OAuth2 state HMAC.", Group::AuthOAuth2),
-        (BROKER_OAUTH2_JWKS_TTL_SECONDS, "JWKS cache TTL in seconds.", Group::AuthOAuth2),
-        (BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY, "Per-IP per-minute on /v1/auth/oauth2/start.", Group::AuthOAuth2),
+        (
+            BROKER_OAUTH2_PROVIDERS,
+            "Comma list of enabled providers (v0: google).",
+            Group::AuthOAuth2,
+        ),
+        (
+            BROKER_OAUTH2_REDIRECT_URI,
+            "Public callback URL.",
+            Group::AuthOAuth2,
+        ),
+        (
+            BROKER_OAUTH2_GOOGLE_CLIENT_ID,
+            "Google OAuth client ID.",
+            Group::AuthOAuth2,
+        ),
+        (
+            BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE,
+            "Path to Google client secret file (mode 0600).",
+            Group::AuthOAuth2,
+        ),
+        (
+            BROKER_OAUTH2_STATE_HMAC_KEY_PATH,
+            "Path to 32-byte file for OAuth2 state HMAC.",
+            Group::AuthOAuth2,
+        ),
+        (
+            BROKER_OAUTH2_JWKS_TTL_SECONDS,
+            "JWKS cache TTL in seconds.",
+            Group::AuthOAuth2,
+        ),
+        (
+            BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY,
+            "Per-IP per-minute on /v1/auth/oauth2/start.",
+            Group::AuthOAuth2,
+        ),
         // Limits
-        (BROKER_RATE_LIMIT_MINTS_PER_HOUR_PER_OMNI, "Maximum mints per OmniAccount per hour.", Group::Limits),
-        (BROKER_RATE_LIMIT_CHALLENGES_PER_HOUR_PER_IP, "Maximum auth-challenge requests per IP per hour.", Group::Limits),
+        (
+            BROKER_RATE_LIMIT_MINTS_PER_HOUR_PER_OMNI,
+            "Maximum mints per OmniAccount per hour.",
+            Group::Limits,
+        ),
+        (
+            BROKER_RATE_LIMIT_CHALLENGES_PER_HOUR_PER_IP,
+            "Maximum auth-challenge requests per IP per hour.",
+            Group::Limits,
+        ),
         // Recovery
-        (BROKER_RECOVERY_GRANT_DELAY_SECONDS, "Time-lock seconds before recovery grant activates.", Group::Limits),
+        (
+            BROKER_RECOVERY_GRANT_DELAY_SECONDS,
+            "Time-lock seconds before recovery grant activates.",
+            Group::Limits,
+        ),
         // Legacy
-        (BROKER_AGENT_ROLE_ARN, "Legacy alias of BROKER_DATA_ROLE_ARN.", Group::Legacy),
-        (ACCOUNT_ID, "Legacy AWS account ID; derives BROKER_DATA_ROLE_ARN.", Group::Legacy),
+        (
+            BROKER_AGENT_ROLE_ARN,
+            "Legacy alias of BROKER_DATA_ROLE_ARN.",
+            Group::Legacy,
+        ),
+        (
+            ACCOUNT_ID,
+            "Legacy AWS account ID; derives BROKER_DATA_ROLE_ARN.",
+            Group::Legacy,
+        ),
         (REGION, "Legacy alias of BROKER_AWS_REGION.", Group::Legacy),
     ]
 }

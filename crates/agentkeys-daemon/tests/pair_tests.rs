@@ -80,11 +80,21 @@ async fn pair_full_loop() {
         .unwrap();
 
     let child_pubkey = dummy_pubkey();
-    let scope = Scope { services: vec![], read_only: false };
+    let scope = Scope {
+        services: vec![],
+        read_only: false,
+    };
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
-        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details, None)
+        .open_auth_request(
+            &child_pubkey,
+            AuthRequestType::Pair {
+                requested_scope: scope,
+            },
+            &request_details,
+            None,
+        )
         .await
         .unwrap();
 
@@ -110,11 +120,17 @@ async fn pair_full_loop() {
 
     // Now poll — should return Some since payload was already delivered
     let poll_result = backend.poll_rendezvous(&reg_token).await.unwrap();
-    assert!(poll_result.is_some(), "poll should return the delivered payload");
+    assert!(
+        poll_result.is_some(),
+        "poll should return the delivered payload"
+    );
 
     let decision = backend.await_auth_decision(&request_id).await.unwrap();
     assert!(decision.approved, "decision should be approved");
-    assert!(decision.session.is_some(), "decision should contain a session");
+    assert!(
+        decision.session.is_some(),
+        "decision should contain a session"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -130,11 +146,21 @@ async fn pair_otp_matches() {
         .unwrap();
 
     let child_pubkey = dummy_pubkey();
-    let scope = Scope { services: vec![], read_only: false };
+    let scope = Scope {
+        services: vec![],
+        read_only: false,
+    };
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
-        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details, None)
+        .open_auth_request(
+            &child_pubkey,
+            AuthRequestType::Pair {
+                requested_scope: scope,
+            },
+            &request_details,
+            None,
+        )
         .await
         .unwrap();
 
@@ -160,11 +186,21 @@ async fn pair_timeout_retry() {
     let backend = create_test_backend();
 
     let child_pubkey = dummy_pubkey();
-    let scope = Scope { services: vec![], read_only: false };
+    let scope = Scope {
+        services: vec![],
+        read_only: false,
+    };
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
-        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details, None)
+        .open_auth_request(
+            &child_pubkey,
+            AuthRequestType::Pair {
+                requested_scope: scope,
+            },
+            &request_details,
+            None,
+        )
         .await
         .unwrap();
 
@@ -229,7 +265,10 @@ async fn pair_expired_code() {
         .fetch_auth_request(&master_sess, &PairCode("EXPIRED-CODE".to_string()))
         .await;
 
-    assert!(result.is_err(), "fetching expired/nonexistent code should fail");
+    assert!(
+        result.is_err(),
+        "fetching expired/nonexistent code should fail"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -245,11 +284,21 @@ async fn pair_replay_resistance() {
         .unwrap();
 
     let child_pubkey = dummy_pubkey();
-    let scope = Scope { services: vec![], read_only: false };
+    let scope = Scope {
+        services: vec![],
+        read_only: false,
+    };
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
-        .open_auth_request(&child_pubkey, AuthRequestType::Pair { requested_scope: scope }, &request_details, None)
+        .open_auth_request(
+            &child_pubkey,
+            AuthRequestType::Pair {
+                requested_scope: scope,
+            },
+            &request_details,
+            None,
+        )
         .await
         .unwrap();
 
@@ -260,14 +309,14 @@ async fn pair_replay_resistance() {
         .unwrap();
 
     // Second approval should fail with AlreadyConsumed
-    let second = backend
-        .approve_auth_request(&master_sess, &opened.id)
-        .await;
+    let second = backend.approve_auth_request(&master_sess, &opened.id).await;
 
     assert!(second.is_err(), "second approval should fail");
     let err_str = second.unwrap_err().to_string().to_lowercase();
     assert!(
-        err_str.contains("already consumed") || err_str.contains("conflict") || err_str.contains("409"),
+        err_str.contains("already consumed")
+            || err_str.contains("conflict")
+            || err_str.contains("409"),
         "error should indicate already consumed: {err_str}"
     );
 }
@@ -306,13 +355,14 @@ async fn pair_wrong_user_approve() {
         .unwrap();
 
     let child_pubkey = dummy_pubkey();
-    let scope = Scope { services: vec![], read_only: false };
+    let scope = Scope {
+        services: vec![],
+        read_only: false,
+    };
     let request_details = pair_canonical_bytes(&scope);
 
-    let pubkey_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &child_pubkey.0,
-    );
+    let pubkey_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &child_pubkey.0);
     let details_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         &request_details.0,
@@ -335,7 +385,10 @@ async fn pair_wrong_user_approve() {
 
     let result = client.approve_auth_request(&user_b_sess, &request_id).await;
 
-    assert!(result.is_err(), "user B should not be able to approve user A's request");
+    assert!(
+        result.is_err(),
+        "user B should not be able to approve user A's request"
+    );
     let err_str = result.unwrap_err().to_string().to_lowercase();
     assert!(
         err_str.contains("unauthorized") || err_str.contains("401") || err_str.contains("auth"),
@@ -356,13 +409,18 @@ async fn recover_full_loop() {
         .unwrap();
 
     let child_pubkey = dummy_pubkey();
-    let scope = Scope { services: vec![ServiceName("openrouter".into())], read_only: false };
+    let scope = Scope {
+        services: vec![ServiceName("openrouter".into())],
+        read_only: false,
+    };
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
         .open_auth_request(
             &child_pubkey,
-            AuthRequestType::Pair { requested_scope: scope.clone() },
+            AuthRequestType::Pair {
+                requested_scope: scope.clone(),
+            },
             &request_details,
             None,
         )
@@ -442,11 +500,18 @@ async fn recover_full_loop() {
         .await
         .unwrap();
 
-    let recover_decision = backend.await_auth_decision(&recover_request_id).await.unwrap();
+    let recover_decision = backend
+        .await_auth_decision(&recover_request_id)
+        .await
+        .unwrap();
     assert!(recover_decision.approved, "recovery should be approved");
 
     let cred_bytes = backend
-        .read_credential(&master_sess, &agent_wallet, &ServiceName("openrouter".into()))
+        .read_credential(
+            &master_sess,
+            &agent_wallet,
+            &ServiceName("openrouter".into()),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -505,13 +570,18 @@ async fn recover_old_pubkey_revoked() {
         .unwrap();
 
     let child_pubkey = dummy_pubkey();
-    let scope = Scope { services: vec![ServiceName("openrouter".into())], read_only: false };
+    let scope = Scope {
+        services: vec![ServiceName("openrouter".into())],
+        read_only: false,
+    };
     let request_details = pair_canonical_bytes(&scope);
 
     let opened = backend
         .open_auth_request(
             &child_pubkey,
-            AuthRequestType::Pair { requested_scope: scope },
+            AuthRequestType::Pair {
+                requested_scope: scope,
+            },
             &request_details,
             None,
         )
@@ -523,7 +593,10 @@ async fn recover_old_pubkey_revoked() {
         .await
         .unwrap();
 
-    backend.approve_auth_request(&master_sess, &opened.id).await.unwrap();
+    backend
+        .approve_auth_request(&master_sess, &opened.id)
+        .await
+        .unwrap();
 
     let payload = EncryptedPairPayload(b"old-session".to_vec());
     backend
@@ -546,10 +619,17 @@ async fn recover_old_pubkey_revoked() {
         .await
         .unwrap();
 
-    backend.revoke_session(&master_sess, &old_session).await.unwrap();
+    backend
+        .revoke_session(&master_sess, &old_session)
+        .await
+        .unwrap();
 
     let read_result = backend
-        .read_credential(&old_session, &agent_wallet, &ServiceName("openrouter".into()))
+        .read_credential(
+            &old_session,
+            &agent_wallet,
+            &ServiceName("openrouter".into()),
+        )
         .await;
 
     assert!(
@@ -572,7 +652,10 @@ async fn recover_credentials_intact() {
 
     let child_pubkey = dummy_pubkey();
     let scope = Scope {
-        services: vec![ServiceName("openrouter".into()), ServiceName("anthropic".into())],
+        services: vec![
+            ServiceName("openrouter".into()),
+            ServiceName("anthropic".into()),
+        ],
         read_only: false,
     };
     let request_details = pair_canonical_bytes(&scope);
@@ -580,7 +663,9 @@ async fn recover_credentials_intact() {
     let opened = backend
         .open_auth_request(
             &child_pubkey,
-            AuthRequestType::Pair { requested_scope: scope },
+            AuthRequestType::Pair {
+                requested_scope: scope,
+            },
             &request_details,
             None,
         )
@@ -592,7 +677,10 @@ async fn recover_credentials_intact() {
         .await
         .unwrap();
 
-    backend.approve_auth_request(&master_sess, &opened.id).await.unwrap();
+    backend
+        .approve_auth_request(&master_sess, &opened.id)
+        .await
+        .unwrap();
 
     let payload = EncryptedPairPayload(b"session-payload".to_vec());
     backend
@@ -604,11 +692,21 @@ async fn recover_credentials_intact() {
     let agent_wallet = decision.wallet.unwrap();
 
     backend
-        .store_credential(&master_sess, &agent_wallet, &ServiceName("openrouter".into()), b"sk-or-v1-original")
+        .store_credential(
+            &master_sess,
+            &agent_wallet,
+            &ServiceName("openrouter".into()),
+            b"sk-or-v1-original",
+        )
         .await
         .unwrap();
     backend
-        .store_credential(&master_sess, &agent_wallet, &ServiceName("anthropic".into()), b"sk-ant-original")
+        .store_credential(
+            &master_sess,
+            &agent_wallet,
+            &ServiceName("anthropic".into()),
+            b"sk-ant-original",
+        )
         .await
         .unwrap();
 
@@ -636,7 +734,10 @@ async fn recover_credentials_intact() {
         .await
         .unwrap();
 
-    backend.approve_auth_request(&master_sess, &recover_opened.id).await.unwrap();
+    backend
+        .approve_auth_request(&master_sess, &recover_opened.id)
+        .await
+        .unwrap();
 
     let recover_payload = EncryptedPairPayload(b"recovered-session".to_vec());
     backend
@@ -645,16 +746,30 @@ async fn recover_credentials_intact() {
         .unwrap();
 
     let or_cred = backend
-        .read_credential(&master_sess, &agent_wallet, &ServiceName("openrouter".into()))
+        .read_credential(
+            &master_sess,
+            &agent_wallet,
+            &ServiceName("openrouter".into()),
+        )
         .await
         .unwrap();
-    assert_eq!(or_cred, b"sk-or-v1-original", "openrouter credential should be intact after recovery");
+    assert_eq!(
+        or_cred, b"sk-or-v1-original",
+        "openrouter credential should be intact after recovery"
+    );
 
     let ant_cred = backend
-        .read_credential(&master_sess, &agent_wallet, &ServiceName("anthropic".into()))
+        .read_credential(
+            &master_sess,
+            &agent_wallet,
+            &ServiceName("anthropic".into()),
+        )
         .await
         .unwrap();
-    assert_eq!(ant_cred, b"sk-ant-original", "anthropic credential should be intact after recovery");
+    assert_eq!(
+        ant_cred, b"sk-ant-original",
+        "anthropic credential should be intact after recovery"
+    );
 }
 
 // ---------------------------------------------------------------------------

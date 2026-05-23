@@ -65,9 +65,8 @@ pub enum OAuth2PendingStatus {
 impl OAuth2PendingStore {
     pub fn open(path: &Path) -> Result<Self, AuthError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AuthError::Internal(format!("create oauth2_pending dir: {}", e))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| AuthError::Internal(format!("create oauth2_pending dir: {}", e)))?;
         }
         let conn = Connection::open(path)
             .map_err(|e| AuthError::Internal(format!("open oauth2_pending db: {}", e)))?;
@@ -79,9 +78,8 @@ impl OAuth2PendingStore {
     }
 
     pub fn open_in_memory() -> Result<Self, AuthError> {
-        let conn = Connection::open_in_memory().map_err(|e| {
-            AuthError::Internal(format!("open in-memory oauth2_pending db: {}", e))
-        })?;
+        let conn = Connection::open_in_memory()
+            .map_err(|e| AuthError::Internal(format!("open in-memory oauth2_pending db: {}", e)))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -154,11 +152,7 @@ impl OAuth2PendingStore {
 
     /// Atomically consume the pending row. Race-safe via the conditional
     /// UPDATE on `consumed_at IS NULL` (mirrors email_tokens pattern).
-    pub fn consume(
-        &self,
-        request_id: &str,
-        now: i64,
-    ) -> Result<OAuth2PendingConsume, AuthError> {
+    pub fn consume(&self, request_id: &str, now: i64) -> Result<OAuth2PendingConsume, AuthError> {
         let conn = self.lock()?;
         let peek: Option<(String, String, String, i64, Option<i64>)> = conn
             .query_row(
@@ -227,7 +221,13 @@ impl OAuth2PendingStore {
                      identity_value = ?4,
                      expires_at = ?5
                  WHERE request_id = ?1 AND status = 'pending'",
-                params![request_id, session_jwt, omni_account, identity_value, expires_at],
+                params![
+                    request_id,
+                    session_jwt,
+                    omni_account,
+                    identity_value,
+                    expires_at
+                ],
             )
             .map_err(|e| AuthError::Internal(format!("mark_verified oauth2_pending: {}", e)))?;
         if rows == 0 {
@@ -346,7 +346,10 @@ mod tests {
         let s = store();
         s.issue("req-1", "google", "pkce-verifier", "nonce-x", 100, 700)
             .unwrap();
-        assert_eq!(s.peek_status("req-1").unwrap(), OAuth2PendingStatus::Pending);
+        assert_eq!(
+            s.peek_status("req-1").unwrap(),
+            OAuth2PendingStatus::Pending
+        );
     }
 
     #[test]
@@ -403,9 +406,7 @@ mod tests {
     fn issue_rejects_duplicate_request_id() {
         let s = store();
         s.issue("req-dup", "google", "pv1", "nx", 100, 700).unwrap();
-        assert!(s
-            .issue("req-dup", "google", "pv2", "nx", 100, 700)
-            .is_err());
+        assert!(s.issue("req-dup", "google", "pv2", "nx", 100, 700).is_err());
     }
 
     #[test]
@@ -436,7 +437,10 @@ mod tests {
         let n = s.purge_expired(10000, 100).unwrap();
         assert_eq!(n, 1);
         // Fresh row still pending.
-        assert_eq!(s.peek_status("fresh").unwrap(), OAuth2PendingStatus::Pending);
+        assert_eq!(
+            s.peek_status("fresh").unwrap(),
+            OAuth2PendingStatus::Pending
+        );
     }
 
     #[test]
@@ -444,7 +448,8 @@ mod tests {
         let s = store();
         s.issue("req-v", "google", "pv", "nx", 50, 100).unwrap();
         s.consume("req-v", 60).unwrap();
-        s.mark_verified("req-v", "eyJ", "0xomni", "sub", 200).unwrap();
+        s.mark_verified("req-v", "eyJ", "0xomni", "sub", 200)
+            .unwrap();
         // Even though expires_at < cutoff, verified rows are preserved.
         let _ = s.purge_expired(10000, 50).unwrap();
         match s.peek_status("req-v").unwrap() {

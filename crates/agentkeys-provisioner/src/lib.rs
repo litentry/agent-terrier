@@ -6,8 +6,7 @@ pub mod subprocess;
 pub mod tripwire;
 
 pub use aws_creds::{
-    fetch_oidc_jwt, fetch_via_broker, fetch_via_broker_default_ttl, AwsTempCreds,
-    OidcJwtResponse,
+    fetch_oidc_jwt, fetch_via_broker, fetch_via_broker_default_ttl, AwsTempCreds, OidcJwtResponse,
 };
 pub use error::{ProvisionError, ProvisionResult};
 pub use orchestrator::{mask_key, run_provision, ActiveProvision, ProvisionSuccess, Provisioner};

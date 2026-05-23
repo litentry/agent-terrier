@@ -89,8 +89,7 @@ mod linux {
         // mlockall(MCL_CURRENT | MCL_FUTURE) is a superset: it locks all current and future
         // mappings eagerly. This is intentionally more aggressive — it prevents any page
         // containing sensitive data from ever being swapped out, at the cost of higher RSS.
-        let result =
-            unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
+        let result = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
         if result == 0 {
             HardeningStep::Ok
         } else {
@@ -111,8 +110,7 @@ mod linux {
     }
 
     pub fn try_set_no_new_privs() -> HardeningStep {
-        let result =
-            unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        let result = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
         if result == 0 {
             HardeningStep::Ok
         } else {
@@ -146,9 +144,8 @@ mod linux {
         const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
 
         // Attempt to clear all ambient capabilities.
-        let ambient_result = unsafe {
-            libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)
-        };
+        let ambient_result =
+            unsafe { libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) };
         if ambient_result != 0 {
             let err = io::Error::last_os_error();
             // EINVAL means ambient caps are not supported by this kernel — not fatal.
@@ -160,9 +157,8 @@ mod linux {
         // Drop all capabilities from the bounding set iteratively.
         let cap_last_cap = read_cap_last_cap().unwrap_or(40);
         for cap in 0..=cap_last_cap {
-            let result = unsafe {
-                libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0)
-            };
+            let result =
+                unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
             if result != 0 {
                 let err = io::Error::last_os_error();
                 // EINVAL means we've gone past the last valid cap — stop.
@@ -199,7 +195,9 @@ mod linux {
         const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
         #[cfg(not(target_arch = "x86_64"))]
         {
-            tracing::info!("Landlock not available on this arch, continuing without filesystem restriction.");
+            tracing::info!(
+                "Landlock not available on this arch, continuing without filesystem restriction."
+            );
             return HardeningStep::Skipped;
         }
 
@@ -293,6 +291,7 @@ pub fn apply_hardening() -> anyhow::Result<HardeningReport> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unused_imports)]
 pub use linux::read_proc_self_status_field;
 
 #[cfg(not(target_os = "linux"))]

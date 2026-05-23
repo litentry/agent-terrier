@@ -34,9 +34,7 @@ pub async fn wallet_verify(
         .auth
         .get("wallet_sig")
         .cloned()
-        .ok_or_else(|| {
-            BrokerError::BadRequest("wallet_sig auth method not enabled".to_string())
-        })?;
+        .ok_or_else(|| BrokerError::BadRequest("wallet_sig auth method not enabled".to_string()))?;
 
     let identity = plugin
         .verify(AuthResponse {
@@ -55,7 +53,10 @@ pub async fn wallet_verify(
     // is Master because the wallet itself is the authenticating identity;
     // daemons get bound via Phase B recovery flow.
     let wallet_address = WalletAddress::parse(&identity.identity_value).map_err(|e| {
-        BrokerError::Internal(format!("verified identity is not a valid wallet address: {}", e))
+        BrokerError::Internal(format!(
+            "verified identity is not a valid wallet address: {}",
+            e
+        ))
     })?;
     state
         .registry

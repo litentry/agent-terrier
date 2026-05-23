@@ -75,7 +75,9 @@ pub async fn provision_inbox(
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
-    Ok(Json(json!({ "address": address, "agent_wallet": agent_id })))
+    Ok(Json(
+        json!({ "address": address, "agent_wallet": agent_id }),
+    ))
 }
 
 pub async fn deliver_inbox(
@@ -228,11 +230,10 @@ pub async fn list_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{create_router, db, state::AppState};
-    use axum::Router;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
+    use axum::Router;
     use http_body_util::BodyExt;
     use serde_json::{json, Value};
     use std::sync::Arc;

@@ -96,7 +96,13 @@ fn write_provision_log(service: &str, outcome: &SubprocessOutcome) -> Option<Pat
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     let safe_service: String = service
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let path = dir.join(format!("provision-{}-{}.log", safe_service, ts));
 
@@ -198,7 +204,11 @@ pub async fn run_provision(
     let mut api_key: Option<String> = None;
     for event in &outcome.events {
         match event {
-            ProvisionEvent::Tripwire { kind, step, elapsed_ms } => {
+            ProvisionEvent::Tripwire {
+                kind,
+                step,
+                elapsed_ms,
+            } => {
                 metrics::emit(&ProvisionMetric::TripWireFired {
                     service: service.to_string(),
                     kind: format!("{kind:?}"),
@@ -233,13 +243,18 @@ pub async fn run_provision(
             .join("\n");
         let log_hint = match write_provision_log(service, &outcome) {
             Some(path) => format!("full log: {}", path.display()),
-            None => "full log: (unable to write ~/.agentkeys/logs — check HOME + permissions)".to_string(),
+            None => "full log: (unable to write ~/.agentkeys/logs — check HOME + permissions)"
+                .to_string(),
         };
         ProvisionError::Internal(format!(
             "subprocess ended without terminal event (exit {:?}). {}. stderr tail:\n{}",
             outcome.exit_code,
             log_hint,
-            if stderr_tail.is_empty() { "(empty)" } else { stderr_tail.as_str() }
+            if stderr_tail.is_empty() {
+                "(empty)"
+            } else {
+                stderr_tail.as_str()
+            }
         ))
     })?;
 
@@ -254,7 +269,10 @@ pub async fn run_provision(
         })?;
 
     let duration_secs = started_at.elapsed().as_secs_f64();
-    metrics::emit(&ProvisionMetric::TierUsed { service: service.to_string(), tier: 2 });
+    metrics::emit(&ProvisionMetric::TierUsed {
+        service: service.to_string(),
+        tier: 2,
+    });
     metrics::emit(&ProvisionMetric::DurationSeconds {
         service: service.to_string(),
         seconds: duration_secs,
@@ -287,9 +305,9 @@ mod orchestrate {
     use super::*;
     use agentkeys_core::backend::BackendError;
     use agentkeys_types::{
-        AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
-        EncryptedPairPayload, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
-        RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
+        AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
+        OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope, ServiceName,
+        Session, SignedAuthDecision, WalletAddress,
     };
     use async_trait::async_trait;
     use std::sync::{
@@ -369,25 +387,128 @@ mod orchestrate {
             }
         }
 
-        async fn create_session(&self, _: agentkeys_types::AuthToken) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
-        async fn create_child_session(&self, _: &Session, _: Scope) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
-        async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), BackendError> { unimplemented!() }
-        async fn revoke_by_wallet(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> { unimplemented!() }
-        async fn teardown_agent(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> { unimplemented!() }
-        async fn shielding_key(&self) -> Result<PublicKey, BackendError> { unimplemented!() }
-        async fn register_rendezvous(&self, _: &PublicKey, _: &PairCode) -> Result<RegistrationToken, BackendError> { unimplemented!() }
-        async fn poll_rendezvous(&self, _: &RegistrationToken) -> Result<Option<PairPayload>, BackendError> { unimplemented!() }
-        async fn deliver_rendezvous(&self, _: &Session, _: &PairCode, _: &EncryptedPairPayload) -> Result<(), BackendError> { unimplemented!() }
-        async fn open_auth_request(&self, _: &PublicKey, _: AuthRequestType, _: &CanonicalBytes, _: Option<&WalletAddress>) -> Result<OpenedAuthRequest, BackendError> { unimplemented!() }
-        async fn fetch_auth_request(&self, _: &Session, _: &PairCode) -> Result<AuthRequest, BackendError> { unimplemented!() }
-        async fn approve_auth_request(&self, _: &Session, _: &AuthRequestId) -> Result<(), BackendError> { unimplemented!() }
-        async fn await_auth_decision(&self, _: &AuthRequestId) -> Result<SignedAuthDecision, BackendError> { unimplemented!() }
-        async fn recover_session(&self, _: &agentkeys_types::AgentIdentity, _: &agentkeys_types::RecoveryMethod) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
-        async fn list_credentials(&self, _: &Session, _: &WalletAddress) -> Result<Vec<ServiceName>, BackendError> { unimplemented!() }
-        async fn get_scope(&self, _: &Session, _: &WalletAddress) -> Result<Option<Scope>, BackendError> { unimplemented!() }
-        async fn update_scope(&self, _: &Session, _: &WalletAddress, _: &Scope) -> Result<(), BackendError> { unimplemented!() }
-        async fn provision_inbox(&self, _: &Session, _: &WalletAddress) -> Result<agentkeys_types::InboxAddress, BackendError> { unimplemented!() }
-        async fn list_inboxes(&self, _: &Session, _: &WalletAddress) -> Result<Vec<agentkeys_types::InboxAddress>, BackendError> { unimplemented!() }
+        async fn create_session(
+            &self,
+            _: agentkeys_types::AuthToken,
+        ) -> Result<(Session, WalletAddress), BackendError> {
+            unimplemented!()
+        }
+        async fn create_child_session(
+            &self,
+            _: &Session,
+            _: Scope,
+        ) -> Result<(Session, WalletAddress), BackendError> {
+            unimplemented!()
+        }
+        async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn revoke_by_wallet(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn teardown_agent(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn shielding_key(&self) -> Result<PublicKey, BackendError> {
+            unimplemented!()
+        }
+        async fn register_rendezvous(
+            &self,
+            _: &PublicKey,
+            _: &PairCode,
+        ) -> Result<RegistrationToken, BackendError> {
+            unimplemented!()
+        }
+        async fn poll_rendezvous(
+            &self,
+            _: &RegistrationToken,
+        ) -> Result<Option<PairPayload>, BackendError> {
+            unimplemented!()
+        }
+        async fn deliver_rendezvous(
+            &self,
+            _: &Session,
+            _: &PairCode,
+            _: &EncryptedPairPayload,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn open_auth_request(
+            &self,
+            _: &PublicKey,
+            _: AuthRequestType,
+            _: &CanonicalBytes,
+            _: Option<&WalletAddress>,
+        ) -> Result<OpenedAuthRequest, BackendError> {
+            unimplemented!()
+        }
+        async fn fetch_auth_request(
+            &self,
+            _: &Session,
+            _: &PairCode,
+        ) -> Result<AuthRequest, BackendError> {
+            unimplemented!()
+        }
+        async fn approve_auth_request(
+            &self,
+            _: &Session,
+            _: &AuthRequestId,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn await_auth_decision(
+            &self,
+            _: &AuthRequestId,
+        ) -> Result<SignedAuthDecision, BackendError> {
+            unimplemented!()
+        }
+        async fn recover_session(
+            &self,
+            _: &agentkeys_types::AgentIdentity,
+            _: &agentkeys_types::RecoveryMethod,
+        ) -> Result<(Session, WalletAddress), BackendError> {
+            unimplemented!()
+        }
+        async fn list_credentials(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<Vec<ServiceName>, BackendError> {
+            unimplemented!()
+        }
+        async fn get_scope(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<Option<Scope>, BackendError> {
+            unimplemented!()
+        }
+        async fn update_scope(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+            _: &Scope,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn provision_inbox(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<agentkeys_types::InboxAddress, BackendError> {
+            unimplemented!()
+        }
+        async fn list_inboxes(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<Vec<agentkeys_types::InboxAddress>, BackendError> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]
@@ -418,7 +539,10 @@ mod orchestrate {
         assert!(success.stored);
         assert!(success.key_verified);
         assert!(backend.store_called.load(Ordering::SeqCst));
-        assert!(!success.obtained_key_masked.contains("realkey12345abcd"), "masked key must not contain full raw key");
+        assert!(
+            !success.obtained_key_masked.contains("realkey12345abcd"),
+            "masked key must not contain full raw key"
+        );
     }
 
     #[tokio::test]
@@ -449,7 +573,10 @@ mod orchestrate {
         let success = result.unwrap();
         assert!(!success.stored, "should not store when duplicate");
         assert!(success.key_verified);
-        assert!(!backend.store_called.load(Ordering::SeqCst), "store should not be called for duplicate");
+        assert!(
+            !backend.store_called.load(Ordering::SeqCst),
+            "store should not be called for duplicate"
+        );
     }
 
     #[tokio::test]
@@ -507,8 +634,14 @@ mod orchestrate {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            ProvisionError::StoreFailed { obtained_key_masked, .. } => {
-                assert!(!obtained_key_masked.is_empty(), "masked key should not be empty for recovery");
+            ProvisionError::StoreFailed {
+                obtained_key_masked,
+                ..
+            } => {
+                assert!(
+                    !obtained_key_masked.is_empty(),
+                    "masked key should not be empty for recovery"
+                );
             }
             other => panic!("expected StoreFailed, got {:?}", other),
         }
@@ -544,7 +677,10 @@ mod orchestrate {
             }
             other => panic!("expected Tripwire, got {:?}", other),
         }
-        assert!(!backend.store_called.load(Ordering::SeqCst), "store must not be called after tripwire");
+        assert!(
+            !backend.store_called.load(Ordering::SeqCst),
+            "store must not be called after tripwire"
+        );
     }
 }
 
@@ -592,6 +728,9 @@ mod tests {
             "after panic + guard drop the mutex should be unclaimed"
         );
         let guard2 = p.try_claim("brave");
-        assert!(guard2.is_ok(), "third call must proceed after panic recovery");
+        assert!(
+            guard2.is_ok(),
+            "third call must proceed after panic recovery"
+        );
     }
 }

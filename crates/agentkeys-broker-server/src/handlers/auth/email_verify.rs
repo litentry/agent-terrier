@@ -48,14 +48,9 @@ pub async fn email_verify(
 ) -> Result<impl IntoResponse, BrokerError> {
     #[cfg(feature = "auth-email-link")]
     {
-        let plugin = state
-            .email_link
-            .as_ref()
-            .ok_or_else(|| {
-                BrokerError::BadRequest(
-                    "email_link auth method is not enabled".to_string(),
-                )
-            })?;
+        let plugin = state.email_link.as_ref().ok_or_else(|| {
+            BrokerError::BadRequest("email_link auth method is not enabled".to_string())
+        })?;
 
         // 1. Atomically consume the raw token.
         let outcome = plugin
@@ -96,7 +91,7 @@ pub async fn email_verify(
             &state.session_keypair,
             &state.config.oidc_issuer,
             omni.as_str(),
-            "",                                    // no wallet for email-only identity
+            "", // no wallet for email-only identity
             IdentityType::Email.canonical(),
             &email,
             ttl_seconds,
@@ -116,19 +111,9 @@ pub async fn email_verify(
         //    page renders human-readable text. NO session JWT in this
         //    response (it lands on the CLI poll instead, plan §3.5.3).
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "cache-control",
-            HeaderValue::from_static("no-store"),
-        );
-        headers.insert(
-            "referrer-policy",
-            HeaderValue::from_static("no-referrer"),
-        );
-        Ok((
-            StatusCode::OK,
-            headers,
-            Json(json!({ "ok": true })),
-        ))
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+        headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+        Ok((StatusCode::OK, headers, Json(json!({ "ok": true }))))
     }
     #[cfg(not(feature = "auth-email-link"))]
     {

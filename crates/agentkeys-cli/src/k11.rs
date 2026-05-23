@@ -69,8 +69,8 @@ pub fn enroll(operator_omni: &str) -> Result<K11Enrollment, K11Error> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| K11Error::Io(e.to_string()))?;
     }
-    let json = serde_json::to_vec_pretty(&enrollment)
-        .map_err(|e| K11Error::Serde(e.to_string()))?;
+    let json =
+        serde_json::to_vec_pretty(&enrollment).map_err(|e| K11Error::Serde(e.to_string()))?;
     fs::write(&path, json).map_err(|e| K11Error::Io(e.to_string()))?;
     #[cfg(unix)]
     {
@@ -92,7 +92,12 @@ pub fn assert_stub(operator_omni: &str, message: &[u8]) -> Result<Vec<u8>, K11Er
     validate_omni(operator_omni)?;
     let mut h = Sha256::new();
     h.update(b"agentkeys-k11-stub-assert:");
-    h.update(operator_omni.trim_start_matches("0x").to_lowercase().as_bytes());
+    h.update(
+        operator_omni
+            .trim_start_matches("0x")
+            .to_lowercase()
+            .as_bytes(),
+    );
     h.update(b":");
     h.update(message);
     let digest = h.finalize();

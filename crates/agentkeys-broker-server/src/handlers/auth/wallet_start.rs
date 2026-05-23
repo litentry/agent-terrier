@@ -49,7 +49,9 @@ pub async fn wallet_start(
     Ok((StatusCode::OK, Json(response)))
 }
 
-fn lookup_wallet_sig(state: &SharedState) -> Result<std::sync::Arc<dyn UserAuthMethod>, BrokerError> {
+fn lookup_wallet_sig(
+    state: &SharedState,
+) -> Result<std::sync::Arc<dyn UserAuthMethod>, BrokerError> {
     state
         .registry
         .auth

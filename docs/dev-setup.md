@@ -137,7 +137,7 @@ You operate the AgentKeys infrastructure for a team. You hold the long-lived `ag
 
 ### 5.1 One-time: AWS setup
 
-Run through [`cloud-setup.md`](./cloud-setup.md) §1–§3 once per AWS account. Afterwards you'll have:
+Run through [`cloud-bootstrap.md`](./cloud-bootstrap.md) §1–§3 once per AWS account. Afterwards you'll have:
 
 - SES domain identity verified on `bots.litentry.org` (or your substitute via `AGENTKEYS_EMAIL_DOMAIN`)
 - `agentkeys-daemon` IAM user with `sts:AssumeRole` only
@@ -242,7 +242,7 @@ The stage-done script is the authoritative evaluator — never self-grade. If it
 | Mock server won't bind port 8090 | Stale process | `lsof -i :8090`, kill, restart |
 | Broker won't bind port 8091 | Stale process | `lsof -i :8091`, kill, restart |
 | `agentkeys init` double-prompts on macOS | Known keyring-rs update path | Filed under Stage 9 "idempotent init" item |
-| `bot-<ts>@bots.litentry.org` email never arrives | DNS / MX / SES receipt-rule misconfigured, or bucket missing write perm | `aws s3 ls s3://$BUCKET/inbound/ --recursive` — if empty >60s after signup, re-verify [`cloud-setup.md` §1–§2](./cloud-setup.md#1-domain--dns) |
+| `bot-<ts>@bots.litentry.org` email never arrives | DNS / MX / SES receipt-rule misconfigured, or bucket missing write perm | `aws s3 ls s3://$BUCKET/inbound/ --recursive` — if empty >60s after signup, re-verify [`cloud-bootstrap.md` §1–§2](./cloud-bootstrap.md#1-domain--dns) |
 | `MalformedPolicyDocument: ... failed legacy parsing` during operator setup | Heredoc-generated JSON lost a `$VAR:r` / `$VAR:h` to a zsh modifier | Use the `jq -n --arg … '{…}'` pattern — never heredoc JSON into AWS calls |
 
 ## 9. When a provider changes their flow
@@ -254,7 +254,7 @@ The longer-term plan (Stage 5b) is to detect drift automatically from telemetry 
 ## 10. Further reading
 
 - [`spec/plans/development-stages.md`](./spec/plans/development-stages.md) — Shipped / Active / Planned roadmap
-- [`cloud-setup.md`](./cloud-setup.md) — one-time AWS infra (DNS, SES, S3, IAM, OIDC federation)
+- [`cloud-bootstrap.md`](./cloud-bootstrap.md) — one-time AWS infra (DNS, SES, S3, IAM, OIDC federation)
 - [`stage7-wip.md`](./stage7-wip.md) — broker server design + acceptance test
 - [`operator-runbook-stage7.md`](./operator-runbook-stage7.md) — start, supervise, rotate, monitor the broker
 - [`spec/credential-backend-interface.md`](./spec/credential-backend-interface.md) — 15-method trait contract

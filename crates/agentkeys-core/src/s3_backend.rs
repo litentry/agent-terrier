@@ -68,9 +68,9 @@ use crate::actor_omni::actor_omni_hex;
 use crate::backend::{BackendError, CredentialBackend};
 use crate::signer_client::{SignerClient, SignerClientError};
 use agentkeys_types::{
-    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
-    EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
-    RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
+    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
+    InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope,
+    ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
 /// AEAD wire-format version byte. v1 (wallet-keyed AAD) is the original
@@ -268,7 +268,11 @@ impl S3CredentialBackend {
         let mut continuation: Option<String> = None;
         let mut names: Vec<ServiceName> = Vec::new();
         loop {
-            let mut req = self.s3.list_objects_v2().bucket(&self.bucket).prefix(prefix);
+            let mut req = self
+                .s3
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix);
             if let Some(token) = &continuation {
                 req = req.continuation_token(token);
             }
@@ -305,7 +309,11 @@ impl S3CredentialBackend {
     async fn delete_under_prefix(&self, prefix: &str) -> Result<(), BackendError> {
         let mut continuation: Option<String> = None;
         loop {
-            let mut req = self.s3.list_objects_v2().bucket(&self.bucket).prefix(prefix);
+            let mut req = self
+                .s3
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix);
             if let Some(token) = &continuation {
                 req = req.continuation_token(token);
             }
@@ -530,14 +538,8 @@ impl CredentialBackend for S3CredentialBackend {
         enforce_scope_for_service(session, service, true)?;
         let kek = self.derive_kek(agent_id, service).await?;
         let (envelope_version, key) = match self.write_envelope {
-            WriteEnvelope::V1 => (
-                ENVELOPE_VERSION_V1,
-                Self::object_key_v1(agent_id, service),
-            ),
-            WriteEnvelope::V2 => (
-                ENVELOPE_VERSION_V2,
-                Self::object_key_v2(agent_id, service),
-            ),
+            WriteEnvelope::V1 => (ENVELOPE_VERSION_V1, Self::object_key_v1(agent_id, service)),
+            WriteEnvelope::V2 => (ENVELOPE_VERSION_V2, Self::object_key_v2(agent_id, service)),
         };
         let envelope = Self::seal(envelope_version, &kek, agent_id, service, plaintext)?;
 
@@ -829,10 +831,7 @@ mod tests {
 
     #[async_trait]
     impl SignerClient for FakeSigner {
-        async fn derive_address(
-            &self,
-            _omni: &str,
-        ) -> Result<DerivedAddress, SignerClientError> {
+        async fn derive_address(&self, _omni: &str) -> Result<DerivedAddress, SignerClientError> {
             Ok(DerivedAddress {
                 address: "0x0000000000000000000000000000000000000000".into(),
                 key_version: 1,
@@ -950,7 +949,10 @@ mod tests {
             token: "tok".into(),
             wallet: WalletAddress("0xabc".into()),
             scope: Some(Scope {
-                services: services.into_iter().map(|s| ServiceName(s.into())).collect(),
+                services: services
+                    .into_iter()
+                    .map(|s| ServiceName(s.into()))
+                    .collect(),
                 read_only,
             }),
             created_at: 0,
@@ -1067,12 +1069,7 @@ mod tests {
         // gate alone returns Ok(()) — anything past that is the SDK's
         // problem.
         assert!(
-            enforce_scope_for_service(
-                &session,
-                &ServiceName("openrouter".into()),
-                false
-            )
-            .is_ok()
+            enforce_scope_for_service(&session, &ServiceName("openrouter".into()), false).is_ok()
         );
         // Sanity: still rejects out-of-scope reads.
         let err = backend
@@ -1142,8 +1139,7 @@ mod tests {
         let err = S3CredentialBackend::open(&kek, &wallet, &svc, &v1).unwrap_err();
         assert!(matches!(err, BackendError::Internal(_)));
         // Sanity: a v2-shaped envelope decrypted against itself works.
-        let v2 =
-            S3CredentialBackend::seal(ENVELOPE_VERSION_V2, &kek, &wallet, &svc, b"x").unwrap();
+        let v2 = S3CredentialBackend::seal(ENVELOPE_VERSION_V2, &kek, &wallet, &svc, b"x").unwrap();
         assert_eq!(
             S3CredentialBackend::open(&kek, &wallet, &svc, &v2).unwrap(),
             b"x"
@@ -1159,8 +1155,7 @@ mod tests {
         let envelope =
             S3CredentialBackend::seal(ENVELOPE_VERSION_V1, &kek, &wallet, &svc, b"sk-or-v1-secret")
                 .unwrap();
-        let err =
-            S3CredentialBackend::open(&kek, &other_wallet, &svc, &envelope).unwrap_err();
+        let err = S3CredentialBackend::open(&kek, &other_wallet, &svc, &envelope).unwrap_err();
         match err {
             BackendError::Internal(m) => assert!(m.contains("aes-gcm")),
             other => panic!("expected Internal, got {other:?}"),
@@ -1175,8 +1170,7 @@ mod tests {
         let other_svc = ServiceName("anthropic".into());
         let envelope =
             S3CredentialBackend::seal(ENVELOPE_VERSION_V1, &kek, &wallet, &svc, b"x").unwrap();
-        let err =
-            S3CredentialBackend::open(&kek, &wallet, &other_svc, &envelope).unwrap_err();
+        let err = S3CredentialBackend::open(&kek, &wallet, &other_svc, &envelope).unwrap_err();
         assert!(matches!(err, BackendError::Internal(_)));
     }
 

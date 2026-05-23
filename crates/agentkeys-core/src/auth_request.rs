@@ -1,4 +1,6 @@
-use agentkeys_types::{AuthRequestType, CanonicalBytes, Scope, AgentIdentity, WalletAddress, ServiceName};
+use agentkeys_types::{
+    AgentIdentity, AuthRequestType, CanonicalBytes, Scope, ServiceName, WalletAddress,
+};
 use ciborium::Value;
 
 #[derive(Debug)]
@@ -25,7 +27,10 @@ fn scope_to_value(scope: &Scope) -> Value {
         .map(|s| Value::Text(s.0.clone()))
         .collect();
     let mut map = vec![
-        (Value::Text("read_only".into()), Value::Bool(scope.read_only)),
+        (
+            Value::Text("read_only".into()),
+            Value::Bool(scope.read_only),
+        ),
         (Value::Text("services".into()), Value::Array(services)),
     ];
     map.sort_by(|(a, _), (b, _)| {
@@ -41,14 +46,15 @@ fn agent_identity_to_value(identity: &AgentIdentity) -> Value {
         AgentIdentity::Alias(s) => ("Alias", Value::Text(s.clone())),
         AgentIdentity::Email(s) => ("Email", Value::Text(s.clone())),
         AgentIdentity::Ens(s) => ("Ens", Value::Text(s.clone())),
-        AgentIdentity::WalletAddress(WalletAddress(s)) => {
-            ("WalletAddress", Value::Text(s.clone()))
-        }
+        AgentIdentity::WalletAddress(WalletAddress(s)) => ("WalletAddress", Value::Text(s.clone())),
         AgentIdentity::OAuth2 { provider, sub } => (
             "OAuth2",
             // Deterministic CBOR map: keys ASCII-sorted ("provider" < "sub").
             Value::Map(vec![
-                (Value::Text("provider".into()), Value::Text(provider.clone())),
+                (
+                    Value::Text("provider".into()),
+                    Value::Text(provider.clone()),
+                ),
                 (Value::Text("sub".into()), Value::Text(sub.clone())),
             ]),
         ),
@@ -98,8 +104,10 @@ pub fn canonical_bytes(request_type: &AuthRequestType) -> Result<CanonicalBytes,
             agent_identity,
             new_daemon_pubkey,
         } => {
-            let pubkey_bytes: Vec<Value> =
-                new_daemon_pubkey.iter().map(|b| Value::Integer((*b).into())).collect();
+            let pubkey_bytes: Vec<Value> = new_daemon_pubkey
+                .iter()
+                .map(|b| Value::Integer((*b).into()))
+                .collect();
             let mut map = vec![
                 (Value::Text("type".into()), Value::Text("Recover".into())),
                 (
@@ -115,9 +123,15 @@ pub fn canonical_bytes(request_type: &AuthRequestType) -> Result<CanonicalBytes,
             let _ = pubkey_bytes;
             Value::Map(map)
         }
-        AuthRequestType::ScopeChange { agent_id, new_scope } => {
+        AuthRequestType::ScopeChange {
+            agent_id,
+            new_scope,
+        } => {
             let mut map = vec![
-                (Value::Text("type".into()), Value::Text("ScopeChange".into())),
+                (
+                    Value::Text("type".into()),
+                    Value::Text("ScopeChange".into()),
+                ),
                 (Value::Text("agent_id".into()), wallet_to_value(agent_id)),
                 (Value::Text("new_scope".into()), scope_to_value(new_scope)),
             ];
@@ -144,7 +158,10 @@ pub fn canonical_bytes(request_type: &AuthRequestType) -> Result<CanonicalBytes,
             sort_map(&mut map);
             Value::Map(map)
         }
-        AuthRequestType::KeyRotate { agent_id, new_pubkey } => {
+        AuthRequestType::KeyRotate {
+            agent_id,
+            new_pubkey,
+        } => {
             let mut map = vec![
                 (Value::Text("type".into()), Value::Text("KeyRotate".into())),
                 (Value::Text("agent_id".into()), wallet_to_value(agent_id)),
@@ -159,8 +176,7 @@ pub fn canonical_bytes(request_type: &AuthRequestType) -> Result<CanonicalBytes,
     };
 
     let mut buf = Vec::new();
-    ciborium::into_writer(&value, &mut buf)
-        .map_err(|e| CborError::Serialization(e.to_string()))?;
+    ciborium::into_writer(&value, &mut buf).map_err(|e| CborError::Serialization(e.to_string()))?;
     Ok(CanonicalBytes(buf))
 }
 

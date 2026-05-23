@@ -29,7 +29,12 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -88,7 +93,9 @@ pub async fn run(args: CompanionArgs) -> anyhow::Result<()> {
         operator_omni: args.operator_omni,
         device_key_hash: args.device_key_hash,
         k11_cred_id: args.k11_cred_id,
-        rp_id: args.rp_id.unwrap_or_else(|| DEFAULT_COMPANION_RP_ID.to_string()),
+        rp_id: args
+            .rp_id
+            .unwrap_or_else(|| DEFAULT_COMPANION_RP_ID.to_string()),
     };
 
     let app = Router::new()
@@ -102,7 +109,9 @@ pub async fn run(args: CompanionArgs) -> anyhow::Result<()> {
         .with_context(|| format!("bind companion daemon at {bind}"))?;
 
     info!(bind = %bind, "agentkeys-daemon companion mode listening");
-    axum::serve(listener, app).await.context("companion axum serve")?;
+    axum::serve(listener, app)
+        .await
+        .context("companion axum serve")?;
     Ok(())
 }
 

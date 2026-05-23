@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    auth::{extract_bearer_token, generate_token, generate_wallet_address, is_owner_of, now_secs, validate_session},
+    auth::{
+        extract_bearer_token, generate_token, generate_wallet_address, is_owner_of, now_secs,
+        validate_session,
+    },
     error::{AppError, AppResult},
     state::SharedState,
 };
@@ -39,7 +42,8 @@ pub async fn create_session(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
 ) -> AppResult<Json<CreateSessionResponse>> {
-    let auth_token = body.get("auth_token")
+    let auth_token = body
+        .get("auth_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("auth_token required"))?;
 
@@ -69,7 +73,10 @@ pub async fn create_session(
             params![session_token, wallet_address, now, DEFAULT_SESSION_TTL_SECONDS],
         )
         .map_err(|e| AppError::internal(e.to_string()))?;
-        return Ok(Json(CreateSessionResponse { session: session_token, wallet: wallet_address }));
+        return Ok(Json(CreateSessionResponse {
+            session: session_token,
+            wallet: wallet_address,
+        }));
     }
 
     // Create new account
@@ -82,7 +89,13 @@ pub async fn create_session(
     db.execute(
         "INSERT INTO accounts (wallet_address, auth_token, public_key, private_key, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![wallet_address, auth_token, public_key_bytes, private_key_bytes, now],
+        params![
+            wallet_address,
+            auth_token,
+            public_key_bytes,
+            private_key_bytes,
+            now
+        ],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
@@ -94,7 +107,10 @@ pub async fn create_session(
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
-    Ok(Json(CreateSessionResponse { session: session_token, wallet: wallet_address }))
+    Ok(Json(CreateSessionResponse {
+        session: session_token,
+        wallet: wallet_address,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -122,11 +138,14 @@ pub async fn create_child_session(
     let parent = validate_session(&state, token)?;
 
     let scope: Scope = serde_json::from_value(
-        body.get("scope").cloned().ok_or_else(|| AppError::bad_request("scope required"))?,
+        body.get("scope")
+            .cloned()
+            .ok_or_else(|| AppError::bad_request("scope required"))?,
     )
     .map_err(|e| AppError::bad_request(e.to_string()))?;
 
-    let scope_json = serde_json::to_string(&scope).map_err(|e| AppError::internal(e.to_string()))?;
+    let scope_json =
+        serde_json::to_string(&scope).map_err(|e| AppError::internal(e.to_string()))?;
     let child_wallet = generate_wallet_address();
     let child_token = generate_token();
     let now = now_secs();
@@ -157,7 +176,10 @@ pub async fn create_child_session(
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
-    Ok(Json(CreateChildSessionResponse { session: child_token, wallet: child_wallet }))
+    Ok(Json(CreateChildSessionResponse {
+        session: child_token,
+        wallet: child_wallet,
+    }))
 }
 
 pub async fn recover_session(
@@ -261,12 +283,23 @@ pub async fn revoke_session(
 
     let session = validate_session(&state, token)?;
 
-    let has_target_session = body.get("target_session").and_then(|v| v.as_str()).is_some();
+    let has_target_session = body
+        .get("target_session")
+        .and_then(|v| v.as_str())
+        .is_some();
     let has_target_wallet = body.get("target_wallet").and_then(|v| v.as_str()).is_some();
 
     match (has_target_session, has_target_wallet) {
-        (true, true) => return Err(AppError::bad_request("provide exactly one of target_session or target_wallet, not both")),
-        (false, false) => return Err(AppError::bad_request("one of target_session or target_wallet is required")),
+        (true, true) => {
+            return Err(AppError::bad_request(
+                "provide exactly one of target_session or target_wallet, not both",
+            ))
+        }
+        (false, false) => {
+            return Err(AppError::bad_request(
+                "one of target_session or target_wallet is required",
+            ))
+        }
         _ => {}
     }
 
@@ -283,14 +316,20 @@ pub async fn revoke_session(
             )
             .ok();
 
-        let target_wallet = target_wallet.ok_or_else(|| AppError::not_found("target session not found"))?;
+        let target_wallet =
+            target_wallet.ok_or_else(|| AppError::not_found("target session not found"))?;
 
         if !is_owner_of(&db, &session.wallet_address, &target_wallet) {
-            return Err(AppError::forbidden("session does not own the target session"));
+            return Err(AppError::forbidden(
+                "session does not own the target session",
+            ));
         }
 
         let rows_affected = db
-            .execute("UPDATE sessions SET revoked = 1 WHERE token = ?1", params![target_token])
+            .execute(
+                "UPDATE sessions SET revoked = 1 WHERE token = ?1",
+                params![target_token],
+            )
             .map_err(|e| AppError::internal(e.to_string()))?;
 
         if rows_affected == 0 {
@@ -302,7 +341,9 @@ pub async fn revoke_session(
         let target_wallet_str = body["target_wallet"].as_str().unwrap();
 
         if !is_owner_of(&db, &session.wallet_address, target_wallet_str) {
-            return Err(AppError::forbidden("session does not own the target wallet"));
+            return Err(AppError::forbidden(
+                "session does not own the target wallet",
+            ));
         }
 
         let rows_affected = db
@@ -313,10 +354,14 @@ pub async fn revoke_session(
             .map_err(|e| AppError::internal(e.to_string()))?;
 
         if rows_affected == 0 {
-            return Err(AppError::not_found("no active sessions found for target wallet"));
+            return Err(AppError::not_found(
+                "no active sessions found for target wallet",
+            ));
         }
 
-        Ok(Json(json!({ "ok": true, "sessions_revoked": rows_affected })))
+        Ok(Json(
+            json!({ "ok": true, "sessions_revoked": rows_affected }),
+        ))
     }
 }
 
@@ -355,11 +400,15 @@ pub async fn update_scope(
     let db = state.db.lock().unwrap();
 
     if !is_owner_of(&db, &session.wallet_address, &target_wallet) {
-        return Err(AppError::forbidden("session does not own the target wallet"));
+        return Err(AppError::forbidden(
+            "session does not own the target wallet",
+        ));
     }
 
     let new_scope: agentkeys_types::Scope = serde_json::from_value(
-        body.get("scope").cloned().ok_or_else(|| AppError::bad_request("scope required"))?,
+        body.get("scope")
+            .cloned()
+            .ok_or_else(|| AppError::bad_request("scope required"))?,
     )
     .map_err(|e| AppError::bad_request(e.to_string()))?;
 
@@ -387,7 +436,9 @@ pub async fn update_scope(
         return Err(AppError::not_found("no active sessions for target wallet"));
     }
 
-    Ok(Json(serde_json::json!({ "ok": true, "updated": rows_affected })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "updated": rows_affected }),
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -411,7 +462,9 @@ pub async fn get_session_scope(
     // Only the master that owns the target wallet may query its scope.
     let db = state.db.lock().unwrap();
     if !is_owner_of(&db, &session.wallet_address, &query.wallet) {
-        return Err(AppError::forbidden("session does not own the target wallet"));
+        return Err(AppError::forbidden(
+            "session does not own the target wallet",
+        ));
     }
 
     let scope_json: Option<String> = db
@@ -424,8 +477,14 @@ pub async fn get_session_scope(
         .flatten();
 
     let scope: agentkeys_types::Scope = match scope_json {
-        Some(ref s) => serde_json::from_str(s).unwrap_or(agentkeys_types::Scope { services: vec![], read_only: false }),
-        None => agentkeys_types::Scope { services: vec![], read_only: false },
+        Some(ref s) => serde_json::from_str(s).unwrap_or(agentkeys_types::Scope {
+            services: vec![],
+            read_only: false,
+        }),
+        None => agentkeys_types::Scope {
+            services: vec![],
+            read_only: false,
+        },
     };
 
     Ok(Json(serde_json::json!({

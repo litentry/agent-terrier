@@ -21,8 +21,7 @@ pub async fn run_stdio_with_broker(
     agent_id: WalletAddress,
     broker_url: Option<String>,
 ) -> anyhow::Result<()> {
-    let handler =
-        McpHandler::new(backend, session, agent_id).with_broker_url(broker_url);
+    let handler = McpHandler::new(backend, session, agent_id).with_broker_url(broker_url);
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
@@ -44,11 +43,8 @@ pub async fn run_stdio_with_broker(
         let request: JsonRpcRequest = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
-                let error_response = crate::JsonRpcResponse::error(
-                    None,
-                    -32700,
-                    format!("parse error: {e}"),
-                );
+                let error_response =
+                    crate::JsonRpcResponse::error(None, -32700, format!("parse error: {e}"));
                 let mut out = serde_json::to_string(&error_response)?;
                 out.push('\n');
                 writer.write_all(out.as_bytes()).await?;

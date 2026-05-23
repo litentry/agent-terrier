@@ -6,8 +6,8 @@
 //!   2. fetch JWKS → confirm ES256 P-256 public key + kid
 //!   3. mint a JWT for a real session → verify ES256 signature with the JWKS
 
-use std::path::PathBuf;
 use agentkeys_broker_server::storage::{GrantStore, IdempotencyStore, IdentityLinkStore};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentkeys_broker_server::audit::AuditLog;
@@ -71,7 +71,8 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
     );
     let sqlite_anchor: std::sync::Arc<dyn agentkeys_broker_server::plugins::audit::AuditAnchor> =
         std::sync::Arc::new(
-            agentkeys_broker_server::plugins::audit::sqlite::SqliteAnchor::open_in_memory().unwrap(),
+            agentkeys_broker_server::plugins::audit::sqlite::SqliteAnchor::open_in_memory()
+                .unwrap(),
         );
     let registry = std::sync::Arc::new(agentkeys_broker_server::plugins::PluginRegistry {
         auth: std::collections::HashMap::new(),
@@ -115,7 +116,6 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
 
 #[tokio::test]
 async fn discovery_returns_aws_compatible_shape() {
-    
     let (broker_url, _) = spawn_broker().await;
 
     let resp: Value = reqwest::Client::new()
@@ -151,7 +151,6 @@ async fn discovery_returns_aws_compatible_shape() {
 
 #[tokio::test]
 async fn jwks_returns_p256_es256_with_kid() {
-    
     let (broker_url, state) = spawn_broker().await;
 
     let resp: Value = reqwest::Client::new()
@@ -175,7 +174,6 @@ async fn jwks_returns_p256_es256_with_kid() {
 
 #[tokio::test]
 async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
-    
     let (broker_url, state) = spawn_broker().await;
 
     // Mint a session JWT against the broker's own session keypair — the
@@ -237,13 +235,11 @@ async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
     // bucket policies expands to empty and tenant isolation is inert.
     let aws_tags = &token_data.claims["https://aws.amazon.com/tags"];
     assert_eq!(
-        aws_tags["principal_tags"]["agentkeys_user_wallet"][0],
-        wallet,
+        aws_tags["principal_tags"]["agentkeys_user_wallet"][0], wallet,
         "JWT must carry agentkeys_user_wallet as a principal_tag for STS to set the session tag"
     );
     assert_eq!(
-        aws_tags["transitive_tag_keys"][0],
-        "agentkeys_user_wallet",
+        aws_tags["transitive_tag_keys"][0], "agentkeys_user_wallet",
         "agentkeys_user_wallet must be transitive so it survives role chaining"
     );
 
@@ -255,7 +251,6 @@ async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
 
 #[tokio::test]
 async fn mint_oidc_jwt_rejects_missing_bearer() {
-    
     let (broker_url, _) = spawn_broker().await;
 
     let resp = reqwest::Client::new()
@@ -269,7 +264,6 @@ async fn mint_oidc_jwt_rejects_missing_bearer() {
 
 #[tokio::test]
 async fn mint_oidc_jwt_rejects_invalid_bearer_and_audits_auth_failed() {
-    
     let (broker_url, state) = spawn_broker().await;
 
     let resp = reqwest::Client::new()

@@ -109,8 +109,10 @@ impl State {
         let mut file_content = String::new();
         for (i, e) in events.iter().enumerate() {
             let proof = merkle_proof(&leaves, i);
-            let proof_hex: Vec<String> =
-                proof.iter().map(|p| format!("0x{}", hex::encode(p))).collect();
+            let proof_hex: Vec<String> = proof
+                .iter()
+                .map(|p| format!("0x{}", hex::encode(p)))
+                .collect();
             let leaf_hex = format!("0x{}", hex::encode(leaves[i]));
             let line = serde_json::json!({
                 "leaf_index": i,
@@ -201,8 +203,10 @@ mod tests {
     #[tokio::test]
     async fn append_then_flush_drains() {
         let s = State::new("/tmp".to_string());
-        s.append("0xabc".into(), ev("actor", "openrouter", 0, "blob-1")).await;
-        s.append("0xabc".into(), ev("actor", "openrouter", 1, "blob-1")).await;
+        s.append("0xabc".into(), ev("actor", "openrouter", 0, "blob-1"))
+            .await;
+        s.append("0xabc".into(), ev("actor", "openrouter", 1, "blob-1"))
+            .await;
         let r = s.flush("0xabc").await.unwrap().expect("non-empty");
         assert_eq!(r.entry_count, 2);
         assert!(r.merkle_root_hex.starts_with("0x"));

@@ -118,7 +118,12 @@ mod tests {
             .map(|k| serde_json::to_string(k).unwrap())
             .collect();
         let unique: std::collections::HashSet<_> = jsons.iter().collect();
-        assert_eq!(unique.len(), kinds.len(), "tripwire kinds collide: {:?}", jsons);
+        assert_eq!(
+            unique.len(),
+            kinds.len(),
+            "tripwire kinds collide: {:?}",
+            jsons
+        );
     }
 
     #[test]
@@ -138,13 +143,22 @@ mod tests {
             .map(|c| serde_json::to_string(c).unwrap())
             .collect();
         let unique: std::collections::HashSet<_> = jsons.iter().collect();
-        assert_eq!(unique.len(), codes.len(), "error codes collide: {:?}", jsons);
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "error codes collide: {:?}",
+            jsons
+        );
     }
 
     #[test]
     fn to_json_line_is_single_line() {
         let e = ProvisionEvent::progress("step with spaces and \"quotes\"");
         let line = e.to_json_line().unwrap();
-        assert!(!line.contains('\n'), "json line contains newline: {:?}", line);
+        assert!(
+            !line.contains('\n'),
+            "json line contains newline: {:?}",
+            line
+        );
     }
 }

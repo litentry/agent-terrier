@@ -137,9 +137,7 @@ fn ciborium_value_to_json(v: &ciborium::Value) -> Result<serde_json::Value, Audi
             } else if n >= i64::MIN as i128 && n <= i64::MAX as i128 {
                 serde_json::Value::Number((n as i64).into())
             } else {
-                return Err(AuditError::Invalid(format!(
-                    "integer {n} out of i64 range"
-                )));
+                return Err(AuditError::Invalid(format!("integer {n} out of i64 range")));
             }
         }
         CV::Float(f) => serde_json::Number::from_f64(*f)
@@ -214,7 +212,9 @@ fn json_to_ciborium(v: serde_json::Value) -> Result<ciborium::Value, AuditError>
             } else if let Some(f) = n.as_f64() {
                 CV::Float(f)
             } else {
-                return Err(AuditError::Invalid(format!("number not representable: {n}")));
+                return Err(AuditError::Invalid(format!(
+                    "number not representable: {n}"
+                )));
             }
         }
         serde_json::Value::String(s) => CV::Text(s),

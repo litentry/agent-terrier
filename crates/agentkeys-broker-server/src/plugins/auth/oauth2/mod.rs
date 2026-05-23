@@ -244,7 +244,9 @@ impl OAuth2Provider for StubOAuth2Provider {
             .push((code.to_string(), pkce_verifier.to_string()));
         let canned = self.canned_id_token.lock().unwrap();
         match &*canned {
-            Ok(t) => Ok(TokenExchangeOutcome { id_token: t.clone() }),
+            Ok(t) => Ok(TokenExchangeOutcome {
+                id_token: t.clone(),
+            }),
             Err(e) => Err(clone_oauth2_err(e)),
         }
     }
@@ -398,12 +400,7 @@ impl OAuth2Auth {
     }
 
     /// Sign and return a state token: `<payload_b64url>.<sig_b64url>`.
-    pub fn sign_state(
-        &self,
-        request_id: &str,
-        nonce: &str,
-        ts: i64,
-    ) -> Result<String, AuthError> {
+    pub fn sign_state(&self, request_id: &str, nonce: &str, ts: i64) -> Result<String, AuthError> {
         let payload = serde_json::to_vec(&StatePayload {
             ver: STATE_HMAC_VERSION.to_string(),
             rid: request_id.to_string(),
@@ -563,14 +560,14 @@ impl UserAuthMethod for OAuth2Auth {
         // gas-drain via mass row creation).
         if let Some(ip) = params.source_ip.as_deref() {
             let bucket = format!("oauth2_start_ip:{}", ip);
-            if let RateLimitOutcome::Denied { retry_after_seconds } =
-                self.rate_limit_store.check_and_increment(
-                    &bucket,
-                    now,
-                    60,
-                    self.start_rate_limit_per_ip_minutely,
-                )?
-            {
+            if let RateLimitOutcome::Denied {
+                retry_after_seconds,
+            } = self.rate_limit_store.check_and_increment(
+                &bucket,
+                now,
+                60,
+                self.start_rate_limit_per_ip_minutely,
+            )? {
                 return Err(AuthError::RateLimited(format!(
                     "per-IP /v1/auth/oauth2/start rate limit exceeded; retry in {}s",
                     retry_after_seconds
@@ -681,7 +678,9 @@ mod tests {
         assert_ne!(a_v, b_v);
         assert_ne!(a_c, b_c);
         // Verifier+challenge are base64url-no-pad.
-        assert!(a_v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        assert!(a_v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
     }
 
     #[tokio::test]
@@ -732,7 +731,10 @@ mod tests {
         let state = extract_query_arg(&url, "state").expect("state");
 
         let now = unix_now().unwrap();
-        let outcome = p.handle_callback("auth-code-123", &state, now).await.unwrap();
+        let outcome = p
+            .handle_callback("auth-code-123", &state, now)
+            .await
+            .unwrap();
         assert_eq!(outcome.request_id, challenge.request_id);
         assert_eq!(outcome.sub, "stub-sub-12345");
         assert_eq!(outcome.identity_type, IdentityType::OAuth2Google);
@@ -766,8 +768,15 @@ mod tests {
         let res = p.handle_callback("auth-code-123", &tampered, now).await;
         match &res {
             Err(e) => {
-                assert!(matches!(e.inner, AuthError::Unauthorized(_)), "got: {:?}", res);
-                assert!(e.owned_request_id.is_none(), "tampered state must NOT own a row");
+                assert!(
+                    matches!(e.inner, AuthError::Unauthorized(_)),
+                    "got: {:?}",
+                    res
+                );
+                assert!(
+                    e.owned_request_id.is_none(),
+                    "tampered state must NOT own a row"
+                );
             }
             _ => panic!("expected Err, got: {:?}", res),
         }
@@ -793,11 +802,18 @@ mod tests {
         )
         .unwrap();
         let now = unix_now().unwrap();
-        let _first = p.handle_callback("auth-code-123", &state, now).await.unwrap();
+        let _first = p
+            .handle_callback("auth-code-123", &state, now)
+            .await
+            .unwrap();
         let replay = p.handle_callback("auth-code-123", &state, now).await;
         match &replay {
             Err(e) => {
-                assert!(matches!(e.inner, AuthError::Unauthorized(_)), "got: {:?}", replay);
+                assert!(
+                    matches!(e.inner, AuthError::Unauthorized(_)),
+                    "got: {:?}",
+                    replay
+                );
                 // P1 fix: replay against an already-consumed row must NOT
                 // be tagged as owned — otherwise the handler would
                 // mark_failed the legitimate in-flight flow.
@@ -840,7 +856,10 @@ mod tests {
                     res
                 );
                 // expired id_token is post-consume — caller MAY mark_failed.
-                assert!(e.owned_request_id.is_some(), "post-consume failure must own request_id");
+                assert!(
+                    e.owned_request_id.is_some(),
+                    "post-consume failure must own request_id"
+                );
             }
             _ => panic!("expected Err, got: {:?}", res),
         }
@@ -875,7 +894,10 @@ mod tests {
                     "got: {:?}",
                     res
                 );
-                assert!(e.owned_request_id.is_some(), "post-consume failure must own request_id");
+                assert!(
+                    e.owned_request_id.is_some(),
+                    "post-consume failure must own request_id"
+                );
             }
             _ => panic!("expected Err, got: {:?}", res),
         }

@@ -130,7 +130,11 @@ mod tests {
         ];
         for k in all {
             let byte = k as u8;
-            assert_eq!(AuditOpKind::from_u8(byte), Some(k), "byte {byte} round-trip");
+            assert_eq!(
+                AuditOpKind::from_u8(byte),
+                Some(k),
+                "byte {byte} round-trip"
+            );
         }
     }
 
@@ -139,7 +143,11 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [3u8, 9, 13, 19, 22, 32, 42, 53, 62, 71, 80, 200, 250, 255] {
-            assert_eq!(AuditOpKind::from_u8(byte), None, "byte {byte} must be unknown");
+            assert_eq!(
+                AuditOpKind::from_u8(byte),
+                None,
+                "byte {byte} must be unknown"
+            );
         }
     }
 

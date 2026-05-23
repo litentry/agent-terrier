@@ -26,7 +26,7 @@ log()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m✓\033[0m  %s\n' "$*"; }
 fail() { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; }
 
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 [[ -f "$ENV_FILE" ]] || { fail "$ENV_FILE not found"; exit 1; }
 # shellcheck disable=SC1090
 set -a; . "$ENV_FILE"; set +a

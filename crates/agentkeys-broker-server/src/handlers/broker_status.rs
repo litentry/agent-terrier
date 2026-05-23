@@ -84,7 +84,12 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
     }
 
     // Tier-2 EVM probes — only when EVM audit anchor is enabled.
-    if state.registry.audit.iter().any(|a| a.name() == "evm_testnet") {
+    if state
+        .registry
+        .audit
+        .iter()
+        .any(|a| a.name() == "evm_testnet")
+    {
         if evm_rpc_reachable {
             ready_names.push("tier2/evm_rpc".into());
         } else {
@@ -171,5 +176,8 @@ fn readiness_to_json(name: &str, r: &Readiness) -> Value {
 /// `docs/operator-runbook-stage7.md`.
 fn runbook_anchor(check_name: &str) -> String {
     let slug = check_name.replace(['/', '_'], "-");
-    format!("https://docs.agentkeys.dev/operator-runbook-stage7#{}", slug)
+    format!(
+        "https://docs.agentkeys.dev/operator-runbook-stage7#{}",
+        slug
+    )
 }

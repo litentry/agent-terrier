@@ -106,7 +106,10 @@ impl PluginRegistry {
         for (name, plugin) in &self.auth {
             checks.push((format!("auth/{}", name), plugin.ready()));
         }
-        checks.push((format!("wallet/{}", self.wallet.name()), self.wallet.ready()));
+        checks.push((
+            format!("wallet/{}", self.wallet.name()),
+            self.wallet.ready(),
+        ));
         for anchor in &self.audit {
             checks.push((format!("audit/{}", anchor.name()), anchor.ready()));
         }

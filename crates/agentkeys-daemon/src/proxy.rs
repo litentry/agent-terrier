@@ -25,6 +25,7 @@
 //!   - **Per-caller scope policies stubbed** — allow-all when no
 //!     policy file is loaded. Stage 2 (#90) adds policy file loading +
 //!     deny-by-default + per-caller spend quotas.
+//!
 //! Both gaps are tracked in #90's "Daemon hardening" task list.
 
 use std::collections::HashMap;
@@ -162,7 +163,10 @@ async fn handle_cap(
     }
 
     // 2. cache hit?
-    let cache_key = format!("{}:{}:{}:{}", req.operator_omni, req.actor_omni, req.service, op_label);
+    let cache_key = format!(
+        "{}:{}:{}:{}",
+        req.operator_omni, req.actor_omni, req.service, op_label
+    );
     {
         let cache = state.cache.read().await;
         if let Some(hit) = cache.entries.get(&cache_key) {
@@ -177,7 +181,11 @@ async fn handle_cap(
     }
 
     // 3. upstream broker call.
-    let upstream = format!("{}/v1/cap/{}", state.broker_url.trim_end_matches('/'), upstream_path);
+    let upstream = format!(
+        "{}/v1/cap/{}",
+        state.broker_url.trim_end_matches('/'),
+        upstream_path
+    );
     let resp = state
         .http
         .post(&upstream)
@@ -191,7 +199,10 @@ async fn handle_cap(
             emit_audit_line(&req, op_label, "broker_unreachable", false);
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(ErrorBody { error: e.to_string(), reason: "broker_unreachable" }),
+                Json(ErrorBody {
+                    error: e.to_string(),
+                    reason: "broker_unreachable",
+                }),
             )
                 .into_response();
         }
@@ -203,7 +214,10 @@ async fn handle_cap(
             emit_audit_line(&req, op_label, "broker_invalid_json", false);
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(ErrorBody { error: e.to_string(), reason: "broker_invalid_json" }),
+                Json(ErrorBody {
+                    error: e.to_string(),
+                    reason: "broker_invalid_json",
+                }),
             )
                 .into_response();
         }
@@ -228,7 +242,11 @@ async fn handle_cap(
         let mut cache = state.cache.write().await;
         cache.entries.insert(
             cache_key,
-            CachedCap { body: body.clone(), fetched_at: Instant::now(), expires_at_unix },
+            CachedCap {
+                body: body.clone(),
+                fetched_at: Instant::now(),
+                expires_at_unix,
+            },
         );
     }
 
@@ -270,7 +288,9 @@ pub fn resolve_socket_path() -> PathBuf {
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    Path::new(&home).join(".agentkeys").join("agentkeys-proxy.sock")
+    Path::new(&home)
+        .join(".agentkeys")
+        .join("agentkeys-proxy.sock")
 }
 
 // ─── tests ─────────────────────────────────────────────────────────────

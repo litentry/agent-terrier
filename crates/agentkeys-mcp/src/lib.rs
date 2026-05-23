@@ -34,14 +34,22 @@ pub struct JsonRpcError {
 
 impl JsonRpcResponse {
     pub fn success(id: Option<Value>, result: Value) -> Self {
-        Self { jsonrpc: "2.0".into(), result: Some(result), error: None, id }
+        Self {
+            jsonrpc: "2.0".into(),
+            result: Some(result),
+            error: None,
+            id,
+        }
     }
 
     pub fn error(id: Option<Value>, code: i64, message: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             result: None,
-            error: Some(JsonRpcError { code, message: message.into() }),
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+            }),
             id,
         }
     }
@@ -190,12 +198,12 @@ impl McpHandler {
                     }
                 }),
             ),
-            "notifications/initialized" => {
-                JsonRpcResponse::success(id, json!(null))
-            }
+            "notifications/initialized" => JsonRpcResponse::success(id, json!(null)),
             "tools/list" => JsonRpcResponse::success(id, json!({ "tools": tool_definitions() })),
             "tools/call" => self.handle_tool_call(id, request.params).await,
-            _ => JsonRpcResponse::error(id, -32601, format!("method not found: {}", request.method)),
+            _ => {
+                JsonRpcResponse::error(id, -32601, format!("method not found: {}", request.method))
+            }
         }
     }
 
@@ -227,7 +235,11 @@ impl McpHandler {
         };
 
         let service = ServiceName(service_str);
-        match self.backend.read_credential(&self.session, &self.agent_id, &service).await {
+        match self
+            .backend
+            .read_credential(&self.session, &self.agent_id, &service)
+            .await
+        {
             Ok(bytes) => {
                 let credential = String::from_utf8_lossy(&bytes).into_owned();
                 JsonRpcResponse::success(
@@ -246,7 +258,11 @@ impl McpHandler {
     }
 
     async fn list_credentials(&self, id: Option<Value>) -> JsonRpcResponse {
-        match self.backend.list_credentials(&self.session, &self.agent_id).await {
+        match self
+            .backend
+            .list_credentials(&self.session, &self.agent_id)
+            .await
+        {
             Ok(services) => {
                 let mut services: Vec<String> = services.into_iter().map(|s| s.0).collect();
                 services.sort();
@@ -261,7 +277,10 @@ impl McpHandler {
             Some(s) => s.to_string(),
             None => return JsonRpcResponse::error(id, -32602, "missing 'service' argument"),
         };
-        let force = arguments.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+        let force = arguments
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Issue #83 — non-CDP `openrouter.ts` is stale (signup_email_otp
         // pattern against a flow that's now Clerk+password+magic-link). Route
@@ -377,7 +396,9 @@ impl McpHandler {
 
 /// Read `AGENTKEYS_DATA_ROLE_ARN`; returns None if unset (broker mint disabled).
 fn read_env_data_role_arn() -> Option<String> {
-    std::env::var("AGENTKEYS_DATA_ROLE_ARN").ok().filter(|s| !s.is_empty())
+    std::env::var("AGENTKEYS_DATA_ROLE_ARN")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Read `AWS_REGION` / `AWS_DEFAULT_REGION`; default `us-east-1`.
@@ -422,9 +443,9 @@ mod tests {
     use super::*;
     use agentkeys_core::backend::BackendError;
     use agentkeys_types::{
-        AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
-        EncryptedPairPayload, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
-        RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
+        AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
+        OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope, ServiceName,
+        Session, SignedAuthDecision, WalletAddress,
     };
     use async_trait::async_trait;
 
@@ -432,27 +453,145 @@ mod tests {
 
     #[async_trait]
     impl CredentialBackend for NoopBackend {
-        async fn create_session(&self, _: agentkeys_types::AuthToken) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
-        async fn create_child_session(&self, _: &Session, _: Scope) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
-        async fn store_credential(&self, _: &Session, _: &WalletAddress, _: &ServiceName, _: &[u8]) -> Result<(), BackendError> { Ok(()) }
-        async fn read_credential(&self, _: &Session, _: &WalletAddress, _: &ServiceName) -> Result<Vec<u8>, BackendError> { Err(BackendError::NotFound("none".into())) }
-        async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), BackendError> { unimplemented!() }
-        async fn revoke_by_wallet(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> { unimplemented!() }
-        async fn teardown_agent(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> { unimplemented!() }
-        async fn shielding_key(&self) -> Result<PublicKey, BackendError> { unimplemented!() }
-        async fn register_rendezvous(&self, _: &PublicKey, _: &PairCode) -> Result<RegistrationToken, BackendError> { unimplemented!() }
-        async fn poll_rendezvous(&self, _: &RegistrationToken) -> Result<Option<PairPayload>, BackendError> { unimplemented!() }
-        async fn deliver_rendezvous(&self, _: &Session, _: &PairCode, _: &EncryptedPairPayload) -> Result<(), BackendError> { unimplemented!() }
-        async fn open_auth_request(&self, _: &PublicKey, _: AuthRequestType, _: &CanonicalBytes, _: Option<&WalletAddress>) -> Result<OpenedAuthRequest, BackendError> { unimplemented!() }
-        async fn fetch_auth_request(&self, _: &Session, _: &PairCode) -> Result<AuthRequest, BackendError> { unimplemented!() }
-        async fn approve_auth_request(&self, _: &Session, _: &AuthRequestId) -> Result<(), BackendError> { unimplemented!() }
-        async fn await_auth_decision(&self, _: &AuthRequestId) -> Result<SignedAuthDecision, BackendError> { unimplemented!() }
-        async fn recover_session(&self, _: &agentkeys_types::AgentIdentity, _: &agentkeys_types::RecoveryMethod) -> Result<(Session, WalletAddress), BackendError> { unimplemented!() }
-        async fn list_credentials(&self, _: &Session, _: &WalletAddress) -> Result<Vec<ServiceName>, BackendError> { unimplemented!() }
-        async fn get_scope(&self, _: &Session, _: &WalletAddress) -> Result<Option<Scope>, BackendError> { unimplemented!() }
-        async fn update_scope(&self, _: &Session, _: &WalletAddress, _: &Scope) -> Result<(), BackendError> { unimplemented!() }
-        async fn provision_inbox(&self, _: &Session, _: &WalletAddress) -> Result<agentkeys_types::InboxAddress, BackendError> { unimplemented!() }
-        async fn list_inboxes(&self, _: &Session, _: &WalletAddress) -> Result<Vec<agentkeys_types::InboxAddress>, BackendError> { unimplemented!() }
+        async fn create_session(
+            &self,
+            _: agentkeys_types::AuthToken,
+        ) -> Result<(Session, WalletAddress), BackendError> {
+            unimplemented!()
+        }
+        async fn create_child_session(
+            &self,
+            _: &Session,
+            _: Scope,
+        ) -> Result<(Session, WalletAddress), BackendError> {
+            unimplemented!()
+        }
+        async fn store_credential(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+            _: &ServiceName,
+            _: &[u8],
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        async fn read_credential(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+            _: &ServiceName,
+        ) -> Result<Vec<u8>, BackendError> {
+            Err(BackendError::NotFound("none".into()))
+        }
+        async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn revoke_by_wallet(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn teardown_agent(&self, _: &Session, _: &WalletAddress) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn shielding_key(&self) -> Result<PublicKey, BackendError> {
+            unimplemented!()
+        }
+        async fn register_rendezvous(
+            &self,
+            _: &PublicKey,
+            _: &PairCode,
+        ) -> Result<RegistrationToken, BackendError> {
+            unimplemented!()
+        }
+        async fn poll_rendezvous(
+            &self,
+            _: &RegistrationToken,
+        ) -> Result<Option<PairPayload>, BackendError> {
+            unimplemented!()
+        }
+        async fn deliver_rendezvous(
+            &self,
+            _: &Session,
+            _: &PairCode,
+            _: &EncryptedPairPayload,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn open_auth_request(
+            &self,
+            _: &PublicKey,
+            _: AuthRequestType,
+            _: &CanonicalBytes,
+            _: Option<&WalletAddress>,
+        ) -> Result<OpenedAuthRequest, BackendError> {
+            unimplemented!()
+        }
+        async fn fetch_auth_request(
+            &self,
+            _: &Session,
+            _: &PairCode,
+        ) -> Result<AuthRequest, BackendError> {
+            unimplemented!()
+        }
+        async fn approve_auth_request(
+            &self,
+            _: &Session,
+            _: &AuthRequestId,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn await_auth_decision(
+            &self,
+            _: &AuthRequestId,
+        ) -> Result<SignedAuthDecision, BackendError> {
+            unimplemented!()
+        }
+        async fn recover_session(
+            &self,
+            _: &agentkeys_types::AgentIdentity,
+            _: &agentkeys_types::RecoveryMethod,
+        ) -> Result<(Session, WalletAddress), BackendError> {
+            unimplemented!()
+        }
+        async fn list_credentials(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<Vec<ServiceName>, BackendError> {
+            unimplemented!()
+        }
+        async fn get_scope(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<Option<Scope>, BackendError> {
+            unimplemented!()
+        }
+        async fn update_scope(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+            _: &Scope,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn provision_inbox(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<agentkeys_types::InboxAddress, BackendError> {
+            unimplemented!()
+        }
+        async fn list_inboxes(
+            &self,
+            _: &Session,
+            _: &WalletAddress,
+        ) -> Result<Vec<agentkeys_types::InboxAddress>, BackendError> {
+            unimplemented!()
+        }
     }
 
     fn test_session() -> Session {
@@ -483,7 +622,11 @@ mod tests {
             id: Some(json!(1)),
         };
         let resp = handler.handle(req).await;
-        assert!(resp.error.is_none(), "tools/list returned error: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "tools/list returned error: {:?}",
+            resp.error
+        );
         let tools = resp.result.unwrap();
         let tool_names: Vec<&str> = tools["tools"]
             .as_array()

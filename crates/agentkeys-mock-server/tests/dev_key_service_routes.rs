@@ -12,7 +12,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 use p256::ecdsa::SigningKey;
 use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use serde::{Deserialize, Serialize};
@@ -125,10 +125,7 @@ fn router_with_signer(master_secret: [u8; 32]) -> Router {
 }
 
 /// Build a signer-only router with JWT auth enabled.
-fn router_signer_only_with_auth(
-    master_secret: [u8; 32],
-    dec: DecodingKey,
-) -> Router {
+fn router_signer_only_with_auth(master_secret: [u8; 32], dec: DecodingKey) -> Router {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
     let signer = DevKeyService::from_master_secret(master_secret);
@@ -290,7 +287,10 @@ async fn sign_message_returns_canonical_65_byte_signature() {
     let raw = hex::decode(sig.trim_start_matches("0x")).unwrap();
     assert_eq!(raw.len(), 65);
     let v = raw[64];
-    assert!(v == 0 || v == 1, "v byte must be canonical {{0,1}}, got {v}");
+    assert!(
+        v == 0 || v == 1,
+        "v byte must be canonical {{0,1}}, got {v}"
+    );
 }
 
 #[tokio::test]
@@ -413,10 +413,7 @@ async fn signer_only_omni_mismatch_returns_401() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], "unauthorized");
-    assert!(body["message"]
-        .as_str()
-        .unwrap()
-        .contains("omni_account"));
+    assert!(body["message"].as_str().unwrap().contains("omni_account"));
 }
 
 #[tokio::test]

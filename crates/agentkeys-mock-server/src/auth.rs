@@ -1,9 +1,12 @@
 use crate::{error::AppError, state::AppState};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 pub struct ValidatedSession {
@@ -40,7 +43,11 @@ pub fn validate_session(state: &AppState, token: &str) -> Result<ValidatedSessio
             if now > created_at + ttl_seconds {
                 return Err(AppError::unauthorized("session expired"));
             }
-            Ok(ValidatedSession { token, wallet_address: wallet, scope_json })
+            Ok(ValidatedSession {
+                token,
+                wallet_address: wallet,
+                scope_json,
+            })
         }
     }
 }

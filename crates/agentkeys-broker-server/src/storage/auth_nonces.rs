@@ -44,7 +44,9 @@ impl AuthNonceStore {
         }
         let conn = Connection::open(path)
             .map_err(|e| AuthError::Internal(format!("open auth_nonces db: {}", e)))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -52,7 +54,9 @@ impl AuthNonceStore {
     pub fn open_in_memory() -> Result<Self, AuthError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| AuthError::Internal(format!("open in-memory auth_nonces db: {}", e)))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -146,7 +150,10 @@ impl AuthNonceStore {
             // Lost the race to another request.
             Ok(ConsumeOutcome::NotFoundOrConsumed)
         } else {
-            Ok(ConsumeOutcome::Consumed { address, expires_at })
+            Ok(ConsumeOutcome::Consumed {
+                address,
+                expires_at,
+            })
         }
     }
 
@@ -169,8 +176,11 @@ impl AuthNonceStore {
         let Ok(conn) = self.conn.lock() else {
             return false;
         };
-        conn.execute("CREATE TABLE IF NOT EXISTS _readyz_probe (id INTEGER PRIMARY KEY)", [])
-            .is_ok()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS _readyz_probe (id INTEGER PRIMARY KEY)",
+            [],
+        )
+        .is_ok()
     }
 }
 

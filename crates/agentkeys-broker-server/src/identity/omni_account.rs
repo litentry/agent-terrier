@@ -170,6 +170,9 @@ mod tests {
     fn output_is_lowercase_hex_64_chars() {
         let out = derive_omni_account("evm", "0xabc");
         assert_eq!(out.as_str().len(), 64);
-        assert!(out.as_str().chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(out
+            .as_str()
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     }
 }

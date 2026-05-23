@@ -135,7 +135,7 @@ fn k11_assert_rejects_invalid_omni() {
         .arg("k11")
         .arg("assert")
         .arg("--operator-omni")
-        .arg("0xabc")  // too short
+        .arg("0xabc") // too short
         .arg("--message-hex")
         .arg("00");
     cmd.assert().failure().stderr(contains("64-hex"));

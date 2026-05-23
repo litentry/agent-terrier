@@ -116,10 +116,8 @@ pub async fn poll_rendezvous(
                 return Err(AppError::conflict("registration already consumed"));
             }
             Some((Some(payload), _, _, _, _)) => {
-                let encoded = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &payload,
-                );
+                let encoded =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &payload);
                 // Mark as consumed so subsequent polls get CONSUMED / NOT_FOUND
                 {
                     let db = state.db.lock().unwrap();
@@ -161,11 +159,8 @@ pub async fn deliver_rendezvous(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("payload required"))?;
 
-    let payload = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        payload_b64,
-    )
-    .map_err(|e| AppError::bad_request(format!("invalid base64 for payload: {e}")))?;
+    let payload = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload_b64)
+        .map_err(|e| AppError::bad_request(format!("invalid base64 for payload: {e}")))?;
 
     let now = now_secs();
     let db = state.db.lock().unwrap();
@@ -185,7 +180,9 @@ pub async fn deliver_rendezvous(
     }
 
     if delivered != 0 {
-        return Err(AppError::already_delivered("payload already delivered for this pair code"));
+        return Err(AppError::already_delivered(
+            "payload already delivered for this pair code",
+        ));
     }
 
     db.execute(

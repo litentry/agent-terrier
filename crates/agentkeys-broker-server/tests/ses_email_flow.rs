@@ -107,12 +107,7 @@ impl TestEnv {
 /// The cleanup ONLY deletes objects whose body contains this specific
 /// test's UUID — every other inbound (production, other tests, SES
 /// verification mails) is left intact.
-async fn cleanup_test_objects(
-    s3: &S3Client,
-    bucket: &str,
-    token: &str,
-    fast_key: Option<String>,
-) {
+async fn cleanup_test_objects(s3: &S3Client, bucket: &str, token: &str, fast_key: Option<String>) {
     if let Some(key) = fast_key {
         log("cleanup: fast-path delete of {}", &[&key]);
         match s3.delete_object().bucket(bucket).key(&key).send().await {
@@ -136,7 +131,10 @@ async fn cleanup_test_objects(
     {
         Ok(r) => r,
         Err(e) => {
-            log("cleanup: list_objects_v2 failed: {} (skipping)", &[&format!("{e}")]);
+            log(
+                "cleanup: list_objects_v2 failed: {} (skipping)",
+                &[&format!("{e}")],
+            );
             return;
         }
     };
@@ -197,7 +195,10 @@ async fn ses_send_and_receive_round_trip() {
     assert_eq!(sender.from_address(), from_address);
 
     // Pre-flight: confirm the FROM identity is verified for sending.
-    log("verify_sender_ready: calling SES GetEmailIdentity({})", &[&from_address]);
+    log(
+        "verify_sender_ready: calling SES GetEmailIdentity({})",
+        &[&from_address],
+    );
     sender
         .verify_sender_ready()
         .await
@@ -260,7 +261,10 @@ async fn run_send_and_poll(
         .send_magic_link(recipient, landing_url)
         .await
         .expect("SES SendEmail failed");
-    log("send_magic_link: ok — polling for inbound delivery to S3", &[]);
+    log(
+        "send_magic_link: ok — polling for inbound delivery to S3",
+        &[],
+    );
 
     // Poll S3 for an inbound object whose body contains our unique token.
     // To keep iteration fast even when the bucket has thousands of stale
@@ -271,7 +275,11 @@ async fn run_send_and_poll(
     'poll: for attempt in 1..=POLL_MAX_ATTEMPTS {
         log(
             "attempt {}/{} — list_objects_v2 prefix={}",
-            &[&attempt.to_string(), &POLL_MAX_ATTEMPTS.to_string(), INBOUND_PREFIX],
+            &[
+                &attempt.to_string(),
+                &POLL_MAX_ATTEMPTS.to_string(),
+                INBOUND_PREFIX,
+            ],
         );
         let listed = match s3
             .list_objects_v2()
@@ -349,7 +357,10 @@ async fn run_send_and_poll(
                 ],
             );
             if hit {
-                log("attempt {}: FOUND token in {}", &[&attempt.to_string(), key]);
+                log(
+                    "attempt {}: FOUND token in {}",
+                    &[&attempt.to_string(), key],
+                );
                 // Publish the key so cleanup can fast-path a single DeleteObject.
                 *found_key_slot.lock().unwrap() = Some(key.to_string());
                 found_body = Some(body_str);

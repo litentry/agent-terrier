@@ -23,9 +23,10 @@ pub async fn oauth2_status(
 ) -> Result<impl IntoResponse, BrokerError> {
     #[cfg(feature = "auth-oauth2")]
     {
-        let plugin = state.oauth2.as_ref().ok_or_else(|| {
-            BrokerError::BadRequest("oauth2 plugin not enabled".to_string())
-        })?;
+        let plugin = state
+            .oauth2
+            .as_ref()
+            .ok_or_else(|| BrokerError::BadRequest("oauth2 plugin not enabled".to_string()))?;
         use crate::storage::OAuth2PendingStatus;
         let status = plugin
             .pending_store

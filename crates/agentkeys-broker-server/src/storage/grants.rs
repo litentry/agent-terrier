@@ -26,7 +26,10 @@ use crate::plugins::auth::AuthError;
 pub enum GrantConsumeOutcome {
     /// Grant matched + was unexpired + had remaining uses + non-revoked;
     /// `used_count` incremented; returns the resolved grant_id.
-    Consumed { grant_id: String, audit_proof: String },
+    Consumed {
+        grant_id: String,
+        audit_proof: String,
+    },
     /// No grant exists for `(omni, daemon, service)`.
     NoGrant,
     /// Grant exists but is revoked.
@@ -366,7 +369,9 @@ mod tests {
         s.create("grn-1", "om", "da", "s3", "p/", 100, 1000, 5, "p")
             .unwrap();
         let outcome = s.try_consume("om", "da", "s3", 200).unwrap();
-        assert!(matches!(outcome, GrantConsumeOutcome::Consumed { ref grant_id, .. } if grant_id == "grn-1"));
+        assert!(
+            matches!(outcome, GrantConsumeOutcome::Consumed { ref grant_id, .. } if grant_id == "grn-1")
+        );
         let g = s.lookup("grn-1").unwrap().unwrap();
         assert_eq!(g.used_count, 1);
     }

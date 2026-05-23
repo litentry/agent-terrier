@@ -162,8 +162,9 @@ impl SessionKeypair {
     /// SubjectPublicKeyInfo (SPKI) string. The signer service reads this at
     /// boot to verify broker session JWTs without holding the private key.
     pub fn public_key_pem(&self) -> BrokerResult<String> {
-        let signing_key = SigningKey::from_pkcs8_pem(&self.private_key_pem)
-            .map_err(|e| BrokerError::Internal(format!("decode pkcs8 pem for pubkey export: {e}")))?;
+        let signing_key = SigningKey::from_pkcs8_pem(&self.private_key_pem).map_err(|e| {
+            BrokerError::Internal(format!("decode pkcs8 pem for pubkey export: {e}"))
+        })?;
         let verifying_key = signing_key.verifying_key();
         verifying_key
             .to_public_key_pem(LineEnding::LF)

@@ -13,7 +13,11 @@ use agentkeys_worker_email::state::State;
 #[command(name = "agentkeys-worker-email", version)]
 struct Args {
     /// Bind address.
-    #[arg(long, env = "AGENTKEYS_WORKER_EMAIL_BIND", default_value = "127.0.0.1:9093")]
+    #[arg(
+        long,
+        env = "AGENTKEYS_WORKER_EMAIL_BIND",
+        default_value = "127.0.0.1:9093"
+    )]
     bind: String,
 
     /// S3 bucket holding inbound mail per-actor at bots/<actor_omni>/inbound/.

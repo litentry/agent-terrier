@@ -51,8 +51,7 @@ async fn spawn_broker_with_wallet_sig() -> (String, Arc<AppState>) {
     let oidc = Arc::new(OidcKeypair::generate_and_persist(&oidc_kp_path).unwrap());
 
     let session_kp_path = tmp.path().join("session.json");
-    let session_keypair =
-        Arc::new(SessionKeypair::generate_and_persist(&session_kp_path).unwrap());
+    let session_keypair = Arc::new(SessionKeypair::generate_and_persist(&session_kp_path).unwrap());
 
     let nonce_store = Arc::new(AuthNonceStore::open_in_memory().unwrap());
     let wallet_store = Arc::new(WalletStore::open_in_memory().unwrap());
@@ -72,7 +71,9 @@ async fn spawn_broker_with_wallet_sig() -> (String, Arc<AppState>) {
         Arc::new(SqliteAnchor::open_in_memory().unwrap());
     let registry = Arc::new(PluginRegistry {
         auth,
-        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(&wallet_store))),
+        wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(
+            &wallet_store,
+        ))),
         audit: vec![sqlite_anchor],
     });
 

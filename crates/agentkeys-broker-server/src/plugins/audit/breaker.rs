@@ -97,9 +97,10 @@ impl CircuitBreaker {
     ///   already in flight.
     pub fn try_acquire(&self) -> Result<BreakerToken<'_>, BreakerError> {
         let now = unix_now();
-        let mut inner = self.inner.lock().map_err(|e| {
-            BreakerError::Internal(format!("breaker mutex poisoned: {}", e))
-        })?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| BreakerError::Internal(format!("breaker mutex poisoned: {}", e)))?;
         match inner.state {
             BreakerState::Closed => Ok(BreakerToken {
                 breaker: self,
@@ -139,7 +140,10 @@ impl CircuitBreaker {
     }
 
     pub fn state(&self) -> BreakerState {
-        self.inner.lock().map(|i| i.state).unwrap_or(BreakerState::Open)
+        self.inner
+            .lock()
+            .map(|i| i.state)
+            .unwrap_or(BreakerState::Open)
     }
 
     pub fn consecutive_failures(&self) -> u32 {

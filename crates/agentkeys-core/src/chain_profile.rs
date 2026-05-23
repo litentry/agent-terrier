@@ -310,7 +310,10 @@ impl ChainProfile {
         if let Some(path) = env_file {
             if !path.is_empty() {
                 let p = Self::load_from_file(path)?;
-                return Ok((p, format!("loaded from $AGENTKEYS_CHAIN_PROFILE_FILE={path}")));
+                return Ok((
+                    p,
+                    format!("loaded from $AGENTKEYS_CHAIN_PROFILE_FILE={path}"),
+                ));
             }
         }
         if let Some(name) = cli_name {
@@ -374,7 +377,10 @@ mod tests {
         assert_eq!(p.chain_id, 212013);
         assert_eq!(p.chain_kind, ChainKind::SubstrateFrontier);
         assert_eq!(p.token.symbol, "HEI");
-        assert!(p.rpc.substrate_wss.is_some(), "heima must carry substrate_wss");
+        assert!(
+            p.rpc.substrate_wss.is_some(),
+            "heima must carry substrate_wss"
+        );
     }
 
     #[test]
@@ -383,7 +389,10 @@ mod tests {
         assert_eq!(p.chain_id, 8453);
         assert_eq!(p.chain_kind, ChainKind::OptimismL2);
         assert_eq!(p.finality.default_block_tag, "safe");
-        assert!(p.rpc.substrate_wss.is_none(), "base must not carry substrate_wss");
+        assert!(
+            p.rpc.substrate_wss.is_none(),
+            "base must not carry substrate_wss"
+        );
     }
 
     #[test]
@@ -400,7 +409,10 @@ mod tests {
         assert_eq!(p.chain_id, 31337);
         assert_eq!(p.finality.confirmation_blocks, 0);
         assert_eq!(p.finality.confirmation_seconds, 0);
-        assert!(p.deploy.default_test_key.is_some(), "anvil ships a default test key");
+        assert!(
+            p.deploy.default_test_key.is_some(),
+            "anvil ships a default test key"
+        );
     }
 
     #[test]
@@ -477,13 +489,19 @@ mod tests {
         let p = ChainProfile::load_builtin("heima-paseo").unwrap();
         assert_eq!(p.chain_id, 2013);
         let mainnet = ChainProfile::load_builtin("heima").unwrap();
-        assert_ne!(p.chain_id, mainnet.chain_id, "paseo and mainnet must not collide");
+        assert_ne!(
+            p.chain_id, mainnet.chain_id,
+            "paseo and mainnet must not collide"
+        );
     }
 
     #[test]
     fn heima_paseo_is_development_default_with_alice_sudo() {
         let p = ChainProfile::load_builtin("heima-paseo").unwrap();
-        let dev = p.dev_environment.as_ref().expect("heima-paseo carries dev metadata");
+        let dev = p
+            .dev_environment
+            .as_ref()
+            .expect("heima-paseo carries dev metadata");
         assert!(dev.is_development_default, "heima-paseo is THE dev default");
         let sudo = dev.sudo.as_ref().expect("heima-paseo carries sudo config");
         assert!(sudo.enabled);
@@ -498,7 +516,10 @@ mod tests {
             sudo.sudoer_seed_phrase.contains("//Alice"),
             "Alice seed phrase must derive via //Alice"
         );
-        assert!(!sudo.warnings.is_empty(), "sudo warnings must surface to operators");
+        assert!(
+            !sudo.warnings.is_empty(),
+            "sudo warnings must surface to operators"
+        );
     }
 
     #[test]
@@ -507,7 +528,10 @@ mod tests {
         // Adding a second dev-default profile would break this — that's
         // the intended behavior (you can have one production default and
         // one dev default, no more).
-        assert_eq!(ChainProfile::development_default_name(), Some("heima-paseo"));
+        assert_eq!(
+            ChainProfile::development_default_name(),
+            Some("heima-paseo")
+        );
     }
 
     #[test]

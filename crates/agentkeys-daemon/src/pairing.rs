@@ -20,11 +20,18 @@ pub async fn run_pair_flow(
     parent_wallet: Option<&WalletAddress>,
 ) -> Result<PairResult> {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-    let pubkey_bytes = ed25519_dalek::VerifyingKey::from(&signing_key).to_bytes().to_vec();
+    let pubkey_bytes = ed25519_dalek::VerifyingKey::from(&signing_key)
+        .to_bytes()
+        .to_vec();
     let child_pubkey = PublicKey(pubkey_bytes);
 
-    let scope = Scope { services: vec![], read_only: false };
-    let request_type = AuthRequestType::Pair { requested_scope: scope };
+    let scope = Scope {
+        services: vec![],
+        read_only: false,
+    };
+    let request_type = AuthRequestType::Pair {
+        requested_scope: scope,
+    };
     let request_details = auth_request::canonical_bytes(&request_type)
         .map_err(|e| anyhow!("canonical_bytes failed: {e}"))?;
 
@@ -96,8 +103,12 @@ pub async fn run_pair_flow(
         return Err(anyhow!("Pair request was rejected"));
     }
 
-    let session = decision.session.ok_or_else(|| anyhow!("no session in decision"))?;
-    let wallet = decision.wallet.ok_or_else(|| anyhow!("no wallet in decision"))?;
+    let session = decision
+        .session
+        .ok_or_else(|| anyhow!("no session in decision"))?;
+    let wallet = decision
+        .wallet
+        .ok_or_else(|| anyhow!("no wallet in decision"))?;
 
     println!("Paired. Session received. Daemon ready.");
 
@@ -112,7 +123,9 @@ pub async fn run_recover_flow(
     parent_wallet: Option<&WalletAddress>,
 ) -> Result<PairResult> {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-    let pubkey_bytes = ed25519_dalek::VerifyingKey::from(&signing_key).to_bytes().to_vec();
+    let pubkey_bytes = ed25519_dalek::VerifyingKey::from(&signing_key)
+        .to_bytes()
+        .to_vec();
     let child_pubkey = PublicKey(pubkey_bytes.clone());
 
     let agent_identity = if agent_identity_str.starts_with("0x") {
@@ -196,8 +209,12 @@ pub async fn run_recover_flow(
         return Err(anyhow!("Recover request was rejected"));
     }
 
-    let session = decision.session.ok_or_else(|| anyhow!("no session in recover decision"))?;
-    let wallet = decision.wallet.ok_or_else(|| anyhow!("no wallet in recover decision"))?;
+    let session = decision
+        .session
+        .ok_or_else(|| anyhow!("no session in recover decision"))?;
+    let wallet = decision
+        .wallet
+        .ok_or_else(|| anyhow!("no wallet in recover decision"))?;
 
     println!("Recovered. Session received. Daemon ready.");
 
@@ -214,7 +231,12 @@ pub async fn run_recover_2fa_flow(
     let recovery_method = match method_str {
         "passkey" => RecoveryMethod::Passkey,
         "email" => RecoveryMethod::Email,
-        other => return Err(anyhow!("Unknown recovery method '{}'. Use 'passkey' or 'email'.", other)),
+        other => {
+            return Err(anyhow!(
+                "Unknown recovery method '{}'. Use 'passkey' or 'email'.",
+                other
+            ))
+        }
     };
 
     let agent_identity = if agent_identity_str.starts_with("0x") {

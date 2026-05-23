@@ -70,7 +70,8 @@ fn valid_envelope_json() -> serde_json::Value {
 #[tokio::test]
 async fn append_v2_then_get_returns_canonical_cbor() {
     let app = router_with_state();
-    let (status, append_resp) = post_json(app.clone(), "/v1/audit/append/v2", valid_envelope_json()).await;
+    let (status, append_resp) =
+        post_json(app.clone(), "/v1/audit/append/v2", valid_envelope_json()).await;
     assert_eq!(status, StatusCode::OK);
     let hash = append_resp["envelope_hash"].as_str().unwrap().to_string();
     assert!(hash.starts_with("0x"));
@@ -85,7 +86,11 @@ async fn append_v2_then_get_returns_canonical_cbor() {
     let resp = app.oneshot(get_req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "application/cbor"
     );
     let cbor = resp.into_body().collect().await.unwrap().to_bytes();
@@ -141,10 +146,7 @@ async fn append_v2_accepts_unknown_op_kind() {
     body["op_body"] = json!({ "future_field": "v2-only" });
     let (status, resp) = post_json(router_with_state(), "/v1/audit/append/v2", body).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["envelope_hash"]
-        .as_str()
-        .unwrap()
-        .starts_with("0x"));
+    assert!(resp["envelope_hash"].as_str().unwrap().starts_with("0x"));
 }
 
 #[tokio::test]
@@ -163,8 +165,5 @@ async fn ts_unix_zero_gets_server_assigned() {
     assert_eq!(status, StatusCode::OK);
     // The hash will differ from a fixed-ts envelope because ts_unix is part
     // of the canonical CBOR. Just confirm we got a valid hash back.
-    assert!(resp["envelope_hash"]
-        .as_str()
-        .unwrap()
-        .starts_with("0x"));
+    assert!(resp["envelope_hash"].as_str().unwrap().starts_with("0x"));
 }

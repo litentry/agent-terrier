@@ -76,15 +76,14 @@ impl ClearSigningCatalog {
             Erc7730Error::Malformed(format!("cannot read 7730 dir {}: {e}", dir.display()))
         })?;
         for entry in read_dir {
-            let entry = entry
-                .map_err(|e| Erc7730Error::Malformed(format!("dir entry error: {e}")))?;
+            let entry =
+                entry.map_err(|e| Erc7730Error::Malformed(format!("dir entry error: {e}")))?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            let content = std::fs::read_to_string(&path).map_err(|e| {
-                Erc7730Error::Malformed(format!("read {}: {e}", path.display()))
-            })?;
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| Erc7730Error::Malformed(format!("read {}: {e}", path.display())))?;
             self.files.push(parse(&content)?);
         }
         Ok(())

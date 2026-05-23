@@ -42,7 +42,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{extract::State, http::StatusCode, response::Html, response::IntoResponse, routing::{get, post}, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::Html,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use p256::elliptic_curve::sec1::FromEncodedPoint;
@@ -385,7 +392,13 @@ pub async fn assert_webauthn(
     operator_omni: &str,
     message: &[u8],
 ) -> Result<Vec<u8>, WebauthnError> {
-    assert_webauthn_inner(operator_omni, message, "localhost", K11IntentContext::empty()).await
+    assert_webauthn_inner(
+        operator_omni,
+        message,
+        "localhost",
+        K11IntentContext::empty(),
+    )
+    .await
 }
 
 /// Same as [`assert_webauthn`] but for the companion daemon — uses RP ID
@@ -461,7 +474,9 @@ async fn enroll_webauthn_inner(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| WebauthnError::Bind(e.to_string()))?;
-    let local_addr = listener.local_addr().map_err(|e| WebauthnError::Bind(e.to_string()))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| WebauthnError::Bind(e.to_string()))?;
     let port = local_addr.port();
     // Bind URL uses 127.0.0.1; but the browser must see the RP ID (e.g.
     // `companion.localhost` for the companion daemon) as the effective
@@ -494,23 +509,24 @@ async fn enroll_webauthn_inner(
 
     let app = Router::new()
         .route("/", get(serve_enroll_page))
-        .route("/finish", post({
-            let tx = tx.clone();
-            move |_: State<Arc<ServerCtx>>, Json(body): Json<EnrollPost>| {
+        .route(
+            "/finish",
+            post({
                 let tx = tx.clone();
-                async move {
-                    if let Some(sender) = tx.lock().await.take() {
-                        let _ = sender.send(body);
+                move |_: State<Arc<ServerCtx>>, Json(body): Json<EnrollPost>| {
+                    let tx = tx.clone();
+                    async move {
+                        if let Some(sender) = tx.lock().await.take() {
+                            let _ = sender.send(body);
+                        }
+                        (StatusCode::OK, "ok")
                     }
-                    (StatusCode::OK, "ok")
                 }
-            }
-        }))
+            }),
+        )
         .with_state(ctx.clone());
 
-    let server_task = tokio::spawn(async move {
-        axum::serve(listener, app).await
-    });
+    let server_task = tokio::spawn(async move { axum::serve(listener, app).await });
 
     // Open the default browser (macOS: `open`; Linux: `xdg-open`; Windows: `start`).
     open_in_browser(&rp_origin)?;
@@ -572,7 +588,10 @@ async fn assert_webauthn_inner_parts(
     let enrollment = load_enrollment_with_rp(operator_omni, rp_id)?;
     // Sanity: the stored rp_id should match what we asked for. If not, the
     // file was written by an older CLI; reject so the user re-enrolls cleanly.
-    let enrolled_rp = enrollment.rp_id.clone().unwrap_or_else(|| "localhost".to_string());
+    let enrolled_rp = enrollment
+        .rp_id
+        .clone()
+        .unwrap_or_else(|| "localhost".to_string());
     if enrolled_rp != rp_id {
         return Err(WebauthnError::Io(format!(
             "K11 credential at ~/.agentkeys/k11/{}--{rp_id}.json was enrolled with rp_id={enrolled_rp:?} \
@@ -585,7 +604,10 @@ async fn assert_webauthn_inner_parts(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| WebauthnError::Bind(e.to_string()))?;
-    let port = listener.local_addr().map_err(|e| WebauthnError::Bind(e.to_string()))?.port();
+    let port = listener
+        .local_addr()
+        .map_err(|e| WebauthnError::Bind(e.to_string()))?
+        .port();
     let rp_origin = format!("http://{rp_id}:{port}");
 
     // The 32-byte challenge passed in IS the value WebAuthn signs over (no
@@ -610,23 +632,24 @@ async fn assert_webauthn_inner_parts(
 
     let app = Router::new()
         .route("/", get(serve_assert_page))
-        .route("/finish", post({
-            let tx = tx.clone();
-            move |_: State<Arc<ServerCtx>>, Json(body): Json<AssertPost>| {
+        .route(
+            "/finish",
+            post({
                 let tx = tx.clone();
-                async move {
-                    if let Some(sender) = tx.lock().await.take() {
-                        let _ = sender.send(body);
+                move |_: State<Arc<ServerCtx>>, Json(body): Json<AssertPost>| {
+                    let tx = tx.clone();
+                    async move {
+                        if let Some(sender) = tx.lock().await.take() {
+                            let _ = sender.send(body);
+                        }
+                        (StatusCode::OK, "ok")
                     }
-                    (StatusCode::OK, "ok")
                 }
-            }
-        }))
+            }),
+        )
         .with_state(ctx.clone());
 
-    let server_task = tokio::spawn(async move {
-        axum::serve(listener, app).await
-    });
+    let server_task = tokio::spawn(async move { axum::serve(listener, app).await });
 
     open_in_browser(&rp_origin)?;
 
@@ -691,7 +714,10 @@ fn finalize_enroll(
     let cd: ClientDataJson = serde_json::from_slice(&client_data_bytes)
         .map_err(|e| WebauthnError::SerdeJson(format!("clientDataJSON: {e}")))?;
     if cd.ty != "webauthn.create" {
-        return Err(WebauthnError::TypeMismatch { expected: "webauthn.create", got: cd.ty });
+        return Err(WebauthnError::TypeMismatch {
+            expected: "webauthn.create",
+            got: cd.ty,
+        });
     }
     if cd.challenge != expected_challenge {
         return Err(WebauthnError::ChallengeMismatch {
@@ -794,7 +820,10 @@ fn finalize_assert_parts(
     let cd: ClientDataJson = serde_json::from_slice(&client_data_bytes)
         .map_err(|e| WebauthnError::SerdeJson(format!("clientDataJSON: {e}")))?;
     if cd.ty != "webauthn.get" {
-        return Err(WebauthnError::TypeMismatch { expected: "webauthn.get", got: cd.ty });
+        return Err(WebauthnError::TypeMismatch {
+            expected: "webauthn.get",
+            got: cd.ty,
+        });
     }
     if cd.challenge != expected_challenge {
         return Err(WebauthnError::ChallengeMismatch {
@@ -832,12 +861,16 @@ fn finalize_assert_parts(
         return Err(WebauthnError::InvalidCosePubkey("not on curve".into()));
     };
     let verifying_key = VerifyingKey::from(pubkey);
-    let sig = Signature::from_der(&signature_der)
-        .map_err(|e| WebauthnError::SigParse(e.to_string()))?;
+    let sig =
+        Signature::from_der(&signature_der).map_err(|e| WebauthnError::SigParse(e.to_string()))?;
     verifying_key
         .verify(&signed_bytes, &sig)
         .map_err(|_| WebauthnError::SigInvalid)?;
-    Ok(AssertParts { authenticator_data, client_data_json: client_data_bytes, signature_der })
+    Ok(AssertParts {
+        authenticator_data,
+        client_data_json: client_data_bytes,
+        signature_der,
+    })
 }
 
 /// Convert verified WebAuthn assertion parts into the chain-ready payload
@@ -864,8 +897,8 @@ pub fn extract_chain_assertion(
 
     // Split COSE pubkey into X, Y.
     let pk_hex = enrollment.cose_pubkey_hex.trim_start_matches("0x");
-    let pk_bytes = hex::decode(pk_hex)
-        .map_err(|e| WebauthnError::InvalidCosePubkey(format!("hex: {e}")))?;
+    let pk_bytes =
+        hex::decode(pk_hex).map_err(|e| WebauthnError::InvalidCosePubkey(format!("hex: {e}")))?;
     if pk_bytes.len() != 65 || pk_bytes[0] != 0x04 {
         return Err(WebauthnError::InvalidCosePubkey(format!(
             "expected 0x04 || X(32) || Y(32) = 65 bytes; got {} bytes",
@@ -936,7 +969,9 @@ fn extract_attested_credential(att_obj_bytes: &[u8]) -> Result<AttestedCredentia
     // attestationObject is CBOR: { "fmt": str, "attStmt": map, "authData": bytes }
     let value: ciborium::Value = ciborium::from_reader(Cursor::new(att_obj_bytes))
         .map_err(|e| WebauthnError::Cbor(format!("attestationObject root: {e}")))?;
-    let map = value.as_map().ok_or(WebauthnError::MissingField("attestationObject not a map"))?;
+    let map = value
+        .as_map()
+        .ok_or(WebauthnError::MissingField("attestationObject not a map"))?;
     let auth_data_bytes = map
         .iter()
         .find(|(k, _)| k.as_text() == Some("authData"))
@@ -967,13 +1002,17 @@ fn extract_attested_credential(att_obj_bytes: &[u8]) -> Result<AttestedCredentia
     let cred_id_start = 55;
     let cred_id_end = cred_id_start + cred_id_len;
     if auth_data_bytes.len() <= cred_id_end {
-        return Err(WebauthnError::Cbor("authData missing credentialPublicKey".into()));
+        return Err(WebauthnError::Cbor(
+            "authData missing credentialPublicKey".into(),
+        ));
     }
     let credential_id = auth_data_bytes[cred_id_start..cred_id_end].to_vec();
     let cose_bytes = &auth_data_bytes[cred_id_end..];
     let cose: ciborium::Value = ciborium::from_reader(Cursor::new(cose_bytes))
         .map_err(|e| WebauthnError::Cbor(format!("COSE pubkey: {e}")))?;
-    let cose_map = cose.as_map().ok_or(WebauthnError::MissingField("COSE pubkey not a map"))?;
+    let cose_map = cose
+        .as_map()
+        .ok_or(WebauthnError::MissingField("COSE pubkey not a map"))?;
     // COSE labels: -2 = x, -3 = y (for EC2 keys). 1 = kty (should be 2 = EC2). 3 = alg (should be -7 = ES256).
     let mut x: Option<Vec<u8>> = None;
     let mut y: Option<Vec<u8>> = None;
@@ -1062,7 +1101,11 @@ pub fn load_enrollment_with_rp(
 
 async fn serve_enroll_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
     let is_companion = ctx.rp_id.contains("companion");
-    let role_label = if is_companion { "COMPANION MASTER" } else { "PRIMARY MASTER" };
+    let role_label = if is_companion {
+        "COMPANION MASTER"
+    } else {
+        "PRIMARY MASTER"
+    };
     let role_tagline = if is_companion {
         "Bind a SECOND platform passkey for M-of-N recovery quorum."
     } else {
@@ -1292,14 +1335,22 @@ async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoRespon
     // about to tap Touch ID for either role and the macOS prompt itself
     // doesn't say which credential — so we surface it here loudly.
     let is_companion = ctx.rp_id.contains("companion");
-    let role_label = if is_companion { "COMPANION MASTER" } else { "PRIMARY MASTER" };
+    let role_label = if is_companion {
+        "COMPANION MASTER"
+    } else {
+        "PRIMARY MASTER"
+    };
     let role_tagline = if is_companion {
         "Second device authorizing an M-of-N quorum operation."
     } else {
         "Original device authorizing a master-mutation."
     };
     let role_accent = if is_companion { "#a855f7" } else { "#0a84ff" }; // purple vs blue
-    let role_accent_rgb = if is_companion { "168, 85, 247" } else { "10, 132, 255" };
+    let role_accent_rgb = if is_companion {
+        "168, 85, 247"
+    } else {
+        "10, 132, 255"
+    };
     let role_emoji = if is_companion { "🛡️" } else { "🔑" };
     let html = format!(
         r##"<!DOCTYPE html>
@@ -1530,7 +1581,8 @@ mod tests {
             ),
             attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]), // empty CBOR map; we won't reach the parser
         };
-        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post).unwrap_err();
+        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post)
+            .unwrap_err();
         assert!(matches!(err, WebauthnError::ChallengeMismatch { .. }));
     }
 
@@ -1543,7 +1595,8 @@ mod tests {
             ),
             attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]),
         };
-        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post).unwrap_err();
+        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post)
+            .unwrap_err();
         assert!(matches!(err, WebauthnError::TypeMismatch { .. }));
     }
 
@@ -1556,7 +1609,8 @@ mod tests {
             ),
             attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]),
         };
-        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post).unwrap_err();
+        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post)
+            .unwrap_err();
         assert!(matches!(err, WebauthnError::OriginMismatch { .. }));
     }
 
@@ -1574,7 +1628,10 @@ mod tests {
 
     #[test]
     fn html_escape_handles_quote_chars() {
-        assert_eq!(html_escape(r#"a&b<c>d"e'f"#), "a&amp;b&lt;c&gt;d&quot;e&#x27;f");
+        assert_eq!(
+            html_escape(r#"a&b<c>d"e'f"#),
+            "a&amp;b&lt;c&gt;d&quot;e&#x27;f"
+        );
     }
 
     #[test]

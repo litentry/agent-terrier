@@ -15,8 +15,8 @@ pub mod email_rate_limits;
 #[cfg(feature = "auth-email-link")]
 pub mod email_tokens;
 pub mod grants;
-pub mod identity_links;
 pub mod idempotency;
+pub mod identity_links;
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth_pending;
 #[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]

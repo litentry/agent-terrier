@@ -47,11 +47,9 @@ pub async fn store_credential(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("ciphertext required"))?;
 
-    let ciphertext = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        ciphertext_b64,
-    )
-    .map_err(|e| AppError::bad_request(format!("invalid base64: {e}")))?;
+    let ciphertext =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, ciphertext_b64)
+            .map_err(|e| AppError::bad_request(format!("invalid base64: {e}")))?;
 
     let now = now_secs();
     let db = state.db.lock().unwrap();
@@ -110,8 +108,8 @@ pub async fn read_credential(
 
     // Scope enforcement: if session has a scope, verify service is allowed
     if let Some(scope_json) = &session.scope_json {
-        let scope: Scope = serde_json::from_str(scope_json)
-            .map_err(|e| AppError::internal(e.to_string()))?;
+        let scope: Scope =
+            serde_json::from_str(scope_json).map_err(|e| AppError::internal(e.to_string()))?;
 
         let service_name = agentkeys_types::ServiceName(service.clone());
         if !scope.services.contains(&service_name) {
@@ -133,10 +131,8 @@ pub async fn read_credential(
             "credential not found for agent={agent_id} service={service}"
         ))),
         Ok(ciphertext) => {
-            let encoded = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &ciphertext,
-            );
+            let encoded =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ciphertext);
             Ok(Json(json!({ "ciphertext": encoded })))
         }
     }
@@ -189,11 +185,14 @@ pub async fn list_credentials(
     // within that scope. This matches the read_credential handler's scope gate so
     // that a scoped child session cannot enumerate services outside its scope.
     let services: Vec<String> = if let Some(scope_json) = &session.scope_json {
-        let scope: Scope = serde_json::from_str(scope_json)
-            .map_err(|e| AppError::internal(e.to_string()))?;
+        let scope: Scope =
+            serde_json::from_str(scope_json).map_err(|e| AppError::internal(e.to_string()))?;
         let allowed: std::collections::HashSet<String> =
             scope.services.into_iter().map(|s| s.0).collect();
-        all_services.into_iter().filter(|s| allowed.contains(s)).collect()
+        all_services
+            .into_iter()
+            .filter(|s| allowed.contains(s))
+            .collect()
     } else {
         all_services
     };
@@ -230,12 +229,18 @@ pub async fn teardown_agent(
     }
 
     // Revoke all sessions for this agent
-    db.execute("UPDATE sessions SET revoked = 1 WHERE wallet_address = ?1", params![agent_id])
-        .map_err(|e| AppError::internal(e.to_string()))?;
+    db.execute(
+        "UPDATE sessions SET revoked = 1 WHERE wallet_address = ?1",
+        params![agent_id],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
 
     // Delete all credentials for this agent
-    db.execute("DELETE FROM credentials WHERE wallet_address = ?1", params![agent_id])
-        .map_err(|e| AppError::internal(e.to_string()))?;
+    db.execute(
+        "DELETE FROM credentials WHERE wallet_address = ?1",
+        params![agent_id],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
 
     Ok(Json(json!({ "ok": true })))
 }

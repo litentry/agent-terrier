@@ -1,11 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::{
-    extract::State,
-    http::HeaderMap,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::HeaderMap, response::IntoResponse, Json};
 use serde_json::json;
 
 use crate::audit::{MintOutcome, MintRecord};
@@ -81,33 +76,33 @@ pub async fn mint_oidc_jwt(
         .and_then(extract_bearer_token)
         .ok_or_else(|| BrokerError::Unauthorized("missing Authorization header".into()))?;
 
-    let session_claims = match verify_session_jwt(
-        &state.session_keypair,
-        &state.config.oidc_issuer,
-        token,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = state.audit.record_mint(
-                MintRecord {
-                    requester_token: token,
-                    requester_wallet: "unknown",
-                    requested_role: "oidc_jwt",
-                    session_duration_seconds: state.config.oidc_jwt_ttl_seconds as i32,
-                    sts_session_name: "(unauthenticated)",
-                    outcome: MintOutcome::AuthFailed,
-                },
-                Some(&e.to_string()),
-            );
-            return Err(e);
-        }
-    };
+    let session_claims =
+        match verify_session_jwt(&state.session_keypair, &state.config.oidc_issuer, token) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = state.audit.record_mint(
+                    MintRecord {
+                        requester_token: token,
+                        requester_wallet: "unknown",
+                        requested_role: "oidc_jwt",
+                        session_duration_seconds: state.config.oidc_jwt_ttl_seconds as i32,
+                        sts_session_name: "(unauthenticated)",
+                        outcome: MintOutcome::AuthFailed,
+                    },
+                    Some(&e.to_string()),
+                );
+                return Err(e);
+            }
+        };
 
     let wallet = session_claims.agentkeys.wallet_address;
     tracing::Span::current().record("wallet", wallet.as_str());
 
-    let (claims, _now, exp) =
-        build_oidc_jwt_claims(&state.config.oidc_issuer, &wallet, state.config.oidc_jwt_ttl_seconds);
+    let (claims, _now, exp) = build_oidc_jwt_claims(
+        &state.config.oidc_issuer,
+        &wallet,
+        state.config.oidc_jwt_ttl_seconds,
+    );
 
     let jwt = state.oidc.sign_jwt(&claims)?;
 

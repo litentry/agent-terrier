@@ -6,6 +6,19 @@ Same addresses are mirrored into [`scripts/operator-workstation.env`](../../scri
 
 ## Heima mainnet (chain_id = 212013)
 
+**v2 (current live)** — wider AgentKeysScope + SidecarRegistry surface:
+
+| Contract | Address | Bytecode |
+|---|---|---|
+| `AgentKeysScope` | `0xd44b375daefc65768f417d0f0125b68d5ba7df3b` | 4572 bytes |
+| `SidecarRegistry` | `0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE` | 4572 bytes |
+| `K3EpochCounter` | `0x6c9e675c699a06acefbc156afdee6bfbfe32ccb3` | 591 bytes |
+| `CredentialAudit` | `0x63c4545ac01c77cc74044f25b8edea3880224577` | 3043 bytes |
+| `P256Verifier` | `0xda5b772f9d6c09abe80414eea908612df9b54749` | (pre-deployed verifier) |
+| `K11Verifier` | `0x5a441431f08e0f5f5ed10659620cb4e0e814e627` | (pre-deployed verifier) |
+
+**Historical v1 deploy** (superseded by v2 above; preserved for cross-reference of old txs):
+
 | Contract | Address | Bytecode |
 |---|---|---|
 | `AgentKeysScope` | `0x14C23B5D1cE20c094af643a20e6b0972dAD12aa8` | 3146 bytes |
@@ -13,17 +26,17 @@ Same addresses are mirrored into [`scripts/operator-workstation.env`](../../scri
 | `K3EpochCounter` | `0x8396dEc50ff755d6DE7728DABB00Be2eFBCdf4dF` | 687 bytes |
 | `CredentialAudit` | `0x1801ded1a4FBD8c9224Ab18B9EcbB293B8674c06` | 1421 bytes |
 
-**Explorer note**: [`heima.statescan.io`](https://heima.statescan.io/) is a Substrate-side explorer — it indexes pallet extrinsics + events but does NOT decode EVM contract calls or bytecode. Verifying EVM contracts on Heima today goes via direct RPC, not the explorer. The recipes:
+**Explorer note**: [`heima.statescan.io`](https://heima.statescan.io/) is a Substrate-side explorer — it indexes pallet extrinsics + events but does NOT decode EVM contract calls or bytecode. Verifying EVM contracts on Heima today goes via direct RPC, not the explorer. The recipes (pointing at the live v2 deploy):
 
 ```bash
-# Bytecode presence (eth_getCode):
+# Bytecode presence (eth_getCode) — v2 AgentKeysScope:
 curl -sS -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"eth_getCode","params":["0x14C23B5D1cE20c094af643a20e6b0972dAD12aa8","latest"],"id":1}' \
+  -d '{"jsonrpc":"2.0","method":"eth_getCode","params":["0xd44b375daefc65768f417d0f0125b68d5ba7df3b","latest"],"id":1}' \
   https://rpc.heima-parachain.heima.network | jq -r '.result' | head -c 40
 # → non-"0x" output = contract bytecode present
 
-# View function (cast call, zero gas):
-cast call 0x76D574a107727bE87fc1422661A030FEFda70786 "ROLE_CAP_MINT()(uint8)" \
+# View function (cast call, zero gas) — v2 SidecarRegistry:
+cast call 0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE "ROLE_CAP_MINT()(uint8)" \
   --rpc-url https://rpc.heima-parachain.heima.network
 # → 1
 ```
@@ -45,8 +58,8 @@ Future stage-2/3 work: agentkeys-specific indexing on top of Litentry's fork of 
 - Forge: 1.6.0
 - Deploy script: [`crates/agentkeys-chain/script/DeployAgentKeysV1.s.sol`](../../crates/agentkeys-chain/script/DeployAgentKeysV1.s.sol)
 
-**Constructor wiring** (verified post-deploy):
-- `AgentKeysScope.registry()` = `0x76D574a107727bE87fc1422661A030FEFda70786` (= the deployed SidecarRegistry above) ✓
+**Constructor wiring** (verified post-deploy against v2):
+- `AgentKeysScope.registry()` = `0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE` (= the deployed v2 SidecarRegistry above) ✓
 - `K3EpochCounter.currentEpoch()` = `1` (initialized) ✓
 - `K3EpochCounter.signerGovernance()` = `0xdE644936D5B7d5d42032fd08bbA42Fbbfd6663Bc` (deployer; expected to be transferred to the operational signer wallet OR an M-of-N multisig in stage 2 via `setSignerGovernance(newGov)`)
 - `SidecarRegistry.ROLE_CAP_MINT()` = `1`, `ROLE_RECOVERY()` = `2`, `ROLE_SCOPE_MGMT()` = `4` ✓

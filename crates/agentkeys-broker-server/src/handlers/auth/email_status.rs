@@ -23,14 +23,9 @@ pub async fn email_status(
 ) -> Result<impl IntoResponse, BrokerError> {
     #[cfg(feature = "auth-email-link")]
     {
-        let plugin = state
-            .email_link
-            .as_ref()
-            .ok_or_else(|| {
-                BrokerError::BadRequest(
-                    "email_link auth method is not enabled".to_string(),
-                )
-            })?;
+        let plugin = state.email_link.as_ref().ok_or_else(|| {
+            BrokerError::BadRequest("email_link auth method is not enabled".to_string())
+        })?;
         let status = plugin
             .token_store
             .peek_status(&request_id)

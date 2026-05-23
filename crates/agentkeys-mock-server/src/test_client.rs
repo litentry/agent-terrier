@@ -1,21 +1,24 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::Router;
 use base64::Engine;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
-    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes,
-    EncryptedPairPayload, InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey,
-    RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
+    AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
+    InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope,
+    ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
-use crate::{create_router, db, state::{AppState, SharedState}};
+use crate::{
+    create_router, db,
+    state::{AppState, SharedState},
+};
 
 /// Percent-encode the unreserved subset of RFC 3986 for query-string values.
 fn pct_encode(s: &str) -> String {
@@ -127,9 +130,10 @@ impl InProcessBackend {
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, BackendError> {
-        self.do_request("POST", path, Some(body), vec![]).await.map(|(_, j)| j)
+        self.do_request("POST", path, Some(body), vec![])
+            .await
+            .map(|(_, j)| j)
     }
-
 
     async fn post_with_session(
         &self,
@@ -151,7 +155,9 @@ impl InProcessBackend {
     }
 
     async fn get_anonymous(&self, path: &str) -> Result<Value, BackendError> {
-        self.do_request("GET", path, None, vec![]).await.map(|(_, j)| j)
+        self.do_request("GET", path, None, vec![])
+            .await
+            .map(|(_, j)| j)
     }
 
     async fn delete_with_session(
@@ -189,7 +195,9 @@ impl CredentialBackend for InProcessBackend {
             }
         };
 
-        let body = self.post("/session/create", json!({ "auth_token": token_str })).await?;
+        let body = self
+            .post("/session/create", json!({ "auth_token": token_str }))
+            .await?;
 
         let session_token = body["session"]
             .as_str()
@@ -267,7 +275,10 @@ impl CredentialBackend for InProcessBackend {
         agent_id: &WalletAddress,
         service: &ServiceName,
     ) -> Result<Vec<u8>, BackendError> {
-        let path = format!("/credential/read?agent_id={}&service={}", agent_id.0, service.0);
+        let path = format!(
+            "/credential/read?agent_id={}&service={}",
+            agent_id.0, service.0
+        );
         let body = self.get_with_session(&path, session).await?;
 
         let ct_b64 = body["ciphertext"]
@@ -505,38 +516,39 @@ impl CredentialBackend for InProcessBackend {
         let request_type = match request_type_str {
             "Recover" => AuthRequestType::Recover {
                 agent_identity: agentkeys_types::AgentIdentity::Alias(
-                    body["agent_identity"].as_str().unwrap_or("unknown").to_string(),
+                    body["agent_identity"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string(),
                 ),
                 new_daemon_pubkey: child_pubkey_bytes.clone(),
             },
             "ScopeChange" => AuthRequestType::ScopeChange {
-                agent_id: WalletAddress(
-                    body["agent_id"].as_str().unwrap_or("unknown").to_string(),
-                ),
-                new_scope: serde_json::from_value(body["new_scope"].clone())
-                    .unwrap_or(Scope { services: vec![], read_only: false }),
+                agent_id: WalletAddress(body["agent_id"].as_str().unwrap_or("unknown").to_string()),
+                new_scope: serde_json::from_value(body["new_scope"].clone()).unwrap_or(Scope {
+                    services: vec![],
+                    read_only: false,
+                }),
             },
             "HighValueRelease" => AuthRequestType::HighValueRelease {
-                agent_id: WalletAddress(
-                    body["agent_id"].as_str().unwrap_or("unknown").to_string(),
-                ),
-                service: ServiceName(
-                    body["service"].as_str().unwrap_or("unknown").to_string(),
-                ),
+                agent_id: WalletAddress(body["agent_id"].as_str().unwrap_or("unknown").to_string()),
+                service: ServiceName(body["service"].as_str().unwrap_or("unknown").to_string()),
                 estimated_cost_cents: body["estimated_cost_cents"].as_u64().unwrap_or(0),
             },
             "KeyRotate" => AuthRequestType::KeyRotate {
-                agent_id: WalletAddress(
-                    body["agent_id"].as_str().unwrap_or("unknown").to_string(),
-                ),
+                agent_id: WalletAddress(body["agent_id"].as_str().unwrap_or("unknown").to_string()),
                 new_pubkey: body["new_pubkey"]
                     .as_str()
                     .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
                     .unwrap_or_default(),
             },
             _ => AuthRequestType::Pair {
-                requested_scope: serde_json::from_value(body["requested_scope"].clone())
-                    .unwrap_or(Scope { services: vec![], read_only: false }),
+                requested_scope: serde_json::from_value(body["requested_scope"].clone()).unwrap_or(
+                    Scope {
+                        services: vec![],
+                        read_only: false,
+                    },
+                ),
             },
         };
 
@@ -573,7 +585,9 @@ impl CredentialBackend for InProcessBackend {
         let status = body["status"].as_str().unwrap_or("timeout");
 
         if status == "timeout" {
-            return Err(BackendError::Transport("await_auth_decision timed out".into()));
+            return Err(BackendError::Transport(
+                "await_auth_decision timed out".into(),
+            ));
         }
 
         if status == "consumed" || status == "consumed_awaited" {
@@ -600,7 +614,9 @@ impl CredentialBackend for InProcessBackend {
             }
         });
 
-        let wallet = body["wallet"].as_str().map(|w| WalletAddress(w.to_string()));
+        let wallet = body["wallet"]
+            .as_str()
+            .map(|w| WalletAddress(w.to_string()));
 
         Ok(SignedAuthDecision {
             request_id: request_id.clone(),
@@ -654,7 +670,10 @@ impl CredentialBackend for InProcessBackend {
                     .map(|s| ServiceName(s.to_string()))
                     .collect();
                 let read_only = body["read_only"].as_bool().unwrap_or(false);
-                Ok(Some(Scope { services, read_only }))
+                Ok(Some(Scope {
+                    services,
+                    read_only,
+                }))
             }
         }
     }

@@ -12,7 +12,10 @@ pub enum ProvisionError {
     SpawnFailed(#[from] std::io::Error),
 
     #[error("subprocess exited with non-zero status before emitting success or error event")]
-    SubprocessFailed { exit_code: Option<i32>, stderr: String },
+    SubprocessFailed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 
     #[error("subprocess emitted malformed event line: {line} ({source})")]
     MalformedEvent {

@@ -27,7 +27,9 @@ impl WalletStore {
         }
         let conn = Connection::open(path)
             .map_err(|e| WalletError::Storage(format!("open wallets db: {}", e)))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -35,7 +37,9 @@ impl WalletStore {
     pub fn open_in_memory() -> Result<Self, WalletError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| WalletError::Storage(format!("open in-memory wallets db: {}", e)))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -190,7 +194,10 @@ impl WalletStore {
         let Ok(conn) = self.conn.lock() else {
             return false;
         };
-        conn.execute("CREATE TABLE IF NOT EXISTS _readyz_probe (id INTEGER PRIMARY KEY)", [])
-            .is_ok()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS _readyz_probe (id INTEGER PRIMARY KEY)",
+            [],
+        )
+        .is_ok()
     }
 }

@@ -21,7 +21,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+# ENV_FILE: caller-supplied (setup-heima.sh exports it for --test mode)
+# takes precedence; falls back to prod. Verifying with the wrong env file
+# silently reports the OTHER stack's contracts as "verified".
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 
 if [ -t 2 ]; then
   C_HEAD='\033[1;36m'; C_OK='\033[1;32m'; C_ERR='\033[1;31m'; C_RESET='\033[0m'

@@ -159,7 +159,7 @@ Three high-severity findings amended into this plan before implementation begins
 ### Bucket policy / OIDC
 - [ ] OIDC JWT emits BOTH `agentkeys_user_wallet` AND `agentkeys_actor_omni` tag claims
 - [ ] Bucket policy: ADD `_v2_omni_keyed` rules ALONGSIDE existing `_v1_wallet_keyed` (do NOT remove v1)
-- [ ] Migration runbook section in [cloud-setup.md](../../cloud-setup.md) §4.4 covering dual-tag transition
+- [ ] Migration runbook section in [cloud-bootstrap.md](../../cloud-bootstrap.md) §4.4 covering dual-tag transition
 
 ### Testing
 - [ ] End-to-end sidecar + broker + worker + signer flow against staging deployment

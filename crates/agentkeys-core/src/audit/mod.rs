@@ -202,57 +202,27 @@ impl TypedAuditBody {
         // both sides use the same field names.
         let value = ciborium_to_json(&env.op_body).ok()?;
         Some(match kind {
-            AuditOpKind::CredStore => {
-                Self::CredStore(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::CredFetch => {
-                Self::CredFetch(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::CredTeardown => {
-                Self::CredTeardown(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::MemoryPut => {
-                Self::MemoryPut(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::MemoryGet => {
-                Self::MemoryGet(serde_json::from_value(value).ok()?)
-            }
+            AuditOpKind::CredStore => Self::CredStore(serde_json::from_value(value).ok()?),
+            AuditOpKind::CredFetch => Self::CredFetch(serde_json::from_value(value).ok()?),
+            AuditOpKind::CredTeardown => Self::CredTeardown(serde_json::from_value(value).ok()?),
+            AuditOpKind::MemoryPut => Self::MemoryPut(serde_json::from_value(value).ok()?),
+            AuditOpKind::MemoryGet => Self::MemoryGet(serde_json::from_value(value).ok()?),
             AuditOpKind::MemoryTeardown => {
                 Self::MemoryTeardown(serde_json::from_value(value).ok()?)
             }
-            AuditOpKind::SignEip191 => {
-                Self::SignEip191(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::SignEip712 => {
-                Self::SignEip712(serde_json::from_value(value).ok()?)
-            }
+            AuditOpKind::SignEip191 => Self::SignEip191(serde_json::from_value(value).ok()?),
+            AuditOpKind::SignEip712 => Self::SignEip712(serde_json::from_value(value).ok()?),
             AuditOpKind::PaymentEscrowRedeem => {
                 Self::PaymentEscrowRedeem(serde_json::from_value(value).ok()?)
             }
-            AuditOpKind::PaymentDirect => {
-                Self::PaymentDirect(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::ScopeGrant => {
-                Self::ScopeGrant(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::ScopeRevoke => {
-                Self::ScopeRevoke(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::DeviceAdd => {
-                Self::DeviceAdd(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::DeviceRevoke => {
-                Self::DeviceRevoke(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::K10Rotate => {
-                Self::K10Rotate(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::EmailSend => {
-                Self::EmailSend(serde_json::from_value(value).ok()?)
-            }
-            AuditOpKind::EmailReceive => {
-                Self::EmailReceive(serde_json::from_value(value).ok()?)
-            }
+            AuditOpKind::PaymentDirect => Self::PaymentDirect(serde_json::from_value(value).ok()?),
+            AuditOpKind::ScopeGrant => Self::ScopeGrant(serde_json::from_value(value).ok()?),
+            AuditOpKind::ScopeRevoke => Self::ScopeRevoke(serde_json::from_value(value).ok()?),
+            AuditOpKind::DeviceAdd => Self::DeviceAdd(serde_json::from_value(value).ok()?),
+            AuditOpKind::DeviceRevoke => Self::DeviceRevoke(serde_json::from_value(value).ok()?),
+            AuditOpKind::K10Rotate => Self::K10Rotate(serde_json::from_value(value).ok()?),
+            AuditOpKind::EmailSend => Self::EmailSend(serde_json::from_value(value).ok()?),
+            AuditOpKind::EmailReceive => Self::EmailReceive(serde_json::from_value(value).ok()?),
             AuditOpKind::K3EpochAdvance => {
                 Self::K3EpochAdvance(serde_json::from_value(value).ok()?)
             }
@@ -278,7 +248,9 @@ fn ciborium_to_json(v: &ciborium::Value) -> Result<serde_json::Value, AuditError
             } else if as_i128 >= i64::MIN as i128 && as_i128 <= i64::MAX as i128 {
                 serde_json::Value::Number((as_i128 as i64).into())
             } else {
-                return Err(AuditError::Invalid(format!("integer out of i64 range: {as_i128}")));
+                return Err(AuditError::Invalid(format!(
+                    "integer out of i64 range: {as_i128}"
+                )));
             }
         }
         CV::Float(f) => serde_json::Number::from_f64(*f)
@@ -305,7 +277,11 @@ fn ciborium_to_json(v: &ciborium::Value) -> Result<serde_json::Value, AuditError
             serde_json::Value::Object(out)
         }
         CV::Tag(_, inner) => ciborium_to_json(inner)?,
-        _ => return Err(AuditError::Invalid(format!("unsupported CBOR variant: {v:?}"))),
+        _ => {
+            return Err(AuditError::Invalid(format!(
+                "unsupported CBOR variant: {v:?}"
+            )))
+        }
     })
 }
 
