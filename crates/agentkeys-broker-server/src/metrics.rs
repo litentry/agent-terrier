@@ -22,8 +22,6 @@ pub struct Metrics {
     pub auth_failed_unauthorized: AtomicU64,
     pub auth_failed_rate_limited: AtomicU64,
     pub auth_failed_other: AtomicU64,
-    pub idempotency_hits: AtomicU64,
-    pub idempotency_conflicts: AtomicU64,
 }
 
 impl Metrics {
@@ -74,16 +72,6 @@ impl Metrics {
                 &self.auth_failed_other,
                 "Auth attempts that failed with any other 4xx/5xx.",
             ),
-            (
-                "agentkeys_broker_idempotency_hits_total",
-                &self.idempotency_hits,
-                "Idempotency-Key replays served from cache.",
-            ),
-            (
-                "agentkeys_broker_idempotency_conflicts_total",
-                &self.idempotency_conflicts,
-                "Idempotency-Key requests with mismatched body hash (422).",
-            ),
         ];
         for (name, counter, help) in pairs {
             use std::fmt::Write as _;
@@ -123,8 +111,8 @@ mod tests {
         let s = m.render_prometheus();
         let help_count = s.matches("# HELP").count();
         let type_count = s.matches("# TYPE").count();
-        assert_eq!(help_count, 10);
-        assert_eq!(type_count, 10);
+        assert_eq!(help_count, 8);
+        assert_eq!(type_count, 8);
     }
 
     #[test]
