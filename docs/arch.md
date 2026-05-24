@@ -1986,7 +1986,7 @@ flowchart TB
 - Signer host is TEE-attested. Brokers and workers pin the signer's attestation hash; mTLS handshake fails if measurement drifts.
 - Daemons reach broker + workers over public TLS. Caller authentication at workers is by cap-token, not by IP.
 
-The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent). Operator-facing commentary in [`operator-runbook.md`](operator-runbook-stage7.md).
+The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent; the single entry point per CLAUDE.md "Remote broker host" rule). Historical stage-7 operator commentary is archived at [`docs/archived/operator-runbook-stage7-2026-04.md`](archived/operator-runbook-stage7-2026-04.md) for reference only.
 
 ---
 
@@ -1999,7 +1999,8 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/s
 - **Stage 2 deliverable inventory** — [`spec/plans/v2-issues/issue-v2-stage-2-hardening.md`](spec/plans/v2-issues/issue-v2-stage-2-hardening.md)
 - **Payment-service design** — [`spec/plans/v2-issues/issue-payment-service-deferred.md`](spec/plans/v2-issues/issue-payment-service-deferred.md)
 - **Migration from pre-v2** — [`v2-stage1-migration-and-demo.md`](../v2-stage1-migration-and-demo.md) (historical; the migration window closed when stage 1 shipped)
-- **Operator runbook** — [`operator-runbook-stage7.md`](operator-runbook-stage7.md)
+- **Operator runbook** — [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent). Historical: [`docs/archived/operator-runbook-stage7-2026-04.md`](archived/operator-runbook-stage7-2026-04.md).
+- **Milestone roadmap (M1-M7)** — [`spec/plans/milestones-roadmap.md`](spec/plans/milestones-roadmap.md)
 - **Cloud-side IAM + DNS + cert** — [`../cloud-setup.md`](../cloud-setup.md)
 - **Per-actor reference (agent role)** — [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
 - **Upstream backend classes (per-upstream design)** — [`wiki/upstream-backend-classes-exercise-vs-distribution.md`](wiki/upstream-backend-classes-exercise-vs-distribution.md)

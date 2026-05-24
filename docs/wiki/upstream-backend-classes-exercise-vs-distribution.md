@@ -132,7 +132,7 @@ The `vault_bucket = S3` choice is one row of [§7 pluggable surfaces](../arch.md
 ## Related
 
 - [`docs/arch.md`](../arch.md) §4b (this split's home), §6 (per-mint sequence), §7 (pluggable surfaces), §7a (bucket layout)
-- [`docs/stage7-demo-and-verification.md`](../stage7-demo-and-verification.md) §5.1, §5.2, §5.3 (Class A pipeline), §6 (grant lifecycle)
+- [archived stage7 demo](../archived/stage7-demo-and-verification-2026-04.md) §5.1, §5.2, §5.3 (Class A pipeline), §6 (grant lifecycle)
 - [`crates/agentkeys-provisioner/`](../../crates/agentkeys-provisioner/) (Class B implementation)
 - [`provisioner-scripts/src/scrapers/openrouter.ts`](../provisioner-scripts/src/scrapers/openrouter.ts) (Class B reference: OpenRouter)
 - [`wiki/key-security.md`](./key-security.md), [`wiki/credential-usage.md`](./credential-usage.md), [`wiki/tag-based-access.md`](./tag-based-access.md) — adjacent wiki pages

@@ -1,0 +1,13 @@
+# AgentKeys ESP32-S3 demo firmware — partition table
+# Plan: docs/spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md
+#
+# Layout: NVS (config) + factory + OTA dual-slot + SPIFFS (future log buffer)
+# Total: 8MB flash assumed (CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y in sdkconfig.defaults)
+
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x6000,
+phy_init,   data, phy,      0xf000,    0x1000,
+factory,    app,  factory,  0x10000,   0x300000,
+ota_0,      app,  ota_0,    0x310000,  0x300000,
+ota_1,      app,  ota_1,    0x610000,  0x300000,
+storage,    data, spiffs,   0x910000,  0x6F0000,
