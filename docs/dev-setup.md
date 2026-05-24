@@ -145,7 +145,7 @@ Run through [`cloud-bootstrap.md`](./cloud-bootstrap.md) §1–§3 once per AWS 
 - S3 bucket `agentkeys-mail-<ACCOUNT_ID>` with receipt rule writing inbound to `inbound/`
 - Route 53 records: three DKIM CNAMEs, MX, SPF, DMARC
 
-Manage the daemon user's long-lived AWS keys via a **named profile** in `~/.aws/credentials` (mode 0600). The broker uses the AWS SDK's default credential chain — `AWS_PROFILE` (set by `awsp` or your shell), the shared credentials file, or an EC2 instance profile via IMDS. **No long-lived AWS keys live in env vars.** See [`operator-runbook-stage7.md`](./operator-runbook-stage7.md) for the full credential story.
+Manage the daemon user's long-lived AWS keys via a **named profile** in `~/.aws/credentials` (mode 0600). The broker uses the AWS SDK's default credential chain — `AWS_PROFILE` (set by `awsp` or your shell), the shared credentials file, or an EC2 instance profile via IMDS. **No long-lived AWS keys live in env vars.** See [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) for the bring-up + credential wiring; historical credential commentary archived at [`archived/operator-runbook-stage7-2026-04.md`](./archived/operator-runbook-stage7-2026-04.md).
 
 ### 5.2 Run the broker server
 
@@ -173,7 +173,7 @@ The broker:
 3. Returns 1-hour temp creds to the caller.
 4. Logs every mint to `BROKER_AUDIT_DB_PATH` (SQLite, one row per mint).
 
-For runbook detail (start / supervise / rotate / monitor / migrate to hosted), see [`docs/operator-runbook-stage7.md`](./operator-runbook-stage7.md).
+For runbook detail (start / supervise / rotate / monitor / migrate to hosted), see [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent; the canonical entry point).
 For the automated remote-host bootstrap, see [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh).
 
 ### 5.3 Hand off bearer tokens to your developers
@@ -249,14 +249,13 @@ The stage-done script is the authoritative evaluator — never self-grade. If it
 
 Providers add, remove, and reorder signup steps. When a deterministic scraper breaks, diagnose with the `/agentkeys-workflow-collection` skill — it drives a real Chrome session via `chrome-devtools-mcp` to produce a diff-ready transcript. That transcript is what feeds back into the scraper's pattern library.
 
-The longer-term plan (Stage 5b) is to detect drift automatically from telemetry and hand MCP-capable callers a fallback that their own LLM can drive — details in [`spec/plans/development-stages.md`](./spec/plans/development-stages.md) § Active.
+The longer-term plan (Stage 5b → folded into M2 vendor wedge) is to detect drift automatically from telemetry and hand MCP-capable callers a fallback that their own LLM can drive — details in [`spec/plans/milestones-roadmap.md`](./spec/plans/milestones-roadmap.md) § M2.
 
 ## 10. Further reading
 
-- [`spec/plans/development-stages.md`](./spec/plans/development-stages.md) — Shipped / Active / Planned roadmap
+- [`spec/plans/milestones-roadmap.md`](./spec/plans/milestones-roadmap.md) — M1-M7 roadmap (replaces the archived v1/v2 stage plan)
 - [`cloud-bootstrap.md`](./cloud-bootstrap.md) — one-time AWS infra (DNS, SES, S3, IAM, OIDC federation)
-- [`stage7-wip.md`](./stage7-wip.md) — broker server design + acceptance test
-- [`operator-runbook-stage7.md`](./operator-runbook-stage7.md) — start, supervise, rotate, monitor the broker
+- [`../scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) — idempotent broker bring-up + supervise + rotate
 - [`spec/credential-backend-interface.md`](./spec/credential-backend-interface.md) — 15-method trait contract
 - [`spec/ses-email-architecture.md`](./spec/ses-email-architecture.md) — Stage 6 email pipeline deep-dive
 - [`spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) — what the broker is defending against

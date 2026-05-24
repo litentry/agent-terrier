@@ -3,7 +3,7 @@
 ## Architecture
 Rust monorepo with Cargo workspace. See `docs/arch.md` for component inventory.
 See `docs/spec/credential-backend-interface.md` for the CredentialBackend trait contract (15 methods).
-See `docs/spec/plans/development-stages.md` for the 8-stage build plan.
+See `docs/spec/plans/milestones-roadmap.md` for the M1–M7 milestone roadmap (replaces the archived v1/v2 staged plan).
 See `docs/spec/plans/execution-plan.md` for the orchestration runbook (ralph, team, ultraqa).
 Do not read folder `docs/archived`
 
@@ -48,7 +48,7 @@ Before changing any file in response to a reported failure, **reproduce the fail
 Once a local repro proves a fix is correct, **land it the same turn**: edit every affected file (search repo-wide — never assume one file), commit, push to `origin/evm`. Do not stop at "verified locally" or "fixed in one place" — the next operator running the docs will hit the same bug if the fix isn't on `origin/evm`. Pair this with the diagnosis-before-edit policy: diagnose once, fix everywhere, push immediately.
 
 ## Runbook-fix-fold-back policy
-When the user is walking through a runbook (`docs/cloud-setup.md`, `docs/stage7-demo-and-verification.md`, `docs/operator-runbook-stage7.md`, etc.) and hits a step that fails, **two things must land in the same turn**:
+When the user is walking through a runbook (`docs/cloud-setup.md`, `docs/v2-stage1-migration-and-demo.md`, `scripts/setup-broker-host.sh`, etc.) and hits a step that fails, **two things must land in the same turn**:
 
 1. The targeted fix to whatever broke (script default, env var, doc command, code).
 2. **A revision to the runbook itself** so the next operator running it top-to-bottom will not hit the same failure. The fix lives wherever the bug was; the runbook revision lives wherever the operator first encounters the broken step.
@@ -191,7 +191,7 @@ Verified live:
 
 On every session start:
 1. `jj log --limit 10 && cat harness/progress.json && bash harness/init.sh $(jq -r .current_stage harness/progress.json)`
-2. Read the stage contract for your current stage in `docs/spec/plans/development-stages.md`
+2. Read the milestone scope for the current milestone in `docs/spec/plans/milestones-roadmap.md` (the v1/v2 stage framing is archived at `docs/archived/development-stages-v2-2026-04.md`)
 3. Pick the HIGHEST-PRIORITY incomplete deliverable from `harness/features.json`
 4. Implement ONE deliverable
 5. Run tests: `cargo test -p <crate>` for the affected crate

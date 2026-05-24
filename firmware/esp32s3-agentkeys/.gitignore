@@ -1,0 +1,17 @@
+# Build artifacts
+build/
+.pio/
+.vscode/
+
+# ESP-IDF generated
+sdkconfig
+sdkconfig.old
+
+# Per-device secrets (WiFi creds, actor token overrides)
+main/secrets.h
+
+# Compiled outputs
+*.bin
+*.elf
+*.map
+*.lst

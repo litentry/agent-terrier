@@ -273,7 +273,7 @@ All `request_details` values MUST be serialized with **deterministic CBOR** (RFC
 
 ### Mapping to Heima Primitives
 
-> **Superseded 2026-04-26 — vault rows.** The `store_credential` / `read_credential` rows below originally pointed at `pallet-secrets-vault` (on-chain encrypted blob store). Per [`./threat-model-key-custody.md`](./threat-model-key-custody.md) and [`../stage8-wip.md`](../stage8-wip.md), the canonical v0.1 design moves ciphertext **off-chain** into S3 under per-epoch DEKs. The chain holds only `(blob_pointer, ciphertext_hash, epoch)` via `pallet-vault-pointers`. Mapping rows updated below; the on-chain encrypted vault is no longer a target.
+> **Superseded 2026-04-26 — vault rows.** The `store_credential` / `read_credential` rows below originally pointed at `pallet-secrets-vault` (on-chain encrypted blob store). Per [`./threat-model-key-custody.md`](./threat-model-key-custody.md) and [`../archived/stage8-wip-2026-04.md`](../stage8-wip.md), the canonical v0.1 design moves ciphertext **off-chain** into S3 under per-epoch DEKs. The chain holds only `(blob_pointer, ciphertext_hash, epoch)` via `pallet-vault-pointers`. Mapping rows updated below; the on-chain encrypted vault is no longer a target.
 
 For the Heima backend implementation:
 

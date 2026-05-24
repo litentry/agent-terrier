@@ -462,7 +462,7 @@ Total: ~2 weeks. No Lambda, no DynamoDB, no server-side MIME parsing — the bro
 
 - **[`docs/wiki/oidc-federation.md`](../wiki/oidc-federation.md)** — the generalized OIDC-provider design that §10.5 references; explains how the same ES256 key federates into AWS, GCP, Azure, Snowflake, K8s
 - **[`docs/spec/threat-model-key-custody.md`](./threat-model-key-custody.md)** — generalizes this spec's "raw MIME in S3, metadata on chain" pattern to credential ciphertext too. The email pipeline is the precedent; Stage 8 generalizes it.
-- **[`docs/stage8-wip.md`](../stage8-wip.md)** — the off-chain encrypted vault. Reuses this spec's S3 bucket pattern under a different prefix (`agentkeys-vault/<wallet>/...`).
+- **[archived stage8 WIP](../archived/stage8-wip-2026-04.md)** — the off-chain encrypted vault. Reuses this spec's S3 bucket pattern under a different prefix (`agentkeys-vault/<wallet>/...`).
 - `docs/spec/email-signing-backends.md` — the generalized trait (needs an SES section added; this spec supplies the content)
 - `docs/spec/credential-backend-interface.md` — the parent trait this extends
 - `docs/stage5-workspace-email-setup.md` — alternative: Google DWD operator runbook (preserved for enterprise deployments)

@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-26
 **Status:** Design — supersedes the on-chain encrypted-vault assumption that runs through docs/wiki/blockchain-tee-architecture.md, docs/wiki/data-classification.md, docs/wiki/key-security.md, and docs/spec/credential-backend-interface.md.
-**Related issues:** [#57](https://github.com/litentry/agentKeys/issues/57) (this doc — security finding), [#9](https://github.com/litentry/agentKeys/issues/9) (master-seed HDKD), [`docs/spec/heima-gaps-vs-desired-architecture.md`](./heima-gaps-vs-desired-architecture.md), [`docs/stage8-wip.md`](../stage8-wip.md)
+**Related issues:** [#57](https://github.com/litentry/agentKeys/issues/57) (this doc — security finding), [#9](https://github.com/litentry/agentKeys/issues/9) (master-seed HDKD), [`docs/spec/heima-gaps-vs-desired-architecture.md`](./heima-gaps-vs-desired-architecture.md), [archived stage8 WIP](../archived/stage8-wip-2026-04.md)
 
 This doc defines the canonical security position for **where sensitive ciphertext lives** and **how decryption keys are managed**. Earlier docs assume an on-chain encrypted vault (`pallet-secrets-vault`); this doc replaces that assumption with off-chain ciphertext + on-chain hash + forward-secret epoch rotation, and explains why.
 
@@ -174,7 +174,7 @@ Three candidates, ordered by attack-surface footprint:
 | **Dedicated rotation enclave** (TEE-B, separate from the auth/decrypt TEE-A) | Smaller | Can be small, network-isolated, no untrusted input parsing. Coordinates with TEE-A via attested channels. |
 | **Threshold across heterogeneous enclaves** (SGX + TDX + Nitro k-of-n) | Smallest joint compromise probability | Highest implementation cost. Reasonable for v0.2+; out of scope for Stage 8. |
 
-This doc commits to the **dedicated rotation enclave** path for Stage 8, with the threshold variant as a v0.2+ consideration. Stage 8 design and operational runbook live in [`docs/stage8-wip.md`](../stage8-wip.md).
+This doc commits to the **dedicated rotation enclave** path for Stage 8, with the threshold variant as a v0.2+ consideration. Stage 8 design and operational runbook live in [archived stage8 WIP](../archived/stage8-wip-2026-04.md).
 
 Reducing TEE-B's attack surface is more important than splitting it from TEE-A. Specifically:
 
@@ -245,7 +245,7 @@ These do not block adopting the position in §6 but need decisions before Stage 
 
 ## 11. Cross-references
 
-- [`docs/stage8-wip.md`](../stage8-wip.md) — operational design for the off-chain vault (storage layout, rotation runbook, encryption-center responsibilities).
+- [archived stage8 WIP](../archived/stage8-wip-2026-04.md) — operational design for the off-chain vault (storage layout, rotation runbook, encryption-center responsibilities).
 - [`docs/spec/heima-gaps-vs-desired-architecture.md`](./heima-gaps-vs-desired-architecture.md) — needs a new §5 "Off-chain ciphertext / `pallet-vault-pointers`" gap entry mirroring this doc's position.
 - [`docs/spec/ses-email-architecture.md`](./ses-email-architecture.md) §4 — the email pipeline already uses the off-chain pattern; this doc generalizes it.
 - [`docs/wiki/tag-based-access.md`](../wiki/tag-based-access.md) — Stage 7 PrincipalTag isolation, unchanged by this doc; gates the per-user S3 vault prefix.
