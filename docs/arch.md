@@ -1892,7 +1892,12 @@ agentkeys/                                  # repo root
 │   │                                       #   scope, device, recovery, whoami, ...)
 │   ├── agentkeys-daemon/                   # sidecar daemon (master + agent variants
 │   │                                       #   under one binary, role decided at init)
-│   ├── agentkeys-mcp/                      # MCP adapter library (used by daemon)
+│   ├── agentkeys-mcp/                      # legacy MCP adapter library (in-process,
+│   │                                       #   used by daemon for the M0 sidecar loop)
+│   ├── agentkeys-mcp-server/                # MCP server binary — standalone Rust
+│   │                                       #   process exposing AgentKeys tools to
+│   │                                       #   LLM hosts over stdio / HTTP / xiaozhi
+│   │                                       #   mcp-endpoint WS relay (issue #107)
 │   ├── agentkeys-provisioner/              # Rust orchestrator that spawns TS scrapers
 │   └── agentkeys-chain/                    # Solidity contracts + Rust ABI bindings
 │       ├── contracts/
@@ -1916,7 +1921,8 @@ agentkeys/                                  # repo root
 | `agentkeys-worker-{creds,memory,audit,email,payment}` | Per-data-class workers per §15 |
 | `agentkeys-cli` | The `agentkeys` binary — `init`, `agent create`, `scope`, `device`, `recovery`, `whoami`, `signer ...` |
 | `agentkeys-daemon` | Sidecar daemon (master / agent role per init); localhost proxy |
-| `agentkeys-mcp` | MCP protocol adapter — exposes daemon ops to LLM agents |
+| `agentkeys-mcp` | Legacy in-process MCP adapter library — used by `agentkeys-daemon`'s sidecar stdio loop (M0). |
+| `agentkeys-mcp-server` | Standalone Rust MCP server binary (issue #107). Three transports: stdio (Claude Desktop / Claude Code / Codex / Cursor / Cline / Roo / Windsurf / Gemini CLI), HTTP (broker-direct + dev demos), xiaozhi `mcp-endpoint` WS relay. Two backends: `in-memory` (dev/demo fixture for the three-act storyboard) and `http` (real broker + memory + audit workers). Installed via `cargo install --git https://github.com/litentry/agentKeys agentkeys-mcp-server`. |
 | `agentkeys-provisioner` | Spawns TS scraper, encrypts obtained creds, submits via cap-store |
 | `agentkeys-chain` | Solidity contracts + Rust ABI bindings |
 

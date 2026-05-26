@@ -15,6 +15,11 @@ AWSCLIV2.pkg
 # Local developer secrets — template is checked in as .env.example.
 agentkeys-secrets.env
 
+# xiaozhi MCP-endpoint URL — contains a bearer JWT, never commit.
+# Used by scripts/run-mcp-local.sh as an optional convenience cache so
+# you don't have to paste the URL every time.
+/mcp-xiaozhi-endpoint
+
 # Operator-supplied mnemonic file(s) for the chain deployer (referenced
 # by HEIMA_DEPLOYER_MNEMONIC_FILE in scripts/heima-bring-up.sh).
 # Never committed — the mnemonic IS the key.
