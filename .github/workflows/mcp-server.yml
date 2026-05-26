@@ -1,0 +1,102 @@
+name: mcp-server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/agentkeys-mcp-server/**"
+      - "scripts/mcp-demo-mode-a.sh"
+      - "scripts/mcp-demo-mode-b-protocol.sh"
+      - "scripts/mcp-demo-mode-c-xiaozhi-client.sh"
+      - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
+      - "scripts/mcp-demo-mode-e-stdio.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/mcp-server.yml"
+  pull_request:
+    paths:
+      - "crates/agentkeys-mcp-server/**"
+      - "scripts/mcp-demo-mode-a.sh"
+      - "scripts/mcp-demo-mode-b-protocol.sh"
+      - "scripts/mcp-demo-mode-c-xiaozhi-client.sh"
+      - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
+      - "scripts/mcp-demo-mode-e-stdio.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/mcp-server.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    name: test + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - name: cargo test
+        run: cargo test -p agentkeys-mcp-server --all-features
+      - name: cargo clippy
+        run: cargo clippy -p agentkeys-mcp-server --all-targets -- -D warnings
+      # Phase A dev-mode demo smoke — boots the binary with --backend in-memory
+      # and walks the three-act storyboard end-to-end via curl. Catches drift
+      # between code and runbook §A in `docs/spec/plans/issue-107-mcp-demo-runbook.md`.
+      - name: mcp demo (mode A — dev smoke)
+        run: bash scripts/mcp-demo-mode-a.sh
+
+      # Phase B testing ladder (runbook §B.0). Modes B/C/D need `uv` to manage
+      # a Python venv on the fly so the official Anthropic mcp SDK + xiaozhi-
+      # server's own integration class can drive our server. These tiers catch
+      # bugs at the MCP wire layer, the xiaozhi integration layer, and the
+      # relay-topology layer respectively. No live broker or xiaozhi account.
+      - name: install uv (for modes B/C/D/E)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: mcp demo (mode B — Anthropic mcp SDK protocol smoke, HTTP)
+        run: bash scripts/mcp-demo-mode-b-protocol.sh
+      - name: mcp demo (mode C — xiaozhi ServerMCPClient integration, HTTP)
+        run: bash scripts/mcp-demo-mode-c-xiaozhi-client.sh
+      - name: mcp demo (mode D — xiaozhi MCP-endpoint relay topology, WS)
+        run: bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh
+      # Mode E covers the stdio transport gap — the actual path Claude Code,
+      # Codex CLI, Claude Desktop, Cursor, Cline, Roo, Windsurf, Gemini CLI
+      # use. Modes B-D are all over HTTP/WS; without this we could ship a
+      # binary that initializes cleanly via curl but corrupts the stdout
+      # JSON-RPC stream with tracing logs (we already hit this once).
+      - name: build release binary (for mode E)
+        run: cargo build --release -p agentkeys-mcp-server
+      - name: mcp demo (mode E — stdio_client functional E2E)
+        run: |
+          AGENTKEYS_MCP_BIN="$(pwd)/target/release/agentkeys-mcp-server" \
+            bash scripts/mcp-demo-mode-e-stdio.sh
+
+  image:
+    name: build + publish image
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/agentkeys-mcp-server/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/agentkeys-mcp-server:latest
+            ghcr.io/${{ github.repository }}/agentkeys-mcp-server:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

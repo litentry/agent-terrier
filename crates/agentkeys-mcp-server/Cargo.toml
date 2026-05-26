@@ -1,0 +1,42 @@
+[package]
+name = "agentkeys-mcp-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "agentkeys-mcp-server"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_mcp_server"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+tower = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
+# Direct rustls dep so we can explicitly install the `ring` crypto
+# provider at startup — tokio-tungstenite pulls rustls in with no
+# provider feature, and rustls 0.23 refuses to auto-select.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = "0.3"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
