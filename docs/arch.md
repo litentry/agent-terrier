@@ -503,7 +503,7 @@ ON AGENT MACHINE (any VM / container / CI runner / cloud sandbox):
        parent_omni     = O_master
        derivation_path = "//agent-A"
        device_pubkey   = D_pub_agent
-9. Daemon: persist J1_agent; enter MCP-stdio loop + sidecar proxy
+9. Daemon: persist J1_agent; start the sidecar proxy (§12) and hand off any LLM-host integration to the MCP server surface per §22c.1 (backend variant decided at startup based on whether the LLM is local or remote)
 ```
 
 **Trust chain:** `master human → master K11 → master J1 + K10 sig → link-code-derivation-cert → agent K10 binding`. The agent never holds K11 or any user-presence credential.
@@ -1866,6 +1866,133 @@ Known sites at HEAD:
 - `scripts/heima-device-register.sh` — empty attestation + empty K11 assertion on first call (§22b.1, §22b.3).
 - `scripts/heima-agent-create.sh` — empty K11 / link-code-redemption stubs (§22b.3).
 - `scripts/heima-scope-set.sh` — stub K11 assertion (§22b.1).
+
+---
+
+## 22c. AgentKeys app surface — CLI + web UI + daemon as one distribution
+
+The user-facing "AgentKeys app" is **one distribution with three surfaces**, modeled on the agentmemory app shape but with AgentKeys' multi-user + multi-device + trust-core requirements. The three surfaces share state via the daemon (§12) and present coherent UX across the consumer flow (parent dashboard, vendor onboarding), the power-user flow (CLI + local web UI), and the developer flow (LLM-host wiring like `agentkeys connect claude-code`).
+
+This section is the operator-facing companion to the broker / signer / worker layers below — it defines what the **operator actually installs and uses**. The trust-plane sections (§12 daemon, §13 broker, §14 signer, §15 workers) define what runs to make it secure; this section defines how the operator interacts.
+
+### 22c.1 Three surfaces, one daemon
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  AgentKeys app  (Rust binary + bundled web UI, one distribution)         │
+│                                                                          │
+│   ┌─────────────────┐  ┌───────────────────────┐  ┌──────────────────┐  │
+│   │   CLI           │  │   Web UI              │  │   MCP server     │  │
+│   │   `agentkeys`   │  │   localhost:3113      │  │   stdio + http   │  │
+│   │                 │  │   (or agentkeys.io)   │  │   + mcp-endpoint │  │
+│   │  init           │  │                       │  │                  │  │
+│   │  connect <host> │  │   Parent dashboard    │  │  See §22.MCP      │  │
+│   │  pair <device>  │  │   Vendor onboarding   │  │  pluggable        │  │
+│   │  daemon         │  │   Device pairing      │  │  surface; backend │  │
+│   │  web            │  │   Audit feed          │  │  variant per      │  │
+│   │  provision      │  │   Backend wiring      │  │  §22c.2 below     │  │
+│   │  doctor         │  │                       │  │                  │  │
+│   └────────┬────────┘  └──────────┬────────────┘  └────────┬─────────┘  │
+│            │                       │                        │            │
+│            └───────────────────────┼────────────────────────┘            │
+│                                    ▼                                     │
+│                       ┌──────────────────────────┐                       │
+│                       │  daemon (sidecar; §12)    │                       │
+│                       │  K10 + K11 (master)       │                       │
+│                       │  K10 only (agent)         │                       │
+│                       │  localhost Unix socket    │                       │
+│                       │  + per-call host policy   │                       │
+│                       └────────────┬─────────────┘                       │
+└────────────────────────────────────┼─────────────────────────────────────┘
+                                     │
+                                     ▼
+                          broker / signer / workers
+                          (trust plane — §13-§15)
+```
+
+**One binary, three surfaces.** Per [#134](https://github.com/litentry/agentKeys/issues/134), the canonical install is `cargo install --git https://github.com/litentry/agentKeys agentkeys` (M6 ships GH Releases + Homebrew). The binary multiplexes via subcommand:
+
+| Surface | Invocation | When operator runs it |
+|---|---|---|
+| **CLI** | `agentkeys <cmd>` directly | First-run setup, day-to-day power-user ops |
+| **Daemon** | `agentkeys daemon` (or autostarted by CLI on first use) | Always running once installed; trust core |
+| **Web UI** | `agentkeys web` (local) OR a hosted instance at `agentkeys.io` (consumer flow) | Consumer onboarding, parent dashboard, device pairing |
+| **MCP server** | `agentkeys mcp-server` (subcommand of the same binary, or separately via `cargo install --git ... agentkeys-mcp-server` per the legacy split) | One LLM host wires it up; one MCP server instance per LLM host |
+
+The MCP server's backend variant (chosen at boot — `DaemonBackend` when co-located with a daemon, `HttpBackend` when talking to a remote broker, `InMemoryBackend` for dev fixtures) decides where its tool calls resolve. Same MCP protocol surface to the LLM either way; see §22c.2 for the four runtime kinds.
+
+### 22c.2 Backend wiring — four agent runtimes
+
+A single user-actor (master or child) can have its tool calls routed through any of four backend kinds, depending on where the LLM lives and what the agent is doing:
+
+| Backend | Where the LLM runs | Where the daemon runs | Use case |
+|---|---|---|---|
+| **Hosted LLM** | Vendor cloud (xiaozhi, Doubao, OpenAI plugin host, Volcano Ark) | No daemon on vendor device; broker is the trust mediator | Voice agents, smart speakers, vendor-hosted assistants. Trust runs vendor JWT → broker → workers per CLAUDE.md per-actor isolation invariants. |
+| **Local LLM** | Operator's machine (Claude Code, Codex CLI, Claude Desktop, Cursor, Cline, Roo, Windsurf, Gemini CLI) | Co-located with LLM | Power-user + developer flow. MCP server uses DaemonBackend; cap-mint is in-process (sub-millisecond). Full §12.2 host-local policy applies. |
+| **Task agent** | Sandboxed VM (aiosandbox / operator-managed pod / TEE-attested enclave) | In the sandbox alongside the LLM | Long-running autonomous workloads — research bot, multi-step DevOps, code interpreter. The agent runs *untrusted code* it receives from upstreams; the daemon is the security boundary. Per [§10.5](#105-where-d_priv-lives-on-an-agent-machine), D_priv lifecycle depends on sandbox-ephemerality. |
+| **Chat agent** | Operator-direct chat session, hosted by us | Operator's local daemon (talking to our chat-agent service) | The "talk to AgentKeys" surface for managing your own agents — what's been spent, what's been audited, what to revoke. Backed by an LLM we control (DeepSeek / Doubao / a tuned model) and proxied through the same cap-token machinery. |
+
+These aren't separate codebases — they're four configurations of the same MCP server + backend trait. The web UI exposes a "Backend" picker per-(actor, service) pair, surfacing what would otherwise be invisible plumbing. M4 deliverable per [#110](https://github.com/litentry/agentKeys/issues/110) comment.
+
+### 22c.3 Multi-device master pairing — phone + desktop as masters
+
+§10.3.1 already specifies the cryptographic flow: a new master device registers via `SidecarRegistry.register_master_device(...)` with a `k11_assertion_from_existing_master`, defeating email-account-compromise → device-takeover. What this section adds is the **operator UX**:
+
+| Pairing mode | UX | Cryptographic anchor |
+|---|---|---|
+| **Desktop + phone, both as masters** | Add-master flow in the web UI: desktop shows QR; user scans with phone (or vice versa). Both devices get a separately-registered K10/K11 pair under the same `O_master` actor omni. `recovery_threshold` defaults to 1; prompt to bump to 2 when third device is added (per §10.3.1). | Existing K11 on device A signs over `D_pub_B` to bind device B under same `O_master`. |
+| **Replace master device** | "I lost my laptop" flow: §11 multi-device recovery quorum. Web UI walks operator through quorum-sign on surviving masters; chain UPSERTs new K10. | M-of-N quorum per §11. |
+| **Rotate K10 on the same master** | "Periodic key rotation" flow: web UI prompts after 90d. Single-tap `agentkeys device rotate` per §10.3.2. | Existing K11 signs over `D_pub_old || D_pub_new || rotation_nonce`. |
+
+The cryptographic plumbing is shipped; the UX is M3 per [#110](https://github.com/litentry/agentKeys/issues/110)'s phased roadmap.
+
+### 22c.4 Vendor device pairing — child device → actor binding
+
+When a user buys a vendor AI device (xiaozhi MagicLick, Doubao smart speaker, future smart glasses), it needs to be bound to one of the user's actors (typically an `O_agent_*` child of the user's `O_master`). The pairing flow:
+
+```
+1. User signs into agentkeys.io (or local web UI) with their existing identity
+   (OAuth via Google / Apple, or K11 WebAuthn re-auth for sensitive bind)
+2. User adds a vendor device:
+   - Pastes the vendor's MCP接入点 URL (or scans QR from vendor's app)
+   - Backend mints a per-actor xiaozhi-vendor-token bound to the chosen
+     O_agent_X with the scope the user authorized
+   - Backend either:
+     a) POSTs the token directly to the vendor's API (if vendor exposes one), or
+     b) Shows the token to the user for paste-back into the vendor's app
+3. Vendor device's traffic now carries a JWT with claims:
+     agentkeys.omni_account = O_agent_X
+     agentkeys.vendor       = magiclick | doubao | …
+     iat / exp / aud         = standard JWT fields
+   Our broker validates the JWT signature against K1 on every cap-mint.
+4. Per-actor IAM scoping (CLAUDE.md "four-layer isolation invariants")
+   enforces that this vendor device can only read its own actor's S3 prefix.
+```
+
+This is the missing piece between [iam.md §4.3](research/agent-iam-strategy.md) (three-act demo) and a real consumer product. Until M2 ships this, the demo runs with hardcoded vendor tokens + seeded in-memory fixtures (per #107's stage-1 simplifications).
+
+### 22c.5 What the daemon does NOT become
+
+The daemon stays a **local trust core** — it does NOT become the agent runtime. It doesn't run LLM inference; doesn't execute untrusted task-agent code; doesn't host a model. Its job per §12 is unchanged: hold K10+K11, run the localhost proxy, enforce host-local policy, mint caps. The four backend kinds in §22c.2 are about *where the LLM runs* relative to the daemon; the daemon's responsibilities are constant.
+
+Likewise the web UI is **not a trust plane** — per the #107 PR thread, the trust plane is signer + workers + on-chain scope + cap-token chain. The web UI is the operator's view into that trust plane. A web UI compromise leaks the operator's UI-bound JWT (TTL ≤ 5h, single-actor scoped) — it does not leak K10, K11, K3, KEK, or any dormant credential.
+
+### 22c.6 Cross-references
+
+- [§10.3](#103-master-device-switch--device-key-rotation) — cryptographic flow for multi-device master pairing (this section is the UX wrapper)
+- [§11](#11-recovery--m-of-n-device-quorum-no-anchor-wallet-no-seed-phrase) — recovery quorum when master devices are lost
+- [§12](#12-sidecar-daemon) — daemon as the trust core under all three surfaces
+- [§22](#22-pluggable-surfaces) — MCP backend variant is one of the pluggable axes
+- [research/agent-iam-strategy.md §4.4](research/agent-iam-strategy.md) — Phase 1 vendor onboarding portal deliverable
+- [#110](https://github.com/litentry/agentKeys/issues/110) — phased web UI roadmap (M1 parent dashboard → M2 onboarding → M3 multi-master → M4 backend wiring)
+- [#133](https://github.com/litentry/agentKeys/issues/133) — Phase 3 hooks that fire when tools are invoked through any of these surfaces
+- [#134](https://github.com/litentry/agentKeys/issues/134) — M6 distribution: GH Releases + Homebrew + `curl | sh` installer
+
+### 22c.7 Prior art
+
+- **[`rohitg00/agentmemory`](https://github.com/rohitg00/agentmemory)** — the closest-in-spirit single-operator app: CLI + persistent daemon + web viewer + plugin-marketplace `connect <host>` model. The shape we mirror in §22c.1; differences are the multi-user / multi-device / trust-core requirements AgentKeys carries that agentmemory doesn't.
+- **[`iii-hq/iii`](https://github.com/iii-hq/iii)** — composable service runtime (Rust engine + Node/Python/Rust SDKs; sibling of Temporal / Inngest / Restate). We **borrow vocabulary only** — iii's Trigger taxonomy (`direct call` / `HTTP endpoint` / `cron schedule` / `queue subscription` / `state change` / `stream event`) is the internal dispatch model for [#133](https://github.com/litentry/agentKeys/issues/133)'s `agentkeys hook` subcommand. We do **NOT** adopt iii as a runtime — its live worker registry would break the per-data-class worker isolation in [§15](#15-workers-per-service) and the CLAUDE.md four-layer per-actor invariants. Engine is Elastic License 2.0; we avoid the legal entanglement by not importing it.
+- **[`huangjunsen0406/xiaozhi-mcphub`](https://github.com/huangjunsen0406/xiaozhi-mcphub)** — multi-MCP aggregator for xiaozhi vendors (Node/TS + React + Postgres+pgvector). Solves "compose N MCP servers behind one xiaozhi endpoint" — a real problem when an operator runs many MCPs, which we're not yet at. If we need this in M4+, the right move is an `AggregateBackend` variant in [`agentkeys-mcp-server`](../crates/agentkeys-mcp-server/) per the §22c.2 backend-wiring pattern, not adopting an external JS/TS stack into the trust path.
 
 ---
 
