@@ -4,7 +4,18 @@
 **Tracking issue:** [#103](https://github.com/litentry/agentKeys/issues/103)
 **Branch:** `claude/hopeful-mccarthy-15e5ba`
 
-> ## ⚠ PIVOT 2026-05-24 (multiple rounds) — read strategic anchor FIRST: [`docs/research/agent-iam-strategy.md`](../../research/agent-iam-strategy.md)
+> ## ⚠ DECISION 2026-05-28 — Option B with hooks-first architecture
+>
+> The integration architecture is **Option B** (vendor surface → Task Host runtime → both MCPs: aiosandbox loopback + AgentKeys over network), with **hooks as the primary IAM-guarantee mechanism** and the OpenAI-compatible proxy as a **lower-priority fallback** for hosts without a hook surface.
+>
+> Full reasoning and the IAM-tool-vs-IAM-guarantee distinction live in [`docs/wiki/agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md); strategic anchor in [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md) §3.6 + §3.7; execution plan in [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](phase-1-fresh-user-wire-onboarding.md). The previous Rust-runtime runbook + verification + setup script were archived 2026-05-28 under `docs/archived/*-rust-runtime-2026-05*`.
+>
+> Phase split:
+> - **Phase 1** (this PR + immediate follow-up): AgentKeys MCP server (7 tools per strategy §4.2), Hermes MCP registration inside aiosandbox.
+> - **Phase 3** ([issue #133](https://github.com/litentry/agentKeys/issues/133)): reference hook configs for Tier-1 hosts (Claude Code, Codex, Hermes, OpenClaw), `agentkeys hook check` CLI helper, cap-mint pre-warming.
+> - **Phase 3b** (after #133 ships): proxy fallback for Tier-2 hosts (xiaozhi-server, vendor mobile SDKs, plain `openai.ChatCompletion` scripts).
+>
+> ## ⚠ PIVOT 2026-05-24 (multiple rounds) — read strategic anchor FIRST: [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md)
 >
 > **Strategic frame**: AgentKeys is the **Agent IAM and memory control plane** for the AI device era. This issue ships Phase 1 from the strategy doc — a three-act demo that proves AgentKeys is Agent IAM, not chatbot infrastructure.
 >
@@ -19,7 +30,7 @@
 >
 > **Four architecture commitments** (corrected from earlier loose framing):
 > 1. **Revocation**: *immediate online, bounded TTL/cache offline*. Not "no propagation delay." High-risk actions always online; low-risk reads use short-lived cached caps; offline mode denies sensitive actions by default.
-> 2. **Audit (two-tier)**: real-time off-chain feed in parent-control UI + **2-min batched Merkle root anchored on-chain** (chain choice is deployment config; the strategy stays chain-agnostic per [`agent-iam-strategy.md`](../../research/agent-iam-strategy.md) §3.2). NOT real-time on-chain. The chain explorer is tamper-evidence proof, not the UX surface.
+> 2. **Audit (two-tier)**: real-time off-chain feed in parent-control UI + **2-min batched Merkle root anchored on-chain** (chain choice is deployment config; the strategy stays chain-agnostic per [`agent-iam-strategy.md`](../../agent-iam-strategy.md) §3.2). NOT real-time on-chain. The chain explorer is tamper-evidence proof, not the UX surface.
 > 3. **Delegation**: `agentkeys.delegation.grant` is **schema-documented but not active** in v1. Returns `not_implemented_in_v1`. Active delegation lands in Phase 4.
 > 4. **Zero orchestration in v1** — hard line. If a vendor needs orchestration, they pick a runtime (Hermes/OpenClaw/their own) via Phase 3 MCP tools.
 >
