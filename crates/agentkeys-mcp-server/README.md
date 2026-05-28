@@ -151,7 +151,7 @@ imports directly — successfully drives this server through the full
 
 ## Three-act demo storyboard
 
-Per [`docs/research/agent-iam-strategy.md`](../../docs/research/agent-iam-strategy.md) §4.3:
+Per [`docs/agent-iam-strategy.md`](../../docs/agent-iam-strategy.md) §4.3:
 
 1. **Permissioned Memory** — `memory.get(actor=O_kevin_001, namespace="travel")`
    returns Chengdu trip context only; other namespaces (`family`, `profile`)

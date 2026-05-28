@@ -677,6 +677,6 @@ sudo systemctl disable --now agentkeys-mcp-server mcp-endpoint-server
 ## See also
 
 - [`docs/spec/plans/issue-107-mcp-server-phase1.md`](issue-107-mcp-server-phase1.md) — the canonical plan + landed-vs-deferred table for #107.
-- [`docs/research/agent-iam-strategy.md`](../../research/agent-iam-strategy.md) §4.3 — the three-act demo storyboard.
+- [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md) §4.3 — the three-act demo storyboard.
 - [`docs/research/xiaozhi-hermes-architecture.md`](../../research/xiaozhi-hermes-architecture.md) — why xiaozhi-server's stock MCP support means no fork needed.
 - [`crates/agentkeys-mcp-server/README.md`](../../../crates/agentkeys-mcp-server/README.md) — server-side ops reference.
