@@ -2,7 +2,7 @@
 
 **Status**: source of truth for milestone-level work after the v2-stage1/2/3 demo lands.
 **Date**: 2026-05-24.
-**Companion to**: [`docs/arch.md`](../../arch.md) (architecture invariants), [`docs/research/agent-iam-strategy.md`](../../research/agent-iam-strategy.md) (positioning + risks + corrections).
+**Companion to**: [`docs/arch.md`](../../arch.md) (architecture invariants), [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md) (positioning + risks + corrections).
 
 This file replaces the v1/v2 staged development-stages.md plan (now archived at [`docs/archived/development-stages-v2-2026-04.md`](../../archived/development-stages-v2-2026-04.md)). Once v2-stage3 ships green, the v1/v2 naming retires entirely. Future work is tracked under the seven milestones below, plus a "beyond M7" horizon.
 
@@ -12,7 +12,7 @@ This file replaces the v1/v2 staged development-stages.md plan (now archived at 
 
 AgentKeys is the **Authority Host** for the AI device era — the cross-vendor identity + memory + permissions + audit layer that lives outside any one agent runtime. We are not a chatbot. We are not an orchestrator. We are the IAM that holds when a hardware vendor's stack changes underneath. The product surface evolves from a three-act demo (M1) → a paid vendor pilot (M2) → cross-runtime neutrality (M3) → production-grade capability + revocation depth (M4) → consumer mobile surface (M5) → TEE-rooted security (M6) → standards adoption (M7). Each milestone earns the right to the next by deploying a working reference implementation before chasing the next ambition.
 
-The category we own is **Agent IAM** — Identity, Memory, Permissions, capability-token Authority, Audit, Delegation, Revocation. Memory is **one of** these surfaces, not the headline. The competition is Auth0/Okta for agents, not Mem0 for chatbots. See [`agent-iam-strategy.md` §2.2](../../research/agent-iam-strategy.md) for the full positioning.
+The category we own is **Agent IAM** — Identity, Memory, Permissions, capability-token Authority, Audit, Delegation, Revocation. Memory is **one of** these surfaces, not the headline. The competition is Auth0/Okta for agents, not Mem0 for chatbots. See [`agent-iam-strategy.md` §2.2](../../agent-iam-strategy.md) for the full positioning.
 
 ---
 
@@ -33,21 +33,21 @@ What this gives us going into M1: a working backend, deployed signer + broker on
 
 ## 2. M1 — Agent IAM v0 demo (0–2 weeks)
 
-**Goal**: a hardware vendor watches a 5-minute demo and understands "this is the IAM for AI devices, not another chatbot platform." Anchored to [`agent-iam-strategy.md` §4](../../research/agent-iam-strategy.md).
+**Goal**: a hardware vendor watches a 5-minute demo and understands "this is the IAM for AI devices, not another chatbot platform." Anchored to [`agent-iam-strategy.md` §4](../../agent-iam-strategy.md).
 
 ### Scope
 
 - **MagicLick 2.5 hardware** (ESP32-S3 + ES8311 + 128×128 LCD + WiFi/4G) running the upstream [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) firmware with no AgentKeys-side fork. Xiaozhi-server's first-class MCP support means we register one MCP server in its `mcp_server_settings.json` — no Hermes-as-bridge fork needed.
 - **AgentKeys MCP server** (issue #107) exposing 7 active tools (`identity.whoami`, `memory.get`, `memory.put`, `permission.check`, `cap.mint`, `cap.revoke`, `audit.append`) + 3 schema-preview tools (`delegation.grant`, `delegation.revoke`, `approval.request` — return `not_implemented_in_v1`).
-- **Memory namespace model** (issue #108) — v0 defaults `personal / family / work / travel`. Wire-format `namespace` field on memory put/get + cap-token `namespaces_allowed` claim. Per [`agent-iam-strategy.md` §3.5](../../research/agent-iam-strategy.md).
-- **Two-tier audit** (issue #109) — real-time off-chain feed for the parent UI; 2-minute Merkle-batched on-chain anchor for tamper-evidence. Chain-agnostic. Per [`agent-iam-strategy.md` §3.2](../../research/agent-iam-strategy.md).
-- **Bounded revocation** (issue #110) — immediate online, ≤60-second offline via cap-token TTL. Per [`agent-iam-strategy.md` §3.1](../../research/agent-iam-strategy.md).
+- **Memory namespace model** (issue #108) — v0 defaults `personal / family / work / travel`. Wire-format `namespace` field on memory put/get + cap-token `namespaces_allowed` claim. Per [`agent-iam-strategy.md` §3.5](../../agent-iam-strategy.md).
+- **Two-tier audit** (issue #109) — real-time off-chain feed for the parent UI; 2-minute Merkle-batched on-chain anchor for tamper-evidence. Chain-agnostic. Per [`agent-iam-strategy.md` §3.2](../../agent-iam-strategy.md).
+- **Bounded revocation** (issue #110) — immediate online, ≤60-second offline via cap-token TTL. Per [`agent-iam-strategy.md` §3.1](../../agent-iam-strategy.md).
 - **Parent-control web UI** (issue #111) — mobile-responsive, three columns: actor list / scope toggles per namespace / real-time audit feed. Native app deferred to M5.
-- **Three-act demo storyboard**: (1) permissioned memory recall demonstrating namespace isolation; (2) deterministic denial of an out-of-scope action; (3) parent revokes a scope live and the device's next attempt fails. Per [`agent-iam-strategy.md` §4.3](../../research/agent-iam-strategy.md).
+- **Three-act demo storyboard**: (1) permissioned memory recall demonstrating namespace isolation; (2) deterministic denial of an out-of-scope action; (3) parent revokes a scope live and the device's next attempt fails. Per [`agent-iam-strategy.md` §4.3](../../agent-iam-strategy.md).
 
 ### Hard exclusions
 
-Per [`agent-iam-strategy.md` §2.4 + §4.5](../../research/agent-iam-strategy.md): no orchestration, no active delegation (schema only), no approval workflows, no native mobile app, no real-time on-chain audit, no vendor onboarding portal, no second-rail integration (Volcano Ark Phase 2).
+Per [`agent-iam-strategy.md` §2.4 + §4.5](../../agent-iam-strategy.md): no orchestration, no active delegation (schema only), no approval workflows, no native mobile app, no real-time on-chain audit, no vendor onboarding portal, no second-rail integration (Volcano Ark Phase 2).
 
 ### M1 done when
 
@@ -83,7 +83,7 @@ Per [`agent-iam-strategy.md` §2.4 + §4.5](../../research/agent-iam-strategy.md
 
 ### M2 kill criterion
 
-Per [`agent-iam-strategy.md` §C12](../../research/agent-iam-strategy.md): 0 paid pilots from 3 priority vendors in 6 months → pivot to MCP credential broker for consumer agent apps.
+Per [`agent-iam-strategy.md` §C12](../../agent-iam-strategy.md): 0 paid pilots from 3 priority vendors in 6 months → pivot to MCP credential broker for consumer agent apps.
 
 ---
 
@@ -94,7 +94,7 @@ Per [`agent-iam-strategy.md` §C12](../../research/agent-iam-strategy.md): 0 pai
 ### Scope
 
 - **Hermes-MCP wrapper** (issue #117) — NousResearch [hermes-agent](https://github.com/nousresearch/hermes-agent) exposed as an MCP server: `hermes.execute_task(task, context, constraints)` returns `{result, steps_taken, cost_usd, audit_trail_id}`. Hermes calls AgentKeys MCP tools internally (recursive composition).
-- **OpenClaw-MCP wrapper** (issue #118) — Tencent OpenClaw same shape as Hermes (commercial ToS verified per [`agent-iam-strategy.md` §9.5](../../research/agent-iam-strategy.md)).
+- **OpenClaw-MCP wrapper** (issue #118) — Tencent OpenClaw same shape as Hermes (commercial ToS verified per [`agent-iam-strategy.md` §9.5](../../agent-iam-strategy.md)).
 - **Doubao agent compatibility** — already exercised via M2's Volcano Ark registration; M3 hardens the integration to production.
 - **Claude Code / Codex CLI compatibility** — these are coding agents (different use case from the consumer demo) but proving cross-runtime IAM works for developer-tier agents widens the moat.
 - **Python SDK + TypeScript SDK** for non-MCP integration paths.
@@ -116,7 +116,7 @@ Per the May session's "agent-as-MCP-tool, NOT LLM-caller-replacement" call: agen
 
 ### Scope
 
-- **Delegation chains in production** — parent agent → child agent with scope narrowing, TTL inheritance, revocation cascade, audit chain. Per [`agent-iam-strategy.md` §3.3](../../research/agent-iam-strategy.md) corrected design: delegation is implicit in cap-tokens by default; explicit delegation activates only after vendor proves M2-tier traction.
+- **Delegation chains in production** — parent agent → child agent with scope narrowing, TTL inheritance, revocation cascade, audit chain. Per [`agent-iam-strategy.md` §3.3](../../agent-iam-strategy.md) corrected design: delegation is implicit in cap-tokens by default; explicit delegation activates only after vendor proves M2-tier traction.
 - **Approval workflows** — high-risk actions (payment > threshold, cross-namespace memory grant, scope expansion) push to the parent app for one-tap approval before execution. Replaces deterministic-denial as the path for "I trust this agent but want eyes on this specific request."
 - **Policy versioning** — vendors deploy new policies; existing devices upgrade with explicit audit trail showing the diff.
 - **Audit replay** — regulator-grade reconstruction of any agent's authority history from the on-chain anchor + off-chain feed. First-class regulator API.
@@ -145,7 +145,7 @@ Per the May session's "agent-as-MCP-tool, NOT LLM-caller-replacement" call: agen
 
 ### Why this is M5 not M1
 
-Per [`agent-iam-strategy.md` §6 Risk 3](../../research/agent-iam-strategy.md): native mobile is expensive and slow to iterate. The v0 web UI is sufficient to prove the UX premise; native ships only after a paying vendor pilot has signed and consumer demand is demonstrated.
+Per [`agent-iam-strategy.md` §6 Risk 3](../../agent-iam-strategy.md): native mobile is expensive and slow to iterate. The v0 web UI is sufficient to prove the UX premise; native ships only after a paying vendor pilot has signed and consumer demand is demonstrated.
 
 ### M5 done when
 
@@ -181,7 +181,7 @@ Per [`agent-iam-strategy.md` §6 Risk 3](../../research/agent-iam-strategy.md): 
 ### Scope
 
 - **Propose MCP extensions** for IAM-grade auth headers (session keys, cap-token forwarding, audit-chain headers).
-- **OAuth-for-Agents specification engagement** — likely IETF or W3C working group. Lead the spec discussion with deployed reference code, not slide decks. Per [`agent-iam-strategy.md` §6 Risk 5](../../research/agent-iam-strategy.md): premature standards engagement looks like vendor lobbying; standards work is post-12-months.
+- **OAuth-for-Agents specification engagement** — likely IETF or W3C working group. Lead the spec discussion with deployed reference code, not slide decks. Per [`agent-iam-strategy.md` §6 Risk 5](../../agent-iam-strategy.md): premature standards engagement looks like vendor lobbying; standards work is post-12-months.
 - **Reference implementations for non-MCP runtimes** — raw HTTP / gRPC clients for vendors that don't use MCP.
 - **Brand-owner partnerships at scale** — Tuya (built in M2), Xiaomi (per [`tuya-vs-xiaozhi.md` Phase 3c "deferred"](../../research/tuya-vs-xiaozhi.md)), Alibaba Smart Home (per Phase 3b "partnership-gated"), Samsung SmartThings.
 - **Open-source SDK ecosystem** — MIT-licensed SDK + MCP server. Community contributions, third-party integrations, hackathon presence.
@@ -212,7 +212,7 @@ A separate product tier with audit-chain APIs, SOC2 / ISO27001 attestations, com
 
 ### 9.4 Hyperscaler interop without absorption
 
-Per [`agent-iam-strategy.md` §6 Risk 1](../../research/agent-iam-strategy.md): Anthropic / OpenAI / ByteDance each build native walled-garden IAM for their own runtime. AgentKeys becomes the cross-walled-garden bridge — a vendor's device can authenticate to Claude *and* Doubao through the same actor tree. Hyperscalers don't credibly build this themselves (each can only do their own garden).
+Per [`agent-iam-strategy.md` §6 Risk 1](../../agent-iam-strategy.md): Anthropic / OpenAI / ByteDance each build native walled-garden IAM for their own runtime. AgentKeys becomes the cross-walled-garden bridge — a vendor's device can authenticate to Claude *and* Doubao through the same actor tree. Hyperscalers don't credibly build this themselves (each can only do their own garden).
 
 ### 9.5 Authority-as-infrastructure pricing
 
@@ -226,7 +226,7 @@ If MCP stalls or shifts, AgentKeys has the actor-tree + cap-token + audit primit
 
 ## 10. Strategic risks to track at every milestone
 
-Full list in [`agent-iam-strategy.md` §6](../../research/agent-iam-strategy.md). Summary:
+Full list in [`agent-iam-strategy.md` §6](../../agent-iam-strategy.md). Summary:
 
 | Risk | Mitigation |
 |---|---|
@@ -247,14 +247,14 @@ Full list in [`agent-iam-strategy.md` §6](../../research/agent-iam-strategy.md)
 - **Per-PR planning**: every PR description that touches feature work should name which milestone it's serving — and if it's expanding scope beyond the milestone's spec, that's a conversation before implementation.
 - **Per-quarter retrospective**: walk this doc and the strategy doc together; identify scope drift, mitigation effectiveness, and what the next milestone needs to gain to be honest about its "done when."
 
-When this doc disagrees with [`arch.md`](../../arch.md), arch.md wins — the milestone roadmap is the plan, arch.md is the architecture. When it disagrees with [`agent-iam-strategy.md`](../../research/agent-iam-strategy.md), the strategy doc wins on positioning + corrections; this doc owns sequencing + scope per milestone.
+When this doc disagrees with [`arch.md`](../../arch.md), arch.md wins — the milestone roadmap is the plan, arch.md is the architecture. When it disagrees with [`agent-iam-strategy.md`](../../agent-iam-strategy.md), the strategy doc wins on positioning + corrections; this doc owns sequencing + scope per milestone.
 
 ---
 
 ## 12. References
 
 - **Architecture** (single source of truth) — [`docs/arch.md`](../../arch.md)
-- **Strategy** (positioning, corrections, risks) — [`docs/research/agent-iam-strategy.md`](../../research/agent-iam-strategy.md)
+- **Strategy** (positioning, corrections, risks) — [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md)
 - **xiaozhi-server integration** — [`docs/research/xiaozhi-hermes-architecture.md`](../../research/xiaozhi-hermes-architecture.md), [`docs/research/xiaozhi-hermes-risks.md`](../../research/xiaozhi-hermes-risks.md), [`docs/research/xiaozhi-esp32-magiclink.md`](../../research/xiaozhi-esp32-magiclink.md)
 - **Volcano Ark integration** — [`docs/research/volcano-ark-mcp-integration.md`](../../research/volcano-ark-mcp-integration.md)
 - **Tuya analysis** — [`docs/research/tuya-vs-xiaozhi.md`](../../research/tuya-vs-xiaozhi.md)

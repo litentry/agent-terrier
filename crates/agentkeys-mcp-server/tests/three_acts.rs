@@ -1,6 +1,6 @@
 //! Three-act demo storyboard exercised end-to-end against the MockBackend.
 //!
-//! Reference: `docs/research/agent-iam-strategy.md` §4.3.
+//! Reference: `docs/agent-iam-strategy.md` §4.3.
 //!   Act 1 — Permissioned Memory (namespace-scoped read returns travel,
 //!           refuses cross-namespace)
 //!   Act 2 — Deterministic Denial (payment over daily cap)
