@@ -1338,7 +1338,7 @@ bash scripts/heima-k3-rotate.sh
 
 The script (idempotent, supports `--target-epoch N` for multi-step advance) wraps `K3EpochCounter.advanceEpoch()`. Only the address stored at the contract's `signerGovernance` field can call this — stage 2 ships with the deployer EOA as governance; stage 3 swaps in an M-of-N multisig (the contract's `setSignerGovernance(newGov)` makes this a one-tx migration when ready).
 
-Operators do NOT need to re-deploy contracts, re-enroll K11, re-register devices, or migrate S3 data when rotating. The full operational walkthrough is at [`docs/runbook-k3-rotation.md`](../runbook-k3-rotation.md).
+Operators do NOT need to re-deploy contracts, re-enroll K11, re-register devices, or migrate S3 data when rotating. The full operational walkthrough is at [`docs/runbook-k3-rotation.md`](runbook-k3-rotation.md).
 
 **Eager re-encryption.** On a confirmed TEE compromise, operators want existing K3_v[old]-encrypted blobs purged ASAP, not just on-next-read. The eager-re-encrypt tool (`scripts/heima-k3-reencrypt-eager.sh` — stage 3 follow-up tracked in §22b.5) scans all blobs for an operator, decrypts under K3_v[old] in the signer enclave, re-encrypts under K3_v[new]. Without it, rotation is lazy: blobs re-encrypt only on next worker write.
 
@@ -1398,14 +1398,15 @@ S3 bucket names are **globally unique across AWS**. Each operator account picks 
 
 ### 17.5 Per-data-class cap-token binding (issue #90)
 
-The cap-token carries a signed `data_class: Credentials | Memory` field. The broker mints four endpoints, one per (data-class, op-type) pair:
+The cap-token carries a signed `data_class: Credentials | Memory | Audit` field. The broker mints one cap endpoint per (data-class, op-type) pair:
 
 | Endpoint | Mints CapPayload |
 |---|---|
-| `POST /v1/cap/cred-store` | `op: Store, data_class: Credentials` |
-| `POST /v1/cap/cred-fetch` | `op: Fetch, data_class: Credentials` |
-| `POST /v1/cap/memory-put` | `op: Store, data_class: Memory` |
-| `POST /v1/cap/memory-get` | `op: Fetch, data_class: Memory` |
+| `POST /v1/cap/cred-store` | `{ op: Store, data_class: Credentials, ... }` |
+| `POST /v1/cap/cred-fetch` | `{ op: Fetch, data_class: Credentials, ... }` |
+| `POST /v1/cap/memory-put` | `{ op: Store, data_class: Memory, ... }` |
+| `POST /v1/cap/memory-get` | `{ op: Fetch, data_class: Memory, ... }` |
+| `POST /v1/cap/audit-append` | `{ op: Append, data_class: Audit, ... }` |
 
 Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 403 `cap_data_class_mismatch`. This is the cap-layer isolation gate — symmetric with the AWS IAM cross-bucket gate (§17.2) but enforced at the broker-signed capability layer, **before** the worker touches AWS at all.
 
@@ -1755,7 +1756,7 @@ Alice's well-known dev key (subkey docs):
 
 **What Alice + sudo do NOT do:**
 
-- They do NOT run on Heima mainnet (`heima` profile). Production has no sudo — confirmed absent or held by a governance multisig (pending [heima-open-questions.md Q15](spec/spec/heima-open-questions.md#q15-heima-mainnet--confirm-sudo-is-not-in-the-runtime)).
+- They do NOT run on Heima mainnet (`heima` profile). Production has no sudo — confirmed absent or held by a governance multisig (pending [heima-open-questions.md Q15](spec/heima-open-questions.md#q15-heima-mainnet--confirm-sudo-is-not-in-the-runtime)).
 - They do NOT replace AgentKeys's K10 / K11 ceremonies. `agentkeys device register`, `agentkeys scope add`, etc. still go through the normal cap-mint + on-chain ceremony on Paseo too. Sudo is a Substrate root-bypass, not an AgentKeys auth path.
 - They do NOT work via Foundry / `cast` / web3.js. Sudo is a Substrate extrinsic; only Substrate-aware toolchains (Polkadot.js Apps, subxt, @polkadot/api, subkey) can construct it.
 
@@ -2191,10 +2192,10 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/s
 - **Stage 1 deliverable inventory** — [`spec/plans/v2-issues/issue-v2-stage-1-foundation.md`](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
 - **Stage 2 deliverable inventory** — [`spec/plans/v2-issues/issue-v2-stage-2-hardening.md`](spec/plans/v2-issues/issue-v2-stage-2-hardening.md)
 - **Payment-service design** — [`spec/plans/v2-issues/issue-payment-service-deferred.md`](spec/plans/v2-issues/issue-payment-service-deferred.md)
-- **Migration from pre-v2** — [`v2-stage1-migration-and-demo.md`](../v2-stage1-migration-and-demo.md) (historical; the migration window closed when stage 1 shipped)
+- **Migration from pre-v2** — [`v2-stage1-migration-and-demo.md`](v2-stage1-migration-and-demo.md) (historical; the migration window closed when stage 1 shipped)
 - **Operator runbook** — [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent). Historical: [`docs/archived/operator-runbook-stage7-2026-04.md`](archived/operator-runbook-stage7-2026-04.md).
 - **Milestone roadmap (M1-M7)** — [`spec/plans/milestones-roadmap.md`](spec/plans/milestones-roadmap.md)
-- **Cloud-side IAM + DNS + cert** — [`../cloud-setup.md`](../cloud-setup.md)
+- **Cloud-side IAM + DNS + cert** — [`../cloud-setup.md`](cloud-bootstrap.md)
 - **Per-actor reference (agent role)** — [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
 - **Upstream backend classes (per-upstream design)** — [`wiki/upstream-backend-classes-exercise-vs-distribution.md`](wiki/upstream-backend-classes-exercise-vs-distribution.md)
 
