@@ -320,12 +320,12 @@ async fn mint_cap(
 
 // ─── on-chain reads (raw eth_call over reqwest) ────────────────────────
 
-const ROLE_CAP_MINT: u8 = 1;
+pub(crate) const ROLE_CAP_MINT: u8 = 1;
 
 #[derive(Debug)]
-struct ChainContracts {
-    rpc_url: String,
-    registry: String,
+pub(crate) struct ChainContracts {
+    pub(crate) rpc_url: String,
+    pub(crate) registry: String,
     scope: String,
     epoch: String,
 }
@@ -336,7 +336,7 @@ impl ChainContracts {
     /// uppercased chain name with `-` → `_`. Matches the shape used in
     /// scripts/operator-workstation.env so broker/worker/CLI/bash all
     /// read the same value.
-    fn from_state(_state: &SharedState) -> Result<Self, CapError> {
+    pub(crate) fn from_state(_state: &SharedState) -> Result<Self, CapError> {
         let profile = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
         let profile_uc = profile.to_uppercase().replace('-', "_");
         let rpc_url = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
@@ -363,12 +363,12 @@ fn profile_env(profile_uc: &str, base: &str) -> Result<String, CapError> {
 }
 
 #[derive(Debug)]
-struct DeviceEntry {
-    operator_omni: String, // hex without 0x
-    actor_omni: String,
-    roles: u8,
-    registered_at: u64,
-    revoked: bool,
+pub(crate) struct DeviceEntry {
+    pub(crate) operator_omni: String, // hex without 0x
+    pub(crate) actor_omni: String,
+    pub(crate) roles: u8,
+    pub(crate) registered_at: u64,
+    pub(crate) revoked: bool,
 }
 
 async fn eth_call(
@@ -402,7 +402,7 @@ async fn eth_call(
         .ok_or_else(|| CapError::ChainRpc("eth_call missing 'result'".into()))
 }
 
-async fn call_get_device(
+pub(crate) async fn call_get_device(
     http: &reqwest::Client,
     rpc: &str,
     registry: &str,

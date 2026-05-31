@@ -204,7 +204,7 @@ Pinned to disambiguate the same value showing up under different labels across c
 | `actor_omni` | **The durable per-actor cryptographic anchor.** `SHA256("agentkeys" \|\| "evm" \|\| initial_master_wallet_K3_v1)`. **Frozen at first SIWE-bind**; never rotates with K3, never changes with wallet rotation. The Layer 1 identifier per §6. | `omni_account` (JWT claim + CLI `whoami` field), `agentkeys_actor_omni` (AWS PrincipalTag key), `OMNI_A` / `OMNI_B` (demo shell vars). |
 | `current_master_wallet` | **The current chain identity** = `HKDF(K3_v[current_epoch], O_master)`. Rotates each K3 epoch. Appears on chain as `msg.sender` in sovereign mode. The Layer 2 identifier per §6. | `master_wallet`, `wallet_address` (JWT claim shape pre-rotation), `MASTER_WALLET` (demo shell var). When historical K3 epochs are in scope, qualify with `master_wallet_K3_v[N]`. |
 | `identity_omni` | **The transient identity omni** — `SHA256("agentkeys" \|\| identity_type \|\| identity_value)`. Used internally by the broker between init and SIWE-verify; never carried in a post-SIWE JWT. | `identity_omni_email` / `identity_omni_oauth2` (when narrowing to a specific identity type), `identity omni` (init-flow CLI log line). |
-| `agent_omni` | **A child actor omni** = `HDKD(O_master, "//<label>")`. Hard derivation; child cannot be computed without parent's master secret. Distinct from `master_omni`; both are valid actor_omnis. | `O_master//agent-A`, `O_agent_A` (HDKD-tree notation). |
+| `agent_omni` | **A child actor omni** = `SHA256("agentkeys-hdkd-v1" \|\| O_master \|\| "//<label>")` (issue #144). **Public + recomputable** — anyone with the parent omni + label recomputes it; unforgeability is the master-gated `/v1/agent/create` + the master-submitted on-chain binding, NOT a secret. (The "cannot be computed without the parent's master secret" property lives one layer down, at the K4 wallet `HKDF(K3_v[epoch], agent_omni)` in the signer.) Distinct from `master_omni`; both are valid actor_omnis. | `O_master//agent-A`, `O_agent_A` (HDKD-tree notation). |
 | `K3` | The 32 bytes inside the signer enclave that K4 + KEK derivation HKDFs against. Per-epoch via `K3EpochCounter`. | `K3_v[N]` to disambiguate epoch; `master_secret` (signer-internal log term — discouraged). |
 | `session JWT` (= K6) | The bearer token at `~/.agentkeys/<id>/session.json` (or OS keychain). Signed by K1. Carries `agentkeys.actor_omni`, `agentkeys.device_pubkey`, `agentkeys.webauthn_cred_id` (master only). | `session_jwt`, `J1` (post-SIWE bearer), `SESSION_JWT_A` / `SESSION_JWT_B` (demo shell vars). |
 | `OIDC JWT` (= K7) | Per-mint short-lived JWT signed by K2; consumed by `AssumeRoleWithWebIdentity`. Carries `agentkeys_actor_omni` claim → AWS session tag. | `oidc_jwt`, `JWT_A` / `JWT_B` (demo shell vars). |
@@ -285,7 +285,7 @@ O_master                                wallet_master = HKDF(K3_v[epoch], O_mast
 └── ...
 ```
 
-Hard derivation (`//N`) — child secret cannot be computed without the parent's master secret. Substrate / SLIP-0010 standard. Each node's wallet is a different EVM address; AWS PrincipalTag is per-actor `actor_omni` for prefix isolation.
+The omni-tree edge `//<label>` is **public + recomputable** (issue #144): `O_child = SHA256("agentkeys-hdkd-v1" || O_parent || "//" || label)`. What "cannot be computed without the parent's master secret" is the per-node **wallet** (K4 = `HKDF(K3_v[epoch], O_node)`, derived in the signer) — not the omni node itself. Each node's wallet is a different EVM address; AWS PrincipalTag is per-actor `actor_omni` for prefix isolation. Only the master can *create* a binding for a child omni (the master-gated `/v1/agent/create` + the master-submitted `registerAgentDevice`), so a public omni derivation never lets anyone bind a sibling.
 
 **Why per-agent omni (not shared with master):**
 
@@ -473,42 +473,60 @@ Per §9 stages 0–4. Identity ceremonies vary per identity type but converge on
 
 ```
 ON MASTER (already initialized; holds J1_master):
-1. CLI: agentkeys agent create --label agent-A
+1. CLI: agentkeys agent create --label agent-A --services memory
 2. CLI → broker: POST /v1/agent/create
-                  { parent_omni: O_master, label: "agent-A", k11_assertion }
+                  { label: "agent-A", requested_scope: "memory" }
                   Authorization: Bearer J1_master
-3. Broker:
-   - Verify J1_master + K11 assertion (master-mutation gate)
-   - Derive O_agent_A = HDKD(O_master, "//agent-A")  [hard derivation]
-   - Persist (parent: O_master, child: O_agent_A, deriv_cert)
-   - Mint one-time link code bound to O_agent_A (TTL 600s)
-4. CLI: print link code (or auto-pipe to agent provisioner)
+3. Broker (J1_master bearer is the gate; K11 is NOT presented here — agents are
+   K10-only per the contract, so there is nothing for the broker to K11-verify):
+   - Verify J1_master
+   - Derive O_agent_A = SHA256(HDKD_DOMAIN || O_master || "//agent-A")
+     [public + recomputable per §6.2 — unforgeability is the J1_master gate +
+      the master-submitted on-chain binding, NOT a secret]
+   - Mint one-time link code bound to O_agent_A + requested_scope (TTL 600s)
+4. CLI: print link code (hand it to the agent out-of-band)
 
 ON AGENT MACHINE (any VM / container / CI runner / cloud sandbox):
-5. Stage 0: daemon generates (D_priv_agent, D_pub_agent) at startup
-            persists D_priv per §10.5
-6. agentkeys-daemon --init-link-code <code> --broker-url B --signer-url S
+5. Stage 0: daemon generates (D_priv_agent, D_pub_agent) IN THE SANDBOX
+            persists D_priv per §10.5 (reused on retry — never auto-regenerated)
+6. agentkeys-daemon --init-link-code <code> --broker-url B
 7. Daemon → broker: POST /v1/auth/link-code/redeem
-                     { link_code, device_pubkey: D_pub_agent,
-                       pop_sig: sign(D_priv_agent, link_code || D_pub_agent) }
+     { link_code, device_pubkey: D_pub_agent,
+       pop_sig: EIP-191( keccak256("agentkeys-agent-pop:" || device_key_hash) ) }
+     [device_key_hash = keccak256(D_pub_agent address bytes); this is the DEPLOYED
+      preimage — proves device-key possession, the link code proves authorization]
 8. Broker:
-   - Verify pop_sig
-   - Mark link code consumed (single-use)
-   - Bind (O_agent_A, D_pub_agent) on chain via
-     SidecarRegistry.register_agent_device(D_pub_hash, O_master, O_agent_A,
-                                            link_code_redemption, agent_pop_sig)
-     [tier=2, roles=CAP_MINT only, k11_cred_id=0]
-   - Mint J1_agent with claims:
-       actor_omni      = O_agent_A
-       parent_omni     = O_master
-       derivation_path = "//agent-A"
-       device_pubkey   = D_pub_agent
-9. Daemon: persist J1_agent; start the sidecar proxy (§12) and hand off any LLM-host integration to the MCP server surface per §22c.1 (backend variant decided at startup based on whether the LLM is local or remote)
+   - Verify pop_sig BEFORE consuming the code (a bad sig leaves the single-use
+     code redeemable → retryable)
+   - Mark link code consumed (single-use); record (D_pub_agent, pop_sig) as a
+     PENDING BINDING for the master
+   - Mint J1_agent { actor_omni=O_agent_A, parent_omni=O_master,
+                     derivation_path="//agent-A", device_pubkey=D_pub_agent }
+   - Does NOT write chain — the broker is read-only; the master binds (below)
+9. Daemon: persist J1_agent; emit the binding artifact. The agent now
+   authenticates but has NO scope yet (installed-but-not-yet-permitted).
+
+MASTER APPROVAL (async; master ≠ agent machine — the iOS/Android "first launch
+→ grant permissions" moment):
+10. Broker notifies the master (push notification in production). The master
+    pulls the pending binding (GET /v1/agent/pending-bindings, J1_master-gated) →
+    learns D_pub_agent + pop_sig it never generated.
+11. The master, with ONE K11/Touch ID approval, submits BOTH on chain:
+    - SidecarRegistry.registerAgentDevice(D_pub_hash, O_master, O_agent_A,
+        link_code_redemption, agent_pop_sig)   [msg.sender == operatorMasterWallet;
+        tier=AGENT, roles=CAP_MINT, k11_cred_id=0 — no biometric on this tx]
+    - AgentKeysScope.setScopeWithWebauthn(... requested_scope ...)  [the K11 gesture]
+    The CLI exposes these as two deterministic steps (test automation); the
+    operator experiences one approval. Install + permissions = one gesture.
+12. Master acks the binding (POST /v1/agent/pending-bindings/ack) → the broker
+    marks it bound so it drops out of the pending list (the rendezvous self-cleans;
+    re-bootstraps are idempotent).
+13. Agent's J1_agent now has scope; cap-mint works (§12).
 ```
 
-**Trust chain:** `master human → master K11 → master J1 + K10 sig → link-code-derivation-cert → agent K10 binding`. The agent never holds K11 or any user-presence credential.
+**Trust chain:** `master human → master K11 (at the approval) → master J1 + master-submitted on-chain binding → agent K10 binding`. The agent never holds K11 or any user-presence credential; the K11 gesture is the master's, exercised at step 11 (binding + scope), not at the broker.
 
-The agent's `pop_sig` is sufficient on its own (no WebAuthn equivalent) because the link code is single-use, TTL-bounded, and bound to a specific agent omni at mint time. Per-actor binding (§14) ensures the agent's K10 cannot mint caps under a sibling agent's omni.
+The agent's `pop_sig` proves K10 possession; the **link code** is the single-use, TTL-bounded, omni-bound authorization. Per-actor binding (§14) ensures the agent's K10 cannot mint caps under a sibling agent's omni. **The broker never writes chain** (decision: issue #144) — it mints the link code + `J1_agent` and records the pending binding; the master submits `registerAgentDevice` + the scope grant. (A faithful "broker binds at redeem" variant would need a contract change + a broker chain key — deferred.)
 
 ### 10.3 Master device switch + device-key rotation
 
@@ -764,8 +782,10 @@ The broker is the cap-mint authority. It does NOT hold credentials, K3, or any c
 /v1/auth/oauth2/{start,callback,status}       — OAuth2 flow (stage 1)
 /v1/auth/wallet/{start,verify}                — SIWE round-trip (stage 3)
 /v1/auth/bind/<request_id>                    — WebAuthn enrollment (stage 2)
-/v1/auth/link-code/redeem                     — agent bootstrap (§10.2)
-/v1/agent/create                              — mint agent link-code (master mutation, K11 required)
+/v1/auth/link-code/redeem                     — agent redeems link code → J1_agent (§10.2; no bearer, pop_sig-gated)
+/v1/agent/create                              — mint agent link-code (J1_master-gated; K11 NOT at broker — §10.2)
+/v1/agent/pending-bindings                    — master pulls redeemed-but-unbound agents to approve (§10.2; GET)
+/v1/agent/pending-bindings/ack                — master acks an on-chain binding → clears it from pending (§10.2; POST, J1_master)
 /v1/wallet/link                               — link wallet to identity (post-derive, pre-SIWE)
 /v1/wallet/device/rotate                      — K10 rotation (§10.3.2; K11 required)
 /v1/cap/cred-fetch                            — cap-mint for credential fetch

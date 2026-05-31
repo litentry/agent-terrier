@@ -42,6 +42,7 @@ name = "agentkeys-broker-server"
 version = "0.1.0"
 dependencies = [
  "agentkeys-broker-server",
+ "agentkeys-core",
  "agentkeys-mock-server",
  "agentkeys-types",
  "anyhow",

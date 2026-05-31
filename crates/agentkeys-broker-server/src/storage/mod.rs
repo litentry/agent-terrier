@@ -16,6 +16,9 @@ pub mod email_rate_limits;
 pub mod email_tokens;
 pub mod grants;
 pub mod identity_links;
+// Issue #144 — §10.2 agent-bootstrap link codes + pending-binding records.
+// Unconditional (the agent bootstrap is core, not feature-gated).
+pub mod link_codes;
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth_pending;
 #[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
@@ -29,6 +32,7 @@ pub use email_rate_limits::{EmailRateLimitStore, RateLimitOutcome};
 pub use email_tokens::{EmailConsumeOutcome, EmailRequestStatus, EmailTokenStore};
 pub use grants::{Grant, GrantConsumeOutcome, GrantStore};
 pub use identity_links::{IdentityLink, IdentityLinkStore};
+pub use link_codes::{LinkCodeConsume, LinkCodeStore, PendingBinding, LINK_CODE_TTL_SECONDS};
 #[cfg(feature = "auth-oauth2")]
 pub use oauth_pending::{OAuth2PendingConsume, OAuth2PendingStatus, OAuth2PendingStore};
 #[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]

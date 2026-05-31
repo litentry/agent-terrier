@@ -62,6 +62,25 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/auth/wallet/verify",
             post(handlers::auth::wallet_verify::wallet_verify),
         )
+        // §10.2 agent-bootstrap link-code ceremony (issue #144). Master mints a
+        // code bound to the HDKD child omni; the agent redeems it (proving K10
+        // possession) → J1_agent; the master pulls pending bindings to approve.
+        .route(
+            "/v1/agent/create",
+            post(handlers::agent::create::agent_create),
+        )
+        .route(
+            "/v1/auth/link-code/redeem",
+            post(handlers::agent::redeem::link_code_redeem),
+        )
+        .route(
+            "/v1/agent/pending-bindings",
+            get(handlers::agent::pending::pending_bindings),
+        )
+        .route(
+            "/v1/agent/pending-bindings/ack",
+            post(handlers::agent::pending::ack_binding),
+        )
         // Phase B grant endpoints (US-026).
         .route(
             "/v1/grant/create",
