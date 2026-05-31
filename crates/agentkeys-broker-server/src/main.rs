@@ -177,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         nonce_store: boot_artifacts.nonce_store,
         grant_store: boot_artifacts.grant_store,
         identity_link_store: boot_artifacts.identity_link_store,
+        link_code_store: boot_artifacts.link_code_store,
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::clone(&tier2),
         #[cfg(feature = "auth-email-link")]

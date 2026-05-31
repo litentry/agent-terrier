@@ -421,23 +421,17 @@ Capture for the next step:
 - A real actor omni from `heima-agent-register.sh` (32-byte hex).
 - A device key hash from `heima-device-register.sh` (32-byte hex).
 
-### B.5 Deploy the MCP server on the broker
+### B.5 Deploy the MCP server on the broker (hosted-LLM path — issue #152, deferred)
 
-**Production / test (one command from the operator workstation):** [`scripts/setup-cloud.sh`](../../../scripts/setup-cloud.sh) step 15 SSMs the broker EC2 and runs [`scripts/setup-mcp-host.sh`](../../../scripts/setup-mcp-host.sh) there. Same step handles prod (`mcp.${ZONE}`) and test (`test-mcp.${ZONE}`).
+> **Moved.** The broker-hosted MCP endpoint is the **Hosted-LLM** path (a remote vendor LLM connects *inward* over WSS) — tracked in [#152](https://github.com/litentry/agentKeys/issues/152) and **deferred**. It is a broker-host concern, so it no longer lives in `setup-cloud.sh` (which is IAM/permission-only). The old `setup-cloud.sh --only-step 15` SSM-ran `setup-mcp-host.sh`, cloning `main` and cold-building via `cargo install --git` (~10–20 min EVERY run). Enable it on the broker with [`setup-mcp-host.sh`](../../../scripts/setup-mcp-host.sh) (cached incremental `cargo build -p` against the checkout); thereafter `setup-broker-host.sh` re-converges it automatically — **no flag to remember**:
 
 ```bash
-# Bring up prod MCP on the broker (cargo installs from github.com/litentry/agentKeys main)
-bash scripts/setup-cloud.sh --env-file scripts/operator-workstation.env --only-step 15
-
-# Bring up test MCP on the same broker (test-mcp.litentry.org)
-bash scripts/setup-cloud.sh --env-file scripts/operator-workstation.test.env --test --only-step 15
-
-# Pin to a PR branch / fork while developing
-AGENTKEYS_REPO_URL=https://github.com/me/agentKeys.git AGENTKEYS_REV=my-feature-branch \
-  bash scripts/setup-cloud.sh --only-step 15
+# On the broker (reach it via scripts/ssh-broker.sh), from the /opt/agentkeys-src checkout:
+sudo bash /opt/agentkeys-src/scripts/setup-mcp-host.sh            # prod  → mcp.${ZONE}
+sudo bash /opt/agentkeys-src/scripts/setup-mcp-host.sh --test     # test → test-mcp.${ZONE}
 ```
 
-The step polls the SSM command for up to 10 min and tails the last 30 lines of stdout when it completes (or stderr on failure). Idempotent — re-runs short-circuit when state is already correct.
+Once the MCP binary is installed, every `setup-broker-host.sh` run keeps it converged (idempotent), so routine broker setups need nothing extra. **The Local-LLM / Task-agent wire demo does NOT need this** — that MCP server runs in the agent's own sandbox (see [`docs/operator-runbook-wire.md`](../../operator-runbook-wire.md) + `harness/phase1-wire-demo.sh`).
 
 **Local development install (laptop / Claude Code / Codex CLI / Claude Desktop):**
 
@@ -664,7 +658,7 @@ sudo systemctl disable --now agentkeys-mcp-server mcp-endpoint-server
 - Parent-control UI (#111) — until it lands, simulate Act 3's revoke via a curl call through the relay between the two voice prompts.
 - Live broker `/v1/revoke/cap/:id` lands in M4 — until then, `cap.revoke` is the structured stub on the MCP server.
 - Vendor token mint is hand-edited into `MCP_VENDOR_TOKENS` for the HTTP transport. The mcp-endpoint transport bypasses vendor tokens (the relay URL token is the binding) so this isn't on the critical path for B.
-- `scripts/setup-broker-host.sh --with-mcp-endpoint` — fold both systemd units (relay + MCP server) into the existing idempotent host setup. Follow-up.
+- The MCP-server systemd unit is already re-converged by `setup-broker-host.sh` once installed (state-driven, no flag — #152). Follow-up: bring the `mcp-endpoint` relay unit under the same auto-convergence so both come up from state with nothing to pass.
 ---
 
 ## Where to file demo-specific bugs

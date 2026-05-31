@@ -25,12 +25,26 @@ pub struct SessionClaims {
 }
 
 /// The custom `agentkeys` namespace inside the session JWT.
+///
+/// The `parent_omni` / `derivation_path` / `device_pubkey` fields are present
+/// only on agent sessions (`J1_agent`, issue #144). They are `Option` with
+/// `serde(default)` so existing wallet/master tokens (which never carried them)
+/// still deserialize — the change is purely additive.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentKeysClaims {
     pub omni_account: String,
     pub wallet_address: String,
     pub identity_type: String,
     pub identity_value: String,
+    /// Agent only: the parent (master) omni this child was HDKD-derived from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_omni: Option<String>,
+    /// Agent only: the HDKD path, e.g. `"//agent-a"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation_path: Option<String>,
+    /// Agent only: the K10 device address whose pop_sig redeemed the link code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_pubkey: Option<String>,
 }
 
 /// Verify a session JWT against the broker's session keypair. Validates

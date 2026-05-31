@@ -1,11 +1,11 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::init_flow;
 use agentkeys_core::mock_client::MockHttpClient;
 use agentkeys_core::session_store;
-use agentkeys_types::WalletAddress;
+use agentkeys_types::{Session, WalletAddress};
 use anyhow::Context;
 use clap::Parser;
 use tracing::info;
@@ -169,6 +169,23 @@ struct Args {
     /// or OAuth2 callback before failing init.
     #[arg(long, default_value_t = 300)]
     init_poll_timeout_seconds: u64,
+
+    /// Issue #144 §10.2: redeem a one-time master-issued link code. Generates
+    /// (or reuses) the K10 device key IN THE SANDBOX, POSTs
+    /// `/v1/auth/link-code/redeem`, persists `J1_agent`, and prints the binding
+    /// artifact (device_pubkey + pop_sig + omnis) on stdout for the master to
+    /// submit `registerAgentDevice`. One-shot: redeems and exits (the MCP/proxy
+    /// surface runs as a separate process per §22c). Requires `--broker-url`.
+    #[arg(long, conflicts_with_all = ["init_email", "init_oauth2_google", "recover"])]
+    init_link_code: Option<String>,
+
+    /// Path to the agent's K10 device-key file for `--init-link-code`. Defaults
+    /// to the same path as `agentkeys agent device-session`
+    /// (`~/.agentkeys/agent-device.key`) so the CLI + daemon share one key.
+    /// Reused on retry (never auto-regenerated) so a re-run after a failed master
+    /// bind/grant keeps the same `device_key_hash` (already-registered skip).
+    #[arg(long, env = "AGENTKEYS_DEVICE_KEY_FILE")]
+    device_key_file: Option<String>,
 }
 
 #[tokio::main]
@@ -189,6 +206,13 @@ async fn main() -> anyhow::Result<()> {
 
     if args.proxy {
         return run_proxy_mode(args).await;
+    }
+
+    // Issue #144 §10.2 one-shot bootstrap: redeem a link code, persist J1_agent,
+    // emit the binding artifact, exit. Runs before the --backend requirement +
+    // hardening (it needs neither — only --broker-url + the OS RNG for keygen).
+    if let Some(code) = args.init_link_code.clone() {
+        return run_link_code_bootstrap(args, &code).await;
     }
 
     // 1. Apply kernel hardening
@@ -413,6 +437,135 @@ async fn main() -> anyhow::Result<()> {
         info!("no --stdio flag; daemon exiting (Unix socket mode not yet implemented)");
     }
 
+    Ok(())
+}
+
+/// Issue #144 §10.2 one-shot agent bootstrap: generate (or reuse) the K10 device
+/// key in the sandbox, redeem the master-issued link code at the broker, persist
+/// `J1_agent`, and print the binding artifact the master needs to submit
+/// `registerAgentDevice`. The device key NEVER leaves this machine.
+///
+/// Logs go to stderr; the JSON artifact is the ONLY thing on stdout, so the wire
+/// harness can capture it and hand it to the master's bind step (same shape
+/// `scripts/heima-agent-create.sh --from-pubkey` consumes).
+async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<()> {
+    use agentkeys_core::device_crypto::DeviceKey;
+
+    let broker_url = args.broker_url.clone().ok_or_else(|| {
+        anyhow::anyhow!("--broker-url (or AGENTKEYS_BROKER_URL) required for --init-link-code")
+    })?;
+    let base = broker_url.trim_end_matches('/').to_string();
+
+    let key_file = args
+        .device_key_file
+        .clone()
+        .unwrap_or_else(|| "~/.agentkeys/agent-device.key".to_string());
+    // Reuse the existing key on retry (no regen): a failed master bind/grant
+    // must re-redeem with the SAME device_key_hash so the on-chain submit hits
+    // the already-registered short-circuit instead of binding a second key.
+    let dk =
+        DeviceKey::load_or_generate(&key_file, false).context("load/generate K10 device key")?;
+    let device_pubkey = dk.address().to_string();
+    let device_key_hash = dk.device_key_hash().context("device_key_hash")?;
+    let pop_sig = dk.pop_sig().context("pop_sig")?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .context("build http client")?;
+    let resp = client
+        .post(format!("{base}/v1/auth/link-code/redeem"))
+        .json(&serde_json::json!({
+            "link_code": link_code,
+            "device_pubkey": device_pubkey,
+            "pop_sig": pop_sig,
+        }))
+        .send()
+        .await
+        .context("POST /v1/auth/link-code/redeem")?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("link-code redeem failed: HTTP {status}: {text}");
+    }
+    let body: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parse redeem response: {text}"))?;
+    let session_jwt = body
+        .get("session_jwt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("redeem response missing session_jwt: {text}"))?;
+    let child_omni = body
+        .get("child_omni")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let operator_omni = body
+        .get("operator_omni")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let derivation_path = body
+        .get("derivation_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    // Persist J1_agent so a daemon restart resumes (Session.wallet = K10 address;
+    // the HDKD omni rides inside the J1 claims, not in Session.wallet).
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let sess = Session {
+        token: session_jwt.to_string(),
+        wallet: WalletAddress(device_pubkey.clone()),
+        scope: None,
+        created_at: now,
+        ttl_seconds: 18_000,
+    };
+    let sid = args
+        .session_id
+        .clone()
+        .unwrap_or_else(|| format!("daemon-{child_omni}"));
+    session_store::save_session(&sess, &sid).context("save link-code session")?;
+
+    // Finding 2 (adversarial review): keep the bearer IN the sandbox. Write the
+    // session JWT to an owner-only (0600) file that the in-sandbox MCP server reads
+    // directly via --agent-session-bearer-file, and DO NOT print it on stdout — the
+    // master captures stdout and would otherwise expose the bearer in its shell +
+    // the sandbox process list (`ps`). Only PUBLIC binding fields leave the box.
+    let session_file = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let dir = format!("{home}/.agentkeys");
+        std::fs::create_dir_all(&dir).ok();
+        format!("{dir}/agent-session.jwt")
+    };
+    agentkeys_core::device_crypto::write_key_0600(&session_file, session_jwt)
+        .context("persist agent session jwt (0600)")?;
+
+    info!(
+        target: "agentkeys.daemon.init",
+        child_omni = %child_omni,
+        operator_omni = %operator_omni,
+        device = %device_pubkey,
+        session_id = %sid,
+        "agentkeys-daemon redeemed §10.2 link code — J1_agent persisted"
+    );
+
+    // Binding artifact on STDOUT (logs are on stderr). Same fields the master's
+    // chain helper consumes; pop_sig + device_key_hash let the master submit
+    // registerAgentDevice without re-deriving.
+    println!(
+        "{}",
+        serde_json::json!({
+            "agent_address": device_pubkey,
+            "actor_omni": child_omni,
+            "operator_omni": operator_omni,
+            "derivation_path": derivation_path,
+            "device_key_hash": device_key_hash,
+            "pop_sig": pop_sig,
+            "session_file": session_file,
+            "link_code": link_code,
+            "key_file": key_file,
+        })
+    );
     Ok(())
 }
 
