@@ -99,6 +99,7 @@ dependencies = [
  "hex",
  "hyper 1.9.0",
  "hyper-util",
+ "k256",
  "p256 0.13.2",
  "predicates",
  "rand_core",
@@ -107,6 +108,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sha3",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -197,6 +199,7 @@ dependencies = [
 name = "agentkeys-mcp-server"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-provisioner",
  "agentkeys-types",
  "anyhow",
  "async-trait",

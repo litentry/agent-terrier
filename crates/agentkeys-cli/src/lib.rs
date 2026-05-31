@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod device_session;
+pub mod hook;
 pub mod k11;
 pub mod k11_intent;
 pub mod k11_webauthn;
+pub mod wire;
 
 use agentkeys_core::actor_omni::actor_omni_hex;
 use agentkeys_core::backend::{BackendError, CredentialBackend};

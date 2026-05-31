@@ -15,6 +15,8 @@ Do not read folder `docs/archived`
 - `docs/wiki/` — end users + hardware integrators; mirrored to GitHub Wiki by [`publish-wiki.yml`](.github/workflows/publish-wiki.yml).
 - `docs/archived/` — superseded files; never linked from arch.md, never read in normal dev. Move stale files here, don't delete. Run the `agentkeys-docs` skill to audit + compact.
 
+**User-facing instructions** — every behavior/caveat a user would notice (e.g. `agentkeys wire` taking over the runtime's `hooks:` block) goes in [`docs/user-manual.md`](docs/user-manual.md), the single home for user-aware instructions.
+
 ## Architecture-as-source-of-truth policy
 [`docs/arch.md`](docs/arch.md) is the **single source of truth** for component inventory, key inventory (K1–K11), trust boundaries, identity model (HDKD actor tree), and per-actor binding ceremonies. **After editing any architectural doc** (broker plans, signer-protocol, demo doc, runbooks, plan files in `docs/spec/plans/`, heima-gaps), re-open `arch.md` and verify it still matches; if it diverges, update arch.md in the same change. If the per-doc detail outgrows arch.md, link from arch.md outward — never duplicate. The wiki page at [`docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md) is a focused operator reference for the agent role; it defers to arch.md.
 
@@ -38,14 +40,14 @@ When you discover a name divergence while making any change, fix it in the same 
 ## Version Control
 Use `jj` (Jujutsu) for all version control. Never use raw `git` commands.
 
-## Branch push policy (this branch: `evm`)
-On the `evm` branch, after **every** code/doc update that lands a `jj describe` (or amends the working change), push immediately with `jj git push`. The remote broker host pulls from `origin/evm` via `scripts/setup-broker-host.sh --upgrade`, so an unpushed local commit means the deploy script silently picks up the previous revision. No "I'll push at the end" — push per change.
+## Branch / deploy policy (`origin/main` is the default + deploy branch)
+**`origin/evm` is DEPRECATED.** All new work lands on the default branch **`origin/main`** (feature branch → PR → `main`). The remote broker host now deploys from `origin/main`: `bash scripts/setup-broker-host.sh --ref main` (fetch + checkout + pull `main`, rebuild, redeploy). `--upgrade` is a back-compat no-op — the script is idempotent and `--ref` drives any pull. Push per change so the branch the host deploys from is never behind your local commits; an unpushed commit means the deploy silently picks up the previous revision. (Historical note: the broker used to deploy from `origin/evm`; that branch is frozen — do not push to it.)
 
 ## Diagnosis-before-edit policy
 Before changing any file in response to a reported failure, **reproduce the failure locally** and isolate the layer (shell quoting, client tooling, doc command, broker code, network). If the cause is local (shell, copy-paste, env var), respond with the one-line fix and let the user run it — do NOT edit code or docs. Only edit when the cause is in the repo. Keep the response concise: failing command, root cause, fix command — nothing else.
 
 ## Land-the-fix policy
-Once a local repro proves a fix is correct, **land it the same turn**: edit every affected file (search repo-wide — never assume one file), commit, push to `origin/evm`. Do not stop at "verified locally" or "fixed in one place" — the next operator running the docs will hit the same bug if the fix isn't on `origin/evm`. Pair this with the diagnosis-before-edit policy: diagnose once, fix everywhere, push immediately.
+Once a local repro proves a fix is correct, **land it the same turn**: edit every affected file (search repo-wide — never assume one file), commit, push to your working branch (PR'd to `origin/main`). Do not stop at "verified locally" or "fixed in one place" — the next operator running the docs will hit the same bug if the fix isn't on `origin/main`. Pair this with the diagnosis-before-edit policy: diagnose once, fix everywhere, push immediately.
 
 ## Runbook-fix-fold-back policy
 When the user is walking through a runbook (`docs/cloud-setup.md`, `docs/v2-stage1-migration-and-demo.md`, `scripts/setup-broker-host.sh`, etc.) and hits a step that fails, **two things must land in the same turn**:
@@ -88,8 +90,13 @@ Also: never gloss over a partial implementation in a demo doc or runbook. If the
 ## Remote broker host (single entry point)
 All remote-host changes (binary upgrades, systemd edits, nginx/certbot, env tweaks, mock-server redeploys) MUST go through `bash scripts/setup-broker-host.sh` — it's idempotent and auto-detects bootstrap vs upgrade. No ad-hoc `systemctl` edits or hand-built `scp`.
 
+### SSH access to the remote broker host
+On the operator machine, **SSH into the prod broker with the zsh alias `ssh-agentkeys`** (= `bash $AGENTKEYS_REPO/scripts/ssh-broker.sh prod`, which uses EC2 Instance Connect under AWS profile `agentkeys-broker`). Use it for read-only diagnostics (worker logs, env, status) — it is the sanctioned remote-shell entry point; do not hand-roll `aws ec2-instance-connect ssh` or raw `ssh`. Pass a trailing command to run non-interactively: `ssh-agentkeys 'systemctl status agentkeys-worker-memory'`. The login user is `agentkey` (uid 1001); it is in the `sudo` group but sudo **requires a password and a TTY**, so `journalctl`/reading `/etc/agentkeys/*.env` (owned `agentkeys:agentkeys 0600`) need an interactive session — non-interactive `ssh-agentkeys '<cmd>'` can only run unprivileged commands. For privileged log reads, open an interactive `ssh-agentkeys` shell and run `sudo` there. (`ssh-broker.sh test` / `--fallback` reach the test stack / use the `.pem` when EC2-IC is down.)
+
 ## Heima chain (single entry point)
 All chain bring-up + per-actor binding ceremonies (contract deploy, deployer funding, master device registration, agent creation, scope grants, K11 enrollment, audit-row append, worker smoke) MUST go through `bash scripts/setup-heima.sh` — it's idempotent and orchestrates the existing per-action `heima-*.sh` helpers in order. Same posture as `setup-broker-host.sh`: one command, every step pre-checks state + short-circuits when already done. The per-action helpers stay callable directly for surgical re-runs (`bash scripts/heima-scope-set.sh ...`); `setup-heima.sh` is the end-to-end orchestrator.
+
+**Harness / demo testing runs on Heima mainnet (`AGENTKEYS_CHAIN=heima`), not a testnet** — the operator deploy wallet has enough HEI to fund test agents, so use real mainnet (no gas-free shortcuts); the per-actor binding txs are funded from the deploy wallet automatically.
 
 ## Idempotent remote-setup rule (CLOUD / BLOCKCHAIN / CI / VM)
 **Every script that mutates remote state — AWS / Heima / CI runners / EC2 VMs / Cloudflare / Tencent / IAM / DNS — MUST be idempotent.** A second run with the same inputs MUST exit 0 without re-applying the mutation. This is non-negotiable because:
@@ -186,6 +193,17 @@ Verified live:
 - Unit tests: `crates/agentkeys-worker-creds/src/verify.rs::check_data_class_rejects_cross_class` + serialization test for `DataClass`
 
 **When a third data class lands** (e.g. payments-audit per arch.md §15.6): mint two more endpoints (`/v1/cap/payaudit-store` + `/v1/cap/payaudit-fetch`), add `DataClass::PaymentsAudit` variant, plumb to the new worker. The pattern is closed-extension: existing data classes don't need to know about the new one.
+
+## Agent-side wire demo — REAL memory only (`harness/phase1-wire-demo.sh`)
+
+The agent-side wire demo (`agentkeys wire hermes` inside the aiosandbox) MUST exercise the **real memory worker only**. Run it `--real`: the MCP server uses `--backend http`, and every `agentkeys.memory.get/put` goes broker cap-mint → per-actor STS relay (`X-Aws-*`) → `memory.litentry.org` → S3 (`bots/<actor>/memory/`). **Never use `--light` / `--backend in-memory` for any demo memory assertion** — that backend auto-seeds a fake Chengdu fixture (actor `0xa0c7…`) and is a dev-loop convenience only, NOT a real-memory proof. When demoing or QA-ing the agent's memory, assert against the real worker (`--real`), or directly: `agentkeys hook memory-inject --namespaces travel </dev/null` (returns the real S3 content) / the live S3 object `bots/<actor>/memory/memory.enc`.
+
+**Three distinct memory systems — never conflate them:**
+1. **Real AgentKeys memory** (the only one the demo proves): MCP `http` backend → worker → S3. Source of truth.
+2. **In-memory fixture** (light mode): fake, dev-only. Forbidden in demo assertions.
+3. **Hermes native session memory** (`recall` / `session_search`): the runtime's own store — **NOT** AgentKeys memory. Wiping Hermes "session memory" does not touch the real worker, and Hermes' native `recall` will never return AgentKeys content.
+
+**No conflict with "passive injection":** passive injection (the `pre_llm_call` hook prepending memory each turn) is the *delivery mechanism* (when/how memory reaches Hermes), orthogonal to the *source*. In `--real` mode the passively-injected block IS the real worker memory — they are the same bytes, just delivered automatically. The rule is only about the SOURCE: real worker, never the in-memory fixture, never Hermes-native.
 
 ## Development Workflow (Anthropic Harness Pattern)
 
