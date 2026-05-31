@@ -100,6 +100,16 @@ pub async fn put(
         .await
         .map_err(|e| McpError::Backend(format!("memory_put failed: {e}")))?;
 
+    // Audit trail: every memory write is logged (actor + namespace + size).
+    tracing::info!(
+        op = "memory.put",
+        actor = %actor,
+        namespace = %namespace,
+        bytes = content.len(),
+        s3_key = %result.s3_key,
+        "memory write"
+    );
+
     Ok(json!({
         "ok": result.ok,
         "namespace": result.namespace,
@@ -169,6 +179,15 @@ pub async fn get(
         .map_err(|e| McpError::Internal(format!("plaintext_b64 decode: {e}")))?;
     let content = String::from_utf8(plaintext)
         .map_err(|e| McpError::Internal(format!("plaintext utf8: {e}")))?;
+
+    // Audit trail: every memory read is logged (actor + namespace + size).
+    tracing::info!(
+        op = "memory.get",
+        actor = %actor,
+        namespace = %namespace,
+        bytes = content.len(),
+        "memory read"
+    );
 
     Ok(json!({
         "ok": result.ok,

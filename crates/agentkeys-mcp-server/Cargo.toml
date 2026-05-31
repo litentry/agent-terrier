@@ -13,6 +13,9 @@ path = "src/lib.rs"
 
 [dependencies]
 agentkeys-types = { workspace = true }
+# Reuse the broker→STS web-identity cred fetch (mint-oidc-jwt +
+# AssumeRoleWithWebIdentity) for the per-actor worker S3 relay (issue #90).
+agentkeys-provisioner = { path = "../agentkeys-provisioner" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -290,6 +290,84 @@ enum Commands {
         #[command(subcommand)]
         action: K11Action,
     },
+
+    #[command(
+        about = "Wire a Task Host runtime with AgentKeys IAM-guarantee hooks",
+        long_about = "Provision a Task Host (Phase 1.a: Hermes) so AgentKeys hooks fire on its tool-call lifecycle — turning the MCP tools into IAM guarantees the LLM cannot bypass. Idempotent: re-runs are no-ops modulo drift; --check-only reports drift without writing.\n\nWrites hook scripts to ~/.<runtime>/agent-hooks/, appends a managed `hooks:` block to the runtime config, and pre-approves first-use consent.\n\nExamples:\n  agentkeys wire hermes\n  agentkeys wire hermes --check-only\n  agentkeys wire hermes --actor-omni 0x<64hex> --namespaces travel,personal"
+    )]
+    Wire {
+        /// Task Host runtime to wire. Phase 1.a ships `hermes`.
+        runtime: String,
+
+        /// Report drift without writing (nightly drift check / dry run).
+        #[arg(long)]
+        check_only: bool,
+
+        /// Actor omni the hooks act for. Defaults to the in-memory demo actor.
+        #[arg(
+            long,
+            env = "AGENTKEYS_ACTOR_OMNI",
+            default_value = "0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7"
+        )]
+        actor_omni: String,
+
+        /// Operator omni for audit-row attribution. Defaults to demo operator.
+        #[arg(
+            long,
+            env = "AGENTKEYS_OPERATOR_OMNI",
+            default_value = "0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8"
+        )]
+        operator_omni: String,
+
+        /// Comma-separated memory namespaces the pre_llm_call hook injects.
+        #[arg(long, default_value = "travel")]
+        namespaces: String,
+
+        /// Scope the pre_tool_call permission gate checks.
+        #[arg(long, default_value = "payment.spend")]
+        payment_scope: String,
+
+        /// AgentKeys MCP server URL the hooks call.
+        #[arg(
+            long,
+            env = "AGENTKEYS_MCP_URL",
+            default_value = "http://localhost:8088/mcp"
+        )]
+        mcp_url: String,
+
+        /// Vendor bearer token for the MCP server.
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN", default_value = "demo-tok")]
+        vendor_token: String,
+
+        /// Operator/agent session JWT baked into the hook scripts (forwarded
+        /// to the broker cap-mint via the MCP server, arch.md §22b.4). Leave
+        /// empty for the in-memory backend. JWTs expire — re-run wire to refresh.
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER", default_value = "")]
+        session_bearer: String,
+    },
+
+    #[command(
+        about = "Runtime lifecycle hook helpers (called BY wire-generated scripts)",
+        long_about = "These subcommands are invoked by the hook scripts `agentkeys wire` drops into a Task Host. Each reads the host's JSON hook payload from stdin, calls an AgentKeys MCP tool, and writes the host's expected JSON decision to stdout. You normally never run these by hand.\n\n  check         — PreToolUse permission gate (fails CLOSED)\n  audit         — PostToolUse audit append (never blocks)\n  memory-inject — pre_llm_call context injection (never blocks)"
+    )]
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
+    },
+
+    #[command(
+        about = "Memory namespace helpers (e.g. SEED a namespace in the real worker)",
+        long_about = "Direct memory operations against the AgentKeys MCP server. `put` writes an entry — used to SEED a namespace (e.g. the demo travel fixture) in the REAL memory worker; in-memory mode auto-seeds the fixture, so this is only needed for the real backend. Identity (actor / operator / device_key_hash) defaults from the MCP server's configured defaults."
+    )]
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+    /// Agent-side device bootstrap (interim §10.2 — full ceremony: issue #144).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -493,6 +571,122 @@ enum InboxAction {
             help = "Agent wallet address, alias, or email (defaults to session wallet)"
         )]
         agent: Option<String>,
+    },
+}
+
+/// Hook helper subcommands. Invoked by wire-generated scripts; read the
+/// host JSON payload from stdin, call an MCP tool, write the host decision
+/// JSON to stdout. Common connection flags fall back to env then demo
+/// defaults: --mcp-url (AGENTKEYS_MCP_URL), --vendor-token
+/// (AGENTKEYS_MCP_VENDOR_TOKEN), --actor (AGENTKEYS_ACTOR_OMNI),
+/// --operator (AGENTKEYS_OPERATOR_OMNI).
+#[derive(Subcommand)]
+enum HookAction {
+    #[command(about = "PreToolUse permission gate (fails CLOSED if MCP unreachable)")]
+    Check {
+        /// Scope to check (e.g. payment.spend).
+        #[arg(long)]
+        scope: String,
+        #[arg(long, env = "AGENTKEYS_MCP_URL")]
+        mcp_url: Option<String>,
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
+        vendor_token: Option<String>,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor: Option<String>,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator: Option<String>,
+    },
+
+    #[command(about = "PostToolUse audit append (never blocks)")]
+    Audit {
+        #[arg(long, env = "AGENTKEYS_MCP_URL")]
+        mcp_url: Option<String>,
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
+        vendor_token: Option<String>,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor: Option<String>,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator: Option<String>,
+    },
+
+    #[command(
+        name = "memory-inject",
+        about = "pre_llm_call context injection from memory namespaces (never blocks)"
+    )]
+    MemoryInject {
+        /// Comma-separated memory namespaces to inject.
+        #[arg(long, default_value = "travel")]
+        namespaces: String,
+        #[arg(long, env = "AGENTKEYS_MCP_URL")]
+        mcp_url: Option<String>,
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
+        vendor_token: Option<String>,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor: Option<String>,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Write a memory entry — SEED a namespace (e.g. the demo travel fixture).
+    /// Reaches the real memory worker in --real mode (in-memory auto-seeds).
+    #[command(about = "Write/seed a memory namespace entry via agentkeys.memory.put")]
+    Put {
+        /// Namespace to write (e.g. `travel`).
+        #[arg(long)]
+        namespace: String,
+        /// Plaintext content to store.
+        #[arg(long)]
+        content: String,
+        #[arg(long, env = "AGENTKEYS_MCP_URL")]
+        mcp_url: Option<String>,
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
+        vendor_token: Option<String>,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor: Option<String>,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Generate (or reuse) THIS machine's secp256k1 device key, mint a broker
+    /// session via wallet_sig SIWE, and print the JSON the master needs to bind
+    /// the device on-chain (device_key_hash + pop_sig). Runs in the sandbox so
+    /// the agent key is never born on the master. Interim §10.2 (issue #144).
+    #[command(
+        about = "Mint this agent's device session (in-sandbox keygen + wallet_sig) — emits JSON"
+    )]
+    DeviceSession {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/agent-device.key",
+            help = "Device key file — sandbox-local, 0600, NEVER leaves the agent"
+        )]
+        key_file: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "One-time link code from the master (echoed into the output for binding)"
+        )]
+        link_code: String,
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "SIWE chain_id replay nonce (not a chain hop)"
+        )]
+        chain_id: u64,
+        #[arg(long, help = "Force a fresh device key → fresh pairing (new omni)")]
+        regen: bool,
     },
 }
 
@@ -829,6 +1023,111 @@ async fn main() {
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
         Commands::K11 { action } => cmd_k11(action).await,
+        Commands::Wire {
+            runtime,
+            check_only,
+            actor_omni,
+            operator_omni,
+            namespaces,
+            payment_scope,
+            mcp_url,
+            vendor_token,
+            session_bearer,
+        } => agentkeys_cli::wire::cmd_wire(
+            runtime,
+            agentkeys_cli::wire::WireRequest {
+                actor: actor_omni.clone(),
+                operator: operator_omni.clone(),
+                namespaces: namespaces.clone(),
+                payment_scope: payment_scope.clone(),
+                mcp_url: mcp_url.clone(),
+                vendor_token: vendor_token.clone(),
+                session_bearer: session_bearer.clone(),
+                check_only: *check_only,
+            },
+        ),
+        Commands::Hook { action } => match action {
+            HookAction::Check {
+                scope,
+                mcp_url,
+                vendor_token,
+                actor,
+                operator,
+            } => {
+                agentkeys_cli::hook::check(
+                    scope,
+                    mcp_url.clone(),
+                    vendor_token.clone(),
+                    actor.clone(),
+                    operator.clone(),
+                )
+                .await
+            }
+            HookAction::Audit {
+                mcp_url,
+                vendor_token,
+                actor,
+                operator,
+            } => {
+                agentkeys_cli::hook::audit(
+                    mcp_url.clone(),
+                    vendor_token.clone(),
+                    actor.clone(),
+                    operator.clone(),
+                )
+                .await
+            }
+            HookAction::MemoryInject {
+                namespaces,
+                mcp_url,
+                vendor_token,
+                actor,
+                operator,
+            } => {
+                agentkeys_cli::hook::memory_inject(
+                    namespaces,
+                    mcp_url.clone(),
+                    vendor_token.clone(),
+                    actor.clone(),
+                    operator.clone(),
+                )
+                .await
+            }
+        },
+        Commands::Memory { action } => match action {
+            MemoryAction::Put {
+                namespace,
+                content,
+                mcp_url,
+                vendor_token,
+                actor,
+                operator,
+            } => {
+                agentkeys_cli::hook::memory_put(
+                    namespace,
+                    content,
+                    mcp_url.clone(),
+                    vendor_token.clone(),
+                    actor.clone(),
+                    operator.clone(),
+                )
+                .await
+            }
+        },
+        Commands::Agent { action } => match action {
+            AgentAction::DeviceSession {
+                broker_url,
+                key_file,
+                link_code,
+                chain_id,
+                regen,
+            } => {
+                agentkeys_cli::device_session::device_session(
+                    broker_url, key_file, link_code, *chain_id, *regen,
+                )
+                .await
+            }
+        },
     };
 
     match result {
@@ -838,7 +1137,11 @@ async fn main() {
             }
         }
         Err(err) => {
-            eprintln!("{}", err);
+            // {:#} prints the FULL anyhow context chain (e.g.
+            // "memory.put: MCP error (http 200): ... 502 ... s3_put"), not just
+            // the top context ("memory.put") — without it the real cause of a
+            // failed command is invisible (the harness only saw "memory.put").
+            eprintln!("{:#}", err);
             std::process::exit(1);
         }
     }

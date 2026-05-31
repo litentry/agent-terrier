@@ -30,6 +30,11 @@ aws-credential-types = "1"
 sha2 = "0.10"
 hex = "0.4"
 thiserror = { workspace = true }
+# `agentkeys agent device-session` — in-sandbox secp256k1 device keygen +
+# EIP-191 wallet_sig session minting (interim §10.2; full ceremony = issue #144).
+# Same versions as agentkeys-core / broker so the workspace lock is unchanged.
+k256 = { version = "0.13", features = ["ecdsa", "sha2"] }
+sha3 = "0.10"
 
 # Real WebAuthn ceremony (--webauthn flag on `agentkeys k11 enroll/assert`).
 # Brings up a localhost axum server that serves the JS calling

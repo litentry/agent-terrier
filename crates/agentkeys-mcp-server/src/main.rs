@@ -36,6 +36,10 @@ async fn main() -> anyhow::Result<()> {
             config.broker_url.clone(),
             config.memory_url.clone(),
             config.audit_url.clone(),
+            config.agent_session_bearer.clone(),
+            config.memory_role_arn.clone(),
+            config.vault_role_arn.clone(),
+            config.aws_region.clone(),
         )),
         BackendKind::InMemory => {
             tracing::info!(

@@ -79,6 +79,27 @@ pub struct Cli {
     /// agent runs on for cap-mint binding.
     #[arg(long, env = "MCP_DEFAULT_DEVICE_KEY_HASH")]
     pub default_device_key_hash: Option<String>,
+
+    /// Agent session JWT whose `agentkeys.omni_account` == `default_actor`.
+    /// Used by the HTTP backend to mint per-actor STS creds for worker S3 ops
+    /// (`/v1/mint-oidc-jwt` → `AssumeRoleWithWebIdentity`, tagged with the
+    /// actor) and forward them as `X-Aws-*` headers. Without it the worker
+    /// falls back to its instance profile and every S3 op 502s. arch.md §17.2
+    /// / issue #90.
+    #[arg(long, env = "MCP_AGENT_SESSION_BEARER")]
+    pub agent_session_bearer: Option<String>,
+
+    /// Per-data-class IAM role ARN the worker S3 op assumes via web-identity.
+    /// memory ops → memory_role_arn; credential ops → vault_role_arn.
+    #[arg(long, env = "MCP_MEMORY_ROLE_ARN")]
+    pub memory_role_arn: Option<String>,
+
+    #[arg(long, env = "MCP_VAULT_ROLE_ARN")]
+    pub vault_role_arn: Option<String>,
+
+    /// AWS region for the STS `AssumeRoleWithWebIdentity` call.
+    #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
+    pub aws_region: String,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +120,11 @@ pub struct Config {
     pub default_actor: Option<String>,
     pub default_operator_omni: Option<String>,
     pub default_device_key_hash: Option<String>,
+    /// Agent session JWT (omni == default_actor) for the per-actor STS relay.
+    pub agent_session_bearer: Option<String>,
+    pub memory_role_arn: Option<String>,
+    pub vault_role_arn: Option<String>,
+    pub aws_region: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +224,10 @@ impl Config {
             default_actor,
             default_operator_omni,
             default_device_key_hash,
+            agent_session_bearer: cli.agent_session_bearer,
+            memory_role_arn: cli.memory_role_arn,
+            vault_role_arn: cli.vault_role_arn,
+            aws_region: cli.aws_region,
         })
     }
 
@@ -216,6 +246,10 @@ impl Config {
             default_actor: None,
             default_operator_omni: None,
             default_device_key_hash: None,
+            agent_session_bearer: None,
+            memory_role_arn: None,
+            vault_role_arn: None,
+            aws_region: "us-east-1".to_string(),
         }
     }
 
