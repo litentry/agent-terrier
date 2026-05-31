@@ -89,6 +89,14 @@ pub struct Cli {
     #[arg(long, env = "MCP_AGENT_SESSION_BEARER")]
     pub agent_session_bearer: Option<String>,
 
+    /// Path to an owner-only file containing the agent session JWT. Preferred
+    /// over --agent-session-bearer: the in-sandbox daemon (`--init-link-code`)
+    /// writes the bearer here (0600) so it never transits the master's shell or
+    /// the process list (adversarial-review finding #2). Used only when
+    /// --agent-session-bearer is not set directly.
+    #[arg(long, env = "MCP_AGENT_SESSION_BEARER_FILE")]
+    pub agent_session_bearer_file: Option<String>,
+
     /// Per-data-class IAM role ARN the worker S3 op assumes via web-identity.
     /// memory ops → memory_role_arn; credential ops → vault_role_arn.
     #[arg(long, env = "MCP_MEMORY_ROLE_ARN")]
@@ -211,6 +219,28 @@ impl Config {
                 )
             };
 
+        // Finding 2 (adversarial review): prefer the owner-only bearer FILE (the
+        // in-sandbox daemon writes it 0600) over an inline bearer, so the JWT never
+        // rides the CLI/process list or the master's shell. A direct
+        // --agent-session-bearer still wins when explicitly set.
+        let agent_session_bearer = match cli.agent_session_bearer {
+            Some(b) => Some(b),
+            None => match cli.agent_session_bearer_file.as_deref() {
+                Some(path) => {
+                    let raw = std::fs::read_to_string(path).map_err(|e| {
+                        anyhow::anyhow!("read --agent-session-bearer-file {path}: {e}")
+                    })?;
+                    let trimmed = raw.trim().to_string();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                }
+                None => None,
+            },
+        };
+
         Ok(Self {
             transport,
             backend,
@@ -224,7 +254,7 @@ impl Config {
             default_actor,
             default_operator_omni,
             default_device_key_hash,
-            agent_session_bearer: cli.agent_session_bearer,
+            agent_session_bearer,
             memory_role_arn: cli.memory_role_arn,
             vault_role_arn: cli.vault_role_arn,
             aws_region: cli.aws_region,

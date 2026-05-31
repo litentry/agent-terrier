@@ -688,6 +688,50 @@ enum AgentAction {
         #[arg(long, help = "Force a fresh device key → fresh pairing (new omni)")]
         regen: bool,
     },
+    /// Master mints a one-time §10.2 link code bound to the HDKD child omni for
+    /// `--label`, declaring the scope the agent should get. Hand the code to the
+    /// agent; it redeems via `agentkeys-daemon --init-link-code`. (issue #144)
+    #[command(about = "Master: mint a one-time agent link code (HDKD child omni)")]
+    Create {
+        #[arg(long, help = "HDKD child label, e.g. agent-a (^[a-z0-9-]{1,32}$)")]
+        label: String,
+        #[arg(
+            long,
+            default_value = "memory",
+            help = "Scope the agent should get (the app-manifest); granted at approve"
+        )]
+        services: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
+    /// Master pulls redeemed-but-unbound agents — "agent-X wants to pair + wants
+    /// [scope]" — the production push-notification substrate. Each row carries
+    /// the device artifact the master submits with registerAgentDevice. (issue #144)
+    #[command(about = "Master: list agents awaiting binding approval")]
+    Pending {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
 }
 
 async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
@@ -1127,6 +1171,24 @@ async fn main() {
                 )
                 .await
             }
+            AgentAction::Create {
+                label,
+                services,
+                broker_url,
+                session_bearer,
+            } => {
+                agentkeys_cli::agent_admin::agent_create(
+                    broker_url,
+                    label,
+                    services,
+                    session_bearer,
+                )
+                .await
+            }
+            AgentAction::Pending {
+                broker_url,
+                session_bearer,
+            } => agentkeys_cli::agent_admin::agent_pending(broker_url, session_bearer).await,
         },
     };
 

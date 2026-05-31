@@ -13,6 +13,10 @@ path = "src/lib.rs"
 
 [dependencies]
 agentkeys-types = { workspace = true }
+# Issue #144 — shared device_crypto (EIP-191 ecrecover for link-code redeem
+# pop_sig verify) + HDKD child_omni derivation. One source of truth across
+# daemon/CLI/broker.
+agentkeys-core = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }

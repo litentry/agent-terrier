@@ -26,8 +26,8 @@ pub(crate) fn random_b64url(byte_len: usize) -> String {
 }
 
 /// Extract + verify a session JWT from `Authorization: Bearer <jwt>`.
-/// Used by every grant endpoint.
-pub(super) fn require_session_jwt(
+/// Used by every grant endpoint and by the §10.2 agent handlers (issue #144).
+pub(crate) fn require_session_jwt(
     headers: &HeaderMap,
     state: &SharedState,
 ) -> Result<SessionClaims, BrokerError> {

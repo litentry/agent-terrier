@@ -62,6 +62,50 @@ pub fn mint_session_jwt(
     keypair.sign_jwt(&claims)
 }
 
+/// Mint `J1_agent` — the agent session JWT for the §10.2 link-code bootstrap
+/// (issue #144). Unlike `mint_session_jwt`, the actor omni is the **HDKD child**
+/// (decoupled from any wallet — `wallet_address` is empty), and the claim
+/// carries the agent lineage (`parent_omni`, `derivation_path`, `device_pubkey`).
+/// `identity_type` is `"agent_hdkd"` and `identity_value` is the K10 device
+/// address. The `omni_account` is the un-prefixed 64-hex child omni so it
+/// matches the PrincipalTag + S3-prefix shape downstream.
+#[allow(clippy::too_many_arguments)]
+pub fn mint_agent_session_jwt(
+    keypair: &SessionKeypair,
+    issuer: &str,
+    child_omni: &str,
+    parent_omni: &str,
+    derivation_path: &str,
+    device_pubkey: &str,
+    ttl_seconds: u64,
+) -> BrokerResult<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| BrokerError::Internal(format!("clock before unix epoch: {e}")))?
+        .as_secs();
+    let exp = now + ttl_seconds;
+
+    let claims = json!({
+        "iss": issuer,
+        "sub": format!("agentkeys:agent:{}", child_omni),
+        "aud": "agentkeys:broker",
+        "exp": exp,
+        "iat": now,
+        "jti": ulid_like(),
+        "agentkeys": {
+            "omni_account":    child_omni,
+            "wallet_address":  "",
+            "identity_type":   "agent_hdkd",
+            "identity_value":  device_pubkey,
+            "parent_omni":     parent_omni,
+            "derivation_path": derivation_path,
+            "device_pubkey":   device_pubkey,
+        }
+    });
+
+    keypair.sign_jwt(&claims)
+}
+
 /// Mint an `audit_proof` JWT for a capability grant (Phase B, US-025).
 ///
 /// Per plan §3.5.5: the audit_proof is the broker's ES256 signature
