@@ -1,9 +1,11 @@
-//! End-to-end tests for the §10.2 agent-bootstrap link-code ceremony (issue #144):
-//!   create (master, J1-gated) → redeem (agent, pop_sig) → pending-bindings (master).
+//! End-to-end tests for the §10.2 agent-**initiated** pairing ceremony (issue
+//! #144, method A):
+//!   request (agent, pop_sig) → claim (master, J1-gated) → poll (agent, pop_sig)
+//!   → pending-bindings (master).
 //!
 //! Exercises the full HTTP path through `create_router`, including the real
 //! secp256k1 pop_sig produced by `agentkeys_core::device_crypto::DeviceKey` and
-//! verified by the broker's redeem handler — the redeem-critical match.
+//! verified by the broker's request + poll handlers — the pop-critical match.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,8 +90,8 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         identity_link_store: Arc::new(
             agentkeys_broker_server::storage::IdentityLinkStore::open_in_memory().unwrap(),
         ),
-        link_code_store: Arc::new(
-            agentkeys_broker_server::storage::LinkCodeStore::open_in_memory().unwrap(),
+        pairing_request_store: Arc::new(
+            agentkeys_broker_server::storage::PairingRequestStore::open_in_memory().unwrap(),
         ),
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::new(agentkeys_broker_server::state::Tier2State::default()),
@@ -124,12 +126,28 @@ fn master_session(state: &AppState) -> (String, String) {
     (token, master_omni)
 }
 
+/// Generate a fresh in-sandbox K10 device key.
+fn device_key() -> (TempDir, DeviceKey) {
+    let kd = TempDir::new().unwrap();
+    let dk =
+        DeviceKey::load_or_generate(kd.path().join("dev.key").to_str().unwrap(), true).unwrap();
+    (kd, dk)
+}
+
 #[tokio::test]
-async fn create_requires_master_bearer() {
+async fn request_rejects_bad_pop_sig() {
+    // The agent /request endpoint takes no bearer but MUST hold a valid pop_sig
+    // — a sig from a different key (recovers to the wrong address) is rejected
+    // and creates no row (no DoS amplification on the unauthenticated endpoint).
     let (broker_url, _state) = spawn_broker().await;
+    let (_kd, dk) = device_key();
+    let (_kd2, other) = device_key();
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/agent/create", broker_url))
-        .json(&json!({ "label": "agent-a" }))
+        .post(format!("{}/v1/agent/pairing/request", broker_url))
+        .json(&json!({
+            "device_pubkey": dk.address(),
+            "pop_sig": other.pop_sig().unwrap(),
+        }))
         .send()
         .await
         .unwrap();
@@ -137,13 +155,27 @@ async fn create_requires_master_bearer() {
 }
 
 #[tokio::test]
-async fn create_rejects_bad_label() {
+async fn claim_requires_master_bearer() {
+    let (broker_url, _state) = spawn_broker().await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/agent/pairing/claim", broker_url))
+        .json(&json!({ "pairing_code": "whatever", "label": "agent-a" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn claim_rejects_bad_label() {
+    // Label is validated before the store is touched, so a bogus code + bad
+    // label still 400s (no need to open a real request first).
     let (broker_url, state) = spawn_broker().await;
     let (bearer, _) = master_session(&state);
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/agent/create", broker_url))
+        .post(format!("{}/v1/agent/pairing/claim", broker_url))
         .header("Authorization", format!("Bearer {bearer}"))
-        .json(&json!({ "label": "Agent/A" }))
+        .json(&json!({ "pairing_code": "whatever", "label": "Agent/A" }))
         .send()
         .await
         .unwrap();
@@ -151,39 +183,16 @@ async fn create_rejects_bad_label() {
 }
 
 #[tokio::test]
-async fn full_create_redeem_pending_flow() {
+async fn full_request_claim_poll_pending_flow() {
     let (broker_url, state) = spawn_broker().await;
     let (bearer, master_omni) = master_session(&state);
     let client = reqwest::Client::new();
 
-    // create → real broker link code + HDKD child omni.
-    let create: Value = client
-        .post(format!("{}/v1/agent/create", broker_url))
-        .header("Authorization", format!("Bearer {bearer}"))
-        .json(&json!({ "label": "agent-a", "requested_scope": "memory" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let link_code = create["link_code"].as_str().unwrap().to_string();
-    let child_omni = create["child_omni"].as_str().unwrap().to_string();
-    // Public recomputability (acceptance criterion).
-    assert_eq!(
-        child_omni,
-        agentkeys_core::actor_omni::child_omni_hex(&master_omni, "agent-a").unwrap()
-    );
-    assert_eq!(create["operator_omni"], master_omni);
-
-    // agent generates K10 in the sandbox + redeems with a real pop_sig.
-    let kd = TempDir::new().unwrap();
-    let dk =
-        DeviceKey::load_or_generate(kd.path().join("dev.key").to_str().unwrap(), true).unwrap();
-    let redeem: Value = client
-        .post(format!("{}/v1/auth/link-code/redeem", broker_url))
+    // 1. AGENT generates K10 in the sandbox + opens an unbound pairing request.
+    let (_kd, dk) = device_key();
+    let request: Value = client
+        .post(format!("{}/v1/agent/pairing/request", broker_url))
         .json(&json!({
-            "link_code": link_code,
             "device_pubkey": dk.address(),
             "pop_sig": dk.pop_sig().unwrap(),
         }))
@@ -193,8 +202,71 @@ async fn full_create_redeem_pending_flow() {
         .json()
         .await
         .unwrap();
-    let j1_agent = redeem["session_jwt"].as_str().unwrap();
-    assert_eq!(redeem["child_omni"], child_omni);
+    let request_id = request["request_id"].as_str().unwrap().to_string();
+    let pairing_code = request["pairing_code"].as_str().unwrap().to_string();
+    assert!(request["device_key_hash"]
+        .as_str()
+        .unwrap()
+        .starts_with("0x"));
+
+    // 2. AGENT polls BEFORE any master claims → pending.
+    let pending_poll: Value = client
+        .post(format!("{}/v1/agent/pairing/poll", broker_url))
+        .json(&json!({
+            "request_id": request_id,
+            "device_pubkey": dk.address(),
+            "pop_sig": dk.pop_sig().unwrap(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending_poll["status"], "pending");
+
+    // 3. MASTER claims the code (the binding act). Derives the HDKD child omni.
+    let claim: Value = client
+        .post(format!("{}/v1/agent/pairing/claim", broker_url))
+        .header("Authorization", format!("Bearer {bearer}"))
+        .json(&json!({
+            "pairing_code": pairing_code,
+            "label": "agent-a",
+            "requested_scope": "memory",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let child_omni = claim["child_omni"].as_str().unwrap().to_string();
+    // Public recomputability (acceptance criterion).
+    assert_eq!(
+        child_omni,
+        agentkeys_core::actor_omni::child_omni_hex(&master_omni, "agent-a").unwrap()
+    );
+    assert_eq!(claim["operator_omni"], master_omni);
+    assert_eq!(claim["request_id"], request_id);
+    assert_eq!(claim["device_pubkey"], dk.address());
+
+    // 4. AGENT polls again → claimed; J1_agent minted at retrieval.
+    let claimed_poll: Value = client
+        .post(format!("{}/v1/agent/pairing/poll", broker_url))
+        .json(&json!({
+            "request_id": request_id,
+            "device_pubkey": dk.address(),
+            "pop_sig": dk.pop_sig().unwrap(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(claimed_poll["status"], "claimed");
+    let j1_agent = claimed_poll["session_jwt"].as_str().unwrap();
+    assert_eq!(claimed_poll["child_omni"], child_omni);
 
     // J1_agent carries the HDKD omni + lineage.
     let claims = verify_session_jwt(&state.session_keypair, TEST_ISSUER, j1_agent).unwrap();
@@ -213,7 +285,7 @@ async fn full_create_redeem_pending_flow() {
     );
     assert_eq!(claims.agentkeys.identity_type, "agent_hdkd");
 
-    // master pulls the pending binding (the push-notification substrate).
+    // 5. MASTER pulls the pending binding (the push-notification substrate).
     let pending: Value = client
         .get(format!("{}/v1/agent/pending-bindings", broker_url))
         .header("Authorization", format!("Bearer {bearer}"))
@@ -225,6 +297,7 @@ async fn full_create_redeem_pending_flow() {
         .unwrap();
     let arr = pending["pending"].as_array().unwrap();
     assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["request_id"], request_id);
     assert_eq!(arr[0]["child_omni"], child_omni);
     assert_eq!(arr[0]["device_pubkey"], dk.address());
     assert_eq!(arr[0]["requested_scope"], "memory");
@@ -234,12 +307,12 @@ async fn full_create_redeem_pending_flow() {
         .unwrap()
         .starts_with("0x"));
 
-    // ack the binding (master submitted registerAgentDevice) → the rendezvous
-    // self-cleans, so a re-run sees an empty pending list (idempotent).
+    // 6. ack the binding (master submitted registerAgentDevice) → the rendezvous
+    //    self-cleans, so a re-run sees an empty pending list (idempotent).
     let ack: Value = client
         .post(format!("{}/v1/agent/pending-bindings/ack", broker_url))
         .header("Authorization", format!("Bearer {bearer}"))
-        .json(&json!({ "link_code": link_code }))
+        .json(&json!({ "request_id": request_id }))
         .send()
         .await
         .unwrap()
@@ -261,7 +334,7 @@ async fn full_create_redeem_pending_flow() {
     let ack2: Value = client
         .post(format!("{}/v1/agent/pending-bindings/ack", broker_url))
         .header("Authorization", format!("Bearer {bearer}"))
-        .json(&json!({ "link_code": link_code }))
+        .json(&json!({ "request_id": request_id }))
         .send()
         .await
         .unwrap()
@@ -270,14 +343,11 @@ async fn full_create_redeem_pending_flow() {
         .unwrap();
     assert_eq!(ack2["acked"], false);
 
-    // single-use: a second redeem of the same code is rejected.
+    // 7. single-use: a second claim of the same pairing_code is rejected.
     let replay = client
-        .post(format!("{}/v1/auth/link-code/redeem", broker_url))
-        .json(&json!({
-            "link_code": link_code,
-            "device_pubkey": dk.address(),
-            "pop_sig": dk.pop_sig().unwrap(),
-        }))
+        .post(format!("{}/v1/agent/pairing/claim", broker_url))
+        .header("Authorization", format!("Bearer {bearer}"))
+        .json(&json!({ "pairing_code": pairing_code, "label": "agent-a" }))
         .send()
         .await
         .unwrap();
@@ -285,47 +355,66 @@ async fn full_create_redeem_pending_flow() {
 }
 
 #[tokio::test]
-async fn bad_pop_sig_rejected_and_code_remains_redeemable() {
+async fn poll_rejects_wrong_device_and_bad_pop_sig() {
     let (broker_url, state) = spawn_broker().await;
     let (bearer, _master_omni) = master_session(&state);
     let client = reqwest::Client::new();
-    let create: Value = client
-        .post(format!("{}/v1/agent/create", broker_url))
-        .header("Authorization", format!("Bearer {bearer}"))
-        .json(&json!({ "label": "agent-b" }))
+
+    // Open + claim a request so it's in the claimed state.
+    let (_kd, dk) = device_key();
+    let request: Value = client
+        .post(format!("{}/v1/agent/pairing/request", broker_url))
+        .json(&json!({ "device_pubkey": dk.address(), "pop_sig": dk.pop_sig().unwrap() }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let link_code = create["link_code"].as_str().unwrap().to_string();
+    let request_id = request["request_id"].as_str().unwrap().to_string();
+    let pairing_code = request["pairing_code"].as_str().unwrap().to_string();
+    client
+        .post(format!("{}/v1/agent/pairing/claim", broker_url))
+        .header("Authorization", format!("Bearer {bearer}"))
+        .json(&json!({ "pairing_code": pairing_code, "label": "agent-c" }))
+        .send()
+        .await
+        .unwrap();
 
-    let kd = TempDir::new().unwrap();
-    let dk =
-        DeviceKey::load_or_generate(kd.path().join("dev.key").to_str().unwrap(), true).unwrap();
-
-    // A pop_sig from a DIFFERENT key must not redeem (recovers to wrong address).
-    let other =
-        DeviceKey::load_or_generate(kd.path().join("other.key").to_str().unwrap(), true).unwrap();
-    let bad = client
-        .post(format!("{}/v1/auth/link-code/redeem", broker_url))
+    // A pop_sig from a DIFFERENT key cannot poll (recovers to wrong address).
+    let (_kd2, other) = device_key();
+    let bad_sig = client
+        .post(format!("{}/v1/agent/pairing/poll", broker_url))
         .json(&json!({
-            "link_code": link_code,
+            "request_id": request_id,
             "device_pubkey": dk.address(),
             "pop_sig": other.pop_sig().unwrap(),
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(bad.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(bad_sig.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    // The single-use code was NOT burned by the failed attempt — a correct
-    // pop_sig still redeems (pop_sig verified BEFORE consume).
-    let good = client
-        .post(format!("{}/v1/auth/link-code/redeem", broker_url))
+    // A valid pop_sig but for a DIFFERENT device_pubkey (the other key's own,
+    // self-consistent) doesn't match the request's bound device → unauthorized
+    // (NotFound collapsed to 401 so a guessed request_id leaks nothing).
+    let wrong_device = client
+        .post(format!("{}/v1/agent/pairing/poll", broker_url))
         .json(&json!({
-            "link_code": link_code,
+            "request_id": request_id,
+            "device_pubkey": other.address(),
+            "pop_sig": other.pop_sig().unwrap(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_device.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // The correct device + pop_sig still retrieves J1_agent.
+    let good = client
+        .post(format!("{}/v1/agent/pairing/poll", broker_url))
+        .json(&json!({
+            "request_id": request_id,
             "device_pubkey": dk.address(),
             "pop_sig": dk.pop_sig().unwrap(),
         }))

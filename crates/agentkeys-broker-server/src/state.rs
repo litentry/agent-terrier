@@ -7,7 +7,9 @@ use crate::metrics::Metrics;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::AuditPolicy;
 use crate::plugins::PluginRegistry;
-use crate::storage::{AuthNonceStore, GrantStore, IdentityLinkStore, LinkCodeStore, WalletStore};
+use crate::storage::{
+    AuthNonceStore, GrantStore, IdentityLinkStore, PairingRequestStore, WalletStore,
+};
 use crate::sts::StsClient;
 
 /// Tier-2 reachability state shared with the /readyz handler.
@@ -43,12 +45,13 @@ pub struct AppState {
     /// (issue #72); grants are kept in-tree for master-managed audit and
     /// potential future re-introduction at the JWT-mint site.
     pub grant_store: Arc<GrantStore>,
-    /// §10.2 agent-bootstrap link codes + pending-binding records (issue #144).
-    /// `/v1/agent/create` issues a code bound to the HDKD child omni;
-    /// `/v1/auth/link-code/redeem` consumes it (capturing device_pubkey +
-    /// pop_sig) and mints `J1_agent`; `/v1/agent/pending-bindings` lets the
-    /// master pull redeemed-but-unbound rows to approve.
-    pub link_code_store: Arc<LinkCodeStore>,
+    /// §10.2 agent-initiated pairing requests + pending-binding records (issue
+    /// #144, method A). `/v1/agent/pairing/request` opens an unbound request
+    /// (capturing device_pubkey + pop_sig); `/v1/agent/pairing/claim` binds it to
+    /// the claiming master (HDKD child omni); `/v1/agent/pairing/poll` mints
+    /// `J1_agent` once claimed; `/v1/agent/pending-bindings` lets the master pull
+    /// claimed-but-unbound rows to approve.
+    pub pairing_request_store: Arc<PairingRequestStore>,
     /// Identity links (Phase B, US-028). Maps verified identities
     /// (email, oauth2 sub, secondary EVM wallet) to their owning master
     /// OmniAccount. Recovery flow consults this to find which master

@@ -90,7 +90,7 @@ pub struct Cli {
     pub agent_session_bearer: Option<String>,
 
     /// Path to an owner-only file containing the agent session JWT. Preferred
-    /// over --agent-session-bearer: the in-sandbox daemon (`--init-link-code`)
+    /// over --agent-session-bearer: the in-sandbox daemon (`--retrieve-pairing`)
     /// writes the bearer here (0600) so it never transits the master's shell or
     /// the process list (adversarial-review finding #2). Used only when
     /// --agent-session-bearer is not set directly.

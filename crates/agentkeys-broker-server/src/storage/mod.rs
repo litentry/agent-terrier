@@ -16,11 +16,11 @@ pub mod email_rate_limits;
 pub mod email_tokens;
 pub mod grants;
 pub mod identity_links;
-// Issue #144 — §10.2 agent-bootstrap link codes + pending-binding records.
-// Unconditional (the agent bootstrap is core, not feature-gated).
-pub mod link_codes;
+// Issue #144 — §10.2 agent-initiated pairing requests + pending-binding records
+// (method A). Unconditional (the agent bootstrap is core, not feature-gated).
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth_pending;
+pub mod pairing_requests;
 #[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
 pub mod rate_limit_mints;
 pub mod wallets;
@@ -32,9 +32,11 @@ pub use email_rate_limits::{EmailRateLimitStore, RateLimitOutcome};
 pub use email_tokens::{EmailConsumeOutcome, EmailRequestStatus, EmailTokenStore};
 pub use grants::{Grant, GrantConsumeOutcome, GrantStore};
 pub use identity_links::{IdentityLink, IdentityLinkStore};
-pub use link_codes::{LinkCodeConsume, LinkCodeStore, PendingBinding, LINK_CODE_TTL_SECONDS};
 #[cfg(feature = "auth-oauth2")]
 pub use oauth_pending::{OAuth2PendingConsume, OAuth2PendingStatus, OAuth2PendingStore};
+pub use pairing_requests::{
+    PairingClaim, PairingPoll, PairingRequestStore, PendingBinding, PAIRING_REQUEST_TTL_SECONDS,
+};
 #[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
 pub use rate_limit_mints::MintRateLimiter;
 pub use wallets::WalletStore;

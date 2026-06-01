@@ -93,7 +93,7 @@ pub fn validate_label(label: &str) -> anyhow::Result<()> {
 ///
 /// **PUBLIC + recomputable** (decision 2): anyone holding the parent omni + label
 /// can recompute the child — unforgeability comes from the master-gated
-/// `/v1/agent/create` (needs `J1_master`) + the master-submitted on-chain binding,
+/// `/v1/agent/pairing/claim` (needs `J1_master`) + the master-submitted on-chain binding,
 /// NOT from a secret. The agent's K10 device key is decoupled from this omni.
 /// `master_omni` is the parent's 32 raw omni bytes (NOT the hex ASCII).
 pub fn child_omni(master_omni: &[u8; 32], label: &str) -> [u8; 32] {

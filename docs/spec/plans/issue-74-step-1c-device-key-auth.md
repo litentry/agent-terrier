@@ -433,10 +433,10 @@ Step 1c is **strictly stronger** than all three Heima variants:
   `~/.agentkeys/daemon-<wallet>/session.json` (mode 0600), which
   survives daemon restarts inside a long-lived container but vanishes
   with the container itself. For ephemeral sandboxes (container
-  destroyed between sessions), the operator runs
-  `agentkeys-daemon --init-link-code <new-code>` from their
-  workstation each new session — same pattern as today's pair-flow
-  with the device-pubkey binding added on top. Hardware-backed
+  destroyed between sessions), the agent re-runs
+  `agentkeys-daemon --request-pairing` on the sandbox each new session
+  and the master re-claims (issue #144 method A) — same pattern as
+  today's pair-flow with the device-pubkey binding added on top. Hardware-backed
   device keys (Secure Enclave / TPM passthrough — passkey path) is
   a v0.2 enhancement.
 
