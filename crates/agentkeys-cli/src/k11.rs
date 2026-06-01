@@ -42,15 +42,24 @@ pub enum K11Error {
     InvalidOperatorOmni(String),
 }
 
-fn enrollment_path(operator_omni: &str) -> PathBuf {
+fn k11_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    Path::new(&home)
-        .join(".agentkeys")
-        .join("k11")
-        .join(format!("{}.json", operator_omni.trim_start_matches("0x")))
+    Path::new(&home).join(".agentkeys").join("k11")
+}
+
+fn enrollment_path_in(dir: &Path, operator_omni: &str) -> PathBuf {
+    dir.join(format!("{}.json", operator_omni.trim_start_matches("0x")))
 }
 
 pub fn enroll(operator_omni: &str) -> Result<K11Enrollment, K11Error> {
+    enroll_in(&k11_dir(), operator_omni)
+}
+
+// Core enroll keyed on an explicit base dir so tests can target a TempDir.
+// Sharing the real `~/.agentkeys/k11/<omni>.json` flaked under the default
+// parallel test run: the lib + `k11_cli` integration binaries both enroll
+// the same omni, racing on one filesystem path.
+fn enroll_in(dir: &Path, operator_omni: &str) -> Result<K11Enrollment, K11Error> {
     validate_omni(operator_omni)?;
     let credential_id = sha256_str(&format!("agentkeys-k11-stub-cred:{}", operator_omni));
     let cose_pubkey = sha256_str(&format!("agentkeys-k11-stub-cose:{}", operator_omni));
@@ -65,7 +74,7 @@ pub fn enroll(operator_omni: &str) -> Result<K11Enrollment, K11Error> {
         enrolled_at_unix: now,
         mode: "stage1-stub".into(),
     };
-    let path = enrollment_path(operator_omni);
+    let path = enrollment_path_in(dir, operator_omni);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| K11Error::Io(e.to_string()))?;
     }
@@ -134,12 +143,15 @@ mod tests {
 
     #[test]
     fn enroll_writes_file_with_strict_perms() {
+        // TempDir-rooted: a per-run unique path that no other test binary
+        // shares, and that auto-cleans on drop (no manual remove_file).
+        let tmp = tempfile::tempdir().unwrap();
         let omni = test_omni();
-        let e = enroll(&omni).unwrap();
+        let e = enroll_in(tmp.path(), &omni).unwrap();
         assert_eq!(e.operator_omni, omni);
         assert_eq!(e.mode, "stage1-stub");
         assert_eq!(e.credential_id_hex.len(), 64);
-        let path = enrollment_path(&omni);
+        let path = enrollment_path_in(tmp.path(), &omni);
         assert!(path.exists());
         #[cfg(unix)]
         {
@@ -147,8 +159,6 @@ mod tests {
             let perms = std::fs::metadata(&path).unwrap().permissions();
             assert_eq!(perms.mode() & 0o777, 0o600);
         }
-        // cleanup
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
