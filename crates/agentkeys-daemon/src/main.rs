@@ -170,16 +170,32 @@ struct Args {
     #[arg(long, default_value_t = 300)]
     init_poll_timeout_seconds: u64,
 
-    /// Issue #144 §10.2: redeem a one-time master-issued link code. Generates
-    /// (or reuses) the K10 device key IN THE SANDBOX, POSTs
-    /// `/v1/auth/link-code/redeem`, persists `J1_agent`, and prints the binding
-    /// artifact (device_pubkey + pop_sig + omnis) on stdout for the master to
-    /// submit `registerAgentDevice`. One-shot: redeems and exits (the MCP/proxy
-    /// surface runs as a separate process per §22c). Requires `--broker-url`.
-    #[arg(long, conflicts_with_all = ["init_email", "init_oauth2_google", "recover"])]
-    init_link_code: Option<String>,
+    /// Issue #144 §10.2 (method A): open an agent-INITIATED pairing request.
+    /// Generates (or reuses) the K10 device key IN THE SANDBOX, POSTs
+    /// `/v1/agent/pairing/request`, and prints `{request_id, pairing_code, …}` on
+    /// stdout. The agent DISPLAYS `pairing_code` (QR / screen) for its owner to
+    /// claim (the Matter/HomeKit model); `request_id` is the secret retrieval
+    /// ticket for `--retrieve-pairing`. One-shot: requests and exits. Requires
+    /// `--broker-url`. (The MCP/proxy surface runs as a separate process per §22c.)
+    #[arg(long, conflicts_with_all = ["init_email", "init_oauth2_google", "recover", "retrieve_pairing"])]
+    request_pairing: bool,
 
-    /// Path to the agent's K10 device-key file for `--init-link-code`. Defaults
+    /// Issue #144 §10.2 (method A): retrieve `J1_agent` after a master claims the
+    /// pairing request. Polls `/v1/agent/pairing/poll` (until claimed or
+    /// `--init-poll-timeout-seconds`), persists `J1_agent`, and prints the binding
+    /// artifact on stdout for the master's already-submitted `registerAgentDevice`.
+    /// Resolves `request_id` from `--request-id` or the state file written by
+    /// `--request-pairing`. One-shot. Requires `--broker-url`.
+    #[arg(long, conflicts_with_all = ["init_email", "init_oauth2_google", "recover"])]
+    retrieve_pairing: bool,
+
+    /// The `request_id` returned by `--request-pairing`, for `--retrieve-pairing`.
+    /// If omitted, read from the pairing state file
+    /// (`~/.agentkeys/pairing-request.json`).
+    #[arg(long)]
+    request_id: Option<String>,
+
+    /// Path to the agent's K10 device-key file for the pairing flow. Defaults
     /// to the same path as `agentkeys agent device-session`
     /// (`~/.agentkeys/agent-device.key`) so the CLI + daemon share one key.
     /// Reused on retry (never auto-regenerated) so a re-run after a failed master
@@ -208,11 +224,16 @@ async fn main() -> anyhow::Result<()> {
         return run_proxy_mode(args).await;
     }
 
-    // Issue #144 §10.2 one-shot bootstrap: redeem a link code, persist J1_agent,
-    // emit the binding artifact, exit. Runs before the --backend requirement +
-    // hardening (it needs neither — only --broker-url + the OS RNG for keygen).
-    if let Some(code) = args.init_link_code.clone() {
-        return run_link_code_bootstrap(args, &code).await;
+    // Issue #144 §10.2 (method A) one-shot pairing. Two synchronous steps mirror
+    // the two broker endpoints: --request-pairing opens the request + prints the
+    // code; --retrieve-pairing polls until the master claims, then persists
+    // J1_agent + emits the binding artifact. Both run before the --backend
+    // requirement + hardening (they need neither — only --broker-url + OS RNG).
+    if args.request_pairing {
+        return run_request_pairing(args).await;
+    }
+    if args.retrieve_pairing {
+        return run_retrieve_pairing(args).await;
     }
 
     // 1. Apply kernel hardening
@@ -440,19 +461,33 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Issue #144 §10.2 one-shot agent bootstrap: generate (or reuse) the K10 device
-/// key in the sandbox, redeem the master-issued link code at the broker, persist
-/// `J1_agent`, and print the binding artifact the master needs to submit
-/// `registerAgentDevice`. The device key NEVER leaves this machine.
+/// Poll cadence for `--retrieve-pairing` while waiting for the master to claim.
+/// Internal timing constant (not operator-facing); the overall wait is bounded by
+/// `--init-poll-timeout-seconds`.
+const PAIRING_POLL_INTERVAL_SECONDS: u64 = 3;
+
+/// Default state file written by `--request-pairing` and read back by
+/// `--retrieve-pairing` (so the two one-shot invocations don't have to thread
+/// `request_id` by hand; `--request-id` overrides). 0600.
+fn pairing_state_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    format!("{home}/.agentkeys/pairing-request.json")
+}
+
+/// `--request-pairing` (method A §10.2): generate (or reuse) the K10 device key
+/// in the sandbox, open an agent-INITIATED pairing request at the broker, and
+/// print `{request_id, pairing_code, …}` on stdout. The agent DISPLAYS
+/// `pairing_code` for its owner to claim (the Matter/HomeKit model); the device
+/// key NEVER leaves this machine.
 ///
 /// Logs go to stderr; the JSON artifact is the ONLY thing on stdout, so the wire
-/// harness can capture it and hand it to the master's bind step (same shape
-/// `scripts/heima-agent-create.sh --from-pubkey` consumes).
-async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<()> {
+/// harness can capture it. `request_id` is the secret retrieval ticket for the
+/// follow-up `--retrieve-pairing`.
+async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     use agentkeys_core::device_crypto::DeviceKey;
 
     let broker_url = args.broker_url.clone().ok_or_else(|| {
-        anyhow::anyhow!("--broker-url (or AGENTKEYS_BROKER_URL) required for --init-link-code")
+        anyhow::anyhow!("--broker-url (or AGENTKEYS_BROKER_URL) required for --request-pairing")
     })?;
     let base = broker_url.trim_end_matches('/').to_string();
 
@@ -460,8 +495,8 @@ async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<
         .device_key_file
         .clone()
         .unwrap_or_else(|| "~/.agentkeys/agent-device.key".to_string());
-    // Reuse the existing key on retry (no regen): a failed master bind/grant
-    // must re-redeem with the SAME device_key_hash so the on-chain submit hits
+    // Reuse the existing key on retry (no regen): a failed master claim/bind
+    // must re-request with the SAME device_key_hash so the on-chain submit hits
     // the already-registered short-circuit instead of binding a second key.
     let dk =
         DeviceKey::load_or_generate(&key_file, false).context("load/generate K10 device key")?;
@@ -474,26 +509,167 @@ async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<
         .build()
         .context("build http client")?;
     let resp = client
-        .post(format!("{base}/v1/auth/link-code/redeem"))
+        .post(format!("{base}/v1/agent/pairing/request"))
         .json(&serde_json::json!({
-            "link_code": link_code,
             "device_pubkey": device_pubkey,
             "pop_sig": pop_sig,
         }))
         .send()
         .await
-        .context("POST /v1/auth/link-code/redeem")?;
+        .context("POST /v1/agent/pairing/request")?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("link-code redeem failed: HTTP {status}: {text}");
+        anyhow::bail!("pairing request failed: HTTP {status}: {text}");
     }
     let body: serde_json::Value =
-        serde_json::from_str(&text).with_context(|| format!("parse redeem response: {text}"))?;
+        serde_json::from_str(&text).with_context(|| format!("parse request response: {text}"))?;
+    let request_id = body
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("request response missing request_id: {text}"))?;
+    let pairing_code = body
+        .get("pairing_code")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("request response missing pairing_code: {text}"))?;
+    let expires_at = body.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    // Persist the request state (0600) so `--retrieve-pairing` can resolve
+    // request_id without the caller threading it (--request-id overrides).
+    let state_file = pairing_state_path();
+    if let Some(parent) = std::path::Path::new(&state_file).parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let state_json = serde_json::json!({
+        "request_id": request_id,
+        "pairing_code": pairing_code,
+        "device_pubkey": device_pubkey,
+        "expires_at": expires_at,
+    })
+    .to_string();
+    agentkeys_core::device_crypto::write_key_0600(&state_file, &state_json)
+        .context("persist pairing request state (0600)")?;
+
+    // Human-facing prompt on stderr (logs stream): show the code to the owner.
+    info!(
+        target: "agentkeys.daemon.init",
+        device = %device_pubkey,
+        "agentkeys-daemon opened §10.2 pairing request — show this code to your owner to claim: {pairing_code}"
+    );
+
+    // Machine artifact on STDOUT (logs are on stderr). The harness/owner reads
+    // pairing_code to claim, request_id to retrieve.
+    println!(
+        "{}",
+        serde_json::json!({
+            "request_id": request_id,
+            "pairing_code": pairing_code,
+            "agent_address": device_pubkey,
+            "device_key_hash": device_key_hash,
+            "expires_at": expires_at,
+            "state_file": state_file,
+            "key_file": key_file,
+        })
+    );
+    Ok(())
+}
+
+/// `--retrieve-pairing` (method A §10.2): after the master claims the pairing
+/// request, poll the broker until `J1_agent` is available, persist it, and print
+/// the binding artifact the master's already-submitted `registerAgentDevice`
+/// consumes. The device key NEVER leaves this machine.
+///
+/// Resolves `request_id` from `--request-id` or the state file written by
+/// `--request-pairing`. Polls every `PAIRING_POLL_INTERVAL_SECONDS` until claimed
+/// or `--init-poll-timeout-seconds`.
+async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
+    use agentkeys_core::device_crypto::DeviceKey;
+
+    let broker_url = args.broker_url.clone().ok_or_else(|| {
+        anyhow::anyhow!("--broker-url (or AGENTKEYS_BROKER_URL) required for --retrieve-pairing")
+    })?;
+    let base = broker_url.trim_end_matches('/').to_string();
+
+    // request_id: explicit flag wins; else read the state file from --request-pairing.
+    let request_id = match args.request_id.clone() {
+        Some(id) => id,
+        None => {
+            let state_file = pairing_state_path();
+            let raw = std::fs::read_to_string(&state_file).with_context(|| {
+                format!("read pairing state file {state_file} (pass --request-id to override)")
+            })?;
+            let v: serde_json::Value = serde_json::from_str(&raw)
+                .with_context(|| format!("parse pairing state file {state_file}"))?;
+            v.get("request_id")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("pairing state file {state_file} missing request_id")
+                })?
+        }
+    };
+
+    let key_file = args
+        .device_key_file
+        .clone()
+        .unwrap_or_else(|| "~/.agentkeys/agent-device.key".to_string());
+    // Same key as --request-pairing (never regenerate — the broker bound the
+    // request to this exact device_pubkey, and poll re-proves possession of it).
+    let dk =
+        DeviceKey::load_or_generate(&key_file, false).context("load/generate K10 device key")?;
+    let device_pubkey = dk.address().to_string();
+    let device_key_hash = dk.device_key_hash().context("device_key_hash")?;
+    let pop_sig = dk.pop_sig().context("pop_sig")?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .context("build http client")?;
+
+    // Poll until claimed or the operator-set timeout elapses.
+    let deadline = SystemTime::now() + Duration::from_secs(args.init_poll_timeout_seconds);
+    let body: serde_json::Value = loop {
+        let resp = client
+            .post(format!("{base}/v1/agent/pairing/poll"))
+            .json(&serde_json::json!({
+                "request_id": request_id,
+                "device_pubkey": device_pubkey,
+                "pop_sig": pop_sig,
+            }))
+            .send()
+            .await
+            .context("POST /v1/agent/pairing/poll")?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("pairing poll failed: HTTP {status}: {text}");
+        }
+        let body: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("parse poll response: {text}"))?;
+        let pstatus = body
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if pstatus == "claimed" {
+            break body;
+        }
+        if SystemTime::now() >= deadline {
+            anyhow::bail!(
+                "pairing not claimed within {}s — the master has not run `agentkeys agent claim --pairing-code <code>` yet",
+                args.init_poll_timeout_seconds
+            );
+        }
+        info!(
+            target: "agentkeys.daemon.init",
+            "§10.2 pairing request still pending — waiting for the master to claim…"
+        );
+        tokio::time::sleep(Duration::from_secs(PAIRING_POLL_INTERVAL_SECONDS)).await;
+    };
+
     let session_jwt = body
         .get("session_jwt")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("redeem response missing session_jwt: {text}"))?;
+        .ok_or_else(|| anyhow::anyhow!("claimed poll response missing session_jwt: {body}"))?;
     let child_omni = body
         .get("child_omni")
         .and_then(|v| v.as_str())
@@ -524,7 +700,7 @@ async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<
         .session_id
         .clone()
         .unwrap_or_else(|| format!("daemon-{child_omni}"));
-    session_store::save_session(&sess, &sid).context("save link-code session")?;
+    session_store::save_session(&sess, &sid).context("save pairing session")?;
 
     // Finding 2 (adversarial review): keep the bearer IN the sandbox. Write the
     // session JWT to an owner-only (0600) file that the in-sandbox MCP server reads
@@ -546,7 +722,7 @@ async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<
         operator_omni = %operator_omni,
         device = %device_pubkey,
         session_id = %sid,
-        "agentkeys-daemon redeemed §10.2 link code — J1_agent persisted"
+        "agentkeys-daemon retrieved §10.2 pairing — J1_agent persisted"
     );
 
     // Binding artifact on STDOUT (logs are on stderr). Same fields the master's
@@ -562,7 +738,7 @@ async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<
             "device_key_hash": device_key_hash,
             "pop_sig": pop_sig,
             "session_file": session_file,
-            "link_code": link_code,
+            "request_id": request_id,
             "key_file": key_file,
         })
     );

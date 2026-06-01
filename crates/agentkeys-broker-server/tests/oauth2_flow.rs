@@ -18,7 +18,6 @@
 #![cfg(feature = "auth-oauth2-google")]
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use agentkeys_broker_server::{
@@ -132,8 +131,8 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
         nonce_store,
         grant_store: Arc::new(GrantStore::open_in_memory().unwrap()),
         identity_link_store: Arc::new(IdentityLinkStore::open_in_memory().unwrap()),
-        link_code_store: Arc::new(
-            agentkeys_broker_server::storage::LinkCodeStore::open_in_memory().unwrap(),
+        pairing_request_store: Arc::new(
+            agentkeys_broker_server::storage::PairingRequestStore::open_in_memory().unwrap(),
         ),
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::new(Tier2State::default()),

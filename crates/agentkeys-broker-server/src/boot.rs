@@ -29,7 +29,9 @@ use crate::jwt::SessionKeypair;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::{AuditAnchor, AuditPolicy};
 use crate::plugins::PluginRegistry;
-use crate::storage::{AuthNonceStore, GrantStore, IdentityLinkStore, LinkCodeStore, WalletStore};
+use crate::storage::{
+    AuthNonceStore, GrantStore, IdentityLinkStore, PairingRequestStore, WalletStore,
+};
 
 /// Outcome of the synchronous Tier-1 boot phase.
 pub struct BootArtifacts {
@@ -41,8 +43,9 @@ pub struct BootArtifacts {
     pub nonce_store: Arc<AuthNonceStore>,
     pub grant_store: Arc<GrantStore>,
     pub identity_link_store: Arc<IdentityLinkStore>,
-    /// §10.2 agent-bootstrap link-code + pending-binding store (issue #144).
-    pub link_code_store: Arc<LinkCodeStore>,
+    /// §10.2 agent-initiated pairing-request + pending-binding store (issue #144,
+    /// method A).
+    pub pairing_request_store: Arc<PairingRequestStore>,
     /// Concrete EmailLink plugin handle (Phase A.1, US-018). Populated
     /// when `email_link` is in `BROKER_AUTH_METHODS` AND the
     /// `auth-email-link` feature is compiled in. The registry's auth
@@ -185,14 +188,16 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
             )
         })?,
     );
-    let link_code_store = Arc::new(LinkCodeStore::open(&link_codes_path(config)).map_err(|e| {
-        boot_fail(
-            env::BROKER_AUDIT_DB_PATH,
-            &config.audit_db_path.display().to_string(),
-            format!("LinkCodeStore: {}", e),
-            "link-codes-db",
-        )
-    })?);
+    let pairing_request_store = Arc::new(
+        PairingRequestStore::open(&pairing_requests_path(config)).map_err(|e| {
+            boot_fail(
+                env::BROKER_AUDIT_DB_PATH,
+                &config.audit_db_path.display().to_string(),
+                format!("PairingRequestStore: {}", e),
+                "pairing-requests-db",
+            )
+        })?,
+    );
 
     // 5. Validate + parse plugin selection env vars. Every name in each
     //    list must resolve at compile time (i.e. the corresponding
@@ -235,7 +240,7 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
         nonce_store,
         grant_store,
         identity_link_store,
-        link_code_store,
+        pairing_request_store,
         #[cfg(feature = "auth-email-link")]
         email_link: built.email_link,
         #[cfg(feature = "auth-oauth2")]
@@ -311,12 +316,12 @@ fn identity_links_path(config: &BrokerConfig) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("identity_links.sqlite"))
 }
 
-fn link_codes_path(config: &BrokerConfig) -> std::path::PathBuf {
+fn pairing_requests_path(config: &BrokerConfig) -> std::path::PathBuf {
     config
         .audit_db_path
         .parent()
-        .map(|p| p.join("link_codes.sqlite"))
-        .unwrap_or_else(|| std::path::PathBuf::from("link_codes.sqlite"))
+        .map(|p| p.join("pairing_requests.sqlite"))
+        .unwrap_or_else(|| std::path::PathBuf::from("pairing_requests.sqlite"))
 }
 
 #[cfg(feature = "audit-sqlite")]

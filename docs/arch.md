@@ -164,7 +164,7 @@ flowchart TB
 |---|---|---|
 | **Master workstation** (host root, no biometric presence) | Stolen J1 session JWT (replay until TTL); stolen K10 (cap-mint as that actor until rotation). Caps bounded by per-actor scope and host-local quotas. | **Cannot complete WebAuthn ceremony** — K11 sealed in hardware requires biometric/PIN. Cannot mutate scope, bind a new device, or rotate K10. Cannot reach other operators' material. |
 | **Master workstation** (full compromise WITH biometric presence) | Above plus: mutate scope, bind new master device, rotate K10. Bounded to this human's actor tree only. Visible on chain (sovereign mode) — every mutation is auditable. | Cannot reach other operators. Recovery via surviving master devices revokes attacker's bindings within ~60s. |
-| **Agent machine** (sandbox root) | Stolen agent K10; stolen session JWT (TTL-bounded). Per-actor binding (Codex finding #1) means caps minted under this K10 are tagged for THIS actor only — cannot impersonate a sibling agent. | Cannot rebind without a fresh master-issued link code; cannot mutate scope; cannot reach master wallet's material; cannot reach sibling agents. PrincipalTag at STS prevents cross-agent S3 access. |
+| **Agent machine** (sandbox root) | Stolen agent K10; stolen session JWT (TTL-bounded). Per-actor binding (Codex finding #1) means caps minted under this K10 are tagged for THIS actor only — cannot impersonate a sibling agent. | Cannot rebind without a fresh pairing the master claims; cannot mutate scope; cannot reach master wallet's material; cannot reach sibling agents. PrincipalTag at STS prevents cross-agent S3 access. |
 | **Broker process** | Mint session JWTs; co-sign caps with K1. Caps still require valid K10 sig from a registered device AND valid K11 assertion for master mutations — broker compromise alone cannot fabricate a usable master-mutation cap. | Cannot derive K4 wallets (no K3); cannot decrypt credentials (no KEK access without mTLS + chain epoch check); cannot reach AWS (no IAM principal). |
 | **Signer enclave (TEE)** (assuming attestation defeated) | Derive any K4 wallet; derive any KEK. Catastrophic for credentials. | Cannot mint session JWTs (no K1); cannot mint caps (no K1); cannot bypass per-actor binding on chain (registry is authoritative); cannot reach S3 directly. TEE attestation is the threat-model floor — see §13. |
 | **One worker** (e.g., credentials-service compromised) | Decrypt credentials for that data class for callers presenting valid caps (cannot forge caps). Cannot read other data classes (separate workers, separate IAM, separate prefixes — §17). | Cannot mutate scope; cannot bind devices; cannot mint own caps; cannot reach memory / audit / email / payment data; cannot escalate to other workers. |
@@ -204,7 +204,7 @@ Pinned to disambiguate the same value showing up under different labels across c
 | `actor_omni` | **The durable per-actor cryptographic anchor.** `SHA256("agentkeys" \|\| "evm" \|\| initial_master_wallet_K3_v1)`. **Frozen at first SIWE-bind**; never rotates with K3, never changes with wallet rotation. The Layer 1 identifier per §6. | `omni_account` (JWT claim + CLI `whoami` field), `agentkeys_actor_omni` (AWS PrincipalTag key), `OMNI_A` / `OMNI_B` (demo shell vars). |
 | `current_master_wallet` | **The current chain identity** = `HKDF(K3_v[current_epoch], O_master)`. Rotates each K3 epoch. Appears on chain as `msg.sender` in sovereign mode. The Layer 2 identifier per §6. | `master_wallet`, `wallet_address` (JWT claim shape pre-rotation), `MASTER_WALLET` (demo shell var). When historical K3 epochs are in scope, qualify with `master_wallet_K3_v[N]`. |
 | `identity_omni` | **The transient identity omni** — `SHA256("agentkeys" \|\| identity_type \|\| identity_value)`. Used internally by the broker between init and SIWE-verify; never carried in a post-SIWE JWT. | `identity_omni_email` / `identity_omni_oauth2` (when narrowing to a specific identity type), `identity omni` (init-flow CLI log line). |
-| `agent_omni` | **A child actor omni** = `SHA256("agentkeys-hdkd-v1" \|\| O_master \|\| "//<label>")` (issue #144). **Public + recomputable** — anyone with the parent omni + label recomputes it; unforgeability is the master-gated `/v1/agent/create` + the master-submitted on-chain binding, NOT a secret. (The "cannot be computed without the parent's master secret" property lives one layer down, at the K4 wallet `HKDF(K3_v[epoch], agent_omni)` in the signer.) Distinct from `master_omni`; both are valid actor_omnis. | `O_master//agent-A`, `O_agent_A` (HDKD-tree notation). |
+| `agent_omni` | **A child actor omni** = `SHA256("agentkeys-hdkd-v1" \|\| O_master \|\| "//<label>")` (issue #144). **Public + recomputable** — anyone with the parent omni + label recomputes it; unforgeability is the master-gated `/v1/agent/pairing/claim` + the master-submitted on-chain binding, NOT a secret. (The "cannot be computed without the parent's master secret" property lives one layer down, at the K4 wallet `HKDF(K3_v[epoch], agent_omni)` in the signer.) Distinct from `master_omni`; both are valid actor_omnis. | `O_master//agent-A`, `O_agent_A` (HDKD-tree notation). |
 | `K3` | The 32 bytes inside the signer enclave that K4 + KEK derivation HKDFs against. Per-epoch via `K3EpochCounter`. | `K3_v[N]` to disambiguate epoch; `master_secret` (signer-internal log term — discouraged). |
 | `session JWT` (= K6) | The bearer token at `~/.agentkeys/<id>/session.json` (or OS keychain). Signed by K1. Carries `agentkeys.actor_omni`, `agentkeys.device_pubkey`, `agentkeys.webauthn_cred_id` (master only). | `session_jwt`, `J1` (post-SIWE bearer), `SESSION_JWT_A` / `SESSION_JWT_B` (demo shell vars). |
 | `OIDC JWT` (= K7) | Per-mint short-lived JWT signed by K2; consumed by `AssumeRoleWithWebIdentity`. Carries `agentkeys_actor_omni` claim → AWS session tag. | `oidc_jwt`, `JWT_A` / `JWT_B` (demo shell vars). |
@@ -285,7 +285,7 @@ O_master                                wallet_master = HKDF(K3_v[epoch], O_mast
 └── ...
 ```
 
-The omni-tree edge `//<label>` is **public + recomputable** (issue #144): `O_child = SHA256("agentkeys-hdkd-v1" || O_parent || "//" || label)`. What "cannot be computed without the parent's master secret" is the per-node **wallet** (K4 = `HKDF(K3_v[epoch], O_node)`, derived in the signer) — not the omni node itself. Each node's wallet is a different EVM address; AWS PrincipalTag is per-actor `actor_omni` for prefix isolation. Only the master can *create* a binding for a child omni (the master-gated `/v1/agent/create` + the master-submitted `registerAgentDevice`), so a public omni derivation never lets anyone bind a sibling.
+The omni-tree edge `//<label>` is **public + recomputable** (issue #144): `O_child = SHA256("agentkeys-hdkd-v1" || O_parent || "//" || label)`. What "cannot be computed without the parent's master secret" is the per-node **wallet** (K4 = `HKDF(K3_v[epoch], O_node)`, derived in the signer) — not the omni node itself. Each node's wallet is a different EVM address; AWS PrincipalTag is per-actor `actor_omni` for prefix isolation. Only the master can *create* a binding for a child omni (the master-gated `/v1/agent/pairing/claim` + the master-submitted `registerAgentDevice`), so a public omni derivation never lets anyone bind a sibling.
 
 **Why per-agent omni (not shared with master):**
 
@@ -310,8 +310,8 @@ The omni-tree edge `//<label>` is **public + recomputable** (issue #144): `O_chi
 | HDKD position | Root | `//<label>` child of master |
 | K11 (WebAuthn) | Yes — needed for master mutations | No — agents have no human-presence credential |
 | Bootstrap | Identity ceremony + WebAuthn enrollment | **Link-code from master, only** |
-| Spawns other actors | Yes (mints derivation certs + link codes) | No |
-| Recovery on lost device | M-of-N quorum across surviving master devices (§11) | Re-bootstrap via fresh link-code from master |
+| Spawns other actors | Yes (claims agent pairing requests + grants scope) | No |
+| Recovery on lost device | M-of-N quorum across surviving master devices (§11) | Re-bootstrap via a fresh pairing the master claims |
 | `SidecarRegistry.role` bitfield | `CAP_MINT \| RECOVERY \| SCOPE_MGMT` (first device) / `CAP_MINT \| RECOVERY` (subsequent) | `CAP_MINT` only |
 
 **Key non-conflations:**
@@ -448,7 +448,7 @@ sequenceDiagram
 Canonical reference for binding K10 to an actor — first-time init and re-binding flows. Roles split per §6.3:
 
 - **Master** = device with platform authenticator. Holds K11. Runs identity ceremony + WebAuthn binding. Spawns agents. Submits master-mutation chain transactions.
-- **Agent** = VM / Linux / CI / `agent-infra/sandbox` container. No K11. **Bootstraps via link-code from a master, only.**
+- **Agent** = VM / Linux / CI / `agent-infra/sandbox` container. No K11. **Bootstraps via agent-initiated pairing claimed by a master, only.**
 
 YubiKey-on-Linux as a master tier (roaming-authenticator binding lets a Linux box be a master) is deferred — see [issue #79](https://github.com/litentry/agentKeys/issues/79).
 
@@ -467,66 +467,77 @@ Per §9 stages 0–4. Identity ceremonies vary per identity type but converge on
 
 **Operator-readable intent on the K11 confirmation page.** WebAuthn's OS-level Touch ID prompt is fixed by the platform — it cannot display application text. AgentKeys closes that gap on the **localhost confirmation page** served before `navigator.credentials.get()` fires: every master-mutation call (scope grant/revoke, device add/revoke, K10 rotation, recovery, audit-row mint, typed-data sign) provides a `K11IntentContext { text, fields }` rendered prominently above the raw challenge hex. The cryptographic binding is unchanged (`challenge = sha256(message)`); the intent text is display-only AND populates `AuditEnvelope.intent_text` + `intent_commitment` so the chain commitment binds to what the operator actually saw. See [`wiki/k11-webauthn-intent-rendering.md`](wiki/k11-webauthn-intent-rendering.md) for the API + worked examples; implementation in [`crates/agentkeys-cli/src/k11_webauthn.rs`](../crates/agentkeys-cli/src/k11_webauthn.rs) (`assert_webauthn_with_intent`, `assert_webauthn_for_chain_with_intent`).
 
-### 10.2 Agent bootstrap (link-code only — single path)
+### 10.2 Agent bootstrap (agent-initiated pairing — single path)
 
-**Agents have exactly one bootstrap path:** a one-time link code minted by an authenticated master. There is no agent-runs-its-own-identity-ceremony, no agent-recovers-via-OAuth, no shared-bearer alternative. One path = one test surface, one threat model.
+**Agents have exactly one bootstrap path:** the agent shows a one-time pairing code; an authenticated master claims it (issue #144, method A — the Matter/HomeKit IoT model). There is no agent-runs-its-own-identity-ceremony, no agent-recovers-via-OAuth, no shared-bearer alternative. One path = one test surface, one threat model.
+
+**Why agent-initiated (not master-initiated):** a no-keyboard physical device (an AI companion in a box) can *show* a QR/setup code but cannot accept a master-minted code typed *into* it — so the agent must initiate. It stays **Sybil-safe** because the request is *unbound* (names no master) and **inert** until a master deliberately claims the code: the master's claim is the sole binder, exactly as the master's mint was under the older master-initiated design. (Device-initiated unbind / factory-reset → re-pair to a new owner is deferred: client lifecycle → issue #156, on-chain agent self-revoke → issue #155.)
 
 ```
-ON MASTER (already initialized; holds J1_master):
-1. CLI: agentkeys agent create --label agent-A --services memory
-2. CLI → broker: POST /v1/agent/create
-                  { label: "agent-A", requested_scope: "memory" }
-                  Authorization: Bearer J1_master
-3. Broker (J1_master bearer is the gate; K11 is NOT presented here — agents are
-   K10-only per the contract, so there is nothing for the broker to K11-verify):
-   - Verify J1_master
-   - Derive O_agent_A = SHA256(HDKD_DOMAIN || O_master || "//agent-A")
-     [public + recomputable per §6.2 — unforgeability is the J1_master gate +
-      the master-submitted on-chain binding, NOT a secret]
-   - Mint one-time link code bound to O_agent_A + requested_scope (TTL 600s)
-4. CLI: print link code (hand it to the agent out-of-band)
-
-ON AGENT MACHINE (any VM / container / CI runner / cloud sandbox):
-5. Stage 0: daemon generates (D_priv_agent, D_pub_agent) IN THE SANDBOX
+ON AGENT MACHINE (any VM / container / CI runner / cloud sandbox / no-input device):
+1. Stage 0: daemon generates (D_priv_agent, D_pub_agent) IN THE SANDBOX
             persists D_priv per §10.5 (reused on retry — never auto-regenerated)
-6. agentkeys-daemon --init-link-code <code> --broker-url B
-7. Daemon → broker: POST /v1/auth/link-code/redeem
-     { link_code, device_pubkey: D_pub_agent,
+2. agentkeys-daemon --request-pairing --broker-url B
+3. Daemon → broker: POST /v1/agent/pairing/request
+     { device_pubkey: D_pub_agent,
        pop_sig: EIP-191( keccak256("agentkeys-agent-pop:" || device_key_hash) ) }
-     [device_key_hash = keccak256(D_pub_agent address bytes); this is the DEPLOYED
-      preimage — proves device-key possession, the link code proves authorization]
-8. Broker:
-   - Verify pop_sig BEFORE consuming the code (a bad sig leaves the single-use
-     code redeemable → retryable)
-   - Mark link code consumed (single-use); record (D_pub_agent, pop_sig) as a
-     PENDING BINDING for the master
-   - Mint J1_agent { actor_omni=O_agent_A, parent_omni=O_master,
-                     derivation_path="//agent-A", device_pubkey=D_pub_agent }
-   - Does NOT write chain — the broker is read-only; the master binds (below)
-9. Daemon: persist J1_agent; emit the binding artifact. The agent now
-   authenticates but has NO scope yet (installed-but-not-yet-permitted).
+     [no bearer — the agent has no session yet; device_key_hash = keccak256(D_pub_agent
+      address bytes), the DEPLOYED preimage; pop_sig proves device-key possession]
+4. Broker:
+   - Verify pop_sig BEFORE storing (a bad sig creates no row — no DoS amplification
+     on the unauthenticated endpoint; rate-limit + TTL + pool cap bound the rest)
+   - Store an UNBOUND pairing request (names NO master; operator/child_omni = ∅; TTL 600s)
+   - Return { request_id (the agent's SECRET retrieval ticket),
+              pairing_code (high-entropy; the agent DISPLAYS this) }
+5. Daemon: DISPLAY pairing_code (QR / screen text) to the owner; begin polling (step 9).
 
-MASTER APPROVAL (async; master ≠ agent machine — the iOS/Android "first launch
-→ grant permissions" moment):
-10. Broker notifies the master (push notification in production). The master
-    pulls the pending binding (GET /v1/agent/pending-bindings, J1_master-gated) →
-    learns D_pub_agent + pop_sig it never generated.
-11. The master, with ONE K11/Touch ID approval, submits BOTH on chain:
+ON MASTER (already initialized; holds J1_master; master ≠ agent machine):
+6. The owner scans/enters the displayed code:
+   agentkeys agent claim --pairing-code <code> --label agent-A --services memory
+7. CLI → broker: POST /v1/agent/pairing/claim
+                  { pairing_code, label: "agent-A", requested_scope: "memory" }
+                  Authorization: Bearer J1_master
+8. Broker (J1_master bearer is the gate; K11 is NOT presented here — agents are
+   K10-only per the contract, so there is nothing for the broker to K11-verify):
+   - Verify J1_master; look up the UNBOUND request by pairing_code (atomic single-claim)
+   - Derive O_agent_A = SHA256(HDKD_DOMAIN || O_master || "//agent-A")
+     [public + recomputable per §6.2 — the master "adopts" the agent under its omni
+      tree; unforgeability is the J1_master claim + the master-submitted on-chain binding]
+   - Bind the request to THIS operator_omni + O_agent_A + label + requested_scope;
+     mark it claimed; record (D_pub_agent, pop_sig) as a PENDING BINDING for the master
+   - Return the device artifact (D_pub_agent, pop_sig, device_key_hash) so the master
+     can REVIEW the device before binding. Does NOT mint J1, does NOT write chain.
+
+ON AGENT MACHINE (continues polling from step 5):
+9.  agentkeys-daemon --retrieve-pairing  (resolves request_id; re-proves possession)
+10. Daemon → broker: POST /v1/agent/pairing/poll { request_id, device_pubkey, pop_sig }
+    - Pending → keep polling; Claimed → broker verifies the fresh pop_sig against the
+      request's bound device key, then mints J1_agent FRESH (at retrieval — so no bearer
+      secret sits at rest, and the JWT TTL starts when the agent actually fetches it):
+      J1_agent { actor_omni=O_agent_A, parent_omni=O_master,
+                 derivation_path="//agent-A", device_pubkey=D_pub_agent }
+11. Daemon: persist J1_agent; emit the binding artifact. The agent now authenticates
+    but has NO scope yet (installed-but-not-yet-permitted).
+
+MASTER APPROVAL (async; the iOS/Android "first launch → grant permissions" moment):
+12. The master pulls the pending binding (GET /v1/agent/pending-bindings, J1_master-gated)
+    → sees D_pub_agent + pop_sig it never generated (also returned inline at claim, step 8).
+13. The master, with ONE K11/Touch ID approval, submits BOTH on chain:
     - SidecarRegistry.registerAgentDevice(D_pub_hash, O_master, O_agent_A,
         link_code_redemption, agent_pop_sig)   [msg.sender == operatorMasterWallet;
         tier=AGENT, roles=CAP_MINT, k11_cred_id=0 — no biometric on this tx]
     - AgentKeysScope.setScopeWithWebauthn(... requested_scope ...)  [the K11 gesture]
     The CLI exposes these as two deterministic steps (test automation); the
     operator experiences one approval. Install + permissions = one gesture.
-12. Master acks the binding (POST /v1/agent/pending-bindings/ack) → the broker
-    marks it bound so it drops out of the pending list (the rendezvous self-cleans;
+14. Master acks the binding (POST /v1/agent/pending-bindings/ack, by request_id) → the
+    broker marks it bound so it drops out of the pending list (the rendezvous self-cleans;
     re-bootstraps are idempotent).
-13. Agent's J1_agent now has scope; cap-mint works (§12).
+15. Agent's J1_agent now has scope; cap-mint works (§12).
 ```
 
-**Trust chain:** `master human → master K11 (at the approval) → master J1 + master-submitted on-chain binding → agent K10 binding`. The agent never holds K11 or any user-presence credential; the K11 gesture is the master's, exercised at step 11 (binding + scope), not at the broker.
+**Trust chain:** `master human → master K11 (at the approval) → master J1 + master-submitted on-chain binding → agent K10 binding`. The agent never holds K11 or any user-presence credential; the K11 gesture is the master's, exercised at step 13 (binding + scope), not at the broker.
 
-The agent's `pop_sig` proves K10 possession; the **link code** is the single-use, TTL-bounded, omni-bound authorization. Per-actor binding (§14) ensures the agent's K10 cannot mint caps under a sibling agent's omni. **The broker never writes chain** (decision: issue #144) — it mints the link code + `J1_agent` and records the pending binding; the master submits `registerAgentDevice` + the scope grant. (A faithful "broker binds at redeem" variant would need a contract change + a broker chain key — deferred.)
+The agent's `pop_sig` proves K10 possession (at both request and retrieval); the **pairing code** is the high-entropy, TTL-bounded, claim-by-code authorization (whoever holds it binds — display it only to the intended owner). Per-actor binding (§14) ensures the agent's K10 cannot mint caps under a sibling agent's omni. **The broker never writes chain** (decision: issue #144) — it stores the pairing request, mints `J1_agent` at retrieval, and records the pending binding; the master submits `registerAgentDevice` + the scope grant. (A faithful "broker binds at claim" variant would need a contract change + a broker chain key — deferred.)
 
 ### 10.3 Master device switch + device-key rotation
 
@@ -568,14 +579,14 @@ If both D_priv_old AND K11 are lost on this master device → fall back to §11 
 ### 10.4 Agent re-bootstrap
 
 ```
-ON MASTER:
-1. agentkeys agent create --label agent-A  (or reuse existing label)
-   → mints fresh link code; old D_pub_agent_old binding remains until
-     explicit revoke (defensive cleanup, not required for security — old
-     pop_sig cannot be re-issued without the agent's old D_priv)
-
 ON NEW AGENT:
-2-9. Same as §10.2 steps 5–9 (new D_pub binds under same O_agent_A)
+1. agentkeys-daemon --request-pairing  (fresh D_pub in the new sandbox; shows a new code)
+   → old D_pub_agent_old binding remains until explicit revoke (defensive cleanup,
+     not required for security — old pop_sig cannot be re-issued without the old D_priv)
+
+ON MASTER:
+2. agentkeys agent claim --pairing-code <code> --label agent-A  (reuse the existing label
+   → same O_agent_A), then §10.2 steps 8–15 bind the new D_pub under the same O_agent_A
 ```
 
 Multiple concurrent device pubkeys under the same agent omni is the default — many concurrent VMs are typical for ephemeral-sandbox patterns. Per-actor binding bounds each one independently.
@@ -587,10 +598,10 @@ OS keychain when available (Linux GNOME Keyring, Windows Credential Locker). Whe
 | Agent lifecycle | D_priv behavior | Operator action |
 |---|---|---|
 | **Long-lived sandbox** (single container instance for hours/days) | File persists across daemon restarts within the container | None |
-| **Ephemeral sandbox** (container destroyed between sessions, e.g. nightly CI) | D_priv vanishes with the container | Master mints fresh link code per §10.4; agent re-bootstraps. **No human re-presence required** — master's daemon can auto-mint on agent-restart signal |
+| **Ephemeral sandbox** (container destroyed between sessions, e.g. nightly CI) | D_priv vanishes with the container | Agent re-requests pairing per §10.4; master re-claims. **No human re-presence required** — the master's daemon can auto-claim on an agent-restart signal |
 | **Hardened sandbox** (TPM / Secure Enclave passthrough, AWS Nitro Enclave) | D_priv pinned to hardware OR sealed to boot measurement | Survives container destruction |
 
-**Why this is the right answer (not a workaround):** the master holds the long-lived authority; agents are short-lived consumers. The link-code-per-restart pattern mirrors `agent-infra/sandbox`'s two-tier orchestrator model — orchestrator holds the long-lived signing key; sandbox holds only short-TTL bearer credentials. Leaked sandbox env = at most one link-code-TTL of access, scoped to that agent's permissions.
+**Why this is the right answer (not a workaround):** the master holds the long-lived authority; agents are short-lived consumers. The pairing-per-restart pattern mirrors `agent-infra/sandbox`'s two-tier orchestrator model — orchestrator holds the long-lived signing key; sandbox holds only short-TTL bearer credentials. Leaked sandbox env = at most one pairing-TTL of access, scoped to that agent's permissions.
 
 ### 10.6 Trust shape across actor roles
 
@@ -598,7 +609,7 @@ OS keychain when available (Linux GNOME Keyring, Windows Credential Locker). Whe
 |---|---|
 | **Master K10 leaked** (host root, no biometric presence) | Cap-mint under `O_master` until rotation. **Cannot mutate scope, rebind, or rotate K10** (requires K11). **Cannot mint agent omnis** (master-mutation, gated by K11). |
 | **Master K10 + biometric presence** | Above plus: mutate scope, bind new master device, rotate K10, mint new agent omnis. Bounded to this human's actor tree. Visible on chain (sovereign mode default). Recovery (§11) revokes within ~60s. |
-| **Agent K10 leaked** (sandbox host root) | Cap-mint under `O_agent_A` until link-code rotation or session-JWT TTL expiry. **Per-actor binding** prevents impersonating siblings. Cannot rebind, mutate scope, or escalate to master. PrincipalTag at STS prevents cross-agent S3 access. |
+| **Agent K10 leaked** (sandbox host root) | Cap-mint under `O_agent_A` until re-pairing/rotation or session-JWT TTL expiry. **Per-actor binding** prevents impersonating siblings. Cannot rebind, mutate scope, or escalate to master. PrincipalTag at STS prevents cross-agent S3 access. |
 
 ---
 
@@ -782,10 +793,11 @@ The broker is the cap-mint authority. It does NOT hold credentials, K3, or any c
 /v1/auth/oauth2/{start,callback,status}       — OAuth2 flow (stage 1)
 /v1/auth/wallet/{start,verify}                — SIWE round-trip (stage 3)
 /v1/auth/bind/<request_id>                    — WebAuthn enrollment (stage 2)
-/v1/auth/link-code/redeem                     — agent redeems link code → J1_agent (§10.2; no bearer, pop_sig-gated)
-/v1/agent/create                              — mint agent link-code (J1_master-gated; K11 NOT at broker — §10.2)
-/v1/agent/pending-bindings                    — master pulls redeemed-but-unbound agents to approve (§10.2; GET)
-/v1/agent/pending-bindings/ack                — master acks an on-chain binding → clears it from pending (§10.2; POST, J1_master)
+/v1/agent/pairing/request                     — agent opens an UNBOUND pairing request → {request_id, pairing_code} (§10.2 method A; no bearer, pop_sig-gated)
+/v1/agent/pairing/claim                       — master claims the pairing_code → binds HDKD child omni (J1_master-gated; K11 NOT at broker — §10.2 method A)
+/v1/agent/pairing/poll                        — agent polls by request_id → J1_agent once claimed (§10.2 method A; no bearer, pop_sig-gated)
+/v1/agent/pending-bindings                    — master pulls claimed-but-unbound agents to approve (§10.2; GET)
+/v1/agent/pending-bindings/ack                — master acks an on-chain binding (by request_id) → clears it from pending (§10.2; POST, J1_master)
 /v1/wallet/link                               — link wallet to identity (post-derive, pre-SIWE)
 /v1/wallet/device/rotate                      — K10 rotation (§10.3.2; K11 required)
 /v1/cap/cred-fetch                            — cap-mint for credential fetch
@@ -1319,7 +1331,7 @@ contract CredentialAudit {
 | `ScopeContract.set_scope_with_webauthn` | Master | K10 + K11 |
 | `ScopeContract.revoke_scope_with_webauthn` | Master | K10 + K11 |
 | `SidecarRegistry.register_master_device` | First master: identity ceremony SIWE; later masters: existing K11 | First: SIWE proof; later: K11 from existing |
-| `SidecarRegistry.register_agent_device` | Agent (via master-issued link code) | Master K11 baked into link_code_redemption; agent pop_sig |
+| `SidecarRegistry.register_agent_device` | Agent (via master-claimed pairing) | Master K11 baked into link_code_redemption; agent pop_sig |
 | `SidecarRegistry.revoke_device` | M-of-N surviving masters | `recovery_threshold` K11 assertions |
 | `SidecarRegistry.rotate_device_key` | Master (the device being rotated) | K11 + new-key pop_sig |
 | `SidecarRegistry.set_recovery_threshold` | Master | K11 |
@@ -1854,7 +1866,7 @@ Codebase rule: any source file that takes a stage-1 shortcut **must** cite this 
 
 **What stage 2 adds**:
 - For master devices: a real attestation blob (webauthn-rs attestation statement) covering both K10 device-key authenticity and K11 platform-passkey binding.
-- For agent devices: a fresh `link_code_redemption` that the master mints; agent redeems it to register; on-chain check that the redemption matches the per-operator unspent set.
+- For agent devices: a fresh `link_code_redemption` authorization the master submits at `registerAgentDevice` (the broker/agent never writes chain — §10.2); on-chain check that the redemption matches the per-operator unspent set.
 
 ### 22b.4 Cap-mint daemon→broker auth — session JWT only, no K10 signature on the request
 
@@ -2096,7 +2108,7 @@ agentkeys/                                  # repo root
 │   ├── agentkeys-worker-audit/             # audit-service worker (tiers A/B/C)
 │   ├── agentkeys-worker-email/             # email-service worker (SES integration)
 │   ├── agentkeys-worker-payment/           # payment-service worker (modes P-1/P-2/P-3)
-│   ├── agentkeys-cli/                      # agentkeys binary (init, agent create,
+│   ├── agentkeys-cli/                      # agentkeys binary (init, agent claim,
 │   │                                       #   scope, device, recovery, whoami, ...)
 │   ├── agentkeys-daemon/                   # sidecar daemon (master + agent variants
 │   │                                       #   under one binary, role decided at init)
@@ -2127,7 +2139,7 @@ agentkeys/                                  # repo root
 | `agentkeys-broker-server` | Broker: `/v1/auth/*`, `/v1/cap/*`, `/v1/mint-oidc-jwt`, `/v1/sse/*`, `/.well-known/*` |
 | `agentkeys-signer` | TEE-attested signer: `/derive-address`, `/derive-cred-kek`, `/sts-credentials`, `/sign/*`, `/verify/*` |
 | `agentkeys-worker-{creds,memory,audit,email,payment}` | Per-data-class workers per §15 |
-| `agentkeys-cli` | The `agentkeys` binary — `init`, `agent create`, `scope`, `device`, `recovery`, `whoami`, `signer ...` |
+| `agentkeys-cli` | The `agentkeys` binary — `init`, `agent claim`, `scope`, `device`, `recovery`, `whoami`, `signer ...` |
 | `agentkeys-daemon` | Sidecar daemon (master / agent role per init); localhost proxy |
 | `agentkeys-mcp` | Legacy in-process MCP adapter library — used by `agentkeys-daemon`'s sidecar stdio loop (M0). |
 | `agentkeys-mcp-server` | Standalone Rust MCP server binary (issue #107). Three transports: stdio (Claude Desktop / Claude Code / Codex / Cursor / Cline / Roo / Windsurf / Gemini CLI), HTTP (broker-direct + dev demos), xiaozhi `mcp-endpoint` WS relay. Two backends: `in-memory` (dev/demo fixture for the three-act storyboard) and `http` (real broker + memory + audit workers). Installed via `cargo install --git https://github.com/litentry/agentKeys agentkeys-mcp-server`. |

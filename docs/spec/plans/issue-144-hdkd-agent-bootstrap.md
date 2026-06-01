@@ -1,5 +1,13 @@
 # Issue #144 — Full arch.md §10.2 agent-bootstrap (HDKD omni + broker link-code endpoints)
 
+> **SUPERSEDED (front-half) by method A — agent-initiated pairing.** This plan
+> describes the **master-initiated** design that #149 shipped (master mints a link
+> code → agent redeems). The pairing *direction* was later flipped to
+> agent-initiated (the agent shows a code, the master claims it — the IoT model);
+> see [`agent-initiated-pairing-method-a.md`](agent-initiated-pairing-method-a.md)
+> and arch.md §10.2 for the current ceremony. The on-chain bind + scope tail
+> (decisions 1–2 below) is reused unchanged. Kept as the historical record of #149.
+
 Converges the PR #141 **interim** §10.2 (agent omni derived from the agent's own
 wallet; `openssl rand` link-code stub) to the literal ceremony: the **master**
 mints a one-time link code bound to a **hard-derived child omni**

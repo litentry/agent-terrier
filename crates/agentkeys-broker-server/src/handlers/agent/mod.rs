@@ -1,23 +1,33 @@
-//! §10.2 agent-bootstrap endpoints (issue #144).
+//! §10.2 agent-bootstrap endpoints — **method A, agent-initiated** (issue #144,
+//! flipped from master-initiated; design doc
+//! `docs/spec/plans/agent-initiated-pairing-method-a.md`).
 //!
-//! Three endpoints implement the link-code ceremony with the master submitting
-//! the on-chain binding (decision 1 — no contract change, no broker chain key):
+//! The agent shows a code, the master claims it (the Matter/HomeKit IoT model),
+//! and the master still submits the on-chain binding (decision 1 — no contract
+//! change, no broker chain key):
 //!
-//! - `POST /v1/agent/create` (master, `J1_master`-gated) — mint a one-time link
-//!   code bound to the HDKD child omni `O_agent = SHA256(.. || O_master || "//label")`.
-//! - `POST /v1/auth/link-code/redeem` (agent, no bearer) — verify the agent's
-//!   `pop_sig`, consume the code, mint `J1_agent`, and stash the device artifact
-//!   as a pending binding.
+//! - `POST /v1/agent/pairing/request` (agent, no bearer) — verify the agent's
+//!   `pop_sig`, store an UNBOUND request (naming no master), return a
+//!   `pairing_code` to display + a secret `request_id` retrieval ticket.
+//! - `POST /v1/agent/pairing/claim` (master, `J1_master`-gated) — claim the
+//!   code; derive the HDKD child omni `O_agent = SHA256(.. || O_master || "//label")`,
+//!   mark the request claimed, and stash the device artifact as a pending binding.
+//! - `POST /v1/agent/pairing/poll` (agent, no bearer) — once claimed, re-prove
+//!   device-key possession (fresh `pop_sig`) and mint + retrieve `J1_agent`.
 //! - `GET /v1/agent/pending-bindings` (master, `J1_master`-gated) — pull the
-//!   redeemed-but-unbound rows to approve (the push-notification substrate).
+//!   claimed-but-unbound rows to approve (the push-notification substrate).
 //!
 //! The broker never K11-verifies on the agent path — agents are K10-only per the
 //! contract (`registerAgentDevice` writes `k11CredId = 0`). The master's K11
 //! gesture happens later, when it submits the on-chain binding + scope grant.
+//!
+//! Agent-side unbind / factory-reset + re-pair is out of this PR (→ #156); on-
+//! chain agent self-revoke is out of this PR (→ #155).
 
-pub mod create;
+pub mod claim;
 pub mod pending;
-pub mod redeem;
+pub mod poll;
+pub mod request;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

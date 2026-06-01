@@ -1,6 +1,7 @@
-//! Master-side §10.2 agent admin (issue #144): mint link codes + pull pending
-//! bindings. These are the master's half of the link-code ceremony — the agent
-//! half lives in the daemon's `--init-link-code` one-shot.
+//! Master-side §10.2 agent admin (issue #144, method A): claim agent-initiated
+//! pairing requests + pull pending bindings. These are the master's half of the
+//! agent-initiated ceremony — the agent half (request + retrieve) lives in the
+//! daemon's `--request-pairing` / `--retrieve-pairing` one-shots.
 //!
 //! Both commands are gated by the master's `J1` session bearer. The on-chain
 //! binding and scope grant (the "bind" and "grant" steps the operator approves
@@ -31,10 +32,13 @@ fn resolve_bearer(session_bearer: &str) -> Result<String> {
     Ok(sess.token)
 }
 
-/// `agentkeys agent create` — master mints a one-time link code bound to the
-/// HDKD child omni for `label`, declaring the scope the agent should get.
-pub async fn agent_create(
+/// `agentkeys agent claim` — master claims an agent's pairing request by the
+/// `pairing_code` the agent displayed, binding it under the HDKD child omni for
+/// `label` and declaring the scope the agent should get. The agent never named
+/// the master; this claim is the binding act (Sybil-safe).
+pub async fn agent_claim(
     broker_url: &str,
+    pairing_code: &str,
     label: &str,
     services: &str,
     session_bearer: &str,
@@ -42,25 +46,30 @@ pub async fn agent_create(
     let bearer = resolve_bearer(session_bearer)?;
     let base = broker_url.trim_end_matches('/');
     let resp = client()?
-        .post(format!("{base}/v1/agent/create"))
+        .post(format!("{base}/v1/agent/pairing/claim"))
         .bearer_auth(bearer)
-        .json(&json!({ "label": label, "requested_scope": services }))
+        .json(&json!({
+            "pairing_code": pairing_code,
+            "label": label,
+            "requested_scope": services,
+        }))
         .send()
         .await
-        .context("POST /v1/agent/create")?;
+        .context("POST /v1/agent/pairing/claim")?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("agent create failed: HTTP {status}: {text}"));
+        return Err(anyhow!("agent claim failed: HTTP {status}: {text}"));
     }
     let v: Value = serde_json::from_str(&text).with_context(|| format!("parse: {text}"))?;
     Ok(serde_json::to_string_pretty(&v)?)
 }
 
-/// `agentkeys agent pending` — master pulls redeemed-but-unbound agents (the
+/// `agentkeys agent pending` — master pulls claimed-but-unbound agents (the
 /// production push-notification substrate). Each row is "agent-X wants to pair,
 /// wants `[requested_scope]`", with the device artifact (`device_pubkey`,
-/// `pop_sig`, `device_key_hash`) the master needs to submit `registerAgentDevice`.
+/// `pop_sig`, `device_key_hash`) the master needs to submit `registerAgentDevice`,
+/// keyed by `request_id`.
 pub async fn agent_pending(broker_url: &str, session_bearer: &str) -> Result<String> {
     let bearer = resolve_bearer(session_bearer)?;
     let base = broker_url.trim_end_matches('/');
