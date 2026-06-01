@@ -89,6 +89,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve lowercase image name
+        id: img
+        # GHCR repository names MUST be lowercase. ${{ github.repository }} keeps
+        # the repo's actual casing (litentry/agentKeys → capital K), which docker
+        # rejects with "repository name must be lowercase". Lowercase via tr
+        # (portable to bash 3.2; CLAUDE.md prefers tr over the bash-4 ${,,}).
+        run: echo "base=ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')/agentkeys-mcp-server" >> "$GITHUB_OUTPUT"
       - name: build + push
         uses: docker/build-push-action@v6
         with:
@@ -96,7 +103,7 @@ jobs:
           file: crates/agentkeys-mcp-server/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/agentkeys-mcp-server:latest
-            ghcr.io/${{ github.repository }}/agentkeys-mcp-server:${{ github.sha }}
+            ${{ steps.img.outputs.base }}:latest
+            ${{ steps.img.outputs.base }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
