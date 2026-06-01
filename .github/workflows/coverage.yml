@@ -1,0 +1,120 @@
+name: coverage
+
+# Rust test coverage via cargo-llvm-cov.
+#
+# Blocking on the new UI-bridge endpoints (PR-C). The threshold is
+# per-file via cargo-llvm-cov's --fail-under-lines:
+#   --fail-under-lines 60   workspace-wide minimum
+# The ui_bridge.rs module specifically is expected to stay >80%
+# (drift triggers a follow-up to add the missing test).
+#
+# To inspect locally:
+#   cargo install cargo-llvm-cov
+#   cargo llvm-cov --workspace --html  # opens target/llvm-cov/html/index.html
+#
+# Generates:
+#   - lcov.info        — for codecov / coveralls (uploaded as artifact today)
+#   - cobertura.xml    — for GitHub PR coverage diff (future)
+#   - html/index.html  — human-readable browseable report (artifact)
+#
+# Local equivalent:
+#   cargo install cargo-llvm-cov
+#   cargo llvm-cov --workspace --lcov --output-path lcov.info
+#   cargo llvm-cov --workspace --html  # opens target/llvm-cov/html/index.html
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/coverage.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  llvm-cov:
+    name: cargo-llvm-cov (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-llvm-cov-
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate lcov + html (blocking; --fail-under-lines 60)
+        id: cov
+        run: |
+          set -euo pipefail
+          # Collect coverage once (single test pass), then emit each report from
+          # the stored profile data. `cargo llvm-cov report` does NOT accept
+          # --workspace or a trailing `-- <test-args>` — newer cargo-llvm-cov
+          # rejects them ("--workspace ... not supported for subcommand 'report'").
+          # Only the collecting run takes --workspace + test args.
+          cargo llvm-cov --no-report --workspace -- --test-threads=1
+          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --html
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          # Workspace-wide floor. Set conservatively (60%); per-file
+          # discipline lives in the test list in each module under
+          # `mod tests`. Bump in follow-up PRs as tests catch up.
+          cargo llvm-cov report --fail-under-lines 60
+
+      - name: Upload lcov artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload html artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Post coverage summary to job summary
+        if: always()
+        run: |
+          {
+            echo "## Coverage (cargo-llvm-cov)"
+            echo
+            echo "Workspace floor: 60% lines. Failing this gate blocks merge."
+            echo
+            echo '```'
+            cat coverage-summary.txt 2>/dev/null || echo "(coverage-summary.txt not produced — see job logs)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
