@@ -15,6 +15,7 @@ mod hardening;
 mod pairing;
 mod proxy;
 mod session;
+mod ui_bridge;
 
 #[derive(Parser)]
 #[command(name = "agentkeys-daemon", about = "AgentKeys sandbox sidecar daemon")]
@@ -26,6 +27,42 @@ struct Args {
     /// `--proxy-session-jwt` provide the upstream broker auth.
     #[arg(long)]
     proxy: bool,
+
+    /// v2 stage-1 ui-bridge mode (arch.md §22c.1 web-UI surface). When
+    /// set, the daemon serves the parent-control web UI's HTTP surface
+    /// on `--ui-bridge-bind` (default 127.0.0.1:3114), CORS-allowing
+    /// `--ui-bridge-origin` (default http://localhost:3113). Exposes
+    /// /v1/k11/enroll/{begin,finish} for browser-driven WebAuthn
+    /// enrollment. Independent of `--proxy` and `--master-companion`.
+    #[arg(long)]
+    ui_bridge: bool,
+
+    /// Bind address for ui-bridge mode. Default 127.0.0.1:3114.
+    #[arg(
+        long,
+        env = "AGENTKEYS_UI_BRIDGE_BIND",
+        default_value = "127.0.0.1:3114"
+    )]
+    ui_bridge_bind: String,
+
+    /// Origin the web UI is served from (used for CORS + WebAuthn rpOrigin).
+    /// Default http://localhost:3113.
+    #[arg(
+        long,
+        env = "AGENTKEYS_UI_BRIDGE_ORIGIN",
+        default_value = "http://localhost:3113"
+    )]
+    ui_bridge_origin: String,
+
+    /// WebAuthn Relying Party ID. Defaults to "localhost" for dev.
+    /// In production, set to the operator's domain (e.g. "agentkeys.io").
+    #[arg(long, env = "AGENTKEYS_UI_BRIDGE_RP_ID", default_value = "localhost")]
+    ui_bridge_rp_id: String,
+
+    /// WebAuthn Relying Party display name. Shown to user in the
+    /// platform-authenticator UI ("agentKeys would like to register…").
+    #[arg(long, env = "AGENTKEYS_UI_BRIDGE_RP_NAME", default_value = "AgentKeys")]
+    ui_bridge_rp_name: String,
 
     /// v2 stage-2 master-companion mode (arch.md §10.3.1 + #90). Spins up
     /// a SECOND daemon instance that holds a distinct K10 + K11 credential
@@ -222,6 +259,10 @@ async fn main() -> anyhow::Result<()> {
 
     if args.proxy {
         return run_proxy_mode(args).await;
+    }
+
+    if args.ui_bridge {
+        return run_ui_bridge_mode(args).await;
     }
 
     // Issue #144 §10.2 (method A) one-shot pairing. Two synchronous steps mirror
@@ -852,6 +893,35 @@ async fn run_companion_mode(args: Args) -> anyhow::Result<()> {
 /// Binds a Unix socket (always) and optionally a TCP listener; serves
 /// the axum router from `proxy::build_router`. The router caches caps
 /// for 5 min and fails closed after 60s of broker silence.
+async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
+    let state = ui_bridge::build_state(
+        &args.ui_bridge_rp_id,
+        &args.ui_bridge_origin,
+        &args.ui_bridge_rp_name,
+    )
+    .with_context(|| {
+        format!(
+            "ui-bridge: webauthn build failed (rp_id={}, origin={})",
+            args.ui_bridge_rp_id, args.ui_bridge_origin
+        )
+    })?;
+    let app = ui_bridge::build_router(state, &args.ui_bridge_origin);
+
+    let listener = tokio::net::TcpListener::bind(&args.ui_bridge_bind)
+        .await
+        .with_context(|| format!("ui-bridge: bind TCP {}", args.ui_bridge_bind))?;
+
+    info!(
+        bind = %args.ui_bridge_bind,
+        origin = %args.ui_bridge_origin,
+        rp_id = %args.ui_bridge_rp_id,
+        "ui-bridge serving"
+    );
+
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
 async fn run_proxy_mode(args: Args) -> anyhow::Result<()> {
     let broker_url = args.proxy_broker_url.clone().ok_or_else(|| {
         anyhow::anyhow!(
