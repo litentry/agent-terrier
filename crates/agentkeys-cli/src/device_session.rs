@@ -9,9 +9,9 @@
 //!
 //! This fixes the "master bootstrap" violation: the agent key is born here, in
 //! the sandbox, not on the operator laptop. The full HDKD-literal ceremony
-//! (broker `/v1/agent/create` + `/v1/auth/link-code/redeem` + daemon keygen,
-//! `O_agent = HDKD(O_master, path)`) is tracked in issue #144 and supersedes
-//! this. Pure-shell can't do EIP-191/secp256k1 and the sandbox has no `cast`, so
+//! (broker `/v1/agent/pairing/{request,claim,poll}` + daemon keygen,
+//! `O_agent = HDKD(O_master, path)`) is tracked in issue #144 (method A) and
+//! supersedes this. Pure-shell can't do EIP-191/secp256k1 and the sandbox has no `cast`, so
 //! the crypto lives in the already-deployed `agentkeys` binary; shell drives it.
 //!
 //! Derivations match the broker's wallet_sig verify

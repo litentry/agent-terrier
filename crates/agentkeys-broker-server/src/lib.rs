@@ -62,16 +62,21 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/auth/wallet/verify",
             post(handlers::auth::wallet_verify::wallet_verify),
         )
-        // §10.2 agent-bootstrap link-code ceremony (issue #144). Master mints a
-        // code bound to the HDKD child omni; the agent redeems it (proving K10
-        // possession) → J1_agent; the master pulls pending bindings to approve.
+        // §10.2 agent-initiated pairing ceremony (issue #144, method A). The
+        // agent opens an unbound request (proving K10 possession) + displays a
+        // pairing_code; the master claims the code → derives the HDKD child omni;
+        // the agent polls → J1_agent; the master pulls pending bindings to approve.
         .route(
-            "/v1/agent/create",
-            post(handlers::agent::create::agent_create),
+            "/v1/agent/pairing/request",
+            post(handlers::agent::request::pairing_request),
         )
         .route(
-            "/v1/auth/link-code/redeem",
-            post(handlers::agent::redeem::link_code_redeem),
+            "/v1/agent/pairing/claim",
+            post(handlers::agent::claim::pairing_claim),
+        )
+        .route(
+            "/v1/agent/pairing/poll",
+            post(handlers::agent::poll::pairing_poll),
         )
         .route(
             "/v1/agent/pending-bindings",

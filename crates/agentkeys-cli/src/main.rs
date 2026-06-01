@@ -688,11 +688,14 @@ enum AgentAction {
         #[arg(long, help = "Force a fresh device key → fresh pairing (new omni)")]
         regen: bool,
     },
-    /// Master mints a one-time §10.2 link code bound to the HDKD child omni for
-    /// `--label`, declaring the scope the agent should get. Hand the code to the
-    /// agent; it redeems via `agentkeys-daemon --init-link-code`. (issue #144)
-    #[command(about = "Master: mint a one-time agent link code (HDKD child omni)")]
-    Create {
+    /// Master claims an agent's §10.2 pairing request by the `pairing_code` the
+    /// agent displayed, binding it under the HDKD child omni for `--label` and
+    /// declaring the scope the agent should get. The agent retrieves J1 via
+    /// `agentkeys-daemon --retrieve-pairing`. (issue #144, method A)
+    #[command(about = "Master: claim an agent pairing request by its code (HDKD child omni)")]
+    Claim {
+        #[arg(long, help = "The pairing_code the agent displayed (scan / enter)")]
+        pairing_code: String,
         #[arg(long, help = "HDKD child label, e.g. agent-a (^[a-z0-9-]{1,32}$)")]
         label: String,
         #[arg(
@@ -1171,14 +1174,16 @@ async fn main() {
                 )
                 .await
             }
-            AgentAction::Create {
+            AgentAction::Claim {
+                pairing_code,
                 label,
                 services,
                 broker_url,
                 session_bearer,
             } => {
-                agentkeys_cli::agent_admin::agent_create(
+                agentkeys_cli::agent_admin::agent_claim(
                     broker_url,
+                    pairing_code,
                     label,
                     services,
                     session_bearer,
