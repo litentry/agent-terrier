@@ -6,15 +6,30 @@
 
 use assert_cmd::Command;
 use predicates::str::contains;
+use tempfile::TempDir;
 
 fn test_omni() -> String {
     format!("0x{}", "a".repeat(64))
 }
 
+/// An `agentkeys` `Command` with `HOME` rooted at a throwaway tempdir. The
+/// subprocess's k11 enrollment writes to `$HOME/.agentkeys/k11/<omni>.json`
+/// (see `enroll()` → `k11_dir()` in `src/k11.rs`), so without this every run would
+/// pollute the developer's real home and leave a stale `<omni>.json` behind —
+/// the same shared-FS-path smell that flaked `k11::tests::enroll_writes_file_*`.
+/// Keep the returned `TempDir` in scope until after `cmd.assert()`; dropping it
+/// deletes the directory mid-run.
+fn isolated_cmd() -> (Command, TempDir) {
+    let home = tempfile::tempdir().expect("create temp HOME");
+    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    cmd.env("HOME", home.path());
+    (cmd, home)
+}
+
 #[test]
 fn k11_enroll_stub_mode_emits_json() {
     let omni = test_omni();
-    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    let (mut cmd, _home) = isolated_cmd();
     // Stub mode is the default; explicitly set AGENTKEYS_K11_STUB=1 to be
     // resilient to env leaks from CI.
     cmd.env("AGENTKEYS_K11_STUB", "1")
@@ -38,7 +53,7 @@ fn k11_enroll_stub_mode_emits_json() {
 #[test]
 fn k11_assert_stub_mode_emits_hex() {
     let omni = test_omni();
-    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    let (mut cmd, _home) = isolated_cmd();
     cmd.env("AGENTKEYS_K11_STUB", "1")
         // Stub mode is dev-chain-only without explicit opt-in
         // (arch.md §22b.1 fail-loud on mainnet).
@@ -64,7 +79,7 @@ fn k11_non_stub_mode_without_webauthn_errors_with_actionable_hint() {
     // ways to proceed (either pass --webauthn or set STUB=1). Real
     // ceremony lives behind --webauthn (no more "stage 2 not shipped").
     let omni = test_omni();
-    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    let (mut cmd, _home) = isolated_cmd();
     cmd.env("AGENTKEYS_K11_STUB", "0")
         .env("AGENTKEYS_CHAIN", "heima-paseo")
         .arg("--backend")
@@ -85,7 +100,7 @@ fn k11_stub_mode_on_mainnet_hard_errors_without_opt_in() {
     // HARD ERROR (not just warn) so operators can't silently sign master
     // mutations against mainnet with stub bytes.
     let omni = test_omni();
-    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    let (mut cmd, _home) = isolated_cmd();
     cmd.env("AGENTKEYS_K11_STUB", "1")
         .env("AGENTKEYS_CHAIN", "heima")
         .env_remove("AGENTKEYS_ALLOW_STAGE1_STUBS")
@@ -107,7 +122,7 @@ fn k11_stub_mode_on_mainnet_opt_in_warns_but_succeeds() {
     // warned. For staging / smoke tests against mainnet that can't yet
     // use Touch ID (CI runners, headless boxes).
     let omni = test_omni();
-    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    let (mut cmd, _home) = isolated_cmd();
     cmd.env("AGENTKEYS_K11_STUB", "1")
         .env("AGENTKEYS_CHAIN", "heima")
         .env("AGENTKEYS_ALLOW_STAGE1_STUBS", "1")
@@ -125,7 +140,7 @@ fn k11_stub_mode_on_mainnet_opt_in_warns_but_succeeds() {
 
 #[test]
 fn k11_assert_rejects_invalid_omni() {
-    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    let (mut cmd, _home) = isolated_cmd();
     cmd.env("AGENTKEYS_K11_STUB", "1")
         // Stub mode is dev-chain-only without explicit opt-in
         // (arch.md §22b.1 fail-loud on mainnet).
