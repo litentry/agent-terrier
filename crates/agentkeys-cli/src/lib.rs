@@ -521,6 +521,26 @@ pub enum InitMode {
 }
 
 pub async fn cmd_init(ctx: &CommandContext, mode: InitMode) -> Result<(String, Session)> {
+    cmd_init_with_force(ctx, mode, false).await
+}
+
+pub async fn cmd_init_with_force(
+    ctx: &CommandContext,
+    mode: InitMode,
+    force: bool,
+) -> Result<(String, Session)> {
+    if !force {
+        if let Ok(existing) = ctx.load_session() {
+            if is_usable_session(&existing) {
+                let msg = format!(
+                    "Already initialized as {}. Run 'agentkeys init --force' to re-initialize.",
+                    existing.wallet.0
+                );
+                return Ok((msg, existing));
+            }
+        }
+    }
+
     match mode {
         InitMode::ImportLegacyMock(token) => init_legacy_mock(ctx, token).await,
         InitMode::Email {
@@ -556,6 +576,21 @@ pub async fn cmd_init(ctx: &CommandContext, mode: InitMode) -> Result<(String, S
             .await
         }
     }
+}
+
+fn is_usable_session(session: &Session) -> bool {
+    if session.token.is_empty() || session.wallet.0.is_empty() || session.ttl_seconds == 0 {
+        return false;
+    }
+
+    if session.created_at == 0 {
+        return true;
+    }
+
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return true;
+    };
+    now.as_secs() <= session.created_at.saturating_add(session.ttl_seconds)
 }
 
 /// Test-only: legacy `/session/create` path. Production cannot reach this

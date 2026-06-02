@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agentkeys_cli::{
-    cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_provision, cmd_read, cmd_revoke, cmd_run,
-    cmd_scope, cmd_store, cmd_teardown, CommandContext, InitMode,
+    cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_init_with_force, cmd_provision, cmd_read,
+    cmd_revoke, cmd_run, cmd_scope, cmd_store, cmd_teardown, CommandContext, InitMode,
 };
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::session_store::SessionStore;
@@ -78,6 +78,66 @@ fn ctx_verbose_with_session(
         .with_backend(backend as Arc<dyn CredentialBackend>)
         .with_session(session)
         .with_session_store(store)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn init_is_idempotent_when_session_exists() {
+    let backend = create_test_backend();
+    let (store, _tmp) = test_store();
+    let ctx = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session_store(store);
+
+    let (first_output, first_session) = cmd_init(
+        &ctx,
+        InitMode::ImportLegacyMock("idempotent-token-a".to_string()),
+    )
+    .await
+    .unwrap();
+    assert!(first_output.starts_with("Initialized. Wallet: "));
+
+    let (second_output, second_session) = cmd_init(
+        &ctx,
+        InitMode::ImportLegacyMock("idempotent-token-b".to_string()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        second_output,
+        format!(
+            "Already initialized as {}. Run 'agentkeys init --force' to re-initialize.",
+            first_session.wallet.0
+        )
+    );
+    assert_eq!(second_session, first_session);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn init_force_overrides_existing_session() {
+    let backend = create_test_backend();
+    let (store, _tmp) = test_store();
+    let ctx = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session_store(store);
+
+    let (_first_output, first_session) = cmd_init(
+        &ctx,
+        InitMode::ImportLegacyMock("force-token-a".to_string()),
+    )
+    .await
+    .unwrap();
+
+    let (second_output, second_session) = cmd_init_with_force(
+        &ctx,
+        InitMode::ImportLegacyMock("force-token-b".to_string()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert!(second_output.starts_with("Initialized. Wallet: "));
+    assert_ne!(second_session.wallet, first_session.wallet);
 }
 
 // Test 1: init creates a session and returns a wallet address
