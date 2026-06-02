@@ -4,19 +4,24 @@ out = "out"
 libs = ["lib"]
 script = "script"
 test = "test"
-# Heima uses Frontier (EVM-compatible). Frontier's block headers do NOT
-# include the `prevrandao` field (Paris+ EVMs require it). Forge's
-# simulator validates block headers against its target EVM version
-# before broadcasting; with evm_version=paris it errors out on Heima
-# mainnet with:
-#   "EVM error; header validation error: `prevrandao` not set"
-# Drop to london (pre-Merge, pre-prevrandao). Our contracts don't use
-# any post-london features, so this is a no-op semantically; it's
-# purely about the validator's expectations.
+# Pin = a `forge script` SIMULATOR workaround, NOT an EVM-capability ceiling.
 #
-# Also avoids the Shanghai-era PUSH0 opcode (which london doesn't emit
-# either) — keeps the bytecode forwards-compatible with older
-# Frontier nodes.
+# Heima's EVM *execution* level is actually Cancun (Frontier stable2412's
+# pallet_evm config() returns CANCUN_CONFIG). Verified on-chain 2026-06-01:
+# PUSH0 (Shanghai) and TSTORE/TLOAD (EIP-1153, Cancun-only) both deploy AND
+# execute on a heima-node dev chain. So the chain does NOT reject post-london
+# opcodes — the old "london avoids PUSH0 which Heima would reject" note was wrong.
+#
+# Why pin london anyway: Heima is a Substrate/Aura parachain via Frontier, so
+# its block header has no `prevrandao` field (a PoS-consensus header field, not
+# an opcode signal). `forge script ... --broadcast` validates the fetched header
+# against the target EVM revision before broadcasting; with evm_version=paris+
+# it errors:
+#   "EVM error; header validation error: `prevrandao` not set"
+# Verified 2026-06-01: DeployAgentKeysV1.s.sol with FOUNDRY_EVM_VERSION=cancun
+# reproduces the error; with london it deploys. (forge CREATE --broadcast does
+# NOT hit this; our deploy path is forge SCRIPT, so the pin stays.)
+# Full diagnosis: CLAUDE.md "Heima EVM compatibility level".
 evm_version = "london"
 solc_version = "0.8.20"
 optimizer = true
