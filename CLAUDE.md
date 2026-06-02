@@ -226,36 +226,34 @@ On every session start:
 4. `jj describe -m "harness: stage N complete"`
 5. `jj new` (start fresh change for next stage)
 
-## Heima EVM compatibility level — pin to `london` in foundry.toml
+## Heima EVM compatibility level — keep `evm_version = "london"` in foundry.toml (but NOT because Heima is "London")
 
-Heima's Frontier EVM (the parachain's `pallet_evm` + `pallet_ethereum` stack) is at **London** EVM level. Pre-Merge. Verified live 2026-05-19 against `https://rpc.heima-parachain.heima.network` block header:
+**Two separate things — do not conflate them (the earlier revision of this section did):**
 
-| Field | Present? | Implication |
-|---|---|---|
-| `baseFeePerGas: 0x5d21dba00` | ✅ | EIP-1559 active → ≥ London |
-| `difficulty: 0x0`, `mixHash: null`, `prevRandao: absent` | ❌ | Pre-Paris (Merge introduced these) → < Paris |
-| `withdrawalsRoot: null` | ❌ | Pre-Shanghai |
-| `blobGasUsed`, `excessBlobGas: null` | ❌ | Pre-Cancun |
+1. **EVM *execution* level (which opcodes the chain runs) = Cancun.** Heima's Frontier `stable2412` `pallet_evm` returns `&CANCUN_CONFIG` from `frame/evm/src/lib.rs::config()` (the `// London` doc-comment one line up is stale upstream). **Verified on-chain** (local `heima-node --dev`, 2026-06-01) by deploying + *executing* contracts that use post-London opcodes:
+   - `PUSH0` (Shanghai, `0x5f`): a Shanghai-compiled `set(42)` ran; `x()` returned `42`.
+   - `TSTORE`/`TLOAD` (EIP-1153, **Cancun-only**): `rt(99)` returned `99`.
+   So **Heima does NOT reject PUSH0 or other ≤Cancun opcodes.** The previous claim ("london avoids PUSH0 which Heima would reject") was wrong.
 
-**Practical consequence**: any Foundry project that deploys to Heima MUST set `evm_version = "london"` in `foundry.toml`. With `paris` or higher, `forge script ... --broadcast` errors with:
+2. **Foundry `forge script` simulator's block-header validation — this is the real reason for the pin, and it is unrelated to (1).** Heima is a Substrate/Aura parachain via Frontier, so its block header has **no `prevrandao`/`mixHash`/`withdrawalsRoot`/`blobGasUsed`** fields — those are Ethereum-PoS-consensus header fields, NOT opcode-capability signals. `forge script ... --broadcast` runs a local simulation that validates the fetched header against the target EVM revision *before broadcasting*; with `evm_version = paris` or higher it requires `prevrandao` and errors:
 
-```
-EVM error; header validation error: `prevrandao` not set
-```
+   ```
+   EVM error; header validation error: `prevrandao` not set
+   ```
 
-…because forge's simulator validates the chain's block header against its target EVM version before broadcasting, and a Paris-or-higher simulator requires `prevrandao` in the header.
+   **Verified 2026-06-01**: running the real `DeployAgentKeysV1.s.sol` against the dev chain with `FOUNDRY_EVM_VERSION=cancun` reproduced this error; with `london` it deploys. (Note: `forge create --broadcast` with `cancun` does NOT hit this — it's specific to `forge script`'s simulator. Our deploy path uses `forge script`, so the pin stays.)
 
-`london` also avoids the Shanghai-era PUSH0 opcode (which Heima would reject during EVM execution).
+**Practical consequence (unchanged): keep `evm_version = "london"` in `crates/agentkeys-chain/foundry.toml`** so `forge script` broadcasts don't trip header validation. But understand it's a **simulator-header workaround, not an EVM-capability ceiling** — our contracts *may* use ≤Cancun features (PUSH0, transient storage) at runtime if ever needed; only the broadcast simulator cares about the header.
 
-Verify the live EVM version of Heima any time with:
+**Why the earlier "London" conclusion was wrong:** it introspected the block header (`baseFeePerGas` present, `mixHash`/`withdrawalsRoot`/`blobGasUsed` absent) and inferred the EVM level from header *format*. Header format reflects the consensus/block-structure layer; opcode support is set independently by Frontier's `config()`. The header check is the right way to predict the **forge-script-simulator** behavior, but the wrong way to determine the **opcode execution level**.
+
+Determine the real opcode level any time by *executing* a probe on a dev chain (authoritative), not by reading the header:
 
 ```bash
-curl -sS -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
-  https://rpc.heima-parachain.heima.network | jq '{baseFeePerGas: .result.baseFeePerGas, mixHash: .result.mixHash, withdrawalsRoot: .result.withdrawalsRoot, blobGasUsed: .result.blobGasUsed}'
+# spin a dev chain, fund an EVM acct, then:
+# deploy a TSTORE/TLOAD contract (Cancun-only) and call it — if it returns its input, EVM >= Cancun.
+# (header introspection only tells you what forge-script's simulator will accept, not what the EVM runs.)
 ```
-
-If any of `mixHash`/`withdrawalsRoot`/`blobGasUsed` becomes non-null in the future (Heima upgrade), bump `evm_version` accordingly in `crates/agentkeys-chain/foundry.toml` AND re-read the verification check above.
 
 ## Deployed contract registry
 
