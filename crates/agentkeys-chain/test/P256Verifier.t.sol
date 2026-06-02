@@ -88,7 +88,7 @@ contract P256VerifierTest is Test {
         uint256 gasUsed = gasBefore - gasleft();
         console.log("P256 verify gas:", gasUsed);
         assertTrue(ok);
-        // London EVM block gas limit is ~30M; we want comfortably under that.
+        // Heima's block gas limit is ~30M; we want comfortably under that.
         assertLt(gasUsed, 2_000_000, "verify must fit under 2M gas");
     }
 }

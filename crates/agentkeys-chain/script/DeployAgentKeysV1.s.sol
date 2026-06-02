@@ -32,7 +32,10 @@ contract DeployAgentKeysV1 is Script {
         P256Verifier p256 = new P256Verifier();
         K11Verifier k11 = new K11Verifier(address(p256));
         SidecarRegistry registry = new SidecarRegistry(address(k11));
-        AgentKeysScope scope = new AgentKeysScope(address(registry), address(k11));
+        // #164 E3: AgentKeysScope no longer verifies K11 itself (scope writes are
+        // authorized by the operator's ERC-4337 master account). Constructor takes
+        // only the registry now.
+        AgentKeysScope scope = new AgentKeysScope(address(registry));
         K3EpochCounter epoch = new K3EpochCounter(signerGov);
         // Audit appendRoot gates on operator-master via the registry (codex M1).
         CredentialAudit audit = new CredentialAudit(address(registry));
