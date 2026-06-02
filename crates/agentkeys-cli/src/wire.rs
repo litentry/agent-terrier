@@ -38,6 +38,12 @@ pub struct WireRequest {
     /// (TTL ≤ 5h) — re-run `agentkeys wire` to refresh, or point the demo at
     /// a fresh session.
     pub session_bearer: String,
+    /// Memory engine baked into the pre_llm_call hook (`passthrough` | `lexical`,
+    /// plan §6a). `passthrough`/empty injects the whole namespace and emits no
+    /// engine env, so the generated script stays byte-identical to the default.
+    pub memory_engine: String,
+    /// Optional cap on how many memory lines the engine injects (None = all).
+    pub memory_max_lines: Option<u32>,
     /// When true, report drift without writing (drift-check / dry-run).
     pub check_only: bool,
 }
@@ -124,6 +130,19 @@ impl HermesAdapter {
                 body = body,
             )
         };
+        let memory_engine_exports = {
+            let mut exports = String::new();
+            if !req.memory_engine.is_empty() && req.memory_engine != "passthrough" {
+                exports.push_str(&format!(
+                    "export AGENTKEYS_MEMORY_ENGINE={}\n",
+                    shell_quote(&req.memory_engine)
+                ));
+            }
+            if let Some(max_lines) = req.memory_max_lines {
+                exports.push_str(&format!("export AGENTKEYS_MEMORY_MAX_LINES={max_lines}\n"));
+            }
+            exports
+        };
         vec![
             (
                 "agentkeys-pretool-permission-gate.sh".to_string(),
@@ -139,7 +158,7 @@ impl HermesAdapter {
             (
                 "agentkeys-prellm-memory-inject.sh".to_string(),
                 header(&format!(
-                    "exec {bin} hook memory-inject --namespaces {ns}",
+                    "{memory_engine_exports}exec {bin} hook memory-inject --namespaces {ns}",
                     ns = shell_quote(&req.namespaces),
                 )),
             ),
@@ -513,6 +532,8 @@ mod tests {
             mcp_url: "http://localhost:8088/mcp".into(),
             vendor_token: "demo-tok".into(),
             session_bearer: String::new(),
+            memory_engine: "passthrough".into(),
+            memory_max_lines: None,
             check_only: false,
         }
     }
@@ -557,6 +578,30 @@ mod tests {
         assert!(scripts[2]
             .1
             .contains("hook memory-inject --namespaces 'travel,personal'"));
+    }
+
+    #[test]
+    fn scripts_omit_memory_engine_by_default() {
+        let a = HermesAdapter;
+        // Default passthrough + no budget → no engine env, byte-identical script.
+        let scripts = a.scripts("/usr/local/bin/agentkeys", &req());
+        assert!(!scripts[2].1.contains("AGENTKEYS_MEMORY_ENGINE"));
+        assert!(!scripts[2].1.contains("AGENTKEYS_MEMORY_MAX_LINES"));
+    }
+
+    #[test]
+    fn scripts_bake_memory_engine_when_set() {
+        let a = HermesAdapter;
+        let mut r = req();
+        r.memory_engine = "lexical".into();
+        r.memory_max_lines = Some(3);
+        let prellm = &a.scripts("/usr/local/bin/agentkeys", &r)[2].1;
+        assert!(prellm.contains("export AGENTKEYS_MEMORY_ENGINE='lexical'"));
+        assert!(prellm.contains("export AGENTKEYS_MEMORY_MAX_LINES=3"));
+        // engine env precedes the exec line so it is in scope for the hook
+        let engine_at = prellm.find("AGENTKEYS_MEMORY_ENGINE").unwrap();
+        let exec_at = prellm.find("hook memory-inject").unwrap();
+        assert!(engine_at < exec_at);
     }
 
     #[test]

@@ -281,4 +281,19 @@ mod tests {
     fn s3_prefix_uses_memory_path() {
         assert_eq!(s3_prefix("0xABCDEF"), "bots/abcdef/memory/");
     }
+
+    #[test]
+    fn namespace_folded_service_segregates_storage() {
+        // Issue #147 (approach B): the MCP mints memory caps with
+        // service="memory:<namespace>". Because the worker keys S3 off the
+        // SIGNED service, two namespaces land at distinct keys — a
+        // `memory:travel` cap physically cannot read/write the
+        // `memory:personal` object. This is the namespace-isolation gate,
+        // enforced by construction (signed service ⇒ key + scope + AAD).
+        let travel = s3_key("0xabc", "memory:travel");
+        let personal = s3_key("0xabc", "memory:personal");
+        assert_ne!(travel, personal);
+        assert_eq!(travel, "bots/abc/memory/memory:travel.enc");
+        assert!(personal.contains("memory:personal"));
+    }
 }
