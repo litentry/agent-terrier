@@ -6,7 +6,7 @@
 
 **Parent docs (authoritative for product vision):**
 
-- `[./design-spec.md](design-spec.md)` — executive summary of AgentKeys: browser-automation provisioning, MCP delivery, x402 billing, Heima TEE storage
+- `[./design-spec.md](../archived/design-spec.md)` — executive summary of AgentKeys: browser-automation provisioning, MCP delivery, x402 billing, Heima TEE storage
 - `[/Users/hanwencheng/Projects/project-life/.omc/specs/deep-interview-agentkeys.md](../../../../.omc/specs/deep-interview-agentkeys.md)` — full deep-interview spec (11 rounds, 19% ambiguity, PASSED)
 
 **Companion research docs:**

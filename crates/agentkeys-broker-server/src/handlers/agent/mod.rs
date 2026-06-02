@@ -1,6 +1,6 @@
 //! §10.2 agent-bootstrap endpoints — **method A, agent-initiated** (issue #144,
 //! flipped from master-initiated; design doc
-//! `docs/spec/plans/agent-initiated-pairing-method-a.md`).
+//! `docs/archived/agent-initiated-pairing-method-a.md`).
 //!
 //! The agent shows a code, the master claims it (the Matter/HomeKit IoT model),
 //! and the master still submits the on-chain binding (decision 1 — no contract

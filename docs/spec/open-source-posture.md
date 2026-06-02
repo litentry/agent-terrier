@@ -7,8 +7,8 @@
 **Sibling docs:**
 - [`../arch.md`](../arch.md) — Rust/TypeScript component split and Cargo workspace layout (read this first for the 13-component inventory)
 - [`./1-step-analysis.md`](./1-step-analysis.md) — auth-layer sub-analysis (threat model lives in §3.3c)
-- [`./plans/design-spec.md`](plans/design-spec.md) — original product vision (historical)
-- [`./plans/ceo-plan.md`](plans/ceo-plan.md) — v0 implementation plan (canonical)
+- [`./plans/design-spec.md`](../archived/design-spec.md) — original product vision (historical)
+- [`./plans/ceo-plan.md`](../plan/ceo-plan.md) — v0 implementation plan (canonical)
 - [`./heima-open-questions.md`](./heima-open-questions.md) — Kai meeting agenda (Q9 is the top priority dependency)
 
 **Prior interview reference:**
@@ -356,7 +356,7 @@ What the writeup can honestly claim, given everything above:
 
 - **Component inventory and language choices:** [`../arch.md`](../arch.md) §2, §3
 - **Kernel hardening threat model:** [`./1-step-analysis.md`](./1-step-analysis.md) §3.3c
-- **Multi-repo structure:** [`./plans/ceo-plan.md`](plans/ceo-plan.md) §"Repository structure"
+- **Multi-repo structure:** [`./plans/ceo-plan.md`](../plan/ceo-plan.md) §"Repository structure"
 - **TEE worker Kai questions:** [`./heima-open-questions.md`](./heima-open-questions.md) Q9 (top priority), Q11, Q1, Q2
 - **Heima parachain licensing:** see `/lifeKnowledge/heima.md`
 - **User flows showing trust boundaries in action:** [`./1-step-analysis.md`](./1-step-analysis.md) §4

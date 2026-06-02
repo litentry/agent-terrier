@@ -8,7 +8,7 @@
 //!
 //! Phase 1.a ships the Hermes adapter. The `RuntimeAdapter` trait is the
 //! seam additional runtimes (Claude Code, Codex, OpenClaw) slot into in
-//! Phase 1.b — see docs/spec/plans/phase-1-fresh-user-wire-onboarding.md §4.
+//! Phase 1.b — see docs/plan/phase-1-fresh-user-wire-onboarding.md §4.
 
 use std::path::PathBuf;
 use std::process::Command;

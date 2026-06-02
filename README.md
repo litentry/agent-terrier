@@ -77,7 +77,7 @@ Dual-licensed under **MIT OR Apache-2.0**, at your choice.
 | [`CLAUDE.md`](CLAUDE.md) | Project-specific rules: docs layout, /create-pr workflow in worktrees, terminology-source-of-truth, branch push policy, idempotent-remote-setup invariants, runbook-fix-fold-back policy. **Read first, every session.** |
 | [`docs/arch.md`](docs/arch.md) | Single source of truth for component inventory (K1–K11), trust boundaries, HDKD actor tree, per-actor binding ceremonies. When the per-doc detail outgrows arch.md, link outward — never duplicate. |
 | [`docs/spec/plans/development-stages.md`](docs/spec/plans/development-stages.md) | The 8-stage build plan. Each stage has a `harness/stage-N-done.sh` gate; never self-grade — run the gate. |
-| [`docs/spec/plans/execution-plan.md`](docs/spec/plans/execution-plan.md) | Orchestration runbook (ralph, team, ultraqa workflows). |
+| [`docs/plan/execution-plan.md`](docs/plan/execution-plan.md) | Orchestration runbook (ralph, team, ultraqa workflows). |
 | [`docs/spec/broker-and-operator-dev-guide.md`](docs/spec/broker-and-operator-dev-guide.md) | Inner edit-build-test loop for broker + operator-side code. Use this before suggesting changes to the broker's run-time behavior. |
 
 ### Hard rules (from CLAUDE.md)
