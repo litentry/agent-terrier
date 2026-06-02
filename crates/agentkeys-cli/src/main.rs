@@ -348,6 +348,16 @@ enum Commands {
         /// empty for the in-memory backend. JWTs expire — re-run wire to refresh.
         #[arg(long, env = "AGENTKEYS_SESSION_BEARER", default_value = "")]
         session_bearer: String,
+
+        /// Memory engine baked into the pre_llm_call hook: `passthrough`
+        /// (inject the whole namespace, default) or `lexical` (deterministic
+        /// recency/relevance selection). Plan §6a / arch.md §22.
+        #[arg(long, env = "AGENTKEYS_MEMORY_ENGINE", default_value = "passthrough")]
+        memory_engine: String,
+
+        /// Cap how many memory lines the engine injects (omit = unbounded).
+        #[arg(long, env = "AGENTKEYS_MEMORY_MAX_LINES")]
+        memory_max_lines: Option<u32>,
     },
 
     #[command(
@@ -1087,6 +1097,8 @@ async fn main() {
             mcp_url,
             vendor_token,
             session_bearer,
+            memory_engine,
+            memory_max_lines,
         } => agentkeys_cli::wire::cmd_wire(
             runtime,
             agentkeys_cli::wire::WireRequest {
@@ -1097,6 +1109,8 @@ async fn main() {
                 mcp_url: mcp_url.clone(),
                 vendor_token: vendor_token.clone(),
                 session_bearer: session_bearer.clone(),
+                memory_engine: memory_engine.clone(),
+                memory_max_lines: *memory_max_lines,
                 check_only: *check_only,
             },
         ),

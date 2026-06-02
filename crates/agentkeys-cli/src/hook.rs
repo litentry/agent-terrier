@@ -246,6 +246,13 @@ pub async fn memory_inject(
     // pipe a payload (EOF arrives) so they were unaffected; direct calls were not.
     let client = HookClient::resolve(mcp_url, vendor_token, actor, operator);
 
+    // Pluggable engine seam (plan §6a): the gate already authorized these bytes;
+    // the engine — caller-side, deterministic, no LLM — selects which lines to
+    // inject within a budget. Default `passthrough` + unbounded budget injects
+    // the whole namespace unchanged. Passive injection carries no query (None).
+    let engine = agentkeys_core::memory_engine::engine_from_env();
+    let budget = agentkeys_core::memory_engine::SelectionBudget::from_env();
+
     let mut chunks = Vec::new();
     for ns in namespaces
         .split(',')
@@ -258,7 +265,15 @@ pub async fn memory_inject(
         {
             Ok(result) => {
                 if let Some(text) = extract_memory_content(&result) {
-                    chunks.push(format!("## Memory: {ns}\n{text}"));
+                    let selected = agentkeys_core::memory_engine::select_blob(
+                        engine.as_ref(),
+                        None,
+                        &text,
+                        &budget,
+                    );
+                    if !selected.is_empty() {
+                        chunks.push(format!("## Memory: {ns}\n{selected}"));
+                    }
                 }
             }
             Err(e) => {
