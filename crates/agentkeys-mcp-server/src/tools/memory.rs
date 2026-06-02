@@ -63,11 +63,14 @@ pub async fn put(
         "device_key_hash",
         config.default_device_key_hash.as_deref(),
     )?;
-    let service = params
-        .get("service")
-        .and_then(|v| v.as_str())
-        .unwrap_or("memory")
-        .to_string();
+    // Issue #147 (approach B): fold the namespace into the SIGNED `service`,
+    // so the cap is cryptographically bound to exactly one namespace and
+    // authorized via the existing on-chain `isServiceInScope` check. A
+    // `memory:travel` cap cannot touch `memory:personal` — different service
+    // ⇒ different scope entry, different S3 key, different AAD. No CapPayload
+    // change, no broker change: the broker already signs whatever `service`
+    // it's given and the worker already keys storage + scope + AAD off it.
+    let service = format!("memory:{namespace}");
     let ttl_seconds = params
         .get("ttl_seconds")
         .and_then(|v| v.as_u64())
@@ -140,11 +143,14 @@ pub async fn get(
         "device_key_hash",
         config.default_device_key_hash.as_deref(),
     )?;
-    let service = params
-        .get("service")
-        .and_then(|v| v.as_str())
-        .unwrap_or("memory")
-        .to_string();
+    // Issue #147 (approach B): fold the namespace into the SIGNED `service`,
+    // so the cap is cryptographically bound to exactly one namespace and
+    // authorized via the existing on-chain `isServiceInScope` check. A
+    // `memory:travel` cap cannot touch `memory:personal` — different service
+    // ⇒ different scope entry, different S3 key, different AAD. No CapPayload
+    // change, no broker change: the broker already signs whatever `service`
+    // it's given and the worker already keys storage + scope + AAD off it.
+    let service = format!("memory:{namespace}");
     let ttl_seconds = params
         .get("ttl_seconds")
         .and_then(|v| v.as_u64())

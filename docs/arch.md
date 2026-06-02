@@ -893,6 +893,8 @@ Each data class gets its own worker — independent IAM, independent deploy life
 - **`master_wallet` on chain?** No
 - **Operations:** R/W agent state at high frequency. **STS session policies enable direct S3 access** from the agent process for the duration of the session — the worker is NOT in the LLM-call hot path. The worker mints a TTL-bounded STS session at session start; the agent's localhost SDK uses STS creds for many ops within the TTL.
 - **OIDC federation (issue #90):** Same `X-Aws-*` header passthrough as creds. Each data-class has its own IAM role (`agentkeys-memory-role`); memory-role STS creds are rejected at the vault bucket and vice versa. See §17.5.
+- **Namespace = signed service (issue #147):** the memory `service` carries the namespace as **`memory:<namespace>`** (e.g. `memory:travel`). Because `service` is a signed cap field, the namespace is tamper-proof and is authorized by the existing on-chain `isServiceInScope(operator, actor, keccak("memory:<ns>"))` gate. The worker keys storage (`bots/<actor_omni_hex>/memory/memory:<ns>.enc`), the envelope AAD, and the scope check all off that one signed field — so two namespaces are physically segregated with no new mechanism. Minted in `crates/agentkeys-mcp-server/src/tools/memory.rs`; enforced in `crates/agentkeys-worker-memory/src/handlers.rs`.
+- **Memory engine — pluggable, not built in v0 (Position C):** the worker is **store + gate only** (deterministic, no ranking, no LLM). Ranking / extraction / consolidation is delegated to an external engine via an adapter trait (`extract` / `rank` / `synthesize`); canonical reference engine **OpenViking**; delivery via the `pre_llm_call` hook (#141), never a runtime `memory.provider`. Full design + Hermes-provider compatibility strategy: [`plan/agentkeys-memory-design.md`](plan/agentkeys-memory-design.md) (§6a engine seam; §22 pluggable-axis row). Background: [`research/ai-memory-systems-survey.md`](research/ai-memory-systems-survey.md), decision record [`research/memory-build-vs-gate-decision.md`](research/memory-build-vs-gate-decision.md), [`research/universal-gate-pattern.md`](research/universal-gate-pattern.md).
 
 ### 15.3 audit-service
 
@@ -1645,7 +1647,7 @@ The only things that change: `K3EpochCounter.current_epoch` (1 chain tx), signer
 
 ## 22. Pluggable surfaces
 
-The architecture is intentionally pluggable on six axes. Each axis has a default v2 implementation and a documented swap-in path.
+The architecture is intentionally pluggable on eight axes. Each axis has a default v2 implementation and a documented swap-in path.
 
 | Axis | v2 default | Future swap | Swap mechanism |
 |---|---|---|---|
@@ -1656,6 +1658,7 @@ The architecture is intentionally pluggable on six axes. Each axis has a default
 | **Worker runtime** | AWS Lambda + API Gateway | axum microservice (vendor-neutral); Cloudflare Worker (edge); Tencent SCF (China) | Worker shape per §15 is uniform across runtimes |
 | **Payment rail** | Per mode: P-1 service-pool / P-2 escrow / P-3 direct | Mode + upstream (Stripe, USDC, SOL, fiat) | Per-mode plugins layer on the §15.5 wire shape |
 | **Clear-signing metadata** (issue #82) | Bundled ERC-7730 v2 set under `agentkeys-core::clear_signing::fixtures/` (USDC permit + curated DEX routers + permit2) | Registry fetch from `github.com/ethereum/clear-signing-erc7730-registry` at daemon startup; on-chain registry / IPFS-pinned + signature-verified | `ClearSigningCatalog` trait in [`crates/agentkeys-core/src/clear_signing/`](../crates/agentkeys-core/src/clear_signing/); bundled → registry-cached → on-chain progression. Operator-custom files via `$AGENTKEYS_7730_DIR` env var |
+| **Memory engine** (issue #147) | None in v0 — `agentkeys-worker-memory` is **store + gate only** (deterministic, no ranking, no LLM) | OpenViking (canonical) / Holographic / mem0-self-hosted / Hermes-native / Claude memory tool / agentmemory | External-engine adapter trait (`extract` / `rank` / `synthesize`) over the cap-gated store. Delivery via the `pre_llm_call` injection hook (#141), **not** a runtime `memory.provider` (which would hand the LLM memory-enumeration tools). Local engines: own-store + gate-the-read; cloud engines: gate-the-egress + audit. See [`plan/agentkeys-memory-design.md` §6a](plan/agentkeys-memory-design.md) |
 
 **Pluggability is the point.** No single backend is load-bearing for the architecture; the contracts (auth-plugin trait, signer-protocol, audit trait, worker shape, chain ABI) are. This is what lets:
 
