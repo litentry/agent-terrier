@@ -1,0 +1,37 @@
+[package]
+name = "agentkeys-web-core"
+version = "0.1.0"
+edition = "2021"
+description = "Host-agnostic master-plane core (broker client + ceremony logic) shared by the daemon, the WASM web host, and the mobile shell."
+
+# cdylib: required by wasm-pack to emit the browser .wasm. rlib: so native
+# crates (agentkeys-core, the daemon) depend on it as a normal Rust lib.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# default-features off so the wasm32 build picks the browser `fetch` backend
+# (no native-tls/hyper, which don't compile for wasm). The native build adds a
+# TLS backend in the target table below.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+# WASM bindings — only compiled for the browser core (`--features wasm`).
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+
+# Native builds (daemon/CLI/mobile) need a TLS backend; rustls avoids the
+# system OpenSSL dep. On wasm32 reqwest auto-uses the browser fetch backend, so
+# no TLS crate is pulled there.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[features]
+wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:serde-wasm-bindgen"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
