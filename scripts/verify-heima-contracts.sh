@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # scripts/verify-heima-contracts.sh — read-only health-check for the
-# four v2 stage-1 contracts deployed to Heima.
+# v2 stage-1 contracts (+ the ERC-4337 master infra, when configured)
+# deployed to Heima.
 #
 # What it checks (all read-only RPC, never spends gas):
 #   1. eth_getCode for each contract — confirms bytecode is present
@@ -9,6 +10,8 @@
 #   3. AgentKeysScope.registry() points at the deployed SidecarRegistry
 #      (catches the constructor wiring drift)
 #   4. K3EpochCounter.currentEpoch() ≥ 1, signerGovernance != address(0)
+#   5. (when configured) ERC-4337 EntryPoint + P256AccountFactory bytecode +
+#      the factory's entryPoint()/k11Verifier() constructor wiring
 #
 # Usage:
 #   bash scripts/verify-heima-contracts.sh
@@ -49,6 +52,10 @@ SCOPE=$(eval echo \$SCOPE_CONTRACT_ADDRESS_${PROFILE_NAME_UC})
 REGISTRY=$(eval echo \$SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC})
 EPOCH=$(eval echo \$K3_EPOCH_COUNTER_ADDRESS_${PROFILE_NAME_UC})
 AUDIT=$(eval echo \$CREDENTIAL_AUDIT_ADDRESS_${PROFILE_NAME_UC})
+# ERC-4337 master infra (#164) — only set on chains where it's deployed
+ENTRYPOINT=$(eval echo \${ENTRYPOINT_ADDRESS_${PROFILE_NAME_UC}:-})
+FACTORY=$(eval echo \${P256_ACCOUNT_FACTORY_ADDRESS_${PROFILE_NAME_UC}:-})
+K11=$(eval echo \${K11_VERIFIER_ADDRESS_${PROFILE_NAME_UC}:-})
 
 FAILED=0
 echo "    chain:           $AGENTKEYS_CHAIN" >&2
@@ -60,7 +67,7 @@ echo "    CredentialAudit: $AUDIT" >&2
 echo >&2
 
 # 1. Bytecode presence
-log "1/4 bytecode presence (eth_getCode)"
+log "1/5 bytecode presence (eth_getCode)"
 for pair in "AgentKeysScope:$SCOPE" "SidecarRegistry:$REGISTRY" "K3EpochCounter:$EPOCH" "CredentialAudit:$AUDIT"; do
   name="${pair%%:*}"; addr="${pair##*:}"
   code=$(curl -sS -H 'Content-Type: application/json' \
@@ -74,7 +81,7 @@ for pair in "AgentKeysScope:$SCOPE" "SidecarRegistry:$REGISTRY" "K3EpochCounter:
 done
 
 # 2. View functions respond with expected values
-log "2/4 view functions return expected constants"
+log "2/5 view functions return expected constants"
 v=$(cast call "$REGISTRY" "ROLE_CAP_MINT()(uint8)" --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
 [ "$v" = "1" ] && ok "SidecarRegistry.ROLE_CAP_MINT = 1" || fail "SidecarRegistry.ROLE_CAP_MINT: expected 1, got '$v'"
 v=$(cast call "$REGISTRY" "ROLE_RECOVERY()(uint8)" --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
@@ -85,7 +92,7 @@ v=$(cast call "$AUDIT" "OP_STORE()(uint8)" --rpc-url "$RPC_HTTP" 2>&1 || echo ER
 [ "$v" = "0" ] && ok "CredentialAudit.OP_STORE = 0" || fail "CredentialAudit.OP_STORE: expected 0, got '$v'"
 
 # 3. AgentKeysScope.registry() points at the deployed SidecarRegistry
-log "3/4 AgentKeysScope.registry() is wired to the deployed SidecarRegistry"
+log "3/5 AgentKeysScope.registry() is wired to the deployed SidecarRegistry"
 linked=$(cast call "$SCOPE" "registry()(address)" --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
 # Normalize case for comparison
 linked_lc=$(printf '%s' "$linked" | tr '[:upper:]' '[:lower:]')
@@ -97,7 +104,7 @@ else
 fi
 
 # 4. K3EpochCounter initialized
-log "4/4 K3EpochCounter initialized"
+log "4/5 K3EpochCounter initialized"
 epoch_val=$(cast call "$EPOCH" "currentEpoch()(uint256)" --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
 gov=$(cast call "$EPOCH" "signerGovernance()(address)" --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
 [ "$epoch_val" -ge 1 ] 2>/dev/null && ok "K3EpochCounter.currentEpoch = $epoch_val" || fail "K3EpochCounter.currentEpoch unset: '$epoch_val'"
@@ -106,6 +113,38 @@ case "$gov" in
   ERR) fail "K3EpochCounter.signerGovernance: cast failed" ;;
   *)   ok "K3EpochCounter.signerGovernance = $gov" ;;
 esac
+
+# 5. ERC-4337 master infra (only on chains where it's deployed)
+log "5/5 ERC-4337 master infra (EntryPoint + P256AccountFactory)"
+if [ -z "$ENTRYPOINT" ] || [ -z "$FACTORY" ]; then
+  ok "skip: no ERC-4337 infra configured for $AGENTKEYS_CHAIN"
+else
+  for pair in "EntryPoint:$ENTRYPOINT" "P256AccountFactory:$FACTORY"; do
+    name="${pair%%:*}"; addr="${pair##*:}"
+    code=$(curl -sS -H 'Content-Type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getCode\",\"params\":[\"$addr\",\"latest\"],\"id\":1}" \
+      "$RPC_HTTP" | jq -r .result)
+    if [ -z "$code" ] || [ "$code" = "0x" ]; then
+      fail "$name @ $addr: NO bytecode"
+    else
+      ok "$name @ $addr: $((${#code} / 2 - 1)) bytes"
+    fi
+  done
+  fac_ep=$(cast call "$FACTORY" "entryPoint()(address)" --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
+  if [ "$(printf '%s' "$fac_ep" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ENTRYPOINT" | tr '[:upper:]' '[:lower:]')" ]; then
+    ok "P256AccountFactory.entryPoint() = $fac_ep (matches deployed EntryPoint)"
+  else
+    fail "P256AccountFactory.entryPoint() = $fac_ep but ENTRYPOINT_ADDRESS_${PROFILE_NAME_UC} = $ENTRYPOINT"
+  fi
+  if [ -n "$K11" ]; then
+    fac_k11=$(cast call "$FACTORY" "k11Verifier()(address)" --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
+    if [ "$(printf '%s' "$fac_k11" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$K11" | tr '[:upper:]' '[:lower:]')" ]; then
+      ok "P256AccountFactory.k11Verifier() = $fac_k11 (matches deployed K11Verifier)"
+    else
+      fail "P256AccountFactory.k11Verifier() = $fac_k11 but K11_VERIFIER_ADDRESS_${PROFILE_NAME_UC} = $K11"
+    fi
+  fi
+fi
 
 echo >&2
 if [ "$FAILED" = "0" ]; then
