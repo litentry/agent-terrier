@@ -50,7 +50,7 @@ Design docs for specific services built on top of the foundations:
 | Role | Start here | Then | Then |
 |---|---|---|---|
 | New engineer | [Blockchain TEE Architecture](blockchain-tee-architecture) | [Session Token](session-token) | [Email System](email-system) |
-| Product / roadmap | This page, §Wiki tree | `docs/spec/plans/development-stages.md` | [Hosted-First](hosted-first) |
+| Product / roadmap | This page, §Wiki tree | `docs/plan/milestones-roadmap.md` | [Hosted-First](hosted-first) |
 | Operator / infra | [Key Security](key-security), [Serve and Audit](serve-and-audit) | `docs/spec/ses-email-architecture.md` | [OIDC Federation](oidc-federation) §Consumer-registration recipes |
 | Security reviewer | [Blockchain TEE Architecture](blockchain-tee-architecture) §6 (four rules) | [Data Classification](data-classification) | [Tag-Based Access](tag-based-access) §Security and attacker surface |
 
@@ -60,7 +60,7 @@ Design docs for specific services built on top of the foundations:
 
 Canonical design records live in `docs/spec/`:
 
-- **`docs/spec/plans/development-stages.md`** — build plan. Stages 0–5 shipped; **Stage 6 = federated own email**; **Stage 7 = generalized OIDC provider**; remaining stages postponed.
+- **`docs/archived/development-stages-v2-2026-04.md`** — build plan (archived). Stages 0–5 shipped; **Stage 6 = federated own email**; **Stage 7 = generalized OIDC provider**; remaining stages postponed.
 - **`docs/spec/ses-email-architecture.md`** — Stage 6 SES email spec.
 - **`docs/spec/email-signing-backends.md`** — generalized backend comparison (SES / DWD / SaaS).
 - **`docs/spec/credential-backend-interface.md`** — the `CredentialBackend` trait.

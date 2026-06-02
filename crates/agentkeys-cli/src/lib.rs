@@ -1281,23 +1281,23 @@ pub async fn cmd_scope(
 fn format_provision_error(err: &ProvisionError) -> String {
     match err {
         ProvisionError::InProgress { active_service } => format!(
-            "Problem: Another provision is running for {}.\nCause: Provisioner serializes calls per daemon.\nFix: Wait and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            "Problem: Another provision is running for {}.\nCause: Provisioner serializes calls per daemon.\nFix: Wait and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
             active_service
         ),
         ProvisionError::Tripwire { kind, step, .. } => format!(
-            "Problem: A script step timed out at '{}'.\nCause: The target site's DOM may have changed (tripwire: {:?}).\nFix: Open an issue at https://github.com/litentry/agentKeys/issues with the logs.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            "Problem: A script step timed out at '{}'.\nCause: The target site's DOM may have changed (tripwire: {:?}).\nFix: Open an issue at https://github.com/litentry/agentKeys/issues with the logs.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
             step, kind
         ),
         ProvisionError::StoreFailed { obtained_key_masked, .. } => format!(
-            "Problem: Credential provisioned but storage failed.\nCause: Backend store_credential returned an error.\nFix: Manually store the key with `agentkeys store <service> <key>`. Masked key for reference: {}.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            "Problem: Credential provisioned but storage failed.\nCause: Backend store_credential returned an error.\nFix: Manually store the key with `agentkeys store <service> <key>`. Masked key for reference: {}.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
             obtained_key_masked
         ),
         ProvisionError::VerificationFailed { service, reason } => format!(
-            "Problem: Key verification failed for {}.\nCause: {}.\nFix: Re-run with --force to attempt a fresh provision.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            "Problem: Key verification failed for {}.\nCause: {}.\nFix: Re-run with --force to attempt a fresh provision.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
             service, reason
         ),
         other => format!(
-            "Problem: Provision failed.\nCause: {}.\nFix: Check logs and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+            "Problem: Provision failed.\nCause: {}.\nFix: Check logs and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
             other
         ),
     }
@@ -1339,7 +1339,7 @@ pub async fn cmd_provision(
         ],
         other => {
             return Err(anyhow!(
-                "Problem: Service '{}' not supported.\nCause: Only 'openrouter' is supported in Stage 5a.\nFix: Use a supported service name.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md",
+                "Problem: Service '{}' not supported.\nCause: Only 'openrouter' is supported in Stage 5a.\nFix: Use a supported service name.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
                 other
             ));
         }
