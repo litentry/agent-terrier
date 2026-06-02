@@ -54,7 +54,7 @@ Future stage-2/3 work: agentkeys-specific indexing on top of Litentry's fork of 
 - Deployer wallet (EVM): `0xdE644936D5B7d5d42032fd08bbA42Fbbfd6663Bc`
 - Deployer wallet (Substrate SS58 prefix 31): `47NGSq6JE5ZSnymGNa4nFVjWbsuhTfoSKN2jtpk28mUyC1M3` *(see [funding the EVM side via the Substrate twin](../../scripts/evm-to-substrate-address.mjs))*
 - Deploy date: 2026-05-19
-- Compiler: Solc 0.8.20, `evm_version = "london"` (matches Heima's Frontier EVM level — see CLAUDE.md "Heima EVM compatibility level")
+- Compiler: Solc 0.8.20, `evm_version = "london"` (a `forge script` header-validation workaround, NOT Heima's EVM level — Heima's execution level is actually Cancun; see CLAUDE.md "Heima EVM compatibility level")
 - Forge: 1.6.0
 - Deploy script: [`crates/agentkeys-chain/script/DeployAgentKeysV1.s.sol`](../../crates/agentkeys-chain/script/DeployAgentKeysV1.s.sol)
 
