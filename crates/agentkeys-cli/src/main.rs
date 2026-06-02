@@ -1,8 +1,8 @@
 use agentkeys_cli::{
-    cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_provision,
-    cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive, cmd_signer_preview_7730,
-    cmd_signer_sign, cmd_signer_sign_typed_data, cmd_store, cmd_teardown, cmd_whoami,
-    CommandContext, CredentialBackendKind, EnvelopeVersionFlag, InitMode,
+    cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init_with_force,
+    cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
+    cmd_signer_preview_7730, cmd_signer_sign, cmd_signer_sign_typed_data, cmd_store, cmd_teardown,
+    cmd_whoami, CommandContext, CredentialBackendKind, EnvelopeVersionFlag, InitMode,
 };
 
 use clap::{Parser, Subcommand};
@@ -120,6 +120,10 @@ enum Commands {
         /// click or OAuth2 callback before failing the init.
         #[arg(long, default_value_t = 300)]
         poll_timeout_seconds: u64,
+
+        /// Re-run initialization even when a usable local session already exists.
+        #[arg(long)]
+        force: bool,
     },
 
     #[command(
@@ -963,6 +967,7 @@ async fn main() {
             signer_url,
             chain_id,
             poll_timeout_seconds,
+            force,
         } => {
             let broker_opt = broker_url.clone().or_else(|| ctx.broker_url.clone());
             let signer = signer_url
@@ -1000,7 +1005,9 @@ async fn main() {
                 )),
             };
             match mode_result {
-                Ok(mode) => cmd_init(&ctx, mode).await.map(|(msg, _session)| msg),
+                Ok(mode) => cmd_init_with_force(&ctx, mode, *force)
+                    .await
+                    .map(|(msg, _session)| msg),
                 Err(e) => Err(e),
             }
         }
