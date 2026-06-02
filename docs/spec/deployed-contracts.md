@@ -27,11 +27,11 @@ Two distinct EVM accounts deploy AgentKeys contracts. They are **different keys*
 | Contract | Address | Bytecode |
 |---|---|---|
 | `AgentKeysScope` | `0xd44b375daefc65768f417d0f0125b68d5ba7df3b` | 4572 bytes |
-| `SidecarRegistry` | `0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE` | 4572 bytes |
+| `SidecarRegistry` | `0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE` | 7200 bytes |
 | `K3EpochCounter` | `0x6c9e675c699a06acefbc156afdee6bfbfe32ccb3` | 591 bytes |
-| `CredentialAudit` | `0x63c4545ac01c77cc74044f25b8edea3880224577` | 3043 bytes |
-| `P256Verifier` | `0xda5b772f9d6c09abe80414eea908612df9b54749` | (pre-deployed verifier) |
-| `K11Verifier` | `0x5a441431f08e0f5f5ed10659620cb4e0e814e627` | (pre-deployed verifier) |
+| `CredentialAudit` | `0x63c4545ac01c77cc74044f25b8edea3880224577` | 2584 bytes |
+| `P256Verifier` | `0xda5b772f9d6c09abe80414eea908612df9b54749` | 3428 bytes (pre-deployed verifier) |
+| `K11Verifier` | `0x5a441431f08e0f5f5ed10659620cb4e0e814e627` | 2033 bytes (pre-deployed verifier) |
 
 ### ERC-4337 master infra (#164, deployed 2026-06-02 — prod deployer)
 
@@ -39,8 +39,10 @@ Foundation plumbing for the P-256 smart-account master ([plan](../plan/chain/erc
 
 | Contract | Address | Notes |
 |---|---|---|
-| `EntryPoint` (ERC-4337 v0.7) | `0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9` | canonical eth-infinitism v0.7 bytecode; landed a UserOp end-to-end in the spike |
-| `P256AccountFactory` | `0x1ccCe65b22De81aDA4F378FeAf7503d93f5d27a3` | CREATE2 factory; `constructor(entryPoint, k11Verifier)`; wired to the live `K11Verifier`; mainnet CREATE2 determinism smoke-verified |
+| `EntryPoint` (ERC-4337 v0.7) | `0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9` | 11810 bytes; canonical eth-infinitism v0.7 bytecode; landed a UserOp end-to-end in the spike |
+| `P256AccountFactory` | `0x1ccCe65b22De81aDA4F378FeAf7503d93f5d27a3` | 4591 bytes; CREATE2 factory; `constructor(entryPoint, k11Verifier)`; wired to the live `K11Verifier`; mainnet CREATE2 determinism smoke-verified |
+
+> **`VerifyingPaymaster` is intentionally NOT deployed.** The spike and current flow submit UserOps via direct `EntryPoint.handleOps` from a pre-funded account — no paymaster needed. [`crates/agentkeys-chain/src/VerifyingPaymaster.sol`](../../crates/agentkeys-chain/src/VerifyingPaymaster.sol) is kept in source for the optional gas-sponsorship path; deploy it only when sponsored UserOps are required, then add its address here and in `operator-workstation.env`.
 
 ### Test / CI deploy (Heima mainnet — test deployer)
 
