@@ -28,6 +28,7 @@ contract SidecarRegistry {
     uint8 public constant TIER_AGENT = 2;
 
     /// @notice Operation kind codes used in challenge-msg construction.
+    bytes32 public constant OP_REGISTER_1ST_MASTER = keccak256("agentkeys:v1:register-first-master");
     bytes32 public constant OP_REGISTER_2ND_MASTER = keccak256("agentkeys:v1:register-master");
     bytes32 public constant OP_REVOKE_MASTER = keccak256("agentkeys:v1:revoke-master");
     bytes32 public constant OP_SET_THRESHOLD = keccak256("agentkeys:v1:set-recovery-threshold");
@@ -99,8 +100,17 @@ contract SidecarRegistry {
     // ─── Master device registration ──────────────────────────────────────
     /// @notice Register the FIRST master device for an operator. First call wins;
     ///         subsequent master mutations need this sender.
-    /// @dev    For initial bootstrap (no existing master), no K11 assertion is
-    ///         required (chicken-and-egg — there's no prior K11 to attest with).
+    /// @dev    Bootstrap requires a K11 **self-attestation**: the new device's own
+    ///         platform authenticator signs a challenge that binds `msg.sender` +
+    ///         the operator/actor omni + device-key-hash + the K11 pubkey being
+    ///         registered + chainid + this contract. This defeats the mempool
+    ///         front-run (issue #165): a captured attestation cannot be replayed by
+    ///         a different sender — the contract rebinds the challenge to the new
+    ///         `msg.sender`, so the embedded clientDataJSON challenge no longer
+    ///         matches and `verifyAssertion` rejects — and an attacker cannot forge
+    ///         the operator's K11 signature. There is no chicken-and-egg: the
+    ///         attesting key IS the key being registered (a *self*-attestation),
+    ///         which exists by bootstrap time (enrolled in stage 2 per arch.md §9).
     function registerFirstMasterDevice(
         bytes32 deviceKeyHash,
         bytes32 operatorOmni,
@@ -109,8 +119,8 @@ contract SidecarRegistry {
         bytes32 k11RpIdHash,
         uint256 k11PubX,
         uint256 k11PubY,
-        bytes calldata attestation,
-        uint8 roles
+        uint8 roles,
+        K11Assertion calldata selfAttestation
     ) external {
         if (devices[deviceKeyHash].registeredAt != 0) {
             revert DeviceAlreadyRegistered(deviceKeyHash);
@@ -119,6 +129,37 @@ contract SidecarRegistry {
             // Operator already has a first master; use registerAdditionalMasterDevice.
             revert DeviceAlreadyRegistered(deviceKeyHash);
         }
+
+        // ── Anti-front-run (issue #165): K11 self-attestation bound to msg.sender ──
+        // Verified against the pubkey BEING registered (k11PubX/k11PubY) — there is
+        // no prior device to attest with at bootstrap. The challenge commits the
+        // sender so a captured assertion is non-transferable to another sender.
+        bytes32 expectedChallenge = keccak256(
+            abi.encode(
+                OP_REGISTER_1ST_MASTER,
+                operatorOmni,
+                actorOmni,
+                deviceKeyHash,
+                k11PubX,
+                k11PubY,
+                roles,
+                msg.sender,
+                block.chainid,
+                address(this)
+            )
+        );
+        bool ok = k11Verifier.verifyAssertion(
+            expectedChallenge,
+            k11RpIdHash,
+            selfAttestation.authenticatorData,
+            selfAttestation.clientDataJSON,
+            selfAttestation.challengeLocation,
+            selfAttestation.r,
+            selfAttestation.s,
+            k11PubX,
+            k11PubY
+        );
+        if (!ok) revert K11VerificationFailed();
 
         operatorMasterWallet[operatorOmni] = msg.sender;
         recoveryThreshold[operatorOmni] = 1;
@@ -134,13 +175,12 @@ contract SidecarRegistry {
             tier: TIER_MASTER,
             roles: roles,
             registeredAt: uint64(block.timestamp),
-            lastSignCount: 0,
+            lastSignCount: k11Verifier.readSignCount(selfAttestation.authenticatorData),
             revoked: false
         });
         operatorDevices[operatorOmni].push(deviceKeyHash);
 
         emit DeviceRegistered(deviceKeyHash, operatorOmni, actorOmni, TIER_MASTER, roles, k11CredId);
-        attestation; // accepted but only emitted via event topics
     }
 
     /// @notice Register a 2nd+ master device. Existing master signs a K11
