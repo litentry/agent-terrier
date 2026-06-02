@@ -95,6 +95,6 @@ firmware/esp32s3-agentkeys/
 
 ## Related
 
-- **Plan**: [`docs/spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md`](../../docs/spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md)
+- **Plan**: [`docs/plan/issue-103-aiosandbox-hermes-esp32-demo.md`](../../docs/plan/issue-103-aiosandbox-hermes-esp32-demo.md)
 - **Sandbox-side runbook**: TBD (issue #103 step 12)
 - **AgentKeys arch**: [`docs/arch.md`](../../docs/arch.md)

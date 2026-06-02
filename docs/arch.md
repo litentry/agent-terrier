@@ -15,9 +15,9 @@ This doc supersedes the pre-v2 architecture revision (which described a single-b
 - [`signer-protocol.md`](spec/signer-protocol.md) — typed RPC over mTLS to the signer
 - [`threat-model-key-custody.md`](spec/threat-model-key-custody.md) — retroactive-confidentiality + key custody position
 - [`credential-backend-interface.md`](spec/credential-backend-interface.md) — `CredentialBackend` trait surface (now backed by the sidecar)
-- [`spec/plans/v2-issues/issue-v2-stage-1-foundation.md`](spec/plans/v2-issues/issue-v2-stage-1-foundation.md) — stage 1 deliverable inventory (shipped)
-- [`spec/plans/v2-issues/issue-v2-stage-2-hardening.md`](spec/plans/v2-issues/issue-v2-stage-2-hardening.md) — stage 2 deliverable inventory (shipped)
-- [`spec/plans/v2-issues/issue-payment-service-deferred.md`](spec/plans/v2-issues/issue-payment-service-deferred.md) — payment-service design (shipped per modes P-1/P-2/P-3)
+- [`plan/v2-issues/issue-v2-stage-1-foundation.md`](plan/v2-issues/issue-v2-stage-1-foundation.md) — stage 1 deliverable inventory (shipped)
+- [`plan/v2-issues/issue-v2-stage-2-hardening.md`](plan/v2-issues/issue-v2-stage-2-hardening.md) — stage 2 deliverable inventory (shipped)
+- [`plan/v2-issues/issue-payment-service-deferred.md`](plan/v2-issues/issue-payment-service-deferred.md) — payment-service design (shipped per modes P-1/P-2/P-3)
 
 ---
 
@@ -199,7 +199,7 @@ flowchart TB
 
 Pinned to disambiguate the same value showing up under different labels across components. **Use the canonical column** in every new doc, runbook, CLI output, and commit message; the alias column lists every spelling that exists today so a reader chasing one of them can find their way back. Per `CLAUDE.md` → "Terminology-source-of-truth rule", if you introduce a name not in this table, either add the alias row here or rename the call site to match the canonical name in the same change.
 
-> **Deployed addresses** for every contract named here (per chain — Heima mainnet v2 set, the ERC-4337 master infra #164, historical v1) live in [`contracts.md`](contracts.md), the canonical address registry. Mirrored to `scripts/operator-workstation.env` for tooling.
+> **Deployed addresses** for every contract named here (per chain — Heima mainnet v2 set, the ERC-4337 master infra #164, historical v1) plus the prod/test EVM deployer wallets live in [`spec/deployed-contracts.md`](spec/deployed-contracts.md), the canonical address registry. Mirrored to `scripts/operator-workstation.env` for tooling.
 
 | Canonical name | Identity | Aliases seen in the codebase / docs |
 |---|---|---|
@@ -2059,7 +2059,7 @@ Task Host runtimes (Claude Code, Codex, Hermes, OpenClaw) fire lifecycle hooks (
 
 Tier-1 coverage means one reference script bundle ports across four hosts with thin shims. Issue #133 is the canonical track: ship reference hook configs + `agentkeys hook check` CLI helper + cap-mint pre-warming for sub-50ms p99 latency.
 
-**Operator-facing delivery: `agentkeys wire <runtime>`** (per [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.7). The reference hook configs from #133 are not hand-installed by users. AgentKeys ships a single CLI command — `agentkeys wire hermes`, `agentkeys wire claude-code`, etc. — that idempotently writes the hook scripts (under `~/.<runtime>/agent-hooks/`), appends the `hooks:` block to the runtime's config, pre-approves first-use consent, fetches the LLM API key from the credential broker, and verifies via the runtime's own `hooks doctor` equivalent. Output follows the CLAUDE.md `ok proceeding / skip <reason> / fail <reason>` convention; re-runs are no-ops modulo drift. Per-runtime adapter trait lives in `crates/agentkeys-cli/src/wire/adapters/`. Full plan: [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](spec/plans/phase-1-fresh-user-wire-onboarding.md).
+**Operator-facing delivery: `agentkeys wire <runtime>`** (per [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.7). The reference hook configs from #133 are not hand-installed by users. AgentKeys ships a single CLI command — `agentkeys wire hermes`, `agentkeys wire claude-code`, etc. — that idempotently writes the hook scripts (under `~/.<runtime>/agent-hooks/`), appends the `hooks:` block to the runtime's config, pre-approves first-use consent, fetches the LLM API key from the credential broker, and verifies via the runtime's own `hooks doctor` equivalent. Output follows the CLAUDE.md `ok proceeding / skip <reason> / fail <reason>` convention; re-runs are no-ops modulo drift. Per-runtime adapter trait lives in `crates/agentkeys-cli/src/wire/adapters/`. Full plan: [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](plan/phase-1-fresh-user-wire-onboarding.md).
 
 ### 22d.3 Fallback — OpenAI-compatible proxy (Phase 3b, lower priority)
 
@@ -2225,12 +2225,12 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/s
 - **Typed signer RPC** — [`signer-protocol.md`](spec/signer-protocol.md)
 - **K3 threat model + TEE attestation** — [`threat-model-key-custody.md`](spec/threat-model-key-custody.md)
 - **CredentialBackend trait surface** — [`credential-backend-interface.md`](spec/credential-backend-interface.md)
-- **Stage 1 deliverable inventory** — [`spec/plans/v2-issues/issue-v2-stage-1-foundation.md`](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
-- **Stage 2 deliverable inventory** — [`spec/plans/v2-issues/issue-v2-stage-2-hardening.md`](spec/plans/v2-issues/issue-v2-stage-2-hardening.md)
-- **Payment-service design** — [`spec/plans/v2-issues/issue-payment-service-deferred.md`](spec/plans/v2-issues/issue-payment-service-deferred.md)
+- **Stage 1 deliverable inventory** — [`plan/v2-issues/issue-v2-stage-1-foundation.md`](plan/v2-issues/issue-v2-stage-1-foundation.md)
+- **Stage 2 deliverable inventory** — [`plan/v2-issues/issue-v2-stage-2-hardening.md`](plan/v2-issues/issue-v2-stage-2-hardening.md)
+- **Payment-service design** — [`plan/v2-issues/issue-payment-service-deferred.md`](plan/v2-issues/issue-payment-service-deferred.md)
 - **Migration from pre-v2** — [`v2-stage1-migration-and-demo.md`](v2-stage1-migration-and-demo.md) (historical; the migration window closed when stage 1 shipped)
 - **Operator runbook** — [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent). Historical: [`docs/archived/operator-runbook-stage7-2026-04.md`](archived/operator-runbook-stage7-2026-04.md).
-- **Milestone roadmap (M1-M7)** — [`spec/plans/milestones-roadmap.md`](spec/plans/milestones-roadmap.md)
+- **Milestone roadmap (M1-M7)** — [`plan/milestones-roadmap.md`](plan/milestones-roadmap.md)
 - **Cloud-side IAM + DNS + cert** — [`../cloud-setup.md`](cloud-bootstrap.md)
 - **Per-actor reference (agent role)** — [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
 - **Upstream backend classes (per-upstream design)** — [`wiki/upstream-backend-classes-exercise-vs-distribution.md`](wiki/upstream-backend-classes-exercise-vs-distribution.md)
@@ -2261,10 +2261,10 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/s
 
 ## 27. What's NOT in this doc
 
-- **Per-endpoint request/response shapes.** Each endpoint surface has its own canonical doc — broker endpoints in `spec/plans/v2-issues/issue-v2-stage-1-foundation.md`; signer in `signer-protocol.md`; workers in per-worker READMEs under each crate.
+- **Per-endpoint request/response shapes.** Each endpoint surface has its own canonical doc — broker endpoints in `plan/v2-issues/issue-v2-stage-1-foundation.md`; signer in `signer-protocol.md`; workers in per-worker READMEs under each crate.
 - **Per-step environment-variable inventory.** That's `operator-runbook.md`.
 - **Detailed threat model for K3 retroactive confidentiality.** That's `threat-model-key-custody.md`.
-- **Stage-by-stage build progression history.** That's `plans/development-stages.md` + `spec/plans/v2-issues/`.
+- **Stage-by-stage build progression history.** That's `plans/development-stages.md` + `plan/v2-issues/`.
 - **MetaMask / Foundry tooling instructions.** Retired in v2 — operators no longer hold local EVM keys unless they want to (`identity_type = evm` is supported but not required).
 - **v3+ hardening** (per-(user, service) KEK, wrap-and-rewrap, ZK-proven cap minting, threshold-MPC signer, per-operator K3) — tracked separately as v3+ issues. v2 ships the design described here.
 

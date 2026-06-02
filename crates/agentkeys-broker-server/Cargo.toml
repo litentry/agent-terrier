@@ -37,7 +37,7 @@ aws-sdk-sts = "1"
 # Real SES sender for email-link auth. Optional, gated behind
 # auth-email-link — without the feature the broker has no SES sender at
 # all (StubEmailSender remains for tests). Pulled in by Pass 1 of
-# Option B per docs/spec/plans/issue-74 (see commit log).
+# Option B per docs/archived/issue-74-dev-key-service-plan.md (see commit log).
 aws-sdk-sesv2 = { version = "1", optional = true }
 jsonwebtoken = "9"
 p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }

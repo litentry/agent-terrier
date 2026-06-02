@@ -180,7 +180,7 @@ impl S3CredentialBackend {
     /// `actor_omni_hex`. Stage 1 ships v1 as default so existing #87
     /// deployments keep working unchanged; per-operator opt-in flips this
     /// to v2 once the bucket policy + OIDC dual-tag rollout completes
-    /// (see `docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md`
+    /// (see `docs/plan/v2-issues/issue-v2-stage-1-foundation.md`
     /// migration step 9).
     pub fn with_write_envelope(mut self, envelope: WriteEnvelope) -> Self {
         self.write_envelope = envelope;

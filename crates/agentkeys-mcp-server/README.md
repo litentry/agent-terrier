@@ -35,7 +35,7 @@ Auto-seeds vendor `magiclick:demo-tok` + three memory namespaces (`travel`,
 `family`, `profile`) on actor `O_kevin_001`. Walk the three-act
 storyboard with `bash scripts/mcp-demo-mode-a.sh` (asserts each act's
 exact wire shape). Full step-by-step walkthrough:
-[`docs/spec/plans/issue-107-mcp-demo-runbook.md`](../../docs/spec/plans/issue-107-mcp-demo-runbook.md).
+[`docs/plan/issue-107-mcp-demo-runbook.md`](../../docs/plan/issue-107-mcp-demo-runbook.md).
 
 ### Local (HTTP, against a real broker / workers)
 
@@ -72,7 +72,7 @@ cargo run -p agentkeys-mcp-server -- \
 Test it locally without a real cloud account: `bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh`
 spins up a mock relay that mirrors `xinnan-tech/mcp-endpoint-server`'s
 routing exactly, then drives every act through it. Full runbook in
-[`docs/spec/plans/issue-107-mcp-demo-runbook.md`](../../docs/spec/plans/issue-107-mcp-demo-runbook.md) §B.
+[`docs/plan/issue-107-mcp-demo-runbook.md`](../../docs/plan/issue-107-mcp-demo-runbook.md) §B.
 
 ### Docker
 
@@ -198,5 +198,5 @@ Coverage:
 - Vendor onboarding portal — M2 (#114)
 - Volcano Ark marketplace registration — M2
 
-See [`docs/spec/plans/issue-107-mcp-server-phase1.md`](../../docs/spec/plans/issue-107-mcp-server-phase1.md)
+See [`docs/archived/issue-107-mcp-server-phase1.md`](../../docs/archived/issue-107-mcp-server-phase1.md)
 for the full plan + follow-ups.

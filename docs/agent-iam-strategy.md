@@ -7,7 +7,7 @@
 **Companion docs**:
 - [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) — original wedge brainstorm (positioning is updated by this doc)
 - [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md), [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md), [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) — tactical adapter architectures (unchanged by this doc)
-- [issue #103 plan](./spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) — Phase 1 execution (scope is updated by this doc)
+- [issue #103 plan](./plan/issue-103-aiosandbox-hermes-esp32-demo.md) — Phase 1 execution (scope is updated by this doc)
 
 ---
 
@@ -240,7 +240,7 @@ A corollary of §3.6: if hooks are the IAM-guarantee delivery mechanism, *who wr
 - **Manual** — user runs both `agentkeys …` and the runtime's own setup wizard, then hand-edits `~/.<runtime>/config.<ext>` to register AgentKeys hooks. Two-wizard friction. Demo "surprise" effect diluted because the user already configured the runtime.
 - **Automatic** — AgentKeys CLI writes the hook scripts + the `hooks:` block + the runtime's LLM-provider config in one idempotent command. One wizard. Strong demo surprise. Higher maintenance burden (track each runtime's config schema; nightly drift check needed).
 
-**Decision (2026-05-28): hybrid.** Detailed in [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](./spec/plans/phase-1-fresh-user-wire-onboarding.md):
+**Decision (2026-05-28): hybrid.** Detailed in [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](./plan/phase-1-fresh-user-wire-onboarding.md):
 
 | AgentKeys owns | Runtime owns |
 |---|---|
@@ -330,7 +330,7 @@ The demo runs on MagicLick 2.5 (xiaozhi-esp32 v1.9.4, unchanged) + stock xinnan-
 | Deliverable | What it is | Why it matters |
 |---|---|---|
 | AgentKeys MCP server | 7 active tools wrapping existing backend RPCs | The integration surface vendors plug into |
-| **`agentkeys wire <runtime>` CLI** (per §3.7) | Hybrid auto-provisioning — writes IAM-gate config + LLM-provider config into a Task Host's config files; idempotent; tracked in [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](./spec/plans/phase-1-fresh-user-wire-onboarding.md) | The user-facing entry point that turns "AgentKeys is wired into the runtime" into one command. The fresh-user "surprise" moment depends on this. |
+| **`agentkeys wire <runtime>` CLI** (per §3.7) | Hybrid auto-provisioning — writes IAM-gate config + LLM-provider config into a Task Host's config files; idempotent; tracked in [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](./plan/phase-1-fresh-user-wire-onboarding.md) | The user-facing entry point that turns "AgentKeys is wired into the runtime" into one command. The fresh-user "surprise" moment depends on this. |
 | Hermes adapter (Phase 1.a) | First runtime adapter for `wire`; lives in `crates/agentkeys-cli/src/wire/adapters/hermes.rs` | Validates the hybrid auto-provisioning shape against a real Task Host inside aiosandbox |
 | `agentkeys hook check / audit / memory-inject` CLI helpers | The thin wrappers the dropped hook scripts call — translate host stdin/stdout JSON to AgentKeys MCP tool calls | Makes the hook scripts trivial (single `exec` line); bug fixes ship in the AgentKeys binary, not in the user's filesystem |
 | Parent-control web UI (mobile-responsive) | One page: actor list, scope toggles, revoke buttons, audit feed | The face of "Agent IAM" — without this, Act 3 isn't a demo |
@@ -495,7 +495,7 @@ Privacy is a benefit, not a category. "Privacy product" is crowded (Brave, DuckD
 |---|---|
 | [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) | Update positioning note at top to point at this strategy doc + add Agent IAM framing + three-narrative reality. Substance below the banner stays. |
 | [`ai-hardware-companion-wedge.md`](./research/ai-hardware-companion-wedge.md) | Update positioning sections — sharper "Agent IAM" framing; keep market sizing + competitive analysis as-is. |
-| [issue #103 plan](./spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) | Pivot demo storyboard to the three-act IAM demo per §4.3. Add parent-control web UI deliverable. Note the four corrections (bounded revocation, two-tier audit, delegation-as-preview, zero orchestration). Implementation detail unchanged (cap-token machinery already exists). |
+| [issue #103 plan](./plan/issue-103-aiosandbox-hermes-esp32-demo.md) | Pivot demo storyboard to the three-act IAM demo per §4.3. Add parent-control web UI deliverable. Note the four corrections (bounded revocation, two-tier audit, delegation-as-preview, zero orchestration). Implementation detail unchanged (cap-token machinery already exists). |
 | [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md) | No change — MCP-direct pivot still correct. |
 | [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md) | Minor: clarify Phase 2 timing per §5 above; tool inventory unchanged. |
 | [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) | No change — complement-not-compete framing still correct. |
