@@ -195,7 +195,7 @@ When you don't want to talk to Heima at all, run [foundry](https://book.getfound
 anvil --chain-id 31337 --port 8545
 ```
 
-Then `AGENTKEYS_CHAIN=anvil` in your operator env makes every `cast send` hit anvil instead of Heima. The deployer wallet is whichever anvil-prefunded key you point at via `HEIMA_DEPLOYER_KEY` / `HEIMA_DEPLOYER_KEY_FILE`. Anvil's mempool is single-tenant — none of the [PR #102 nonce-contention issues](./plans/issue-101-ci-auto-deploy.md) bite locally.
+Then `AGENTKEYS_CHAIN=anvil` in your operator env makes every `cast send` hit anvil instead of Heima. The deployer wallet is whichever anvil-prefunded key you point at via `HEIMA_DEPLOYER_KEY` / `HEIMA_DEPLOYER_KEY_FILE`. Anvil's mempool is single-tenant — none of the [PR #102 nonce-contention issues](../ci-setup.md) bite locally.
 
 ### 4.4 Editing `setup-broker-host.sh`
 
@@ -333,4 +333,4 @@ Switch with `--chain` on any harness script. Contract addresses for `heima` and 
 - [`docs/ci-setup.md`](../ci-setup.md) — no-LLM CI + auto-deploy of test broker (issue #101 / PR #102).
 - [`docs/spec/signer-protocol.md`](./signer-protocol.md) — wire contract for the signer (TEE swap-in target).
 - [`docs/spec/credential-backend-interface.md`](./credential-backend-interface.md) — the `CredentialBackend` trait; what the broker's storage plug-ins must implement.
-- [`docs/spec/plans/development-stages.md`](./plans/development-stages.md) — the staged build plan + harness gates.
+- [`docs/archived/development-stages-v2-2026-04.md`](../archived/development-stages-v2-2026-04.md) — the staged build plan + harness gates.

@@ -1,12 +1,12 @@
 # Post-v0.1 Future Work
 
 **Status:** living backlog — items deferred past v0.1.
-**Purpose:** capture design directions, hardening work, and extensions that are valuable but not on the v0 or v0.1 critical path. Every item here should eventually be promoted to `docs/spec/plans/development-stages.md` with a concrete stage number, or dropped.
+**Purpose:** capture design directions, hardening work, and extensions that are valuable but not on the v0 or v0.1 critical path. Every item here should eventually be promoted to `docs/archived/development-stages-v2-2026-04.md` with a concrete stage number, or dropped.
 **Last updated:** 2026-04-20.
 
 ## 1. How this doc relates to the stage plan
 
-- [`docs/spec/plans/development-stages.md`](./plans/development-stages.md) — the stages we are committed to shipping.
+- [`docs/archived/development-stages-v2-2026-04.md`](../archived/development-stages-v2-2026-04.md) — the stages we are committed to shipping.
 - [`docs/spec/heima-gaps-vs-desired-architecture.md`](./heima-gaps-vs-desired-architecture.md) — deltas between upstream `litentry/heima` and the desired architecture; blockers for current stages.
 - **This doc** — ideas that do not block current stages. Items here come from design reviews where we identified a better-but-bigger option, deferred it, and shipped the cheap version.
 

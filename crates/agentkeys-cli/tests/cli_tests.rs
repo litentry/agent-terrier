@@ -1552,7 +1552,7 @@ async fn cli_provision_error_format() {
     assert!(result.is_err());
     match result.unwrap_err() {
         ProvisionError::InProgress { .. } => {
-            let formatted = "Problem: Another provision is running for openrouter.\nCause: Provisioner serializes calls per daemon.\nFix: Wait and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/development-stages.md";
+            let formatted = "Problem: Another provision is running for openrouter.\nCause: Provisioner serializes calls per daemon.\nFix: Wait and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md";
             assert!(
                 formatted.contains("Problem:"),
                 "missing Problem: in: {formatted}"
