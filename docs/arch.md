@@ -199,6 +199,8 @@ flowchart TB
 
 Pinned to disambiguate the same value showing up under different labels across components. **Use the canonical column** in every new doc, runbook, CLI output, and commit message; the alias column lists every spelling that exists today so a reader chasing one of them can find their way back. Per `CLAUDE.md` → "Terminology-source-of-truth rule", if you introduce a name not in this table, either add the alias row here or rename the call site to match the canonical name in the same change.
 
+> **Deployed addresses** for every contract named here (per chain — Heima mainnet v2 set, the ERC-4337 master infra #164, historical v1) live in [`contracts.md`](contracts.md), the canonical address registry. Mirrored to `scripts/operator-workstation.env` for tooling.
+
 | Canonical name | Identity | Aliases seen in the codebase / docs |
 |---|---|---|
 | `actor_omni` | **The durable per-actor cryptographic anchor.** `SHA256("agentkeys" \|\| "evm" \|\| initial_master_wallet_K3_v1)`. **Frozen at first SIWE-bind**; never rotates with K3, never changes with wallet rotation. The Layer 1 identifier per §6. | `omni_account` (JWT claim + CLI `whoami` field), `agentkeys_actor_omni` (AWS PrincipalTag key), `OMNI_A` / `OMNI_B` (demo shell vars). |
