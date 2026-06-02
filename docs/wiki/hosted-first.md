@@ -221,7 +221,7 @@ The tradeoff is correct for the user segment: non-dev users accept "trust AgentK
 - **Stage 7** — Generalized OIDC Provider: the federation pattern exposed publicly; accepts external consumers; enables the BYO AWS / GCP / GitHub / etc. advanced paths.
 - **Later** — BYO custom-domain email, BYO Workspace DWD (existing `docs/stage5-workspace-email-setup.md` becomes the runbook), BYO GitHub org, enterprise SSO integration.
 
-See `docs/spec/plans/development-stages.md` for the authoritative stage list.
+See `docs/archived/development-stages-v2-2026-04.md` for the authoritative stage list.
 
 ---
 
@@ -234,5 +234,5 @@ See `docs/spec/plans/development-stages.md` for the authoritative stage list.
 - `docs/spec/ses-email-architecture.md` — spec for the SES-backed hosted path
 - `docs/stage5-workspace-email-setup.md` — the BYO Workspace runbook (advanced, deferred)
 - `wiki/blockchain-tee-architecture.md` (repo) — the three rules hosted-first preserves
-- `docs/spec/plans/development-stages.md` §Stage 6 — federated own email stage plan
+- `docs/archived/development-stages-v2-2026-04.md` §Stage 6 — federated own email stage plan
 

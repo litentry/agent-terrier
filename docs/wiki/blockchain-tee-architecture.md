@@ -135,7 +135,7 @@ The core pattern: **clients talk to the TEE, the TEE talks to the chain.** Clien
 
 ## 2. Worked example: credential retrieval
 
-> **Status:** this example shows the **v0.1** flow (Pattern 4: TEE-as-paymaster per-read sponsored audit). v0 uses the mock backend with a synchronous SQLite audit insert — see `docs/spec/plans/development-stages.md` Stage 1 for the v0 implementation. Pattern 4 is tracked in [#5](https://github.com/litentry/agentKeys/issues/5).
+> **Status:** this example shows the **v0.1** flow (Pattern 4: TEE-as-paymaster per-read sponsored audit). v0 uses the mock backend with a synchronous SQLite audit insert — see `docs/archived/development-stages-v2-2026-04.md` Stage 1 for the v0 implementation. Pattern 4 is tracked in [#5](https://github.com/litentry/agentKeys/issues/5).
 
 This is the most common operation. An agent daemon needs an API key to call OpenRouter.
 
@@ -196,9 +196,9 @@ This is the most common operation. An agent daemon needs an API key to call Open
 
 ## 3. Worked example: pairing (on-chain transport — v0.1 target)
 
-> **Status:** this example shows the **v0.1** on-chain pair transport. v0 uses a centralized rendezvous relay (SQLite `rendezvous_registrations` + `auth_requests` tables, 6 REST endpoints) — see `docs/spec/plans/development-stages.md` Stage 1 for the v0 implementation. The v0.1 migration is tracked in [#6](https://github.com/litentry/agentKeys/issues/6).
+> **Status:** this example shows the **v0.1** on-chain pair transport. v0 uses a centralized rendezvous relay (SQLite `rendezvous_registrations` + `auth_requests` tables, 6 REST endpoints) — see `docs/archived/development-stages-v2-2026-04.md` Stage 1 for the v0 implementation. The v0.1 migration is tracked in [#6](https://github.com/litentry/agentKeys/issues/6).
 
-A new daemon in a sandbox wants to pair with the master user's wallet. This is the on-chain pair design from `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` Stage 9.
+A new daemon in a sandbox wants to pair with the master user's wallet. This is the on-chain pair design from `[docs/archived/development-stages-v2-2026-04.md](../archived/development-stages-v2-2026-04.md)` Stage 9.
 
 ### Step-by-step
 
@@ -322,7 +322,7 @@ The pair flow uses two distinct human-verification codes at different stages of 
 | Server-validated? | Yes — stored in `auth_requests` table, single-use enforced | No — server holds no OTP state; any client derives the same VVC from the same signature |
 | Threat it defends against | Tampered request details between `open` and `approve` (canonical-hash mismatch rejects the approval) | Decoy pair requests on-chain — multiple pending pairs look the same, VVC lets the user visually tiebreak |
 | Shipped in | v0 mock backend (current code) | v0.1 on-chain pair transport (not yet implemented) |
-| Referenced in | `development-stages.md` Stages 0, 1, 4; `otp::determinism` test | `development-stages.md` Stage 9; [#6](https://github.com/litentry/agentKeys/issues/6) |
+| Referenced in | `development-stages-v2-2026-04.md` Stages 0, 1, 4; `otp::determinism` test | `development-stages-v2-2026-04.md` Stage 9; [#6](https://github.com/litentry/agentKeys/issues/6) |
 
 v0.1 does **not** keep OTP: with on-chain pair transport, there is no `auth_requests` table to hold nonces, and tamper detection comes from extrinsic signature verification at the pallet level. VVC replaces OTP as the human-visible code; the security property (protect against request-detail tampering and decoy daemons) shifts from OTP's HMAC-of-details to the pallet's signature check + VVC's signature-fingerprint comparison.
 
@@ -636,7 +636,7 @@ Narrower surfaces with their own dedicated pages:
 - `[docs/spec/heima-cli-exploration.md](../spec/heima-cli-exploration.md)` — per-call signing, audit-as-extrinsic, latency acknowledgement
 - `[docs/spec/heima-open-questions.md](../spec/heima-open-questions.md)` — Q1 (scoped session minting), Q3 (TEE-side scope enforcement), Q9 (revocation latency)
 - `[docs/spec/credential-backend-interface.md](../spec/credential-backend-interface.md)` — CredentialBackend trait, signing model, payment rails
-- `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` — Stage 9 design decisions (Pattern 4, on-chain pair transport)
+- `[docs/archived/development-stages-v2-2026-04.md](../archived/development-stages-v2-2026-04.md)` — Stage 9 design decisions (Pattern 4, on-chain pair transport)
 
 ### Wiki
 

@@ -271,7 +271,7 @@ The two surfaces need two different mitigation layers, and they map directly to 
 
 ### Layer 1 — Kernel hardening (already planned in Stage 3)
 
-`docs/spec/plans/development-stages.md:351-358` and `docs/arch.md:70` already specify the kernel-level defenses. They are required deliverables for Stage 3 (the daemon stage), with passing tests gating stage completion. Reproduced here for reference:
+`docs/archived/development-stages-v2-2026-04.md` and `docs/arch.md:70` already specify the kernel-level defenses. They are required deliverables for Stage 3 (the daemon stage), with passing tests gating stage completion. Reproduced here for reference:
 
 
 | Feature                                          | What it blocks                                                            | Verified by                                         |
@@ -289,7 +289,7 @@ This is **all kernel-side**. It assumes the daemon's own code is well-behaved an
 
 ### Layer 2 — Memory hygiene and credential lifecycle (planned in Stage 8)
 
-`docs/spec/plans/development-stages.md` Stage 8 (added after this Stage 4 investigation) covers the process-internal hardening. **Priority A items shrink the dominant exposure window — the agent-side window — not the daemon window.** This is the corrected framing after the Stage 4 review caught the original ranking inverting these.
+`docs/archived/development-stages-v2-2026-04.md` Stage 8 (added after this Stage 4 investigation) covers the process-internal hardening. **Priority A items shrink the dominant exposure window — the agent-side window — not the daemon window.** This is the corrected framing after the Stage 4 review caught the original ranking inverting these.
 
 
 | Priority A item                                                                                    | What it blocks                                                                                                                                                    | Verified by                                                                   |
@@ -313,7 +313,7 @@ This is **all kernel-side**. It assumes the daemon's own code is well-behaved an
 
 **Priority C items** are reserved for v0.2+ generalizations: extending `memfd_secret`-via-SCM_RIGHTS to upstream agent runtimes that don't currently support fd-based credential reads, and generalizing daemon-mediated `cmd_run` to arbitrary parent processes. Both require runtime cooperation that we can't unilaterally provide.
 
-See `docs/spec/plans/development-stages.md` Stage 8 section for the full breakdown, the unit test matrix, and the reviewer E2E checklist.
+See `docs/archived/development-stages-v2-2026-04.md` Stage 8 section for the full breakdown, the unit test matrix, and the reviewer E2E checklist.
 
 ### Where the credential actually lives
 
@@ -368,11 +368,11 @@ These are server-side properties that survive even when the user's machine is co
 
 ## 9. Hardening features and where they live in the plan
 
-Every hardening item raised by this investigation has been mapped to a concrete stage in `docs/spec/plans/development-stages.md`. None of these are floating ideas anymore — they are all in either Stage 3 (kernel-level, daemon-only, already planned) or Stage 8 (memory hygiene + CLI features + storage options, added during this Stage 4 investigation).
+Every hardening item raised by this investigation has been mapped to a concrete stage in `docs/archived/development-stages-v2-2026-04.md`. None of these are floating ideas anymore — they are all in either Stage 3 (kernel-level, daemon-only, already planned) or Stage 8 (memory hygiene + CLI features + storage options, added during this Stage 4 investigation).
 
 ### Already in Stage 3 (kernel hardening, daemon)
 
-These were in the spec from day one and gate Stage 3 completion. Reproduced from `development-stages.md:351-358`:
+These were in the spec from day one and gate Stage 3 completion. Reproduced from `development-stages-v2-2026-04.md`:
 
 - `memfd_secret()` for runtime session key copy (fallback to `mlock2` if `ENOSYS`)
 - `mlock2(MCL_CURRENT|MCL_FUTURE)` to prevent swap
@@ -452,7 +452,7 @@ Sketch:
 - **Estimated effort:** 4-6 days
 - **Position in critical path:** Off the critical path. Stage 8 ships after the v0 demo (Stage 7) and does not block any earlier stage. Recommended sequencing: ship v0 from Stage 7, then immediately roll into Stage 8 before broad deployment.
 
-See `docs/spec/plans/development-stages.md` Stage 8 section for the full deliverable list, unit test matrix, and reviewer E2E checklist.
+See `docs/archived/development-stages-v2-2026-04.md` Stage 8 section for the full deliverable list, unit test matrix, and reviewer E2E checklist.
 
 ---
 

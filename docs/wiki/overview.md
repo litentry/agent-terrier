@@ -77,7 +77,7 @@ AgentKeys wiki
 | If you're a… | Start with | Then | Then |
 |---|---|---|---|
 | New engineer on the team | `wiki/blockchain-tee-architecture.md` (repo) | [hosted-first](hosted-first) | [email-system](email-system) |
-| Product / roadmap reviewer | [hosted-first](hosted-first) | `docs/spec/plans/development-stages.md` §Stage 5–7 roadmap update | [knowledge-storage](knowledge-storage) |
+| Product / roadmap reviewer | [hosted-first](hosted-first) | `docs/archived/development-stages-v2-2026-04.md` §Stage 5–7 roadmap update | [knowledge-storage](knowledge-storage) |
 | Operator / infra setup | `docs/spec/ses-email-architecture.md` | [oidc-federation](oidc-federation) §Consumer-registration recipes | [tag-based-access](tag-based-access) §Concrete AWS configuration |
 | Security reviewer | `wiki/blockchain-tee-architecture.md` (repo) | [tag-based-access](tag-based-access) §Security properties and attacker surface | [oidc-federation](oidc-federation) §Threat model |
 
@@ -105,7 +105,7 @@ Living in `docs/spec/`:
 | `ses-email-architecture.md` | The SES-backed email backend (v0.1 default on `agentkeys-email.io`) |
 | `email-signing-backends.md` | Generalized backend comparison (SES / DWD / AgentMail-style SaaS) |
 | `credential-backend-interface.md` | The `CredentialBackend` trait that every backend implements |
-| `plans/development-stages.md` | The stage roadmap (Stages 0–5 shipped; Stage 6 = hosted email; Stage 7 = OIDC provider) |
+| `../archived/development-stages-v2-2026-04.md` | The stage roadmap (archived; Stages 0–5 shipped; Stage 6 = hosted email; Stage 7 = OIDC provider) |
 
 And operator-facing docs:
 

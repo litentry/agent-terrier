@@ -76,7 +76,7 @@ Dual-licensed under **MIT OR Apache-2.0**, at your choice.
 |---|---|
 | [`CLAUDE.md`](CLAUDE.md) | Project-specific rules: docs layout, /create-pr workflow in worktrees, terminology-source-of-truth, branch push policy, idempotent-remote-setup invariants, runbook-fix-fold-back policy. **Read first, every session.** |
 | [`docs/arch.md`](docs/arch.md) | Single source of truth for component inventory (K1–K11), trust boundaries, HDKD actor tree, per-actor binding ceremonies. When the per-doc detail outgrows arch.md, link outward — never duplicate. |
-| [`docs/spec/plans/development-stages.md`](docs/spec/plans/development-stages.md) | The 8-stage build plan. Each stage has a `harness/stage-N-done.sh` gate; never self-grade — run the gate. |
+| [`docs/archived/development-stages-v2-2026-04.md`](docs/archived/development-stages-v2-2026-04.md) | The 8-stage build plan (archived; superseded by the milestone roadmap below). Each stage has a `harness/stage-N-done.sh` gate; never self-grade — run the gate. |
 | [`docs/plan/execution-plan.md`](docs/plan/execution-plan.md) | Orchestration runbook (ralph, team, ultraqa workflows). |
 | [`docs/spec/broker-and-operator-dev-guide.md`](docs/spec/broker-and-operator-dev-guide.md) | Inner edit-build-test loop for broker + operator-side code. Use this before suggesting changes to the broker's run-time behavior. |
 
@@ -97,7 +97,7 @@ These are non-negotiable. Violating them produces broken PRs / corrupted state.
 ### Per-session protocol
 
 1. `jj log --limit 10 && cat harness/progress.json && bash harness/init.sh $(jq -r .current_stage harness/progress.json)`
-2. Read the stage contract for the current stage in `docs/spec/plans/development-stages.md`.
+2. Read the milestone scope for the current milestone in `docs/plan/milestones-roadmap.md` (the v1/v2 stage framing is archived at `docs/archived/development-stages-v2-2026-04.md`).
 3. Pick the HIGHEST-PRIORITY incomplete deliverable from `harness/features.json`.
 4. Implement ONE deliverable, run `cargo test -p <crate>`, `jj describe`, update `harness/features.json`, `jj new`.
 

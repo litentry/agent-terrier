@@ -24,7 +24,7 @@ Related docs:
 - [`plans/issue-74-step-1c-device-key-auth.md`](../plan/issue-74-step-1c-device-key-auth.md) — device-key auth on `/dev/*`, planned.
 - [`docs/wiki/blockchain-tee-architecture.md`](../wiki/blockchain-tee-architecture.md) — canonical desired architecture (four rules).
 - [`docs/wiki/key-security.md`](../wiki/key-security.md) — TEE key security model.
-- [`plans/development-stages.md`](./plans/development-stages.md) — stage roadmap; this gap list is the critical path for Stage 6 and Stage 7.
+- [`development-stages-v2-2026-04.md`](../archived/development-stages-v2-2026-04.md) — stage roadmap (archived); this gap list is the critical path for Stage 6 and Stage 7.
 - [`ses-email-architecture.md`](./ses-email-architecture.md) — Stage 6 email spec; depends on gaps §2, §3, §5.
 
 ## 1a. Status snapshot (added 2026-05-09)

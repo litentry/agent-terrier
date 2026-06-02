@@ -2264,7 +2264,7 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/s
 - **Per-endpoint request/response shapes.** Each endpoint surface has its own canonical doc — broker endpoints in `plan/v2-issues/issue-v2-stage-1-foundation.md`; signer in `signer-protocol.md`; workers in per-worker READMEs under each crate.
 - **Per-step environment-variable inventory.** That's `operator-runbook.md`.
 - **Detailed threat model for K3 retroactive confidentiality.** That's `threat-model-key-custody.md`.
-- **Stage-by-stage build progression history.** That's `plans/development-stages.md` + `plan/v2-issues/`.
+- **Stage-by-stage build progression history.** That's `plan/milestones-roadmap.md` §1 (Phase 0, which links onward to the archived stage plan) + `plan/v2-issues/`.
 - **MetaMask / Foundry tooling instructions.** Retired in v2 — operators no longer hold local EVM keys unless they want to (`identity_type = evm` is supported but not required).
 - **v3+ hardening** (per-(user, service) KEK, wrap-and-rewrap, ZK-proven cap minting, threshold-MPC signer, per-operator K3) — tracked separately as v3+ issues. v2 ships the design described here.
 

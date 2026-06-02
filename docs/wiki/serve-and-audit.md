@@ -370,7 +370,7 @@ The TEE signs the audit extrinsic with the user's wallet key, and fees are debit
 
 ### Why Option A for v0.1
 
-The chosen option (A) minimizes Heima-side work and matches the hosted-AgentKeys business model. Options B and C remain open for future reconsideration as the product matures. See `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` Stage 9 for the full decision record.
+The chosen option (A) minimizes Heima-side work and matches the hosted-AgentKeys business model. Options B and C remain open for future reconsideration as the product matures. See `[docs/archived/development-stages-v2-2026-04.md](../archived/development-stages-v2-2026-04.md)` Stage 9 for the full decision record.
 
 ---
 
@@ -407,7 +407,7 @@ Full design: [issue #4](https://github.com/litentry/agentKeys/issues/4).
 
 ## 9. Deferred decisions
 
-From the Stage 9 notes in `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)`, three things need explicit design work before Pattern 4 implementation starts:
+From the Stage 9 notes in `[docs/archived/development-stages-v2-2026-04.md](../archived/development-stages-v2-2026-04.md)`, three things need explicit design work before Pattern 4 implementation starts:
 
 ### 9.1 Cross-pattern mixing: `--sync-audit` opt-out
 
@@ -453,7 +453,7 @@ Each has different durability-availability tradeoffs. **Decision deferred** unti
 
 - ⏳ **Rate limit ([issue #4](https://github.com/litentry/agentKeys/issues/4))** — must land in v0 mock backend as well as v0.1 TEE, prerequisite for Pattern 4
 - ⏳ **Pattern 4 ([issue #5](https://github.com/litentry/agentKeys/issues/5))** — TEE-side paymaster integration, decoupled serve/audit code path, failure handling strategy (deferred decisions above)
-- ⏳ **Stage 9 design decisions** captured in `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` as a holding pen until v0.1 migration work begins
+- ⏳ **Stage 9 design decisions** captured in `[docs/archived/development-stages-v2-2026-04.md](../archived/development-stages-v2-2026-04.md)` as a holding pen until v0.1 migration work begins
 
 ### v0.2+ (future)
 
@@ -491,7 +491,7 @@ The ~50ms target assumes Heima TEE is co-located with the daemon's network reach
 - `[docs/spec/1-step-analysis.md](../spec/1-step-analysis.md)` — auth layer design, `pallet-bitacross` pattern for TEE-held wallet keys
 - `[docs/spec/heima-cli-exploration.md](../spec/heima-cli-exploration.md)` — audit-as-extrinsic design (line 85), latency acknowledgement (line 116)
 - `[docs/spec/heima-open-questions.md](../spec/heima-open-questions.md)` — open questions for Kai including paymaster feasibility
-- `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` — Stage 9 design decisions for Pattern 4, Option A fee funding, rate limit rationale
+- `[docs/archived/development-stages-v2-2026-04.md](../archived/development-stages-v2-2026-04.md)` — Stage 9 design decisions for Pattern 4, Option A fee funding, rate limit rationale
 - `[wiki/key-security.md](./key-security.md)` — companion doc on the broader security architecture
 
 ### Source
