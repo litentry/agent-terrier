@@ -74,21 +74,7 @@ contract AgentKeysV1Test is Test {
 
     // ─── SidecarRegistry: first-master bootstrap ─────────────────────────
     function test_RegisterFirstMasterDevice_BootstrapsOperator() public {
-        uint8 fullRoles =
-            registry.ROLE_CAP_MINT() | registry.ROLE_RECOVERY() | registry.ROLE_SCOPE_MGMT();
-
-        vm.prank(master);
-        registry.registerFirstMasterDevice(
-            deviceKeyHashMaster,
-            operatorOmni,
-            actorOmniMaster,
-            k11CredId,
-            k11RpIdHash,
-            k11PubX,
-            k11PubY,
-            hex"cafe",
-            fullRoles
-        );
+        _registerFirstMaster();
         assertEq(registry.operatorMasterWallet(operatorOmni), master);
         assertEq(uint256(registry.recoveryThreshold(operatorOmni)), 1);
         SidecarRegistry.DeviceEntry memory entry = registry.getDevice(deviceKeyHashMaster);
@@ -100,12 +86,10 @@ contract AgentKeysV1Test is Test {
     }
 
     function test_RegisterFirstMaster_RejectsDuplicateBootstrap() public {
-        vm.prank(master);
-        registry.registerFirstMasterDevice(
-            deviceKeyHashMaster, operatorOmni, actorOmniMaster, k11CredId, k11RpIdHash, k11PubX, k11PubY, "", 7
-        );
+        _registerFirstMaster();
         // Second bootstrap with a different device hash → rejected because
-        // operatorMasterWallet is now set.
+        // operatorMasterWallet is now set (checked before the K11 verify, so no
+        // mock needed here).
         vm.prank(master);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -120,9 +104,109 @@ contract AgentKeysV1Test is Test {
             k11RpIdHash,
             k11PubX,
             k11PubY,
-            "",
-            7
+            7,
+            _bogusAssertion(bytes32(0))
         );
+    }
+
+    /// @notice Issue #165: the bootstrap is no longer unauthenticated. Without a
+    ///         valid K11 self-attestation the call reverts — closing the
+    ///         first-call-wins front-run's enabler.
+    function test_RegisterFirstMaster_RejectsBogusSelfAttestation() public {
+        // No mock → the real K11Verifier runs against a bogus self-attestation and
+        // reverts (challenge/P-256 mismatch).
+        vm.prank(master);
+        vm.expectRevert();
+        registry.registerFirstMasterDevice(
+            deviceKeyHashMaster,
+            operatorOmni,
+            actorOmniMaster,
+            k11CredId,
+            k11RpIdHash,
+            k11PubX,
+            k11PubY,
+            7,
+            _bogusAssertion(bytes32(0))
+        );
+        assertEq(registry.operatorMasterWallet(operatorOmni), address(0));
+    }
+
+    /// @notice Issue #165: a captured self-attestation is non-transferable to a
+    ///         different sender. The challenge binds msg.sender, so a front-runner
+    ///         replaying the victim's assertion with their own sender is rejected,
+    ///         while the legitimate operator still bootstraps.
+    function test_RegisterFirstMaster_RejectsFrontRunWithDifferentSender() public {
+        uint8 roles = 7;
+        SidecarRegistry.K11Assertion memory att = _bogusAssertion(bytes32(0));
+        // The verifier accepts ONLY the challenge that binds `master` as the sender.
+        bytes32 victimChallenge = keccak256(
+            abi.encode(
+                registry.OP_REGISTER_1ST_MASTER(),
+                operatorOmni,
+                actorOmniMaster,
+                deviceKeyHashMaster,
+                k11PubX,
+                k11PubY,
+                roles,
+                master,
+                block.chainid,
+                address(registry)
+            )
+        );
+        vm.mockCall(
+            address(k11),
+            abi.encodeWithSelector(
+                K11Verifier.verifyAssertion.selector,
+                victimChallenge,
+                k11RpIdHash,
+                att.authenticatorData,
+                att.clientDataJSON,
+                att.challengeLocation,
+                att.r,
+                att.s,
+                k11PubX,
+                k11PubY
+            ),
+            abi.encode(true)
+        );
+        vm.mockCall(
+            address(k11),
+            abi.encodeWithSelector(K11Verifier.readSignCount.selector),
+            abi.encode(uint32(0))
+        );
+
+        // Attacker front-runs with the victim's omni/pubkey/assertion but their own
+        // sender → contract recomputes the challenge with msg.sender = attacker →
+        // no mock match → real verifier → revert. Victim's omni stays unclaimed.
+        vm.prank(attacker);
+        vm.expectRevert();
+        registry.registerFirstMasterDevice(
+            deviceKeyHashMaster,
+            operatorOmni,
+            actorOmniMaster,
+            k11CredId,
+            k11RpIdHash,
+            k11PubX,
+            k11PubY,
+            roles,
+            att
+        );
+        assertEq(registry.operatorMasterWallet(operatorOmni), address(0));
+
+        // The legitimate operator bootstraps — its challenge matches the mock.
+        vm.prank(master);
+        registry.registerFirstMasterDevice(
+            deviceKeyHashMaster,
+            operatorOmni,
+            actorOmniMaster,
+            k11CredId,
+            k11RpIdHash,
+            k11PubX,
+            k11PubY,
+            roles,
+            att
+        );
+        assertEq(registry.operatorMasterWallet(operatorOmni), master);
     }
 
     // ─── SidecarRegistry: 2nd master device requires K11 ────────────────
@@ -441,6 +525,20 @@ contract AgentKeysV1Test is Test {
     function _registerFirstMaster() internal {
         uint8 fullRoles =
             registry.ROLE_CAP_MINT() | registry.ROLE_RECOVERY() | registry.ROLE_SCOPE_MGMT();
+        // Real P-256 verification is covered by K11Verifier.t.sol / P256Verifier.t.sol;
+        // here we mock the verifier so registry liveness tests don't need a real
+        // self-attestation. Mocks are cleared after bootstrap so later assertions
+        // (e.g. RejectsInvalidK11) exercise the real verifier.
+        vm.mockCall(
+            address(k11),
+            abi.encodeWithSelector(K11Verifier.verifyAssertion.selector),
+            abi.encode(true)
+        );
+        vm.mockCall(
+            address(k11),
+            abi.encodeWithSelector(K11Verifier.readSignCount.selector),
+            abi.encode(uint32(0))
+        );
         vm.prank(master);
         registry.registerFirstMasterDevice(
             deviceKeyHashMaster,
@@ -450,9 +548,10 @@ contract AgentKeysV1Test is Test {
             k11RpIdHash,
             k11PubX,
             k11PubY,
-            "",
-            fullRoles
+            fullRoles,
+            _bogusAssertion(bytes32(0))
         );
+        vm.clearMockedCalls();
     }
 
     /// @dev Bogus assertion for SidecarRegistry — fails challenge or P-256
