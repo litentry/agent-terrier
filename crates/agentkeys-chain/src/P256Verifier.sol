@@ -5,11 +5,14 @@ pragma solidity ^0.8.20;
 /// @notice Verifies WebAuthn / FIDO2 authenticator (K11) assertions on chain
 ///         until Heima ships an EIP-7212 / RIP-7212 P-256 precompile.
 ///
-/// @dev    Heima is at London EVM level (verified 2026-05-19: mixHash=null,
-///         withdrawalsRoot=null, blobGasUsed=null) — no native P-256
-///         precompile at 0x100 or 0x0b. This contract performs the verify
+/// @dev    Heima executes at Cancun EVM level (verified on-chain 2026-06-02 per
+///         #168 — PUSH0 + TSTORE/TLOAD run; the earlier "London" call introspected
+///         block-header format, which signals the consensus layer, not opcode
+///         capability) — and has no native P-256 precompile at 0x100 (RIP-7212)
+///         or 0x0b. This contract performs the verify
 ///         in pure Solidity using Jacobian coordinates + Shamir's trick
-///         double-scalar multiplication. Roughly ~700k gas per verify;
+///         double-scalar multiplication. ~707k gas per verify (measured on
+///         Heima mainnet 2026-06-02);
 ///         acceptable because K11 mutations are master-only and rare
 ///         (scope grant/revoke, multi-master pairing, recovery). Per-call
 ///         hot paths (broker cap-mint, worker cap-verify) never invoke this.

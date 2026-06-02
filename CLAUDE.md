@@ -257,7 +257,7 @@ Determine the real opcode level any time by *executing* a probe on a dev chain (
 
 ## Deployed contract registry
 
-Live v2 stage-1 contract addresses on each chain are kept in [`docs/spec/deployed-contracts.md`](docs/spec/deployed-contracts.md). The same addresses are also written to `scripts/operator-workstation.env` (via `env_set` in `scripts/heima-bring-up.sh` step 6) for shell-script consumption — those env-file entries are the operational source of truth and `deployed-contracts.md` is the human-readable canonical record (deployer, deploy date, block, explorer links, ABI summary).
+Live contract addresses on each chain (Heima mainnet v2 set, the ERC-4337 master infra #164, historical v1) are kept in [`docs/contracts.md`](docs/contracts.md) — the single canonical registry, indexed from `arch.md` §5. (The old `docs/spec/deployed-contracts.md` is now a redirect to it.) The same addresses are also written to `scripts/operator-workstation.env` (via `env_set` in `scripts/heima-bring-up.sh` step 6) for shell-script consumption — those env-file entries are the operational source of truth and `docs/contracts.md` is the human-readable canonical record (deployer, deploy date, block, explorer links, ABI summary).
 
 Verify all contracts are live + functional any time:
 

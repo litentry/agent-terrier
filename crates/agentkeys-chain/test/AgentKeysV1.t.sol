@@ -67,7 +67,7 @@ contract AgentKeysV1Test is Test {
         p256 = new P256Verifier();
         k11 = new K11Verifier(address(p256));
         registry = new SidecarRegistry(address(k11));
-        scope = new AgentKeysScope(address(registry), address(k11));
+        scope = new AgentKeysScope(address(registry));
         epoch = new K3EpochCounter(address(this));
         audit = new CredentialAudit(address(registry));
     }
@@ -323,29 +323,44 @@ contract AgentKeysV1Test is Test {
         registry.revokeMasterDevice(deviceKeyHashMaster, bogus);
     }
 
-    // ─── AgentKeysScope: rejects without K11 ─────────────────────────────
-    function test_SetScope_RejectsAttacker() public {
+    // ─── AgentKeysScope (#164 E3: account-authorized, K11 retired) ───────
+    function test_SetScope_RejectsNonMaster() public {
         _registerFirstMaster();
         bytes32[] memory services = new bytes32[](0);
-        AgentKeysScope.K11Assertion memory bogus = _bogusScopeAssertion(deviceKeyHashMaster);
         vm.prank(attacker);
         vm.expectRevert(
             abi.encodeWithSelector(AgentKeysScope.NotAuthorized.selector, attacker, master)
         );
-        scope.setScopeWithWebauthn(
-            operatorOmni, actorOmniAgentA, services, false, 0, 0, 0, 0, bogus
-        );
+        scope.setScope(operatorOmni, actorOmniAgentA, services, false, 0, 0, 0, 0);
     }
 
-    function test_SetScope_RejectsInvalidK11() public {
+    /// @notice #164 E3: scope writes are authorized by `msg.sender == master
+    ///         account` (the passkey check happened upstream in the account's
+    ///         validateUserOp). The master sets + revokes scope directly.
+    function test_SetScope_MasterSucceedsAndRevokes() public {
         _registerFirstMaster();
-        bytes32[] memory services = new bytes32[](0);
-        AgentKeysScope.K11Assertion memory bogus = _bogusScopeAssertion(deviceKeyHashMaster);
+        bytes32 svc = keccak256("memory");
+        bytes32[] memory services = new bytes32[](1);
+        services[0] = svc;
+
         vm.prank(master);
-        vm.expectRevert();
-        scope.setScopeWithWebauthn(
-            operatorOmni, actorOmniAgentA, services, false, 0, 0, 0, 0, bogus
+        scope.setScope(operatorOmni, actorOmniAgentA, services, false, 100, 1000, 10000, 86400);
+        assertTrue(scope.isServiceInScope(operatorOmni, actorOmniAgentA, svc));
+
+        vm.prank(master);
+        scope.revokeScope(operatorOmni, actorOmniAgentA);
+        assertFalse(scope.isServiceInScope(operatorOmni, actorOmniAgentA, svc));
+    }
+
+    function test_RevokeScope_RejectsWhenUnset() public {
+        _registerFirstMaster();
+        vm.prank(master);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AgentKeysScope.ScopeNotSet.selector, operatorOmni, actorOmniAgentA
+            )
         );
+        scope.revokeScope(operatorOmni, actorOmniAgentA);
     }
 
     // ─── K3EpochCounter (unchanged from PR #87) ──────────────────────────
@@ -575,22 +590,4 @@ contract AgentKeysV1Test is Test {
         });
     }
 
-    function _bogusScopeAssertion(bytes32 attestingDevice)
-        internal
-        pure
-        returns (AgentKeysScope.K11Assertion memory)
-    {
-        bytes memory authData = new bytes(37);
-        bytes memory cdj = bytes(
-            '{"type":"webauthn.get","challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","origin":"https://localhost"}'
-        );
-        return AgentKeysScope.K11Assertion({
-            attestingDeviceKeyHash: attestingDevice,
-            authenticatorData: authData,
-            clientDataJSON: cdj,
-            challengeLocation: 36,
-            r: 1,
-            s: 1
-        });
-    }
 }
