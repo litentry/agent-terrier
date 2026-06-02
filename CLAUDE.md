@@ -3,8 +3,8 @@
 ## Architecture
 Rust monorepo with Cargo workspace. See `docs/arch.md` for component inventory.
 See `docs/spec/credential-backend-interface.md` for the CredentialBackend trait contract (15 methods).
-See `docs/spec/plans/milestones-roadmap.md` for the M1–M7 milestone roadmap (replaces the archived v1/v2 staged plan).
-See `docs/spec/plans/execution-plan.md` for the orchestration runbook (ralph, team, ultraqa).
+See `docs/plan/milestones-roadmap.md` for the M1–M7 milestone roadmap (replaces the archived v1/v2 staged plan).
+See `docs/plan/execution-plan.md` for the orchestration runbook (ralph, team, ultraqa).
 Do not read folder `docs/archived`
 
 ## Docs layout (lean)
@@ -18,7 +18,7 @@ Do not read folder `docs/archived`
 **User-facing instructions** — every behavior/caveat a user would notice (e.g. `agentkeys wire` taking over the runtime's `hooks:` block) goes in [`docs/user-manual.md`](docs/user-manual.md), the single home for user-aware instructions.
 
 ## Architecture-as-source-of-truth policy
-[`docs/arch.md`](docs/arch.md) is the **single source of truth** for component inventory, key inventory (K1–K11), trust boundaries, identity model (HDKD actor tree), and per-actor binding ceremonies. **After editing any architectural doc** (broker plans, signer-protocol, demo doc, runbooks, plan files in `docs/spec/plans/`, heima-gaps), re-open `arch.md` and verify it still matches; if it diverges, update arch.md in the same change. If the per-doc detail outgrows arch.md, link from arch.md outward — never duplicate. The wiki page at [`docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md) is a focused operator reference for the agent role; it defers to arch.md.
+[`docs/arch.md`](docs/arch.md) is the **single source of truth** for component inventory, key inventory (K1–K11), trust boundaries, identity model (HDKD actor tree), and per-actor binding ceremonies. **After editing any architectural doc** (broker plans, signer-protocol, demo doc, runbooks, plan files in `docs/plan/`, heima-gaps), re-open `arch.md` and verify it still matches; if it diverges, update arch.md in the same change. If the per-doc detail outgrows arch.md, link from arch.md outward — never duplicate. The wiki page at [`docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](docs/wiki/agent-role-and-usage-hdkd-per-agent-omni.md) is a focused operator reference for the agent role; it defers to arch.md.
 
 ## `/create-pr` policy
 When the `/create-pr` skill is invoked from a Claude Code worktree at `.claude/worktrees/<name>`, the worktree is a *git worktree* under the main repo — `jj` cannot colocate there (`jj git init --colocate` fails with "Cannot create a colocated jj repo inside a Git worktree"). Use this hybrid workflow so the jj-only rule is preserved everywhere it can be:
@@ -76,7 +76,7 @@ If a hardcoded value is genuinely temporary — e.g. you're sketching a fix and 
 Hardcoded values that go unrecorded compound: each new operator adds defaults baked into a different layer, the runbook drifts from reality, and the project becomes un-deployable to anyone but the original author. The audit log is the cure — it forces an explicit decision instead of an accumulating series of "I'll fix it later"s.
 
 ## Plan-completion policy
-When the user references a plan (e.g. `docs/spec/plans/issue-XX-*.md`), **complete every numbered step in the plan's implementation-order table — not a self-selected subset**. If you cannot complete a step (interactive flow needs human, scope explosion, prerequisites missing), say so up front before starting work and get explicit approval to defer. Never silently drop steps and ship a partial plan as "done."
+When the user references a plan (e.g. `docs/plan/issue-XX-*.md`), **complete every numbered step in the plan's implementation-order table — not a self-selected subset**. If you cannot complete a step (interactive flow needs human, scope explosion, prerequisites missing), say so up front before starting work and get explicit approval to defer. Never silently drop steps and ship a partial plan as "done."
 
 The end-of-PR summary is mandatory and has two sections in this exact order:
 
@@ -211,7 +211,7 @@ The agent-side wire demo (`agentkeys wire hermes` inside the aiosandbox) MUST ex
 
 On every session start:
 1. `jj log --limit 10 && cat harness/progress.json && bash harness/init.sh $(jq -r .current_stage harness/progress.json)`
-2. Read the milestone scope for the current milestone in `docs/spec/plans/milestones-roadmap.md` (the v1/v2 stage framing is archived at `docs/archived/development-stages-v2-2026-04.md`)
+2. Read the milestone scope for the current milestone in `docs/plan/milestones-roadmap.md` (the v1/v2 stage framing is archived at `docs/archived/development-stages-v2-2026-04.md`)
 3. Pick the HIGHEST-PRIORITY incomplete deliverable from `harness/features.json`
 4. Implement ONE deliverable
 5. Run tests: `cargo test -p <crate>` for the affected crate
@@ -257,7 +257,7 @@ Determine the real opcode level any time by *executing* a probe on a dev chain (
 
 ## Deployed contract registry
 
-Live contract addresses on each chain (Heima mainnet v2 set, the ERC-4337 master infra #164, historical v1) are kept in [`docs/contracts.md`](docs/contracts.md) — the single canonical registry, indexed from `arch.md` §5. (The old `docs/spec/deployed-contracts.md` is now a redirect to it.) The same addresses are also written to `scripts/operator-workstation.env` (via `env_set` in `scripts/heima-bring-up.sh` step 6) for shell-script consumption — those env-file entries are the operational source of truth and `docs/contracts.md` is the human-readable canonical record (deployer, deploy date, block, explorer links, ABI summary).
+Live contract addresses on each chain (Heima mainnet v2 set, the ERC-4337 master infra #164, historical v1) plus the prod/test EVM deployer wallets are kept in [`docs/spec/deployed-contracts.md`](docs/spec/deployed-contracts.md) — the single canonical registry, indexed from `arch.md` §5. (`docs/contracts.md` is now a redirect to it.) The same addresses are also written to `scripts/operator-workstation.env` (via `env_set` in `scripts/heima-bring-up.sh` step 6) for shell-script consumption — those env-file entries are the operational source of truth and `docs/spec/deployed-contracts.md` is the human-readable canonical record (deployer, deploy date, block, explorer links, ABI summary).
 
 Verify all contracts are live + functional any time:
 

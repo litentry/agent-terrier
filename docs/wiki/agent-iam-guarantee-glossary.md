@@ -90,7 +90,7 @@ Rationale (anchored in [`agent-iam-strategy.md`](../../docs/agent-iam-strategy.m
 | Phase | Track | Deliverable |
 |---|---|---|
 | **Phase 1** (this PR + immediate follow-up) | MCP server | Extend [`crates/agentkeys-mcp-server`](../../crates/agentkeys-mcp-server) with the 7 Phase-1 tools (`identity.whoami`, `memory.get`, `memory.put`, `permission.check`, `cap.mint`, `cap.revoke`, `audit.append`) per strategy doc §4.2 |
-| **Phase 1** | `agentkeys wire <runtime>` CLI + Hermes adapter | Single command that drops AgentKeys hook scripts into `~/.hermes/agent-hooks/` and appends the `hooks:` block to `~/.hermes/config.yaml` — three-act demo (Permissioned Memory / Deterministic Denial / Online Revocation per strategy doc §4.3). Full plan: [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](../spec/plans/phase-1-fresh-user-wire-onboarding.md) |
+| **Phase 1** | `agentkeys wire <runtime>` CLI + Hermes adapter | Single command that drops AgentKeys hook scripts into `~/.hermes/agent-hooks/` and appends the `hooks:` block to `~/.hermes/config.yaml` — three-act demo (Permissioned Memory / Deterministic Denial / Online Revocation per strategy doc §4.3). Full plan: [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](../plan/phase-1-fresh-user-wire-onboarding.md) |
 | **Phase 3** ([#133](https://github.com/litentry/agentKeys/issues/133)) | Hooks production | Reference hook configs for Hermes + Claude Code + Codex + OpenClaw; `agentkeys hook check` CLI helper; cap-mint pre-warming for sub-50ms p99 |
 | **Phase 3b** (after #133) | Proxy fallback | OpenAI-compatible proxy endpoint for hooks-less hosts (xiaozhi-server, vendor mobile chatbots). Lower priority. |
 | **Phase 4** | Standards | Propose MCP extensions for IAM-grade auth headers; OAuth-for-Agents engagement. Per strategy doc §5 Phase 5. |
@@ -98,7 +98,7 @@ Rationale (anchored in [`agent-iam-strategy.md`](../../docs/agent-iam-strategy.m
 ## 6. Cross-references
 
 - [`docs/agent-iam-strategy.md`](../../docs/agent-iam-strategy.md) — strategic anchor: Authority Host vs Task Host (§2.1), zero-orchestration hard line (§2.4), MCP as integration surface (§2.3), Phase 1 MCP scope (§4.2), three-act demo (§4.3), 12-month roadmap (§5)
-- [`docs/spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md`](../spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) — execution plan for Phase 1
-- [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](../spec/plans/phase-1-fresh-user-wire-onboarding.md) — Phase 1 plan that ships the `agentkeys wire` CLI delivering these hooks (the previous operator-facing summary at `docs/demo-aiosandbox-runbook.md` §6 was archived 2026-05-28)
+- [`docs/plan/issue-103-aiosandbox-hermes-esp32-demo.md`](../plan/issue-103-aiosandbox-hermes-esp32-demo.md) — execution plan for Phase 1
+- [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](../plan/phase-1-fresh-user-wire-onboarding.md) — Phase 1 plan that ships the `agentkeys wire` CLI delivering these hooks (the previous operator-facing summary at `docs/demo-aiosandbox-runbook.md` §6 was archived 2026-05-28)
 - [Issue #133](https://github.com/litentry/agentKeys/issues/133) — Phase 3 LLM-host hook integration; the canonical track for the hooks deliverable
 - [Issue #103](https://github.com/litentry/agentKeys/issues/103) — Phase 1 demo umbrella

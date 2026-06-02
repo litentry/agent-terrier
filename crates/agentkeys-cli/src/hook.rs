@@ -10,7 +10,7 @@
 //!
 //! Wire protocol (Hermes / Claude-Code compatible — see
 //! `docs/wiki/agent-iam-guarantee-glossary.md` §3 + the plan
-//! `docs/spec/plans/phase-1-fresh-user-wire-onboarding.md` §5.2):
+//! `docs/plan/phase-1-fresh-user-wire-onboarding.md` §5.2):
 //!
 //! ```text
 //! stdin:  {hook_event_name, tool_name, tool_input, session_id, cwd, extra}

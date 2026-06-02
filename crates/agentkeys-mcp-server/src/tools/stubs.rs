@@ -10,7 +10,7 @@
 use crate::errors::McpError;
 
 pub const SPEC_URL: &str =
-    "https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/milestones-roadmap.md#m4";
+    "https://github.com/litentry/agentKeys/blob/main/docs/plan/milestones-roadmap.md#m4";
 
 pub fn not_implemented_v1() -> McpError {
     McpError::NotImplementedV1 {

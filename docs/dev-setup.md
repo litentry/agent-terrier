@@ -249,11 +249,11 @@ The stage-done script is the authoritative evaluator — never self-grade. If it
 
 Providers add, remove, and reorder signup steps. When a deterministic scraper breaks, diagnose with the `/agentkeys-workflow-collection` skill — it drives a real Chrome session via `chrome-devtools-mcp` to produce a diff-ready transcript. That transcript is what feeds back into the scraper's pattern library.
 
-The longer-term plan (Stage 5b → folded into M2 vendor wedge) is to detect drift automatically from telemetry and hand MCP-capable callers a fallback that their own LLM can drive — details in [`spec/plans/milestones-roadmap.md`](./spec/plans/milestones-roadmap.md) § M2.
+The longer-term plan (Stage 5b → folded into M2 vendor wedge) is to detect drift automatically from telemetry and hand MCP-capable callers a fallback that their own LLM can drive — details in [`plan/milestones-roadmap.md`](./plan/milestones-roadmap.md) § M2.
 
 ## 10. Further reading
 
-- [`spec/plans/milestones-roadmap.md`](./spec/plans/milestones-roadmap.md) — M1-M7 roadmap (replaces the archived v1/v2 stage plan)
+- [`plan/milestones-roadmap.md`](./plan/milestones-roadmap.md) — M1-M7 roadmap (replaces the archived v1/v2 stage plan)
 - [`cloud-bootstrap.md`](./cloud-bootstrap.md) — one-time AWS infra (DNS, SES, S3, IAM, OIDC federation)
 - [`../scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) — idempotent broker bring-up + supervise + rotate
 - [`spec/credential-backend-interface.md`](./spec/credential-backend-interface.md) — 15-method trait contract

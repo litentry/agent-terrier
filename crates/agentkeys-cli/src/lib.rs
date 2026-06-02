@@ -118,7 +118,7 @@ impl CredentialBackendKind {
 /// Which envelope format the S3 backend writes. Defaults to `V1` to keep
 /// existing #87 deployments working unchanged; operators opt in to `V2`
 /// once they've finished the dual-tag + bucket-policy migration steps in
-/// `docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md`.
+/// `docs/plan/v2-issues/issue-v2-stage-1-foundation.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeVersionFlag {
     V1,
