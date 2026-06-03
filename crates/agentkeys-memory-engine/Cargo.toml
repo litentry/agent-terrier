@@ -1,0 +1,7 @@
+[package]
+name = "agentkeys-memory-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Pluggable memory-engine seam: MemoryEngine trait + built-in passthrough/lexical engines + registry (plan docs/plan/agentkeys-memory-design.md §6a). Pure std — no external deps, so changing it never cascades to the broker/workers."
+
+[dependencies]
