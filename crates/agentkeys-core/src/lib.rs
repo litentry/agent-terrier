@@ -8,6 +8,7 @@ pub mod device_crypto;
 pub mod init_flow;
 pub mod memory_engine;
 pub mod mock_client;
+pub mod openviking;
 pub mod otp;
 pub mod payment;
 pub mod s3_backend;

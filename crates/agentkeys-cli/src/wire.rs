@@ -44,6 +44,11 @@ pub struct WireRequest {
     pub memory_engine: String,
     /// Optional cap on how many memory lines the engine injects (None = all).
     pub memory_max_lines: Option<u32>,
+    /// OpenViking server URL baked as `OPENVIKING_ENDPOINT` into the hook when
+    /// `memory_engine == "openviking"` (plan §6a). None → not emitted.
+    pub memory_engine_endpoint: Option<String>,
+    /// Optional OpenViking API key baked as `OPENVIKING_API_KEY`.
+    pub memory_engine_api_key: Option<String>,
     /// When true, report drift without writing (drift-check / dry-run).
     pub check_only: bool,
 }
@@ -140,6 +145,20 @@ impl HermesAdapter {
             }
             if let Some(max_lines) = req.memory_max_lines {
                 exports.push_str(&format!("export AGENTKEYS_MEMORY_MAX_LINES={max_lines}\n"));
+            }
+            if req.memory_engine.eq_ignore_ascii_case("openviking") {
+                if let Some(endpoint) = req.memory_engine_endpoint.as_deref() {
+                    exports.push_str(&format!(
+                        "export OPENVIKING_ENDPOINT={}\n",
+                        shell_quote(endpoint)
+                    ));
+                }
+                if let Some(api_key) = req.memory_engine_api_key.as_deref() {
+                    exports.push_str(&format!(
+                        "export OPENVIKING_API_KEY={}\n",
+                        shell_quote(api_key)
+                    ));
+                }
             }
             exports
         };
@@ -534,6 +553,8 @@ mod tests {
             session_bearer: String::new(),
             memory_engine: "passthrough".into(),
             memory_max_lines: None,
+            memory_engine_endpoint: None,
+            memory_engine_api_key: None,
             check_only: false,
         }
     }
@@ -602,6 +623,27 @@ mod tests {
         let engine_at = prellm.find("AGENTKEYS_MEMORY_ENGINE").unwrap();
         let exec_at = prellm.find("hook memory-inject").unwrap();
         assert!(engine_at < exec_at);
+    }
+
+    #[test]
+    fn scripts_bake_openviking_endpoint_only_for_openviking() {
+        let a = HermesAdapter;
+        // endpoint set but engine is lexical → OPENVIKING_* must NOT be emitted
+        let mut lexical = req();
+        lexical.memory_engine = "lexical".into();
+        lexical.memory_engine_endpoint = Some("http://127.0.0.1:1933".into());
+        assert!(!a.scripts("/usr/local/bin/agentkeys", &lexical)[2]
+            .1
+            .contains("OPENVIKING_ENDPOINT"));
+        // engine openviking + endpoint → baked
+        let mut ov = req();
+        ov.memory_engine = "openviking".into();
+        ov.memory_engine_endpoint = Some("http://127.0.0.1:1933".into());
+        ov.memory_engine_api_key = Some("sk-ov-123".into());
+        let prellm = &a.scripts("/usr/local/bin/agentkeys", &ov)[2].1;
+        assert!(prellm.contains("export AGENTKEYS_MEMORY_ENGINE='openviking'"));
+        assert!(prellm.contains("export OPENVIKING_ENDPOINT='http://127.0.0.1:1933'"));
+        assert!(prellm.contains("export OPENVIKING_API_KEY='sk-ov-123'"));
     }
 
     #[test]
