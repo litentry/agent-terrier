@@ -25,7 +25,7 @@
 
 use serde::Deserialize;
 
-use crate::memory_engine::{MemoryLine, SelectionBudget};
+use agentkeys_memory_engine::{MemoryLine, SelectionBudget};
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1933";
 

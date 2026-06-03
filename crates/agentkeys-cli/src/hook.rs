@@ -243,7 +243,7 @@ pub async fn memory_inject(
     // the engine — caller-side, no LLM in the gate — selects which lines to
     // inject within a budget. Default `passthrough` + unbounded budget injects
     // the whole namespace unchanged.
-    let budget = agentkeys_core::memory_engine::SelectionBudget::from_env();
+    let budget = agentkeys_memory_engine::SelectionBudget::from_env();
     let engine_name = std::env::var("AGENTKEYS_MEMORY_ENGINE").unwrap_or_default();
 
     // OpenViking (plan §6a, model B) is query-driven, so it only engages when a
@@ -254,7 +254,7 @@ pub async fn memory_inject(
     // unconfigured / has no query / errors, we fall back to a deterministic
     // engine, so OpenViking is never load-bearing for availability.
     let openviking = if engine_name.trim().eq_ignore_ascii_case("openviking") {
-        agentkeys_core::openviking::OpenVikingClient::from_env()
+        agentkeys_memory_openviking::OpenVikingClient::from_env()
     } else {
         None
     };
@@ -263,12 +263,11 @@ pub async fn memory_inject(
     } else {
         None
     };
-    let fallback_engine: Box<dyn agentkeys_core::memory_engine::MemoryEngine> =
-        if openviking.is_some() {
-            Box::new(agentkeys_core::memory_engine::LexicalEngine)
-        } else {
-            agentkeys_core::memory_engine::engine_from_env()
-        };
+    let fallback_engine: Box<dyn agentkeys_memory_engine::MemoryEngine> = if openviking.is_some() {
+        Box::new(agentkeys_memory_engine::LexicalEngine)
+    } else {
+        agentkeys_memory_engine::engine_from_env()
+    };
 
     let mut chunks = Vec::new();
     for ns in namespaces
@@ -284,8 +283,8 @@ pub async fn memory_inject(
                 if let Some(text) = extract_memory_content(&result) {
                     let selected = match (&openviking, &query) {
                         (Some(ov), Some(q)) => {
-                            let lines = agentkeys_core::memory_engine::MemoryLine::from_blob(&text);
-                            match agentkeys_core::openviking::rank_gate_bounded(
+                            let lines = agentkeys_memory_engine::MemoryLine::from_blob(&text);
+                            match agentkeys_memory_openviking::rank_gate_bounded(
                                 ov, q, &lines, &budget,
                             )
                             .await
@@ -295,7 +294,7 @@ pub async fn memory_inject(
                                     .map(|l| l.text)
                                     .collect::<Vec<_>>()
                                     .join("\n"),
-                                None => agentkeys_core::memory_engine::select_blob(
+                                None => agentkeys_memory_engine::select_blob(
                                     fallback_engine.as_ref(),
                                     query.as_deref(),
                                     &text,
@@ -303,7 +302,7 @@ pub async fn memory_inject(
                                 ),
                             }
                         }
-                        _ => agentkeys_core::memory_engine::select_blob(
+                        _ => agentkeys_memory_engine::select_blob(
                             fallback_engine.as_ref(),
                             query.as_deref(),
                             &text,

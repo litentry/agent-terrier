@@ -86,6 +86,8 @@ name = "agentkeys-cli"
 version = "0.1.0"
 dependencies = [
  "agentkeys-core",
+ "agentkeys-memory-engine",
+ "agentkeys-memory-openviking",
  "agentkeys-mock-server",
  "agentkeys-provisioner",
  "agentkeys-types",
@@ -228,6 +230,23 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "agentkeys-memory-engine"
+version = "0.1.0"
+
+[[package]]
+name = "agentkeys-memory-openviking"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-memory-engine",
+ "axum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
