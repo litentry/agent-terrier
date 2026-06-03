@@ -358,6 +358,16 @@ enum Commands {
         /// Cap how many memory lines the engine injects (omit = unbounded).
         #[arg(long, env = "AGENTKEYS_MEMORY_MAX_LINES")]
         memory_max_lines: Option<u32>,
+
+        /// OpenViking server URL, baked into the hook as OPENVIKING_ENDPOINT
+        /// when --memory-engine openviking (plan §6a). e.g. http://127.0.0.1:1933
+        #[arg(long, env = "OPENVIKING_ENDPOINT")]
+        openviking_endpoint: Option<String>,
+
+        /// Optional OpenViking API key, baked as OPENVIKING_API_KEY when
+        /// --memory-engine openviking.
+        #[arg(long, env = "OPENVIKING_API_KEY")]
+        openviking_api_key: Option<String>,
     },
 
     #[command(
@@ -1099,6 +1109,8 @@ async fn main() {
             session_bearer,
             memory_engine,
             memory_max_lines,
+            openviking_endpoint,
+            openviking_api_key,
         } => agentkeys_cli::wire::cmd_wire(
             runtime,
             agentkeys_cli::wire::WireRequest {
@@ -1111,6 +1123,8 @@ async fn main() {
                 session_bearer: session_bearer.clone(),
                 memory_engine: memory_engine.clone(),
                 memory_max_lines: *memory_max_lines,
+                memory_engine_endpoint: openviking_endpoint.clone(),
+                memory_engine_api_key: openviking_api_key.clone(),
                 check_only: *check_only,
             },
         ),

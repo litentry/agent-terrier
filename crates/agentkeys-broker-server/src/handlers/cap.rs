@@ -383,23 +383,47 @@ async fn eth_call(
         "params": [{"to": to, "data": data}, "latest"],
         "id": 1,
     });
-    let resp = http
-        .post(rpc_url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| CapError::ChainRpc(format!("eth_call POST failed: {e}")))?;
-    let v: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| CapError::ChainRpc(format!("eth_call JSON parse: {e}")))?;
-    if let Some(err) = v.get("error") {
-        return Err(CapError::ChainRpc(format!("RPC error: {err}")));
+    // The Heima public RPC intermittently 500s on eth_call (~12% per call,
+    // HTML error page → non-JSON). Retry transient failures (transport / HTTP
+    // 5xx / non-JSON) with backoff so a flaky RPC doesn't randomly fail
+    // cap-mint; do NOT retry a valid JSON-RPC `error` (a real revert result).
+    const ATTEMPTS: u32 = 4;
+    let mut last = String::new();
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            let ms = 150u64 * (1u64 << (attempt - 1)); // 150, 300, 600 ms
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        let resp = match http.post(rpc_url).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("eth_call POST failed: {e}");
+                continue;
+            }
+        };
+        if resp.status().is_server_error() {
+            last = format!("eth_call HTTP {}", resp.status());
+            continue;
+        }
+        let v: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                last = format!("eth_call JSON parse: {e}");
+                continue;
+            }
+        };
+        if let Some(err) = v.get("error") {
+            return Err(CapError::ChainRpc(format!("RPC error: {err}")));
+        }
+        return v
+            .get("result")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| CapError::ChainRpc("eth_call missing 'result'".into()));
     }
-    v.get("result")
-        .and_then(|r| r.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| CapError::ChainRpc("eth_call missing 'result'".into()))
+    Err(CapError::ChainRpc(format!(
+        "eth_call failed after {ATTEMPTS} attempts: {last}"
+    )))
 }
 
 pub(crate) async fn call_get_device(
