@@ -1,0 +1,16 @@
+[package]
+name = "agentkeys-memory-openviking"
+version = "0.1.0"
+edition = "2021"
+description = "OpenViking memory-engine adapter (gate-bounded ranking behind the AgentKeys gate) — plan §6a. A leaf provider crate: depends only on agentkeys-memory-engine, so it never pulls the broker/workers into a rebuild."
+
+[dependencies]
+agentkeys-memory-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
