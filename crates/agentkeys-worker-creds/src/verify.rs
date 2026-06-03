@@ -259,23 +259,49 @@ async fn eth_call(
         "params": [{"to": to, "data": data}, "latest"],
         "id": 1,
     });
-    let resp = http
-        .post(rpc_url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| VerifyError::ChainRpc(format!("eth_call POST: {e}")))?;
-    let v: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| VerifyError::ChainRpc(format!("eth_call json: {e}")))?;
-    if let Some(err) = v.get("error") {
-        return Err(VerifyError::ChainRpc(format!("rpc error: {err}")));
+    // The Heima public RPC intermittently 500s on eth_call (~12% per call,
+    // returning an HTML error page → non-JSON body). A single attempt makes
+    // every chain-verify a coin-flip and the worker returns a 502. Retry
+    // transient failures (transport error / HTTP 5xx / non-JSON body) with
+    // backoff; do NOT retry a valid JSON-RPC `error` (a real revert/bad-arg
+    // result, which is deterministic).
+    const ATTEMPTS: u32 = 4;
+    let mut last = String::new();
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            let ms = 150u64 * (1u64 << (attempt - 1)); // 150, 300, 600 ms
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        let resp = match http.post(rpc_url).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("eth_call POST: {e}");
+                continue;
+            }
+        };
+        if resp.status().is_server_error() {
+            last = format!("eth_call HTTP {}", resp.status());
+            continue;
+        }
+        let v: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                last = format!("eth_call json: {e}");
+                continue;
+            }
+        };
+        if let Some(err) = v.get("error") {
+            return Err(VerifyError::ChainRpc(format!("rpc error: {err}")));
+        }
+        return v
+            .get("result")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| VerifyError::ChainRpc("missing 'result'".into()));
     }
-    v.get("result")
-        .and_then(|r| r.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| VerifyError::ChainRpc("missing 'result'".into()))
+    Err(VerifyError::ChainRpc(format!(
+        "eth_call failed after {ATTEMPTS} attempts: {last}"
+    )))
 }
 
 fn parse_device_entry(raw: &str) -> Result<OnChainDevice, VerifyError> {

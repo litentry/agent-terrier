@@ -24,7 +24,7 @@
 //!   - `audit`         → PostToolUse audit append (never blocks)
 //!   - `memory-inject` → pre_llm_call context injection (never blocks)
 
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -237,21 +237,38 @@ pub async fn memory_inject(
     actor: Option<String>,
     operator: Option<String>,
 ) -> Result<String> {
-    // NOTE: deliberately does NOT read stdin. memory-inject discards the host
-    // payload (we inject regardless), and reading stdin would block on
-    // read_to_string until EOF — which never arrives when the binary is invoked
-    // directly without a piped payload (e.g. the harness's 1.5 seed probe, or
-    // any `aiosandbox /v1/shell/exec` call that leaves stdin open). That stall
-    // silently froze the whole wire demo after step 1.4. Wired hook scripts
-    // pipe a payload (EOF arrives) so they were unaffected; direct calls were not.
     let client = HookClient::resolve(mcp_url, vendor_token, actor, operator);
 
     // Pluggable engine seam (plan §6a): the gate already authorized these bytes;
-    // the engine — caller-side, deterministic, no LLM — selects which lines to
+    // the engine — caller-side, no LLM in the gate — selects which lines to
     // inject within a budget. Default `passthrough` + unbounded budget injects
-    // the whole namespace unchanged. Passive injection carries no query (None).
-    let engine = agentkeys_core::memory_engine::engine_from_env();
+    // the whole namespace unchanged.
     let budget = agentkeys_core::memory_engine::SelectionBudget::from_env();
+    let engine_name = std::env::var("AGENTKEYS_MEMORY_ENGINE").unwrap_or_default();
+
+    // OpenViking (plan §6a, model B) is query-driven, so it only engages when a
+    // query is present. We read the current turn from the host payload ONLY in
+    // openviking mode, and ONLY when stdin is piped (the `is_terminal()` guard
+    // means a direct interactive call can never hang — the historical no-stdin
+    // rule for the default engines is preserved). When OpenViking is
+    // unconfigured / has no query / errors, we fall back to a deterministic
+    // engine, so OpenViking is never load-bearing for availability.
+    let openviking = if engine_name.trim().eq_ignore_ascii_case("openviking") {
+        agentkeys_core::openviking::OpenVikingClient::from_env()
+    } else {
+        None
+    };
+    let query = if openviking.is_some() {
+        read_turn_query()
+    } else {
+        None
+    };
+    let fallback_engine: Box<dyn agentkeys_core::memory_engine::MemoryEngine> =
+        if openviking.is_some() {
+            Box::new(agentkeys_core::memory_engine::LexicalEngine)
+        } else {
+            agentkeys_core::memory_engine::engine_from_env()
+        };
 
     let mut chunks = Vec::new();
     for ns in namespaces
@@ -265,12 +282,34 @@ pub async fn memory_inject(
         {
             Ok(result) => {
                 if let Some(text) = extract_memory_content(&result) {
-                    let selected = agentkeys_core::memory_engine::select_blob(
-                        engine.as_ref(),
-                        None,
-                        &text,
-                        &budget,
-                    );
+                    let selected = match (&openviking, &query) {
+                        (Some(ov), Some(q)) => {
+                            let lines = agentkeys_core::memory_engine::MemoryLine::from_blob(&text);
+                            match agentkeys_core::openviking::rank_gate_bounded(
+                                ov, q, &lines, &budget,
+                            )
+                            .await
+                            {
+                                Some(ranked) => ranked
+                                    .into_iter()
+                                    .map(|l| l.text)
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                                None => agentkeys_core::memory_engine::select_blob(
+                                    fallback_engine.as_ref(),
+                                    query.as_deref(),
+                                    &text,
+                                    &budget,
+                                ),
+                            }
+                        }
+                        _ => agentkeys_core::memory_engine::select_blob(
+                            fallback_engine.as_ref(),
+                            query.as_deref(),
+                            &text,
+                            &budget,
+                        ),
+                    };
                     if !selected.is_empty() {
                         chunks.push(format!("## Memory: {ns}\n{selected}"));
                     }
@@ -329,6 +368,50 @@ pub fn extract_memory_content(result: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Read the current user turn from the host hook payload (stdin) for use as the
+/// OpenViking search query. Guarded by `is_terminal()` so a direct interactive
+/// call can never block on an open stdin — this only runs in openviking mode;
+/// the default engines never read stdin. Returns None when stdin is a TTY,
+/// empty, or carries no recognizable query field.
+fn read_turn_query() -> Option<String> {
+    if std::io::stdin().is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(&buf).ok()?;
+    extract_query(&payload)
+}
+
+/// Pull the user's latest message from a host hook payload. Hermes'
+/// `pre_llm_call` payload shape is not pinned, so we try several common field
+/// names and a `messages: [{role, content}]` array (last user turn). Pure
+/// helper, unit-tested.
+pub fn extract_query(payload: &Value) -> Option<String> {
+    for key in ["query", "prompt", "input", "user_message", "text"] {
+        if let Some(s) = payload.get(key).and_then(|v| v.as_str()) {
+            if !s.trim().is_empty() {
+                return Some(s.trim().to_string());
+            }
+        }
+    }
+    if let Some(messages) = payload.get("messages").and_then(|v| v.as_array()) {
+        for message in messages.iter().rev() {
+            let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "user" || role.is_empty() {
+                if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+                    if !content.trim().is_empty() {
+                        return Some(content.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +465,31 @@ mod tests {
     #[test]
     fn extract_memory_content_missing_field_is_none() {
         assert_eq!(extract_memory_content(&json!({"ok": true})), None);
+    }
+
+    #[test]
+    fn extract_query_tries_common_fields_and_messages() {
+        assert_eq!(
+            extract_query(&json!({"query": "where did I go"})).as_deref(),
+            Some("where did I go")
+        );
+        assert_eq!(
+            extract_query(&json!({"prompt": "recall the trip"})).as_deref(),
+            Some("recall the trip")
+        );
+        assert_eq!(
+            extract_query(&json!({"messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "what about Chengdu?"}
+            ]}))
+            .as_deref(),
+            Some("what about Chengdu?")
+        );
+        // a bare pre_llm_call payload (the demo's default) carries no query
+        assert_eq!(
+            extract_query(&json!({"hook_event_name": "pre_llm_call"})),
+            None
+        );
     }
 }
