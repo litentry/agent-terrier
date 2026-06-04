@@ -15,7 +15,8 @@ the signer for three things only:
 1. The 0x-address derived from a given `omni_account` (so the daemon knows
    what to `link` against the broker).
 2. An EIP-191 ECDSA signature over an arbitrary message produced under that
-   same derived key (so the daemon can complete the broker's SIWE round-trip).
+   same derived key (so the daemon can complete the **managed-wallet
+   attestation** — the broker's SIWE round-trip; see `arch.md` §5).
 3. An EIP-712 typed-data signature over a structured data object (so agents
    can sign Permit / Permit2 / DEX orders / EIP-4337 UserOps / Heima extrinsic
    envelopes under their per-actor K4 wallet, with the signer parsing the
