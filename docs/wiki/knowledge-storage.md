@@ -1,6 +1,3 @@
-# Knowledge Base Storage Options — Deferred Decision Matrix
-
-
 **Status:** deferred (2026-04-19)
 **Scope:** which backend(s) AgentKeys will support as the agent's "memory" / knowledge-base storage layer once we commit.
 **Why deferred:** no single choice fits all users; the best backend depends on developer/non-developer split and jurisdictional constraints (China vs non-China). Decision is held open so we don't prematurely commit infrastructure before user segments are clearer.

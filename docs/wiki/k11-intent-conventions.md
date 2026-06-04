@@ -1,5 +1,3 @@
-# K11 intent conventions — typed contract, uniform Touch ID prompts
-
 Every K11 WebAuthn ceremony in AgentKeys renders an operator-readable confirmation block on its localhost page. The contract is **typed** — scripts pass a single JSON payload describing the operation, and the shared Rust renderer in [`crates/agentkeys-cli/src/k11_intent.rs`](../../crates/agentkeys-cli/src/k11_intent.rs) produces the canonical headline + per-field rows. No more ad-hoc `--intent-field "Label=Value"` strings duplicated across 7 bash scripts; no more drift between "Chain ID" vs "Chain"; no more raw role bitfields ("Role bitfield=3" replaced by "Permissions: CAP_MINT | RECOVERY").
 
 See [`wiki/k11-webauthn-intent-rendering.md`](./k11-webauthn-intent-rendering.md) for the underlying rendering mechanism (the `K11IntentContext` type + `assert_webauthn_*_with_intent` entry points). This page covers the *content convention* — the typed enum, JSON wire shape, formatting rules, and per-operation conformance.

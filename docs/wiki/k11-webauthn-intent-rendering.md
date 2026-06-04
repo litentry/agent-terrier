@@ -1,5 +1,3 @@
-# K11 WebAuthn — operator-facing intent rendering
-
 The K11 WebAuthn ceremony at AgentKeys binds master-only mutations (scope grant/revoke, device add/revoke, K10 rotation, recovery) to a hardware-attested Touch ID / Face ID / Windows Hello assertion. Without operator-readable text on the confirmation page, the operator sees only the 32-byte challenge hex and has to trust the daemon that the bytes mean what it claims — exactly the same "agent signed `0xdead…beef` without me knowing what it was" failure mode that arch.md §15.3a calls out for typed-data signs.
 
 This page is the design rationale + integration recipe for the K11 confirmation page's intent block. See [`crates/agentkeys-cli/src/k11_webauthn.rs`](../../crates/agentkeys-cli/src/k11_webauthn.rs) for the implementation.

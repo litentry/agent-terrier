@@ -1,5 +1,3 @@
-# Adding a new audit op_kind
-
 This is the operator-facing detailed guide for extending the AgentKeys audit envelope with a new op_kind. Defers to [`docs/arch.md`](../arch.md) §15.3a (canonical schema + 8 non-break invariants) and §15.3b (the 5-step ritual). This page walks through a worked example + the complete PR checklist.
 
 ## The current op design (one-paragraph recap)

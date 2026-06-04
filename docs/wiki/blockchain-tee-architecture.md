@@ -1,5 +1,3 @@
-# Blockchain + TEE Architecture: how AgentKeys splits state and computation
-
 AgentKeys uses two infrastructure layers — a Heima parachain and a TEE (Trusted Execution Environment) worker — with a clear separation of responsibilities. This page explains what each layer does, how they interact, and why the split looks the way it does. Two concrete flows (credential retrieval and pairing) are worked through end-to-end. A comparison with the pure-TEE-backend alternative (Heima's existing dexs-backend model) is included at the end.
 
 Companion docs:

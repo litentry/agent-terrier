@@ -1,5 +1,3 @@
-# Bearer Token (session token): what it is, how it works, how to protect it
-
 > **Terminology (2026-04-14 decision, tracked in [#10](https://github.com/litentry/agentKeys/issues/10)):** AgentKeys canonical term is **"bearer token"**. "Session token" is accepted as a synonym in older docs. The underlying format is a JWT (verified against the Heima source `tee-worker/omni-executor/core/src/auth/auth_token.rs`), but we deliberately avoid the term "JWT" in user-facing docs because it carries "short-lived, disposable" connotations that misrepresent the 30-day TTL. Heima-side code and terminology are out of scope for this rename — only AgentKeys-side docs/code use "bearer token."
 
 This page defines what the AgentKeys **bearer token** is, based on verification against the Heima source code.

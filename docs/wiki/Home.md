@@ -1,5 +1,3 @@
-# AgentKeys — Wiki
-
 > **This wiki is auto-generated from the `docs/wiki/` folder in the main repo.** Edit the source files there, not through the web UI — direct edits will be overwritten on the next push to `main`. The canonical source is [`docs/wiki/` in `litentry/agentKeys`](https://github.com/litentry/agentKeys/tree/main/docs/wiki).
 
 AgentKeys is a credential custody service: a TEE-backed vault that issues long-lived bearer tokens for per-agent credential access, with on-chain audit. **We mint ephemeral credentials; daemons use them to call remote services directly.** Credential broker, not operation proxy.
