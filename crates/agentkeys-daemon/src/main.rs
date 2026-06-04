@@ -202,6 +202,25 @@ struct Args {
     #[arg(long, default_value_t = 84532)]
     init_chain_id: u64,
 
+    /// W3 real-memory: the memory worker base URL (e.g. https://memory.litentry.org).
+    /// Unset ⇒ master-memory plant/list use the in-memory fallback (dev/no-infra).
+    #[arg(long, env = "AGENTKEYS_MEMORY_URL")]
+    memory_url: Option<String>,
+
+    /// W3 real-memory: per-actor memory IAM role ARN for the STS relay (sourced from
+    /// operator-workstation.env). Required alongside --memory-url for the real chain.
+    #[arg(long, env = "MEMORY_ROLE_ARN")]
+    memory_role_arn: Option<String>,
+
+    /// W3 real-memory: AWS region for the STS relay.
+    #[arg(long, env = "REGION", default_value = "us-east-1")]
+    region: String,
+
+    /// W3 real-memory: the on-chain-registered master device key hash (the cap-mint
+    /// device binding). Must match the device registered via the W3 bootstrap.
+    #[arg(long, env = "AGENTKEYS_MASTER_DEVICE_KEY_HASH")]
+    master_device_key_hash: Option<String>,
+
     /// How long to wait for the operator to complete email-link click
     /// or OAuth2 callback before failing init.
     #[arg(long, default_value_t = 300)]
@@ -1082,6 +1101,10 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.broker_url.clone(),
         args.signer_url.clone(),
         args.init_chain_id,
+        args.memory_url.clone(),
+        args.memory_role_arn.clone(),
+        args.region.clone(),
+        args.master_device_key_hash.clone(),
     )
     .with_context(|| {
         format!(
