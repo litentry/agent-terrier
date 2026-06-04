@@ -12,6 +12,9 @@ agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
 agentkeys-cli = { path = "../agentkeys-cli" } # K11 webauthn helpers (companion mode)
 agentkeys-mcp = { path = "../agentkeys-mcp" }
+# W3 real-memory: shared STS relay primitive (fetch_via_broker_default_ttl) for
+# the master-memory cap-mint -> mint-oidc-jwt -> AssumeRoleWithWebIdentity chain.
+agentkeys-provisioner = { path = "../agentkeys-provisioner" }
 hex = "0.4"
 sha2 = "0.10" # ui-bridge master-memory content-hash dedup (§2 plant)
 tokio = { workspace = true }
