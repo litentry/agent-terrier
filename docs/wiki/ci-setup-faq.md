@@ -1,5 +1,3 @@
-# CI setup — FAQ
-
 Troubleshooting + edge cases for [`docs/ci-setup.md`](https://github.com/litentry/agentKeys/blob/main/docs/ci-setup.md) + [`.github/workflows/harness-ci.yml`](https://github.com/litentry/agentKeys/blob/main/.github/workflows/harness-ci.yml).
 
 ## Q. The `harness-e2e` job always shows "skipped" — what gives?

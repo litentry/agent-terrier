@@ -1,6 +1,3 @@
-# Tag-Based Access Control — PrincipalTags from JWT Claims for Per-User Isolation
-
-
 **Status:** pattern (2026-04-19)
 **Scope:** how AgentKeys enforces per-user isolation on shared cloud resources (one S3 bucket, one GCS shared drive, one OSS bucket) when many users' data coexists — **without** needing per-user IAM roles or per-user buckets.
 

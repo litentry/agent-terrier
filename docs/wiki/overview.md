@@ -1,5 +1,3 @@
-# AgentKeys Wiki — Index and Reading Order
-
 The tree. Every wiki page in this repo, grouped by concern, with a one-line description so you can pick where to start.
 
 ---

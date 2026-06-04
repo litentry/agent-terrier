@@ -1,5 +1,3 @@
-# Email System — Architecture, Backends, and Usage Isolation
-
 **Status:** design consolidation (2026-04-18)
 **Scope:** how AgentKeys handles email across Stage 5 (provisioning demo) and v0.1 (production)
 **Companion specs:**
