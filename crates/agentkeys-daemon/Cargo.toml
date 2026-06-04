@@ -25,6 +25,12 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json"] }
+# Parse `Retry-After` HTTP-date form (RFC 7231) for the §10.2 pairing poll
+# backoff; tiny, zero-dep, the same parser hyper uses internally.
+httpdate = "1"
+# Advisory file lock to serialize same-device `--request-pairing` (no unsafe;
+# flock on unix / LockFileEx on windows; released when the File is dropped).
+fs2 = "0.4"
 # v2 stage-1 localhost proxy (US-008). axum + tower + hyper power the
 # `agentkeys-daemon proxy` subcommand (arch.md §6 + §15.1). The proxy
 # binds to a unix socket (and optionally TCP 127.0.0.1:9090 when
