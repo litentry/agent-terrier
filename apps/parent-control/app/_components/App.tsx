@@ -10,6 +10,7 @@ import {
   txHash,
 } from '@/lib/demoData';
 import { NAMESPACES } from '@/lib/constants';
+import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
 import { CeremonyRunner, OnboardingScreen } from './ceremony';
 import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
 import { LogoPage } from './logos';
@@ -50,6 +51,8 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
 
   const [onboarded, setOnboarded] = useState(false);
+  const [identity, setIdentity] = useState<{ email?: string; omni?: string } | null>(null);
+  const [maskEm, setMaskEm] = useState(true);
   const [memories, setMemories] = useState<PreservedMemory[]>([]);
   const [planting, setPlanting] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
@@ -58,8 +61,24 @@ export function App() {
   const [memoryView, setMemoryView] = useState<PreservedMemory | null>(null);
 
   useEffect(() => {
-    try { setOnboarded(localStorage.getItem('ak_onboarded') === '1'); } catch {}
-  }, []);
+    let cancelled = false;
+    (async () => {
+      // Real "logged in" = the daemon holds a verified session (W1). Fall back to
+      // the local flag only for the offline/demo path (no daemon to ask).
+      const r = await client.getOnboardingState();
+      let on = false;
+      if (r.ok && r.data.identity === 'verified') {
+        on = true;
+        if (!cancelled) setIdentity({ email: r.data.email, omni: r.data.omni });
+      } else {
+        try { on = localStorage.getItem('ak_onboarded') === '1'; } catch {}
+      }
+      if (!cancelled) setOnboarded(on);
+    })();
+    return () => { cancelled = true; };
+  }, [client]);
+
+  useEffect(() => { setMaskEm(getMaskEmail()); }, []);
 
   // §2: list the master's real memory once onboarded. EmptyBackend returns
   // disconnected → stays empty → the memory page renders its empty state.
@@ -121,8 +140,10 @@ export function App() {
   // Log out: clear the local session flag and reset all in-memory view state so
   // the next login starts clean. Returns to the §9 onboarding (email) screen.
   const logout = () => {
+    void client.logout(); // W1: clear the daemon-held session (the real re-test reset)
     try { localStorage.removeItem('ak_onboarded'); } catch {}
     setOnboarded(false);
+    setIdentity(null);
     setActors([]);
     setEvents([]);
     setMemories([]);
@@ -254,6 +275,19 @@ export function App() {
     );
   }
 
+  // Privacy-preserving identity for the header: a public omni hash is truncated
+  // (full value in the title/hover), and we prefer the on-chain actor omni
+  // (`master.omni`) once it exists, falling back to the email-identity omni held
+  // after login. No secret (J1/K10/K11) is ever in the browser to show.
+  const shortOmni = (o?: string) => {
+    if (!o) return '';
+    const h = o.startsWith('0x') ? o.slice(2) : o;
+    return h.length <= 12 ? o : `0x${h.slice(0, 6)}…${h.slice(-4)}`;
+  };
+  const whoOmni = master?.omni ?? identity?.omni;
+  // Email shown masked when the privacy toggle is on (persisted in localStorage).
+  const whoLabel = master?.label ?? (identity?.email ? maskEmail(identity.email, maskEm) : undefined) ?? 'O_master';
+
   return (
     <div className="app">
       <header className="app-head">
@@ -274,7 +308,12 @@ export function App() {
           >
             ◉{pairingRequests.length > 0 && <span className="badge">{pairingRequests.length}</span>}
           </button>
-          <span className="who"><span className="who-text">{master ? `${master.label} · ${master.omni}` : 'O_master'}</span></span>
+          <button
+            className="btn sm"
+            onClick={() => { const v = !maskEm; setMaskEm(v); setMaskEmail(v); }}
+            title={maskEm ? 'Email masked (for screen-sharing) — click to show' : 'Email shown — click to mask'}
+          >{maskEm ? '🕶' : '👁'}</button>
+          <span className="who" title={whoOmni ?? ''}><span className="who-text">{whoOmni ? `${whoLabel} · ${shortOmni(whoOmni)}` : whoLabel}</span></span>
           <button className="btn sm" onClick={logout} title="Clear this session and return to login">log out</button>
         </div>
       </header>
