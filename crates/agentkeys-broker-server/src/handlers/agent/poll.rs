@@ -83,6 +83,15 @@ pub async fn pairing_poll(
                     "unknown pairing request or device mismatch".into(),
                 ));
             }
+            PairingPoll::RetrieveExpired => {
+                // Claimed, but the post-claim retrieve window elapsed — the row no
+                // longer mints J1_agent (caps replay of the static poll tuple).
+                // The agent re-requests with --request-pairing if it genuinely
+                // missed the window.
+                return Err(BrokerError::Unauthorized(
+                    "pairing retrieval window elapsed — re-request with --request-pairing".into(),
+                ));
+            }
         };
 
     // 3. Mint J1_agent fresh (HDKD omni + lineage). The agent authenticates with
