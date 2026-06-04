@@ -108,6 +108,100 @@ pub async fn init_via_email_link(
     Ok(result)
 }
 
+// ── Non-blocking stages for the web onboarding (W1 of wire-real-paths.md) ──
+//
+// The web host can't run the blocking `init_via_email_link` (it waits up to
+// `poll_timeout` for the magic-link click). The browser instead drives the flow
+// in stages over HTTP: `email_request` → poll `auth_status_once` until verified
+// → `finish_email_session`. These reuse the same private broker helpers as the
+// CLI path, so there is one source of truth for the broker contract.
+
+/// Single-shot auth status (no internal polling loop — the web host polls by
+/// repeating the call). Mirrors the states `poll_auth_status` loops over.
+#[derive(Debug, Clone)]
+pub enum AuthStatus {
+    /// Magic link not yet clicked.
+    Pending,
+    /// Verified — carries the identity-omni session JWT + omni account.
+    Verified {
+        session_jwt: String,
+        identity_omni: String,
+    },
+    /// Broker reported `expired` / `rejected`.
+    Failed(String),
+}
+
+/// Stage 1: request a magic link. Returns the broker `request_id` immediately
+/// (the operator then clicks the link in their inbox).
+pub async fn email_request(broker_url: &str, email: &str) -> FlowResult<String> {
+    let http = reqwest::Client::new();
+    let broker = broker_url.trim_end_matches('/');
+    let req = post_json(
+        &http,
+        &format!("{broker}/v1/auth/email/request"),
+        json!({ "email": email }),
+    )
+    .await?;
+    string_field(&req, "/v1/auth/email/request", "request_id")
+}
+
+/// Stage 2: one status check (the web host calls this on a timer until it is no
+/// longer `Pending`). `provider` is `"email"` (or `"oauth2"`).
+pub async fn auth_status_once(
+    broker_url: &str,
+    provider: &str,
+    request_id: &str,
+) -> FlowResult<AuthStatus> {
+    let http = reqwest::Client::new();
+    let broker = broker_url.trim_end_matches('/');
+    let url = format!("{broker}/v1/auth/{provider}/status/{request_id}");
+    let body: serde_json::Value = http
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| InitFlowError::Transport(format!("GET {url}: {e}")))?
+        .json()
+        .await
+        .map_err(|e| InitFlowError::Transport(format!("parse JSON: {e}")))?;
+    match body["status"].as_str() {
+        Some("verified") => Ok(AuthStatus::Verified {
+            session_jwt: string_field(&body, "/v1/auth/status", "session_jwt")?,
+            identity_omni: string_field(&body, "/v1/auth/status", "omni_account")?,
+        }),
+        Some("expired") | Some("rejected") => Ok(AuthStatus::Failed(
+            body["status"].as_str().unwrap_or("?").to_string(),
+        )),
+        _ => Ok(AuthStatus::Pending),
+    }
+}
+
+/// Stage 3: after the email identity is verified (`auth_status_once` returned
+/// `Verified`), derive the managed wallet, link it, run the SIWE round-trip, and
+/// return the EVM-omni `InitResult` (the J1 session). Thin `"email"` wrapper over
+/// the shared `finish_init`.
+pub async fn finish_email_session(
+    broker_url: &str,
+    signer_url: &str,
+    identity_session_jwt: &str,
+    identity_omni: &str,
+    chain_id: u64,
+    email: &str,
+) -> FlowResult<InitResult> {
+    let http = reqwest::Client::new();
+    let broker = broker_url.trim_end_matches('/');
+    finish_init(
+        &http,
+        broker,
+        signer_url,
+        identity_session_jwt,
+        identity_omni,
+        chain_id,
+        "email",
+        email,
+    )
+    .await
+}
+
 /// OAuth2/Google bootstrap. Returns `(authorization_url, request_id)` after
 /// `/v1/auth/oauth2/start`; the caller prints the URL and waits for the
 /// operator. Then call `complete_oauth2_google(...)` with the request_id.

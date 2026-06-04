@@ -44,7 +44,7 @@ export function MemoryPage({
       <PageHead
         crumb="memory · per-namespace · agentmemory-compatible"
         title={<><span className="muted serif">/</span> memory</>}
-        desc="Your portable memory namespace — the spine agents read from and write to. It follows you across every vendor device. Stored encrypted; agents see only what their scope grants."
+        desc="Your portable memory namespace — the spine agents read from and write to. It follows you across every vendor device. Stored encrypted; agents see only the namespaces their scope grants (memory:<ns>), and the configured engine ranks what's injected per query — never widening past the gate."
       />
 
       {!hasMemory && !planting && (
@@ -92,7 +92,7 @@ export function MemoryPage({
             <span className="lbl">✓ planted</span>
             <span>
               Prepared memory is live. The <strong>plant</strong> action is hidden — re-planting is a server-side no-op
-              (content-hash match). Agents read this per their granted scope.
+              (content-hash match). Agents read this per their granted <code>memory:&lt;ns&gt;</code> scope, query-ranked by the configured engine.
             </span>
           </div>
 

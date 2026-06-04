@@ -64,6 +64,10 @@ export interface RevokeIntent {
 }
 
 export interface MasterMemoryEntry {
+  /** Namespace (e.g. `travel`). An agent's cap/scope to read this namespace is
+   *  the namespace-qualified signed service `memory:<ns>` — build it with
+   *  `memoryService(ns)` (lib/constants.ts); a bare `memory` fails cap-mint
+   *  (arch.md §896, #177). The configured engine ranks injected lines per query. */
   ns: string;
   key: string;
   title: string;
@@ -79,6 +83,26 @@ export interface PlantResult {
   planted: number;
   skipped: number;
   total: number;
+}
+
+export interface EmailVerifyStart {
+  requestId: string;
+}
+
+export interface EmailVerifyStatus {
+  /** "pending" | "verified" | "failed:<reason>" */
+  status: string;
+  /** Set when verified: the operator's identity omni (shown after login). */
+  omniAccount?: string;
+}
+
+export interface OnboardingState {
+  /** "verified" once the magic link is clicked + held by the daemon; else "none". */
+  identity: string;
+  email?: string;
+  omni?: string;
+  /** "enrolled" if a K11 passkey was registered this session, else "none". */
+  k11: string;
 }
 
 export interface AgentKeysClient {
@@ -102,7 +126,17 @@ export interface AgentKeysClient {
   enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>>;
   enrollK11Finish(input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>>;
 
-  // §2 — master memory (real list + idempotent plant; server dedups by content-hash)
+  // §1 onboarding — real email magic-link verify (broker-backed, W1). The
+  // browser starts it, then polls until the operator clicks the link.
+  startEmailVerify(email: string): Promise<Result<EmailVerifyStart>>;
+  pollEmailVerify(requestId: string): Promise<Result<EmailVerifyStatus>>;
+  // Real "logged in" state, held by the daemon (replaces the ak_onboarded flag).
+  getOnboardingState(): Promise<Result<OnboardingState>>;
+  logout(): Promise<Result<void>>;
+
+  // §2 — master memory (real list + idempotent plant; server dedups by content-hash).
+  // Per namespace; an agent reads a namespace only with a `memory:<ns>` scope
+  // (memoryService(ns)), and the configured engine ranks what's injected (#177).
   listMasterMemory(): Promise<Result<MasterMemoryEntry[]>>;
   plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>>;
 }
