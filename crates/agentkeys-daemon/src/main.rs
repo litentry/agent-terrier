@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::init_flow;
@@ -227,10 +227,17 @@ struct Args {
     retrieve_pairing: bool,
 
     /// The `request_id` returned by `--request-pairing`, for `--retrieve-pairing`.
-    /// If omitted, read from the pairing state file
-    /// (`~/.agentkeys/pairing-request.json`).
+    /// If omitted, read from the per-device pairing state file
+    /// (`~/.agentkeys/pairing-request-<device_pubkey>.json`).
     #[arg(long)]
     request_id: Option<String>,
+
+    /// Replace an existing UNEXPIRED `--request-pairing` request for this device.
+    /// Without it, re-running `--request-pairing` while a prior request is still
+    /// claimable refuses (so it can't silently destroy the only retrieval handle,
+    /// since request_id is off stdout).
+    #[arg(long)]
+    force: bool,
 
     /// Path to the agent's K10 device-key file for the pairing flow. Defaults
     /// to the same path as `agentkeys agent device-session`
@@ -510,20 +517,79 @@ const PAIRING_POLL_INTERVAL_SECONDS: u64 = 3;
 /// Default state file written by `--request-pairing` and read back by
 /// `--retrieve-pairing` (so the two one-shot invocations don't have to thread
 /// `request_id` by hand; `--request-id` overrides). 0600.
-fn pairing_state_path() -> String {
+/// Per-DEVICE pairing state file (0600). Keyed by the K10 `device_pubkey` so two
+/// concurrent `--request-pairing` under one HOME with DISTINCT device keys never
+/// clobber each other's `request_id` retrieval handle (the state file is the
+/// default handle now that request_id is kept off stdout). `--request-pairing`
+/// writes it; `--retrieve-pairing` derives the SAME path from its own device key.
+fn pairing_state_path(device_pubkey: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    format!("{home}/.agentkeys/pairing-request.json")
+    format!("{home}/.agentkeys/pairing-request-{device_pubkey}.json")
+}
+
+/// Guard `--request-pairing` against silently clobbering an in-flight request for
+/// the SAME device. Refuses (Err) when `existing_state` holds an UNEXPIRED
+/// request and `force` is false — re-running would replace the only retrieval
+/// handle (request_id is off stdout), stranding a still-claimable pairing_code.
+/// Proceeds (Ok) when there is no prior state, it is expired/unparseable, or
+/// `--force` is set.
+fn pairing_request_guard(
+    existing_state: Option<&str>,
+    now_secs: i64,
+    force: bool,
+) -> anyhow::Result<()> {
+    if force {
+        return Ok(());
+    }
+    let Some(raw) = existing_state else {
+        return Ok(());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Ok(()); // unreadable prior state is not a valid handle to protect
+    };
+    let expires_at = v.get("expires_at").and_then(|x| x.as_i64()).unwrap_or(0);
+    if expires_at > now_secs {
+        anyhow::bail!(
+            "an unexpired §10.2 pairing request already exists for this device (expires in {}s) — \
+             retrieve it with --retrieve-pairing, wait for it to expire, or pass --force to replace it",
+            expires_at - now_secs
+        );
+    }
+    Ok(())
+}
+
+/// Acquire an advisory lock at `<path>.lock` so two CONCURRENT `--request-pairing`
+/// invocations serialize: the second is refused instead of racing key generation,
+/// the unexpired-request guard, the broker POST, or the state write. Releases when
+/// the returned File is dropped, so the caller holds it across the whole critical
+/// section (`--force` replaces under the same lock).
+fn acquire_pairing_lock(path: &str) -> anyhow::Result<std::fs::File> {
+    use fs2::FileExt;
+    let lock_path = format!("{path}.lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open pairing lock {lock_path}"))?;
+    f.try_lock_exclusive().map_err(|_| {
+        anyhow::anyhow!("another --request-pairing is in progress — retry once it finishes")
+    })?;
+    Ok(f)
 }
 
 /// `--request-pairing` (method A §10.2): generate (or reuse) the K10 device key
 /// in the sandbox, open an agent-INITIATED pairing request at the broker, and
-/// print `{request_id, pairing_code, …}` on stdout. The agent DISPLAYS
+/// print `{pairing_code, state_file, …}` on stdout. The agent DISPLAYS
 /// `pairing_code` for its owner to claim (the Matter/HomeKit model); the device
 /// key NEVER leaves this machine.
 ///
 /// Logs go to stderr; the JSON artifact is the ONLY thing on stdout, so the wire
-/// harness can capture it. `request_id` is the secret retrieval ticket for the
-/// follow-up `--retrieve-pairing`.
+/// harness can capture it. `request_id` — the secret retrieval ticket — is
+/// DELIBERATELY kept OFF stdout (it is half of the replayable broker-poll tuple
+/// `(request_id, device_pubkey, pop_sig)`); it is written only to the 0600
+/// `state_file`, which `--retrieve-pairing` reads by default and from which an
+/// explicit workflow can source it.
 async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     use agentkeys_core::device_crypto::DeviceKey;
 
@@ -531,6 +597,20 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
         anyhow::anyhow!("--broker-url (or AGENTKEYS_BROKER_URL) required for --request-pairing")
     })?;
     let base = broker_url.trim_end_matches('/').to_string();
+
+    // Serialize the ENTIRE --request-pairing flow (K10 load/generate → guard →
+    // broker POST → state write) under ONE HOME-scoped advisory lock, acquired
+    // BEFORE keygen. The per-device state path isn't known until after keygen, so
+    // a lock taken later can't stop two concurrent invocations from racing key
+    // generation (fresh HOME: both see no key, generate different keys, race the
+    // key-file write) or the state write. A second concurrent --request-pairing is
+    // refused; released when `_pairing_lock` drops (fn end / early `?`-error).
+    let _pairing_lock = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let lock_dir = format!("{home}/.agentkeys");
+        std::fs::create_dir_all(&lock_dir).ok();
+        acquire_pairing_lock(&format!("{lock_dir}/request-pairing"))?
+    };
 
     let key_file = args
         .device_key_file
@@ -545,8 +625,30 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     let device_key_hash = dk.device_key_hash().context("device_key_hash")?;
     let pop_sig = dk.pop_sig().context("pop_sig")?;
 
+    // Refuse to clobber an in-flight (unexpired) request for this device unless
+    // --force: request_id is off stdout, so a silent overwrite would strand a
+    // still-claimable pairing_code with no way to retrieve it. (Concurrency is
+    // already serialized by the HOME-scoped _pairing_lock above, held through
+    // this guard + the POST + the state write.)
+    let state_file = pairing_state_path(&device_pubkey);
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    pairing_request_guard(
+        std::fs::read_to_string(&state_file).ok().as_deref(),
+        now_secs,
+        args.force,
+    )?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
+        // Never follow redirects: the request/poll POST bodies carry the pairing
+        // credential (device_pubkey + pop_sig, and request_id for poll), and
+        // reqwest re-sends a cloneable body across 307/308 — a broker/proxy
+        // redirect would forward that bearer-minting tuple to another origin. A
+        // 3xx is therefore fatal (classify_poll suppresses the body).
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build http client")?;
     let resp = client
@@ -559,25 +661,39 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
         .await
         .context("POST /v1/agent/pairing/request")?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    // Cap the body (one-shot request, but a faulty broker/proxy shouldn't be able
+    // to make us buffer an unbounded response).
+    let text = read_capped_body(resp, MAX_POLL_BODY).await;
     if !status.is_success() {
-        anyhow::bail!("pairing request failed: HTTP {status}: {text}");
+        // Body is never trusted (a proxy/WAF could echo the request JSON incl.
+        // pop_sig) — same suppression contract as the poll path.
+        anyhow::bail!(
+            "pairing request failed: {}",
+            format_broker_error(status, &text)
+        );
     }
-    let body: serde_json::Value =
-        serde_json::from_str(&text).with_context(|| format!("parse request response: {text}"))?;
+    let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "unparseable request response (body suppressed; parse error at line {} col {})",
+            e.line(),
+            e.column()
+        )
+    })?;
     let request_id = body
         .get("request_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("request response missing request_id: {text}"))?;
+        .ok_or_else(|| anyhow::anyhow!("request response missing request_id (body suppressed)"))?;
     let pairing_code = body
         .get("pairing_code")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("request response missing pairing_code: {text}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("request response missing pairing_code (body suppressed)")
+        })?;
     let expires_at = body.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    // Persist the request state (0600) so `--retrieve-pairing` can resolve
-    // request_id without the caller threading it (--request-id overrides).
-    let state_file = pairing_state_path();
+    // Persist the request state (0600, per-device path computed + guarded above)
+    // so `--retrieve-pairing` can resolve request_id without the caller threading
+    // it (--request-id overrides).
     if let Some(parent) = std::path::Path::new(&state_file).parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -598,19 +714,19 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
         "agentkeys-daemon opened §10.2 pairing request — show this code to your owner to claim: {pairing_code}"
     );
 
-    // Machine artifact on STDOUT (logs are on stderr). The harness/owner reads
-    // pairing_code to claim, request_id to retrieve.
+    // Machine artifact on STDOUT (logs are on stderr). The owner reads
+    // pairing_code to claim; request_id is NOT here (it is half the replayable
+    // poll tuple) — it lives only in the 0600 state_file for --retrieve-pairing.
     println!(
         "{}",
-        serde_json::json!({
-            "request_id": request_id,
-            "pairing_code": pairing_code,
-            "agent_address": device_pubkey,
-            "device_key_hash": device_key_hash,
-            "expires_at": expires_at,
-            "state_file": state_file,
-            "key_file": key_file,
-        })
+        request_artifact(
+            pairing_code,
+            &device_pubkey,
+            &device_key_hash,
+            expires_at,
+            &state_file,
+            &key_file,
+        )
     );
     Ok(())
 }
@@ -631,11 +747,27 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
     })?;
     let base = broker_url.trim_end_matches('/').to_string();
 
-    // request_id: explicit flag wins; else read the state file from --request-pairing.
+    // Load the device key FIRST: its device_pubkey keys the per-device state file
+    // read below. Same key as --request-pairing (never regenerate — the broker
+    // bound the request to this exact device_pubkey, and poll re-proves it).
+    let key_file = args
+        .device_key_file
+        .clone()
+        .unwrap_or_else(|| "~/.agentkeys/agent-device.key".to_string());
+    let dk =
+        DeviceKey::load_or_generate(&key_file, false).context("load/generate K10 device key")?;
+    let device_pubkey = dk.address().to_string();
+    let device_key_hash = dk.device_key_hash().context("device_key_hash")?;
+    let pop_sig = dk.pop_sig().context("pop_sig")?;
+
+    // request_id: explicit flag wins; else read the per-device state file written
+    // by --request-pairing (derived from THIS device key, so it resolves to the
+    // file --request-pairing wrote for the same device — concurrent requests for
+    // other devices have their own files and can't be read by mistake).
     let request_id = match args.request_id.clone() {
         Some(id) => id,
         None => {
-            let state_file = pairing_state_path();
+            let state_file = pairing_state_path(&device_pubkey);
             let raw = std::fs::read_to_string(&state_file).with_context(|| {
                 format!("read pairing state file {state_file} (pass --request-id to override)")
             })?;
@@ -650,79 +782,116 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
         }
     };
 
-    let key_file = args
-        .device_key_file
-        .clone()
-        .unwrap_or_else(|| "~/.agentkeys/agent-device.key".to_string());
-    // Same key as --request-pairing (never regenerate — the broker bound the
-    // request to this exact device_pubkey, and poll re-proves possession of it).
-    let dk =
-        DeviceKey::load_or_generate(&key_file, false).context("load/generate K10 device key")?;
-    let device_pubkey = dk.address().to_string();
-    let device_key_hash = dk.device_key_hash().context("device_key_hash")?;
-    let pop_sig = dk.pop_sig().context("pop_sig")?;
-
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
+        // Never follow redirects: the request/poll POST bodies carry the pairing
+        // credential (device_pubkey + pop_sig, and request_id for poll), and
+        // reqwest re-sends a cloneable body across 307/308 — a broker/proxy
+        // redirect would forward that bearer-minting tuple to another origin. A
+        // 3xx is therefore fatal (classify_poll suppresses the body).
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build http client")?;
 
-    // Poll until claimed or the operator-set timeout elapses.
-    let deadline = SystemTime::now() + Duration::from_secs(args.init_poll_timeout_seconds);
+    // Poll until claimed or the operator deadline. classify_poll() (below,
+    // unit-tested) decides the failure class; here we drive retries. Two
+    // deadline guards (codex review #182): the loop checks the deadline at the
+    // TOP before sending (so we never make an extra poll after timeout), and
+    // each request is bounded by the remaining time (so a hung/slow poll can't
+    // overrun it). Instant = monotonic. `last_outcome` makes the give-up message
+    // reflect the CURRENT state (pending vs a transient error); read at the top
+    // on the first iteration, so it is never a dead assignment.
+    let deadline = Instant::now() + Duration::from_secs(args.init_poll_timeout_seconds);
+    let mut transient_attempts: u32 = 0;
+    let mut last_outcome: Option<String> = None;
     let body: serde_json::Value = loop {
-        let resp = client
-            .post(format!("{base}/v1/agent/pairing/poll"))
-            .json(&serde_json::json!({
-                "request_id": request_id,
-                "device_pubkey": device_pubkey,
-                "pop_sig": pop_sig,
-            }))
-            .send()
-            .await
-            .context("POST /v1/agent/pairing/poll")?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("pairing poll failed: HTTP {status}: {text}");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            match &last_outcome {
+                Some(reason) => anyhow::bail!(
+                    "pairing poll gave up after {}s — last error was transient: {reason}",
+                    args.init_poll_timeout_seconds
+                ),
+                None => anyhow::bail!(
+                    "pairing not claimed within {}s — the master has not run `agentkeys agent claim --pairing-code <code>` yet",
+                    args.init_poll_timeout_seconds
+                ),
+            }
         }
-        let body: serde_json::Value =
-            serde_json::from_str(&text).with_context(|| format!("parse poll response: {text}"))?;
-        let pstatus = body
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if pstatus == "claimed" {
-            break body;
+
+        // One poll, bounded by the remaining deadline so a hung/slow request
+        // (or the client's own timeout) can never overrun the operator timeout.
+        let poll = async {
+            let resp = client
+                .post(format!("{base}/v1/agent/pairing/poll"))
+                .json(&serde_json::json!({
+                    "request_id": request_id,
+                    "device_pubkey": device_pubkey,
+                    "pop_sig": pop_sig,
+                }))
+                .send()
+                .await?;
+            let status = resp.status();
+            // Read any server-directed Retry-After (429 AND 5xx load-shed, e.g.
+            // 503) from the header BEFORE consuming the body.
+            let retry_after = retry_after_for(&resp, SystemTime::now());
+            // Skip the body for retryable statuses (5xx/408/429) — classify_poll
+            // suppresses it anyway, and an overloaded/malicious broker must not be
+            // able to make every retry download a huge/slow body until the
+            // deadline. Success/fatal bodies are read but capped.
+            let text = read_poll_body(resp).await;
+            Ok::<_, reqwest::Error>((status, retry_after, text))
+        };
+
+        let (class, retry_after) = match tokio::time::timeout(remaining, poll).await {
+            Err(_elapsed) => (
+                PollClass::Transient("poll exceeded the remaining pairing deadline".to_string()),
+                None,
+            ),
+            Ok(Err(e)) => (PollClass::Transient(format!("send: {e}")), None),
+            Ok(Ok((status, retry_after, text))) => (classify_poll(status, &text), retry_after),
+        };
+
+        match class {
+            PollClass::Claimed(v) => break v,
+            PollClass::Fatal(reason) => anyhow::bail!(
+                "pairing poll rejected by broker ({reason}) — a stale pairing state file or \
+                 wrong --device-key-file will not resolve by waiting; re-run --request-pairing"
+            ),
+            PollClass::Pending => {
+                last_outcome = None;
+                transient_attempts = 0;
+                info!(
+                    target: "agentkeys.daemon.init",
+                    "§10.2 pairing request still pending — waiting for the master to claim…"
+                );
+                sleep_within_deadline(Duration::from_secs(PAIRING_POLL_INTERVAL_SECONDS), deadline)
+                    .await;
+            }
+            PollClass::Transient(reason) => {
+                transient_attempts += 1;
+                let wait = poll_retry_wait(retry_after, transient_attempts);
+                let wait_secs = wait.as_secs();
+                info!(
+                    target: "agentkeys.daemon.init",
+                    "§10.2 pairing poll transient (retry in ~{wait_secs}s): {reason}"
+                );
+                last_outcome = Some(reason);
+                sleep_within_deadline(wait, deadline).await;
+            }
         }
-        if SystemTime::now() >= deadline {
-            anyhow::bail!(
-                "pairing not claimed within {}s — the master has not run `agentkeys agent claim --pairing-code <code>` yet",
-                args.init_poll_timeout_seconds
-            );
-        }
-        info!(
-            target: "agentkeys.daemon.init",
-            "§10.2 pairing request still pending — waiting for the master to claim…"
-        );
-        tokio::time::sleep(Duration::from_secs(PAIRING_POLL_INTERVAL_SECONDS)).await;
     };
 
-    let session_jwt = body
-        .get("session_jwt")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("claimed poll response missing session_jwt: {body}"))?;
-    let child_omni = body
-        .get("child_omni")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let operator_omni = body
-        .get("operator_omni")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let derivation_path = body
-        .get("derivation_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    // Validate the claimed binding BEFORE logging, deriving session_id, or
+    // emitting any field on stdout — these public fields are attacker-
+    // influenceable under the untrusted-body model, so a reflected token must
+    // never reach a log or the master's stdout.
+    let ClaimedBinding {
+        session_jwt,
+        child_omni,
+        operator_omni,
+        derivation_path,
+    } = validate_claimed_binding(&body)?;
 
     // Persist J1_agent so a daemon restart resumes (Session.wallet = K10 address;
     // the HDKD omni rides inside the J1 claims, not in Session.wallet).
@@ -731,7 +900,7 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let sess = Session {
-        token: session_jwt.to_string(),
+        token: session_jwt.clone(),
         wallet: WalletAddress(device_pubkey.clone()),
         scope: None,
         created_at: now,
@@ -752,9 +921,12 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
         let dir = format!("{home}/.agentkeys");
         std::fs::create_dir_all(&dir).ok();
-        format!("{dir}/agent-session.jwt")
+        // Per-ACTOR bearer path: pairing a second actor under the same HOME must
+        // NOT overwrite the first actor's bearer (a stale artifact + an
+        // overwritten file would pair actor A with JWT B → STS identity skew).
+        session_bearer_path(&dir, &child_omni)
     };
-    agentkeys_core::device_crypto::write_key_0600(&session_file, session_jwt)
+    agentkeys_core::device_crypto::write_key_0600(&session_file, &session_jwt)
         .context("persist agent session jwt (0600)")?;
 
     info!(
@@ -769,19 +941,28 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
     // Binding artifact on STDOUT (logs are on stderr). Same fields the master's
     // chain helper consumes; pop_sig + device_key_hash let the master submit
     // registerAgentDevice without re-deriving.
+    //
+    // request_id is DELIBERATELY omitted: the broker poll authenticates with the
+    // tuple (request_id, device_pubkey, pop_sig) and mints a fresh J1_agent on
+    // every claimed poll (the claimed row is not consumed, pop_sig is static), so
+    // emitting request_id here would put a replayable bearer-minting credential
+    // on stdout — which the master captures and which can surface in `ps`/logs —
+    // defeating the "bearer stays in the sandbox" boundary. The master does not
+    // need it (registerAgentDevice keys off omni + device + pop_sig; the agent
+    // already holds request_id in its 0600 pairing-state file for polling).
+    // (The broker-side replay window itself is tracked as a separate follow-up.)
     println!(
         "{}",
-        serde_json::json!({
-            "agent_address": device_pubkey,
-            "actor_omni": child_omni,
-            "operator_omni": operator_omni,
-            "derivation_path": derivation_path,
-            "device_key_hash": device_key_hash,
-            "pop_sig": pop_sig,
-            "session_file": session_file,
-            "request_id": request_id,
-            "key_file": key_file,
-        })
+        binding_artifact(
+            &device_pubkey,
+            &child_omni,
+            &operator_omni,
+            &derivation_path,
+            &device_key_hash,
+            &pop_sig,
+            &session_file,
+            &key_file,
+        )
     );
     Ok(())
 }
@@ -1035,6 +1216,1078 @@ async fn run_proxy_mode(args: Args) -> anyhow::Result<()> {
         _ = async { if let Some(t) = tcp_task { let _ = t.await; } else { std::future::pending::<()>().await } } => {},
     }
     Ok(())
+}
+
+// ── §10.2 pairing-poll response classification (codex review #182) ───────────
+// Pure, unit-testable helpers behind run_retrieve_pairing's poll loop.
+
+/// Classification of a single pairing-poll response. Pure over `(status, body)`
+/// so it is unit-testable without HTTP.
+#[derive(Debug)]
+enum PollClass {
+    /// 2xx `status: "claimed"` — carries the binding artifact (incl. J1_agent).
+    Claimed(serde_json::Value),
+    /// 2xx not-yet-claimed — keep waiting for the master.
+    Pending,
+    /// Retry until the deadline. The reason is PRE-REDACTED — it never contains a
+    /// 2xx body, because a claimed 2xx carries `session_jwt`; logging it would
+    /// leak the bearer token (codex review #182, high finding).
+    Transient(String),
+    /// Definitive 4xx (bad device_pubkey/pop_sig, expired/unknown request,
+    /// device mismatch) — fail fast; waiting cannot fix it.
+    Fatal(String),
+}
+
+/// Cap a response body for safe logging (avoid dumping huge error pages).
+fn truncate_body(body: &str) -> String {
+    const MAX: usize = 300;
+    if body.chars().count() <= MAX {
+        body.to_string()
+    } else {
+        let head: String = body.chars().take(MAX).collect();
+        format!("{head}…[{} bytes total]", body.len())
+    }
+}
+
+/// Closed allowlist of broker error KINDS (mirrors
+/// `agentkeys-broker-server`'s `BrokerError::status_and_kind`). The fatal
+/// branch logs the `error` field ONLY when it exactly matches one of these
+/// short, broker-controlled category strings; any other value (a token,
+/// reflected request_id/pop_sig, proxy/WAF text, or a wrongly-statused claimed
+/// payload) is suppressed to status-only. The set degrades gracefully: a kind
+/// missing here is logged as "unrecognized" — never leaked — so drift from the
+/// broker only costs log detail, never correctness.
+const KNOWN_BROKER_ERROR_KINDS: &[&str] = &[
+    "unauthorized",
+    "forbidden",
+    "backend_unreachable",
+    "sts_error",
+    "audit_error",
+    "bad_request",
+    "internal",
+];
+
+/// Classify a pairing-poll response. 4xx → fail fast; 5xx/408/429 → transient;
+/// a 2xx that fails to parse is transient but its body is SUPPRESSED (a claimed
+/// 2xx contains `session_jwt`). 4xx/5xx bodies are broker error messages (no
+/// token), capped for logging.
+fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
+    if status.is_success() {
+        match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(v) => match v.get("status").and_then(|s| s.as_str()) {
+                Some("claimed") => {
+                    // Validate required fields BEFORE returning Claimed, so the
+                    // caller never interpolates a claimed body (it carries
+                    // session_jwt). A parse-VALID schema mismatch — e.g. a
+                    // non-string session_jwt — must not slip through as Claimed.
+                    if v.get("session_jwt").and_then(|t| t.as_str()).is_some() {
+                        PollClass::Claimed(v)
+                    } else {
+                        PollClass::Fatal(
+                            "claimed response missing a valid string session_jwt \
+                             (body suppressed — possible token/schema drift)"
+                                .to_string(),
+                        )
+                    }
+                }
+                // Only an explicit "pending" keeps waiting; a missing/unknown
+                // success status (e.g. "expired", an error envelope) is a
+                // protocol/state error → fail fast.
+                Some("pending") => PollClass::Pending,
+                // Known statuses (claimed/pending) are matched above, so `other`
+                // is by definition unrecognized. Do NOT interpolate the value: a
+                // reflected `{"status":"session_jwt=..."}` would leak it (same
+                // class as the fatal error-value leak). Log only whether status
+                // was missing vs present-but-unrecognized — never the value or
+                // the body.
+                other => {
+                    let detail = if other.is_none() {
+                        "missing"
+                    } else {
+                        "unrecognized"
+                    };
+                    PollClass::Fatal(format!(
+                        "unexpected poll status ({detail}; value + body suppressed)"
+                    ))
+                }
+            },
+            // Body is unparseable JSON. Do NOT format the serde error's Display
+            // (a body-derived string): surface only its line/column integers,
+            // which provably cannot carry a token. Keeps the boundary airtight —
+            // no body-derived string is logged on ANY poll path.
+            Err(e) => PollClass::Transient(format!(
+                "unparseable success response (body suppressed; parse error at line {} col {})",
+                e.line(),
+                e.column()
+            )),
+        }
+    } else if is_retryable_status(status) {
+        // Retryable failure: suppress the response body entirely. A faulty
+        // gateway/proxy can echo diagnostics, request metadata, or even a
+        // misclassified claimed payload (carrying session_jwt) in a 5xx/408/429
+        // body — none of which belongs in daemon logs. The status/class alone
+        // is enough to drive the retry. (4xx Fatal below keeps its capped body:
+        // it is the broker's actionable rejection reason and is not retried.)
+        PollClass::Transient(format!("HTTP {status} (transient; body suppressed)"))
+    } else {
+        // Fatal (4xx/3xx + any other non-success, non-retryable status). The body
+        // is never trusted — format_broker_error surfaces only an allowlisted
+        // broker error KIND and suppresses everything else to status-only.
+        PollClass::Fatal(format_broker_error(status, body))
+    }
+}
+
+/// Format a non-success broker HTTP response for safe logging, shared by the poll
+/// path (classify_poll's fatal branch) and the request path. The body is NEVER
+/// trusted: a reverse proxy / WAF / stale route / reflected payload can echo a
+/// token, request_id, or pop_sig. Parse the broker envelope ({"error": <kind>})
+/// and surface the `error` field ONLY when its VALUE is one of the closed set of
+/// known broker kinds (allowlisting the field NAME alone is not enough — e.g.
+/// `{"error":"pop_sig=..."}` would leak); otherwise suppress to status-only.
+fn format_broker_error(status: reqwest::StatusCode, body: &str) -> String {
+    let kind = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .filter(|k| KNOWN_BROKER_ERROR_KINDS.contains(&k.as_str()));
+    match kind {
+        // truncate_body is a no-op on these short closed-set literals; kept as a
+        // defensive second layer against any future kind drift.
+        Some(k) => format!("HTTP {status}: {}", truncate_body(&k)),
+        None => format!("HTTP {status} (body suppressed — unrecognized error kind)"),
+    }
+}
+
+/// Parse a `Retry-After` header into a delay from `now`. Handles BOTH RFC 7231
+/// forms: delta-seconds (`"120"`) and an HTTP-date
+/// (`"Wed, 21 Oct 2026 07:28:00 GMT"`), so a proxy throttling with a future date
+/// is honored instead of being ignored. A past/now date or an unparseable value
+/// yields `None`, and the caller floors the wait at the jittered backoff.
+fn parse_retry_after(header_val: Option<&str>, now: SystemTime) -> Option<Duration> {
+    let raw = header_val?.trim();
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    // HTTP-date form — honor only a FUTURE instant (past date → None → backoff).
+    httpdate::parse_http_date(raw)
+        .ok()?
+        .duration_since(now)
+        .ok()
+}
+
+/// Capped exponential backoff (base = poll interval) with sub-second jitter, so
+/// many unauthenticated pollers don't retry in lockstep and extend a broker
+/// overload (codex review #182, medium finding). `attempt` starts at 1.
+fn backoff_with_jitter(attempt: u32) -> Duration {
+    let base = PAIRING_POLL_INTERVAL_SECONDS.max(1);
+    let factor = 1u64 << attempt.min(4); // ×2 … ×16
+    let secs = base.saturating_mul(factor).min(30);
+    let jitter_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()) % 1000)
+        .unwrap_or(0);
+    Duration::from_secs(secs) + Duration::from_millis(jitter_ms)
+}
+
+/// Sleep `dur`, but never past `deadline`, so the next iteration's deadline
+/// check fires promptly.
+async fn sleep_within_deadline(dur: Duration, deadline: Instant) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    tokio::time::sleep(dur.min(remaining)).await;
+}
+
+/// Effective wait before the next transient retry. Floors at the jittered
+/// backoff so a broker/proxy `Retry-After: 0` (or any value below the backoff)
+/// can't disable backoff and let the loop hammer the broker until the deadline;
+/// a LONGER `Retry-After` is still honored (codex review #182).
+fn poll_retry_wait(retry_after: Option<Duration>, attempt: u32) -> Duration {
+    let backoff = backoff_with_jitter(attempt);
+    retry_after.map_or(backoff, |ra| ra.max(backoff))
+}
+
+/// Max bytes to buffer from a poll/request response body. A broker JSON envelope
+/// is tiny; this bounds the allocation if a broker/proxy streams a huge body.
+const MAX_POLL_BODY: usize = 64 * 1024;
+
+/// Statuses classify_poll treats as retryable (body suppressed): 5xx, 408, 429.
+/// Shared so the poll path can SKIP reading the body for these — an overloaded or
+/// malicious broker must not be able to make every retry download a huge/slow
+/// body until the deadline (codex review #182).
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Read at most `max` bytes of a response body by streaming chunks, so an
+/// oversized body is never fully buffered. Returns lossy UTF-8.
+async fn read_capped_body(mut resp: reqwest::Response, max: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = max.saturating_sub(buf.len());
+                if remaining == 0 {
+                    break;
+                }
+                let take = remaining.min(chunk.len());
+                buf.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    break; // hit the cap mid-chunk
+                }
+            }
+            Ok(None) => break, // EOF
+            Err(_) => break,   // transport error mid-body: use what we have
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Read a poll response body ONLY when the classifier will use it. Retryable
+/// statuses (5xx/408/429) suppress the body anyway, so skip the download
+/// entirely; success/fatal bodies are read but capped at `MAX_POLL_BODY`.
+async fn read_poll_body(resp: reqwest::Response) -> String {
+    if is_retryable_status(resp.status()) {
+        return String::new();
+    }
+    read_capped_body(resp, MAX_POLL_BODY).await
+}
+
+/// Extract a server-directed `Retry-After` cooldown for any retryable response
+/// that may legally carry it — NOT just 429. A `503 Service Unavailable` plus
+/// `Retry-After: <delay>` is the standard load-shed/maintenance signal; honoring
+/// it (via poll_retry_wait's max(header, backoff)) stops every daemon from
+/// hammering an overloaded broker on local backoff. Non-retryable statuses have
+/// no cooldown to honor.
+fn retry_after_for(resp: &reqwest::Response, now: SystemTime) -> Option<Duration> {
+    if !is_retryable_status(resp.status()) {
+        return None;
+    }
+    parse_retry_after(
+        resp.headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        now,
+    )
+}
+
+/// True iff `s` is a 64-char lowercase-hex omni address — the exact shape
+/// `agentkeys_core::actor_omni::{actor_omni_hex,child_omni_hex}` emit. Rejects
+/// reflected tokens, `0x`-prefixed values, uppercase, and any non-hex.
+fn is_omni_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// True iff `s` is a `//<label>` derivation path with a valid HDKD label
+/// (`^[a-z0-9-]{1,32}$`), matching the broker's `format!("//{label}")`.
+fn is_derivation_path(s: &str) -> bool {
+    match s.strip_prefix("//") {
+        Some(label) => {
+            !label.is_empty()
+                && label.len() <= 32
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        }
+        None => false,
+    }
+}
+
+/// The PUBLIC binding fields the daemon logs + emits on stdout after a claimed
+/// pairing. `classify_poll` only guarantees `session_jwt` is a string; the other
+/// three fields are still attacker-influenceable under the same untrusted-body
+/// model, and a reflected token in `child_omni`/`operator_omni`/`derivation_path`
+/// would otherwise be logged AND printed to the master's stdout. Validate each
+/// to its exact shape; a malformed identity is a protocol error.
+struct ClaimedBinding {
+    session_jwt: String,
+    child_omni: String,
+    operator_omni: String,
+    derivation_path: String,
+}
+
+// Manual Debug that REDACTS session_jwt — never derive it, or a future
+// `debug!("{binding:?}")` would dump the bearer. The public fields are already
+// validated to safe shapes (64-hex omni / //label), so they print as-is.
+impl std::fmt::Debug for ClaimedBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimedBinding")
+            .field("session_jwt", &"<redacted>")
+            .field("child_omni", &self.child_omni)
+            .field("operator_omni", &self.operator_omni)
+            .field("derivation_path", &self.derivation_path)
+            .finish()
+    }
+}
+
+/// Extract + validate the claimed-pairing binding from a 2xx claimed body.
+/// Error messages never echo a field value (it could carry a token).
+fn validate_claimed_binding(body: &serde_json::Value) -> anyhow::Result<ClaimedBinding> {
+    let session_jwt = body
+        .get("session_jwt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("claimed poll response missing session_jwt (body suppressed)")
+        })?;
+    let child_omni = body
+        .get("child_omni")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let operator_omni = body
+        .get("operator_omni")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let derivation_path = body
+        .get("derivation_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !is_omni_hex(child_omni) {
+        anyhow::bail!("claimed poll response has a malformed child_omni (value suppressed)");
+    }
+    if !is_omni_hex(operator_omni) {
+        anyhow::bail!("claimed poll response has a malformed operator_omni (value suppressed)");
+    }
+    if !is_derivation_path(derivation_path) {
+        anyhow::bail!("claimed poll response has a malformed derivation_path (value suppressed)");
+    }
+    // Defense-in-depth HDKD check: child_omni MUST equal the deterministic
+    // child_omni_hex(operator_omni, label). This rejects a shape-valid-but-
+    // impossible tuple (corrupt/stale broker or a terminating proxy) HERE, before
+    // run_retrieve_pairing saves the bearer + prints the artifact the master feeds
+    // to registerAgentDevice — otherwise the master could register/grant an actor
+    // that is not the HDKD child of the returned (operator_omni, path). The label
+    // charset was validated by is_derivation_path above; values are suppressed.
+    let label = derivation_path.strip_prefix("//").unwrap_or_default();
+    let expected_child =
+        agentkeys_core::actor_omni::child_omni_hex(operator_omni, label).map_err(|_| {
+            anyhow::anyhow!("claimed binding: child_omni recompute failed (values suppressed)")
+        })?;
+    if expected_child != child_omni {
+        anyhow::bail!(
+            "claimed binding child_omni does not match HDKD(operator_omni, label) (values suppressed)"
+        );
+    }
+    Ok(ClaimedBinding {
+        session_jwt: session_jwt.to_string(),
+        child_omni: child_omni.to_string(),
+        operator_omni: operator_omni.to_string(),
+        derivation_path: derivation_path.to_string(),
+    })
+}
+
+/// The PUBLIC binding artifact emitted on stdout after a claimed pairing — the
+/// fields the master's chain helper needs for `registerAgentDevice`. `request_id`
+/// is intentionally NOT included: the broker poll authenticates with
+/// (request_id, device_pubkey, pop_sig) and mints a fresh J1_agent on every
+/// claimed poll, so emitting request_id would put a replayable bearer-minting
+/// credential on stdout. session_jwt is likewise absent (it stays in the 0600
+/// session file inside the sandbox).
+#[allow(clippy::too_many_arguments)]
+fn binding_artifact(
+    agent_address: &str,
+    actor_omni: &str,
+    operator_omni: &str,
+    derivation_path: &str,
+    device_key_hash: &str,
+    pop_sig: &str,
+    session_file: &str,
+    key_file: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "agent_address": agent_address,
+        "actor_omni": actor_omni,
+        "operator_omni": operator_omni,
+        "derivation_path": derivation_path,
+        "device_key_hash": device_key_hash,
+        "pop_sig": pop_sig,
+        "session_file": session_file,
+        "key_file": key_file,
+    })
+}
+
+/// The stdout artifact for `--request-pairing`. `request_id` is intentionally
+/// NOT included — it is half the replayable broker-poll tuple
+/// (request_id, device_pubkey, pop_sig), and the daemon already writes it to the
+/// 0600 `state_file` that `--retrieve-pairing` reads by default. `pairing_code`
+/// (the master's claim code) is NOT a poll credential and stays.
+fn request_artifact(
+    pairing_code: &str,
+    agent_address: &str,
+    device_key_hash: &str,
+    expires_at: i64,
+    state_file: &str,
+    key_file: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pairing_code": pairing_code,
+        "agent_address": agent_address,
+        "device_key_hash": device_key_hash,
+        "expires_at": expires_at,
+        "state_file": state_file,
+        "key_file": key_file,
+    })
+}
+
+/// Per-actor path for the 0600 session-bearer file, scoped by `child_omni` (the
+/// validated 64-hex actor id — a safe filename). Pairing a second actor under the
+/// same HOME thus writes a DISTINCT file instead of overwriting the first actor's
+/// bearer, which would otherwise skew actor↔JWT (per-actor isolation). Re-pairing
+/// the SAME actor reuses the same path (it overwrites only its own bearer).
+fn session_bearer_path(dir: &str, child_omni: &str) -> String {
+    format!("{dir}/agent-session-{child_omni}.jwt")
+}
+
+#[cfg(test)]
+mod pairing_poll_tests {
+    use super::{
+        acquire_pairing_lock, backoff_with_jitter, binding_artifact, classify_poll,
+        format_broker_error, is_derivation_path, is_omni_hex, is_retryable_status,
+        pairing_request_guard, pairing_state_path, parse_retry_after, poll_retry_wait,
+        read_poll_body, request_artifact, retry_after_for, session_bearer_path, truncate_body,
+        validate_claimed_binding, PollClass, MAX_POLL_BODY, PAIRING_POLL_INTERVAL_SECONDS,
+    };
+    use reqwest::StatusCode;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn claimed_2xx_is_claimed() {
+        let body = r#"{"status":"claimed","session_jwt":"tok"}"#;
+        assert!(matches!(
+            classify_poll(StatusCode::OK, body),
+            PollClass::Claimed(_)
+        ));
+    }
+
+    #[test]
+    fn pending_2xx_is_pending() {
+        assert!(matches!(
+            classify_poll(StatusCode::OK, r#"{"status":"pending"}"#),
+            PollClass::Pending
+        ));
+    }
+
+    #[test]
+    fn only_explicit_pending_is_pending() {
+        // Unknown / missing / non-"pending" success status must NOT silently
+        // wait — it fails fast (protocol/state error). The status VALUE is never
+        // logged: a reflected `{"status":"session_jwt=..."}` must not leak (same
+        // class as the fatal error-value leak).
+        for body in ["{}", r#"{"foo":1}"#] {
+            match classify_poll(StatusCode::OK, body) {
+                PollClass::Fatal(reason) => assert!(
+                    reason.contains("missing"),
+                    "missing status should report 'missing', got {reason}"
+                ),
+                other => panic!("body {body} should fail fast, got {other:?}"),
+            }
+        }
+
+        let long_leak = format!(r#"{{"status":"{}"}}"#, "SENTINEL_JWT".repeat(40));
+        for body in [
+            r#"{"status":"expired"}"#, // rejected/expired state
+            r#"{"status":"error","detail":"nope"}"#,
+            r#"{"status":"SENTINEL_JWT"}"#, // identifier-shaped token
+            r#"{"status":"session_jwt=SENTINEL_JWT"}"#, // key=value leak
+            long_leak.as_str(),             // long reflected string
+        ] {
+            match classify_poll(StatusCode::OK, body) {
+                PollClass::Fatal(reason) => {
+                    assert!(
+                        !reason.contains("SENTINEL_JWT"),
+                        "unknown status leaked its value: {reason}"
+                    );
+                    assert!(
+                        reason.contains("unrecognized"),
+                        "present-but-unknown status should report 'unrecognized', got {reason}"
+                    );
+                }
+                other => panic!("body {body} should fail fast, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn claimed_2xx_with_non_string_session_jwt_is_fatal_no_leak() {
+        // A parse-VALID claimed body whose session_jwt is the wrong shape must
+        // not become Claimed (the caller would otherwise dump it), and the
+        // token-bearing body must not appear in the error.
+        let body = r#"{"status":"claimed","session_jwt":{"token":"SECRET-OBJ-TOKEN"}}"#;
+        match classify_poll(StatusCode::OK, body) {
+            PollClass::Fatal(reason) => assert!(
+                !reason.contains("SECRET-OBJ-TOKEN"),
+                "token leaked into fatal reason: {reason}"
+            ),
+            other => panic!("expected Fatal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_claimed_2xx_never_leaks_token() {
+        // A truncated claimed payload that fails to parse must not echo the body.
+        let body = r#"{"status":"claimed","session_jwt":"SUPER-SECRET-TOKEN""#;
+        match classify_poll(StatusCode::OK, body) {
+            PollClass::Transient(reason) => assert!(
+                !reason.contains("SUPER-SECRET-TOKEN"),
+                "session token leaked into log reason: {reason}"
+            ),
+            other => panic!("expected Transient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_errors_are_transient() {
+        // A faulty gateway could echo a misclassified claimed payload (with a
+        // token) inside a 5xx body — the transient reason must never carry it.
+        let leaky_body = r#"<html>err {"session_jwt":"SENTINEL_TOKEN_LEAK"}</html>"#;
+        for s in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            match classify_poll(s, leaky_body) {
+                PollClass::Transient(reason) => assert!(
+                    !reason.contains("SENTINEL_TOKEN_LEAK"),
+                    "transient reason for {s} leaked the response body: {reason}"
+                ),
+                other => panic!("status {s} should be transient, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_and_rate_limit_are_transient() {
+        // Same suppression contract for 408/429: status only, never the body.
+        let leaky_body = r#"{"session_jwt":"SENTINEL_TOKEN_LEAK"}"#;
+        for s in [StatusCode::REQUEST_TIMEOUT, StatusCode::TOO_MANY_REQUESTS] {
+            match classify_poll(s, leaky_body) {
+                PollClass::Transient(reason) => assert!(
+                    !reason.contains("SENTINEL_TOKEN_LEAK"),
+                    "transient reason for {s} leaked the response body: {reason}"
+                ),
+                other => panic!("status {s} should be transient, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn client_errors_fail_fast() {
+        for s in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::CONFLICT,
+        ] {
+            assert!(
+                matches!(
+                    classify_poll(s, r#"{"error":"bad pop_sig"}"#),
+                    PollClass::Fatal(_)
+                ),
+                "status {s} should fail fast"
+            );
+        }
+    }
+
+    #[test]
+    fn fatal_non_success_bodies_never_leak_secrets() {
+        // A fatal (4xx/3xx) body whose provenance we can't trust — proxy/WAF,
+        // stale route, or a wrongly-statused claimed payload — must NEVER be
+        // logged. Only the broker envelope's short `error` kind is allowed
+        // through; everything else (session_jwt/request_id/pop_sig) is dropped.
+        let secrets = ["SENTINEL_JWT", "SENTINEL_REQ_ID", "SENTINEL_POP_SIG"];
+
+        // (a) No broker envelope (raw reflected/claimed payload) → fully suppressed.
+        let no_envelope = r#"{"session_jwt":"SENTINEL_JWT","request_id":"SENTINEL_REQ_ID","pop_sig":"SENTINEL_POP_SIG"}"#;
+        for s in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::MOVED_PERMANENTLY, // 3xx also lands in the fatal branch
+        ] {
+            match classify_poll(s, no_envelope) {
+                PollClass::Fatal(reason) => {
+                    for secret in secrets {
+                        assert!(
+                            !reason.contains(secret),
+                            "fatal reason for {s} leaked {secret}: {reason}"
+                        );
+                    }
+                    assert!(
+                        reason.contains("body suppressed"),
+                        "fatal reason for {s} should be suppressed, got {reason}"
+                    );
+                }
+                other => panic!("status {s} should be fatal, got {other:?}"),
+            }
+        }
+
+        // (b) Broker envelope with a KNOWN kind + sibling secret → logs ONLY the
+        //     known kind, never the sibling secret.
+        let known = r#"{"error":"forbidden","message":"...","session_jwt":"SENTINEL_JWT"}"#;
+        match classify_poll(StatusCode::FORBIDDEN, known) {
+            PollClass::Fatal(reason) => {
+                assert!(
+                    reason.contains("forbidden"),
+                    "fatal reason should surface the known broker error kind: {reason}"
+                );
+                for secret in secrets {
+                    assert!(
+                        !reason.contains(secret),
+                        "fatal reason leaked {secret}: {reason}"
+                    );
+                }
+            }
+            other => panic!("403 with known kind should be fatal, got {other:?}"),
+        }
+
+        // (c)-(e) An `error` field whose VALUE is not a known broker kind is
+        // suppressed — allowlisting the field NAME alone is not enough. Covers:
+        // an identifier-shaped token, a key=value leak, a long reflected string,
+        // and arbitrary proxy text.
+        let long_leak = format!(r#"{{"error":"{}"}}"#, "SENTINEL_JWT".repeat(40));
+        for body in [
+            r#"{"error":"SENTINEL_JWT"}"#,
+            r#"{"error":"session_jwt=SENTINEL_JWT"}"#,
+            long_leak.as_str(),
+            r#"{"error":"some unexpected proxy message"}"#,
+        ] {
+            match classify_poll(StatusCode::BAD_REQUEST, body) {
+                PollClass::Fatal(reason) => {
+                    assert!(
+                        !reason.contains("SENTINEL_JWT"),
+                        "fatal reason leaked an unrecognized error value: {reason}"
+                    );
+                    assert!(
+                        reason.contains("body suppressed"),
+                        "unrecognized error value should be suppressed, got {reason}"
+                    );
+                }
+                other => panic!("400 with unknown error value should be fatal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn retry_after_parses_delta_and_http_date() {
+        let epoch = SystemTime::UNIX_EPOCH;
+        // delta-seconds form (now-independent).
+        assert_eq!(
+            parse_retry_after(Some("5"), epoch),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            parse_retry_after(Some("  12 "), epoch),
+            Some(Duration::from_secs(12))
+        );
+        // HTTP-date form, relative to `now`. A FUTURE date longer than local
+        // backoff is honored (the point of finding #2 — no retry storm).
+        assert_eq!(
+            parse_retry_after(Some("Thu, 01 Jan 1970 01:00:00 GMT"), epoch),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            parse_retry_after(Some("Thu, 01 Jan 1970 00:00:10 GMT"), epoch),
+            Some(Duration::from_secs(10))
+        );
+        // A PAST date yields None → caller floors at jittered backoff.
+        let later = epoch + Duration::from_secs(100);
+        assert_eq!(
+            parse_retry_after(Some("Thu, 01 Jan 1970 00:00:10 GMT"), later),
+            None
+        );
+        // Garbage / missing → None.
+        assert_eq!(parse_retry_after(Some("garbage"), epoch), None);
+        assert_eq!(parse_retry_after(None, epoch), None);
+    }
+
+    #[test]
+    fn binding_artifact_omits_replayable_request_id() {
+        // The stdout artifact must NOT carry request_id: with it, the tuple
+        // (request_id, device_pubkey=agent_address, pop_sig) replays the broker
+        // poll to mint a fresh J1_agent. Nor may it carry the session_jwt.
+        let art = binding_artifact(
+            "0xdevice",
+            "childomni",
+            "operomni",
+            "//hermes",
+            "dkh",
+            "popsig",
+            "/s.jwt",
+            "/k.json",
+        );
+        assert!(
+            art.get("request_id").is_none(),
+            "artifact must not expose request_id (replayable poll credential): {art}"
+        );
+        assert!(
+            art.get("session_jwt").is_none(),
+            "artifact must not expose the bearer"
+        );
+        // The fields the master legitimately needs are still present.
+        for k in ["agent_address", "pop_sig", "device_key_hash", "actor_omni"] {
+            assert!(art.get(k).is_some(), "artifact missing required field {k}");
+        }
+    }
+
+    #[test]
+    fn request_artifact_omits_replayable_request_id() {
+        // --request-pairing stdout must NOT carry request_id (half the replayable
+        // poll tuple); it lives only in the 0600 state_file. pairing_code (claim
+        // code, not a poll credential) and the state_file path stay.
+        let art = request_artifact("paircode", "0xdevice", "dkh", 123, "/state.json", "/k.json");
+        assert!(
+            art.get("request_id").is_none(),
+            "request artifact must not expose request_id: {art}"
+        );
+        for k in ["pairing_code", "state_file", "agent_address"] {
+            assert!(art.get(k).is_some(), "request artifact missing field {k}");
+        }
+    }
+
+    #[test]
+    fn format_broker_error_suppresses_untrusted_bodies() {
+        // A 307 proxy body echoing the request JSON (incl. pop_sig) must NOT leak
+        // through the request path's non-2xx error.
+        let reflected = r#"{"device_pubkey":"0xabc","pop_sig":"SENTINEL_POP_SIG"}"#;
+        let out = format_broker_error(StatusCode::TEMPORARY_REDIRECT, reflected);
+        assert!(
+            !out.contains("SENTINEL_POP_SIG"),
+            "format_broker_error leaked pop_sig: {out}"
+        );
+        // An `error` field whose VALUE is not a known kind is suppressed too.
+        let leaky_kind = r#"{"error":"pop_sig=SENTINEL_POP_SIG"}"#;
+        assert!(
+            !format_broker_error(StatusCode::BAD_REQUEST, leaky_kind).contains("SENTINEL_POP_SIG"),
+            "unknown error-kind value leaked"
+        );
+        // A KNOWN broker kind is surfaced for operator diagnostics.
+        let known = r#"{"error":"bad_request","message":"..."}"#;
+        assert!(format_broker_error(StatusCode::BAD_REQUEST, known).contains("bad_request"));
+    }
+
+    #[test]
+    fn session_bearer_path_is_per_actor() {
+        let dir = "/h/.agentkeys";
+        let omni_a = "a".repeat(64);
+        let omni_b = "b".repeat(64);
+        let a = session_bearer_path(dir, &omni_a);
+        let b = session_bearer_path(dir, &omni_b);
+        // Two distinct actors → distinct bearer files (no cross-actor overwrite).
+        assert_ne!(a, b, "two actors must not share a bearer file: {a}");
+        assert!(a.contains(&omni_a) && b.contains(&omni_b));
+        // Re-pairing the SAME actor reuses its own path (overwrites only itself).
+        assert_eq!(a, session_bearer_path(dir, &omni_a));
+    }
+
+    #[test]
+    fn pairing_state_path_is_per_device() {
+        // Two distinct device keys → distinct state files, so two concurrent
+        // --request-pairing for different devices can't clobber each other's
+        // request_id retrieval handle.
+        let a = pairing_state_path("0xaaaa1111");
+        let b = pairing_state_path("0xbbbb2222");
+        assert_ne!(a, b, "distinct devices must not share a state file: {a}");
+        assert!(a.contains("0xaaaa1111") && b.contains("0xbbbb2222"));
+        assert!(a.ends_with(".json"));
+        // Same device → stable path (--request-pairing and --retrieve-pairing
+        // derive the same handle from the same device key).
+        assert_eq!(a, pairing_state_path("0xaaaa1111"));
+    }
+
+    #[test]
+    fn pairing_request_guard_protects_unexpired_handle() {
+        let unexpired = r#"{"request_id":"x","expires_at":1000}"#;
+        // Unexpired (now < expires_at) + no --force → refuse (no silent clobber).
+        assert!(pairing_request_guard(Some(unexpired), 500, false).is_err());
+        // --force overrides.
+        assert!(pairing_request_guard(Some(unexpired), 500, true).is_ok());
+        // Expired → safe to replace.
+        assert!(pairing_request_guard(Some(unexpired), 2000, false).is_ok());
+        // No prior state → proceed.
+        assert!(pairing_request_guard(None, 500, false).is_ok());
+        // Unreadable prior state is not a handle worth protecting → proceed.
+        assert!(pairing_request_guard(Some("not json"), 500, false).is_ok());
+    }
+
+    #[test]
+    fn acquire_pairing_lock_serializes_concurrent_requests() {
+        let base = std::env::temp_dir().join(format!("akd-pairlock-{}", std::process::id()));
+        let path = base.to_string_lossy().into_owned();
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+        // First acquisition succeeds and HOLDS the lock.
+        let held = acquire_pairing_lock(&path).expect("first lock acquires");
+        // A concurrent acquisition is refused while the first is held (serializes
+        // the whole --request-pairing flow: keygen → guard → POST → state write).
+        assert!(
+            acquire_pairing_lock(&path).is_err(),
+            "concurrent --request-pairing must be refused while one is in progress"
+        );
+        // After the first releases, a new acquisition succeeds.
+        drop(held);
+        assert!(
+            acquire_pairing_lock(&path).is_ok(),
+            "lock must re-acquire after release"
+        );
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+    }
+
+    #[test]
+    fn is_retryable_status_covers_5xx_408_429_only() {
+        for s in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            assert!(is_retryable_status(s), "{s} should be retryable");
+        }
+        for s in [
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::MOVED_PERMANENTLY,
+        ] {
+            assert!(!is_retryable_status(s), "{s} should NOT be retryable");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_poll_body_skips_retryable_and_caps_success() {
+        use axum::{routing::get, Router};
+        // Bodies far larger than the cap, served on a retryable 503 and a 200.
+        let big = "x".repeat(MAX_POLL_BODY * 4);
+        let big503 = big.clone();
+        let big200 = big;
+        let app = Router::new()
+            .route(
+                "/r",
+                get(move || {
+                    let b = big503.clone();
+                    async move { (axum::http::StatusCode::SERVICE_UNAVAILABLE, b) }
+                }),
+            )
+            .route(
+                "/ok",
+                get(move || {
+                    let b = big200.clone();
+                    async move { b }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+
+        // Retryable 503: the body is NOT read (empty), no matter how large.
+        let resp = client.get(format!("http://{addr}/r")).send().await.unwrap();
+        assert!(is_retryable_status(resp.status()));
+        let body = read_poll_body(resp).await;
+        assert!(
+            body.is_empty(),
+            "retryable body must be skipped, got {} bytes",
+            body.len()
+        );
+
+        // Success 200: body is read but capped at MAX_POLL_BODY (not the full size).
+        let resp = client
+            .get(format!("http://{addr}/ok"))
+            .send()
+            .await
+            .unwrap();
+        let body = read_poll_body(resp).await;
+        assert!(!body.is_empty());
+        assert!(
+            body.len() <= MAX_POLL_BODY,
+            "success body must be capped at {MAX_POLL_BODY}, got {}",
+            body.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_for_honors_503_load_shed() {
+        use axum::{http::header::RETRY_AFTER, routing::get, Router};
+        let app = Router::new()
+            .route(
+                "/down",
+                get(|| async {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        [(RETRY_AFTER, "300")],
+                        "down",
+                    )
+                }),
+            )
+            .route("/ok", get(|| async { "ok" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+
+        // 503 + Retry-After: 300 is honored even though it is NOT a 429.
+        let resp = client
+            .get(format!("http://{addr}/down"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            retry_after_for(&resp, SystemTime::UNIX_EPOCH),
+            Some(Duration::from_secs(300)),
+            "503 Retry-After must be honored, not just 429"
+        );
+        // A success response has no cooldown to honor.
+        let resp = client
+            .get(format!("http://{addr}/ok"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry_after_for(&resp, SystemTime::UNIX_EPOCH), None);
+    }
+
+    #[test]
+    fn backoff_is_capped_and_nondecreasing() {
+        let a1 = backoff_with_jitter(1);
+        let a_big = backoff_with_jitter(10);
+        assert!(a1 >= Duration::from_secs(1));
+        assert!(
+            a_big <= Duration::from_secs(31),
+            "backoff not capped: {a_big:?}"
+        );
+        assert!(a_big >= a1, "backoff should not shrink with attempts");
+    }
+
+    #[test]
+    fn truncate_caps_long_bodies() {
+        let long = "x".repeat(2000);
+        let out = truncate_body(&long);
+        assert!(out.chars().count() < 400);
+        assert!(out.contains("bytes total"));
+        assert_eq!(truncate_body("short"), "short");
+    }
+
+    #[test]
+    fn omni_and_path_validators_reject_reflected_tokens() {
+        // Valid shapes (64-char lowercase hex omni; //label path) pass.
+        assert!(is_omni_hex(&"0123456789abcdef".repeat(4)));
+        assert!(is_omni_hex(&"a".repeat(64)));
+        assert!(is_derivation_path("//hermes"));
+        assert!(is_derivation_path("//agent-01"));
+
+        // Reflected tokens / wrong shapes are rejected — these would otherwise
+        // be logged + printed on stdout from a claimed body.
+        let upper_hex = "A".repeat(64); // uppercase hex
+        let short_hex = "a".repeat(63); // wrong length
+        for bad in [
+            "session_jwt=SENTINEL_JWT",
+            "eyJhbGciOiJIUzI1NiJ9.payload.sig", // JWT-shaped (dots)
+            "SENTINEL_JWT",
+            "0xabcdef", // 0x prefix + short
+            upper_hex.as_str(),
+            short_hex.as_str(),
+            "",
+        ] {
+            assert!(!is_omni_hex(bad), "is_omni_hex must reject {bad}");
+        }
+        for bad in [
+            "//session_jwt=SENTINEL_JWT", // label charset
+            "//UPPER",
+            "/hermes", // single slash
+            "//",      // empty label
+            "session_jwt=x",
+            "",
+        ] {
+            assert!(
+                !is_derivation_path(bad),
+                "is_derivation_path must reject {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn claimed_binding_rejects_reflected_tokens_in_public_fields() {
+        // 64-char lowercase hex operator omni; child is its REAL HDKD derivation
+        // (the semantic check requires child_omni == HDKD(operator, label)).
+        let operator = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let child = agentkeys_core::actor_omni::child_omni_hex(operator, "hermes").unwrap();
+        let ok = serde_json::json!({
+            "session_jwt": "tok",
+            "child_omni": child.clone(),
+            "operator_omni": operator,
+            "derivation_path": "//hermes",
+        });
+        assert!(validate_claimed_binding(&ok).is_ok());
+
+        // A reflected token in ANY public field is rejected at the shape check,
+        // and the error never echoes the offending value.
+        for field in ["child_omni", "operator_omni", "derivation_path"] {
+            let mut v = ok.clone();
+            v[field] = serde_json::json!("session_jwt=SENTINEL_JWT");
+            let err = validate_claimed_binding(&v)
+                .expect_err("reflected token must be rejected")
+                .to_string();
+            assert!(
+                !err.contains("SENTINEL_JWT"),
+                "{field} value leaked into error: {err}"
+            );
+        }
+
+        // Missing session_jwt is rejected (before any field/HDKD check) without
+        // echoing the body.
+        let no_jwt = serde_json::json!({
+            "child_omni": child.clone(), "operator_omni": operator, "derivation_path": "//hermes",
+        });
+        assert!(validate_claimed_binding(&no_jwt).is_err());
+    }
+
+    #[test]
+    fn claimed_binding_rejects_hdkd_child_mismatch() {
+        // All fields are individually well-shaped (64-hex omnis, //label), but
+        // child_omni is NOT the HDKD derivation of (operator_omni, label) — a
+        // corrupt/stale broker or terminating-proxy response. Reject it locally.
+        let operator = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let wrong_child = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let v = serde_json::json!({
+            "session_jwt": "tok",
+            "child_omni": wrong_child,
+            "operator_omni": operator,
+            "derivation_path": "//hermes",
+        });
+        let err = validate_claimed_binding(&v)
+            .expect_err("HDKD child mismatch must be rejected")
+            .to_string();
+        assert!(
+            err.contains("HDKD") || err.contains("does not match"),
+            "should reject HDKD mismatch, got: {err}"
+        );
+        assert!(
+            !err.contains("ffffffff"),
+            "error must not echo the bad value: {err}"
+        );
+    }
+
+    #[test]
+    fn retry_after_zero_does_not_disable_backoff() {
+        // A broker/proxy `Retry-After: 0` must NOT zero the wait (which would let
+        // the loop hammer the broker); it floors at the jittered backoff.
+        let w = poll_retry_wait(Some(Duration::ZERO), 1);
+        assert!(
+            w >= Duration::from_secs(PAIRING_POLL_INTERVAL_SECONDS),
+            "zero Retry-After must floor at backoff, got {w:?}"
+        );
+        // A longer Retry-After is honored.
+        let long = Duration::from_secs(3600);
+        assert_eq!(poll_retry_wait(Some(long), 1), long);
+        // No header → pure backoff, still nonzero.
+        assert!(poll_retry_wait(None, 2) > Duration::ZERO);
+    }
 }
 
 #[cfg(test)]
