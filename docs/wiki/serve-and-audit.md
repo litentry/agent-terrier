@@ -1,5 +1,3 @@
-# Credential Serve + Audit: the design space
-
 How AgentKeys answers two questions that every credential manager has to answer:
 
 1. **Serve:** when an agent asks for a credential, how does the system return the plaintext bytes?

@@ -1,5 +1,3 @@
-# Key Security in AgentKeys
-
 > **Updated 2026-04-26 — v0.1 storage column.** §1 used to say "v0.1 Heima: encrypted blob in `pallet-secrets-vault` (on chain)." That target is superseded. The canonical v0.1 design moves ciphertext **off-chain** (S3) under per-epoch DEKs that rotate; chain holds only pointer + hash. See [`docs/spec/threat-model-key-custody.md`](../spec/threat-model-key-custody.md) and [`docs/stage8-wip.md`](../stage8-wip.md). Stage 9 (memory hygiene; renumbered from Stage 8 in the same change) is unaffected.
 
 Reference notes on how AgentKeys stores session tokens and user credentials, what the macOS Keychain prompt behavior actually means, and why our architecture looks different from 1Password-style local vaults.

@@ -1,5 +1,3 @@
-# Heima setup — FAQ
-
 Troubleshooting + edge cases for [`docs/chain-setup.md`](https://github.com/litentry/agentKeys/blob/main/docs/chain-setup.md) + [`scripts/setup-heima.sh`](https://github.com/litentry/agentKeys/blob/main/scripts/setup-heima.sh).
 
 ## Q. `chain mismatch: profile says chain_id=X but RPC reports Y`

@@ -1,5 +1,3 @@
-# Agent role & usage — the per-agent omni in the HDKD tree
-
 A focused operator reference for the **agent** actor. It defers to [`../arch.md`](../arch.md) for the authoritative model — read this when you need the operator-facing "what is an agent, what can it do, how do I create and scope one" view without re-reading the whole architecture.
 
 > Canonical model: [`../arch.md` §6 — Identity model + HDKD actor tree](../arch.md#6-identity-model--three-layers--hdkd-actor-tree). Binding ceremonies: §10. Sidecar daemon: §12. Workers the agent calls: §15. Anything here that disagrees with arch.md is wrong — fix it against arch.md.

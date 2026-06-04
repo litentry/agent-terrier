@@ -1,5 +1,3 @@
-# Upstream backend classes — exercise vs distribution
-
 **Status:** decided 2026-05-15. Source of truth for *how a new upstream is integrated* and *which patterns apply*. Cross-link from [`docs/arch.md`](../arch.md) §4b and §7a.
 
 ## The two security concerns

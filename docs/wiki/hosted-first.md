@@ -1,6 +1,3 @@
-# Hosted-First vs Bring-Your-Own — User Segmentation
-
-
 **Status:** decision (2026-04-19)
 **Scope:** how AgentKeys onboards non-developer users vs enterprise / advanced users across email, knowledge base, and OIDC identity.
 

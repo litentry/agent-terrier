@@ -1,5 +1,3 @@
-# Data Classification: what is encrypted, what is plaintext, where
-
 > **Updated 2026-04-26 — credential storage row.** The "Credential blobs" row in §1 used to read "On chain: encrypted ciphertext." That position is superseded — sensitive ciphertext now lives **off-chain** (S3) under per-epoch DEKs that rotate; chain holds only `(blob_pointer, ciphertext_hash, epoch)`. Architectural rationale: [`docs/spec/threat-model-key-custody.md`](../spec/threat-model-key-custody.md). Operational design: [`docs/stage8-wip.md`](../stage8-wip.md). The change is structural, not cosmetic — it closes the harvest-now-decrypt-later gap that on-chain ciphertext could not.
 
 Every piece of data in AgentKeys exists in one or more of four locations: the blockchain, the TEE, **off-chain content-addressed storage (S3 today)**, and the client (CLI or daemon). This document maps each data item to its encryption status at each location.

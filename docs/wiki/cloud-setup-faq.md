@@ -1,5 +1,3 @@
-# Cloud setup — FAQ
-
 Troubleshooting + edge cases for the two cloud-side operator docs:
 
 - [`docs/cloud-bootstrap.md`](https://github.com/litentry/agentKeys/blob/main/docs/cloud-bootstrap.md) — first-time provisioning (per account or per cloud provider).

@@ -1,5 +1,3 @@
-# TEE as OIDC Identity Provider — Universal Federation Pattern
-
 **Status:** design (2026-04-19)
 **Scope:** how AgentKeys' TEE becomes a conforming OpenID Connect identity provider, letting the TEE's sealed signing key federate into any cloud that accepts external OIDC (AWS, GCP, Azure, Snowflake, Kubernetes, …) with no static secrets stored anywhere in AgentKeys.
 **Companion specs:** `docs/spec/ses-email-architecture.md`, `docs/spec/email-signing-backends.md`

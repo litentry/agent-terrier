@@ -1,5 +1,3 @@
-# Credential Usage Guide
-
 How to store, read, inject, and manage API keys with AgentKeys.
 
 > **Breaking change in v0.x (issue #16):** the `agent` argument is now a `--agent` flag instead of a leading positional. Existing scripts using `agentkeys store 0xABC openrouter sk-xxx` must migrate to `agentkeys store --agent 0xABC openrouter sk-xxx`. Quick migration: `sed -i '' -E 's/agentkeys (store|read|run) (0x[0-9a-fA-F]+|[a-zA-Z0-9_-]+@[a-zA-Z0-9._-]+|[a-zA-Z][a-zA-Z0-9_-]*) /agentkeys \1 --agent \2 /g' your-scripts/*.sh`. Omit `--agent` entirely to default to the current session wallet.

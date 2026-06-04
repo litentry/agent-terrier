@@ -1,5 +1,3 @@
-# Agent IAM glossary — tool vs guarantee, hooks vs proxy
-
 Companion to [`docs/agent-iam-strategy.md`](../../docs/agent-iam-strategy.md). Defines the load-bearing terminology AgentKeys uses when describing what an integration delivers — so vendor conversations don't confuse "the LLM can call our tool" with "the policy check actually runs."
 
 ## 1. IAM tool vs IAM guarantee
