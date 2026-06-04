@@ -1,15 +1,3 @@
----
-title: "Tag-Based Access Control — PrincipalTags from JWT Claims for Per-User Isolation"
-tags: ["tag-based-access-control", "principal-tag", "session-tag", "oidc", "aws", "iam", "gcp", "per-user-isolation", "security", "attack-surface"]
-created: 2026-04-19T10:08:52.043Z
-updated: 2026-04-19T10:08:52.043Z
-sources: []
-links: ["hosted-first.md", "oidc-federation.md", "email-system.md", "knowledge-storage.md"]
-category: pattern
-confidence: medium
-schemaVersion: 1
----
-
 # Tag-Based Access Control — PrincipalTags from JWT Claims for Per-User Isolation
 
 

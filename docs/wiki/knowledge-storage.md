@@ -1,15 +1,3 @@
----
-title: "Knowledge Base Storage Options — Deferred Decision Matrix"
-tags: ["knowledge-base", "storage", "deferred", "github", "s3", "google-drive", "alicloud", "jurisdictional", "user-segmentation"]
-created: 2026-04-19T10:06:02.153Z
-updated: 2026-04-19T10:06:02.153Z
-sources: []
-links: ["email-system.md", "tag-based-access.md", "blockchain-tee-architecture.md", "oidc-federation.md", "hosted-first.md"]
-category: decision
-confidence: medium
-schemaVersion: 1
----
-
 # Knowledge Base Storage Options — Deferred Decision Matrix
 
 
