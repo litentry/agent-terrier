@@ -1,0 +1,31 @@
+name: wiki lint
+
+# Gate docs/wiki/ source against the GitHub-Wiki rendering rules BEFORE merge:
+#   - no YAML frontmatter (GitHub Wiki does not strip it; publish-wiki.yml is a
+#     raw mirror, so a `---...---` block renders as literal text)
+#   - no redundant leading `# H1` (the filename already renders as the page
+#     title; a body H1 duplicates it and over-indents the sidebar TOC)
+#
+# The check lives in scripts/lint-wiki.sh (runnable locally too). The rule is
+# documented in CLAUDE.md "Wiki-location policy". Companion to publish-wiki.yml,
+# which mirrors docs/wiki/ to the GitHub Wiki on push to main.
+
+on:
+  pull_request:
+    paths:
+      - 'docs/wiki/**'
+      - 'scripts/lint-wiki.sh'
+      - '.github/workflows/wiki-lint.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/wiki/**'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint docs/wiki source
+        run: bash scripts/lint-wiki.sh
