@@ -1,5 +1,3 @@
-# The open-source frontend is keyless by design
-
 > Why publishing the parent-control web UI source changes nothing about key safety — and exactly what a malicious clone or a phished magic-link can (and cannot) reach. Defers to [Blockchain TEE Architecture §7](blockchain-tee-architecture#7-security-model-assumptions-and-attacker-surface) and [`arch.md`](../arch.md) §3–§6 for the canonical model.
 
 The parent-control web app (the browser onboarding + master dashboard) is open source. A natural worry: *if anyone can read and clone the frontend, can a hacker stand up a malicious copy, trigger the login email, persuade me to click the magic link, and walk away with my keys?*
