@@ -4,10 +4,13 @@ import type {
   CapToken,
   ConnectionStatus,
   DisconnectedStatus,
+  EmailVerifyStart,
+  EmailVerifyStatus,
   K11EnrollBegin,
   K11EnrollFinishInput,
   K11EnrollResult,
   MasterMemoryEntry,
+  OnboardingState,
   PlantResult,
   Result,
   RevokeIntent,
@@ -217,6 +220,27 @@ export class DaemonBackend implements AgentKeysClient {
       { cap: capName, intent_text: intent.text },
     );
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
+  }
+
+  async startEmailVerify(email: string): Promise<Result<EmailVerifyStart>> {
+    const r = await this.postJson<{ request_id: string }>('/v1/auth/email/start', { email });
+    return r.ok ? { ok: true, data: { requestId: r.data.request_id } } : r;
+  }
+
+  async pollEmailVerify(requestId: string): Promise<Result<EmailVerifyStatus>> {
+    const r = await this.getJson<{ status: string; omni_account?: string }>(
+      `/v1/auth/email/status?request_id=${encodeURIComponent(requestId)}`,
+    );
+    return r.ok ? { ok: true, data: { status: r.data.status, omniAccount: r.data.omni_account } } : r;
+  }
+
+  async getOnboardingState(): Promise<Result<OnboardingState>> {
+    return this.getJson<OnboardingState>('/v1/onboarding/state');
+  }
+
+  async logout(): Promise<Result<void>> {
+    const r = await this.postJson<{ ok: boolean }>('/v1/auth/logout', {});
+    return r.ok ? { ok: true, data: undefined } : r;
   }
 
   async enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>> {

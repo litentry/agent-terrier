@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -42,6 +42,8 @@ use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 use url::Url;
 use webauthn_rs::prelude::*;
+
+use agentkeys_core::init_flow;
 
 /// In-flight registration state. Keyed by `user_id` (the random opaque
 /// handle the browser echoes back). Cleared once a finish call consumes
@@ -72,6 +74,29 @@ pub struct UiBridgeState {
     /// plant (re-planting the same entry is a no-op). Maps the §2 "plant
     /// preserved memory" flow + GH plan issue-9step-flow.md.
     pub master_memory: RwLock<HashMap<String, ApiMemoryEntry>>,
+    /// Broker base URL for the W1 onboarding email→verify flow. `None` ⇒ email
+    /// onboarding is disabled (the daemon was started without `--broker-url`)
+    /// and the email endpoints fail closed with `broker-not-configured`.
+    pub broker_url: Option<String>,
+    /// Allowed browser origin (= the CORS origin, e.g. `http://localhost:3113`).
+    /// Server-side defense-in-depth: the onboarding email endpoints reject a
+    /// mismatched `Origin` header even though browser CORS already would, so a
+    /// cross-origin page can't trigger magic-link emails.
+    pub allowed_origin: String,
+    /// W1 onboarding: request_id → email, recorded at email/start so email/status
+    /// knows which identity verified. Cleared on logout.
+    pub pending_email: RwLock<HashMap<String, String>>,
+    /// The verified operator identity, held in the daemon once the magic link is
+    /// clicked (never handed to the browser — the daemon is the authenticated
+    /// proxy). `None` until verified / after logout; this is the real "logged in"
+    /// signal that replaces the browser's `ak_onboarded` localStorage flag.
+    pub onboarding_session: RwLock<Option<OnboardingSession>>,
+    /// Signer (dev_key_service) base URL for the SIWE→J1 step — the signer
+    /// *attests* the managed wallet it derives (no user wallet / MetaMask).
+    /// `None` ⇒ email verify holds an identity-only session (no EVM J1 / actor omni).
+    pub signer_url: Option<String>,
+    /// Chain id for the managed-wallet attestation (mirrors `--init-chain-id`).
+    pub chain_id: u64,
 }
 
 /// A master-actor memory entry. `content_hash` is the dedup key —
@@ -238,6 +263,59 @@ pub struct EnrollFinishResponse {
     pub chain_tx_hash: Option<String>,
 }
 
+// ── W1 onboarding: real email magic-link verify (broker-backed) ──
+
+#[derive(Debug, Deserialize)]
+pub struct EmailStartRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmailStartResponse {
+    pub request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EmailStatusQuery {
+    pub request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmailStatusResponse {
+    /// "pending" | "verified" | "failed:<reason>"
+    pub status: String,
+    /// Set when verified: the operator's identity omni (shown after login).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omni_account: Option<String>,
+}
+
+/// The verified operator identity held in the daemon after the magic link is
+/// clicked. Held server-side; never serialized to the browser.
+#[derive(Clone, Debug)]
+pub struct OnboardingSession {
+    pub email: String,
+    /// The EVM `actor_omni` after the managed-wallet attestation (SIWE→J1), or
+    /// the identity omni if that step was skipped / unavailable.
+    pub omni: String,
+    /// The J1 (EVM-omni) session JWT — the daemon's authenticated bearer; held
+    /// here, never handed to the browser. Read once cap-mint over the EVM session
+    /// lands (next W-phase); held now so onboarding establishes the real session.
+    #[allow(dead_code)]
+    pub j1: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OnboardingStateResponse {
+    /// "verified" once the magic link is clicked + held; else "none".
+    pub identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omni: Option<String>,
+    /// "enrolled" if a K11 passkey was registered this session, else "none".
+    pub k11: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -274,6 +352,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/healthz", get(healthz))
         .route("/v1/k11/enroll/begin", post(enroll_begin))
         .route("/v1/k11/enroll/finish", post(enroll_finish))
+        .route("/v1/auth/email/start", post(auth_email_start))
+        .route("/v1/auth/email/status", get(auth_email_status))
+        .route("/v1/onboarding/state", get(onboarding_state))
+        .route("/v1/auth/logout", post(logout))
         .route("/v1/actors", get(list_actors))
         .route("/v1/actors/:id", get(get_actor))
         .route("/v1/actors/:id/caps", get(list_caps))
@@ -301,6 +383,9 @@ pub fn build_state(
     rp_id: &str,
     rp_origin: &str,
     rp_name: &str,
+    broker_url: Option<String>,
+    signer_url: Option<String>,
+    chain_id: u64,
 ) -> anyhow::Result<SharedUiBridgeState> {
     let origin = Url::parse(rp_origin)?;
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
@@ -316,11 +401,203 @@ pub fn build_state(
         workers: RwLock::new(HashMap::new()),
         anchor: RwLock::new(ApiAnchorStatus::default()),
         master_memory: RwLock::new(HashMap::new()),
+        broker_url,
+        allowed_origin: rp_origin.to_string(),
+        pending_email: RwLock::new(HashMap::new()),
+        onboarding_session: RwLock::new(None),
+        signer_url,
+        chain_id,
     }))
 }
 
 async fn healthz() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "surface": "ui-bridge" }))
+}
+
+/// W1: request a magic-link email. Proxies the broker's `email/request` so the
+/// browser never holds broker URLs; returns the `request_id` the browser polls.
+/// Server-side origin gate for the onboarding email endpoints (defense-in-depth
+/// on top of CORS): a present `Origin` that doesn't match the configured app
+/// origin is rejected, so a cross-origin page can't trigger magic-link emails.
+/// A missing Origin (non-browser / CLI) is allowed.
+fn reject_cross_origin(
+    state: &SharedUiBridgeState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if origin != state.allowed_origin {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                format!("cross-origin onboarding request from {origin} rejected"),
+                "bad-origin",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn auth_email_start(
+    State(state): State<SharedUiBridgeState>,
+    headers: HeaderMap,
+    Json(req): Json<EmailStartRequest>,
+) -> Result<Json<EmailStartResponse>, (StatusCode, Json<ErrorBody>)> {
+    reject_cross_origin(&state, &headers)?;
+    let broker = state.broker_url.as_deref().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "email onboarding disabled (daemon started without --broker-url)",
+            "broker-not-configured",
+        )
+    })?;
+    if req.email.trim().is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "email required",
+            "missing-email",
+        ));
+    }
+    let request_id = init_flow::email_request(broker, req.email.trim())
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("broker email/request failed: {e}"),
+                "broker-email-failed",
+            )
+        })?;
+    state
+        .pending_email
+        .write()
+        .await
+        .insert(request_id.clone(), req.email.trim().to_string());
+    Ok(Json(EmailStartResponse { request_id }))
+}
+
+/// W1: poll the magic-link status (the browser calls this on a timer until the
+/// status is no longer `pending` — i.e. the operator clicked the link).
+async fn auth_email_status(
+    State(state): State<SharedUiBridgeState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<EmailStatusQuery>,
+) -> Result<Json<EmailStatusResponse>, (StatusCode, Json<ErrorBody>)> {
+    reject_cross_origin(&state, &headers)?;
+    let broker = state.broker_url.as_deref().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "email onboarding disabled (daemon started without --broker-url)",
+            "broker-not-configured",
+        )
+    })?;
+    let status = init_flow::auth_status_once(broker, "email", &q.request_id)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("broker email/status failed: {e}"),
+                "broker-status-failed",
+            )
+        })?;
+    let resp = match status {
+        init_flow::AuthStatus::Pending => EmailStatusResponse {
+            status: "pending".into(),
+            omni_account: None,
+        },
+        init_flow::AuthStatus::Verified {
+            session_jwt,
+            identity_omni,
+        } => {
+            let email = state
+                .pending_email
+                .read()
+                .await
+                .get(&q.request_id)
+                .cloned()
+                .unwrap_or_default();
+            // Managed-wallet attestation (SIWE→J1): the signer derives + attests
+            // the managed wallet for this email identity (no user wallet) and the
+            // broker mints J1. On success we hold the EVM `actor_omni` + J1; if the
+            // signer is unconfigured/unreachable we fall back to the identity-only
+            // session so onboarding still completes (the EVM session can retry).
+            let held = match state.signer_url.as_deref() {
+                Some(signer) => match init_flow::finish_email_session(
+                    broker,
+                    signer,
+                    &session_jwt,
+                    &identity_omni,
+                    state.chain_id,
+                    &email,
+                )
+                .await
+                {
+                    Ok(init) => OnboardingSession {
+                        email,
+                        omni: init.evm_omni,
+                        j1: init.session.token,
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            "ui-bridge: SIWE->J1 attestation failed, holding identity-only: {e}"
+                        );
+                        OnboardingSession {
+                            email,
+                            omni: identity_omni,
+                            j1: String::new(),
+                        }
+                    }
+                },
+                None => OnboardingSession {
+                    email,
+                    omni: identity_omni,
+                    j1: String::new(),
+                },
+            };
+            let omni = held.omni.clone();
+            *state.onboarding_session.write().await = Some(held);
+            EmailStatusResponse {
+                status: "verified".into(),
+                omni_account: Some(omni),
+            }
+        }
+        init_flow::AuthStatus::Failed(reason) => EmailStatusResponse {
+            status: format!("failed:{reason}"),
+            omni_account: None,
+        },
+    };
+    Ok(Json(resp))
+}
+
+/// W1: aggregate onboarding state — the real "are we logged in" signal that
+/// replaces the browser's `ak_onboarded` localStorage flag. Identity is held in
+/// the daemon (never the browser); `k11` reflects the in-memory enroll store.
+async fn onboarding_state(
+    State(state): State<SharedUiBridgeState>,
+) -> Json<OnboardingStateResponse> {
+    let session = state.onboarding_session.read().await.clone();
+    let k11 = if state.enroll.read().await.registered.is_empty() {
+        "none"
+    } else {
+        "enrolled"
+    };
+    let (identity, email, omni) = match session {
+        Some(s) => ("verified".to_string(), Some(s.email), Some(s.omni)),
+        None => ("none".to_string(), None, None),
+    };
+    Json(OnboardingStateResponse {
+        identity,
+        email,
+        omni,
+        k11: k11.to_string(),
+    })
+}
+
+/// W1: clear the held onboarding session (logout / reset) so re-onboarding
+/// starts clean. Re-testability per arch.md §6: the same email re-verifies to the
+/// same `actor_omni`, and the device key + encryption are untouched — only the
+/// session is dropped.
+async fn logout(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
+    *state.onboarding_session.write().await = None;
+    state.pending_email.write().await.clear();
+    Json(serde_json::json!({ "ok": true }))
 }
 
 async fn enroll_begin(
@@ -896,7 +1173,78 @@ mod tests {
     use super::*;
 
     fn make_state() -> SharedUiBridgeState {
-        build_state("localhost", "http://localhost:3113", "AgentKeys Test").unwrap()
+        build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            None,
+            None,
+            84532,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn auth_email_start_without_broker_is_unavailable() {
+        // make_state() builds with broker_url = None ⇒ email onboarding is
+        // disabled, so the endpoint fails closed (503 broker-not-configured)
+        // rather than silently no-op'ing.
+        let state = make_state();
+        let e = auth_email_start(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(EmailStartRequest {
+                email: "sara@example.com".into(),
+            }),
+        )
+        .await
+        .expect_err("no broker configured should error");
+        assert_eq!(e.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(e.1 .0.reason, "broker-not-configured");
+    }
+
+    #[tokio::test]
+    async fn auth_email_start_rejects_cross_origin() {
+        // make_state()'s allowed origin is http://localhost:3113; a request
+        // carrying a different Origin is rejected before any broker call —
+        // the server-side gate on top of CORS.
+        let state = make_state();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("origin", "http://evil.example".parse().unwrap());
+        let e = auth_email_start(
+            State(state),
+            headers,
+            Json(EmailStartRequest {
+                email: "sara@example.com".into(),
+            }),
+        )
+        .await
+        .expect_err("cross-origin should be rejected");
+        assert_eq!(e.0, StatusCode::FORBIDDEN);
+        assert_eq!(e.1 .0.reason, "bad-origin");
+    }
+
+    #[tokio::test]
+    async fn onboarding_state_reflects_session_and_logout() {
+        let state = make_state();
+        // No session held yet → identity "none".
+        assert_eq!(
+            onboarding_state(State(state.clone())).await.0.identity,
+            "none"
+        );
+        // Simulate a verified magic-link click.
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "sara@example.com".into(),
+            omni: "0xabc123".into(),
+            j1: String::new(),
+        });
+        let s = onboarding_state(State(state.clone())).await;
+        assert_eq!(s.0.identity, "verified");
+        assert_eq!(s.0.email.as_deref(), Some("sara@example.com"));
+        assert_eq!(s.0.omni.as_deref(), Some("0xabc123"));
+        // Logout clears it → re-testable.
+        let _ = logout(State(state.clone())).await;
+        assert_eq!(onboarding_state(State(state)).await.0.identity, "none");
     }
 
     #[tokio::test]

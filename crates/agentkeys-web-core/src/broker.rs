@@ -190,6 +190,12 @@ impl BrokerClient {
 pub struct CapRequest {
     pub operator_omni: String,
     pub actor_omni: String,
+    /// Signed capability service. For memory it is **namespace-qualified** —
+    /// `memory:<ns>` (e.g. `memory:travel`), arch.md §896 — because the broker
+    /// hashes it (`keccak(service)`) for `isServiceInScope` and the worker keys
+    /// storage off it (`bots/<actor>/memory/memory:<ns>.enc`). A bare `memory`
+    /// never matches a `memory:<ns>` grant → `service_not_in_scope`; the web
+    /// client builds it with `memoryService(ns)`, never a bare `memory`.
     pub service: String,
     pub device_key_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
