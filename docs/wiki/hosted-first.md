@@ -1,15 +1,3 @@
----
-title: "Hosted-First vs Bring-Your-Own — User Segmentation"
-tags: ["hosted", "byo", "bring-your-own", "user-segmentation", "non-developer", "onboarding", "agentkeys-email.io", "default"]
-created: 2026-04-19T10:07:18.478Z
-updated: 2026-04-19T10:07:18.478Z
-sources: []
-links: ["email-system.md", "tag-based-access.md", "knowledge-storage.md", "oidc-federation.md"]
-category: decision
-confidence: medium
-schemaVersion: 1
----
-
 # Hosted-First vs Bring-Your-Own — User Segmentation
 
 

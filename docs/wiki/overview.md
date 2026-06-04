@@ -1,17 +1,3 @@
----
-title: "AgentKeys Wiki — Index and Reading Order"
-tags: ["index", "overview", "reading-order", "tree", "navigation"]
-created: 2026-04-19T11:39:37.415Z
-updated: 2026-04-19T11:39:37.415Z
-sources: []
-links: ["hosted-first.md", "tag-based-access.md", "oidc-federation.md", "email-system.md", "knowledge-storage.md"]
-category: reference
-confidence: medium
-schemaVersion: 1
----
-
-# AgentKeys Wiki — Index and Reading Order
-
 # AgentKeys Wiki — Index and Reading Order
 
 The tree. Every wiki page in this repo, grouped by concern, with a one-line description so you can pick where to start.

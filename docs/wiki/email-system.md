@@ -1,15 +1,3 @@
----
-title: "Email System — Architecture, Backends, and Usage Isolation"
-tags: ["email", "architecture", "iam", "token-authority", "grant-store", "stage5", "isolation"]
-created: 2026-04-18T06:58:59.906Z
-updated: 2026-04-18T06:58:59.906Z
-sources: []
-links: ["session-token.md", "blockchain-tee-architecture.md", "key-security.md"]
-category: architecture
-confidence: medium
-schemaVersion: 1
----
-
 # Email System — Architecture, Backends, and Usage Isolation
 
 **Status:** design consolidation (2026-04-18)

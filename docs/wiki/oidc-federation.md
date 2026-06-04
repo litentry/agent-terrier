@@ -1,15 +1,3 @@
----
-title: "TEE as OIDC Identity Provider — Universal Federation Pattern"
-tags: ["oidc", "iam", "tee", "federation", "authentication", "aws", "gcp", "architecture", "no-static-secrets"]
-created: 2026-04-19T05:55:11.690Z
-updated: 2026-04-19T05:55:11.690Z
-sources: []
-links: ["email-system.md", "blockchain-tee-architecture.md", "session-token.md", "key-security.md"]
-category: architecture
-confidence: medium
-schemaVersion: 1
----
-
 # TEE as OIDC Identity Provider — Universal Federation Pattern
 
 **Status:** design (2026-04-19)
