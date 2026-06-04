@@ -203,12 +203,13 @@ Pinned to disambiguate the same value showing up under different labels across c
 
 | Canonical name | Identity | Aliases seen in the codebase / docs |
 |---|---|---|
-| `actor_omni` | **The durable per-actor cryptographic anchor.** `SHA256("agentkeys" \|\| "evm" \|\| initial_master_wallet_K3_v1)`. **Frozen at first SIWE-bind**; never rotates with K3, never changes with wallet rotation. The Layer 1 identifier per §6. | `omni_account` (JWT claim + CLI `whoami` field), `agentkeys_actor_omni` (AWS PrincipalTag key), `OMNI_A` / `OMNI_B` (demo shell vars). |
+| `actor_omni` | **The durable per-actor cryptographic anchor.** `SHA256("agentkeys" \|\| "evm" \|\| initial_master_wallet_K3_v1)`. **Frozen at the first managed-wallet attestation** (the wallet-bind); never rotates with K3, never changes with wallet rotation. The Layer 1 identifier per §6. | `omni_account` (JWT claim + CLI `whoami` field), `agentkeys_actor_omni` (AWS PrincipalTag key), `OMNI_A` / `OMNI_B` (demo shell vars). |
+| `managed-wallet attestation` | **The stage-3 proof that the operator controls the derived managed wallet (K4).** The signer (TEE) produces an EIP-191 signature over the broker's challenge *on the wallet's behalf*; the broker verifies and mints the long-lived session JWT (J1); **`actor_omni` freezes here**. The operator never holds the wallet key — this is NOT a user-wallet sign-in. Distinct from the **K5 / `evm`-identity path** (§4 K5, §10.1), where the operator signs SIWE *directly* with their own MetaMask / hardware wallet (genuine Sign-In With Ethereum). | User-facing: **"activate your managed wallet"**. Small technical note: **SIWE / EIP-191, signer-performed** (the broker round-trip is SIWE-shaped). Aliases seen today: `SIWE → J1`, `SIWE round-trip`, `SIWE-bind`, "wallet attestation". |
 | `current_master_wallet` | **The current chain identity** = `HKDF(K3_v[current_epoch], O_master)`. Rotates each K3 epoch. Appears on chain as `msg.sender` in sovereign mode. The Layer 2 identifier per §6. | `master_wallet`, `wallet_address` (JWT claim shape pre-rotation), `MASTER_WALLET` (demo shell var). When historical K3 epochs are in scope, qualify with `master_wallet_K3_v[N]`. |
-| `identity_omni` | **The transient identity omni** — `SHA256("agentkeys" \|\| identity_type \|\| identity_value)`. Used internally by the broker between init and SIWE-verify; never carried in a post-SIWE JWT. | `identity_omni_email` / `identity_omni_oauth2` (when narrowing to a specific identity type), `identity omni` (init-flow CLI log line). |
+| `identity_omni` | **The transient identity omni** — `SHA256("agentkeys" \|\| identity_type \|\| identity_value)`. Used internally by the broker between init and the managed-wallet attestation; never carried in a post-attestation JWT (J1). | `identity_omni_email` / `identity_omni_oauth2` (when narrowing to a specific identity type), `identity omni` (init-flow CLI log line). |
 | `agent_omni` | **A child actor omni** = `SHA256("agentkeys-hdkd-v1" \|\| O_master \|\| "//<label>")` (issue #144). **Public + recomputable** — anyone with the parent omni + label recomputes it; unforgeability is the master-gated `/v1/agent/pairing/claim` + the master-submitted on-chain binding, NOT a secret. (The "cannot be computed without the parent's master secret" property lives one layer down, at the K4 wallet `HKDF(K3_v[epoch], agent_omni)` in the signer.) Distinct from `master_omni`; both are valid actor_omnis. | `O_master//agent-A`, `O_agent_A` (HDKD-tree notation). |
 | `K3` | The 32 bytes inside the signer enclave that K4 + KEK derivation HKDFs against. Per-epoch via `K3EpochCounter`. | `K3_v[N]` to disambiguate epoch; `master_secret` (signer-internal log term — discouraged). |
-| `session JWT` (= K6) | The bearer token at `~/.agentkeys/<id>/session.json` (or OS keychain). Signed by K1. Carries `agentkeys.actor_omni`, `agentkeys.device_pubkey`, `agentkeys.webauthn_cred_id` (master only). | `session_jwt`, `J1` (post-SIWE bearer), `SESSION_JWT_A` / `SESSION_JWT_B` (demo shell vars). |
+| `session JWT` (= K6) | The bearer token at `~/.agentkeys/<id>/session.json` (or OS keychain). Signed by K1. Carries `agentkeys.actor_omni`, `agentkeys.device_pubkey`, `agentkeys.webauthn_cred_id` (master only). | `session_jwt`, `J1` (post-attestation bearer), `SESSION_JWT_A` / `SESSION_JWT_B` (demo shell vars). |
 | `OIDC JWT` (= K7) | Per-mint short-lived JWT signed by K2; consumed by `AssumeRoleWithWebIdentity`. Carries `agentkeys_actor_omni` claim → AWS session tag. | `oidc_jwt`, `JWT_A` / `JWT_B` (demo shell vars). |
 | `cap-token` | The bearer issued by broker authorizing one specific operation (cred-fetch / cred-store / memory-read / audit-append / payment / etc.). Carries K10 sig + K11 assertion (for master mutations) + broker's K1 co-signature. | `cap`, `capability_token`, `op_cap`. |
 | `credential_kek` | 32-byte AES-256 key for one operator's credentials. Derived as `HKDF-SHA256(salt="agentkeys.kek-salt.v2", ikm=K3_v[epoch], info="agentkeys.user.v1" \|\| actor_omni)`. | `KEK`, `cred_kek`. |
@@ -231,7 +232,7 @@ The system uses **three identity layers** to separate concerns that earlier desi
 actor_omni = SHA256("agentkeys" || "evm" || initial_master_wallet_K3_v1)
 ```
 
-Frozen at first SIWE-bind. Never changes for the lifetime of the account. Survives K3 rotation, wallet rotation, device-set changes, master device replacement. This is the operator's durable identity at the cryptographic anchor.
+Frozen at the first managed-wallet attestation (the wallet-bind; SIWE / EIP-191, signer-performed — see §5). For `evm`-identity the bind is a direct operator SIWE instead. Never changes for the lifetime of the account. Survives K3 rotation, wallet rotation, device-set changes, master device replacement. This is the operator's durable identity at the cryptographic anchor.
 
 **Layer 2 — Current chain identity (rotatable)**
 
@@ -273,7 +274,7 @@ flowchart LR
   A_WALLET["wallet_agent_A<br/>= HKDF(K3_v[epoch], O_master//agent-A)"]
 
   ID -->|identity ceremony| ID_OMNI
-  ID_OMNI -->|derive + link + SIWE + freeze| M_OMNI
+  ID_OMNI -->|derive + link + attest + freeze| M_OMNI
   M_OMNI --> M_WALLET
   M_OMNI -->|HDKD //label| A_OMNI
   A_OMNI --> A_WALLET
@@ -375,7 +376,7 @@ The system separates four concepts that earlier drafts collapsed. Each axis has 
 
 | Axis | Object | Lives in | Compromise radius |
 |---|---|---|---|
-| **Identity** | identity omni | Broker memory (transient) | Identity-only — caps gate on actor omni, which is locked at first SIWE |
+| **Identity** | identity omni | Broker memory (transient) | Identity-only — caps gate on actor omni, which is locked at the first managed-wallet attestation |
 | **Actor** | actor_omni | Chain (SidecarRegistry, ScopeContract), session JWT, OIDC JWT, AWS PrincipalTag, S3 path, AAD | Per-actor (one HDKD tree node) |
 | **Machine** | K10 device key + K11 WebAuthn (master only) | Per-machine OS keychain / TPM / SE / TEE; pubkey registered on chain | Per-machine + per-actor (per-actor binding limits cross-actor reach) |
 | **Capability** | ScopeContract entry + cap-token + host-local policy | Chain (scope) + broker (cap-mint state) + sidecar (host-local policy) | Per-(actor, service); host-local policy bypassable but bounded by cloud scope |
@@ -393,7 +394,7 @@ Master init has four stages.
 | **0 — Device-key generation** | Daemon generates `(D_priv, D_pub) = K10` at startup. No network traffic. | Local (master OS keychain) |
 | **1 — Identity ceremony** | Verify the human via email link / OAuth callback / EVM SIWE / passkey. Returns `binding_nonce` to the broker. | Master ↔ broker |
 | **2 — Master binding ceremony (WebAuthn)** | Platform authenticator generates K11; commits D_pub atomically inside WebAuthn challenge `SHA256(binding_nonce \|\| D_pub)`. | Master ↔ platform authenticator ↔ broker |
-| **3 — Wallet derivation + SIWE → J1** | Derive wallet via signer; link at broker; SIWE round-trip → mint long-lived J1; **actor_omni freezes here**. | Master ↔ broker ↔ signer |
+| **3 — Wallet derivation + managed-wallet attestation → J1** | Derive wallet via signer; link at broker; **managed-wallet attestation** (SIWE / EIP-191, signer-performed) → mint long-lived J1; **actor_omni freezes here**. | Master ↔ broker ↔ signer |
 | **4 — On-chain SidecarRegistry binding** | Submit `SidecarRegistry.register_master_device(...)` to chain. First device gets `CAP_MINT \| RECOVERY \| SCOPE_MGMT` roles. | Master → chain |
 
 ```mermaid
@@ -422,7 +423,7 @@ sequenceDiagram
   CLI->>Brk: POST /v1/auth/bind/<request_id> {webauthn_attestation, D_pub}
   Brk-->>CLI: J0 (claims: agentkeys.device_pubkey=D_pub, agentkeys.webauthn_cred=K11_id)
 
-  Note over CLI,Sig: Stage 3 — derive + link + SIWE → J1
+  Note over CLI,Sig: Stage 3 — derive + link + managed-wallet attestation → J1
   CLI->>Sig: POST /derive-address {O_master} (mTLS via broker; Bearer J0)
   Sig-->>CLI: {address: initial_master_wallet}
   CLI->>Brk: POST /v1/wallet/link {evm, initial_master_wallet} (Bearer J0)
@@ -460,9 +461,9 @@ Per §9 stages 0–4. Identity ceremonies vary per identity type but converge on
 
 | Identity type | Stage 1 (identity ceremony) | Output | Stage 3 note |
 |---|---|---|---|
-| `email-link` | Broker emails magic link; operator clicks; broker confirms single-use within TTL | `(email, binding_nonce)` | Standard (derive + link + SIWE → J1) |
+| `email-link` | Broker emails magic link; operator clicks; broker confirms single-use within TTL | `(email, binding_nonce)` | Standard (derive + link + managed-wallet attestation → J1) |
 | `oauth2_google` | Broker redirects to Google; OAuth2 callback returns code; broker exchanges for ID token | `(google_sub, binding_nonce)` | Standard |
-| `evm` | Broker generates SIWE-shaped identity-only payload; operator signs with EVM key; broker ecrecover | `(evm_address, binding_nonce)` | **Collapses** — the user's own EVM key IS the wallet, no signer derivation; broker mints J1 directly |
+| `evm` | Broker generates SIWE-shaped identity-only payload; operator signs with their own EVM key (genuine SIWE — *not* a managed-wallet attestation); broker ecrecover | `(evm_address, binding_nonce)` | **Collapses** — the user's own EVM key IS the wallet, no signer derivation; broker mints J1 directly |
 | `passkey-as-identity` | WebAuthn assertion against an existing platform-authenticator credential | `(webauthn_user_handle, binding_nonce)` | Standard (re-auth case) |
 
 **Q7 fix:** email-account compromise alone cannot rebind. An attacker who phished the email account can complete the identity ceremony but cannot complete the WebAuthn ceremony on the legitimate user's hardware.
@@ -793,14 +794,14 @@ The broker is the cap-mint authority. It does NOT hold credentials, K3, or any c
 ```
 /v1/auth/email/{request,verify,status}        — email-link flow (stage 1)
 /v1/auth/oauth2/{start,callback,status}       — OAuth2 flow (stage 1)
-/v1/auth/wallet/{start,verify}                — SIWE round-trip (stage 3)
+/v1/auth/wallet/{start,verify}                — managed-wallet attestation round-trip (stage 3; SIWE / EIP-191, signer-performed)
 /v1/auth/bind/<request_id>                    — WebAuthn enrollment (stage 2)
 /v1/agent/pairing/request                     — agent opens an UNBOUND pairing request → {request_id, pairing_code} (§10.2 method A; no bearer, pop_sig-gated)
 /v1/agent/pairing/claim                       — master claims the pairing_code → binds HDKD child omni (J1_master-gated; K11 NOT at broker — §10.2 method A)
 /v1/agent/pairing/poll                        — agent polls by request_id → J1_agent once claimed (§10.2 method A; no bearer, pop_sig-gated)
 /v1/agent/pending-bindings                    — master pulls claimed-but-unbound agents to approve (§10.2; GET)
 /v1/agent/pending-bindings/ack                — master acks an on-chain binding (by request_id) → clears it from pending (§10.2; POST, J1_master)
-/v1/wallet/link                               — link wallet to identity (post-derive, pre-SIWE)
+/v1/wallet/link                               — link wallet to identity (post-derive, pre-attestation)
 /v1/wallet/device/rotate                      — K10 rotation (§10.3.2; K11 required)
 /v1/cap/cred-fetch                            — cap-mint for credential fetch
 /v1/cap/cred-store                            — cap-mint for credential store (provisioner)
@@ -1279,7 +1280,7 @@ contract SidecarRegistry {
         bytes32 operator_omni, bytes32 actor_omni,
         bytes32 k11_cred_id, bytes calldata attestation,
         uint8 roles,
-        bytes calldata authorization_proof  // first device: SIWE sig; later: K11 sig from existing master
+        bytes calldata authorization_proof  // first device: managed-wallet attestation (SIWE/EIP-191 sig; direct SIWE for evm); later: K11 sig from existing master
     ) external;
 
     function register_agent_device(
@@ -1335,7 +1336,7 @@ contract CredentialAudit {
 |---|---|---|
 | `ScopeContract.set_scope_with_webauthn` | Master | K10 + K11 |
 | `ScopeContract.revoke_scope_with_webauthn` | Master | K10 + K11 |
-| `SidecarRegistry.register_master_device` | First master: identity ceremony SIWE; later masters: existing K11 | First: SIWE proof; later: K11 from existing |
+| `SidecarRegistry.register_master_device` | First master: managed-wallet attestation; later masters: existing K11 | First: attestation proof (SIWE/EIP-191, signer-performed; direct SIWE for evm); later: K11 from existing |
 | `SidecarRegistry.register_agent_device` | Agent (via master-claimed pairing) | Master K11 baked into link_code_redemption; agent pop_sig |
 | `SidecarRegistry.revoke_device` | M-of-N surviving masters | `recovery_threshold` K11 assertions |
 | `SidecarRegistry.rotate_device_key` | Master (the device being rotated) | K11 + new-key pop_sig |
@@ -1465,7 +1466,7 @@ Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 4
 
 **Why route-per-class beats a single endpoint with a `data_class` parameter:** the broker statically derives the variant from the URL, so a programmer error in the cap-mint handler cannot produce a cap with the wrong class. A query-param would carry the variant through user input, expanding the attack surface for nothing.
 
-**Why agent-side STS creds (not operator-side):** the cap binds to `actor_omni` (the agent's), so the S3 PUT path is `bots/<agent>/...`. The IAM PrincipalTag on the STS creds must match — only the agent's session JWT produces STS creds tagged with the agent's omni. The operator authorises via cap-mint; the agent identifies via SIWE+STS. Both must agree on actor_omni for the IAM resource ARN to allow the op.
+**Why agent-side STS creds (not operator-side):** the cap binds to `actor_omni` (the agent's), so the S3 PUT path is `bots/<agent>/...`. The IAM PrincipalTag on the STS creds must match — only the agent's session JWT produces STS creds tagged with the agent's omni. The operator authorises via cap-mint; the agent identifies via its own session JWT (J1) → STS. Both must agree on actor_omni for the IAM resource ARN to allow the op.
 
 ---
 
@@ -2253,7 +2254,7 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/s
 |---|---|
 | No seed phrase required for daily use | K10 in OS keychain; K11 sealed in platform authenticator; no operator-managed seed |
 | Recovery via M-of-N device quorum | Per §11 multi-device flow; no friends, no third parties, no anchor wallet |
-| No IdP lock-in after Day 0 | Email/OAuth is one-time sybil check; `actor_omni` is bound to first SIWE-derived wallet hash, NOT IdP identifier |
+| No IdP lock-in after Day 0 | Email/OAuth is one-time sybil check; `actor_omni` is bound to the first managed-wallet-attestation wallet hash (the wallet-bind), NOT IdP identifier |
 | Agent never holds credential bytes | Sidecar holds plaintext only; agent sees localhost proxy URL + placeholder token |
 | Device key bound to specific actor | SidecarRegistry per-actor binding; compromised agent K10 cannot mint caps as siblings |
 | K11 user-presence required for master mutations | Scope, device-bind, K10-rotation, device-revoke all require fresh K11 WebAuthn |

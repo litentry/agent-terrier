@@ -62,6 +62,8 @@ TEE signs a session token with its RSA private key:
 TEE returns the token string to the client
 ```
 
+> **AgentKeys user-facing name:** for the email / OAuth onboarding path, this issuance step — where the signer attests control of your derived **managed wallet** and the broker mints your session bearer (J1) — is surfaced to operators as **"activate your managed wallet"**. Canonically it is the **managed-wallet attestation** (SIWE / EIP-191, signer-performed; see [`arch.md` §5 canonical names](../arch.md)). The "Web3 signature" variant above maps to the **`evm`-identity** path, where you sign directly with your own wallet — genuine Sign-In With Ethereum, *not* a managed-wallet attestation.
+
 The issuer signing key:
 
 - Lives inside the TEE (sealed storage), derived from the sealed TEE master seed at path `issuer/jwt/v1` via SLIP-0010 HDKD — the same seed that roots the shielding key, per-user wallet keys, OIDC-issuer key, and per-domain DKIM keys (see [Blockchain TEE Architecture §1](blockchain-tee-architecture#tee-trusted-execution-environment-worker) and [`docs/spec/heima-gaps-vs-desired-architecture.md`](../spec/heima-gaps-vs-desired-architecture.md) for the current-vs-desired gap)
