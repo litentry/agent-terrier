@@ -97,6 +97,18 @@ pub struct UiBridgeState {
     pub signer_url: Option<String>,
     /// Chain id for the managed-wallet attestation (mirrors `--init-chain-id`).
     pub chain_id: u64,
+    /// W3 real-memory chain — the memory worker base URL (e.g. `https://memory.litentry.org`).
+    /// `None` ⇒ master-memory plant/list fall back to the in-memory store (dev/no-infra).
+    pub memory_url: Option<String>,
+    /// Per-actor memory IAM role ARN for the STS relay (`MEMORY_ROLE_ARN`). Required
+    /// alongside `memory_url` for the real chain; a partial config fails loud (issue #90 discipline).
+    pub memory_role_arn: Option<String>,
+    /// AWS region for the STS relay (`REGION`).
+    pub region: String,
+    /// The on-chain-registered master device key hash, sent as `device_key_hash` in
+    /// memory cap-mint. Must match the device registered via the W3 bootstrap
+    /// (`docs/plan/web-flow/w3-real-memory.md` §4). `None` ⇒ real chain disabled.
+    pub master_device_key_hash: Option<String>,
 }
 
 /// A master-actor memory entry. `content_hash` is the dedup key —
@@ -379,6 +391,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 /// Build the bridge state. `rp_id` is the WebAuthn relying-party id —
 /// always "localhost" for dev, "agentkeys.io" (or operator domain) in
 /// production. `rp_origin` is the browser's window.location.origin.
+// Runtime-config constructor: the params ARE the daemon's config surface (RP +
+// broker/signer + chain + W3 memory). Bundling into a config struct is deferred
+// (W2 adds more chain config here); clippy's documented escape for constructors.
+#[allow(clippy::too_many_arguments)]
 pub fn build_state(
     rp_id: &str,
     rp_origin: &str,
@@ -386,6 +402,10 @@ pub fn build_state(
     broker_url: Option<String>,
     signer_url: Option<String>,
     chain_id: u64,
+    memory_url: Option<String>,
+    memory_role_arn: Option<String>,
+    region: String,
+    master_device_key_hash: Option<String>,
 ) -> anyhow::Result<SharedUiBridgeState> {
     let origin = Url::parse(rp_origin)?;
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
@@ -407,6 +427,10 @@ pub fn build_state(
         onboarding_session: RwLock::new(None),
         signer_url,
         chain_id,
+        memory_url,
+        memory_role_arn,
+        region,
+        master_device_key_hash,
     }))
 }
 
@@ -1079,6 +1103,139 @@ async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> impl In
     Json(serde_json::json!({ "entries": entries }))
 }
 
+// ─── W3: real memory chain (cap-mint → STS relay → worker → S3) ─────────────
+//
+// When the daemon has --memory-url + --memory-role-arn + --master-device-key-hash
+// AND a master onboarding session, the master plants its OWN memory under its
+// actor_omni (operator == actor == O_master) via the same chain the MCP
+// http_backend + phase1-wire-demo use. Otherwise plant falls back to the
+// in-memory store. Per-actor by construction (cap-mint binds device.actor_omni
+// == req.actor_omni); see docs/plan/web-flow/w3-real-memory.md §1.
+
+struct RealMemoryCtx {
+    broker: String,
+    memory_url: String,
+    role_arn: String,
+    region: String,
+    j1: String,
+    omni: String,
+    device_key_hash: String,
+}
+
+/// `Ok(None)` → real chain not configured (in-memory fallback). `Ok(Some)` →
+/// fully configured + a master session present. `Err` → configured but a
+/// required piece is missing (partial config / not logged in) — fail loud
+/// rather than silently degrade per-actor isolation (issue #90 discipline).
+async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>, String> {
+    let Some(memory_url) = state.memory_url.clone() else {
+        return Ok(None);
+    };
+    let broker = state
+        .broker_url
+        .clone()
+        .ok_or("real memory: --memory-url set but --broker-url missing")?;
+    let role_arn = state
+        .memory_role_arn
+        .clone()
+        .ok_or("real memory: --memory-url set but MEMORY_ROLE_ARN missing")?;
+    let device_key_hash = state
+        .master_device_key_hash
+        .clone()
+        .ok_or("real memory: --memory-url set but --master-device-key-hash missing")?;
+    let session = state
+        .onboarding_session
+        .read()
+        .await
+        .clone()
+        .ok_or("real memory: no master session — complete onboarding first")?;
+    if session.omni.is_empty() || session.j1.is_empty() {
+        return Err("real memory: master session is identity-only (no EVM omni/J1)".into());
+    }
+    Ok(Some(RealMemoryCtx {
+        broker,
+        memory_url,
+        role_arn,
+        region: state.region.clone(),
+        j1: session.j1,
+        omni: session.omni,
+        device_key_hash,
+    }))
+}
+
+/// One real memory-put: cap-mint(`memory:<ns>`) → STS relay → worker
+/// `/v1/memory/put`. Returns the worker's S3 key. Mirrors
+/// `agentkeys-mcp-server::backend::http_backend::memory_put`.
+async fn memory_put_real(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    entry: &ApiMemoryEntry,
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    // 1. cap-mint for the master's own actor (operator == actor == O_master).
+    let cap_resp = client
+        .post(format!("{}/v1/cap/memory-put", ctx.broker))
+        .bearer_auth(&ctx.j1)
+        .json(&serde_json::json!({
+            "operator_omni": ctx.omni,
+            "actor_omni": ctx.omni,
+            "service": format!("memory:{}", entry.ns),
+            "device_key_hash": ctx.device_key_hash,
+            "ttl_seconds": 300,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("cap-mint transport: {e}"))?;
+    if !cap_resp.status().is_success() {
+        let status = cap_resp.status();
+        let body = cap_resp.text().await.unwrap_or_default();
+        return Err(format!("cap-mint {status}: {body}"));
+    }
+    let cap: serde_json::Value = cap_resp
+        .json()
+        .await
+        .map_err(|e| format!("cap-mint parse: {e}"))?;
+
+    // 2. STS relay — per-actor creds tagged agentkeys_actor_omni == O_master.
+    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    .map_err(|e| format!("STS relay: {e}"))?;
+
+    // 3. worker put → S3 bots/<O_master>/memory/memory:<ns>.enc.
+    let put_resp = client
+        .post(format!("{}/v1/memory/put", ctx.memory_url))
+        .header("x-aws-access-key-id", creds.access_key_id)
+        .header("x-aws-secret-access-key", creds.secret_access_key)
+        .header("x-aws-session-token", creds.session_token)
+        .json(&serde_json::json!({
+            "cap": cap,
+            "plaintext_b64": STANDARD.encode(entry.body.as_bytes()),
+            "namespace": entry.ns,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("worker put transport: {e}"))?;
+    if !put_resp.status().is_success() {
+        let status = put_resp.status();
+        let body = put_resp.text().await.unwrap_or_default();
+        return Err(format!("worker put {status}: {body}"));
+    }
+    let parsed: serde_json::Value = put_resp
+        .json()
+        .await
+        .map_err(|e| format!("worker put parse: {e}"))?;
+    Ok(parsed
+        .get("s3_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PlantRequest {
     pub entries: Vec<ApiMemoryEntry>,
@@ -1098,10 +1255,62 @@ pub struct PlantResponse {
 async fn plant_master_memory(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<PlantRequest>,
-) -> Json<PlantResponse> {
+) -> axum::response::Response {
+    match plant_master_memory_inner(&state, req).await {
+        Ok(resp) => (axum::http::StatusCode::OK, Json(resp)).into_response(),
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+/// Core plant logic. Returns the typed `PlantResponse` (real chain or in-memory
+/// fallback) or an `(HTTP status, reason)` for partial-config / not-logged-in
+/// (409) and real-worker-failure (502). The handler maps it to a response; tests
+/// call this directly to assert the typed counts.
+async fn plant_master_memory_inner(
+    state: &SharedUiBridgeState,
+    req: PlantRequest,
+) -> Result<PlantResponse, (axum::http::StatusCode, String)> {
+    let ctx = real_memory_ctx(state).await.map_err(|reason| {
+        tracing::warn!("plant_master_memory: {reason}");
+        (axum::http::StatusCode::CONFLICT, reason)
+    })?;
+
     let mut planted = 0usize;
     let mut skipped = 0usize;
-    {
+
+    if let Some(ctx) = ctx {
+        // REAL chain — the master plants its own memory to the worker/S3.
+        let client = reqwest::Client::new();
+        let mut errors: Vec<String> = Vec::new();
+        for mut e in req.entries {
+            let hash = if e.content_hash.is_empty() {
+                e.compute_hash()
+            } else {
+                e.content_hash.clone()
+            };
+            e.content_hash = hash.clone();
+            if state.master_memory.read().await.contains_key(&hash) {
+                skipped += 1;
+                continue;
+            }
+            match memory_put_real(&client, &ctx, &e).await {
+                Ok(_s3_key) => {
+                    state.master_memory.write().await.insert(hash, e);
+                    planted += 1;
+                }
+                Err(err) => {
+                    tracing::warn!("plant_master_memory: real put failed: {err}");
+                    errors.push(err);
+                }
+            }
+        }
+        if planted == 0 && !errors.is_empty() {
+            return Err((axum::http::StatusCode::BAD_GATEWAY, errors.join("; ")));
+        }
+    } else {
+        // In-memory fallback (dev / no infra) — content-hash dedup.
         let mut mem = state.master_memory.write().await;
         for mut e in req.entries {
             let hash = if e.content_hash.is_empty() {
@@ -1118,6 +1327,7 @@ async fn plant_master_memory(
             }
         }
     }
+
     let total = state.master_memory.read().await.len();
     if planted > 0 {
         let evt = ApiAuditEvent {
@@ -1130,9 +1340,9 @@ async fn plant_master_memory(
             chip: "memory".into(),
             sev: "ok".into(),
         };
-        push_audit(&state, evt).await;
+        push_audit(state, evt).await;
     }
-    Json(PlantResponse {
+    Ok(PlantResponse {
         planted,
         skipped,
         total,
@@ -1180,8 +1390,67 @@ mod tests {
             None,
             None,
             84532,
+            None,
+            None,
+            "us-east-1".into(),
+            None,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn real_memory_ctx_none_when_unconfigured() {
+        // No --memory-url ⇒ in-memory fallback (Ok(None)), not an error.
+        let state = make_state();
+        assert!(real_memory_ctx(&state).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn real_memory_ctx_errs_on_partial_config() {
+        // --memory-url set but MEMORY_ROLE_ARN missing ⇒ fail loud (issue #90),
+        // never a silent per-actor-isolation downgrade.
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            Some("https://broker.example".into()),
+            None,
+            84532,
+            Some("https://memory.example".into()),
+            None,
+            "us-east-1".into(),
+            Some("0xdkh".into()),
+        )
+        .unwrap();
+        let err = match real_memory_ctx(&state).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected real_memory_ctx to return Err"),
+        };
+        assert!(err.contains("MEMORY_ROLE_ARN"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn real_memory_ctx_errs_when_not_logged_in() {
+        // Fully configured but no onboarding session ⇒ Err (onboard first),
+        // not a silent no-op.
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            Some("https://broker.example".into()),
+            None,
+            84532,
+            Some("https://memory.example".into()),
+            Some("arn:aws:iam::1:role/memory".into()),
+            "us-east-1".into(),
+            Some("0xdkh".into()),
+        )
+        .unwrap();
+        let err = match real_memory_ctx(&state).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected real_memory_ctx to return Err"),
+        };
+        assert!(err.contains("session"), "got: {err}");
     }
 
     #[tokio::test]
@@ -1785,23 +2054,26 @@ mod tests {
         ];
 
         // First plant: both land.
-        let r1 = plant_master_memory(
-            State(state.clone()),
-            Json(PlantRequest {
+        let r1 = plant_master_memory_inner(
+            &state,
+            PlantRequest {
                 entries: entries.clone(),
-            }),
+            },
         )
-        .await;
-        assert_eq!(r1.0.planted, 2);
-        assert_eq!(r1.0.skipped, 0);
-        assert_eq!(r1.0.total, 2);
+        .await
+        .unwrap();
+        assert_eq!(r1.planted, 2);
+        assert_eq!(r1.skipped, 0);
+        assert_eq!(r1.total, 2);
         assert_eq!(state.master_memory.read().await.len(), 2);
 
         // Re-plant the SAME content: 0 planted, 2 skipped (dedup by content_hash).
-        let r2 = plant_master_memory(State(state.clone()), Json(PlantRequest { entries })).await;
-        assert_eq!(r2.0.planted, 0);
-        assert_eq!(r2.0.skipped, 2);
-        assert_eq!(r2.0.total, 2);
+        let r2 = plant_master_memory_inner(&state, PlantRequest { entries })
+            .await
+            .unwrap();
+        assert_eq!(r2.planted, 0);
+        assert_eq!(r2.skipped, 2);
+        assert_eq!(r2.total, 2);
         assert_eq!(
             state.master_memory.read().await.len(),
             2,
@@ -1820,22 +2092,24 @@ mod tests {
     #[tokio::test]
     async fn plant_changed_body_adds_a_new_entry() {
         let state = make_state();
-        let _ = plant_master_memory(
-            State(state.clone()),
-            Json(PlantRequest {
+        let _ = plant_master_memory_inner(
+            &state,
+            PlantRequest {
                 entries: vec![mem_entry("personal", "profile", "v1 body")],
-            }),
+            },
         )
-        .await;
+        .await
+        .unwrap();
         // Same ns/key but DIFFERENT body → different content_hash → a new entry.
-        let r = plant_master_memory(
-            State(state.clone()),
-            Json(PlantRequest {
+        let r = plant_master_memory_inner(
+            &state,
+            PlantRequest {
                 entries: vec![mem_entry("personal", "profile", "v2 body")],
-            }),
+            },
         )
-        .await;
-        assert_eq!(r.0.planted, 1);
+        .await
+        .unwrap();
+        assert_eq!(r.planted, 1);
         assert_eq!(state.master_memory.read().await.len(), 2);
     }
 
