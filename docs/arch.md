@@ -745,6 +745,8 @@ sequenceDiagram
 
 The agent process never sees the plaintext credential. The bearer is injected at the localhost proxy at request-forward time; the agent only ever talks to the sidecar's localhost address.
 
+> **Master-self scope skip (`operator_omni == actor_omni`).** The scope check at steps 732 (broker) + 735 (worker) is **skipped when the operator is acting on its own actor** — the master reading/writing its **own** data classes (memory / credentials / email). Scope gates *agents*; the operator owns its own data, so it needs no self-grant. **Bounded-safe**: the per-actor device binding in the same steps already pins `device.actor_omni == request.actor_omni`, so the skip only ever opens `bots/<O_master>/…` — never an agent's or another operator's prefix, and never widens cross-actor. It is a deliberate **skip**, NOT a removal of the scope-grant mechanism (that path is retained; a future design may re-introduce an explicit master-self grant). Enforced symmetrically in [`handlers/cap.rs`](../crates/agentkeys-broker-server/src/handlers/cap.rs) (broker cap-mint) and [`verify.rs`](../crates/agentkeys-worker-creds/src/verify.rs) (`check_chain_scope`, worker re-verify) — defense-in-depth must agree, or the worker would reject a cap the broker minted.
+
 ### 12.5 Bootstrap output
 
 Daemon writes `~/.config/agentkeys/env` on first run:
