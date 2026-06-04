@@ -273,16 +273,26 @@ async fn mint_cap(
     }
 
     // 2. AgentKeysScope.isServiceInScope(operator, actor, keccak(service)).
+    //    SKIP when operator == actor — the master accessing its OWN data classes
+    //    (memory / credentials / email). Scope gates AGENTS, not the operator over
+    //    its own actor. Bounded-safe: the device check above already pinned
+    //    device.actor_omni == req.actor_omni, so this only ever opens
+    //    bots/<O_master>/. Deliberate SKIP, NOT a removal of the scope-grant path
+    //    (retained for a possible future design) — see docs/arch.md §12.4.
     let service_hash = keccak256_of_lc_service(&req.service);
-    let in_scope = call_is_service_in_scope(
-        &state.http,
-        &chain.rpc_url,
-        &chain.scope,
-        &req.operator_omni,
-        &req.actor_omni,
-        &service_hash,
-    )
-    .await?;
+    let in_scope = if req_omni == req_actor {
+        true
+    } else {
+        call_is_service_in_scope(
+            &state.http,
+            &chain.rpc_url,
+            &chain.scope,
+            &req.operator_omni,
+            &req.actor_omni,
+            &service_hash,
+        )
+        .await?
+    };
     if !in_scope {
         return Err(CapError::ServiceNotInScope);
     }

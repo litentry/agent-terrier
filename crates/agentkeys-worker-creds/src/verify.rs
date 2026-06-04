@@ -218,6 +218,15 @@ pub async fn check_chain_scope(
     let selector = function_selector("isServiceInScope(bytes32,bytes32,bytes32)");
     let a = pad32(&token.payload.operator_omni)?;
     let b = pad32(&token.payload.actor_omni)?;
+    // SKIP when operator == actor — the master accessing its OWN data. Mirrors
+    // the broker cap-mint skip (handlers/cap.rs); defense-in-depth must agree, or
+    // the worker would reject a cap the broker minted. Bounded-safe:
+    // check_chain_device already pinned device.actor_omni == payload.actor_omni,
+    // so this only ever opens bots/<O_master>/. Deliberate SKIP; the scope-grant
+    // path is retained for a possible future design — see docs/arch.md §12.4.
+    if a == b {
+        return Ok(());
+    }
     let service_hash = keccak_lc_service(&token.payload.service);
     let c = pad32(&service_hash)?;
     let data = format!("0x{selector}{a}{b}{c}");
@@ -408,6 +417,28 @@ mod tests {
             },
             broker_sig: "x".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn check_chain_scope_skips_when_operator_is_actor() {
+        // Master accessing its OWN data (operator == actor) must SKIP the on-chain
+        // scope check — proven by an UNREACHABLE rpc_url: if the skip didn't fire,
+        // eth_call would error. Mirrors the broker cap-mint skip (handlers/cap.rs).
+        let mut token = sample_token(CapOp::Fetch);
+        token.payload.actor_omni = token.payload.operator_omni.clone();
+        let client = reqwest::Client::new();
+        let r = check_chain_scope(&client, "http://127.0.0.1:1", "0xscope", &token).await;
+        assert!(r.is_ok(), "operator==actor must skip scope (got {r:?})");
+    }
+
+    #[tokio::test]
+    async fn check_chain_scope_consults_chain_when_operator_differs() {
+        // Cross-actor (operator != actor) must NOT skip — it consults the chain,
+        // so an unreachable rpc_url surfaces an error, never a silent pass.
+        let token = sample_token(CapOp::Fetch); // operator 0xaa…, actor 0xbb…
+        let client = reqwest::Client::new();
+        let r = check_chain_scope(&client, "http://127.0.0.1:1", "0xscope", &token).await;
+        assert!(r.is_err(), "operator!=actor must still consult the chain");
     }
 
     #[test]
