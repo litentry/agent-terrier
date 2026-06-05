@@ -10,6 +10,7 @@ pub mod jwt;
 pub mod metrics;
 pub mod oidc;
 pub mod plugins;
+pub mod sponsor;
 pub mod state;
 pub mod storage;
 pub mod sts;
@@ -53,6 +54,16 @@ pub fn create_router(state: SharedState) -> Router {
         // memory worker accepts and the cred worker rejects.
         .route("/v1/cap/memory-put", post(handlers::cap::cap_memory_put))
         .route("/v1/cap/memory-get", post(handlers::cap::cap_memory_get))
+        // Per-data-class CONFIG caps (#178 P1 / config-data-class-memory-list).
+        // data_class=Config — the policy / memory-types taxonomy; master-only.
+        .route(
+            "/v1/cap/config-store",
+            post(handlers::cap::cap_config_store),
+        )
+        .route(
+            "/v1/cap/config-fetch",
+            post(handlers::cap::cap_config_fetch),
+        )
         // Stage 7 §3.5 — pluggable auth surface.
         .route(
             "/v1/auth/wallet/start",

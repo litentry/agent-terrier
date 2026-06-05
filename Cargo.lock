@@ -159,6 +159,7 @@ dependencies = [
  "agentkeys-core",
  "agentkeys-mcp",
  "agentkeys-mock-server",
+ "agentkeys-provisioner",
  "agentkeys-types",
  "anyhow",
  "axum",

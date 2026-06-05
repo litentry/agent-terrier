@@ -69,6 +69,10 @@ impl CapOp {
 pub enum DataClass {
     Credentials,
     Memory,
+    /// Policy / memory-types taxonomy (#178 §7). Master-only; its own bucket +
+    /// role per §17.2. `/v1/cap/config-*` mints this; cred + memory workers
+    /// reject a Config cap via `verify::check_data_class`.
+    Config,
 }
 
 /// Cap payload — the signed-over portion of a cap-token. The worker
@@ -208,6 +212,30 @@ pub async fn cap_memory_get(
     Json(req): Json<CapRequest>,
 ) -> Result<Json<CapToken>, CapError> {
     mint_cap(state, headers, req, CapOp::Fetch, DataClass::Memory)
+        .await
+        .map(Json)
+}
+
+// Config cap-mint endpoints (#178 P1 / config-data-class-memory-list plan): the
+// policy / memory-types taxonomy data class. The minted cap carries
+// data_class=Config; the cred + memory workers reject it via
+// verify::check_data_class. Master-only (the governed agent has no config cap).
+pub async fn cap_config_store(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    mint_cap(state, headers, req, CapOp::Store, DataClass::Config)
+        .await
+        .map(Json)
+}
+
+pub async fn cap_config_fetch(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    mint_cap(state, headers, req, CapOp::Fetch, DataClass::Config)
         .await
         .map(Json)
 }
