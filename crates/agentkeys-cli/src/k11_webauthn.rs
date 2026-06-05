@@ -467,6 +467,79 @@ pub async fn assert_webauthn_for_chain_with_intent(
     extract_chain_assertion(&enrollment, expected_challenge, &parts)
 }
 
+/// keygen (HARDWARE — #164 local register): load-or-enroll the operator's hardware K11
+/// (Secure Enclave / TPM / StrongBox, Touch ID-gated) and return its `(pubX, pubY,
+/// rpIdHash)` as bare lowercase hex — the SAME shape [`software_webauthn_keygen`]
+/// returns, so the harness consumes both identically. Unlike the software signer there
+/// is **no on-disk private key**: the credential lives in the platform authenticator and
+/// can never be exfiltrated. If not yet enrolled, runs the WebAuthn *create* ceremony
+/// (Touch ID prompt), persisting the attested credential to `~/.agentkeys/k11/<omni>.json`.
+pub async fn hardware_webauthn_keygen(
+    operator_omni: &str,
+    rp_id: &str,
+) -> Result<(String, String, String), WebauthnError> {
+    let enrollment = match load_enrollment_with_rp(operator_omni, rp_id) {
+        Ok(e) => e,
+        Err(_) => enroll_webauthn_with_rp(operator_omni, rp_id).await?,
+    };
+    let pk = enrollment.cose_pubkey_hex.trim_start_matches("0x");
+    let pk_bytes = hex::decode(pk).map_err(|e| WebauthnError::InvalidCosePubkey(e.to_string()))?;
+    if pk_bytes.len() != 65 || pk_bytes[0] != 0x04 {
+        return Err(WebauthnError::InvalidCosePubkey(format!(
+            "expected 0x04 || X(32) || Y(32) = 65 bytes; got {}",
+            pk_bytes.len()
+        )));
+    }
+    Ok((
+        hex::encode(&pk_bytes[1..33]),
+        hex::encode(&pk_bytes[33..65]),
+        hex::encode(Sha256::digest(rp_id.as_bytes())),
+    ))
+}
+
+/// sign (HARDWARE — #164 local register): produce a WebAuthn assertion over the 32-byte
+/// `userop_hash` (hex) using the operator's hardware K11 — a real **Touch ID *get*
+/// ceremony**. The challenge **IS the raw userOpHash** (NOT `sha256(message)`), matching
+/// exactly what the on-chain `P256Account` expects, so the returned `(authData,
+/// clientDataJSON, challengeLocation, r, s)` drop straight into the same `handleOps` path
+/// the software signer feeds. `intent_text` renders on the localhost confirmation page
+/// above the raw hash so the operator sees what they approve. Bare-hex return, matching
+/// [`software_webauthn_sign`].
+pub async fn hardware_webauthn_userop_sign(
+    operator_omni: &str,
+    userop_hash_hex: &str,
+    rp_id: &str,
+    intent_text: Option<String>,
+) -> Result<(String, String, usize, String, String), WebauthnError> {
+    let uoh = hex::decode(userop_hash_hex.trim_start_matches("0x"))
+        .map_err(|e| WebauthnError::Cbor(format!("userOpHash hex: {e}")))?;
+    if uoh.len() != 32 {
+        return Err(WebauthnError::Cbor(format!(
+            "userOpHash must be 32 bytes, got {}",
+            uoh.len()
+        )));
+    }
+    let mut challenge = [0u8; 32];
+    challenge.copy_from_slice(&uoh);
+    let intent = match intent_text {
+        Some(t) => K11IntentContext {
+            text: Some(t),
+            fields: vec![],
+        },
+        None => K11IntentContext::empty(),
+    };
+    let a = assert_webauthn_for_chain_with_intent(operator_omni, challenge, rp_id, intent).await?;
+    Ok((
+        a.authenticator_data_hex
+            .trim_start_matches("0x")
+            .to_string(),
+        hex::encode(a.client_data_json_utf8.as_bytes()),
+        a.challenge_location,
+        a.r_hex.trim_start_matches("0x").to_string(),
+        a.s_hex.trim_start_matches("0x").to_string(),
+    ))
+}
+
 async fn enroll_webauthn_inner(
     operator_omni: &str,
     rp_id: &str,
@@ -1055,6 +1128,32 @@ fn extract_attested_credential(att_obj_bytes: &[u8]) -> Result<AttestedCredentia
     })
 }
 
+/// The on-chain K11 fields the daemon ui-bridge forwards to the register-master
+/// shell-out on the WEB path (issue #196), parsed from the browser passkey's
+/// attestationObject. Both are hex with no `0x` prefix.
+pub struct WebK11Material {
+    /// SEC1 uncompressed P-256 pubkey `04 || X || Y` → 130 hex chars.
+    /// Byte-identical to what `agentkeys k11 enroll --webauthn` persists as
+    /// `cose_pubkey_hex` (minus the `0x`).
+    pub cose_pubkey_hex: String,
+    /// `sha256(rp_id)` taken straight from authData[0:32] — exactly the
+    /// credential's own rpIdHash, so the on-chain `k11RpIdHash` matches the
+    /// authenticator-bound value regardless of how rp_id is configured.
+    pub rp_id_hash_hex: String,
+}
+
+/// Public helper (issue #196): extract the K11 pubkey + rpIdHash from a raw
+/// WebAuthn attestationObject. The daemon ui-bridge uses this to register the
+/// master device on chain — on the web path there is no
+/// `~/.agentkeys/k11/<omni>.json` on disk (web K11 enrollment is in-memory).
+pub fn parse_web_k11(att_obj_bytes: &[u8]) -> Result<WebK11Material, WebauthnError> {
+    let attested = extract_attested_credential(att_obj_bytes)?;
+    Ok(WebK11Material {
+        cose_pubkey_hex: hex::encode(&attested.cose_pubkey),
+        rp_id_hash_hex: hex::encode(&attested.rp_id_hash),
+    })
+}
+
 pub fn persist_enrollment(enrollment: &WebauthnEnrollment) -> Result<(), WebauthnError> {
     let rp_id = enrollment.rp_id.as_deref().unwrap_or("localhost");
     let path = enrollment_path_with_rp(&enrollment.operator_omni, rp_id);
@@ -1560,6 +1659,115 @@ fn html_escape(s: &str) -> String {
     out
 }
 
+// ─── Software WebAuthn authenticator (issue #164 headless/CI register) ───────
+//
+// The Rust replacement for harness/scripts/erc4337-webauthn-sign.py (drops the
+// python/cryptography venv). It produces the SAME WebAuthn assertion BYTES a
+// hardware Touch ID authenticator would — from a P-256 key in a file, no hardware
+// and no biometric — so the on-chain K11Verifier accepts it identically. This is
+// the SOFTWARE implementation of the #164 passkey-account flow (the hardware one
+// is the browser Touch ID ceremony above); it is NOT the deprecated EOA path.
+// Wire format mirrors K11Verifier.verifyAssertion exactly:
+//   authData = sha256(rpId) || flags(0x05 = UP|UV) || signCount(4 BE)   (37 bytes)
+//   clientDataJSON = {"type":"webauthn.get","challenge":"<43-char b64url>","origin":...}
+//                    (challenge value at offset 36 = challengeLocation)
+//   sig = P-256 (low-s) over sha256(authData || sha256(clientDataJSON))
+
+/// keygen: load-or-generate the software P-256 passkey at `key_file` (PKCS#8 PEM).
+/// Idempotent — NEVER overwrites an existing key (so a reused account keeps its
+/// CREATE2 address). Returns (pubX, pubY, rpIdHash) as bare lowercase hex.
+pub fn software_webauthn_keygen(
+    key_file: &str,
+    rp_id: &str,
+) -> Result<(String, String, String), WebauthnError> {
+    use p256::ecdsa::SigningKey;
+    use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+    let signing = if std::path::Path::new(key_file).exists() {
+        let pem = fs::read_to_string(key_file).map_err(|e| WebauthnError::Io(e.to_string()))?;
+        SigningKey::from_pkcs8_pem(&pem).map_err(|e| WebauthnError::Io(format!("load key: {e}")))?
+    } else {
+        let sk = SigningKey::random(&mut rand_core::OsRng);
+        if let Some(parent) = std::path::Path::new(key_file).parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|e| WebauthnError::Io(e.to_string()))?;
+            }
+        }
+        let pem = sk
+            .to_pkcs8_pem(LineEnding::LF)
+            .map_err(|e| WebauthnError::Io(format!("encode key: {e}")))?;
+        fs::write(key_file, pem.as_bytes()).map_err(|e| WebauthnError::Io(e.to_string()))?;
+        sk
+    };
+    let pt = signing.verifying_key().to_encoded_point(false); // 0x04 || X(32) || Y(32)
+    let b = pt.as_bytes();
+    if b.len() != 65 {
+        return Err(WebauthnError::InvalidCosePubkey(format!(
+            "expected 65-byte uncompressed point, got {}",
+            b.len()
+        )));
+    }
+    Ok((
+        hex::encode(&b[1..33]),
+        hex::encode(&b[33..65]),
+        hex::encode(Sha256::digest(rp_id.as_bytes())),
+    ))
+}
+
+/// sign: produce a WebAuthn assertion over the 32-byte `userop_hash` (hex). Returns
+/// (authData, clientDataJSON, challengeLocation, r, s) — hex (loc decimal), the
+/// exact fields K11Verifier.verifyAssertion takes.
+pub fn software_webauthn_sign(
+    key_file: &str,
+    userop_hash_hex: &str,
+    rp_id: &str,
+) -> Result<(String, String, usize, String, String), WebauthnError> {
+    use p256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+    use p256::pkcs8::DecodePrivateKey;
+    let pem = fs::read_to_string(key_file).map_err(|e| WebauthnError::Io(e.to_string()))?;
+    let signing = SigningKey::from_pkcs8_pem(&pem)
+        .map_err(|e| WebauthnError::Io(format!("load key: {e}")))?;
+    let uoh = hex::decode(userop_hash_hex.trim_start_matches("0x"))
+        .map_err(|e| WebauthnError::Cbor(format!("userOpHash hex: {e}")))?;
+    if uoh.len() != 32 {
+        return Err(WebauthnError::Cbor(format!(
+            "userOpHash must be 32 bytes, got {}",
+            uoh.len()
+        )));
+    }
+    let challenge_b64 = URL_SAFE_NO_PAD.encode(&uoh); // 43 chars
+    let client_data = format!(
+        r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"https://{rp_id}"}}"#
+    )
+    .into_bytes();
+    // K11Verifier expects the challenge value at offset 36.
+    if client_data.len() < 36 + challenge_b64.len()
+        || &client_data[36..36 + challenge_b64.len()] != challenge_b64.as_bytes()
+    {
+        return Err(WebauthnError::Cbor(
+            "challengeLocation drift (expected 36)".into(),
+        ));
+    }
+    let mut auth_data = Sha256::digest(rp_id.as_bytes()).to_vec();
+    auth_data.push(0x05); // flags: UP | UV
+    auth_data.extend_from_slice(&[0u8, 0, 0, 0]); // signCount = 0 → 37 bytes
+    let mut hasher = Sha256::new();
+    hasher.update(&auth_data);
+    hasher.update(Sha256::digest(&client_data));
+    let msg_hash = hasher.finalize();
+    let sig: Signature = signing
+        .sign_prehash(&msg_hash)
+        .map_err(|e| WebauthnError::Cbor(format!("sign: {e}")))?;
+    let sig = sig.normalize_s().unwrap_or(sig); // enforce low-s
+    let bytes = sig.to_bytes(); // 64: r || s
+    Ok((
+        hex::encode(&auth_data),
+        hex::encode(&client_data),
+        36,
+        hex::encode(&bytes[0..32]),
+        hex::encode(&bytes[32..64]),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1655,5 +1863,68 @@ mod tests {
             fields: vec![("Service".into(), "openrouter".into())],
         };
         assert!(!intent.is_empty());
+    }
+
+    // Software P-256 passkey (#164 headless/CI register signer). The live mainnet
+    // K11Verifier accepts these bytes (verified manually, verifyAssertion → true);
+    // this is the fast, no-network guard reproducing the on-chain verification math:
+    // VerifyingKey(x,y).verify(sha256(authData || sha256(clientDataJSON)), (r,s)).
+    #[test]
+    fn software_passkey_roundtrip_verifies_locally() {
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
+        use p256::ecdsa::{Signature, VerifyingKey};
+
+        let rp_id = "localhost";
+        let key_file = std::env::temp_dir().join("ak-software-passkey-roundtrip.key");
+        let key = key_file.to_string_lossy().to_string();
+        let _ = fs::remove_file(&key); // start fresh → exercises the generate branch
+
+        let (pubx, puby, rpid_hash) = software_webauthn_keygen(&key, rp_id).expect("keygen");
+        assert_eq!(pubx.len(), 64);
+        assert_eq!(puby.len(), 64);
+        // rpIdHash MUST be sha256(rpId) — what authData embeds + the verifier expects.
+        assert_eq!(rpid_hash, hex::encode(Sha256::digest(rp_id.as_bytes())));
+
+        // Idempotent: a second keygen loads the SAME key (never overwrites) — so a
+        // reused account keeps its CREATE2 address.
+        let (pubx2, puby2, _) = software_webauthn_keygen(&key, rp_id).expect("keygen reload");
+        assert_eq!(
+            (&pubx, &puby),
+            (&pubx2, &puby2),
+            "keygen must not overwrite"
+        );
+
+        let uoh = format!("0x{}", "ab".repeat(32)); // a 32-byte userOpHash
+        let (authdata, cdj, loc, r, s) = software_webauthn_sign(&key, &uoh, rp_id).expect("sign");
+        assert_eq!(loc, 36, "K11Verifier requires challengeLocation == 36");
+
+        let authdata_bytes = hex::decode(&authdata).unwrap();
+        let cdj_bytes = hex::decode(&cdj).unwrap();
+        // authData = sha256(rpId)(32) || flags(1) || signCount(4) = 37 bytes, leads with rpIdHash.
+        assert_eq!(authdata_bytes.len(), 37);
+        assert!(authdata.starts_with(&rpid_hash));
+        // clientDataJSON carries challenge == base64url(userOpHash).
+        let challenge_b64 =
+            URL_SAFE_NO_PAD.encode(hex::decode(uoh.trim_start_matches("0x")).unwrap());
+        assert!(String::from_utf8_lossy(&cdj_bytes)
+            .contains(&format!("\"challenge\":\"{challenge_b64}\"")));
+
+        // Reconstruct the verifying key from (x,y) and verify the (r,s) signature over
+        // the exact prehash the on-chain K11Verifier computes.
+        let mut sec1 = vec![0x04u8];
+        sec1.extend_from_slice(&hex::decode(&pubx).unwrap());
+        sec1.extend_from_slice(&hex::decode(&puby).unwrap());
+        let vk = VerifyingKey::from_sec1_bytes(&sec1).expect("pubkey");
+        let mut rs = hex::decode(&r).unwrap();
+        rs.extend_from_slice(&hex::decode(&s).unwrap());
+        let sig = Signature::from_slice(&rs).expect("sig");
+        let mut hasher = Sha256::new();
+        hasher.update(&authdata_bytes);
+        hasher.update(Sha256::digest(&cdj_bytes));
+        let msg_hash = hasher.finalize();
+        vk.verify_prehash(&msg_hash, &sig)
+            .expect("software passkey assertion must verify (mirror of K11Verifier)");
+
+        let _ = fs::remove_file(&key);
     }
 }

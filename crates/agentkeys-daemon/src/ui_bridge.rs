@@ -15,9 +15,12 @@
 //!   3. browser POST /v1/k11/enroll/finish  → daemon verifies
 //!      attestation via webauthn-rs, returns credentialId
 //!
-//! For M1 the on-chain SidecarRegistry.register_master_device() call
-//! is stubbed (returns chainTxHash=null). Real chain submission lands
-//! in PR-C alongside the audit-service SSE feed.
+//! The on-chain register (registerFirstMasterDevice) is WIRED (issue #196):
+//! K11-finish shells out to `--register-master-script` and returns the real
+//! `chain_tx_hash` + `chain` status (+ `chain_error` on failure). It is skipped
+//! (`chain: none`) ONLY when no register script is configured (dev/no-infra) —
+//! the web app launcher (`dev.sh`) always passes one, so the onboarding
+//! ceremony is NOT deferred.
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -108,7 +111,35 @@ pub struct UiBridgeState {
     /// The on-chain-registered master device key hash, sent as `device_key_hash` in
     /// memory cap-mint. Must match the device registered via the W3 bootstrap
     /// (`docs/plan/web-flow/w3-real-memory.md` §4). `None` ⇒ real chain disabled.
+    /// Issue #196 makes this a FALLBACK: once the K11-finish register shell-out
+    /// runs, `registered_master` holds the freshly-registered hash and takes
+    /// precedence, so the operator no longer has to pass `--master-device-key-hash`.
     pub master_device_key_hash: Option<String>,
+    /// Issue #196: the on-chain master-device registration result, populated by
+    /// the K11-finish handler's register shell-out. `Some` ⇒ the master device is
+    /// on chain with CAP_MINT; its `device_key_hash` is what real cap-mint sends
+    /// (takes precedence over `master_device_key_hash`).
+    pub registered_master: RwLock<Option<RegisteredMaster>>,
+    /// Issue #196: path to `harness/scripts/heima-register-first-master.sh` (the
+    /// §4.2 sanctioned shell-out). `None` ⇒ K11-finish does NOT submit the
+    /// on-chain register (chain stays "none"); set via `--register-master-script`
+    /// to enable the real web onboarding chain write.
+    pub register_master_script: Option<String>,
+}
+
+/// Issue #196: outcome of the on-chain master-device registration shell-out.
+#[derive(Clone, Debug)]
+pub struct RegisteredMaster {
+    /// `device_key_hash` the broker resolves on cap-mint — what `real_memory_ctx`
+    /// sends. Derived + returned by `heima-register-first-master.sh`.
+    pub device_key_hash: String,
+    /// The session (managed-wallet) omni the device was registered under
+    /// (operator == actor for master-self). `cap.rs` requires
+    /// `device.actor_omni == req.actor_omni`, so this must equal the cap-mint omni.
+    pub operator_omni: String,
+    /// `registerFirstMasterDevice` tx hash. `None` on idempotent skip (the device
+    /// was already on chain from a prior login).
+    pub tx_hash: Option<String>,
 }
 
 /// A master-actor memory entry. `content_hash` is the dedup key —
@@ -272,7 +303,20 @@ pub struct EnrollFinishRequest {
 pub struct EnrollFinishResponse {
     pub credential_id: String,
     pub registered_at_unix: u64,
+    /// Issue #196: real `registerFirstMasterDevice` tx hash once the on-chain
+    /// register shell-out succeeds. `None` on idempotent skip (already on chain),
+    /// when no register script is configured, or when chain registration failed
+    /// (see `chain` / `chain_error`). No longer a hard-coded stub.
     pub chain_tx_hash: Option<String>,
+    /// "master-registered" once the master device is on chain with CAP_MINT (new
+    /// tx OR idempotent-skip), else "none". Mirrors `GET /v1/onboarding/state`.
+    pub chain: String,
+    /// Populated only when the register shell-out FAILED — the passkey is still
+    /// enrolled (the `credential_id` above is valid), but the chain write didn't
+    /// land. The web UI surfaces this so the operator funds + retries instead of
+    /// hitting a confusing cap-mint failure at plant time (issue #90 fail-loud).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_error: Option<String>,
 }
 
 // ── W1 onboarding: real email magic-link verify (broker-backed) ──
@@ -326,6 +370,11 @@ pub struct OnboardingStateResponse {
     pub omni: Option<String>,
     /// "enrolled" if a K11 passkey was registered this session, else "none".
     pub k11: String,
+    /// Issue #196: "master-registered" once the master device is on chain with
+    /// CAP_MINT (the K11-finish register shell-out landed or was idempotent-skip),
+    /// else "none". This is the last onboarding gate before the memory plant
+    /// button works end-to-end (real cap-mint resolves the on-chain device).
+    pub chain: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -406,6 +455,7 @@ pub fn build_state(
     memory_role_arn: Option<String>,
     region: String,
     master_device_key_hash: Option<String>,
+    register_master_script: Option<String>,
 ) -> anyhow::Result<SharedUiBridgeState> {
     let origin = Url::parse(rp_origin)?;
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
@@ -431,6 +481,8 @@ pub fn build_state(
         memory_role_arn,
         region,
         master_device_key_hash,
+        registered_master: RwLock::new(None),
+        register_master_script,
     }))
 }
 
@@ -602,6 +654,11 @@ async fn onboarding_state(
     } else {
         "enrolled"
     };
+    let chain = if state.registered_master.read().await.is_some() {
+        "master-registered"
+    } else {
+        "none"
+    };
     let (identity, email, omni) = match session {
         Some(s) => ("verified".to_string(), Some(s.email), Some(s.omni)),
         None => ("none".to_string(), None, None),
@@ -611,6 +668,7 @@ async fn onboarding_state(
         email,
         omni,
         k11: k11.to_string(),
+        chain: chain.to_string(),
     })
 }
 
@@ -667,6 +725,17 @@ async fn enroll_finish(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<EnrollFinishRequest>,
 ) -> Result<Json<EnrollFinishResponse>, (StatusCode, Json<ErrorBody>)> {
+    // Issue #196: pull the raw attestationObject (b64url) out of the credential
+    // JSON BEFORE `from_value` consumes it — the on-chain register shell-out
+    // forwards the K11 pubkey + rpIdHash extracted from it (the web path has no
+    // disk K11 file). Always present in a real registration response.
+    let attestation_object_b64 = req
+        .credential
+        .get("response")
+        .and_then(|r| r.get("attestationObject"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let reg =
         serde_json::from_value::<RegisterPublicKeyCredential>(req.credential).map_err(|e| {
             err(
@@ -713,15 +782,183 @@ async fn enroll_finish(
         },
     );
 
-    // TODO(PR-C): submit credentialId to SidecarRegistry.register_master_device()
-    // via the broker. Currently stubbed — chain_tx_hash returns null.
-    let chain_tx_hash: Option<String> = None;
+    drop(guard);
+
+    // Issue #196: submit registerFirstMasterDevice on chain (un-stub
+    // chain_tx_hash). The device is registered under the daemon's SESSION omni —
+    // cap.rs forces device.operator_omni == J1.omni_account == the cap-mint
+    // operator_omni, so a master-self memory cap resolves exactly this device.
+    // The deployer key signs the tx (msg.sender); the K11 pubkey is the browser
+    // passkey just enrolled. Best-effort: a chain failure does NOT void the
+    // passkey enrollment — it surfaces in `chain_error` so the operator funds +
+    // retries instead of hitting a confusing cap-mint failure at plant time.
+    let (chain_tx_hash, chain, chain_error) = finish_chain_register(
+        &state,
+        &credential_id_b64,
+        attestation_object_b64.as_deref(),
+    )
+    .await;
 
     Ok(Json(EnrollFinishResponse {
         credential_id: credential_id_b64,
         registered_at_unix,
         chain_tx_hash,
+        chain,
+        chain_error,
     }))
+}
+
+/// K11-finish → on-chain register glue (issue #196). Returns
+/// `(chain_tx_hash, chain_status, chain_error)` and never errors out the
+/// enrollment (the passkey is already persisted). Chain registration is skipped
+/// — `("none", None)` with no error — when no register script is configured
+/// (dev / no-infra). A missing session or a shell-out failure returns a
+/// `chain_error` so the web UI can surface "fund + retry".
+async fn finish_chain_register(
+    state: &SharedUiBridgeState,
+    credential_id_b64url: &str,
+    attestation_object_b64: Option<&str>,
+) -> (Option<String>, String, Option<String>) {
+    let Some(script) = state.register_master_script.clone() else {
+        return (None, "none".to_string(), None);
+    };
+    let session = state.onboarding_session.read().await.clone();
+    let Some(session) = session else {
+        let msg = "K11 enrolled but no onboarding session — verify email first, \
+                   then re-enroll to register the master device on chain"
+            .to_string();
+        tracing::warn!("ui-bridge register-master: {msg}");
+        return (None, "none".to_string(), Some(msg));
+    };
+    if session.omni.is_empty() {
+        return (
+            None,
+            "none".to_string(),
+            Some("onboarding session has no EVM omni (managed-wallet attestation skipped)".into()),
+        );
+    }
+    let Some(att_b64) = attestation_object_b64 else {
+        return (
+            None,
+            "none".to_string(),
+            Some("credential missing response.attestationObject — cannot derive K11 pubkey".into()),
+        );
+    };
+    let k11 = match decode_web_k11(att_b64) {
+        Ok(k) => k,
+        Err(e) => {
+            return (
+                None,
+                "none".to_string(),
+                Some(format!("K11 pubkey extract: {e}")),
+            )
+        }
+    };
+
+    match register_master_device(&script, &session.omni, &k11, credential_id_b64url).await {
+        Ok(rm) => {
+            tracing::info!(
+                target: "agentkeys.daemon.ui_bridge",
+                operator_omni = %rm.operator_omni,
+                device_key_hash = %rm.device_key_hash,
+                tx = rm.tx_hash.as_deref().unwrap_or("(already-registered)"),
+                "issue #196: master device registered on chain (CAP_MINT) — cap-mint will resolve this device"
+            );
+            let tx = rm.tx_hash.clone();
+            *state.registered_master.write().await = Some(rm);
+            (tx, "master-registered".to_string(), None)
+        }
+        Err(e) => {
+            tracing::error!("ui-bridge register-master shell-out failed: {e}");
+            (None, "none".to_string(), Some(e))
+        }
+    }
+}
+
+/// Decode the attestationObject (b64url) → the on-chain K11 material (pubkey +
+/// rpIdHash). Reuses the CLI's tested CBOR/COSE parser.
+fn decode_web_k11(
+    att_obj_b64url: &str,
+) -> Result<agentkeys_cli::k11_webauthn::WebK11Material, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(att_obj_b64url)
+        .map_err(|e| format!("attestationObject not valid b64url: {e}"))?;
+    agentkeys_cli::k11_webauthn::parse_web_k11(&bytes).map_err(|e| e.to_string())
+}
+
+/// Shell out to `heima-register-first-master.sh` (wire-real-paths.md §4.2) to
+/// submit `registerFirstMasterDevice` under the session omni, signed by the
+/// local deployer key (msg.sender). Parses the trailing JSON line for the
+/// device_key_hash (what cap-mint sends) + tx_hash (None on idempotent skip).
+async fn register_master_device(
+    script: &str,
+    session_omni: &str,
+    k11: &agentkeys_cli::k11_webauthn::WebK11Material,
+    credential_id_b64url: &str,
+) -> Result<RegisteredMaster, String> {
+    let output = tokio::process::Command::new("bash")
+        .arg(script)
+        .arg("--operator-omni")
+        .arg(session_omni)
+        .arg("--actor-omni")
+        .arg(session_omni)
+        .arg("--k11-cose-hex")
+        .arg(&k11.cose_pubkey_hex)
+        .arg("--k11-cred-id")
+        .arg(credential_id_b64url)
+        .arg("--rp-id-hash")
+        .arg(&k11.rp_id_hash_hex)
+        .output()
+        .await
+        .map_err(|e| format!("spawn {script}: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Surface the last few stderr lines (the script logs `fail <reason>`).
+        let tail: String = stderr
+            .lines()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("register script exited {}: {tail}", output.status));
+    }
+
+    // The script prints human logs on stderr and a single JSON line on stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .ok_or_else(|| format!("register script produced no JSON on stdout: {stdout}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_line.trim()).map_err(|e| format!("register JSON parse: {e}"))?;
+
+    let device_key_hash = parsed
+        .get("device_key_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("register JSON missing device_key_hash: {json_line}"))?
+        .to_string();
+    let operator_omni = parsed
+        .get("operator_omni")
+        .and_then(|v| v.as_str())
+        .unwrap_or(session_omni)
+        .to_string();
+    let tx_hash = parsed
+        .get("tx_hash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(RegisteredMaster {
+        device_key_hash,
+        operator_omni,
+        tx_hash,
+    })
 }
 
 fn base64url_encode(bytes: &[u8]) -> String {
@@ -1138,10 +1375,16 @@ async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>,
         .memory_role_arn
         .clone()
         .ok_or("real memory: --memory-url set but MEMORY_ROLE_ARN missing")?;
-    let device_key_hash = state
-        .master_device_key_hash
-        .clone()
-        .ok_or("real memory: --memory-url set but --master-device-key-hash missing")?;
+    // Prefer the device hash from the K11-finish register shell-out (issue #196)
+    // — it's the device actually on chain under this session omni. Fall back to
+    // the --master-device-key-hash CLI flag (pre-registered device / tests).
+    let device_key_hash = match state.registered_master.read().await.as_ref() {
+        Some(rm) => rm.device_key_hash.clone(),
+        None => state.master_device_key_hash.clone().ok_or(
+            "real memory: master device not registered on chain yet (finish K11 \
+             enrollment to register) and no --master-device-key-hash fallback set",
+        )?,
+    };
     let session = state
         .onboarding_session
         .read()
@@ -1157,7 +1400,15 @@ async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>,
         role_arn,
         region: state.region.clone(),
         j1: session.j1,
-        omni: session.omni,
+        // The broker cap-mint input-validates that operator_omni/actor_omni start with
+        // 0x, but the onboarding session stores the omni bare. Normalize ONCE here so
+        // both memory_put_real + memory_get_real send a 0x-prefixed omni (the broker
+        // normalize_hex32's it for the device-binding match either way).
+        omni: if session.omni.starts_with("0x") {
+            session.omni
+        } else {
+            format!("0x{}", session.omni)
+        },
         device_key_hash,
     }))
 }
@@ -1306,8 +1557,21 @@ async fn plant_master_memory_inner(
                 }
             }
         }
-        if planted == 0 && !errors.is_empty() {
-            return Err((axum::http::StatusCode::BAD_GATEWAY, errors.join("; ")));
+        // Any durable-write failure fails the whole plant — a partial plant must NOT
+        // read as success (the prepared archive would be partially persisted while the
+        // caller proceeds with missing memory). The successfully-written entries stay in
+        // `master_memory` so a re-plant is idempotent and resumes the failed namespaces.
+        // We early-return BEFORE the success audit + Ok response below.
+        if !errors.is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!(
+                    "plant incomplete: {} of {} write(s) failed (planted {planted}, skipped {skipped}): {}",
+                    errors.len(),
+                    planted + skipped + errors.len(),
+                    errors.join("; ")
+                ),
+            ));
         }
     } else {
         // In-memory fallback (dev / no infra) — content-hash dedup.
@@ -1394,6 +1658,7 @@ mod tests {
             None,
             "us-east-1".into(),
             None,
+            None,
         )
         .unwrap()
     }
@@ -1420,6 +1685,7 @@ mod tests {
             None,
             "us-east-1".into(),
             Some("0xdkh".into()),
+            None,
         )
         .unwrap();
         let err = match real_memory_ctx(&state).await {
@@ -1444,6 +1710,7 @@ mod tests {
             Some("arn:aws:iam::1:role/memory".into()),
             "us-east-1".into(),
             Some("0xdkh".into()),
+            None,
         )
         .unwrap();
         let err = match real_memory_ctx(&state).await {
@@ -2180,5 +2447,120 @@ mod tests {
     #[allow(dead_code)]
     fn _keep_seed_actor_alive(state: &SharedUiBridgeState) -> ApiActor {
         seed_actor(state)
+    }
+
+    // ─── Issue #196: on-chain master-device registration (K11-finish glue) ───
+
+    fn write_temp_script(name: &str, body: &str) -> String {
+        let path = std::env::temp_dir().join(format!("ak196-{name}.sh"));
+        std::fs::write(&path, body).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn dummy_k11() -> agentkeys_cli::k11_webauthn::WebK11Material {
+        // Values are opaque to register_master_device (it just forwards them as
+        // args; the fake scripts ignore them).
+        agentkeys_cli::k11_webauthn::WebK11Material {
+            cose_pubkey_hex: format!("04{}", "ab".repeat(64)),
+            rp_id_hash_hex: "cd".repeat(32),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_master_device_parses_success() {
+        let script = write_temp_script(
+            "ok",
+            "#!/usr/bin/env bash\necho 'human log' >&2\n\
+             echo '{\"ok\":true,\"device_key_hash\":\"0xdeadbeef\",\"operator_omni\":\"0xfeed\",\"actor_omni\":\"0xfeed\",\"tx_hash\":\"0xTX\",\"block_number\":\"42\"}'\n",
+        );
+        let rm = register_master_device(&script, "0xfeed", &dummy_k11(), "credid")
+            .await
+            .expect("parse success JSON");
+        assert_eq!(rm.device_key_hash, "0xdeadbeef");
+        assert_eq!(rm.operator_omni, "0xfeed");
+        assert_eq!(rm.tx_hash.as_deref(), Some("0xTX"));
+    }
+
+    #[tokio::test]
+    async fn register_master_device_parses_idempotent_skip() {
+        // Already-registered skip: device_key_hash present, NO tx_hash.
+        let script = write_temp_script(
+            "skip",
+            "#!/usr/bin/env bash\n\
+             echo '{\"ok\":true,\"skipped\":\"already-registered\",\"device_key_hash\":\"0xabc\",\"operator_omni\":\"0xfeed\",\"actor_omni\":\"0xfeed\"}'\n",
+        );
+        let rm = register_master_device(&script, "0xfeed", &dummy_k11(), "credid")
+            .await
+            .expect("parse skip JSON");
+        assert_eq!(rm.device_key_hash, "0xabc");
+        assert!(rm.tx_hash.is_none(), "idempotent skip carries no tx_hash");
+    }
+
+    #[tokio::test]
+    async fn register_master_device_errors_on_nonzero_exit() {
+        let script = write_temp_script(
+            "fail",
+            "#!/usr/bin/env bash\necho '    fail cast send failed' >&2\nexit 1\n",
+        );
+        let err = register_master_device(&script, "0xfeed", &dummy_k11(), "credid")
+            .await
+            .expect_err("non-zero exit must be an Err");
+        assert!(
+            err.contains("exited") || err.contains("cast send failed"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn onboarding_state_reports_chain_status() {
+        let state = make_state();
+        let before = onboarding_state(State(state.clone())).await;
+        assert_eq!(before.0.chain, "none");
+        *state.registered_master.write().await = Some(RegisteredMaster {
+            device_key_hash: "0xabc".into(),
+            operator_omni: "0xfeed".into(),
+            tx_hash: Some("0xTX".into()),
+        });
+        let after = onboarding_state(State(state.clone())).await;
+        assert_eq!(after.0.chain, "master-registered");
+    }
+
+    #[tokio::test]
+    async fn finish_chain_register_skips_when_no_script() {
+        // No --register-master-script ⇒ on-chain register disabled (dev/no-infra),
+        // a CLEAN skip (chain "none", no error), not a failure.
+        let state = make_state();
+        let (tx, chain, err) = finish_chain_register(&state, "credid", Some("ignored")).await;
+        assert!(tx.is_none());
+        assert_eq!(chain, "none");
+        assert!(err.is_none(), "no-script is a clean skip: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn finish_chain_register_errors_when_no_session() {
+        // Script configured but no onboarding session ⇒ can't determine the omni
+        // to register under; surfaces a chain_error (passkey still enrolled).
+        let script = write_temp_script("nosession", "#!/usr/bin/env bash\necho '{}'\n");
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            None,
+            None,
+            84532,
+            None,
+            None,
+            "us-east-1".into(),
+            None,
+            Some(script),
+        )
+        .unwrap();
+        let (tx, chain, err) = finish_chain_register(&state, "credid", Some("ignored")).await;
+        assert!(tx.is_none());
+        assert_eq!(chain, "none");
+        assert!(
+            err.as_deref().unwrap_or("").contains("session"),
+            "should explain the missing session: {err:?}"
+        );
     }
 }
