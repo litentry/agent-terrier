@@ -64,6 +64,19 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_UI_BRIDGE_RP_NAME", default_value = "AgentKeys")]
     ui_bridge_rp_name: String,
 
+    /// HARNESS/TEST SEAM (web-parity, v2-demo phase 6): seed the ui-bridge
+    /// onboarding session directly with an existing master J1, bypassing the
+    /// interactive email + WebAuthn onboarding. Lets the harness drive the REAL
+    /// plant chain with its already-registered master (pair with
+    /// --master-device-key-hash + --ui-bridge-seed-omni). UNSET in normal operation.
+    #[arg(long, env = "AGENTKEYS_UI_BRIDGE_SEED_SESSION_JWT")]
+    ui_bridge_seed_session_jwt: Option<String>,
+
+    /// Companion to --ui-bridge-seed-session-jwt: the master omni the seeded
+    /// session authenticates as (0x-prefixed or bare; normalized to 0x).
+    #[arg(long, env = "AGENTKEYS_UI_BRIDGE_SEED_OMNI")]
+    ui_bridge_seed_omni: Option<String>,
+
     /// v2 stage-2 master-companion mode (arch.md §10.3.1 + #90). Spins up
     /// a SECOND daemon instance that holds a distinct K10 + K11 credential
     /// on RP ID `companion.localhost` and serves an HTTP approval API on
@@ -218,8 +231,18 @@ struct Args {
 
     /// W3 real-memory: the on-chain-registered master device key hash (the cap-mint
     /// device binding). Must match the device registered via the W3 bootstrap.
+    /// Issue #196 makes this a FALLBACK — once the K11-finish register shell-out
+    /// runs, the daemon uses the freshly-registered hash automatically.
     #[arg(long, env = "AGENTKEYS_MASTER_DEVICE_KEY_HASH")]
     master_device_key_hash: Option<String>,
+
+    /// Issue #196: path to `harness/scripts/heima-register-first-master.sh`. When
+    /// set, the ui-bridge K11-finish handler shells out to it to register the
+    /// master device on chain (un-stubbing `chain_tx_hash`) under the session
+    /// omni, signed by the local deployer key. Unset ⇒ on-chain registration is
+    /// skipped and `GET /v1/onboarding/state` reports `chain: none` (dev/no-infra).
+    #[arg(long, env = "AGENTKEYS_REGISTER_MASTER_SCRIPT")]
+    register_master_script: Option<String>,
 
     /// How long to wait for the operator to complete email-link click
     /// or OAuth2 callback before failing init.
@@ -1105,6 +1128,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.memory_role_arn.clone(),
         args.region.clone(),
         args.master_device_key_hash.clone(),
+        args.register_master_script.clone(),
     )
     .with_context(|| {
         format!(
@@ -1112,6 +1136,26 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
             args.ui_bridge_rp_id, args.ui_bridge_origin
         )
     })?;
+    // Harness web-parity seam (v2-demo phase 6): seed the onboarding session from
+    // --ui-bridge-seed-* so the parity phase drives the REAL plant chain with the
+    // harness's already-registered master, without re-running interactive
+    // onboarding/WebAuthn. Pair with --master-device-key-hash. No-op otherwise.
+    if let (Some(j1), Some(omni)) = (
+        args.ui_bridge_seed_session_jwt.clone(),
+        args.ui_bridge_seed_omni.clone(),
+    ) {
+        let omni = if omni.starts_with("0x") {
+            omni
+        } else {
+            format!("0x{omni}")
+        };
+        *state.onboarding_session.write().await = Some(ui_bridge::OnboardingSession {
+            email: "harness-web-parity@local".to_string(),
+            omni,
+            j1,
+        });
+        info!("ui-bridge: SEEDED onboarding session (harness web-parity seam) — interactive onboarding bypassed");
+    }
     let app = ui_bridge::build_router(state, &args.ui_bridge_origin);
 
     let listener = tokio::net::TcpListener::bind(&args.ui_bridge_bind)

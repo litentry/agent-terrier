@@ -486,6 +486,81 @@ enum K11Action {
         )]
         intent_op_json: Option<String>,
     },
+    #[command(
+        name = "software-keygen",
+        about = "Software WebAuthn authenticator (#164 headless/CI register): load-or-generate a software P-256 passkey at --key-file and print PUBX/PUBY/RPIDHASH (eval-able). Rust replacement for erc4337-webauthn-sign.py keygen — no python. NOT a hardware/Touch ID passkey and NOT the deprecated EOA path."
+    )]
+    SoftwareKeygen {
+        #[arg(
+            long,
+            help = "Path to the software passkey file (PKCS#8 PEM; never overwritten)"
+        )]
+        key_file: String,
+        #[arg(long, default_value = "localhost", help = "WebAuthn RP ID")]
+        rp_id: String,
+    },
+    #[command(
+        name = "software-sign",
+        about = "Software WebAuthn authenticator (#164 headless/CI): sign a 32-byte userOpHash with the --key-file passkey, printing AUTHDATA/CDJ/CHALLENGE_LOC/R/S (eval-able) — a byte-identical WebAuthn assertion the on-chain K11Verifier accepts. Rust replacement for erc4337-webauthn-sign.py sign."
+    )]
+    SoftwareSign {
+        #[arg(
+            long,
+            help = "Path to the software passkey file (from software-keygen)"
+        )]
+        key_file: String,
+        #[arg(
+            long,
+            help = "32-byte userOpHash hex (with or without 0x) to sign over"
+        )]
+        userop_hash: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP ID (must match keygen)"
+        )]
+        rp_id: String,
+    },
+    #[command(
+        name = "webauthn-keygen",
+        about = "Hardware WebAuthn authenticator (#164 LOCAL register): load-or-enroll the operator's hardware K11 (Secure Enclave / Touch ID) and print PUBX/PUBY/RPIDHASH (eval-able). Triggers a Touch ID *create* ceremony if not yet enrolled. The SECURE local counterpart to software-keygen — the private key never leaves the platform authenticator (no on-disk key)."
+    )]
+    WebauthnKeygen {
+        #[arg(
+            long,
+            help = "Operator omni (0x + 64 hex) — locates the enrolled credential"
+        )]
+        operator_omni: String,
+        #[arg(long, default_value = "localhost", help = "WebAuthn RP ID")]
+        rp_id: String,
+    },
+    #[command(
+        name = "webauthn-userop-sign",
+        about = "Hardware WebAuthn authenticator (#164 LOCAL register): sign a 32-byte userOpHash with the operator's hardware K11 — a real Touch ID *get* ceremony — printing AUTHDATA/CDJ/CHALLENGE_LOC/R/S (eval-able). challenge == userOpHash (raw), so it drops into the same handleOps path as software-sign. The SECURE local counterpart to software-sign."
+    )]
+    WebauthnUseropSign {
+        #[arg(
+            long,
+            help = "Operator omni (0x + 64 hex) — locates the enrolled credential"
+        )]
+        operator_omni: String,
+        #[arg(
+            long,
+            help = "32-byte userOpHash hex (with or without 0x) to sign over"
+        )]
+        userop_hash: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP ID (must match keygen)"
+        )]
+        rp_id: String,
+        #[arg(
+            long,
+            help = "Operator-readable intent shown on the confirmation page above the raw hash"
+        )]
+        intent_text: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -786,6 +861,83 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
 /// Stub-mode toggle: `AGENTKEYS_K11_STUB=1` (default). Setting it to `0`
 /// errors out today — real WebAuthn is a stage-2 deliverable.
 async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
+    // Software WebAuthn authenticator (#164 headless/CI) — real P-256 crypto, NOT
+    // the stub and NOT the EOA path, so it bypasses the stub-mode gating below.
+    if matches!(
+        action,
+        K11Action::SoftwareKeygen { .. } | K11Action::SoftwareSign { .. }
+    ) {
+        // Load-bearing security notice → STDERR (stdout is eval-able by the harness).
+        // The software passkey signs with an ON-DISK P-256 key: no Secure-Enclave
+        // boundary and no biometric gate, so anyone who can read the key file can sign
+        // as this credential. It is a CI / headless / throwaway-TEST stand-in ONLY — it
+        // does NOT forge a hardware K11 (a different keypair lives in the Secure Enclave;
+        // the on-chain registry binds to that pubkey). A real operator master MUST use a
+        // hardware authenticator (`agentkeys k11 enroll --webauthn` → Touch ID). The
+        // cryptographic enforcement that REFUSES a software credential at master
+        // enrollment — WebAuthn attestation verification — is the stage-2 (#90) hardening
+        // (arch.md §22b.1); until it lands, the software path is fenced by policy.
+        eprintln!(
+            "==> ⚠️  WARN: software P-256 passkey — the key is ON DISK (no hardware \
+             boundary, no biometric). Anyone who can read the key file can sign as this \
+             credential, so use it for CI / headless / throwaway-TEST masters ONLY. A real \
+             operator master MUST use a hardware authenticator (`agentkeys k11 enroll \
+             --webauthn`, Touch ID). It does NOT impersonate a hardware K11 — it signs with \
+             its own keypair. See arch.md §9 / §22b.1 (attestation verification = stage-2 #90)."
+        );
+    }
+    match action {
+        K11Action::SoftwareKeygen { key_file, rp_id } => {
+            let (x, y, h) = agentkeys_cli::k11_webauthn::software_webauthn_keygen(key_file, rp_id)
+                .map_err(|e| anyhow::anyhow!("software-keygen: {e}"))?;
+            return Ok(format!("PUBX=0x{x}\nPUBY=0x{y}\nRPIDHASH=0x{h}"));
+        }
+        K11Action::SoftwareSign {
+            key_file,
+            userop_hash,
+            rp_id,
+        } => {
+            let (ad, cdj, loc, r, s) =
+                agentkeys_cli::k11_webauthn::software_webauthn_sign(key_file, userop_hash, rp_id)
+                    .map_err(|e| anyhow::anyhow!("software-sign: {e}"))?;
+            return Ok(format!(
+                "AUTHDATA=0x{ad}\nCDJ=0x{cdj}\nCHALLENGE_LOC={loc}\nR=0x{r}\nS=0x{s}"
+            ));
+        }
+        // Hardware WebAuthn authenticator (#164 LOCAL register) — real Touch ID, the
+        // private key sealed in the Secure Enclave. Same eval-able output as the
+        // software path, so the harness submit flow is identical.
+        K11Action::WebauthnKeygen {
+            operator_omni,
+            rp_id,
+        } => {
+            let (x, y, h) =
+                agentkeys_cli::k11_webauthn::hardware_webauthn_keygen(operator_omni, rp_id)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("webauthn-keygen: {e}"))?;
+            return Ok(format!("PUBX=0x{x}\nPUBY=0x{y}\nRPIDHASH=0x{h}"));
+        }
+        K11Action::WebauthnUseropSign {
+            operator_omni,
+            userop_hash,
+            rp_id,
+            intent_text,
+        } => {
+            let (ad, cdj, loc, r, s) = agentkeys_cli::k11_webauthn::hardware_webauthn_userop_sign(
+                operator_omni,
+                userop_hash,
+                rp_id,
+                intent_text.clone(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("webauthn-userop-sign: {e}"))?;
+            return Ok(format!(
+                "AUTHDATA=0x{ad}\nCDJ=0x{cdj}\nCHALLENGE_LOC={loc}\nR=0x{r}\nS=0x{s}"
+            ));
+        }
+        _ => {}
+    }
+
     let stub_env = std::env::var("AGENTKEYS_K11_STUB")
         .map(|v| v != "0")
         .unwrap_or(true);
@@ -839,6 +991,13 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
     }
 
     match action {
+        // Software/hardware passkey actions return early in the dispatch above.
+        K11Action::SoftwareKeygen { .. }
+        | K11Action::SoftwareSign { .. }
+        | K11Action::WebauthnKeygen { .. }
+        | K11Action::WebauthnUseropSign { .. } => {
+            unreachable!("software/hardware passkey actions are handled by the early dispatch")
+        }
         K11Action::Enroll {
             operator_omni,
             webauthn,
