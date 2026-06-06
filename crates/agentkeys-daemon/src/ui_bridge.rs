@@ -543,6 +543,17 @@ fn err(
     )
 }
 
+/// Canonical master-memory web-API routes — the SINGLE source of truth for the
+/// path the React frontend (`apps/parent-control/lib/client/daemon.ts`) and the
+/// harness web-parity demo (`harness/web-parity-demo.sh`) both hit. They used to
+/// hardcode `/v1/master/memory/plant` independently → a rename here left phase 6
+/// green on the old path (false-green, issue #203 / the #206 parity ladder). The
+/// route + the `ApiMemoryEntry` body shape are now pinned to
+/// `harness/fixtures/web-api/master_memory_plant.json` (see the test below) and
+/// the two consumers are gated against it by `scripts/check-web-api-drift.sh`.
+pub const MASTER_MEMORY_ROUTE: &str = "/v1/master/memory";
+pub const MASTER_MEMORY_PLANT_ROUTE: &str = "/v1/master/memory/plant";
+
 /// Build the ui-bridge router with CORS open to the configured web-UI origin.
 pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router {
     let cors = CorsLayer::new()
@@ -575,9 +586,9 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/anchor/status", get(anchor_status))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/:id", get(get_worker))
-        .route("/v1/master/memory", get(list_master_memory))
+        .route(MASTER_MEMORY_ROUTE, get(list_master_memory))
         .route("/v1/master/memory/entry", get(get_master_memory_entry))
-        .route("/v1/master/memory/plant", post(plant_master_memory))
+        .route(MASTER_MEMORY_PLANT_ROUTE, post(plant_master_memory))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -1665,14 +1676,11 @@ async fn resolve_session_coords(state: &UiBridgeState) -> Result<SessionCoords, 
         region: state.region.clone(),
         j1: session.j1,
         // The broker cap-mint input-validates that operator_omni/actor_omni start with
-        // 0x, but the onboarding session stores the omni bare. Normalize ONCE here so
-        // every worker call sends a 0x-prefixed omni (the broker normalize_hex32's it
-        // for the device-binding match either way).
-        omni: if session.omni.starts_with("0x") {
-            session.omni
-        } else {
-            format!("0x{}", session.omni)
-        },
+        // 0x, but the onboarding session stores the omni bare. Normalize via the ONE
+        // shared normalizer (issue #203) so every worker call (memory + config) sends
+        // a 0x-prefixed omni and this can't drift from the cap-mint body the
+        // MCP/harness paths send (the broker normalize_hex32's it either way).
+        omni: agentkeys_backend_client::normalize_omni_0x(&session.omni),
         device_key_hash,
     })
 }
@@ -1748,36 +1756,52 @@ async fn real_config_ctx(state: &UiBridgeState) -> Result<Option<RealConfigCtx>,
 /// `memory-get` / `config-store` / `config-fetch`) and `service` string.
 /// operator == actor == O_master, so the broker skips the on-chain scope check
 /// (#195). Returns the raw cap JSON the worker re-verifies.
+///
+/// Routes through the shared `agentkeys-backend-client` (issue #203): the
+/// cap-mint body IS the crate's `BrokerCapRequest`, so the daemon's cap-mint —
+/// for memory AND the #201 config data class — can't drift its shape or omni
+/// from the agent/MCP path (the #200 bug locus). Worker put/get bodies use the
+/// crate's body types too (see callers); the raw worker POST stays here to reuse
+/// the once-minted STS creds across namespaces.
 async fn mint_master_cap(
-    client: &reqwest::Client,
     broker: &str,
     j1: &str,
     omni: &str,
     device_key_hash: &str,
     route: &str,
     service: &str,
-) -> Result<serde_json::Value, String> {
-    let resp = client
-        .post(format!("{broker}/v1/cap/{route}"))
-        .bearer_auth(j1)
-        .json(&serde_json::json!({
-            "operator_omni": omni,
-            "actor_omni": omni,
-            "service": service,
-            "device_key_hash": device_key_hash,
-            "ttl_seconds": 300,
-        }))
-        .send()
+) -> Result<agentkeys_backend_client::CapToken, String> {
+    use agentkeys_backend_client::{BackendClient, CapMintOp, CapMintRequest};
+    let op = match route {
+        "memory-put" => CapMintOp::MemoryPut,
+        "memory-get" => CapMintOp::MemoryGet,
+        "config-store" => CapMintOp::ConfigStore,
+        "config-fetch" => CapMintOp::ConfigFetch,
+        other => return Err(format!("mint_master_cap: unknown cap route {other}")),
+    };
+    let client = BackendClient::new(
+        Some(broker.to_string()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        String::new(),
+    );
+    client
+        .cap_mint(
+            op,
+            CapMintRequest {
+                operator_omni: omni.to_string(),
+                actor_omni: omni.to_string(),
+                service: service.to_string(),
+                device_key_hash: device_key_hash.to_string(),
+                ttl_seconds: 300,
+            },
+            j1,
+        )
         .await
-        .map_err(|e| format!("cap-mint({route}) transport: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("cap-mint({route}) {status}: {body}"));
-    }
-    resp.json()
-        .await
-        .map_err(|e| format!("cap-mint({route}) parse: {e}"))
+        .map_err(|e| format!("cap-mint({route}): {e}"))
 }
 
 /// Per-namespace memory-put (#201 Phase 4): cap-mint(`memory:<ns>`) → worker
@@ -1792,7 +1816,6 @@ async fn memory_put_ns_real(
 ) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
-        client,
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
@@ -1807,11 +1830,12 @@ async fn memory_put_ns_real(
         .header("x-aws-access-key-id", &creds.access_key_id)
         .header("x-aws-secret-access-key", &creds.secret_access_key)
         .header("x-aws-session-token", &creds.session_token)
-        .json(&serde_json::json!({
-            "cap": cap,
-            "plaintext_b64": STANDARD.encode(&plaintext),
-            "namespace": ns,
-        }))
+        // Crate-owned body shape (issue #203) — a drifted field is a compile error.
+        .json(&agentkeys_backend_client::MemoryPutBody {
+            cap,
+            plaintext_b64: STANDARD.encode(&plaintext),
+            namespace: ns.to_string(),
+        })
         .send()
         .await
         .map_err(|e| format!("worker put transport: {e}"))?;
@@ -1847,7 +1871,6 @@ async fn memory_get_ns_real(
 ) -> Result<Option<Vec<StoredMemoryEntry>>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
-        client,
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
@@ -1861,7 +1884,11 @@ async fn memory_get_ns_real(
         .header("x-aws-access-key-id", &creds.access_key_id)
         .header("x-aws-secret-access-key", &creds.secret_access_key)
         .header("x-aws-session-token", &creds.session_token)
-        .json(&serde_json::json!({ "cap": cap, "namespace": ns }))
+        // Crate-owned body shape (issue #203).
+        .json(&agentkeys_backend_client::MemoryGetBody {
+            cap,
+            namespace: ns.to_string(),
+        })
         .send()
         .await
         .map_err(|e| format!("worker get transport: {e}"))?;
@@ -1899,7 +1926,6 @@ async fn config_store_taxonomy(
 ) -> Result<(), String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
-        client,
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
@@ -1922,10 +1948,11 @@ async fn config_store_taxonomy(
         .header("x-aws-access-key-id", creds.access_key_id)
         .header("x-aws-secret-access-key", creds.secret_access_key)
         .header("x-aws-session-token", creds.session_token)
-        .json(&serde_json::json!({
-            "cap": cap,
-            "plaintext_b64": STANDARD.encode(&plaintext),
-        }))
+        // Crate-owned body shape (issue #203) — config worker put body.
+        .json(&agentkeys_backend_client::ConfigPutBody {
+            cap,
+            plaintext_b64: STANDARD.encode(&plaintext),
+        })
         .send()
         .await
         .map_err(|e| format!("config put transport: {e}"))?;
@@ -1950,7 +1977,6 @@ async fn config_fetch_taxonomy(
 ) -> Result<Option<MemoryTaxonomy>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
-        client,
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
@@ -1972,7 +1998,8 @@ async fn config_fetch_taxonomy(
         .header("x-aws-access-key-id", creds.access_key_id)
         .header("x-aws-secret-access-key", creds.secret_access_key)
         .header("x-aws-session-token", creds.session_token)
-        .json(&serde_json::json!({ "cap": cap }))
+        // Crate-owned body shape (issue #203) — config worker get body.
+        .json(&agentkeys_backend_client::ConfigGetBody { cap })
         .send()
         .await
         .map_err(|e| format!("config get transport: {e}"))?;
@@ -2226,6 +2253,60 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin the master-memory plant CONTRACT (the daemon's web API) to the
+    /// committed fixture that `daemon.ts` + `web-parity-demo.sh` are gated
+    /// against (issue #203 / the #206 parity ladder, rung 2). The Rust struct +
+    /// route const are the source of truth; this test fails the moment they
+    /// drift from the fixture, so a field rename or route change can't silently
+    /// leave phase 6 green on the old path. If you change `ApiMemoryEntry` or the
+    /// route on purpose, update `harness/fixtures/web-api/master_memory_plant.json`
+    /// to match (and the two consumers will be re-gated by the bash check).
+    #[test]
+    fn master_memory_plant_contract_matches_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../harness/fixtures/web-api/master_memory_plant.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&raw).expect("fixture is JSON");
+
+        assert_eq!(
+            fixture["route"].as_str().expect("fixture.route"),
+            MASTER_MEMORY_PLANT_ROUTE,
+            "route const drifted from the web-api fixture"
+        );
+
+        let sample = ApiMemoryEntry {
+            ns: "travel".into(),
+            key: "probe".into(),
+            title: "t".into(),
+            bytes: 1,
+            version: "v1".into(),
+            updated: "2026-06-05".into(),
+            preview: "p".into(),
+            body: "b".into(),
+            content_hash: String::new(),
+        };
+        let mut got: Vec<String> = serde_json::to_value(&sample)
+            .expect("entry serializes")
+            .as_object()
+            .expect("entry is an object")
+            .keys()
+            .cloned()
+            .collect();
+        got.sort();
+        let want: Vec<String> = fixture["entry_keys"]
+            .as_array()
+            .expect("fixture.entry_keys")
+            .iter()
+            .map(|v| v.as_str().expect("entry_key is str").to_string())
+            .collect();
+        assert_eq!(
+            got, want,
+            "ApiMemoryEntry keys drifted from the web-api fixture — regenerate \
+             harness/fixtures/web-api/master_memory_plant.json + re-gate daemon.ts/web-parity-demo.sh"
+        );
+    }
 
     fn make_state() -> SharedUiBridgeState {
         build_state(

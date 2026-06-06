@@ -2137,6 +2137,8 @@ agentkeys/                                  # repo root
 │   │                                       #   typed RPC over mTLS
 │   ├── agentkeys-worker-creds/             # credentials-service worker
 │   ├── agentkeys-worker-memory/            # memory-service worker
+│   ├── agentkeys-worker-config/            # config-service worker (#201 — the
+│   │                                       #   Config data class; master-only)
 │   ├── agentkeys-worker-audit/             # audit-service worker (tiers A/B/C)
 │   ├── agentkeys-worker-email/             # email-service worker (SES integration)
 │   ├── agentkeys-worker-payment/           # payment-service worker (modes P-1/P-2/P-3)
@@ -2151,6 +2153,14 @@ agentkeys/                                  # repo root
 │   │                                       #   LLM hosts over stdio / HTTP / xiaozhi
 │   │                                       #   mcp-endpoint WS relay (issue #107)
 │   ├── agentkeys-provisioner/              # Rust orchestrator that spawns TS scrapers
+│   ├── agentkeys-backend-client/           # ONE owner of the broker/worker client
+│   │                                       #   protocol (issue #203): cap-mint (6
+│   │                                       #   data-class endpoints: cred/memory/config
+│   │                                       #   store+fetch), STS relay, worker put/get +
+│   │                                       #   config put/get body types, memory:<ns>
+│   │                                       #   builder, 0x-omni normalize. MCP
+│   │                                       #   HttpBackend delegates to it; daemon
+│   │                                       #   ui_bridge cap-mint + worker bodies use it
 │   └── agentkeys-chain/                    # Solidity contracts + Rust ABI bindings
 │       ├── contracts/
 │       │   ├── AgentKeysScope.sol

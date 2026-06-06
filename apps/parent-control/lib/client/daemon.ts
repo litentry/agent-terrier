@@ -336,6 +336,8 @@ export class DaemonBackend implements AgentKeysClient {
     const r = await this.postJson<{ planted: number; skipped: number; total: number; taxonomy_status?: string }>(
       '/v1/master/memory/plant',
       {
+        // @web-fixture: master_memory_plant — entry shape gated by scripts/check-web-api-drift.sh
+        // (must match the daemon's ApiMemoryEntry + web-parity-demo.sh; issue #203 / the #206 parity ladder).
         entries: entries.map((m) => ({
           ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
           version: m.version, updated: m.updated, preview: m.preview, body: m.body,
