@@ -3,8 +3,9 @@
 use clap::Parser;
 use std::sync::Arc;
 
+use agentkeys_backend_client::BackendClient;
 use agentkeys_mcp_server::{
-    backend::{Backend, HttpBackend, InMemoryBackend},
+    backend::Backend,
     config::{BackendKind, Cli, Config, Transport},
     server::Server,
     transport,
@@ -31,8 +32,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::from_cli(cli)?;
 
+    // Real-data-only: the MCP server has exactly one backend — the real HTTP
+    // chain (broker cap-mint → per-actor STS → worker → S3), which IS the shared
+    // `agentkeys_backend_client::BackendClient` (#203/#207 collapsed the former
+    // `HttpBackend` delegate; `Backend` is impl'd directly on `BackendClient`).
+    // The in-memory fixture backend was removed.
     let backend: Arc<dyn Backend> = match config.backend {
-        BackendKind::Http => Arc::new(HttpBackend::new(
+        BackendKind::Http => Arc::new(BackendClient::new(
             config.broker_url.clone(),
             config.memory_url.clone(),
             config.audit_url.clone(),
@@ -41,12 +47,6 @@ async fn main() -> anyhow::Result<()> {
             config.vault_role_arn.clone(),
             config.aws_region.clone(),
         )),
-        BackendKind::InMemory => {
-            tracing::info!(
-                "backend=in-memory (dev demo); seeded with three-act fixture (actor 0xa0c7…01a0c7)"
-            );
-            Arc::new(InMemoryBackend::new_with_demo_fixture())
-        }
     };
     let server = Arc::new(Server::new(config.clone(), backend));
 
