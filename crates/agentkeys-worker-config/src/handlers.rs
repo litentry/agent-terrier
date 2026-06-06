@@ -104,7 +104,7 @@ async fn config_put(
         .body(env_bytes.clone().into())
         .send()
         .await
-        .map_err(|e| err_502(e.to_string(), "s3_put"))?;
+        .map_err(|e| err_502(format!("s3 PutObject: {}", s3_err_detail(&e)), "s3_put"))?;
     Ok(Json(PutResponse {
         ok: true,
         s3_key: key,
@@ -137,7 +137,11 @@ async fn config_get(
             {
                 err_404("config object not found", "s3_no_such_key")
             } else {
-                err_502(e.to_string(), "s3_get")
+                // Surface the REAL S3 error (AccessDenied / NoSuchBucket / region
+                // mismatch) instead of a generic "service error", so a broken
+                // Config data class is diagnosable — the #207 init/list 502 the
+                // operator sees now names the actual cause to fix.
+                err_502(format!("s3 GetObject: {}", s3_err_detail(&e)), "s3_get")
             }
         })?;
     let body = resp
@@ -255,6 +259,23 @@ fn err_403_or_502(e: verify::VerifyError) -> ApiError {
         | verify::VerifyError::NotInScope
         | verify::VerifyError::K3Mismatch { .. } => err_403(e.to_string(), "chain_check_failed"),
         _ => err_502(e.to_string(), "chain_rpc"),
+    }
+}
+
+/// Extract the REAL S3 error (code + message) from an aws SdkError so a broken
+/// Config data class surfaces the actual cause — `AccessDenied` (role missing
+/// S3 Get/Put/List on `bots/<actor>/config/*`, or a PrincipalTag mismatch),
+/// `NoSuchBucket` (`$CONFIG_BUCKET` not provisioned), a region mismatch, etc. —
+/// instead of a generic "service error" the operator can't act on.
+fn s3_err_detail<E, R>(e: &aws_sdk_s3::error::SdkError<E, R>) -> String
+where
+    E: aws_sdk_s3::error::ProvideErrorMetadata,
+{
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    match (e.code(), e.message()) {
+        (Some(code), Some(msg)) if !msg.is_empty() => format!("{code} — {msg}"),
+        (Some(code), _) => code.to_string(),
+        _ => e.to_string(),
     }
 }
 

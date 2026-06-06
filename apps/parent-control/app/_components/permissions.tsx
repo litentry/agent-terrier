@@ -2,8 +2,9 @@
 
 import { useState, type ReactNode } from 'react';
 import { NAMESPACES } from '@/lib/constants';
-import { Dot } from './shared';
+import { Dot, Panel } from './shared';
 import type { Actor, Namespace, ScopeBits, VaultItem } from './types';
+import type { ProposedScope } from '@/lib/client/types';
 
 // Segmented control: deny | read | read+write
 export function PermSeg({
@@ -207,6 +208,89 @@ export function PermissionList({
           control={<PermSwitch on={true} locked />}
         />
       </PermSection>
+    </div>
+  );
+}
+
+// #207 items 5 + 7 — connect-time auto-distribution. Classify the agent's
+// surface (the cred services it uses) → categories, then PROPOSE scopes tiered by
+// the catalog's sensitivity: `auto` (Safe → auto-confirm + daily review) vs `k11`
+// (Sensitive → explicit per-grant Touch ID). The proposal writes NOTHING; the
+// master confirms, and only the K11-gated grant path writes scope — so an
+// unconfirmed sensitive category never becomes a grant (the load-bearing invariant).
+export function AutoDistributePanel({
+  actor,
+  proposals,
+  proposing,
+  onPropose,
+  onConfirm,
+  onConfirmSafe,
+}: {
+  actor: Actor;
+  proposals: ProposedScope[] | null;
+  proposing: boolean;
+  onPropose: () => void;
+  onConfirm: (p: ProposedScope) => void;
+  onConfirmSafe: (ps: ProposedScope[]) => void;
+}) {
+  const safe = (proposals ?? []).filter((p) => p.gating === 'auto');
+  const sensitive = (proposals ?? []).filter((p) => p.gating === 'k11');
+
+  return (
+    <Panel title="── connect-time auto-distribution">
+      <div className="muted" style={{ fontSize: 11, marginBottom: 12 }}>
+        The classifier tags this agent&apos;s surface — the master <strong>memory namespaces</strong> it can inherit and the{' '}
+        <strong>credential services</strong> it uses — into categories and proposes scopes. <strong>Safe</strong> categories
+        auto-confirm into your daily review; <strong>sensitive</strong> ones (payments, access-control, health, finance,
+        credentials) need an explicit Touch ID per grant — the tier comes from the catalog, so a vendor can&apos;t downgrade it.
+      </div>
+
+      {proposals === null ? (
+        <button className="btn primary" disabled={proposing} onClick={onPropose}>
+          {proposing ? 'classifying…' : '▷ classify agent surface'}
+        </button>
+      ) : (
+        <>
+          {safe.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600 }}>Safe · auto-confirm ({safe.length})</span>
+                <button className="btn sm" onClick={() => onConfirmSafe(safe)}>confirm reviewed set</button>
+              </div>
+              {safe.map((p) => <ProposalRow key={p.service} p={p} onConfirm={() => onConfirm(p)} />)}
+            </div>
+          )}
+          {sensitive.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>
+                Sensitive · explicit Touch ID per grant ({sensitive.length})
+              </div>
+              {sensitive.map((p) => <ProposalRow key={p.service} p={p} onConfirm={() => onConfirm(p)} sensitive />)}
+            </div>
+          )}
+          {safe.length === 0 && sensitive.length === 0 && (
+            <div className="muted" style={{ fontSize: 11.5 }}>No proposable scopes for this agent.</div>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function ProposalRow({ p, onConfirm, sensitive }: { p: ProposedScope; onConfirm: () => void; sensitive?: boolean }) {
+  return (
+    <div className={`perm-row ${sensitive ? 'denied' : 'granted'}`} style={{ alignItems: 'center' }}>
+      <div className="perm-icon">{p.dataClass === 'memory' ? '◇' : '$'}</div>
+      <div className="perm-body">
+        <div className="perm-title">
+          {p.entity}
+          <span className={`perm-risk ${sensitive ? 'high' : 'low'}`} style={{ marginLeft: 8 }}>{p.category}</span>
+        </div>
+        <div className="perm-state mono">{p.service} · {p.sensitivity} · conf {p.confidence.toFixed(2)}</div>
+      </div>
+      <button className={`btn sm ${sensitive ? '' : ''}`} onClick={onConfirm}>
+        {sensitive ? '⊕ confirm · Touch ID' : '⊕ grant'}
+      </button>
     </div>
   );
 }

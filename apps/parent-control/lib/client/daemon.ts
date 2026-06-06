@@ -2,10 +2,15 @@ import type {
   AgentKeysClient,
   AnchorStatus,
   CapToken,
+  Classification,
+  ConfigPresetList,
   ConnectionStatus,
+  CredCategorization,
+  CredService,
   DisconnectedStatus,
   EmailVerifyStart,
   EmailVerifyStatus,
+  InitConfigResult,
   K11EnrollBegin,
   K11EnrollFinishInput,
   K11EnrollResult,
@@ -13,8 +18,10 @@ import type {
   MemoryCategory,
   OnboardingState,
   PlantResult,
+  ProposedScope,
   Result,
   RevokeIntent,
+  SurfaceItem,
 } from './types';
 import type {
   Actor,
@@ -356,6 +363,127 @@ export class DaemonBackend implements AgentKeysClient {
       },
     };
   }
+
+  async listConfigPresets(): Promise<Result<ConfigPresetList>> {
+    const r = await this.getJson<{
+      default_id: string;
+      presets: { id: string; label: string; description: string; categories: ApiMemoryCategory[] }[];
+    }>('/v1/master/config/presets');
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      data: {
+        defaultId: r.data.default_id,
+        presets: r.data.presets.map((p) => ({
+          id: p.id,
+          label: p.label,
+          description: p.description,
+          categories: p.categories.map((c) => ({ ns: c.ns, label: c.label })),
+        })),
+      },
+    };
+  }
+
+  async initConfigDefault(presetId: string): Promise<Result<InitConfigResult>> {
+    const r = await this.postJson<{
+      preset_id: string;
+      taxonomy_status: string;
+      categories: ApiMemoryCategory[];
+    }>('/v1/master/config/init', { preset_id: presetId });
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      data: {
+        presetId: r.data.preset_id,
+        taxonomyStatus: r.data.taxonomy_status,
+        categories: r.data.categories.map((c) => ({ ns: c.ns, label: c.label })),
+      },
+    };
+  }
+
+  async classifyEntity(dataClass: string, entity: string): Promise<Result<CredCategorization>> {
+    const r = await this.postJson<{
+      data_class: string;
+      entity: string;
+      service: string;
+      classification: Classification;
+      audited: boolean;
+    }>('/v1/master/classify/tag', { data_class: dataClass, entity });
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      data: {
+        dataClass: r.data.data_class,
+        entity: r.data.entity,
+        service: r.data.service,
+        classification: r.data.classification,
+        audited: r.data.audited,
+      },
+    };
+  }
+
+  async proposeScopes(actorId: string, surface: SurfaceItem[]): Promise<Result<ProposedScope[]>> {
+    const r = await this.postJson<{ actor_id: string; proposals: ApiProposedScope[] }>(
+      '/v1/master/classify/propose',
+      { actor_id: actorId, surface: surface.map((s) => ({ data_class: s.dataClass, entity: s.entity })) },
+    );
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      data: r.data.proposals.map((p) => ({
+        dataClass: p.data_class,
+        entity: p.entity,
+        service: p.service,
+        category: p.category,
+        sensitivity: p.sensitivity,
+        gating: p.gating,
+        confidence: p.confidence,
+      })),
+    };
+  }
+
+  async grantScope(actorId: string, p: ProposedScope): Promise<Result<Actor>> {
+    const r = await this.postJson<ApiActor>(
+      `/v1/actors/${encodeURIComponent(actorId)}/scope/grant`,
+      { data_class: p.dataClass, entity: p.entity, category: p.category, gating: p.gating },
+    );
+    if (!r.ok) return r;
+    return { ok: true, data: apiToActor(r.data) };
+  }
+
+  async listCredentials(): Promise<Result<CredService[]>> {
+    const r = await this.getJson<{
+      credentials: { service: string; category: string; sensitivity: 'safe' | 'sensitive' }[];
+    }>('/v1/master/credentials');
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      data: r.data.credentials.map((c) => ({
+        service: c.service,
+        category: c.category,
+        sensitivity: c.sensitivity,
+      })),
+    };
+  }
+
+  async storeCredential(service: string, secret: string): Promise<Result<{ service: string; category: string }>> {
+    const r = await this.postJson<{ ok: boolean; service: string; category: string }>(
+      '/v1/master/credentials/store',
+      { service, secret },
+    );
+    if (!r.ok) return r;
+    return { ok: true, data: { service: r.data.service, category: r.data.category } };
+  }
+}
+
+interface ApiProposedScope {
+  data_class: string;
+  entity: string;
+  service: string;
+  category: string;
+  sensitivity: 'safe' | 'sensitive';
+  gating: 'auto' | 'k11';
+  confidence: number;
 }
 
 // ─── API wire types (snake_case, mirror ui_bridge.rs ApiActor etc.) ────
