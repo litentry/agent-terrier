@@ -30,6 +30,7 @@ import type {
   AuditEvent,
   ChipKind,
   Namespace,
+  PairingRequest,
   ScopeBits,
   StatusKind,
   Worker,
@@ -459,6 +460,33 @@ export class DaemonBackend implements AgentKeysClient {
     );
     if (!r.ok) return r;
     return { ok: true, data: apiToActor(r.data) };
+  }
+
+  // #214: poll the broker rendezvous for agents the master has claimed that
+  // await on-chain approval. The daemon maps broker PendingBinding rows → the
+  // PairingRequest shape, so this is a straight pass-through.
+  async listPairingRequests(): Promise<Result<PairingRequest[]>> {
+    const r = await this.getJson<{ requests: PairingRequest[] }>('/v1/agent/pairing/pending');
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.requests };
+  }
+
+  // #214: claim an agent's one-time pairing code → broker /v1/agent/pairing/claim.
+  async claimPairing(input: { code: string; label: string; scope?: string }): Promise<Result<void>> {
+    const r = await this.postJson<unknown>('/v1/agent/pairing/claim', {
+      pairing_code: input.code,
+      label: input.label,
+      requested_scope: input.scope ?? '',
+    });
+    if (!r.ok) return r;
+    return { ok: true, data: undefined };
+  }
+
+  // #214: approve a claimed agent → daemon registers it on chain + acks the broker.
+  async registerPairing(requestId: string): Promise<Result<void>> {
+    const r = await this.postJson<unknown>('/v1/agent/pairing/register', { request_id: requestId });
+    if (!r.ok) return r;
+    return { ok: true, data: undefined };
   }
 
   async listCredentials(): Promise<Result<CredService[]>> {

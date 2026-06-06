@@ -649,6 +649,12 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             "/v1/master/credentials/store",
             post(store_master_credential),
         )
+        // Agent pairing — the web-app half of the §10.2 agent-initiated ceremony
+        // (issue #214). The master pulls the broker's pending agent bindings
+        // (agents it claimed, awaiting on-chain register) for the pairing screen.
+        .route("/v1/agent/pairing/pending", get(list_pairing_requests))
+        .route("/v1/agent/pairing/claim", post(claim_pairing))
+        .route("/v1/agent/pairing/register", post(register_pairing))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -1740,6 +1746,399 @@ async fn dev_emit_event(
 /// unconfigured or the taxonomy is confirmed missing; a configured-but-failing
 /// Config surfaces as 502 (codex finding 2 — never hide a broken Config behind a
 /// stale "looks empty" view). Per-entry detail is lazy via `.../memory/entry`.
+/// GET /v1/agent/pairing/pending — the web-app half of §10.2 agent pairing
+/// (issue #214). The master pulls the broker's pending agent bindings (agents it
+/// claimed that await on-chain register) via its J1 session, mapped to the web
+/// UI's `PairingRequest` shape. REAL data — broker `/v1/agent/pending-bindings`
+/// (reuses `agentkeys_cli::agent_admin`, the CLI master-side pairing client).
+async fn list_pairing_requests(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "no broker configured (--broker-url) — cannot pull pending agent pairings"
+            })),
+        )
+            .into_response();
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "no master session — verify email + register the master first"
+                })),
+            )
+                .into_response()
+        }
+    };
+    match agentkeys_cli::agent_admin::agent_pending_value(broker, &j1).await {
+        Ok(v) => {
+            let requests: Vec<serde_json::Value> = v
+                .get("pending")
+                .and_then(|p| p.as_array())
+                .map(|rows| rows.iter().map(pending_binding_to_request).collect())
+                .unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "requests": requests })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("broker pending-bindings: {e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// Map one broker `PendingBinding` row → the web UI's `PairingRequest` JSON
+/// (`apps/parent-control/app/_components/types.ts`). These rows are POST-claim
+/// (the one-time code was consumed at claim), so `pairCode` carries the real
+/// request handle and the UI presents them as "awaiting your on-chain approval".
+fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
+    let field = |k: &str| {
+        b.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let request_id = field("request_id");
+    let label = field("label");
+    let device_pubkey = field("device_pubkey");
+    let pop_sig = field("pop_sig");
+    let requested_scope = field("requested_scope");
+    // char-safe head…tail elision for long hex handles.
+    let short = |v: &str| -> String {
+        let n = v.chars().count();
+        if n > 18 {
+            let head: String = v.chars().take(10).collect();
+            let tail: String = v.chars().skip(n - 6).collect();
+            format!("{head}…{tail}")
+        } else {
+            v.to_string()
+        }
+    };
+    // requested_scope: comma-separated "<service>:<ns>" tokens → RequestedPerm[].
+    let requested: Vec<serde_json::Value> = requested_scope
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|tok| {
+            let (cap, ns) = match tok.split_once(':') {
+                Some((c, n)) => (
+                    c.to_string(),
+                    vec![serde_json::Value::String(n.to_string())],
+                ),
+                None => (tok.to_string(), Vec::new()),
+            };
+            serde_json::json!({ "cap": cap, "ns": ns, "reason": "requested at pairing" })
+        })
+        .collect();
+    serde_json::json!({
+        "id": request_id,
+        "agent": label,
+        "vendor": "agent",
+        "device": "sandbox device (K10)",
+        "machine": "aiosandbox",
+        "runtime": "hermes",
+        "dpub": short(&device_pubkey),
+        "dpubFull": device_pubkey,
+        "pairCode": short(&request_id),
+        "derivation": format!("//{label}"),
+        "requested": requested,
+        "requestedAt": "awaiting on-chain approval",
+        "attestation": format!("PoP verified · {}", short(&pop_sig)),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimPairingRequest {
+    pairing_code: String,
+    label: String,
+    #[serde(default)]
+    requested_scope: String,
+}
+
+/// POST /v1/agent/pairing/claim — the master claims an agent's one-time pairing
+/// code (#214, §10.2 P.1). Binds the agent under the HDKD child omni for `label`
+/// and declares its requested scope, via the broker, using the master's J1
+/// session. The agent then surfaces in pending-bindings (GET …/pending) awaiting
+/// the master's on-chain register. Reuses `agentkeys_cli::agent_admin::agent_claim`.
+async fn claim_pairing(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ClaimPairingRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "no broker configured (--broker-url)" })),
+        )
+            .into_response();
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "no master session — verify email + register the master first"
+                })),
+            )
+                .into_response()
+        }
+    };
+    let code = req.pairing_code.trim();
+    let label = req.label.trim();
+    if code.is_empty() || label.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "pairing_code and label are required" })),
+        )
+            .into_response();
+    }
+    match agentkeys_cli::agent_admin::agent_claim(broker, code, label, &req.requested_scope, &j1)
+        .await
+    {
+        Ok(body) => {
+            let claim: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "ok": true }));
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "claim": claim })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("agent claim: {e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+fn pairing_err(status: StatusCode, msg: &str) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterPairingRequest {
+    request_id: String,
+}
+
+/// POST /v1/agent/pairing/register — the master approves a claimed agent: submit
+/// `registerAgentDevice` on chain for its sandbox-generated device key, then ack
+/// the broker so it clears from pending (#214, §10.2 P.2). The device fields come
+/// from the broker's AUTHORITATIVE pending binding (never the browser). Shells out
+/// to `heima-agent-create.sh --from-pubkey` (the sibling of the master register
+/// script), mirroring `register_master_device`. The Touch-ID scope grant is the
+/// separate `/v1/actors/:id/scope/grant` step (P.3).
+async fn register_pairing(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<RegisterPairingRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.as_deref() else {
+        return pairing_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no broker configured (--broker-url)",
+        );
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => {
+            return pairing_err(
+                StatusCode::FORBIDDEN,
+                "no master session — verify email + register the master first",
+            )
+        }
+    };
+    // The agent-create script is the sibling of the master register script (both
+    // live in scripts/); reuse that config rather than a second flag.
+    let Some(master_script) = state.register_master_script.clone() else {
+        return pairing_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "on-chain register not configured (--register-master-script) — cannot register the agent device",
+        );
+    };
+    let agent_script = match std::path::Path::new(&master_script).parent() {
+        Some(dir) => dir.join("heima-agent-create.sh"),
+        None => {
+            return pairing_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot derive heima-agent-create.sh path",
+            )
+        }
+    };
+    // Pull the authoritative binding from the broker (device fields, never the UI).
+    let bindings = match agentkeys_cli::agent_admin::agent_pending_value(broker, &j1).await {
+        Ok(v) => v,
+        Err(e) => {
+            return pairing_err(
+                StatusCode::BAD_GATEWAY,
+                &format!("broker pending-bindings: {e:#}"),
+            )
+        }
+    };
+    let row = bindings
+        .get("pending")
+        .and_then(|p| p.as_array())
+        .and_then(|rows| {
+            rows.iter()
+                .find(|r| {
+                    r.get("request_id").and_then(|v| v.as_str()) == Some(req.request_id.as_str())
+                })
+                .cloned()
+        });
+    let Some(row) = row else {
+        return pairing_err(
+            StatusCode::NOT_FOUND,
+            "no pending binding for that request_id (claim it first, or it was already registered)",
+        );
+    };
+    let field = |k: &str| {
+        row.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let label = field("label");
+    // The binding's `device_pubkey` holds the agent's EVM address (§10.2).
+    let agent_address = field("device_pubkey");
+    let actor_omni = field("child_omni");
+    let device_key_hash = field("device_key_hash");
+    let pop_sig = field("pop_sig");
+    if label.is_empty()
+        || agent_address.is_empty()
+        || actor_omni.is_empty()
+        || device_key_hash.is_empty()
+        || pop_sig.is_empty()
+    {
+        return pairing_err(
+            StatusCode::BAD_GATEWAY,
+            "pending binding is missing device fields (label/address/omni/key-hash/pop-sig)",
+        );
+    }
+    let tx = match register_agent_device(
+        &agent_script.to_string_lossy(),
+        &label,
+        &agent_address,
+        &actor_omni,
+        &device_key_hash,
+        &pop_sig,
+    )
+    .await
+    {
+        Ok(tx) => tx,
+        Err(e) => {
+            return pairing_err(
+                StatusCode::BAD_GATEWAY,
+                &format!("registerAgentDevice: {e}"),
+            )
+        }
+    };
+    // Clear it from the broker's pending list (best-effort — the chain write is
+    // the binding act; a failed ack just leaves a stale pending row).
+    if let Err(e) = agentkeys_cli::agent_admin::agent_ack(broker, &req.request_id, &j1).await {
+        tracing::warn!("ui-bridge: registered agent but broker ack failed: {e:#}");
+    }
+    tracing::info!(
+        target: "agentkeys.daemon.ui_bridge",
+        label = %label,
+        actor_omni = %actor_omni,
+        tx = tx.as_deref().unwrap_or("(already-registered)"),
+        "#214: agent device registered on chain (web pairing)"
+    );
+    // Surface the freshly-registered agent in the web UI (state.actors) so it
+    // appears in the devices view + becomes targetable by the existing scope-grant
+    // flow (P.3, /v1/actors/:id/scope/grant). Keyed by `agent-<label>`, mirroring
+    // the master actor's in-memory model (chain-backed reload is a separate concern).
+    let omni_hex = if actor_omni.starts_with("0x") {
+        actor_omni.clone()
+    } else {
+        format!("0x{actor_omni}")
+    };
+    let agent_actor = ApiActor {
+        id: format!("agent-{label}"),
+        omni: omni_hex.clone(),
+        omni_hex,
+        label: label.clone(),
+        role: "agent".into(),
+        parent: Some("master".into()),
+        derivation: format!("//{label}"),
+        device: "sandbox device (§10.2)".into(),
+        device_pubkey: agent_address.clone(),
+        last_active: "just paired".into(),
+        status: "ok".into(),
+        vendor: String::new(),
+        k11: false,
+        scope: None,
+        payment_cap: None,
+        time_window: None,
+        services: None,
+    };
+    state
+        .actors
+        .write()
+        .await
+        .insert(agent_actor.id.clone(), agent_actor);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "label": label, "actor_omni": actor_omni, "tx_hash": tx })),
+    )
+        .into_response()
+}
+
+/// Shell out to `heima-agent-create.sh --from-pubkey` to submit `registerAgentDevice`
+/// for a SANDBOX-generated device key (the master never holds the agent key).
+/// Mirrors `register_master_device`. Returns the tx hash (None on idempotent skip).
+async fn register_agent_device(
+    script: &str,
+    label: &str,
+    agent_address: &str,
+    actor_omni: &str,
+    device_key_hash: &str,
+    pop_sig: &str,
+) -> Result<Option<String>, String> {
+    let output = tokio::process::Command::new("bash")
+        .arg(script)
+        .arg("--label")
+        .arg(label)
+        .arg("--agent-address")
+        .arg(agent_address)
+        .arg("--actor-omni")
+        .arg(actor_omni)
+        .arg("--device-key-hash")
+        .arg(device_key_hash)
+        .arg("--pop-sig")
+        .arg(pop_sig)
+        .output()
+        .await
+        .map_err(|e| format!("spawn {script}: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut lines: Vec<&str> = stderr.lines().rev().take(6).collect();
+        lines.reverse();
+        return Err(format!(
+            "heima-agent-create.sh exited {}: {}",
+            output.status,
+            lines.join("\n")
+        ));
+    }
+    // The script logs to stderr + prints a final JSON line to stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let tx = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .and_then(|v| v.get("tx_hash").and_then(|t| t.as_str()).map(String::from));
+    Ok(tx)
+}
+
 async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
     match resolve_categories(&state).await {
         Ok(categories) => (
@@ -2037,6 +2436,7 @@ async fn mint_master_cap(
     };
     let client = BackendClient::new(
         Some(broker.to_string()),
+        None,
         None,
         None,
         None,
@@ -3235,6 +3635,69 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #214: a broker PendingBinding row (post-claim, §10.2) maps to the web UI's
+    /// PairingRequest shape — label→agent, requested_scope→RequestedPerm[],
+    /// device_pubkey→dpub. The device key is surfaced for display only, never as
+    /// a secret, and the HDKD derivation path is reconstructed from the label.
+    #[test]
+    fn pending_binding_maps_to_pairing_request() {
+        let row = serde_json::json!({
+            "request_id": "req-abc123def456",
+            "child_omni": "0xchildomni",
+            "operator_omni": "0xmasteromni",
+            "label": "demo-agent",
+            "requested_scope": "memory:travel,memory:family",
+            "device_pubkey": "0x04aabbccddeeff00112233445566778899aabbcc",
+            "pop_sig": "0xsignaturedeadbeef0011223344556677",
+        });
+        let pr = pending_binding_to_request(&row);
+        assert_eq!(pr["id"], "req-abc123def456");
+        assert_eq!(pr["agent"], "demo-agent");
+        assert_eq!(pr["derivation"], "//demo-agent");
+        assert_eq!(pr["dpubFull"], "0x04aabbccddeeff00112233445566778899aabbcc");
+        let requested = pr["requested"].as_array().expect("requested is an array");
+        assert_eq!(requested.len(), 2, "two scope tokens");
+        assert_eq!(requested[0]["cap"], "memory");
+        assert_eq!(requested[0]["ns"][0], "travel");
+        assert_eq!(requested[1]["ns"][0], "family");
+    }
+
+    /// #214: the pairing routes (poll / claim / register) require a configured
+    /// broker — `make_state` has none, so every one fails closed with 503 rather
+    /// than reaching the network. (Live broker behavior is the harness e2e.)
+    #[tokio::test]
+    async fn pairing_routes_fail_closed_without_a_broker() {
+        let state = make_state();
+        assert_eq!(
+            list_pairing_requests(State(state.clone())).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            claim_pairing(
+                State(state.clone()),
+                Json(ClaimPairingRequest {
+                    pairing_code: "PAIR-1234".into(),
+                    label: "demo-agent".into(),
+                    requested_scope: String::new(),
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            register_pairing(
+                State(state),
+                Json(RegisterPairingRequest {
+                    request_id: "req-1".into(),
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 
     /// Pin the master-memory plant CONTRACT (the daemon's web API) to the
     /// committed fixture that `daemon.ts` + `web-parity-demo.sh` are gated

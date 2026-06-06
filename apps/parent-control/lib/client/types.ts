@@ -1,4 +1,4 @@
-import type { Actor, AuditEvent, Namespace, ScopeBits, Worker } from '@/app/_components/types';
+import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
 
 export type ConnectionStatus =
   | { kind: 'disconnected'; reason: 'no-backend-configured' | 'unreachable' | 'unauthorized'; detail?: string }
@@ -341,6 +341,21 @@ export interface AgentKeysClient {
   // memory-namespace / cred-service grant in actor state + audits; returns the
   // updated actor. Reached ONLY after the master confirms (sensitive ⇒ K11).
   grantScope(actorId: string, p: ProposedScope): Promise<Result<Actor>>;
+
+  // §pairing (#214) — the web-app half of the §10.2 agent-initiated ceremony.
+  // `listPairingRequests` polls the broker rendezvous (daemon GET
+  // /v1/agent/pairing/pending) for agents the master has claimed that await
+  // on-chain register + scope. REAL data; the device key never touches the
+  // master. (claim-by-code + register + scope land in follow-up slices.)
+  listPairingRequests(): Promise<Result<PairingRequest[]>>;
+  // Claim an agent's one-time pairing code (#214 §10.2 P.1) — binds it under a
+  // label + declares its requested scope via the broker. The agent then appears
+  // in listPairingRequests() awaiting on-chain register.
+  claimPairing(input: { code: string; label: string; scope?: string }): Promise<Result<void>>;
+  // Approve a claimed agent (#214 §10.2 P.2) — the daemon submits registerAgentDevice
+  // on chain for the binding's request_id, then acks the broker. (The Touch-ID scope
+  // grant is the separate grantScope step, P.3.)
+  registerPairing(requestId: string): Promise<Result<void>>;
 
   // §credentials data class (#207). The SAME abstraction as memory: list the
   // master's stored credential services (categorized via the catalog) and vault

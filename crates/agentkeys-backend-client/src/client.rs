@@ -12,9 +12,9 @@ use reqwest::Client;
 
 use crate::protocol::{
     AuditAppendInput, AuditAppendResult, AuditAppendV2, AuditAppendV2Resp, BrokerCapRequest,
-    CapMintOp, CapMintRequest, CapToken, MemoryGetBody, MemoryGetInput, MemoryGetResp,
-    MemoryGetResult, MemoryPutBody, MemoryPutInput, MemoryPutResp, MemoryPutResult, RevokeResult,
-    ENVELOPE_VERSION,
+    CapMintOp, CapMintRequest, CapToken, CredFetchBody, CredFetchInput, CredFetchResp,
+    CredFetchResult, MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult, MemoryPutBody,
+    MemoryPutInput, MemoryPutResp, MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -40,6 +40,9 @@ pub struct BackendClient {
     pub broker_url: Option<String>,
     pub memory_url: Option<String>,
     pub audit_url: Option<String>,
+    /// Cred worker base URL (#216 agent-side vaulted-key fetch). `None` → no
+    /// cred-fetch available.
+    pub cred_url: Option<String>,
     /// Agent session JWT (omni == the actor). Used to mint per-actor STS creds
     /// for the worker S3 relay (issue #90). `None` → no relay (worker falls
     /// back to its own creds).
@@ -55,6 +58,7 @@ impl BackendClient {
         broker_url: Option<String>,
         memory_url: Option<String>,
         audit_url: Option<String>,
+        cred_url: Option<String>,
         agent_session_bearer: Option<String>,
         memory_role_arn: Option<String>,
         vault_role_arn: Option<String>,
@@ -65,6 +69,7 @@ impl BackendClient {
             broker_url,
             memory_url,
             audit_url,
+            cred_url,
             agent_session_bearer,
             memory_role_arn,
             vault_role_arn,
@@ -88,6 +93,12 @@ impl BackendClient {
         self.audit_url
             .as_deref()
             .ok_or(BackendError::NotConfigured("audit_url"))
+    }
+
+    fn cred(&self) -> Result<&str, BackendError> {
+        self.cred_url
+            .as_deref()
+            .ok_or(BackendError::NotConfigured("cred_url"))
     }
 
     /// Mint per-actor AWS STS creds via the broker and return the three
@@ -264,6 +275,42 @@ impl BackendClient {
             ok: parsed.ok,
             plaintext_b64: parsed.plaintext_b64,
             namespace: input.namespace,
+        })
+    }
+
+    /// `POST /v1/cred/fetch` — fetch + decrypt a stored credential's plaintext
+    /// (#216 agent-side vaulted-key fetch). The `cap` (a cred-fetch cap with the
+    /// `service` signed inside) is minted separately via [`Self::cap_mint`]; this
+    /// forwards per-actor STS creds under the VAULT role so the cred worker's S3
+    /// GET is scoped to `bots/<actor>/credentials/<service>.enc`. Returns the
+    /// base64 plaintext.
+    pub async fn cred_fetch(&self, input: CredFetchInput) -> Result<CredFetchResult, BackendError> {
+        let url = format!("{}/v1/cred/fetch", self.cred()?);
+        let mut req = self
+            .client
+            .post(&url)
+            .json(&CredFetchBody { cap: input.cap });
+        if let Some(headers) = self.sts_headers(self.vault_role_arn.as_ref()).await? {
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        let parsed: CredFetchResp = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))?;
+        Ok(CredFetchResult {
+            ok: parsed.ok,
+            plaintext_b64: parsed.plaintext_b64,
         })
     }
 

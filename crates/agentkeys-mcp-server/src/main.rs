@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
             config.broker_url.clone(),
             config.memory_url.clone(),
             config.audit_url.clone(),
+            None, // cred_url — no MCP cred tool yet; #216 cred-fetch is the CLI path
             config.agent_session_bearer.clone(),
             config.memory_role_arn.clone(),
             config.vault_role_arn.clone(),
