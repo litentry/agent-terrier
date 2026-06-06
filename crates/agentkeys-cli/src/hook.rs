@@ -280,7 +280,11 @@ pub async fn memory_inject(
             .await
         {
             Ok(result) => {
-                if let Some(text) = extract_memory_content(&result) {
+                if let Some(raw) = extract_memory_content(&result) {
+                    // #201 Phase 4: the master's blobs are now per-namespace JSON
+                    // arrays; render them to injectable text (single-body blobs
+                    // pass through unchanged, so the wire demo still injects).
+                    let text = render_memory_blob(&raw);
                     let selected = match (&openviking, &query) {
                         (Some(ov), Some(q)) => {
                             let lines = agentkeys_memory_engine::MemoryLine::from_blob(&text);
@@ -365,6 +369,39 @@ pub fn extract_memory_content(result: &Value) -> Option<String> {
         .get("content")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+/// Render a decrypted `memory:<ns>` blob into injectable text, tolerating BOTH
+/// the per-namespace JSON array (#201 Phase 4 — the master plant writes
+/// `[{key,title,body,updated,bytes}]`) and a legacy single-body blob (pre-#201
+/// or agent-written). A JSON array is flattened to one `title: body` line per
+/// entry; anything else passes through unchanged, so the wire demo's
+/// single-body Chengdu memory still injects (plan §4 agent-read parity). Pure
+/// helper, unit-tested.
+pub fn render_memory_blob(content: &str) -> String {
+    if content.trim_start().starts_with('[') {
+        if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(content) {
+            let lines: Vec<String> = items
+                .iter()
+                .filter_map(|it| {
+                    let body = it.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                    if body.trim().is_empty() {
+                        return None;
+                    }
+                    let title = it.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    Some(if title.trim().is_empty() {
+                        body.to_string()
+                    } else {
+                        format!("{title}: {body}")
+                    })
+                })
+                .collect();
+            if !lines.is_empty() {
+                return lines.join("\n");
+            }
+        }
+    }
+    content.to_string()
 }
 
 /// Read the current user turn from the host hook payload (stdin) for use as the
@@ -464,6 +501,34 @@ mod tests {
     #[test]
     fn extract_memory_content_missing_field_is_none() {
         assert_eq!(extract_memory_content(&json!({"ok": true})), None);
+    }
+
+    #[test]
+    fn render_memory_blob_passes_through_single_body() {
+        // The wire demo seeds a single-body blob; it must inject unchanged.
+        let raw = "Chengdu trip — Apr 12 to 16, hotpot at Yulin.";
+        assert_eq!(render_memory_blob(raw), raw);
+    }
+
+    #[test]
+    fn render_memory_blob_flattens_json_array() {
+        // #201 Phase 4: a per-namespace JSON array renders one title: body line each.
+        let raw = r#"[
+            {"key":"chengdu-trip","title":"Chengdu trip","body":"Apr 12 to 16","updated":"2026-04-02","bytes":9},
+            {"key":"customs","title":"","body":"customs note","updated":"2026-04-02","bytes":12}
+        ]"#;
+        assert_eq!(
+            render_memory_blob(raw),
+            "Chengdu trip: Apr 12 to 16\ncustoms note"
+        );
+    }
+
+    #[test]
+    fn render_memory_blob_non_entry_array_falls_back_to_raw() {
+        // A JSON array that isn't memory entries (no `body`) passes through as-is
+        // rather than rendering empty — never silently drop content.
+        let raw = r#"["a","b"]"#;
+        assert_eq!(render_memory_blob(raw), raw);
     }
 
     #[test]

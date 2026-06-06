@@ -355,6 +355,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-worker-config"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-worker-creds",
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentkeys-worker-creds"
 version = "0.1.0"
 dependencies = [

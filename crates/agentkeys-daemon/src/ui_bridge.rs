@@ -77,6 +77,11 @@ pub struct UiBridgeState {
     /// plant (re-planting the same entry is a no-op). Maps the §2 "plant
     /// preserved memory" flow + GH plan issue-9step-flow.md.
     pub master_memory: RwLock<HashMap<String, ApiMemoryEntry>>,
+    /// Serializes real-chain plants (#201 Phase 4, codex finding 1). The plant is
+    /// a read-modify-write of each `memory:<ns>` blob; two concurrent plants for
+    /// the same namespace would otherwise race (both read, both write → last wins,
+    /// dropping the other's entries). Held for the whole real-chain plant body.
+    pub plant_lock: tokio::sync::Mutex<()>,
     /// Broker base URL for the W1 onboarding email→verify flow. `None` ⇒ email
     /// onboarding is disabled (the daemon was started without `--broker-url`)
     /// and the email endpoints fail closed with `broker-not-configured`.
@@ -106,6 +111,14 @@ pub struct UiBridgeState {
     /// Per-actor memory IAM role ARN for the STS relay (`MEMORY_ROLE_ARN`). Required
     /// alongside `memory_url` for the real chain; a partial config fails loud (issue #90 discipline).
     pub memory_role_arn: Option<String>,
+    /// #201 config data class — the config worker base URL (e.g. `https://config.litentry.org`).
+    /// `None` ⇒ the memory-types taxonomy is read/written from the in-memory fallback (dev/no-infra),
+    /// and the master-memory list derives categories from the cache instead of the durable,
+    /// master-only Config-class taxonomy object (`config/memory-taxonomy.enc`).
+    pub config_url: Option<String>,
+    /// #201 config data class — per-actor config IAM role ARN for the STS relay (`CONFIG_ROLE_ARN`).
+    /// Required alongside `config_url`; a partial config fails loud (issue #90 discipline).
+    pub config_role_arn: Option<String>,
     /// AWS region for the STS relay (`REGION`).
     pub region: String,
     /// The on-chain-registered master device key hash, sent as `device_key_hash` in
@@ -159,17 +172,150 @@ pub struct ApiMemoryEntry {
     pub content_hash: String,
 }
 
+/// Content hash over (ns ‖ key ‖ body) — the dedup key for plant idempotency
+/// AND the durable-merge identity (codex finding 1). A free function so the
+/// merge can recompute it for durable `StoredMemoryEntry`s (which don't carry
+/// the hash) using the same scheme as `ApiMemoryEntry::compute_hash`.
+fn content_hash_for(ns: &str, key: &str, body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(ns.as_bytes());
+    h.update(b"\x1f");
+    h.update(key.as_bytes());
+    h.update(b"\x1f");
+    h.update(body.as_bytes());
+    hex::encode(h.finalize())
+}
+
 impl ApiMemoryEntry {
     fn compute_hash(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(self.ns.as_bytes());
-        h.update(b"\x1f");
-        h.update(self.key.as_bytes());
-        h.update(b"\x1f");
-        h.update(self.body.as_bytes());
-        hex::encode(h.finalize())
+        content_hash_for(&self.ns, &self.key, &self.body)
     }
+
+    /// The on-disk form stored inside the per-namespace JSON array (#201 Phase 4).
+    fn to_stored(&self) -> StoredMemoryEntry {
+        StoredMemoryEntry {
+            key: self.key.clone(),
+            title: self.title.clone(),
+            body: self.body.clone(),
+            updated: self.updated.clone(),
+            bytes: self.bytes,
+        }
+    }
+
+    /// Rehydrate a UI entry from a stored array element decrypted out of
+    /// `memory:<ns>.enc`. `version`/`preview` are derived (not stored) and
+    /// `content_hash` is left empty (the read path doesn't dedup).
+    fn from_stored(ns: &str, s: StoredMemoryEntry) -> Self {
+        let preview = s.body.chars().take(80).collect();
+        ApiMemoryEntry {
+            ns: ns.to_string(),
+            key: s.key,
+            title: s.title,
+            bytes: s.bytes,
+            version: "v1".to_string(),
+            updated: s.updated,
+            preview,
+            body: s.body,
+            content_hash: String::new(),
+        }
+    }
+}
+
+/// One element of the per-namespace JSON array `memory:<ns>.enc` (#201 Phase 4).
+/// Fixes the lossy single-body overwrite: a namespace with several memories
+/// round-trips as one array. The agent reads the same blobs (W4 inheritance
+/// defers the agent WRITE path; the inject already renders this shape).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredMemoryEntry {
+    key: String,
+    title: String,
+    body: String,
+    updated: String,
+    bytes: u64,
+}
+
+/// The `config/memory-taxonomy.enc` object (#178 §7 / #201): the master-only
+/// category set the web list resolves WITHOUT decrypting any memory blob. The
+/// categories are the namespaces the operator has planted; labels are derived.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct MemoryTaxonomy {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    categories: Vec<MemoryCategory>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryCategory {
+    pub ns: String,
+    pub label: String,
+}
+
+/// The signed `service` of the Config-class taxonomy object (→ S3 key
+/// `bots/<O_master>/config/memory-taxonomy.enc`). Config is master-only, so the
+/// broker + worker skip the on-chain scope check for `operator == actor` (#195).
+const TAXONOMY_SERVICE: &str = "memory-taxonomy";
+
+/// Title-case a namespace for its display label (`travel` → `Travel`). The
+/// taxonomy object is the durable label home; this is the derivation used when
+/// minting a fresh taxonomy from planted namespaces.
+fn label_for_ns(ns: &str) -> String {
+    let mut chars = ns.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Parse a decrypted `memory:<ns>` blob into its entries, tolerating BOTH the
+/// new per-namespace JSON array (#201 Phase 4) and a legacy single-body blob
+/// (pre-#201 / agent-written) — the latter becomes a one-element array keyed by
+/// the namespace, so the read path never breaks on an old blob.
+fn parse_stored_blob(plaintext: &str, ns: &str) -> Vec<StoredMemoryEntry> {
+    let trimmed = plaintext.trim_start();
+    if trimmed.starts_with('[') {
+        if let Ok(entries) = serde_json::from_str::<Vec<StoredMemoryEntry>>(plaintext) {
+            return entries;
+        }
+    }
+    vec![StoredMemoryEntry {
+        key: ns.to_string(),
+        title: ns.to_string(),
+        body: plaintext.to_string(),
+        updated: String::new(),
+        bytes: plaintext.len() as u64,
+    }]
+}
+
+/// Merge the DURABLE entries already stored in a namespace with the newly
+/// planted entries, deduped by content hash (ns‖key‖body). Durable entries are
+/// ALWAYS preserved (codex finding 1 — a plant must never drop already-stored
+/// memory); a new entry whose content matches an existing one is a no-op,
+/// otherwise it is appended. Sorted by key for a stable on-disk blob. Returns
+/// the merged array plus the count of entries that were genuinely new to the
+/// durable set (for the plant's `planted`/`skipped` accounting).
+fn merge_stored_entries(
+    ns: &str,
+    durable: Vec<StoredMemoryEntry>,
+    incoming: &[ApiMemoryEntry],
+) -> (Vec<StoredMemoryEntry>, usize) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<StoredMemoryEntry> = Vec::new();
+    for d in durable {
+        if seen.insert(content_hash_for(ns, &d.key, &d.body)) {
+            out.push(d);
+        }
+    }
+    let mut newly_added = 0usize;
+    for e in incoming {
+        if seen.insert(content_hash_for(ns, &e.key, &e.body)) {
+            out.push(e.to_stored());
+            newly_added += 1;
+        }
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    (out, newly_added)
 }
 
 pub type SharedUiBridgeState = Arc<UiBridgeState>;
@@ -430,6 +576,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/:id", get(get_worker))
         .route("/v1/master/memory", get(list_master_memory))
+        .route("/v1/master/memory/entry", get(get_master_memory_entry))
         .route("/v1/master/memory/plant", post(plant_master_memory))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
@@ -453,6 +600,8 @@ pub fn build_state(
     chain_id: u64,
     memory_url: Option<String>,
     memory_role_arn: Option<String>,
+    config_url: Option<String>,
+    config_role_arn: Option<String>,
     region: String,
     master_device_key_hash: Option<String>,
     register_master_script: Option<String>,
@@ -471,6 +620,7 @@ pub fn build_state(
         workers: RwLock::new(HashMap::new()),
         anchor: RwLock::new(ApiAnchorStatus::default()),
         master_memory: RwLock::new(HashMap::new()),
+        plant_lock: tokio::sync::Mutex::new(()),
         broker_url,
         allowed_origin: rp_origin.to_string(),
         pending_email: RwLock::new(HashMap::new()),
@@ -479,6 +629,8 @@ pub fn build_state(
         chain_id,
         memory_url,
         memory_role_arn,
+        config_url,
+        config_role_arn,
         region,
         master_device_key_hash,
         registered_master: RwLock::new(None),
@@ -1333,11 +1485,131 @@ async fn dev_emit_event(
 
 // ─── Master memory — list + idempotent plant (§2 "plant preserved memory") ──
 
-async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> impl IntoResponse {
+/// `GET /v1/master/memory` → the memory CATEGORIES, resolved from the durable,
+/// master-only Config-class taxonomy (#178 §7 / #201) with **zero memory
+/// decryption**. Falls back to cache-derived categories ONLY when Config is
+/// unconfigured or the taxonomy is confirmed missing; a configured-but-failing
+/// Config surfaces as 502 (codex finding 2 — never hide a broken Config behind a
+/// stale "looks empty" view). Per-entry detail is lazy via `.../memory/entry`.
+async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
+    match resolve_categories(&state).await {
+        Ok(categories) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "categories": categories })),
+        )
+            .into_response(),
+        Err(reason) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": reason })),
+        )
+            .into_response(),
+    }
+}
+
+/// Resolve the category set. Cache fallback is returned ONLY for the two benign
+/// cases — Config unconfigured, or the taxonomy object confirmed missing (404 /
+/// never planted). Every OTHER Config failure (partial config, cap-mint/STS,
+/// worker 5xx, decrypt/parse) is propagated as `Err` so the list 502s instead of
+/// silently masking it as an empty store (codex finding 2).
+async fn resolve_categories(state: &SharedUiBridgeState) -> Result<Vec<MemoryCategory>, String> {
+    match real_config_ctx(state).await {
+        Ok(Some(ctx)) => {
+            let client = reqwest::Client::new();
+            match config_fetch_taxonomy(&client, &ctx).await {
+                Ok(Some(tax)) if !tax.categories.is_empty() => Ok(tax.categories),
+                // Present-but-empty (unusual) or confirmed-missing taxonomy →
+                // cache fallback is legitimate (nothing durable to list).
+                Ok(_) => Ok(categories_from_cache(state).await),
+                Err(e) => Err(format!("config taxonomy unavailable: {e}")),
+            }
+        }
+        Ok(None) => Ok(categories_from_cache(state).await), // Config not configured
+        Err(e) => Err(format!("config not ready: {e}")),    // partial config / no session
+    }
+}
+
+/// Derive categories from the distinct namespaces present in the in-memory
+/// cache (the dev/no-infra path + the post-restart fallback before the durable
+/// taxonomy is re-read). Labels are title-cased from the namespace.
+async fn categories_from_cache(state: &SharedUiBridgeState) -> Vec<MemoryCategory> {
     let guard = state.master_memory.read().await;
-    let mut entries: Vec<ApiMemoryEntry> = guard.values().cloned().collect();
-    entries.sort_by(|a, b| a.ns.cmp(&b.ns).then_with(|| a.key.cmp(&b.key)));
-    Json(serde_json::json!({ "entries": entries }))
+    let mut seen = std::collections::BTreeSet::new();
+    for e in guard.values() {
+        seen.insert(e.ns.clone());
+    }
+    seen.into_iter()
+        .map(|ns| MemoryCategory {
+            label: label_for_ns(&ns),
+            ns,
+        })
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemoryEntryQuery {
+    pub ns: String,
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// `GET /v1/master/memory/entry?ns=<ns>[&key=<key>]` → the entries in one
+/// namespace, decrypted ON DEMAND (#201 Phase 4 lazy detail). Real chain:
+/// memory-get(`memory:<ns>`) → decrypt → parse the JSON array. Fallback:
+/// filter the in-memory cache. `&key=` narrows to a single entry.
+async fn get_master_memory_entry(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::Query(q): axum::extract::Query<MemoryEntryQuery>,
+) -> axum::response::Response {
+    match get_master_memory_entry_inner(&state, &q).await {
+        Ok(entries) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ns": q.ns, "entries": entries })),
+        )
+            .into_response(),
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+async fn get_master_memory_entry_inner(
+    state: &SharedUiBridgeState,
+    q: &MemoryEntryQuery,
+) -> Result<Vec<ApiMemoryEntry>, (StatusCode, String)> {
+    let ctx = real_memory_ctx(state)
+        .await
+        .map_err(|reason| (StatusCode::CONFLICT, reason))?;
+    if let Some(ctx) = ctx {
+        let client = reqwest::Client::new();
+        let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+            &ctx.broker,
+            &ctx.j1,
+            &ctx.role_arn,
+            &ctx.region,
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
+        // Ok(None) → the namespace has no durable blob (nothing to show); a real
+        // worker error surfaces as 502 (not an empty list masking a failure).
+        let stored = memory_get_ns_real(&client, &ctx, &creds, &q.ns)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+            .unwrap_or_default();
+        Ok(stored
+            .into_iter()
+            .filter(|s| q.key.as_deref().is_none_or(|k| k == s.key))
+            .map(|s| ApiMemoryEntry::from_stored(&q.ns, s))
+            .collect())
+    } else {
+        let guard = state.master_memory.read().await;
+        let mut entries: Vec<ApiMemoryEntry> = guard
+            .values()
+            .filter(|e| e.ns == q.ns && q.key.as_deref().is_none_or(|k| k == e.key))
+            .cloned()
+            .collect();
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(entries)
+    }
 }
 
 // ─── W3: real memory chain (cap-mint → STS relay → worker → S3) ─────────────
@@ -1348,6 +1620,62 @@ async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> impl In
 // http_backend + phase1-wire-demo use. Otherwise plant falls back to the
 // in-memory store. Per-actor by construction (cap-mint binds device.actor_omni
 // == req.actor_omni); see docs/plan/web-flow/w3-real-memory.md §1.
+
+/// The session-scoped coordinates shared by every real-chain worker call
+/// (memory + config): the broker, the master J1, the (normalized) master omni,
+/// the on-chain device hash, and the region. Resolved once; the per-data-class
+/// contexts add the worker URL + IAM role on top.
+struct SessionCoords {
+    broker: String,
+    region: String,
+    j1: String,
+    omni: String,
+    device_key_hash: String,
+}
+
+/// Resolve the master session coordinates or fail loud (issue #90 discipline):
+/// a missing broker / unregistered device / absent session is an `Err`, never a
+/// silent degrade. Shared by `real_memory_ctx` + `real_config_ctx`.
+async fn resolve_session_coords(state: &UiBridgeState) -> Result<SessionCoords, String> {
+    let broker = state
+        .broker_url
+        .clone()
+        .ok_or("real chain: worker URL set but --broker-url missing")?;
+    // Prefer the device hash from the K11-finish register shell-out (issue #196)
+    // — it's the device actually on chain under this session omni. Fall back to
+    // the --master-device-key-hash CLI flag (pre-registered device / tests).
+    let device_key_hash = match state.registered_master.read().await.as_ref() {
+        Some(rm) => rm.device_key_hash.clone(),
+        None => state.master_device_key_hash.clone().ok_or(
+            "real chain: master device not registered on chain yet (finish K11 \
+             enrollment to register) and no --master-device-key-hash fallback set",
+        )?,
+    };
+    let session = state
+        .onboarding_session
+        .read()
+        .await
+        .clone()
+        .ok_or("real chain: no master session — complete onboarding first")?;
+    if session.omni.is_empty() || session.j1.is_empty() {
+        return Err("real chain: master session is identity-only (no EVM omni/J1)".into());
+    }
+    Ok(SessionCoords {
+        broker,
+        region: state.region.clone(),
+        j1: session.j1,
+        // The broker cap-mint input-validates that operator_omni/actor_omni start with
+        // 0x, but the onboarding session stores the omni bare. Normalize ONCE here so
+        // every worker call sends a 0x-prefixed omni (the broker normalize_hex32's it
+        // for the device-binding match either way).
+        omni: if session.omni.starts_with("0x") {
+            session.omni
+        } else {
+            format!("0x{}", session.omni)
+        },
+        device_key_hash,
+    })
+}
 
 struct RealMemoryCtx {
     broker: String,
@@ -1367,106 +1695,122 @@ async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>,
     let Some(memory_url) = state.memory_url.clone() else {
         return Ok(None);
     };
-    let broker = state
-        .broker_url
-        .clone()
-        .ok_or("real memory: --memory-url set but --broker-url missing")?;
     let role_arn = state
         .memory_role_arn
         .clone()
         .ok_or("real memory: --memory-url set but MEMORY_ROLE_ARN missing")?;
-    // Prefer the device hash from the K11-finish register shell-out (issue #196)
-    // — it's the device actually on chain under this session omni. Fall back to
-    // the --master-device-key-hash CLI flag (pre-registered device / tests).
-    let device_key_hash = match state.registered_master.read().await.as_ref() {
-        Some(rm) => rm.device_key_hash.clone(),
-        None => state.master_device_key_hash.clone().ok_or(
-            "real memory: master device not registered on chain yet (finish K11 \
-             enrollment to register) and no --master-device-key-hash fallback set",
-        )?,
-    };
-    let session = state
-        .onboarding_session
-        .read()
-        .await
-        .clone()
-        .ok_or("real memory: no master session — complete onboarding first")?;
-    if session.omni.is_empty() || session.j1.is_empty() {
-        return Err("real memory: master session is identity-only (no EVM omni/J1)".into());
-    }
+    let c = resolve_session_coords(state).await?;
     Ok(Some(RealMemoryCtx {
-        broker,
+        broker: c.broker,
         memory_url,
         role_arn,
-        region: state.region.clone(),
-        j1: session.j1,
-        // The broker cap-mint input-validates that operator_omni/actor_omni start with
-        // 0x, but the onboarding session stores the omni bare. Normalize ONCE here so
-        // both memory_put_real + memory_get_real send a 0x-prefixed omni (the broker
-        // normalize_hex32's it for the device-binding match either way).
-        omni: if session.omni.starts_with("0x") {
-            session.omni
-        } else {
-            format!("0x{}", session.omni)
-        },
-        device_key_hash,
+        region: c.region,
+        j1: c.j1,
+        omni: c.omni,
+        device_key_hash: c.device_key_hash,
     }))
 }
 
-/// One real memory-put: cap-mint(`memory:<ns>`) → STS relay → worker
-/// `/v1/memory/put`. Returns the worker's S3 key. Mirrors
-/// `agentkeys-mcp-server::backend::http_backend::memory_put`.
-async fn memory_put_real(
-    client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    entry: &ApiMemoryEntry,
-) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+struct RealConfigCtx {
+    broker: String,
+    config_url: String,
+    role_arn: String,
+    region: String,
+    j1: String,
+    omni: String,
+    device_key_hash: String,
+}
 
-    // 1. cap-mint for the master's own actor (operator == actor == O_master).
-    let cap_resp = client
-        .post(format!("{}/v1/cap/memory-put", ctx.broker))
-        .bearer_auth(&ctx.j1)
+/// Same `Ok(None)`/`Ok(Some)`/`Err` contract as `real_memory_ctx`, gated on
+/// `config_url` (#201 Config data class). When `None`, the taxonomy lives only
+/// in the in-memory fallback and the list derives categories from the cache.
+async fn real_config_ctx(state: &UiBridgeState) -> Result<Option<RealConfigCtx>, String> {
+    let Some(config_url) = state.config_url.clone() else {
+        return Ok(None);
+    };
+    let role_arn = state
+        .config_role_arn
+        .clone()
+        .ok_or("real config: --config-url set but CONFIG_ROLE_ARN missing")?;
+    let c = resolve_session_coords(state).await?;
+    Ok(Some(RealConfigCtx {
+        broker: c.broker,
+        config_url,
+        role_arn,
+        region: c.region,
+        j1: c.j1,
+        omni: c.omni,
+        device_key_hash: c.device_key_hash,
+    }))
+}
+
+/// Mint a master-self cap for the given broker route (`memory-put` /
+/// `memory-get` / `config-store` / `config-fetch`) and `service` string.
+/// operator == actor == O_master, so the broker skips the on-chain scope check
+/// (#195). Returns the raw cap JSON the worker re-verifies.
+async fn mint_master_cap(
+    client: &reqwest::Client,
+    broker: &str,
+    j1: &str,
+    omni: &str,
+    device_key_hash: &str,
+    route: &str,
+    service: &str,
+) -> Result<serde_json::Value, String> {
+    let resp = client
+        .post(format!("{broker}/v1/cap/{route}"))
+        .bearer_auth(j1)
         .json(&serde_json::json!({
-            "operator_omni": ctx.omni,
-            "actor_omni": ctx.omni,
-            "service": format!("memory:{}", entry.ns),
-            "device_key_hash": ctx.device_key_hash,
+            "operator_omni": omni,
+            "actor_omni": omni,
+            "service": service,
+            "device_key_hash": device_key_hash,
             "ttl_seconds": 300,
         }))
         .send()
         .await
-        .map_err(|e| format!("cap-mint transport: {e}"))?;
-    if !cap_resp.status().is_success() {
-        let status = cap_resp.status();
-        let body = cap_resp.text().await.unwrap_or_default();
-        return Err(format!("cap-mint {status}: {body}"));
+        .map_err(|e| format!("cap-mint({route}) transport: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("cap-mint({route}) {status}: {body}"));
     }
-    let cap: serde_json::Value = cap_resp
-        .json()
+    resp.json()
         .await
-        .map_err(|e| format!("cap-mint parse: {e}"))?;
+        .map_err(|e| format!("cap-mint({route}) parse: {e}"))
+}
 
-    // 2. STS relay — per-actor creds tagged agentkeys_actor_omni == O_master.
-    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+/// Per-namespace memory-put (#201 Phase 4): cap-mint(`memory:<ns>`) → worker
+/// `/v1/memory/put` with the JSON array as plaintext. STS creds are minted once
+/// by the caller and reused across namespaces. Returns the worker's S3 key.
+async fn memory_put_ns_real(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &agentkeys_provisioner::AwsTempCreds,
+    ns: &str,
+    entries: &[StoredMemoryEntry],
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let cap = mint_master_cap(
+        client,
         &ctx.broker,
         &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "memory-put",
+        &format!("memory:{ns}"),
     )
-    .await
-    .map_err(|e| format!("STS relay: {e}"))?;
-
-    // 3. worker put → S3 bots/<O_master>/memory/memory:<ns>.enc.
+    .await?;
+    let plaintext = serde_json::to_vec(entries).map_err(|e| format!("ns array serialize: {e}"))?;
     let put_resp = client
         .post(format!("{}/v1/memory/put", ctx.memory_url))
-        .header("x-aws-access-key-id", creds.access_key_id)
-        .header("x-aws-secret-access-key", creds.secret_access_key)
-        .header("x-aws-session-token", creds.session_token)
+        .header("x-aws-access-key-id", &creds.access_key_id)
+        .header("x-aws-secret-access-key", &creds.secret_access_key)
+        .header("x-aws-session-token", &creds.session_token)
         .json(&serde_json::json!({
             "cap": cap,
-            "plaintext_b64": STANDARD.encode(entry.body.as_bytes()),
-            "namespace": entry.ns,
+            "plaintext_b64": STANDARD.encode(&plaintext),
+            "namespace": ns,
         }))
         .send()
         .await
@@ -1487,6 +1831,176 @@ async fn memory_put_real(
         .to_string())
 }
 
+/// Per-namespace memory-get (#201 Phase 4 lazy detail): cap-mint(`memory:<ns>`)
+/// → worker `/v1/memory/get` → decrypt → parse the JSON array (tolerant of a
+/// legacy single-body blob). The whole namespace decrypts in one round-trip.
+/// `Ok(Some(entries))` when the namespace blob exists, `Ok(None)` when the
+/// worker reports it MISSING (HTTP 404 / `NoSuchKey` — never written), and `Err`
+/// on a real worker/transport/decrypt failure. The `Option` is what lets the
+/// read-modify-write plant tell "new namespace" (write fresh) from "transient
+/// error" (abort — never overwrite durable data) per codex finding 1.
+async fn memory_get_ns_real(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &agentkeys_provisioner::AwsTempCreds,
+    ns: &str,
+) -> Result<Option<Vec<StoredMemoryEntry>>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let cap = mint_master_cap(
+        client,
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "memory-get",
+        &format!("memory:{ns}"),
+    )
+    .await?;
+    let get_resp = client
+        .post(format!("{}/v1/memory/get", ctx.memory_url))
+        .header("x-aws-access-key-id", &creds.access_key_id)
+        .header("x-aws-secret-access-key", &creds.secret_access_key)
+        .header("x-aws-session-token", &creds.session_token)
+        .json(&serde_json::json!({ "cap": cap, "namespace": ns }))
+        .send()
+        .await
+        .map_err(|e| format!("worker get transport: {e}"))?;
+    if get_resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None); // namespace never written
+    }
+    if !get_resp.status().is_success() {
+        let status = get_resp.status();
+        let body = get_resp.text().await.unwrap_or_default();
+        return Err(format!("worker get {status}: {body}"));
+    }
+    let parsed: serde_json::Value = get_resp
+        .json()
+        .await
+        .map_err(|e| format!("worker get parse: {e}"))?;
+    let b64 = parsed
+        .get("plaintext_b64")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let bytes = STANDARD
+        .decode(b64)
+        .map_err(|e| format!("plaintext_b64 decode: {e}"))?;
+    let plaintext = String::from_utf8(bytes).map_err(|e| format!("plaintext utf8: {e}"))?;
+    Ok(Some(parse_stored_blob(&plaintext, ns)))
+}
+
+/// Config-store the master-only memory-types taxonomy (#201): cap-mint
+/// (`config-store`, service `memory-taxonomy`) → config worker `/v1/config/put`.
+/// Mints its own STS creds under the CONFIG role (distinct from the memory role
+/// per arch.md §17.2 per-data-class bucket separation).
+async fn config_store_taxonomy(
+    client: &reqwest::Client,
+    ctx: &RealConfigCtx,
+    taxonomy: &MemoryTaxonomy,
+) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let cap = mint_master_cap(
+        client,
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "config-store",
+        TAXONOMY_SERVICE,
+    )
+    .await?;
+    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    .map_err(|e| format!("STS relay (config): {e}"))?;
+    let plaintext = serde_json::to_vec(taxonomy).map_err(|e| format!("taxonomy serialize: {e}"))?;
+    let resp = client
+        .post(format!("{}/v1/config/put", ctx.config_url))
+        .header("x-aws-access-key-id", creds.access_key_id)
+        .header("x-aws-secret-access-key", creds.secret_access_key)
+        .header("x-aws-session-token", creds.session_token)
+        .json(&serde_json::json!({
+            "cap": cap,
+            "plaintext_b64": STANDARD.encode(&plaintext),
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("config put transport: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("config put {status}: {body}"));
+    }
+    Ok(())
+}
+
+/// Config-fetch the taxonomy (#201). `Ok(None)` ONLY when the object is
+/// confirmed MISSING (HTTP 404 / `NoSuchKey` — never planted), so the list may
+/// legitimately fall back to cache-derived categories. Any OTHER failure
+/// (cap-mint, STS, config worker 5xx, decrypt/parse) is an `Err` that the caller
+/// MUST surface — never silently downgrade to the cache, which would hide a
+/// configured-but-broken Config behind a stale "looks empty" view (codex
+/// finding 2).
+async fn config_fetch_taxonomy(
+    client: &reqwest::Client,
+    ctx: &RealConfigCtx,
+) -> Result<Option<MemoryTaxonomy>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let cap = mint_master_cap(
+        client,
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "config-fetch",
+        TAXONOMY_SERVICE,
+    )
+    .await?;
+    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    .map_err(|e| format!("STS relay (config): {e}"))?;
+    let resp = client
+        .post(format!("{}/v1/config/get", ctx.config_url))
+        .header("x-aws-access-key-id", creds.access_key_id)
+        .header("x-aws-secret-access-key", creds.secret_access_key)
+        .header("x-aws-session-token", creds.session_token)
+        .json(&serde_json::json!({ "cap": cap }))
+        .send()
+        .await
+        .map_err(|e| format!("config get transport: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // Confirmed missing — nothing planted yet. The ONLY legitimate fallback.
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("config get {status}: {body}"));
+    }
+    let parsed: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("config get parse: {e}"))?;
+    let b64 = parsed
+        .get("plaintext_b64")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let bytes = STANDARD
+        .decode(b64)
+        .map_err(|e| format!("taxonomy plaintext decode: {e}"))?;
+    let taxonomy: MemoryTaxonomy =
+        serde_json::from_slice(&bytes).map_err(|e| format!("taxonomy parse: {e}"))?;
+    Ok(Some(taxonomy))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PlantRequest {
     pub entries: Vec<ApiMemoryEntry>,
@@ -1497,6 +2011,12 @@ pub struct PlantResponse {
     pub planted: usize,
     pub skipped: usize,
     pub total: usize,
+    /// Durable category-index (taxonomy) outcome, surfaced so a configured-Config
+    /// store failure is NOT hidden behind an otherwise-successful memory plant
+    /// (codex finding 2): `"ok"` (written), `"unconfigured"` (Config not set up,
+    /// cache-only), `"failed: <reason>"` (memory IS durable but the category index
+    /// is stale → retry), or `"skipped: <reason>"` (config-context unavailable).
+    pub taxonomy_status: String,
 }
 
 /// Idempotent plant: each entry's content_hash is the dedup key. Re-planting
@@ -1530,49 +2050,109 @@ async fn plant_master_memory_inner(
 
     let mut planted = 0usize;
     let mut skipped = 0usize;
+    let mut taxonomy_status = String::from("unconfigured");
 
     if let Some(ctx) = ctx {
-        // REAL chain — the master plants its own memory to the worker/S3.
+        // REAL chain — read-modify-write per namespace under a plant lock so a
+        // restart-stale cache or a concurrent plant can NEVER drop durable
+        // entries (codex finding 1). Each namespace write MERGES the current
+        // durable blob with the request, so the per-namespace JSON array grows
+        // monotonically instead of last-writer-wins overwriting.
+        let _plant_guard = state.plant_lock.lock().await;
         let client = reqwest::Client::new();
-        let mut errors: Vec<String> = Vec::new();
+
+        // Hash every request entry once, then group by namespace.
+        let mut by_ns: std::collections::BTreeMap<String, Vec<ApiMemoryEntry>> =
+            std::collections::BTreeMap::new();
         for mut e in req.entries {
-            let hash = if e.content_hash.is_empty() {
-                e.compute_hash()
-            } else {
-                e.content_hash.clone()
-            };
-            e.content_hash = hash.clone();
-            if state.master_memory.read().await.contains_key(&hash) {
-                skipped += 1;
-                continue;
+            if e.content_hash.is_empty() {
+                e.content_hash = e.compute_hash();
             }
-            match memory_put_real(&client, &ctx, &e).await {
-                Ok(_s3_key) => {
-                    state.master_memory.write().await.insert(hash, e);
-                    planted += 1;
-                }
-                Err(err) => {
-                    tracing::warn!("plant_master_memory: real put failed: {err}");
-                    errors.push(err);
-                }
-            }
+            by_ns.entry(e.ns.clone()).or_default().push(e);
         }
-        // Any durable-write failure fails the whole plant — a partial plant must NOT
-        // read as success (the prepared archive would be partially persisted while the
-        // caller proceeds with missing memory). The successfully-written entries stay in
-        // `master_memory` so a re-plant is idempotent and resumes the failed namespaces.
-        // We early-return BEFORE the success audit + Ok response below.
-        if !errors.is_empty() {
-            return Err((
+
+        // STS creds (memory role) minted once, reused across namespaces.
+        let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+            &ctx.broker,
+            &ctx.j1,
+            &ctx.role_arn,
+            &ctx.region,
+        )
+        .await
+        .map_err(|e| {
+            (
                 axum::http::StatusCode::BAD_GATEWAY,
-                format!(
-                    "plant incomplete: {} of {} write(s) failed (planted {planted}, skipped {skipped}): {}",
-                    errors.len(),
-                    planted + skipped + errors.len(),
-                    errors.join("; ")
-                ),
-            ));
+                format!("STS relay: {e}"),
+            )
+        })?;
+
+        let mut committed: Vec<ApiMemoryEntry> = Vec::new();
+        for (ns, entries) in &by_ns {
+            // Read the durable blob FIRST. Ok(None) = brand-new namespace;
+            // Err = a real worker/transport error → ABORT this plant rather than
+            // overwrite durable data we failed to read (the finding-1 footgun).
+            let durable = match memory_get_ns_real(&client, &ctx, &creds, ns).await {
+                Ok(opt) => opt.unwrap_or_default(),
+                Err(e) => {
+                    return Err((
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        format!(
+                            "plant aborted: durable read of memory:{ns} failed ({e}) — not overwriting"
+                        ),
+                    ));
+                }
+            };
+            let (merged, newly) = merge_stored_entries(ns, durable, entries);
+            if let Err(e) = memory_put_ns_real(&client, &ctx, &creds, ns, &merged).await {
+                return Err((
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("plant aborted: write of memory:{ns} failed: {e}"),
+                ));
+            }
+            planted += newly;
+            skipped += entries.len().saturating_sub(newly);
+            committed.extend(entries.iter().cloned());
         }
+
+        // Mirror the committed entries into the in-memory cache (a secondary
+        // index for the list/detail fallback + same-session dedup); durable S3
+        // remains the source of truth.
+        {
+            let mut cache = state.master_memory.write().await;
+            for e in committed {
+                cache.insert(e.content_hash.clone(), e);
+            }
+        }
+
+        // Reconcile the durable taxonomy LAST. A configured store FAILURE is
+        // surfaced as an explicit partial-success status (codex finding 2) — the
+        // memory blobs ARE durable, but the category index would be stale, so the
+        // operator must know to retry rather than see a silent success.
+        taxonomy_status = match real_config_ctx(state).await {
+            Ok(Some(cfg)) => {
+                let taxonomy = MemoryTaxonomy {
+                    version: 1,
+                    categories: categories_from_cache(state).await,
+                };
+                match config_store_taxonomy(&client, &cfg, &taxonomy).await {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => {
+                        tracing::error!(
+                            "plant_master_memory: taxonomy config-store FAILED (memory durable; \
+                             category index stale — retry the plant): {e}"
+                        );
+                        format!("failed: {e}")
+                    }
+                }
+            }
+            Ok(None) => "unconfigured".to_string(),
+            Err(e) => {
+                tracing::warn!(
+                    "plant_master_memory: config-context unavailable (taxonomy skipped): {e}"
+                );
+                format!("skipped: {e}")
+            }
+        };
     } else {
         // In-memory fallback (dev / no infra) — content-hash dedup.
         let mut mem = state.master_memory.write().await;
@@ -1610,6 +2190,7 @@ async fn plant_master_memory_inner(
         planted,
         skipped,
         total,
+        taxonomy_status,
     })
 }
 
@@ -1656,6 +2237,8 @@ mod tests {
             84532,
             None,
             None,
+            None,
+            None,
             "us-east-1".into(),
             None,
             None,
@@ -1683,6 +2266,8 @@ mod tests {
             84532,
             Some("https://memory.example".into()),
             None,
+            None,
+            None,
             "us-east-1".into(),
             Some("0xdkh".into()),
             None,
@@ -1708,6 +2293,8 @@ mod tests {
             84532,
             Some("https://memory.example".into()),
             Some("arn:aws:iam::1:role/memory".into()),
+            None,
+            None,
             "us-east-1".into(),
             Some("0xdkh".into()),
             None,
@@ -2380,6 +2967,219 @@ mod tests {
         assert_eq!(state.master_memory.read().await.len(), 2);
     }
 
+    // ─── #201 Phase 4: taxonomy categories + per-ns array + lazy detail ───
+
+    #[test]
+    fn label_for_ns_titlecases() {
+        assert_eq!(label_for_ns("travel"), "Travel");
+        assert_eq!(label_for_ns("personal"), "Personal");
+        assert_eq!(label_for_ns(""), "");
+    }
+
+    #[test]
+    fn parse_stored_blob_reads_json_array() {
+        let blob = r#"[{"key":"chengdu-trip","title":"Chengdu trip","body":"Apr 12-16","updated":"2026-04-02","bytes":9}]"#;
+        let entries = parse_stored_blob(blob, "travel");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "chengdu-trip");
+        assert_eq!(entries[0].body, "Apr 12-16");
+    }
+
+    #[test]
+    fn parse_stored_blob_tolerates_legacy_single_body() {
+        // A pre-#201 single-body blob (or an agent-written one) becomes a
+        // one-element array keyed by the namespace — the read path never breaks.
+        let entries = parse_stored_blob("Chengdu trip — Apr 12 to 16", "travel");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "travel");
+        assert!(entries[0].body.contains("Chengdu"));
+    }
+
+    #[test]
+    fn to_stored_from_stored_round_trip() {
+        let e = mem_entry("travel", "chengdu", "trip body");
+        let s = e.to_stored();
+        assert_eq!(s.key, "chengdu");
+        assert_eq!(s.body, "trip body");
+        let back = ApiMemoryEntry::from_stored("travel", s);
+        assert_eq!(back.ns, "travel");
+        assert_eq!(back.key, "chengdu");
+        assert_eq!(back.body, "trip body");
+    }
+
+    #[tokio::test]
+    async fn list_master_memory_returns_categories_from_cache_fallback() {
+        // No config_url ⇒ categories derive from the planted namespaces (sorted,
+        // deduped, title-cased), with ZERO memory decryption.
+        let state = make_state();
+        plant_master_memory_inner(
+            &state,
+            PlantRequest {
+                entries: vec![
+                    mem_entry("travel", "chengdu", "trip"),
+                    mem_entry("personal", "profile", "name: Kevin"),
+                    mem_entry("travel", "customs", "customs note"),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        let resp = list_master_memory(State(state)).await.into_response();
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let cats = json["categories"].as_array().unwrap();
+        assert_eq!(cats.len(), 2, "two distinct namespaces");
+        assert_eq!(cats[0]["ns"], "personal");
+        assert_eq!(cats[0]["label"], "Personal");
+        assert_eq!(cats[1]["ns"], "travel");
+    }
+
+    #[tokio::test]
+    async fn get_master_memory_entry_filters_ns_and_key() {
+        let state = make_state();
+        plant_master_memory_inner(
+            &state,
+            PlantRequest {
+                entries: vec![
+                    mem_entry("travel", "chengdu", "trip body"),
+                    mem_entry("travel", "customs", "customs body"),
+                    mem_entry("personal", "profile", "profile body"),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        // ns only → both travel entries (lazy detail, in-memory fallback).
+        let all = get_master_memory_entry_inner(
+            &state,
+            &MemoryEntryQuery {
+                ns: "travel".into(),
+                key: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|e| e.ns == "travel"));
+        // ns + key → exactly one entry.
+        let one = get_master_memory_entry_inner(
+            &state,
+            &MemoryEntryQuery {
+                ns: "travel".into(),
+                key: Some("chengdu".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].key, "chengdu");
+        assert_eq!(one[0].body, "trip body");
+    }
+
+    // ─── #201 Phase 4 codex fixes: durable merge + configured-Config surfacing ──
+
+    fn stored(key: &str, body: &str) -> StoredMemoryEntry {
+        StoredMemoryEntry {
+            key: key.into(),
+            title: key.into(),
+            body: body.into(),
+            updated: "2026-04-02".into(),
+            bytes: body.len() as u64,
+        }
+    }
+
+    #[test]
+    fn merge_preserves_durable_when_request_omits_them() {
+        // codex finding 1: durable entries read back from S3 (e.g. after a daemon
+        // restart, so they're ABSENT from the in-memory cache) MUST survive a
+        // plant that only carries a new entry for the same namespace.
+        let durable = vec![
+            stored("chengdu-trip", "Apr 12-16"),
+            stored("customs", "note"),
+        ];
+        let incoming = vec![mem_entry("travel", "anniversary", "dinner 2026-06-15")];
+        let (merged, newly) = merge_stored_entries("travel", durable, &incoming);
+        assert_eq!(newly, 1);
+        assert_eq!(
+            merged.len(),
+            3,
+            "durable entries preserved, new one appended"
+        );
+        let keys: Vec<&str> = merged.iter().map(|m| m.key.as_str()).collect();
+        assert!(
+            keys.contains(&"chengdu-trip")
+                && keys.contains(&"customs")
+                && keys.contains(&"anniversary")
+        );
+        assert!(
+            keys.windows(2).all(|w| w[0] <= w[1]),
+            "sorted by key for a stable blob"
+        );
+    }
+
+    #[test]
+    fn merge_dedups_identical_content() {
+        // Re-planting content already in the durable blob is a no-op (newly == 0).
+        let durable = vec![stored("profile", "name: Kevin")];
+        let incoming = vec![mem_entry("personal", "profile", "name: Kevin")];
+        let (merged, newly) = merge_stored_entries("personal", durable, &incoming);
+        assert_eq!(newly, 0);
+        assert_eq!(merged.len(), 1, "no duplicate appended");
+    }
+
+    #[test]
+    fn merge_same_key_different_body_keeps_both() {
+        // Content-hash identity: editing a key's body adds a 2nd entry (matches
+        // the in-memory model) rather than dropping the original.
+        let durable = vec![stored("profile", "v1")];
+        let incoming = vec![mem_entry("personal", "profile", "v2")];
+        let (merged, newly) = merge_stored_entries("personal", durable, &incoming);
+        assert_eq!(newly, 1);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_master_memory_surfaces_configured_config_error() {
+        // codex finding 2: a CONFIGURED-but-broken Config (--config-url set but
+        // CONFIG_ROLE_ARN missing) must NOT silently fall back to the cache and
+        // report an empty 200 — it surfaces as 502 so the operator sees it.
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            None,
+            None,
+            84532,
+            None,
+            None,
+            Some("https://config.example".into()), // config_url set
+            None,                                  // CONFIG_ROLE_ARN missing → partial config
+            "us-east-1".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let resp = list_master_memory(State(state)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn plant_reports_taxonomy_status_unconfigured_in_fallback() {
+        // No config_url ⇒ the plant's taxonomy_status is the honest "unconfigured"
+        // (not a fake "ok"), so the caller knows the durable index wasn't touched.
+        let state = make_state();
+        let r = plant_master_memory_inner(
+            &state,
+            PlantRequest {
+                entries: vec![mem_entry("travel", "chengdu", "trip")],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.taxonomy_status, "unconfigured");
+        assert_eq!(r.planted, 1);
+    }
+
     #[tokio::test]
     async fn list_workers_empty_by_default() {
         let state = make_state();
@@ -2548,6 +3348,8 @@ mod tests {
             None,
             None,
             84532,
+            None,
+            None,
             None,
             None,
             "us-east-1".into(),
