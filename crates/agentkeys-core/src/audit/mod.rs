@@ -42,6 +42,7 @@
 //! §15.3a for the canonical schema.
 
 pub mod bodies;
+pub mod calldata;
 pub mod cbor;
 pub mod client;
 pub mod op_kind;
@@ -156,6 +157,47 @@ impl AuditEnvelope {
     pub fn typed_body(&self) -> Option<TypedAuditBody> {
         TypedAuditBody::from_envelope(self)
     }
+
+    /// Render the envelope as operator-facing JSON for the audit UI (#153):
+    /// the envelope hash + every envelope-level field (omni / commitment bytes
+    /// as `0x` hex), the `op_kind` byte plus its canonical label (`null` for an
+    /// unknown future byte — the non-break path), and `op_body` as JSON. The
+    /// op_body CBOR map already carries the typed field names (it was encoded
+    /// from the per-op body struct), so the raw CBOR→JSON conversion yields the
+    /// typed shape for known op_kinds and the opaque map for unknown ones.
+    /// Never fails — an unknown op_kind still renders every envelope-level field.
+    pub fn to_json(&self) -> serde_json::Value {
+        let op_label = AuditOpKind::from_u8(self.op_kind).map(|k| k.label());
+        let body = ciborium_to_json(&self.op_body).unwrap_or(serde_json::Value::Null);
+        let hash = self
+            .envelope_hash()
+            .map(|h| format!("0x{}", hex::encode(h)))
+            .unwrap_or_default();
+        serde_json::json!({
+            "envelope_hash": hash,
+            "version": self.version,
+            "ts_unix": self.ts_unix,
+            "actor_omni": format!("0x{}", hex::encode(self.actor_omni)),
+            "operator_omni": format!("0x{}", hex::encode(self.operator_omni)),
+            "op_kind": self.op_kind,
+            "op_kind_label": op_label,
+            "op_body": body,
+            "result": self.result as u8,
+            "intent_text": self.intent_text,
+            "intent_commitment": self
+                .intent_commitment
+                .map(|c| format!("0x{}", hex::encode(c))),
+        })
+    }
+}
+
+/// Decode canonical-CBOR envelope hex (`0x…` or bare) into operator-facing JSON
+/// — the daemon `/v1/audit/:id/decode` CBOR half (#153). Thin wrapper over
+/// [`AuditEnvelope::from_canonical_cbor`] + [`AuditEnvelope::to_json`].
+pub fn decode_envelope_hex(cbor_hex: &str) -> Result<serde_json::Value, AuditError> {
+    let trimmed = cbor_hex.trim().strip_prefix("0x").unwrap_or(cbor_hex);
+    let bytes = hex::decode(trimmed).map_err(|e| AuditError::HexDecode(e.to_string()))?;
+    Ok(AuditEnvelope::from_canonical_cbor(&bytes)?.to_json())
 }
 
 /// Helper: `keccak256(intent_text.as_bytes() || 0x7c || op_payload_digest)`.
@@ -393,5 +435,79 @@ mod tests {
         let a = commit_intent(intent, &digest);
         let b = crate::clear_signing::commit_intent(intent, &digest);
         assert_eq!(a, b);
+    }
+
+    /// #153 acceptance bullet 4: the #137 cross-language CBOR vectors are the
+    /// decode test fixtures. We build canonical envelopes via the same
+    /// `envelope_for` path the #137 exporter
+    /// (`examples/export_audit_vectors.rs`) uses, encode to canonical CBOR,
+    /// then decode back through the real `decode_envelope_hex` daemon path and
+    /// assert the operator-facing JSON. A known op_kind yields the typed body
+    /// shape + label; an unknown future byte still decodes every
+    /// envelope-level field with a null label (the non-break guarantee).
+    #[test]
+    fn decode_envelope_hex_round_trips_137_style_vectors() {
+        use crate::audit::client::envelope_for;
+        use crate::audit::{AuditOpKind, CredStoreBody};
+
+        // ── known op_kind (CredStore=0), mirrors the exporter's first vector ──
+        let mut env = envelope_for(
+            [0x11; 32],
+            [0x22; 32],
+            AuditOpKind::CredStore,
+            CredStoreBody {
+                service: "openrouter".into(),
+                payload_hash: format!("0x{}", hex::encode([0xab; 32])),
+            },
+            AuditResult::Success,
+            Some("Store credential for openrouter".into()),
+            Some([0xcc; 32]),
+        )
+        .unwrap();
+        env.ts_unix = 1_700_000_000;
+
+        let cbor_hex = format!("0x{}", hex::encode(env.to_canonical_cbor().unwrap()));
+        let decoded = decode_envelope_hex(&cbor_hex).unwrap();
+
+        assert_eq!(
+            decoded["envelope_hash"],
+            serde_json::json!(format!("0x{}", hex::encode(env.envelope_hash().unwrap())))
+        );
+        assert_eq!(decoded["op_kind"], serde_json::json!(0));
+        assert_eq!(decoded["op_kind_label"], serde_json::json!("cred.store"));
+        assert_eq!(
+            decoded["op_body"]["service"],
+            serde_json::json!("openrouter")
+        );
+        assert_eq!(
+            decoded["actor_omni"],
+            serde_json::json!(format!("0x{}", hex::encode([0x11; 32])))
+        );
+        assert_eq!(
+            decoded["intent_text"],
+            serde_json::json!("Store credential for openrouter")
+        );
+        assert_eq!(decoded["result"], serde_json::json!(0));
+
+        // ── unknown op_kind (250) — the reserved-future canary vector ──
+        let mut unknown = env.clone();
+        unknown.op_kind = 250;
+        unknown.op_body = ciborium::Value::Map(vec![(
+            ciborium::Value::Text("future_field_only_v2_knows".into()),
+            ciborium::Value::Text("opaque".into()),
+        )]);
+        let uhex = format!("0x{}", hex::encode(unknown.to_canonical_cbor().unwrap()));
+        let udecoded = decode_envelope_hex(&uhex).unwrap();
+        assert_eq!(udecoded["op_kind"], serde_json::json!(250));
+        assert_eq!(udecoded["op_kind_label"], serde_json::Value::Null);
+        assert_eq!(
+            udecoded["op_body"]["future_field_only_v2_knows"],
+            serde_json::json!("opaque")
+        );
+        // envelope-level fields still present despite the unknown op_kind.
+        assert_eq!(
+            udecoded["operator_omni"],
+            serde_json::json!(format!("0x{}", hex::encode([0x22; 32])))
+        );
     }
 }

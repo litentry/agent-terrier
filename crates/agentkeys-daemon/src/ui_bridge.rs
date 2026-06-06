@@ -152,6 +152,10 @@ pub struct UiBridgeState {
     /// on-chain register (chain stays "none"); set via `--register-master-script`
     /// to enable the real web onboarding chain write.
     pub register_master_script: Option<String>,
+    /// Resolved chain profile (deployed contract registry + explorer + RPC) the
+    /// chain-info + audit-decode endpoints serve to the web UI (#153). Resolved
+    /// from `$AGENTKEYS_CHAIN` (default `heima`) at `build_state`.
+    pub chain_profile: agentkeys_core::chain_profile::ChainProfile,
 }
 
 /// Issue #196: outcome of the on-chain master-device registration shell-out.
@@ -628,6 +632,8 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/actors/:id/caps/revoke", post(revoke_cap))
         .route("/v1/audit/recent", get(list_recent_audit))
         .route("/v1/audit/stream", get(audit_stream))
+        .route("/v1/audit/:id/decode", get(decode_audit_event))
+        .route("/v1/chain/info", get(chain_info))
         .route("/v1/anchor/status", get(anchor_status))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/:id", get(get_worker))
@@ -676,6 +682,30 @@ pub fn build_state(
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
     let webauthn = builder.build()?;
     let (audit_tx, _audit_rx) = broadcast::channel::<ApiAuditEvent>(256);
+    // Resolve the chain profile (deployed contract registry + explorer) from
+    // $AGENTKEYS_CHAIN, defaulting to heima mainnet. Drives /v1/chain/info +
+    // /v1/audit/:id/decode (#153). Never hard-fails: an unknown chain name
+    // falls back to the embedded heima profile.
+    let chain_profile = match agentkeys_core::chain_profile::ChainProfile::resolve(
+        None,
+        std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
+        std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
+            .ok()
+            .as_deref(),
+    ) {
+        Ok((p, _)) => p,
+        Err(e) => {
+            // codex review #153: don't silently serve heima addresses when the
+            // operator set a bad $AGENTKEYS_CHAIN / profile file — warn loudly so
+            // /v1/chain/info isn't trusted as the wrong chain.
+            tracing::warn!(
+                error = %e,
+                "ui-bridge: chain profile resolution failed; falling back to heima — \
+                 /v1/chain/info will show heima addresses regardless of the requested chain"
+            );
+            agentkeys_core::chain_profile::ChainProfile::load_builtin("heima")?
+        }
+    };
     Ok(Arc::new(UiBridgeState {
         webauthn,
         enroll: RwLock::new(EnrollState::default()),
@@ -703,6 +733,7 @@ pub fn build_state(
         master_device_key_hash,
         registered_master: RwLock::new(None),
         register_master_script,
+        chain_profile,
     }))
 }
 
@@ -1541,6 +1572,76 @@ async fn anchor_status(State(state): State<SharedUiBridgeState>) -> impl IntoRes
         snapshot.next_anchor_in = 120u64.saturating_sub(now % 120);
     }
     Json(snapshot)
+}
+
+/// `GET /v1/chain/info` — the chain the daemon targets + its deployed contract
+/// registry, for the parent-control chain page (#153). Real addresses from the
+/// resolved chain profile, each with an explorer link.
+async fn chain_info(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
+    let p = &state.chain_profile;
+    let contracts: Vec<serde_json::Value> = p
+        .contracts
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "address": c.address,
+                "purpose": c.purpose,
+                "deployedAt": c.deployed_at,
+                "explorerUrl": p.explorer.contract_url(&c.address),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "name": p.name,
+        "display": p.display_name,
+        "chainId": p.chain_id,
+        "rpc": p.rpc.http,
+        "wss": p.rpc.wss,
+        "explorer": p.explorer.url,
+        "tokenSymbol": p.token.symbol,
+        "tokenDecimals": p.token.decimals,
+        "finality": p.finality.default_block_tag,
+        "contracts": contracts,
+    }))
+}
+
+/// `GET /v1/audit/:id/decode` — decode one audit event's CBOR `AuditEnvelope`
+/// and the on-chain calldata it commits, against the verified ABIs (#153). The
+/// real replacement for the web UI's `decodeCalldata` mock.
+async fn decode_audit_event(
+    State(state): State<SharedUiBridgeState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let event = {
+        let guard = state.audit.read().await;
+        guard.iter().find(|e| e.id == id).cloned()
+    }
+    .ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            "audit event not found",
+            "no-such-event",
+        )
+    })?;
+
+    // Resolve the real omnis: the event's actor, and the master (operator).
+    let (actor_omni, operator_omni) = {
+        let actors = state.actors.read().await;
+        let actor_omni = actors.get(&event.actor_id).map(|a| a.omni_hex.clone());
+        let operator_omni = actors
+            .values()
+            .find(|a| a.role.eq_ignore_ascii_case("master"))
+            .map(|a| a.omni_hex.clone());
+        (actor_omni, operator_omni)
+    };
+
+    Ok(Json(crate::audit_decode::decode_event(
+        &event,
+        actor_omni.as_deref(),
+        operator_omni.as_deref(),
+        &state.chain_profile,
+    )))
 }
 
 async fn list_workers(State(state): State<SharedUiBridgeState>) -> impl IntoResponse {
@@ -4508,6 +4609,59 @@ mod tests {
             .expect("must receive within 200ms")
             .expect("must not error");
         assert_eq!(received.id, "e-stream-1");
+    }
+
+    #[tokio::test]
+    async fn decode_audit_event_returns_real_calldata_and_envelope() {
+        // #153: GET /v1/audit/:id/decode wires the real decoder. Assert the
+        // registry-derived fields (selector/function/op_kind label) which are
+        // independent of which chain profile CI resolves.
+        let state = make_state();
+        let evt = ApiAuditEvent {
+            id: "dec-1".into(),
+            ts: "00:00:00".into(),
+            actor_id: "agent-x".into(),
+            actor: "X".into(),
+            kind: "audit.append".into(),
+            detail: "stored a credential".into(),
+            chip: "credentials".into(),
+            sev: "ok".into(),
+        };
+        push_audit(&state, evt).await;
+
+        let resp = decode_audit_event(State(state.clone()), Path("dec-1".into()))
+            .await
+            .expect("decode must succeed");
+        let v = resp.0;
+        assert_eq!(v["tier"], serde_json::json!("tier-2"));
+        assert_eq!(v["tx"]["to_contract"], serde_json::json!("CredentialAudit"));
+        assert_eq!(
+            v["tx"]["decoded"]["selector"],
+            serde_json::json!("0xc1bf0e32")
+        );
+        assert_eq!(v["tx"]["decoded"]["function"], serde_json::json!("append"));
+        assert_eq!(
+            v["envelope"]["op_kind_label"],
+            serde_json::json!("cred.store")
+        );
+
+        // unknown id → 404
+        let err = decode_audit_event(State(state), Path("nope".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn chain_info_serves_resolved_profile_and_contract_array() {
+        let state = make_state();
+        let name = state.chain_profile.name.clone();
+        let chain_id = state.chain_profile.chain_id;
+        let resp = chain_info(State(state)).await;
+        let v = resp.0;
+        assert_eq!(v["name"], serde_json::json!(name));
+        assert_eq!(v["chainId"], serde_json::json!(chain_id));
+        assert!(v["contracts"].is_array(), "contracts must be an array");
     }
 
     // Convince clippy the sync helper isn't dead code.

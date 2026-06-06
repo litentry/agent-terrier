@@ -26,12 +26,16 @@ Two distinct EVM accounts deploy AgentKeys contracts. They are **different keys*
 
 | Contract | Address | Bytecode |
 |---|---|---|
-| `AgentKeysScope` | `0xd44b375daefc65768f417d0f0125b68d5ba7df3b` | 4572 bytes |
+| `AgentKeysScope` | `0xd44b375daefc65768f417d0f0125b68d5ba7df3b` | 4572 bytes · ⚠ **source ≠ `src/` — see note below** |
 | `SidecarRegistry` | `0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE` | 7200 bytes |
 | `K3EpochCounter` | `0x6c9e675c699a06acefbc156afdee6bfbfe32ccb3` | 591 bytes |
 | `CredentialAudit` | `0x63c4545ac01c77cc74044f25b8edea3880224577` | 2584 bytes |
 | `P256Verifier` | `0xda5b772f9d6c09abe80414eea908612df9b54749` | 3428 bytes (pre-deployed verifier) |
 | `K11Verifier` | `0x5a441431f08e0f5f5ed10659620cb4e0e814e627` | 2033 bytes (pre-deployed verifier) |
+
+> **Also embedded in the chain profile.** These six addresses are mirrored in [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) `contracts[]`, which the daemon serves to the parent-control web UI via `GET /v1/chain/info` and uses for audit-decode (#153). **When an address changes here, update `heima.json` in the same commit** — `chain_profile::tests::heima_carries_stage1_contract_registry` pins the four stage-1 cores so the two can't silently drift.
+
+> ⚠ **`AgentKeysScope` source ≠ `src/AgentKeysScope.sol` (intentional, until the #164 redeploy).** The contract **live at `0xd44b375…` is the pre-#164 stage-1 design** (`setScopeWithWebauthn(...,K11Assertion)`, sel `0x864ae93c`; `revokeScope(...,K11Assertion)`, sel `0x6f37dd80`) — scope mutations gated by an inline on-chain WebAuthn assertion. The current [`src/AgentKeysScope.sol`](../../crates/agentkeys-chain/src/AgentKeysScope.sol) is the **#164 ERC-4337 rewrite** (`setScope(...)` sel `0xd8e9e3c6`; `revokeScope(bytes32,bytes32)` sel `0xdcff8c5b`) — the inline K11 gate is **removed** because authorization moves upstream to the 4337 account's `validateUserOp`. It is deliberately **NOT deployed**: shipping the thinned scope before the registry stores 4337 accounts as masters would let a raw EOA mutate scope with no biometric (see the `src/` header's ⚠ DEPLOYMENT ORDER warning + [`docs/plan/chain/erc4337-master-account.md`](../plan/chain/erc4337-master-account.md)). The live source is preserved at [`crates/agentkeys-chain/archived/AgentKeysScope.deployed-stage1.sol`](../../crates/agentkeys-chain/archived/AgentKeysScope.deployed-stage1.sol) so the on-chain bytecode has a matching, findable source. **At the coordinated cutover redeploy: update this row's address, refresh `heima.json`, delete the archived file, and drop the `setScopeWithWebauthn` entry from the audit decoder registry.**
 
 ### ERC-4337 master infra (#164, deployed 2026-06-02 — prod deployer)
 

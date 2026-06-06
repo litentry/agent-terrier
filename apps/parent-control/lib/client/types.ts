@@ -196,8 +196,95 @@ export interface OnboardingState {
   k11: string;
 }
 
+/** One deployed contract from `GET /v1/chain/info` (real address + explorer link). */
+export interface ChainContract {
+  name: string;
+  address: string;
+  purpose: string;
+  deployedAt: string;
+  explorerUrl: string;
+}
+
+/** Chain the daemon targets + its deployed contract registry (#153). */
+export interface ChainInfo {
+  name: string;
+  display: string;
+  chainId: number;
+  rpc: string;
+  wss: string;
+  explorer: string;
+  tokenSymbol: string;
+  tokenDecimals: number;
+  finality: string;
+  contracts: ChainContract[];
+}
+
+/** One ABI-decoded argument of a transaction's calldata. */
+export interface DecodedArg {
+  name: string;
+  ty: string;
+  value: unknown;
+}
+
+/** Calldata decoded against a verified contract ABI (real selector + typed args). */
+export interface DecodedCalldata {
+  contract: string;
+  function: string;
+  signature: string;
+  selector: string;
+  args: DecodedArg[];
+  /** Set when some args (e.g. a WebAuthn assertion tuple) were not ABI-expanded. */
+  note?: string;
+  calldata: string;
+  intent_tx_hash: string;
+}
+
+/** The on-chain transaction half of a decoded audit event. */
+export interface DecodedTx {
+  to_contract: string;
+  to_address: string;
+  explorer_url: string | null;
+  decoded: DecodedCalldata;
+}
+
+/** The CBOR `AuditEnvelope v1` half of a decoded audit event. */
+export interface DecodedEnvelope {
+  envelope_hash: string;
+  version: number;
+  ts_unix: number;
+  actor_omni: string;
+  operator_omni: string;
+  op_kind: number;
+  op_kind_label: string | null;
+  op_body: Record<string, unknown>;
+  result: number;
+  intent_text: string | null;
+  intent_commitment: string | null;
+  canonical_cbor?: string;
+}
+
+/** `GET /v1/audit/:id/decode` — both decode halves + the anchoring tier (#153). */
+export interface DecodedAuditEvent {
+  id: string;
+  kind: string;
+  tier: string;
+  tier_label: string;
+  /** True when the decode is reconstructed from the audit row (preview), not
+   *  fetched from a stored on-chain envelope/tx. Hashes are derived, not chain. */
+  synthesized?: boolean;
+  /** Human-readable provenance note for the synthesized/preview state. */
+  provenance?: string;
+  envelope: DecodedEnvelope | null;
+  tx: DecodedTx | null;
+}
+
 export interface AgentKeysClient {
   status(): Promise<ConnectionStatus>;
+
+  /** Chain + deployed-contract registry for the chain page (#153). */
+  getChainInfo(): Promise<Result<ChainInfo>>;
+  /** Decode one audit event's CBOR envelope + on-chain calldata (#153). */
+  decodeAuditEvent(id: string): Promise<Result<DecodedAuditEvent>>;
 
   listActors(): Promise<Result<Actor[]>>;
   getActor(id: string): Promise<Result<Actor | null>>;

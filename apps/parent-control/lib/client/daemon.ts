@@ -2,11 +2,13 @@ import type {
   AgentKeysClient,
   AnchorStatus,
   CapToken,
+  ChainInfo,
   Classification,
   ConfigPresetList,
   ConnectionStatus,
   CredCategorization,
   CredService,
+  DecodedAuditEvent,
   DisconnectedStatus,
   EmailVerifyStart,
   EmailVerifyStatus,
@@ -106,6 +108,14 @@ export class DaemonBackend implements AgentKeysClient {
     } catch (e) {
       return unreachable(`fetch ${this.baseUrl}/healthz failed: ${(e as Error).message}`);
     }
+  }
+
+  async getChainInfo(): Promise<Result<ChainInfo>> {
+    return this.getJson<ChainInfo>('/v1/chain/info');
+  }
+
+  async decodeAuditEvent(id: string): Promise<Result<DecodedAuditEvent>> {
+    return this.getJson<DecodedAuditEvent>(`/v1/audit/${encodeURIComponent(id)}/decode`);
   }
 
   async listActors(): Promise<Result<Actor[]>> {
