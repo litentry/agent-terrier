@@ -71,6 +71,15 @@ pub async fn agent_claim(
 /// `pop_sig`, `device_key_hash`) the master needs to submit `registerAgentDevice`,
 /// keyed by `request_id`.
 pub async fn agent_pending(broker_url: &str, session_bearer: &str) -> Result<String> {
+    let v = agent_pending_value(broker_url, session_bearer).await?;
+    Ok(serde_json::to_string_pretty(&v)?)
+}
+
+/// Same as [`agent_pending`] but returns the parsed broker response
+/// (`{ "pending": [PendingBinding, …] }`) for programmatic callers — the daemon
+/// ui-bridge maps it to the web UI's pairing-request shape (issue #214). The CLI
+/// wrapper above pretty-prints this for the operator.
+pub async fn agent_pending_value(broker_url: &str, session_bearer: &str) -> Result<Value> {
     let bearer = resolve_bearer(session_bearer)?;
     let base = broker_url.trim_end_matches('/');
     let resp = client()?
@@ -84,6 +93,27 @@ pub async fn agent_pending(broker_url: &str, session_bearer: &str) -> Result<Str
     if !status.is_success() {
         return Err(anyhow!("agent pending failed: HTTP {status}: {text}"));
     }
-    let v: Value = serde_json::from_str(&text).with_context(|| format!("parse: {text}"))?;
-    Ok(serde_json::to_string_pretty(&v)?)
+    serde_json::from_str(&text).with_context(|| format!("parse: {text}"))
+}
+
+/// `agentkeys agent ack` (programmatic) — the master acks a pending binding by
+/// `request_id` after submitting `registerAgentDevice` on chain, clearing it from
+/// the broker's pending list (§10.2 P.2). Used by the daemon web pairing flow
+/// (#214) after a successful on-chain register.
+pub async fn agent_ack(broker_url: &str, request_id: &str, session_bearer: &str) -> Result<()> {
+    let bearer = resolve_bearer(session_bearer)?;
+    let base = broker_url.trim_end_matches('/');
+    let resp = client()?
+        .post(format!("{base}/v1/agent/pending-bindings/ack"))
+        .bearer_auth(bearer)
+        .json(&json!({ "request_id": request_id }))
+        .send()
+        .await
+        .context("POST /v1/agent/pending-bindings/ack")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("agent ack failed: HTTP {status}: {text}"));
+    }
+    Ok(())
 }
