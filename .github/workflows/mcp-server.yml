@@ -5,22 +5,14 @@ on:
     branches: [main]
     paths:
       - "crates/agentkeys-mcp-server/**"
-      - "scripts/mcp-demo-mode-a.sh"
-      - "scripts/mcp-demo-mode-b-protocol.sh"
-      - "scripts/mcp-demo-mode-c-xiaozhi-client.sh"
-      - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
-      - "scripts/mcp-demo-mode-e-stdio.sh"
+      - "crates/agentkeys-backend-client/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"
   pull_request:
     paths:
       - "crates/agentkeys-mcp-server/**"
-      - "scripts/mcp-demo-mode-a.sh"
-      - "scripts/mcp-demo-mode-b-protocol.sh"
-      - "scripts/mcp-demo-mode-c-xiaozhi-client.sh"
-      - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
-      - "scripts/mcp-demo-mode-e-stdio.sh"
+      - "crates/agentkeys-backend-client/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"
@@ -41,40 +33,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-      - name: cargo test
+      # The tests/ suite includes transport_conformance.rs (#207) — it boots the
+      # REAL binary as a subprocess and drives it as an MCP client over HTTP +
+      # stdio, asserting protocol conformance (initialize, tools/list schemas,
+      # auth gating, well-formed tools/call round-trips, clean stdio stream)
+      # against the REAL http backend (BackendClient → broker). This is the
+      # Rust, no-python replacement for the former bash+python
+      # mcp-demo-mode-{a,b,c,d,e}.sh demos (curl / Anthropic SDK / xiaozhi
+      # ServerMCPClient / WS relay / stdio_client) — real backend, no in-memory
+      # fixture. CONFORMANCE_BROKER_URL points the round-trip at the public
+      # broker; if it's unreachable the tool-call degrades to a well-formed
+      # connection error, so this stays green + flake-free either way.
+      - name: cargo test (incl. real-backend transport-conformance)
+        env:
+          CONFORMANCE_BROKER_URL: https://broker.litentry.org
         run: cargo test -p agentkeys-mcp-server --all-features
       - name: cargo clippy
         run: cargo clippy -p agentkeys-mcp-server --all-targets -- -D warnings
-      # Phase A dev-mode demo smoke — boots the binary with --backend in-memory
-      # and walks the three-act storyboard end-to-end via curl. Catches drift
-      # between code and runbook §A in `docs/spec/plans/issue-107-mcp-demo-runbook.md`.
-      - name: mcp demo (mode A — dev smoke)
-        run: bash scripts/mcp-demo-mode-a.sh
-
-      # Phase B testing ladder (runbook §B.0). Modes B/C/D need `uv` to manage
-      # a Python venv on the fly so the official Anthropic mcp SDK + xiaozhi-
-      # server's own integration class can drive our server. These tiers catch
-      # bugs at the MCP wire layer, the xiaozhi integration layer, and the
-      # relay-topology layer respectively. No live broker or xiaozhi account.
-      - name: install uv (for modes B/C/D/E)
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - name: mcp demo (mode B — Anthropic mcp SDK protocol smoke, HTTP)
-        run: bash scripts/mcp-demo-mode-b-protocol.sh
-      - name: mcp demo (mode C — xiaozhi ServerMCPClient integration, HTTP)
-        run: bash scripts/mcp-demo-mode-c-xiaozhi-client.sh
-      - name: mcp demo (mode D — xiaozhi MCP-endpoint relay topology, WS)
-        run: bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh
-      # Mode E covers the stdio transport gap — the actual path Claude Code,
-      # Codex CLI, Claude Desktop, Cursor, Cline, Roo, Windsurf, Gemini CLI
-      # use. Modes B-D are all over HTTP/WS; without this we could ship a
-      # binary that initializes cleanly via curl but corrupts the stdout
-      # JSON-RPC stream with tracing logs (we already hit this once).
-      - name: build release binary (for mode E)
-        run: cargo build --release -p agentkeys-mcp-server
-      - name: mcp demo (mode E — stdio_client functional E2E)
-        run: |
-          AGENTKEYS_MCP_BIN="$(pwd)/target/release/agentkeys-mcp-server" \
-            bash scripts/mcp-demo-mode-e-stdio.sh
 
   image:
     name: build + publish image

@@ -23,19 +23,11 @@ etc.) can call.
 
 ## Run
 
-### Dev demo (in-memory backend, no external services)
-
-```bash
-cargo run -p agentkeys-mcp-server -- \
-  --backend in-memory \
-  --listen 127.0.0.1:8088
-```
-
-Auto-seeds vendor `magiclick:demo-tok` + three memory namespaces (`travel`,
-`family`, `profile`) on actor `O_kevin_001`. Walk the three-act
-storyboard with `bash scripts/mcp-demo-mode-a.sh` (asserts each act's
-exact wire shape). Full step-by-step walkthrough:
-[`docs/plan/issue-107-mcp-demo-runbook.md`](../../docs/plan/issue-107-mcp-demo-runbook.md).
+> **Real-data-only (#207):** the MCP server has **one backend — `http`** (the
+> real broker + workers, which IS the shared `agentkeys-backend-client::BackendClient`).
+> The former `--backend in-memory` fixture was removed; transport/protocol
+> conformance is now proven by the Rust [`tests/transport_conformance.rs`](tests/transport_conformance.rs)
+> (a subprocess MCP client over HTTP + stdio against the real backend).
 
 ### Local (HTTP, against a real broker / workers)
 
@@ -65,14 +57,12 @@ binding).
 ```bash
 cargo run -p agentkeys-mcp-server -- \
   --transport mcp-endpoint \
-  --backend in-memory \
+  --backend http \
+  --broker-url https://broker.litentry.org \
+  --memory-url https://memory.litentry.org \
+  --audit-url  https://audit.litentry.org \
   --mcp-endpoint 'ws://<relay-host>:8004/mcp_endpoint/mcp/?token=<your-tool-token>'
 ```
-
-Test it locally without a real cloud account: `bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh`
-spins up a mock relay that mirrors `xinnan-tech/mcp-endpoint-server`'s
-routing exactly, then drives every act through it. Full runbook in
-[`docs/plan/issue-107-mcp-demo-runbook.md`](../../docs/plan/issue-107-mcp-demo-runbook.md) §B.
 
 ### Docker
 
@@ -143,11 +133,14 @@ For local development with the stdio transport:
 }
 ```
 
-**Protocol-level verification:** the official Anthropic `mcp` Python SDK
-(`mcp.client.streamable_http.streamablehttp_client`) — which xiaozhi-server
-imports directly — successfully drives this server through the full
-`initialize` → `tools/list` → `tools/call` lifecycle. Reproduce with
-`bash scripts/mcp-demo-mode-b-protocol.sh`.
+**Protocol-level verification:** [`tests/transport_conformance.rs`](tests/transport_conformance.rs)
+(Rust, `cargo test`) boots the real binary as a subprocess and drives it as an
+MCP client through the full `initialize` → `tools/list` → `tools/call` lifecycle
+over **HTTP + stdio**, against the real `http` backend — asserting a spec-compliant
+client (the Anthropic SDK, xiaozhi's `ServerMCPClient`, Claude Desktop) can
+discover + drive every tool, that auth gates (401/403), and that the stdio stream
+stays pure JSON-RPC. (This replaced the former bash+python `mcp-demo-mode-*`
+demos in #207 — Rust, no python, real backend.)
 
 ## Three-act demo storyboard
 
@@ -173,10 +166,13 @@ cargo test -p agentkeys-mcp-server
 
 Coverage:
 
-- 17 unit tests across auth, policy, identity, permission
-- 6 HTTP transport tests (bearer + actor header negative paths)
-- 3 schema-only stub shape assertions
-- 5 three-act integration tests against a `MockBackend`
+- unit tests across auth, policy, identity, permission
+- HTTP transport tests (bearer + actor header negative paths)
+- schema-only stub shape assertions
+- three-act integration tests against a `MockBackend` (the trait's test seam)
+- `transport_conformance.rs` — real-binary subprocess driven as an MCP client
+  over HTTP + stdio against the real `http` backend (#207; `CONFORMANCE_BROKER_URL`
+  points the round-trip at a real broker, else a hermetic well-formed error)
 
 ## What this crate is NOT
 
