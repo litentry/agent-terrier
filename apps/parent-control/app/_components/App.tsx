@@ -7,7 +7,6 @@ import {
   PAIRING_STEPS,
   contractFor,
   decodeCalldata,
-  txHash,
 } from '@/lib/demoData';
 import { NAMESPACES } from '@/lib/constants';
 import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
@@ -20,10 +19,10 @@ import { PairingPage } from './pairing';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
-import type { ConfigPreset, CredService, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
+import type { ChainInfo, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
 
-type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'pairing' | 'audit' | 'chain' | 'logo';
+type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'pairing' | 'audit' | 'decode' | 'chain' | 'logo';
 
 type PendingAction =
   | { kind: 'revoke-device'; actor: Actor; intent: Intent }
@@ -429,7 +428,7 @@ export function App() {
 
   const currentActor = actorId ? actors.find((a) => a.id === actorId) : null;
   const master = actors.find((a) => a.role === 'master');
-  const sectionAttr = (['audit', 'memory', 'pairing', 'chain', 'logo'] as string[]).includes(page) ? page : undefined;
+  const sectionAttr = page === 'decode' ? 'audit' : ((['audit', 'memory', 'pairing', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
 
   // ─── Onboarding gate (workflow 1) ──────────────────────────────
   if (!onboarded) {
@@ -566,7 +565,8 @@ export function App() {
         {page === 'pairing' && (
           <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} justPaired={justPaired} onManage={(id) => go('detail', id)} />
         )}
-        {page === 'audit' && <AuditFeed events={events} status={status} onPick={setEventDetail} paused={paused} onPause={() => setPaused((p) => !p)} />}
+        {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
+        {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
         {page === 'chain' && <ChainPage />}
         {page === 'logo' && <LogoPage />}
       </main>
@@ -574,8 +574,6 @@ export function App() {
       {pendingAction && (
         <WebAuthnModal intent={pendingAction.intent} onConfirm={confirmAction} onCancel={() => setPendingAction(null)} />
       )}
-
-      {eventDetail && <EventDecodeModal event={eventDetail} onClose={() => setEventDetail(null)} />}
 
       {memoryView && (
         <Modal
@@ -626,83 +624,191 @@ export function App() {
   );
 }
 
-// ─── Step 9: decode the Heima transaction for an audit event ──────
-function EventDecodeModal({ event, onClose }: { event: AuditEvent; onClose: () => void }) {
-  const dec = decodeCalldata(event);
-  const onchain = ONCHAIN_KINDS.has(event.kind);
-  const tx = txHash(event.id + event.kind);
-  const signer = event.actor === 'Sara (master)' ? 'D_pub_master_iphone' : 'D_pub_' + event.actor.toLowerCase().replace(/[^a-z]/g, '');
-  const toContract = contractFor(event.kind);
-  return (
-    <Modal
-      title={`event · ${event.kind}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>close</button>
-          <a className="btn primary" href={`${CHAIN_PROFILE.explorer}/tx/${tx}`} target="_blank" rel="noreferrer">view on heima ↗</a>
-        </>
-      }
-    >
-      <dl className="kvs">
-        <dt>timestamp</dt><dd className="mono">{event.ts}</dd>
-        <dt>actor</dt><dd>{event.actor}</dd>
-        <dt>kind</dt><dd className="mono">{event.kind}</dd>
-        <dt>detail</dt><dd>{event.detail}</dd>
-        <dt>worker</dt><dd className="mono">{event.chip}-service</dd>
-        <dt>tier</dt><dd>{onchain ? 'tier-2 · committed on-chain' : 'tier-1 (sse) · folds into next 2-min anchor'}</dd>
-        <dt>K10 signer</dt><dd className="mono">{signer}…</dd>
-      </dl>
-
-      <div className="hr-ascii" style={{ margin: '14px 0' }}>{'─'.repeat(220)}</div>
-
-      <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 8 }}>decoded heima transaction</div>
-      <div className="tx-decode">
-        <div className="tx-row"><span className="tx-k">tx_hash</span><span className="tx-v mono">{tx}</span></div>
-        <div className="tx-row"><span className="tx-k">status</span><span className="tx-v">{onchain ? '✓ success · finalized' : 'tier-1 · not yet anchored'}</span></div>
-        <div className="tx-row"><span className="tx-k">to</span><span className="tx-v mono">{toContract} · {CHAIN_PROFILE.contracts[0].addr.slice(0, 14)}…</span></div>
-        <div className="tx-row"><span className="tx-k">selector</span><span className="tx-v mono">{dec.sel}</span></div>
-        <div className="tx-row"><span className="tx-k">function</span><span className="tx-v mono">{dec.fn}</span></div>
-        <div className="tx-row"><span className="tx-k">gas</span><span className="tx-v mono">{onchain ? '0.0009 HEI' : '— (off-chain)'}</span></div>
-      </div>
-      <div className="muted" style={{ fontSize: 10.5, marginTop: 10 }}>
-        calldata decoded against verified ABI · {CHAIN_PROFILE.display} · <span className="mono">mock — real decode: GH #153</span>
-      </div>
-    </Modal>
-  );
+// Render one decoded ABI arg value (bytes32/uint/bool/address/array) compactly.
+function argValue(v: unknown): string {
+  if (Array.isArray(v)) return v.length ? `[${v.map(String).join(', ')}]` : '[]';
+  if (v === null || v === undefined) return '—';
+  return String(v);
 }
 
-// ─── Lightweight chain page (deployed contracts + anchor countdown) ──
-function ChainPage() {
-  const p = CHAIN_PROFILE;
-  const [picked, setPicked] = useState<(typeof p.contracts)[number] | null>(null);
+// ─── Step 9: decode the Heima transaction for an audit event ──────
+// Real decode (#153): the daemon decodes the CBOR AuditEnvelope + the on-chain
+// calldata against the verified ABIs. While loading / when no daemon is wired,
+// a clearly-labelled reference decode (demoData) is shown instead. Rendered as a
+// dedicated page (reachable at the `decode` nav state), not a modal.
+function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => void }) {
+  const client = useClient();
+  const [decoded, setDecoded] = useState<DecodedAuditEvent | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const r = await client.decodeAuditEvent(event.id);
+      if (!alive) return;
+      if (r.ok) { setDecoded(r.data); setErr(null); }
+      else { setDecoded(null); setErr(r.status.detail ?? 'decode unavailable'); }
+    })();
+    return () => { alive = false; };
+  }, [client, event.id]);
+
+  const mock = decodeCalldata(event);
+  const onchain = ONCHAIN_KINDS.has(event.kind);
+  const tx = decoded?.tx ?? null;
+  const env = decoded?.envelope ?? null;
+  const tier = decoded?.tier_label ?? (onchain ? 'tier-2 · committed on-chain' : 'tier-1 (sse) · folds into next 2-min anchor');
+  const signer = event.actor === 'Sara (master)' ? 'D_pub_master_iphone' : 'D_pub_' + event.actor.toLowerCase().replace(/[^a-z]/g, '');
+
+  const sel = tx?.decoded.selector ?? mock.sel;
+  const fn = tx?.decoded.signature ?? mock.fn;
+  const toContract = tx?.to_contract ?? contractFor(event.kind);
+  const toAddr = tx?.to_address ?? '';
+  // Only link to chain when there's a real on-chain contract target — the
+  // contract page (Heima /contract/{addr}). No fabricated tx link for
+  // synthesized / tier-1 / offline decodes (codex review #153).
+  const contractLink = tx?.explorer_url ?? null;
+
   return (
     <>
       <div className="page-head">
         <div>
-          <div className="crumb">chain · {p.name} · chain_id {p.chainId}</div>
+          <div className="crumb">audit · event · {event.kind}</div>
+          <h1><span className="muted serif">/</span> decode</h1>
+          <div className="desc">CBOR audit envelope + the on-chain transaction, decoded against the verified ABIs.</div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <button className="btn" onClick={onBack}>← audit</button>
+          {contractLink && <a className="btn primary" href={contractLink} target="_blank" rel="noreferrer">view contract ↗</a>}
+        </div>
+      </div>
+
+      {decoded?.synthesized && (
+        <div style={{ fontSize: 11, color: 'var(--warn, #b8860b)', border: '1px solid var(--warn, #b8860b)', padding: '8px 12px', marginBottom: 16 }}>
+          ⚠ preview decode — reconstructed from the audit row. The shape is real (verified-ABI calldata + canonical CBOR), but the values + hashes are derived, not yet fetched from a stored envelope / on-chain tx.
+        </div>
+      )}
+
+      <div className="panel">
+        <div className="panel-head"><span>── event</span></div>
+        <div className="panel-body">
+          <dl className="kvs">
+            <dt>timestamp</dt><dd className="mono">{event.ts}</dd>
+            <dt>actor</dt><dd>{event.actor}</dd>
+            <dt>kind</dt><dd className="mono">{event.kind}</dd>
+            <dt>detail</dt><dd>{event.detail}</dd>
+            <dt>worker</dt><dd className="mono">{event.chip}-service</dd>
+            <dt>tier</dt><dd>{tier}</dd>
+            <dt>K10 signer</dt><dd className="mono">{signer}…</dd>
+          </dl>
+        </div>
+      </div>
+
+      {/* ── CBOR AuditEnvelope (decoded) ── */}
+      {env && (
+        <div className="panel">
+          <div className="panel-head"><span>── decoded audit envelope · cbor v{env.version}</span></div>
+          <div className="panel-body">
+            <div className="tx-decode">
+              <div className="tx-row"><span className="tx-k">op_kind</span><span className="tx-v mono">{env.op_kind}{env.op_kind_label ? ` · ${env.op_kind_label}` : ' · Unknown(byte)'}</span></div>
+              {env.intent_text && <div className="tx-row"><span className="tx-k">intent</span><span className="tx-v">{env.intent_text}</span></div>}
+              {Object.entries(env.op_body || {}).map(([k, v]) => (
+                <div className="tx-row" key={k}><span className="tx-k">{k}</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{argValue(v)}</span></div>
+              ))}
+              <div className="tx-row"><span className="tx-k">envelope_hash</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{env.envelope_hash}</span></div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── on-chain transaction (calldata decoded against the verified ABI) ── */}
+      <div className="panel">
+        <div className="panel-head"><span>── decoded heima transaction</span></div>
+        <div className="panel-body">
+          {decoded && !tx ? (
+            <div className="muted" style={{ fontSize: 12 }}>
+              tier-1 · off-chain action — recorded in the audit envelope above and folded into the next 2-min Merkle anchor. No direct contract call.
+            </div>
+          ) : (
+            <div className="tx-decode">
+              <div className="tx-row"><span className="tx-k">to</span><span className="tx-v mono">{toContract}{toAddr ? ` · ${toAddr}` : ''}</span></div>
+              <div className="tx-row"><span className="tx-k">selector</span><span className="tx-v mono">{sel}</span></div>
+              <div className="tx-row"><span className="tx-k">function</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{fn}</span></div>
+              {tx?.decoded.args.map((a) => (
+                <div className="tx-row" key={a.name}><span className="tx-k">{a.name}</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{argValue(a.value)} <span className="muted">· {a.ty}</span></span></div>
+              ))}
+              {tx?.decoded.note && <div className="tx-row"><span className="tx-k">note</span><span className="tx-v">{tx.decoded.note}</span></div>}
+            </div>
+          )}
+          <div className="muted" style={{ fontSize: 11, marginTop: 12 }}>
+            {decoded ? (
+              <>{decoded.provenance ?? 'calldata + CBOR decoded by the daemon against the verified ABIs'} · {CHAIN_PROFILE.display}</>
+            ) : err ? (
+              <>offline — showing reference decode · <span className="mono">connect a daemon for real decode (#153)</span></>
+            ) : (
+              <>decoding…</>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+interface ChainRow { name: string; addr: string; deployedAt: string; purpose: string; explorerUrl: string }
+
+// ─── Chain page — deployed contract registry (real, from the daemon #153) ──
+function ChainPage() {
+  const client = useClient();
+  const [info, setInfo] = useState<ChainInfo | null>(null);
+  const [picked, setPicked] = useState<ChainRow | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const r = await client.getChainInfo();
+      if (alive && r.ok) setInfo(r.data);
+    })();
+    return () => { alive = false; };
+  }, [client]);
+
+  const name = info?.name ?? CHAIN_PROFILE.name;
+  const chainId = info?.chainId ?? CHAIN_PROFILE.chainId;
+  const explorer = info?.explorer ?? CHAIN_PROFILE.explorer;
+  const rpc = info?.rpc ?? CHAIN_PROFILE.rpc;
+  const display = info?.display ?? CHAIN_PROFILE.display;
+  const live = info != null;
+
+  const contracts: ChainRow[] = info
+    ? info.contracts.map((c) => ({ name: c.name, addr: c.address, deployedAt: c.deployedAt, purpose: c.purpose, explorerUrl: c.explorerUrl }))
+    : CHAIN_PROFILE.contracts.map((c) => ({ name: c.name, addr: c.addr, deployedAt: c.deployedAt, purpose: c.purpose, explorerUrl: `${explorer}/contract/${c.addr}` }));
+
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <div className="crumb">chain · {name} · chain_id {chainId}</div>
           <h1><span className="muted serif">/</span> chain</h1>
-          <div className="desc">Four stage-1 contracts deployed via Foundry. Tier-2 audit anchors a Merkle root here every 2 minutes.</div>
+          <div className="desc">{display}. Stage-1 contracts deployed via Foundry; tier-2 audit anchors a Merkle root here every 2 minutes.</div>
         </div>
       </div>
       <div className="stats">
-        <div className="stat"><div className="v">{p.name}</div><div className="k">AGENTKEYS_CHAIN</div></div>
-        <div className="stat"><div className="v">{p.chainId}</div><div className="k">chain id</div></div>
-        <div className="stat"><div className="v">{p.block}</div><div className="k">latest block</div></div>
-        <div className="stat"><div className="v">{p.contracts.length}</div><div className="k">contracts deployed</div></div>
+        <div className="stat"><div className="v">{name}</div><div className="k">AGENTKEYS_CHAIN</div></div>
+        <div className="stat"><div className="v">{chainId}</div><div className="k">chain id</div></div>
+        <div className="stat"><div className="v">{live ? 'live' : 'reference'}</div><div className="k">source</div></div>
+        <div className="stat"><div className="v">{contracts.length}</div><div className="k">contracts deployed</div></div>
       </div>
       <div className="panel">
-        <div className="panel-head"><span>── deployed contracts · stage-1</span></div>
+        <div className="panel-head"><span>── deployed contracts{live ? '' : ' · reference (connect a daemon for live addresses)'}</span></div>
         <div className="panel-body flush">
           <table className="tab">
             <thead><tr><th>contract</th><th>address</th><th>deployed</th><th /></tr></thead>
             <tbody>
-              {p.contracts.map((c) => (
+              {contracts.map((c) => (
                 <tr key={c.name} className="clickable" onClick={() => setPicked(c)}>
                   <td><span style={{ fontWeight: 500 }}>{c.name}</span><div className="secondary">{c.purpose}</div></td>
                   <td className="mono" style={{ fontSize: 11 }}>{c.addr}</td>
                   <td className="muted mono">{c.deployedAt}</td>
-                  <td className="right"><a href={`${p.explorer}/address/${c.addr}`} target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>explorer ↗</a></td>
+                  <td className="right"><a href={c.explorerUrl} target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>explorer ↗</a></td>
                 </tr>
               ))}
             </tbody>
@@ -713,14 +819,14 @@ function ChainPage() {
         <Modal
           title={`contract · ${picked.name}`}
           onClose={() => setPicked(null)}
-          footer={<a className="btn primary" href={`${p.explorer}/address/${picked.addr}`} target="_blank" rel="noreferrer">view on {p.name} explorer ↗</a>}
+          footer={<a className="btn primary" href={picked.explorerUrl} target="_blank" rel="noreferrer">view on {name} explorer ↗</a>}
         >
           <dl className="kvs">
             <dt>name</dt><dd>{picked.name}</dd>
             <dt>address</dt><dd className="mono" style={{ fontSize: 11 }}>{picked.addr}</dd>
             <dt>deployed at</dt><dd>{picked.deployedAt}</dd>
             <dt>purpose</dt><dd>{picked.purpose}</dd>
-            <dt>verify</dt><dd className="mono" style={{ fontSize: 11 }}>cast code {picked.addr} --rpc-url {p.rpc}</dd>
+            <dt>verify</dt><dd className="mono" style={{ fontSize: 11 }}>cast code {picked.addr} --rpc-url {rpc}</dd>
           </dl>
         </Modal>
       )}

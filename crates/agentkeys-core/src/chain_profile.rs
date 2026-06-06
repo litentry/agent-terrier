@@ -89,11 +89,44 @@ pub struct ChainProfile {
     pub finality: FinalityConfig,
     pub gas: GasConfig,
     pub deploy: DeployConfig,
+    /// Deployed stage-1 contract registry for this chain — the addresses the
+    /// broker/daemon/workers read and the parent-control UI displays (#153).
+    /// Empty for chains where AgentKeys contracts aren't deployed. This is the
+    /// single embedded source of truth (mirrors `docs/spec/deployed-contracts.md`);
+    /// operators targeting a custom deploy override it via a profile file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contracts: Vec<ContractInfo>,
     /// Present for dev/test chains; absent for production. See
     /// `DevEnvironment` doc-comment for the convention around
     /// `is_development_default`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev_environment: Option<DevEnvironment>,
+}
+
+/// One deployed contract on a chain: name + address + operator-facing purpose.
+/// Mirrors the per-chain table in `docs/spec/deployed-contracts.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractInfo {
+    /// Contract name, e.g. `CredentialAudit`. Matches the Solidity source file.
+    pub name: String,
+    /// `0x`-prefixed EVM address (mixed-case checksum as deployed).
+    pub address: String,
+    /// One-line operator-facing description of what this contract anchors.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub purpose: String,
+    /// Free-form deploy marker (date / "stage-1" / block) for display.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deployed_at: String,
+}
+
+impl ChainProfile {
+    /// Look up one deployed contract by name (case-insensitive). `None` if this
+    /// chain has no such contract in its registry.
+    pub fn contract(&self, name: &str) -> Option<&ContractInfo> {
+        self.contracts
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -129,6 +162,12 @@ pub struct ExplorerLinks {
     pub url: String,
     pub tx_url_template: String,
     pub address_url_template: String,
+    /// Optional separate template for *contract* pages, when the explorer
+    /// distinguishes them from plain accounts (Heima's explorer uses
+    /// `/contract/{address}` for contracts vs `/address/{address}` for EOAs).
+    /// Empty ⇒ `contract_url()` falls back to `address_url()`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub contract_url_template: String,
     /// Optional pointer at the open-source explorer codebase, when one is
     /// available. Stage 1 uses it to track *where* to land agentkeys-
     /// specific indexing + display for ScopeContract / SidecarRegistry /
@@ -159,6 +198,17 @@ impl ExplorerLinks {
     /// Render the explorer URL for one address by substituting `{address}`.
     pub fn address_url(&self, address: &str) -> String {
         self.address_url_template.replace("{address}", address)
+    }
+
+    /// Render the explorer URL for one *contract* by substituting `{address}`.
+    /// Falls back to [`Self::address_url`] when no contract-specific template
+    /// is set (most explorers serve contracts under `/address/` too).
+    pub fn contract_url(&self, address: &str) -> String {
+        if self.contract_url_template.is_empty() {
+            self.address_url(address)
+        } else {
+            self.contract_url_template.replace("{address}", address)
+        }
     }
 }
 
@@ -381,6 +431,74 @@ mod tests {
             p.rpc.substrate_wss.is_some(),
             "heima must carry substrate_wss"
         );
+    }
+
+    #[test]
+    fn heima_carries_stage1_contract_registry() {
+        let p = ChainProfile::load_builtin("heima").unwrap();
+        // The 4 stage-1 core contracts the audit decode + UI reference must be
+        // present with the canonical mainnet addresses (mirrors
+        // docs/spec/deployed-contracts.md). Pin them so a profile edit that
+        // drops/renames one fails CI.
+        for (name, addr) in [
+            (
+                "AgentKeysScope",
+                "0xd44b375daefc65768f417d0f0125b68d5ba7df3b",
+            ),
+            (
+                "SidecarRegistry",
+                "0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE",
+            ),
+            (
+                "K3EpochCounter",
+                "0x6c9e675c699a06acefbc156afdee6bfbfe32ccb3",
+            ),
+            (
+                "CredentialAudit",
+                "0x63c4545ac01c77cc74044f25b8edea3880224577",
+            ),
+        ] {
+            let c = p
+                .contract(name)
+                .unwrap_or_else(|| panic!("heima profile must carry {name}"));
+            assert_eq!(c.address, addr, "{name} address drift");
+            assert!(!c.purpose.is_empty(), "{name} must carry a purpose");
+        }
+        // Case-insensitive lookup + miss path.
+        assert!(p.contract("credentialaudit").is_some());
+        assert!(p.contract("NotAContract").is_none());
+    }
+
+    #[test]
+    fn heima_explorer_uses_real_evm_explorer_urls() {
+        // #153: the chain page + audit decode link to the live Heima EVM
+        // explorer — contracts under /contract/, accounts under /address/.
+        let p = ChainProfile::load_builtin("heima").unwrap();
+        let addr = "0x63c4545ac01c77cc74044f25b8edea3880224577";
+        assert_eq!(
+            p.explorer.contract_url(addr),
+            format!("https://explorer.heima.network/contract/{addr}")
+        );
+        assert_eq!(
+            p.explorer.address_url(addr),
+            format!("https://explorer.heima.network/address/{addr}")
+        );
+    }
+
+    #[test]
+    fn contract_url_falls_back_to_address_url_without_template() {
+        // base has no contract_url_template → contract_url() === address_url().
+        let p = ChainProfile::load_builtin("base").unwrap();
+        let addr = "0x0000000000000000000000000000000000000001";
+        assert_eq!(p.explorer.contract_url(addr), p.explorer.address_url(addr));
+    }
+
+    #[test]
+    fn production_l1_chains_have_no_agentkeys_contracts() {
+        // ethereum mainnet has no AgentKeys deploy — registry must be empty
+        // (the field defaults to an empty vec when absent from the JSON).
+        let p = ChainProfile::load_builtin("ethereum").unwrap();
+        assert!(p.contracts.is_empty());
     }
 
     #[test]

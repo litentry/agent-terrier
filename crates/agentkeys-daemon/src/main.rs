@@ -10,6 +10,7 @@ use anyhow::Context;
 use clap::Parser;
 use tracing::info;
 
+mod audit_decode;
 mod companion;
 mod hardening;
 mod pairing;
