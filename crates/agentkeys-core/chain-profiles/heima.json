@@ -9,9 +9,10 @@
     "substrate_wss": "wss://rpc.heima-parachain.heima.network"
   },
   "explorer": {
-    "url": "https://heima.statescan.io",
-    "tx_url_template": "https://heima.statescan.io/#/extrinsics/{tx_hash}",
-    "address_url_template": "https://heima.statescan.io/#/accounts/{address}",
+    "url": "https://explorer.heima.network",
+    "tx_url_template": "https://explorer.heima.network/tx/{tx_hash}",
+    "address_url_template": "https://explorer.heima.network/address/{address}",
+    "contract_url_template": "https://explorer.heima.network/contract/{address}",
     "subscan_source": {
       "backend_repo": "https://github.com/litentry/subscan-essentials",
       "frontend_repo": "https://github.com/litentry/subscan-essentials-ui-react",
@@ -36,5 +37,43 @@
   "deploy": {
     "deployer_env_var": "AGENTKEYS_HEIMA_DEPLOYER_KEY",
     "foundry_chain_arg": "heima"
-  }
+  },
+  "contracts": [
+    {
+      "name": "AgentKeysScope",
+      "address": "0xd44b375daefc65768f417d0f0125b68d5ba7df3b",
+      "purpose": "per-actor scope grants — services, namespaces, spend/time windows",
+      "deployed_at": "Heima mainnet · stage-1"
+    },
+    {
+      "name": "SidecarRegistry",
+      "address": "0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE",
+      "purpose": "D_pub ↔ (operator_omni, actor_omni, roles) device bindings + K11 cred storage",
+      "deployed_at": "Heima mainnet · stage-1"
+    },
+    {
+      "name": "K3EpochCounter",
+      "address": "0x6c9e675c699a06acefbc156afdee6bfbfe32ccb3",
+      "purpose": "current K3 epoch; bumps trigger signer-side KEK + K4 derivation rotation",
+      "deployed_at": "Heima mainnet · stage-1"
+    },
+    {
+      "name": "CredentialAudit",
+      "address": "0x63c4545ac01c77cc74044f25b8edea3880224577",
+      "purpose": "per-actor append-only audit log + tier-2 Merkle root anchor every 2 min",
+      "deployed_at": "Heima mainnet · stage-1"
+    },
+    {
+      "name": "P256Verifier",
+      "address": "0xda5b772f9d6c09abe80414eea908612df9b54749",
+      "purpose": "P-256 (secp256r1) signature verifier for WebAuthn/passkey master auth",
+      "deployed_at": "Heima mainnet · pre-deployed"
+    },
+    {
+      "name": "K11Verifier",
+      "address": "0x5a441431f08e0f5f5ed10659620cb4e0e814e627",
+      "purpose": "K11 WebAuthn assertion verifier used by scope + registry master mutations",
+      "deployed_at": "Heima mainnet · pre-deployed"
+    }
+  ]
 }

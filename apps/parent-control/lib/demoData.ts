@@ -28,7 +28,7 @@ export const CHAIN_PROFILE: ChainProfile = {
   rpc: 'https://rpc.heima.network',
   wss: 'wss://rpc.heima.network',
   substrateWss: 'wss://rpc.heima.network',
-  explorer: 'https://heima.statescan.io',
+  explorer: 'https://explorer.heima.network',
   tokenSymbol: 'HEI',
   tokenDecimals: 18,
   finality: 'latest (instant)',

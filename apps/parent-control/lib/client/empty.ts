@@ -64,6 +64,14 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
+  async getChainInfo(): Promise<Result<import('./types').ChainInfo>> {
+    return disconnected();
+  }
+
+  async decodeAuditEvent(_id: string): Promise<Result<import('./types').DecodedAuditEvent>> {
+    return disconnected();
+  }
+
   async listCapTokens(_actorId: string): Promise<Result<CapToken[]>> {
     return disconnected();
   }
