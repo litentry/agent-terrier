@@ -194,7 +194,7 @@ The OIDC + cap-token + IAM stack enforces a defense-in-depth chain across **four
 
 ### Cap-tokens are data-class-explicit (issue #90 followup)
 
-The broker mints SIX cap endpoints — two per data class (credentials, memory, config) — and the `data_class` is a SIGNED FIELD in the cap payload. Workers reject caps whose `data_class` doesn't match their bucket. This is the cap-layer isolation gate, symmetric with the AWS IAM cross-bucket gate (layer 4) but at the broker-signed capability layer.
+The broker mints SIX **storage** cap endpoints — two per data class (credentials, memory, config) — plus ONE **compute-gate** cap (`/v1/cap/classify`, #207), and the `data_class` is a SIGNED FIELD in the cap payload. Workers reject caps whose `data_class` doesn't match their bucket. This is the cap-layer isolation gate, symmetric with the AWS IAM cross-bucket gate (layer 4) but at the broker-signed capability layer.
 
 ```
 POST /v1/cap/cred-store    → mints CapPayload { op: Store,    data_class: Credentials, ... }
@@ -203,7 +203,10 @@ POST /v1/cap/memory-put    → mints CapPayload { op: Store,    data_class: Memo
 POST /v1/cap/memory-get    → mints CapPayload { op: Fetch,    data_class: Memory,      ... }
 POST /v1/cap/config-store  → mints CapPayload { op: Store,    data_class: Config,      ... }   # #201, master-only
 POST /v1/cap/config-fetch  → mints CapPayload { op: Fetch,    data_class: Config,      ... }   # #201, master-only
+POST /v1/cap/classify      → mints CapPayload { op: Classify, data_class: <from body>, ... }   # #207, compute gate (no S3)
 ```
+
+The 7th (`/v1/cap/classify`, #207 items 2-3) is the **compute-gate** cap for the `agentkeys-worker-classify` worker (COMPILE + TAG, no S3 bucket). It is the ONLY endpoint where `data_class` comes from the request body, not the route — a classify cap spans data classes, so the worker binds on the signed `data_class` (a Memory-classify cap can't TAG a credential) AND on `op: Classify` (the storage workers reject `op: Classify`; the classify worker rejects any non-Classify op).
 
 What this prevents:
 

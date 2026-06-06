@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import { CHIP_STYLES, NAMESPACES } from '@/lib/constants';
 import type { ConnectionStatus } from '@/lib/client/types';
-import { PermissionList } from './permissions';
+import { AutoDistributePanel, PermissionList } from './permissions';
+import type { ProposedScope } from '@/lib/client/types';
 import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
 import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
 
@@ -96,12 +97,22 @@ export function ActorDetail({
   onUpdate,
   onRevoke,
   recentEvents,
+  proposals,
+  proposing,
+  onPropose,
+  onConfirmProposal,
+  onConfirmSafe,
 }: {
   actor: Actor;
   onBack: () => void;
   onUpdate: (id: string, patch: Partial<Actor>) => void;
   onRevoke: (a: Actor) => void;
   recentEvents: AuditEvent[];
+  proposals: ProposedScope[] | null;
+  proposing: boolean;
+  onPropose: (a: Actor) => void;
+  onConfirmProposal: (a: Actor, p: ProposedScope) => void;
+  onConfirmSafe: (a: Actor, ps: ProposedScope[]) => void;
 }) {
   const events = recentEvents.filter((e) => e.actorId === actor.id).slice(0, 6);
   const isMaster = actor.role === 'master';
@@ -149,6 +160,17 @@ export function ActorDetail({
           </div>
           <PermissionList actor={actor} editable onScopeChange={setScope} />
         </Panel>
+      )}
+
+      {!isMaster && (
+        <AutoDistributePanel
+          actor={actor}
+          proposals={proposals}
+          proposing={proposing}
+          onPropose={() => onPropose(actor)}
+          onConfirm={(p) => onConfirmProposal(actor, p)}
+          onConfirmSafe={(ps) => onConfirmSafe(actor, ps)}
+        />
       )}
 
       <Panel title={`── recent activity · ${actor.label}`} flush>

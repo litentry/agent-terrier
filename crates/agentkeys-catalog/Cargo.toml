@@ -1,0 +1,17 @@
+[package]
+name = "agentkeys-catalog"
+version = "0.1.0"
+edition = "2021"
+description = "The shared category catalog (#207 item 6 / #178 §8.1) — entity→category + sensitivity floor + signed vendor overlays. Dependency-light: consumed by the classifier worker AND the daemon (deterministic tier-0)."
+
+[lib]
+name = "agentkeys_catalog"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+base64 = "0.22"
+sha2 = "0.10"

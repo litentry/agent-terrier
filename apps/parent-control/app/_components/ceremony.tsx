@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
-import type { AgentKeysClient } from '@/lib/client/types';
+import type { AgentKeysClient, ConfigPreset } from '@/lib/client/types';
 import { credentialToFinishPayload, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
 import type { CeremonyStep } from './types';
 import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
@@ -126,9 +126,18 @@ export function CeremonyRunner({
 }
 
 // Full-screen WebAuthn login → onboarding ceremony (workflow 1).
-export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
+export function OnboardingScreen({
+  onComplete,
+}: {
+  // `summary` lets the host (App) show the right post-onboarding toast: how many
+  // categories were authored, whether the taxonomy already existed (idempotent
+  // re-onboard), and whether it was a dev-only (no config worker) write.
+  onComplete: (summary?: { categories?: number; already?: boolean; dev?: boolean }) => void;
+}) {
   const client = useClient();
-  const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony'>('email');
+  // email → verify → ceremony (passkey) → setup (#207 1A: author the taxonomy)
+  // → onComplete. `setup` is the last onboarding step before connecting agents.
+  const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony' | 'setup'>('email');
   const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending'>('pending');
   const [email, setEmail] = useState('');
   const [requestId, setRequestId] = useState('');
@@ -138,6 +147,111 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   const [maskEm, setMaskEm] = useState(true);
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+
+  // #207 item 1A — the onboarding setup step: author the default taxonomy behind a
+  // visible progress ceremony (init does cap-mint → STS → config worker → S3, so
+  // it takes several seconds). `checking` runs the idempotency probe, `pick` shows
+  // the preset picker, `authoring` runs the progress bar.
+  const [setupStage, setSetupStage] = useState<'checking' | 'pick' | 'authoring'>('checking');
+  const [presets, setPresets] = useState<ConfigPreset[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState('');
+  const [setupNote, setSetupNote] = useState('');
+  const initResult = useRef<{ ok: boolean; count: number; dev: boolean; note: string }>({
+    ok: false,
+    count: 0,
+    dev: false,
+    note: '',
+  });
+
+  // On entering 'setup': (1) IDEMPOTENCY — if a taxonomy ALREADY exists (a
+  // re-onboard), jump straight in without re-authoring (never clobber, never
+  // re-prompt). (2) else load the presets for the picker.
+  useEffect(() => {
+    if (phase !== 'setup') return;
+    let cancelled = false;
+    (async () => {
+      const existing = await client.listMemoryCategories();
+      if (cancelled) return;
+      if (existing.ok && existing.data.length > 0) {
+        onComplete({ categories: existing.data.length, already: true });
+        return;
+      }
+      const r = await client.listConfigPresets();
+      if (cancelled) return;
+      if (r.ok) {
+        setPresets(r.data.presets);
+        setSelectedPreset(r.data.defaultId);
+      } else {
+        setSetupNote('Categories are set up once a daemon is connected — you can do this later from the memory page.');
+      }
+      setSetupStage('pick');
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [phase, client]);
+
+  const chosenPreset = presets.find((p) => p.id === selectedPreset) ?? presets[0];
+
+  // The init progress ceremony. The real author call fires as the slow step's
+  // `action` (the runner AWAITS it), so the bar reflects the true duration and
+  // we read the captured result in `authoringDone`.
+  const initStages: CeremonyStep[] = [
+    {
+      label: 'Read your profile',
+      sub: chosenPreset ? `${chosenPreset.label} · ${chosenPreset.categories.length} categories` : '',
+    },
+    {
+      label: 'Compile category taxonomy',
+      sub: 'merge into config/memory-taxonomy (idempotent — never clobbers existing)',
+    },
+    {
+      label: 'Encrypt + store to Config',
+      sub: 'cap-mint → STS → config worker → S3 · AES-256-GCM · master-only',
+      action: async () => {
+        const r = await client.initConfigDefault(selectedPreset);
+        if (r.ok) {
+          initResult.current = {
+            ok: true,
+            count: r.data.categories.length,
+            dev: r.data.taxonomyStatus === 'cached',
+            note: '',
+          };
+        } else {
+          const detail = r.status.detail ?? '';
+          const m = detail.match(/\{"error":"([^"]+)"\}/);
+          initResult.current = { ok: false, count: 0, dev: false, note: m ? m[1] : detail || 'init failed' };
+          throw new Error('init failed'); // narrated by the runner; handled in authoringDone
+        }
+      },
+    },
+    {
+      label: 'Index + audit',
+      sub: 'CredentialAudit.append(op=config.taxonomy) · tier-1 + anchor',
+      onchain: true,
+      fn: 'append(bytes32,bytes32,bytes32)',
+    },
+  ];
+
+  const startAuthoring = () => {
+    if (!selectedPreset) return;
+    setSetupNote('');
+    initResult.current = { ok: false, count: 0, dev: false, note: '' };
+    setSetupStage('authoring');
+  };
+
+  // The runner finished the animation — act on the REAL captured result: success
+  // jumps straight into the app (no extra button); failure returns to the picker
+  // with the actionable error.
+  const authoringDone = () => {
+    const res = initResult.current;
+    if (res.ok) {
+      onComplete({ categories: res.count, dev: res.dev });
+    } else {
+      setSetupStage('pick');
+      setSetupNote(`Couldn't author your categories — ${res.note}. Fix the config worker, then try again.`);
+    }
+  };
 
   // First-run is the arch.md §9 master-bootstrap ceremony. Identity (the real
   // email) comes FIRST; the WebAuthn Touch ID is Stage 2 (master binding),
@@ -309,7 +423,73 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
                 logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni {omni}
               </div>
             )}
-            <CeremonyRunner steps={stages} onDone={onComplete} stepMs={760} />
+            <CeremonyRunner steps={stages} onDone={() => setPhase('setup')} stepMs={760} />
+          </div>
+        )}
+
+        {phase === 'setup' && (
+          <div className="onboard-login">
+            {setupStage === 'checking' && (
+              <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
+                ▸ checking your setup…
+              </div>
+            )}
+
+            {setupStage === 'pick' && (
+              <>
+                <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your categories.</h1>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 16, maxWidth: 420 }}>
+                  Pick a starting profile. This authors your <strong>category taxonomy</strong> — the vocabulary agentKeys uses
+                  to scope everything an agent can touch: the <strong>memory</strong> it reads, the <strong>credentials</strong> it
+                  uses, and more data classes (payments, …) as you add them. It seeds your categories now; credentials are
+                  auto-categorized into the same taxonomy when you connect an agent. Refine it any time — nothing is shared until
+                  you connect one.
+                </p>
+                {presets.length > 0 ? (
+                  <>
+                    <label htmlFor="ak-preset" style={{ display: 'block', fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}>
+                      starting profile
+                    </label>
+                    <select
+                      id="ak-preset"
+                      value={selectedPreset}
+                      onChange={(e) => setSelectedPreset(e.target.value)}
+                      style={{ width: '100%', padding: '10px 11px', fontSize: 13, border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)', marginBottom: 10 }}
+                    >
+                      {presets.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    </select>
+                    {chosenPreset && (
+                      <>
+                        <p className="muted" style={{ fontSize: 11.5, margin: '0 0 10px' }}>{chosenPreset.description}</p>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 16 }}>
+                          {chosenPreset.categories.map((c) => <span key={c.ns} className="chip">{c.label}</span>)}
+                        </div>
+                      </>
+                    )}
+                    <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={startAuthoring}>
+                      ⊕ initialize my categories
+                    </button>
+                    <button className="btn" style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: 8 }} onClick={() => onComplete()}>
+                      skip — set up later
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={() => onComplete()}>
+                    Continue →
+                  </button>
+                )}
+                {setupNote && <div style={{ fontSize: 11.5, color: 'var(--accent, #b8860b)', marginTop: 12 }}>{setupNote}</div>}
+              </>
+            )}
+
+            {setupStage === 'authoring' && (
+              <>
+                <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
+                  Authoring your taxonomy{chosenPreset ? ` · ${chosenPreset.label}` : ''}
+                </div>
+                <CeremonyRunner steps={initStages} onDone={authoringDone} stepMs={700} />
+              </>
+            )}
           </div>
         )}
       </div>

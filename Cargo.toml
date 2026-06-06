@@ -17,6 +17,8 @@ members = [
     "crates/agentkeys-worker-creds",
     "crates/agentkeys-worker-memory",
     "crates/agentkeys-worker-config",
+    "crates/agentkeys-catalog",
+    "crates/agentkeys-worker-classify",
     "crates/agentkeys-worker-audit",
     "crates/agentkeys-worker-email",
 ]

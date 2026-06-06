@@ -32,8 +32,68 @@ pub fn build_router(state: SharedWorkerState) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/cred/store", post(cred_store))
         .route("/v1/cred/fetch", post(cred_fetch))
+        .route("/v1/cred/list", post(cred_list))
         .route("/v1/cred/teardown", post(cred_teardown))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListRequest {
+    pub cap: CapToken,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListResponse {
+    pub ok: bool,
+    /// The stored credential service ids under `bots/<actor>/credentials/` (the
+    /// filenames, sans `.enc`). The daemon categorizes these via the catalog so the
+    /// master's credentials surface mirrors the memory category list (#207 item 2-app).
+    pub services: Vec<String>,
+}
+
+/// `POST /v1/cred/list` — enumerate the credential service ids the actor has stored
+/// (the per-data-class parallel to listing memory namespaces). **MASTER-ONLY**: a
+/// single-service cap must NOT be able to enumerate the whole vault, so this rejects
+/// any cap whose `operator != actor` (an agent lists nothing; the master lists its
+/// own). Read op (`Fetch`); same cap + chain-verify chain as fetch, no decrypt.
+async fn cred_list(
+    State(state): State<SharedWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
+    Json(req): Json<ListRequest>,
+) -> Result<Json<ListResponse>, ApiError> {
+    verify_cap(&state, &req.cap, CapOp::Fetch).await?;
+    if req.cap.payload.operator_omni != req.cap.payload.actor_omni {
+        return Err(err_403(
+            "cred list is master-only (operator must equal actor)",
+            "list_not_master_self",
+        ));
+    }
+    let prefix = s3_prefix(&req.cap.payload.actor_omni);
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let list = s3
+        .list_objects_v2()
+        .bucket(&state.config.vault_bucket)
+        .prefix(&prefix)
+        .send()
+        .await
+        .map_err(|e| err_502(e.to_string(), "s3_list"))?;
+    let services: Vec<String> = list
+        .contents()
+        .iter()
+        .filter_map(|o| o.key())
+        .filter_map(|k| service_from_key(k, &prefix))
+        .collect();
+    Ok(Json(ListResponse { ok: true, services }))
+}
+
+/// Parse the service id out of an S3 key `bots/<actor>/credentials/<service>.enc`
+/// given the prefix `bots/<actor>/credentials/`. Returns `None` for a key that
+/// isn't under the prefix or lacks the `.enc` suffix (defensive).
+fn service_from_key(key: &str, prefix: &str) -> Option<String> {
+    key.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(".enc"))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -294,5 +354,31 @@ mod tests {
     #[test]
     fn s3_prefix_matches_arch_md_15_1() {
         assert_eq!(s3_prefix("0xABCDEF"), "bots/abcdef/credentials/");
+    }
+
+    #[test]
+    fn service_from_key_parses_service_id() {
+        let prefix = "bots/abcdef/credentials/";
+        assert_eq!(
+            service_from_key("bots/abcdef/credentials/openrouter.enc", prefix),
+            Some("openrouter".to_string())
+        );
+        assert_eq!(
+            service_from_key("bots/abcdef/credentials/stripe.enc", prefix),
+            Some("stripe".to_string())
+        );
+        // not under the prefix / no .enc / empty → None (defensive)
+        assert_eq!(
+            service_from_key("bots/other/credentials/x.enc", prefix),
+            None
+        );
+        assert_eq!(
+            service_from_key("bots/abcdef/credentials/x.txt", prefix),
+            None
+        );
+        assert_eq!(
+            service_from_key("bots/abcdef/credentials/.enc", prefix),
+            None
+        );
     }
 }

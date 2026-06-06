@@ -82,6 +82,14 @@ pub struct UiBridgeState {
     /// the same namespace would otherwise race (both read, both write → last wins,
     /// dropping the other's entries). Held for the whole real-chain plant body.
     pub plant_lock: tokio::sync::Mutex<()>,
+    /// In-memory mirror of the authored memory-types taxonomy (#207 item 1A,
+    /// config-init entry point A). On the REAL chain the durable
+    /// `config/memory-taxonomy.enc` is the source of truth and this is just a
+    /// write-through cache; with Config UNCONFIGURED (dev / no-infra) it is the
+    /// only home, so `init` still authors a taxonomy and the master-memory list
+    /// can show its categories before any memory is planted. `None` until the
+    /// master picks a preset (or NL→COMPILE, #207 item 1B, lands).
+    pub authored_taxonomy: RwLock<Option<MemoryTaxonomy>>,
     /// Broker base URL for the W1 onboarding email→verify flow. `None` ⇒ email
     /// onboarding is disabled (the daemon was started without `--broker-url`)
     /// and the email endpoints fail closed with `broker-not-configured`.
@@ -119,6 +127,12 @@ pub struct UiBridgeState {
     /// #201 config data class — per-actor config IAM role ARN for the STS relay (`CONFIG_ROLE_ARN`).
     /// Required alongside `config_url`; a partial config fails loud (issue #90 discipline).
     pub config_role_arn: Option<String>,
+    /// #207 classifier-service — the classify worker base URL. `Some` ⇒ the
+    /// cap-gated, audited worker TAG path (mint a `Classify` cap → `/v1/classify/tag`);
+    /// `None` ⇒ the daemon classifies against the bundled `agentkeys-catalog` tier-0
+    /// locally (deterministic, dev/no-infra). Drives cred auto-categorize (#207 item 7)
+    /// + connect-time auto-distribute (#207 item 5).
+    pub classify_url: Option<String>,
     /// AWS region for the STS relay (`REGION`).
     pub region: String,
     /// The on-chain-registered master device key hash, sent as `device_key_hash` in
@@ -239,7 +253,7 @@ struct StoredMemoryEntry {
 /// category set the web list resolves WITHOUT decrypting any memory blob. The
 /// categories are the namespaces the operator has planted; labels are derived.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct MemoryTaxonomy {
+pub struct MemoryTaxonomy {
     #[serde(default)]
     version: u32,
     #[serde(default)]
@@ -266,6 +280,36 @@ fn label_for_ns(ns: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+/// Union `incoming` categories INTO `existing`, keyed by namespace, preserving
+/// every existing entry (its label is kept — an authored label or a user edit is
+/// never clobbered) and appending only namespaces not already present. Sorted by
+/// ns for a stable on-disk blob.
+///
+/// This is what makes an **authored** taxonomy (#207 item 1A) durable against the
+/// test-only `plant`: re-running `init` is an idempotent no-op, and a later plant
+/// (cache-derived categories) ADDS its namespaces but can never drop the authored
+/// ones — the same read-modify-write discipline already applied to memory blobs
+/// (#201 codex finding 1), now applied to the category index.
+fn merge_categories(
+    existing: Vec<MemoryCategory>,
+    incoming: &[MemoryCategory],
+) -> Vec<MemoryCategory> {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out: Vec<MemoryCategory> = Vec::new();
+    for c in existing {
+        if seen.insert(c.ns.clone()) {
+            out.push(c);
+        }
+    }
+    for c in incoming {
+        if seen.insert(c.ns.clone()) {
+            out.push(c.clone());
+        }
+    }
+    out.sort_by(|a, b| a.ns.cmp(&b.ns));
+    out
 }
 
 /// Parse a decrypted `memory:<ns>` blob into its entries, tolerating BOTH the
@@ -578,6 +622,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/actors/:id", get(get_actor))
         .route("/v1/actors/:id/caps", get(list_caps))
         .route("/v1/actors/:id/scope", post(update_scope))
+        .route("/v1/actors/:id/scope/grant", post(grant_service_scope))
         .route("/v1/actors/:id/payment-cap", post(update_payment_cap))
         .route("/v1/actors/:id/revoke", post(revoke_device))
         .route("/v1/actors/:id/caps/revoke", post(revoke_cap))
@@ -589,6 +634,15 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route(MASTER_MEMORY_ROUTE, get(list_master_memory))
         .route("/v1/master/memory/entry", get(get_master_memory_entry))
         .route(MASTER_MEMORY_PLANT_ROUTE, post(plant_master_memory))
+        .route("/v1/master/config/presets", get(list_config_presets))
+        .route("/v1/master/config/init", post(init_config_default))
+        .route("/v1/master/classify/tag", post(classify_tag))
+        .route("/v1/master/classify/propose", post(classify_propose))
+        .route("/v1/master/credentials", get(list_master_credentials))
+        .route(
+            "/v1/master/credentials/store",
+            post(store_master_credential),
+        )
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -613,6 +667,7 @@ pub fn build_state(
     memory_role_arn: Option<String>,
     config_url: Option<String>,
     config_role_arn: Option<String>,
+    classify_url: Option<String>,
     region: String,
     master_device_key_hash: Option<String>,
     register_master_script: Option<String>,
@@ -632,6 +687,7 @@ pub fn build_state(
         anchor: RwLock::new(ApiAnchorStatus::default()),
         master_memory: RwLock::new(HashMap::new()),
         plant_lock: tokio::sync::Mutex::new(()),
+        authored_taxonomy: RwLock::new(None),
         broker_url,
         allowed_origin: rp_origin.to_string(),
         pending_email: RwLock::new(HashMap::new()),
@@ -642,6 +698,7 @@ pub fn build_state(
         memory_role_arn,
         config_url,
         config_role_arn,
+        classify_url,
         region,
         master_device_key_hash,
         registered_master: RwLock::new(None),
@@ -1227,6 +1284,86 @@ async fn update_scope(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GrantScopeRequest {
+    pub data_class: String,
+    /// The namespace (memory) or service id (credentials) being granted.
+    pub entity: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub gating: String,
+}
+
+/// `POST /v1/actors/:id/scope/grant` (#207 items 5/7/8) — record a CONFIRMED
+/// auto-distribute grant: a memory namespace the agent inherits (read) or a
+/// credential service it may use. Same daemon-state + audit posture as
+/// `update_scope` — the ui-bridge owns the scope VIEW; the on-chain `setScope`
+/// is the operator's `heima-scope-set.sh` (a master `SCOPE_MGMT` + K11 mutation),
+/// which the web surface deliberately does NOT drive (mirrors `update_scope`).
+///
+/// A `Sensitive` grant only reaches this endpoint after an explicit per-grant K11
+/// confirm in the UI; a `Safe` one after the reviewed-set confirm. `propose` never
+/// calls this — so an unconfirmed sensitive category is never granted (the §3.2
+/// invariant, enforced end to end).
+async fn grant_service_scope(
+    State(state): State<SharedUiBridgeState>,
+    Path(id): Path<String>,
+    Json(req): Json<GrantScopeRequest>,
+) -> Result<Json<ApiActor>, (StatusCode, Json<ErrorBody>)> {
+    let mut guard = state.actors.write().await;
+    let actor = guard
+        .get_mut(&id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
+    let (chip, label) = if req.data_class == "memory" {
+        // Memory inheritance (#207 item 8): granting a namespace = read access.
+        let scope = actor.scope.get_or_insert_with(HashMap::new);
+        scope.insert(
+            req.entity.clone(),
+            ApiScopeBits {
+                read: true,
+                write: false,
+            },
+        );
+        ("memory", format!("memory:{}", req.entity))
+    } else {
+        // Credential grant (#207 item 7): the service joins the agent's services.
+        let services = actor.services.get_or_insert_with(Vec::new);
+        if !services.contains(&req.entity) {
+            services.push(req.entity.clone());
+        }
+        ("creds", req.entity.clone())
+    };
+    let snapshot = actor.clone();
+    drop(guard);
+
+    let how = if req.gating == "k11" {
+        "K11-confirmed"
+    } else {
+        "auto-confirmed"
+    };
+    let detail = if req.category.is_empty() {
+        format!("granted {label} · {how} · chain commit via master K11")
+    } else {
+        format!(
+            "granted {label} · {} · {how} · chain commit via master K11",
+            req.category
+        )
+    };
+    let evt = ApiAuditEvent {
+        id: format!("e-grant-{}", now_unix()),
+        ts: now_ts_hms(),
+        actor_id: id.clone(),
+        actor: id.clone(),
+        kind: "scope.granted".into(),
+        detail,
+        chip: chip.into(),
+        sev: "ok".into(),
+    };
+    push_audit(&state, evt).await;
+    Ok(Json(snapshot))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdatePaymentCapRequest {
     pub per_tx: f64,
     pub daily: f64,
@@ -1529,13 +1666,29 @@ async fn resolve_categories(state: &SharedUiBridgeState) -> Result<Vec<MemoryCat
             match config_fetch_taxonomy(&client, &ctx).await {
                 Ok(Some(tax)) if !tax.categories.is_empty() => Ok(tax.categories),
                 // Present-but-empty (unusual) or confirmed-missing taxonomy →
-                // cache fallback is legitimate (nothing durable to list).
-                Ok(_) => Ok(categories_from_cache(state).await),
+                // fallback is legitimate (nothing durable to list).
+                Ok(_) => Ok(fallback_categories(state).await),
+                // A configured-but-broken Config store is a HARD error (502), never
+                // masked behind in-memory data or an empty list (#201 finding-2):
+                // the operator must see + fix it. Real data or a loud failure.
                 Err(e) => Err(format!("config taxonomy unavailable: {e}")),
             }
         }
-        Ok(None) => Ok(categories_from_cache(state).await), // Config not configured
-        Err(e) => Err(format!("config not ready: {e}")),    // partial config / no session
+        Ok(None) => Ok(fallback_categories(state).await), // Config not configured
+        Err(e) => Err(format!("config not ready: {e}")),  // partial config / no session
+    }
+}
+
+/// Categories to show when no durable taxonomy is available — the union of the
+/// authored in-memory taxonomy (`init`, #207 item 1A) and the cache-derived
+/// namespaces (planted memory). Used as the dev/no-infra path and as the
+/// real-path fallback when the durable object is missing/empty, so an authored
+/// preset is visible even before any memory is planted.
+async fn fallback_categories(state: &SharedUiBridgeState) -> Vec<MemoryCategory> {
+    let cache_cats = categories_from_cache(state).await;
+    match state.authored_taxonomy.read().await.clone() {
+        Some(tax) => merge_categories(tax.categories, &cache_cats),
+        None => cache_cats,
     }
 }
 
@@ -1777,6 +1930,8 @@ async fn mint_master_cap(
         "memory-get" => CapMintOp::MemoryGet,
         "config-store" => CapMintOp::ConfigStore,
         "config-fetch" => CapMintOp::ConfigFetch,
+        "cred-store" => CapMintOp::CredStore,
+        "cred-fetch" => CapMintOp::CredFetch,
         other => return Err(format!("mint_master_cap: unknown cap route {other}")),
     };
     let client = BackendClient::new(
@@ -2028,6 +2183,35 @@ async fn config_fetch_taxonomy(
     Ok(Some(taxonomy))
 }
 
+/// Read-modify-write the durable taxonomy: config-fetch the current
+/// `config/memory-taxonomy.enc`, MERGE `new_categories` in (preserving every
+/// existing entry, [`merge_categories`]), and config-store the union. Returns the
+/// merged categories now durable.
+///
+/// A fetch ERROR aborts WITHOUT storing — never overwrite a taxonomy we failed to
+/// read (the #201 finding-1 footgun, now guarding the category index too). A
+/// confirmed-missing object (`Ok(None)`) is a fresh start, not an error. Shared by
+/// the test-only `plant` (cache-derived categories) and the authored `init`
+/// (preset categories, #207 item 1A) so both compose without clobbering.
+async fn reconcile_taxonomy(
+    client: &reqwest::Client,
+    cfg: &RealConfigCtx,
+    new_categories: &[MemoryCategory],
+) -> Result<Vec<MemoryCategory>, String> {
+    let existing = match config_fetch_taxonomy(client, cfg).await {
+        Ok(Some(tax)) => tax.categories,
+        Ok(None) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    let merged = merge_categories(existing, new_categories);
+    let taxonomy = MemoryTaxonomy {
+        version: 1,
+        categories: merged.clone(),
+    };
+    config_store_taxonomy(client, cfg, &taxonomy).await?;
+    Ok(merged)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PlantRequest {
     pub entries: Vec<ApiMemoryEntry>,
@@ -2151,21 +2335,21 @@ async fn plant_master_memory_inner(
             }
         }
 
-        // Reconcile the durable taxonomy LAST. A configured store FAILURE is
-        // surfaced as an explicit partial-success status (codex finding 2) — the
-        // memory blobs ARE durable, but the category index would be stale, so the
-        // operator must know to retry rather than see a silent success.
+        // Reconcile the durable taxonomy LAST, as a read-modify-write MERGE so a
+        // plant ADDS its namespaces without ever dropping an authored taxonomy
+        // (#207 item 1A) — categories_from_cache only knows planted namespaces.
+        // A configured store FAILURE is surfaced as an explicit partial-success
+        // status (codex finding 2) — the memory blobs ARE durable, but the
+        // category index would be stale, so the operator must know to retry
+        // rather than see a silent success.
         taxonomy_status = match real_config_ctx(state).await {
             Ok(Some(cfg)) => {
-                let taxonomy = MemoryTaxonomy {
-                    version: 1,
-                    categories: categories_from_cache(state).await,
-                };
-                match config_store_taxonomy(&client, &cfg, &taxonomy).await {
-                    Ok(()) => "ok".to_string(),
+                let cache_cats = categories_from_cache(state).await;
+                match reconcile_taxonomy(&client, &cfg, &cache_cats).await {
+                    Ok(_) => "ok".to_string(),
                     Err(e) => {
                         tracing::error!(
-                            "plant_master_memory: taxonomy config-store FAILED (memory durable; \
+                            "plant_master_memory: taxonomy reconcile FAILED (memory durable; \
                              category index stale — retry the plant): {e}"
                         );
                         format!("failed: {e}")
@@ -2219,6 +2403,703 @@ async fn plant_master_memory_inner(
         total,
         taxonomy_status,
     })
+}
+
+// ─── #207 item 1A: config-init entry point A (default-preset bootstrap) ──────
+
+/// One bundled preset, flattened for the wire (the daemon's `MemoryCategory`
+/// shape so the UI reuses its category renderer).
+#[derive(Serialize)]
+struct PresetView {
+    id: String,
+    label: String,
+    description: String,
+    categories: Vec<MemoryCategory>,
+}
+
+fn preset_categories(p: &crate::presets::ConfigPreset) -> Vec<MemoryCategory> {
+    p.categories
+        .iter()
+        .map(|(ns, label)| MemoryCategory {
+            ns: (*ns).to_string(),
+            label: (*label).to_string(),
+        })
+        .collect()
+}
+
+/// `GET /v1/master/config/presets` → the bundled default taxonomy presets + the
+/// shipped default id (#207 item 1A). Read-only, no session required — these are
+/// public bundled defaults (catalog ≠ policy: the presets carry categories, never
+/// a tenant's grants).
+async fn list_config_presets() -> axum::response::Response {
+    let presets: Vec<PresetView> = crate::presets::bundled_presets()
+        .iter()
+        .map(|p| PresetView {
+            id: p.id.to_string(),
+            label: p.label.to_string(),
+            description: p.description.to_string(),
+            categories: preset_categories(p),
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "default_id": crate::presets::DEFAULT_PRESET_ID,
+            "presets": presets,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct InitConfigRequest {
+    /// Preset id to author; empty ⇒ the shipped default (rich adult-household).
+    #[serde(default)]
+    pub preset_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InitConfigResponse {
+    /// The preset actually authored (echoes the resolved default for an empty id).
+    pub preset_id: String,
+    /// `"ok"` (durable `config/memory-taxonomy.enc` written) or `"cached"` (Config
+    /// unconfigured — authored into the in-memory mirror only, dev/no-infra).
+    pub taxonomy_status: String,
+    /// The merged category set now in effect (authored ∪ any pre-existing).
+    pub categories: Vec<MemoryCategory>,
+}
+
+/// `POST /v1/master/config/init` → author the memory-types taxonomy from a
+/// bundled default preset (#207 item 1A, config-init entry point A). This writes
+/// the category INDEX, not scope grants — it is master-self (operator == actor;
+/// the broker skips the on-chain scope check, #195), the same posture as the
+/// plant's taxonomy reconcile. Scope grants are K11-gated and land with
+/// auto-distribute (#207 item 5); entry point B (NL → COMPILE) is #207 item 1B.
+///
+/// Idempotent: re-running merges (never clobbers) so a second init or a later
+/// plant only adds namespaces.
+async fn init_config_default(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<InitConfigRequest>,
+) -> axum::response::Response {
+    match init_config_default_inner(&state, &req).await {
+        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+async fn init_config_default_inner(
+    state: &SharedUiBridgeState,
+    req: &InitConfigRequest,
+) -> Result<InitConfigResponse, (StatusCode, String)> {
+    let preset = crate::presets::resolve_preset(&req.preset_id).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!("unknown preset_id: {}", req.preset_id),
+    ))?;
+    let authored = preset_categories(preset);
+
+    let (taxonomy_status, categories) = match real_config_ctx(state).await {
+        Ok(Some(cfg)) => {
+            // REAL chain: read-modify-write MERGE into the durable, encrypted Config
+            // store. A config worker failure (unreachable / S3 error) is a HARD error
+            // — we author REAL durable data or fail loud. NO in-memory fallback that
+            // masks a broken store (#201 finding-2): the operator must fix the Config
+            // data class (provision the bucket + role, deploy/repair the worker).
+            let client = reqwest::Client::new();
+            let merged = reconcile_taxonomy(&client, &cfg, &authored)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!(
+                            "taxonomy authoring failed — the Config data class must be healthy \
+                             (config worker reachable + its bucket/role provisioned with S3 \
+                             Get/Put/List on bots/<actor>/config/*): {e}"
+                        ),
+                    )
+                })?;
+            ("ok".to_string(), merged)
+        }
+        // No `--config-url` configured AT ALL: the explicit dev/no-infra mode —
+        // author into the in-memory mirror so the local UI works WITHOUT a config
+        // worker. This is NOT a degrade of a configured store (that fails loud
+        // above); it is the honest absence of one.
+        Ok(None) => {
+            let existing = state
+                .authored_taxonomy
+                .read()
+                .await
+                .clone()
+                .map(|t| t.categories)
+                .unwrap_or_default();
+            ("cached".to_string(), merge_categories(existing, &authored))
+        }
+        // Partial config (config-url set but role missing) / no session — a real
+        // misconfiguration the operator must fix; fail loud.
+        Err(e) => return Err((StatusCode::CONFLICT, format!("config not ready: {e}"))),
+    };
+
+    // Write-through the in-memory mirror in both paths (the unconfigured home,
+    // and a cache aligned with durable Config for the real path).
+    *state.authored_taxonomy.write().await = Some(MemoryTaxonomy {
+        version: 1,
+        categories: categories.clone(),
+    });
+
+    // Audit the authoring action. The taxonomy is the Config data class; the
+    // closest existing audit chip is `memory` (it IS the memory-types taxonomy).
+    let evt = ApiAuditEvent {
+        id: format!("e-cfg-init-{}", now_unix()),
+        ts: now_ts_hms(),
+        actor_id: "master".into(),
+        actor: "master".into(),
+        kind: "config.taxonomy".into(),
+        detail: format!(
+            "authored taxonomy · preset {} · {} categories",
+            preset.id,
+            categories.len()
+        ),
+        chip: "memory".into(),
+        sev: "ok".into(),
+    };
+    push_audit(state, evt).await;
+
+    Ok(InitConfigResponse {
+        preset_id: preset.id.to_string(),
+        taxonomy_status,
+        categories,
+    })
+}
+
+// ─── #207 items 5 + 7: classification (cred-categorize + auto-distribute) ────
+//
+// The CLASSIFY BRIDGE. Two paths, same deterministic catalog data:
+//   • worker (audited) — when `--classify-url` + a real session: mint a master-self
+//     `Classify` cap → `POST /v1/classify/tag`. Picks up signed vendor overlays + audit.
+//   • local tier-0 — otherwise: the bundled `agentkeys-catalog` in-process
+//     (deterministic, free, no infra). This IS the intended tier-0 (#178 §8.1).
+//
+// Determinism guardrail (#178 §5): TAG returns a category + sensitivity, NEVER
+// allow/deny. The sensitivity comes from the CATALOG floor (not a vendor/telemetry
+// prior, #207 §3 invariant 2). `propose` proposes scopes; it NEVER writes one —
+// the confirm/grant path (the existing K11-gated `update_scope`) is the only writer,
+// so an unconfirmed sensitive category produces NO scope grant by construction.
+
+/// Process-wide bundled catalog (tier-0). Built once.
+fn bundled_catalog() -> &'static agentkeys_catalog::Catalog {
+    static CATALOG: std::sync::OnceLock<agentkeys_catalog::Catalog> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(agentkeys_catalog::Catalog::bundled)
+}
+
+/// Normalize/validate a data-class string to the cap's snake_case set. Defaults
+/// to `credentials` (the common cred-categorize case) for an empty value.
+fn normalize_data_class(s: &str) -> Result<&'static str, String> {
+    match s.trim().to_lowercase().as_str() {
+        "" | "credentials" | "cred" => Ok("credentials"),
+        "memory" => Ok("memory"),
+        "config" => Ok("config"),
+        other => Err(format!("unknown data_class: {other}")),
+    }
+}
+
+/// The auto-distribute gating tier for a category's sensitivity (#207 §3 inv. 2):
+/// Safe → `auto` (auto-confirm + daily review); Sensitive → `k11` (explicit confirm).
+/// The tier comes from the CATALOG floor, so a vendor/telemetry prior can't downgrade it.
+fn gating_for(s: agentkeys_catalog::Sensitivity) -> &'static str {
+    match s {
+        agentkeys_catalog::Sensitivity::Safe => "auto",
+        agentkeys_catalog::Sensitivity::Sensitive => "k11",
+    }
+}
+
+/// The signed `service` string a scope grant would be over: memory → `memory:<ns>`,
+/// credentials/other → the lowercased entity (service id). Matches the cap layer.
+fn service_for(data_class: &str, entity: &str) -> String {
+    match data_class {
+        "memory" => format!("memory:{}", entity.trim().to_lowercase()),
+        _ => entity.trim().to_lowercase(),
+    }
+}
+
+/// Mint a master-self `Classify` cap for `(data_class, entity)` via the broker.
+async fn mint_master_classify_cap(
+    client: &reqwest::Client,
+    broker: &str,
+    j1: &str,
+    omni: &str,
+    device_key_hash: &str,
+    data_class: &str,
+) -> Result<serde_json::Value, String> {
+    let service = format!("classify:{data_class}");
+    let resp = client
+        .post(format!("{broker}/v1/cap/classify"))
+        .bearer_auth(j1)
+        .json(&serde_json::json!({
+            "operator_omni": omni,
+            "actor_omni": omni,
+            "service": service,
+            "device_key_hash": device_key_hash,
+            "data_class": data_class,
+            "ttl_seconds": 300,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("classify cap-mint transport: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!(
+            "classify cap-mint {status}: {}",
+            resp.text().await.unwrap_or_default()
+        ));
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("classify cap json: {e}"))
+}
+
+/// The audited worker TAG path. `Ok(None)` when `--classify-url` is unset (caller
+/// falls back to the local tier-0); `Err` on a real failure (session/cap/worker).
+async fn classify_via_worker(
+    state: &SharedUiBridgeState,
+    data_class: &str,
+    entity: &str,
+) -> Result<Option<agentkeys_catalog::Classification>, String> {
+    let Some(classify_url) = state.classify_url.clone() else {
+        return Ok(None);
+    };
+    let coords = resolve_session_coords(state).await?;
+    let client = reqwest::Client::new();
+    let cap = mint_master_classify_cap(
+        &client,
+        &coords.broker,
+        &coords.j1,
+        &coords.omni,
+        &coords.device_key_hash,
+        data_class,
+    )
+    .await?;
+    let resp = client
+        .post(format!("{classify_url}/v1/classify/tag"))
+        .json(&serde_json::json!({ "cap": cap, "data_class": data_class, "entity": entity }))
+        .send()
+        .await
+        .map_err(|e| format!("classify tag transport: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!(
+            "classify tag {status}: {}",
+            resp.text().await.unwrap_or_default()
+        ));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("classify tag json: {e}"))?;
+    let classification = serde_json::from_value(body["classification"].clone())
+        .map_err(|e| format!("classification parse: {e}"))?;
+    Ok(Some(classification))
+}
+
+/// Classify an entity → category + sensitivity. For MEMORY the entity is a
+/// namespace = a category, so its sensitivity is the catalog FLOOR (#207 item 8,
+/// agent memory inheritance) — a deterministic local lookup. For credentials/config
+/// the entity is a service: worker (audited) when configured + reachable, else the
+/// bundled catalog tier-0 (same data, deterministic).
+async fn classify_entity(
+    state: &SharedUiBridgeState,
+    data_class: &str,
+    entity: &str,
+) -> agentkeys_catalog::Classification {
+    if data_class == "memory" {
+        return bundled_catalog().classify_namespace(entity);
+    }
+    if state.classify_url.is_some() {
+        match classify_via_worker(state, data_class, entity).await {
+            Ok(Some(c)) => return c,
+            Ok(None) => {}
+            Err(e) => tracing::warn!("classify worker path failed, using local tier-0: {e}"),
+        }
+    }
+    bundled_catalog().tag(entity)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClassifyTagRequest {
+    #[serde(default)]
+    pub data_class: String,
+    pub entity: String,
+}
+
+/// `POST /v1/master/classify/tag` (#207 item 7 — cred auto-categorize). Classify a
+/// minted credential's service (or any entity) → its category + sensitivity, so the
+/// master can confirm a `cred:<service>` grant. Read-only; never writes scope.
+async fn classify_tag(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ClassifyTagRequest>,
+) -> axum::response::Response {
+    let data_class = match normalize_data_class(&req.data_class) {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    if req.entity.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "entity required" })),
+        )
+            .into_response();
+    }
+    let c = classify_entity(&state, data_class, &req.entity).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "data_class": data_class,
+            "entity": req.entity.trim().to_lowercase(),
+            "service": service_for(data_class, &req.entity),
+            "classification": c,
+            "audited": state.classify_url.is_some(),
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SurfaceItem {
+    #[serde(default)]
+    pub data_class: String,
+    pub entity: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProposeRequest {
+    #[serde(default)]
+    pub actor_id: String,
+    pub surface: Vec<SurfaceItem>,
+}
+
+/// One proposed scope grant. `gating` is the sensitivity tier from the CATALOG:
+/// `auto` (Safe → auto-confirm + surface in the daily review) | `k11` (Sensitive →
+/// explicit per-grant K11 confirm). NEVER granted here — `propose` only proposes.
+#[derive(Debug, Serialize)]
+pub struct ProposedScope {
+    pub data_class: String,
+    pub entity: String,
+    pub service: String,
+    pub category: String,
+    pub sensitivity: agentkeys_catalog::Sensitivity,
+    pub gating: &'static str,
+    pub confidence: f32,
+}
+
+/// `POST /v1/master/classify/propose` (#207 item 5 — connect-time auto-distribute).
+/// Classify an agent's surface (the memory namespaces it reads + the cred services
+/// it uses) and PROPOSE scopes, sensitivity-tiered. This writes NOTHING: safe
+/// proposals are `auto` (the UI can confirm a reviewed set in one gesture); sensitive
+/// ones are `k11` (explicit per-grant confirm). The grant itself is the existing
+/// K11-gated `update_scope` path — so an unconfirmed sensitive category produces NO
+/// scope grant (the load-bearing #207 §3 invariant 2, true by construction).
+async fn classify_propose(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ProposeRequest>,
+) -> axum::response::Response {
+    let mut proposals: Vec<ProposedScope> = Vec::new();
+    for item in &req.surface {
+        let data_class = match normalize_data_class(&item.data_class) {
+            Ok(d) => d,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
+            }
+        };
+        if item.entity.trim().is_empty() {
+            continue;
+        }
+        let c = classify_entity(&state, data_class, &item.entity).await;
+        let gating = gating_for(c.sensitivity);
+        proposals.push(ProposedScope {
+            data_class: data_class.to_string(),
+            entity: item.entity.trim().to_lowercase(),
+            service: service_for(data_class, &item.entity),
+            category: c.category,
+            sensitivity: c.sensitivity,
+            gating,
+            confidence: c.confidence,
+        });
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "actor_id": req.actor_id, "proposals": proposals })),
+    )
+        .into_response()
+}
+
+// ─── #207: master CREDENTIALS surface (same abstraction as memory) ───────────
+//
+// Credentials are a first-class data class in the app, mirroring memory: the
+// memory list resolves namespaces → categories (the taxonomy); the credentials
+// list resolves stored services → categories (the catalog). Both are
+// list-then-categorize over the master's own real data. Real data or a loud
+// failure — no in-memory stand-in (the unconfigured dev case is an honest empty).
+
+struct RealCredCtx {
+    broker: String,
+    cred_url: String,
+    role_arn: String,
+    region: String,
+    j1: String,
+    omni: String,
+    device_key_hash: String,
+}
+
+/// Resolve the cred-worker context from env (`AGENTKEYS_WORKER_CRED_URL` +
+/// `VAULT_ROLE_ARN`, which the daemon's launcher sources from
+/// operator-workstation.env) + the master session. `Ok(None)` when the cred
+/// worker isn't configured (dev/no-infra). A partial config (URL set but role
+/// missing) fails loud (issue #90 discipline).
+async fn real_cred_ctx(state: &UiBridgeState) -> Result<Option<RealCredCtx>, String> {
+    let cred_url = match std::env::var("AGENTKEYS_WORKER_CRED_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return Ok(None),
+    };
+    let role_arn = std::env::var("VAULT_ROLE_ARN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or("real cred: AGENTKEYS_WORKER_CRED_URL set but VAULT_ROLE_ARN missing")?;
+    let c = resolve_session_coords(state).await?;
+    Ok(Some(RealCredCtx {
+        broker: c.broker,
+        cred_url,
+        role_arn,
+        region: c.region,
+        j1: c.j1,
+        omni: c.omni,
+        device_key_hash: c.device_key_hash,
+    }))
+}
+
+/// A categorized credential service — the cred parallel to `MemoryCategory`:
+/// the service id + its catalog category + sensitivity (so the UI groups creds
+/// by category exactly like memory namespaces).
+#[derive(Debug, Serialize)]
+pub struct CredService {
+    pub service: String,
+    pub category: String,
+    pub sensitivity: agentkeys_catalog::Sensitivity,
+}
+
+/// `GET /v1/master/credentials` — list the master's stored credential services
+/// (cred worker `/v1/cred/list`), each categorized via the catalog. The
+/// per-data-class parallel to `GET /v1/master/memory`. Unconfigured (no cred
+/// worker) → empty (honest dev); a configured-but-broken worker → 502.
+async fn list_master_credentials(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    match list_master_credentials_inner(&state).await {
+        Ok(creds) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "credentials": creds })),
+        )
+            .into_response(),
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+async fn list_master_credentials_inner(
+    state: &SharedUiBridgeState,
+) -> Result<Vec<CredService>, (StatusCode, String)> {
+    let ctx = match real_cred_ctx(state).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(Vec::new()), // no cred worker configured (dev) → empty
+        Err(e) => return Err((StatusCode::CONFLICT, format!("cred not ready: {e}"))),
+    };
+    let client = reqwest::Client::new();
+    let cap = mint_master_cap(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "cred-fetch",
+        "credentials",
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred cap-mint: {e}")))?;
+    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay (cred): {e}")))?;
+    let resp = client
+        .post(format!("{}/v1/cred/list", ctx.cred_url))
+        .header("x-aws-access-key-id", creds.access_key_id)
+        .header("x-aws-secret-access-key", creds.secret_access_key)
+        .header("x-aws-session-token", creds.session_token)
+        .json(&serde_json::json!({ "cap": cap }))
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred list transport: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "cred list {status}: {}",
+                resp.text().await.unwrap_or_default()
+            ),
+        ));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred list json: {e}")))?;
+    let services: Vec<String> = body["services"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Vec::with_capacity(services.len());
+    for svc in services {
+        let c = classify_entity(state, "credentials", &svc).await;
+        out.push(CredService {
+            service: svc,
+            category: c.category,
+            sensitivity: c.sensitivity,
+        });
+    }
+    out.sort_by(|a, b| {
+        (a.category.clone(), a.service.clone()).cmp(&(b.category.clone(), b.service.clone()))
+    });
+    Ok(out)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StoreCredRequest {
+    pub service: String,
+    pub secret: String,
+}
+
+/// `POST /v1/master/credentials/store` — vault a master credential (mint a
+/// master-self `cred-store` cap → STS → cred worker `/v1/cred/store`). The
+/// credential parallel to the memory plant. Real durable write or a loud failure.
+async fn store_master_credential(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<StoreCredRequest>,
+) -> axum::response::Response {
+    let service = req.service.trim().to_lowercase();
+    if service.is_empty() || service.len() > 64 || req.secret.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "service (1..=64) and secret are required" })),
+        )
+            .into_response();
+    }
+    let ctx = match real_cred_ctx(&state).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "no cred worker configured (set AGENTKEYS_WORKER_CRED_URL + VAULT_ROLE_ARN)" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": format!("cred not ready: {e}") }))).into_response()
+        }
+    };
+    match store_master_credential_inner(&ctx, &service, &req.secret).await {
+        Ok(category) => {
+            let evt = ApiAuditEvent {
+                id: format!("e-cred-store-{}", now_unix()),
+                ts: now_ts_hms(),
+                actor_id: "master".into(),
+                actor: "master".into(),
+                kind: "credential.store".into(),
+                detail: format!("vaulted credential · {service} · {category}"),
+                chip: "creds".into(),
+                sev: "ok".into(),
+            };
+            push_audit(&state, evt).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "service": service, "category": category })),
+            )
+                .into_response()
+        }
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+async fn store_master_credential_inner(
+    ctx: &RealCredCtx,
+    service: &str,
+    secret: &str,
+) -> Result<String, (StatusCode, String)> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let client = reqwest::Client::new();
+    let cap = mint_master_cap(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "cred-store",
+        service,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred cap-mint: {e}")))?;
+    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay (cred): {e}")))?;
+    let resp = client
+        .post(format!("{}/v1/cred/store", ctx.cred_url))
+        .header("x-aws-access-key-id", creds.access_key_id)
+        .header("x-aws-secret-access-key", creds.secret_access_key)
+        .header("x-aws-session-token", creds.session_token)
+        .json(
+            &serde_json::json!({ "cap": cap, "plaintext_b64": STANDARD.encode(secret.as_bytes()) }),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("cred store transport: {e}"),
+            )
+        })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "cred store {status}: {}",
+                resp.text().await.unwrap_or_default()
+            ),
+        ));
+    }
+    Ok(bundled_catalog().tag(service).category)
 }
 
 async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
@@ -2320,11 +3201,254 @@ mod tests {
             None,
             None,
             None,
+            None,
             "us-east-1".into(),
             None,
             None,
         )
         .unwrap()
+    }
+
+    fn cat(ns: &str, label: &str) -> MemoryCategory {
+        MemoryCategory {
+            ns: ns.into(),
+            label: label.into(),
+        }
+    }
+
+    // ─── #207 item 1A: authored-taxonomy bootstrap ──────────────────────────
+
+    #[test]
+    fn merge_categories_preserves_existing_and_adds_new() {
+        // Existing labels win (an authored label / user edit is never clobbered);
+        // a new ns is appended; output is ns-sorted for a stable blob.
+        let existing = vec![cat("travel", "Travel"), cat("finance", "Finance")];
+        let incoming = vec![
+            cat("finance", "Finance & Investment"), // same ns → existing label kept
+            cat("kids", "Kids"),                    // new ns → added
+        ];
+        let merged = merge_categories(existing, &incoming);
+        let by_ns: std::collections::BTreeMap<_, _> = merged
+            .iter()
+            .map(|c| (c.ns.as_str(), c.label.as_str()))
+            .collect();
+        assert_eq!(by_ns.get("finance"), Some(&"Finance")); // existing wins
+        assert_eq!(by_ns.get("kids"), Some(&"Kids"));
+        assert_eq!(merged.len(), 3);
+        // ns-sorted
+        let ns: Vec<&str> = merged.iter().map(|c| c.ns.as_str()).collect();
+        assert_eq!(ns, ["finance", "kids", "travel"]);
+    }
+
+    #[tokio::test]
+    async fn init_default_authors_taxonomy_not_plant_derived() {
+        // Acceptance (#207): the DEFAULT preset writes a REAL authored taxonomy
+        // even with ZERO memory planted — the old path could only derive
+        // categories from planted namespaces.
+        let state = make_state();
+        let resp = init_config_default_inner(&state, &InitConfigRequest::default())
+            .await
+            .expect("init default");
+        assert_eq!(resp.preset_id, crate::presets::DEFAULT_PRESET_ID);
+        assert_eq!(resp.taxonomy_status, "cached"); // Config unconfigured in tests
+        let ns: Vec<&str> = resp.categories.iter().map(|c| c.ns.as_str()).collect();
+        for required in ["kids", "business", "smart-home", "finance", "family"] {
+            assert!(
+                ns.contains(&required),
+                "authored taxonomy missing {required}"
+            );
+        }
+        // And the master-memory list now resolves those authored categories with
+        // NOTHING planted (proves "authored, not plant-derived").
+        let listed = resolve_categories(&state).await.expect("resolve");
+        assert_eq!(listed.len(), resp.categories.len());
+    }
+
+    #[tokio::test]
+    async fn init_then_plant_preserves_authored_categories() {
+        // Author a preset, then simulate a plant (a memory entry in the cache).
+        // The list must be authored ∪ planted — the plant adds its namespace but
+        // never drops an authored one (merge-not-clobber).
+        let state = make_state();
+        init_config_default_inner(
+            &state,
+            &InitConfigRequest {
+                preset_id: "investor".into(),
+            },
+        )
+        .await
+        .expect("init investor");
+
+        state.master_memory.write().await.insert(
+            "h1".into(),
+            ApiMemoryEntry {
+                ns: "travel".into(),
+                key: "chengdu".into(),
+                title: "Chengdu".into(),
+                bytes: 4,
+                version: "v1".into(),
+                updated: "2026-06-06".into(),
+                preview: "trip".into(),
+                body: "trip".into(),
+                content_hash: "h1".into(),
+            },
+        );
+
+        let listed = resolve_categories(&state).await.expect("resolve");
+        let ns: std::collections::BTreeSet<&str> = listed.iter().map(|c| c.ns.as_str()).collect();
+        // authored investor namespaces survive…
+        assert!(ns.contains("investment") && ns.contains("markets"));
+        // …and the planted namespace is added.
+        assert!(ns.contains("travel"));
+    }
+
+    #[tokio::test]
+    async fn init_is_idempotent() {
+        let state = make_state();
+        let first = init_config_default_inner(&state, &InitConfigRequest::default())
+            .await
+            .expect("init 1")
+            .categories
+            .len();
+        let second = init_config_default_inner(&state, &InitConfigRequest::default())
+            .await
+            .expect("init 2")
+            .categories
+            .len();
+        assert_eq!(first, second, "re-init must not grow the taxonomy");
+    }
+
+    #[tokio::test]
+    async fn init_preserves_a_pre_existing_planted_namespace() {
+        // Idempotency invariant (#207): init MERGES into the existing taxonomy —
+        // it must NEVER clobber/delete a namespace a prior plant added. Seed a
+        // "planted" namespace not in any preset, then init the default; the
+        // planted namespace must survive alongside the newly-authored ones.
+        let state = make_state();
+        *state.authored_taxonomy.write().await = Some(MemoryTaxonomy {
+            version: 1,
+            categories: vec![cat("chengdu-trip", "Chengdu Trip")],
+        });
+        let resp = init_config_default_inner(&state, &InitConfigRequest::default())
+            .await
+            .expect("init");
+        let ns: Vec<&str> = resp.categories.iter().map(|c| c.ns.as_str()).collect();
+        assert!(
+            ns.contains(&"chengdu-trip"),
+            "init DELETED the planted namespace — not idempotent/non-destructive"
+        );
+        assert!(
+            ns.contains(&"kids"),
+            "init did not add the preset categories"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_unknown_preset_is_bad_request() {
+        let state = make_state();
+        let err = init_config_default_inner(
+            &state,
+            &InitConfigRequest {
+                preset_id: "nope".into(),
+            },
+        )
+        .await
+        .expect_err("unknown preset must 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    // ─── #207 items 5 + 7: classify bridge + auto-distribute gating ─────────
+
+    #[tokio::test]
+    async fn classify_entity_local_categorizes_known_service() {
+        // No --classify-url ⇒ local catalog tier-0. A known service resolves to
+        // its category + the catalog floor sensitivity (cred auto-categorize, #207 7).
+        let state = make_state();
+        let stripe = classify_entity(&state, "credentials", "Stripe").await;
+        assert_eq!(stripe.category, "payments");
+        assert_eq!(
+            stripe.sensitivity,
+            agentkeys_catalog::Sensitivity::Sensitive
+        );
+        let notion = classify_entity(&state, "credentials", "notion").await;
+        assert_eq!(notion.category, "productivity");
+        assert_eq!(notion.sensitivity, agentkeys_catalog::Sensitivity::Safe);
+    }
+
+    #[tokio::test]
+    async fn classify_entity_local_unknown_is_deny_by_default() {
+        let state = make_state();
+        let u = classify_entity(&state, "credentials", "totally-unknown-xyz").await;
+        assert_eq!(u.category, "unknown");
+        assert_eq!(u.sensitivity, agentkeys_catalog::Sensitivity::Sensitive);
+    }
+
+    #[test]
+    fn gating_tiers_safe_auto_sensitive_k11() {
+        // #207 §3 invariant 2: Safe → auto (auto-confirm + daily review),
+        // Sensitive → k11 (explicit per-grant confirm). The tier is the CATALOG's.
+        assert_eq!(gating_for(agentkeys_catalog::Sensitivity::Safe), "auto");
+        assert_eq!(gating_for(agentkeys_catalog::Sensitivity::Sensitive), "k11");
+    }
+
+    #[tokio::test]
+    async fn auto_distribute_sensitive_service_is_k11_gated() {
+        // The load-bearing invariant surfaced: a sensitive cred (stripe→payments)
+        // proposes as k11 (NOT auto) — it can never be silently granted; only the
+        // explicit K11 confirm path writes scope. A safe one (notion) is auto.
+        let state = make_state();
+        let stripe = classify_entity(&state, "credentials", "stripe").await;
+        assert_eq!(gating_for(stripe.sensitivity), "k11");
+        let notion = classify_entity(&state, "credentials", "notion").await;
+        assert_eq!(gating_for(notion.sensitivity), "auto");
+    }
+
+    #[test]
+    fn service_for_builds_memory_and_cred_services() {
+        assert_eq!(service_for("memory", "Travel"), "memory:travel");
+        assert_eq!(service_for("credentials", "OpenRouter"), "openrouter");
+    }
+
+    #[tokio::test]
+    async fn memory_namespace_inheritance_uses_category_floor() {
+        // #207 item 8 — a memory namespace is classified as its CATEGORY (floor),
+        // not a service lookup: travel → Safe (auto), health/finance → Sensitive
+        // (explicit pick). A namespace the catalog doesn't vouch for → Sensitive.
+        let state = make_state();
+        let travel = classify_entity(&state, "memory", "travel").await;
+        assert_eq!(travel.category, "travel");
+        assert_eq!(gating_for(travel.sensitivity), "auto");
+        let health = classify_entity(&state, "memory", "health").await;
+        assert_eq!(gating_for(health.sensitivity), "k11");
+        let finance = classify_entity(&state, "memory", "finance").await;
+        assert_eq!(gating_for(finance.sensitivity), "k11");
+        // unknown namespace → conservative Sensitive (explicit pick).
+        let kids = classify_entity(&state, "memory", "kids").await;
+        assert_eq!(gating_for(kids.sensitivity), "k11");
+    }
+
+    #[tokio::test]
+    async fn list_credentials_empty_when_cred_worker_unconfigured() {
+        // Credentials are the same abstraction as memory, with the same honesty:
+        // no cred worker configured (AGENTKEYS_WORKER_CRED_URL unset in `cargo test`)
+        // → empty (real-data-or-nothing, no in-memory stand-in). A configured-but-
+        // broken worker would 502 instead (real_cred_ctx Ok(Some) → worker error).
+        if std::env::var("AGENTKEYS_WORKER_CRED_URL")
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
+            return; // runner has a cred worker configured — skip the unconfigured assertion
+        }
+        let state = make_state();
+        let creds = list_master_credentials_inner(&state).await.expect("list");
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn normalize_data_class_defaults_and_validates() {
+        assert_eq!(normalize_data_class("").unwrap(), "credentials");
+        assert_eq!(normalize_data_class("Memory").unwrap(), "memory");
+        assert!(normalize_data_class("payments").is_err());
     }
 
     #[tokio::test]
@@ -2346,6 +3470,7 @@ mod tests {
             None,
             84532,
             Some("https://memory.example".into()),
+            None,
             None,
             None,
             None,
@@ -2374,6 +3499,7 @@ mod tests {
             84532,
             Some("https://memory.example".into()),
             Some("arn:aws:iam::1:role/memory".into()),
+            None,
             None,
             None,
             "us-east-1".into(),
@@ -2799,6 +3925,65 @@ mod tests {
                 namespace: "family".into(),
                 read: true,
                 write: false,
+            }),
+        )
+        .await
+        .expect_err("must 404");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn grant_service_scope_records_cred_and_memory() {
+        // #207 items 7/8 — a CONFIRMED grant persists in actor state + audits.
+        let state = make_state();
+        seed_actor_async(&state).await;
+        let resp = grant_service_scope(
+            State(state.clone()),
+            Path("agent-folotoy".into()),
+            Json(GrantScopeRequest {
+                data_class: "credentials".into(),
+                entity: "openrouter".into(),
+                category: "ai-services".into(),
+                gating: "auto".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(resp
+            .0
+            .services
+            .as_ref()
+            .unwrap()
+            .contains(&"openrouter".to_string()));
+
+        let resp2 = grant_service_scope(
+            State(state.clone()),
+            Path("agent-folotoy".into()),
+            Json(GrantScopeRequest {
+                data_class: "memory".into(),
+                entity: "travel".into(),
+                category: "travel".into(),
+                gating: "k11".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(resp2.0.scope.as_ref().unwrap().get("travel").unwrap().read);
+        let audit = state.audit.read().await;
+        assert!(audit.iter().any(|e| e.kind == "scope.granted"));
+    }
+
+    #[tokio::test]
+    async fn grant_service_scope_unknown_actor_404() {
+        let state = make_state();
+        let err = grant_service_scope(
+            State(state),
+            Path("nope".into()),
+            Json(GrantScopeRequest {
+                data_class: "credentials".into(),
+                entity: "x".into(),
+                category: String::new(),
+                gating: String::new(),
             }),
         )
         .await
@@ -3235,6 +4420,7 @@ mod tests {
             None,
             Some("https://config.example".into()), // config_url set
             None,                                  // CONFIG_ROLE_ARN missing → partial config
+            None,                                  // classify_url
             "us-east-1".into(),
             None,
             None,
@@ -3429,6 +4615,7 @@ mod tests {
             None,
             None,
             84532,
+            None,
             None,
             None,
             None,

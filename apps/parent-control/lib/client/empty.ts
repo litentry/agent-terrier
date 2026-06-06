@@ -2,10 +2,14 @@ import type {
   AgentKeysClient,
   AnchorStatus,
   CapToken,
+  ConfigPresetList,
   ConnectionStatus,
+  CredCategorization,
+  CredService,
   DisconnectedStatus,
   EmailVerifyStart,
   EmailVerifyStatus,
+  InitConfigResult,
   K11EnrollBegin,
   K11EnrollFinishInput,
   K11EnrollResult,
@@ -13,8 +17,10 @@ import type {
   MemoryCategory,
   OnboardingState,
   PlantResult,
+  ProposedScope,
   Result,
   RevokeIntent,
+  SurfaceItem,
 } from './types';
 import type { Actor, AuditEvent, Namespace, ScopeBits, Worker } from '@/app/_components/types';
 
@@ -119,6 +125,34 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async plantMemory(_entries: MasterMemoryEntry[]): Promise<Result<PlantResult>> {
+    return disconnected();
+  }
+
+  async listConfigPresets(): Promise<Result<ConfigPresetList>> {
+    return disconnected();
+  }
+
+  async initConfigDefault(_presetId: string): Promise<Result<InitConfigResult>> {
+    return disconnected();
+  }
+
+  async classifyEntity(_dataClass: string, _entity: string): Promise<Result<CredCategorization>> {
+    return disconnected();
+  }
+
+  async proposeScopes(_actorId: string, _surface: SurfaceItem[]): Promise<Result<ProposedScope[]>> {
+    return disconnected();
+  }
+
+  async grantScope(_actorId: string, _p: ProposedScope): Promise<Result<Actor>> {
+    return disconnected();
+  }
+
+  async listCredentials(): Promise<Result<CredService[]>> {
+    return disconnected();
+  }
+
+  async storeCredential(_service: string, _secret: string): Promise<Result<{ service: string; category: string }>> {
     return disconnected();
   }
 }
