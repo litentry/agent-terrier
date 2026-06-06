@@ -1,0 +1,14 @@
+{
+  "route": "/v1/master/memory/plant",
+  "entry_keys": [
+    "body",
+    "bytes",
+    "content_hash",
+    "key",
+    "ns",
+    "preview",
+    "title",
+    "updated",
+    "version"
+  ]
+}

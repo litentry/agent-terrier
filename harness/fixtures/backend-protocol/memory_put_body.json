@@ -1,0 +1,5 @@
+{
+  "cap": "<cap-token>",
+  "namespace": "<namespace>",
+  "plaintext_b64": "<base64-plaintext>"
+}
