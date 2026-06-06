@@ -12,8 +12,14 @@ agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
 agentkeys-cli = { path = "../agentkeys-cli" } # K11 webauthn helpers (companion mode)
 agentkeys-mcp = { path = "../agentkeys-mcp" }
-# W3 real-memory: shared STS relay primitive (fetch_via_broker_default_ttl) for
-# the master-memory cap-mint -> mint-oidc-jwt -> AssumeRoleWithWebIdentity chain.
+# W3 real-memory + #201 config: the ONE shared broker/worker client (issue #203)
+# — cap-mint (incl. the config-store/fetch endpoints) + the worker body types, so
+# the daemon's cap-mint + worker bodies can't drift from the agent path.
+agentkeys-backend-client = { workspace = true }
+# The shared STS relay primitive (mint-oidc-jwt -> AssumeRoleWithWebIdentity). The
+# per-namespace memory + config plant paths (#201) mint creds once and reuse them
+# across the worker POSTs, so they call this directly rather than through the
+# client's per-call sts_headers.
 agentkeys-provisioner = { path = "../agentkeys-provisioner" }
 hex = "0.4"
 sha2 = "0.10" # ui-bridge master-memory content-hash dedup (§2 plant)
