@@ -47,3 +47,62 @@ Remove it any time with `agentkeys wire <runtime> --unwire`.
 > `hermes config set model.default …` strips the sentinel comment lines while
 > keeping the hooks data. `agentkeys wire` detects a de-sentineled block and
 > re-wraps it on the next run, so re-running wire is always safe.
+
+## Setting up your categories (parent-control)
+
+Onboarding ends with a **"Set up your categories"** step (right after you bind
+your passkey): pick a starting profile and your taxonomy is authored before you
+connect any agent. You can **skip** it there and do it later — the **memory** page
+offers the same setup whenever your taxonomy is empty. Either way you author your
+**category taxonomy** — the vocabulary agentKeys uses to scope everything an agent
+can touch: the **memory** it reads (`memory:<namespace>`), the **credentials** it
+uses, and more data classes (payments, …) as you add them. It seeds your memory
+categories now; credentials are auto-categorized into the same taxonomy when you
+connect an agent. You author it in one of two ways:
+
+> **If init fails with a config-worker error** (e.g. `taxonomy authoring failed —
+> the Config data class must be healthy … s3 GetObject: AccessDenied`): the
+> encrypted, master-only `Config` store isn't healthy, so **nothing was written** —
+> AgentKeys authors real durable data or fails loudly; it never keeps a silent
+> in-memory stand-in. Fix the real cause the error names: provision `$CONFIG_BUCKET`
+> + the config role (`setup-cloud.sh`), deploy/repair the config worker
+> (`setup-broker-host.sh --ref main`), and check the role's S3 Get/Put/List on
+> `bots/<actor>/config/*` and the region — then re-initialize. (A dev daemon
+> started WITHOUT `--config-url` authors in-memory only, clearly labelled "dev
+> only" — that is the one non-durable path, and it exists only when you opt out of
+> a config worker entirely.)
+
+- **A · Start from a profile** — pick one of ~10 role presets (the default is a
+  rich *adult-household* profile: kids, business, smart-home, finance, family,
+  health, travel, personal), preview its categories, and click **initialize
+  categories**. This authors your taxonomy in one step. You can re-run it or
+  switch presets later — it **merges**, so it never drops categories you already
+  have.
+- **B · Describe in your own words** — a natural-language box that compiles a
+  sentence into a taxonomy. This is shown as **coming soon**; it lands in a later
+  release.
+
+> Initializing categories writes only the **category index** (which namespaces
+> exist), not any memory contents and not agent permissions — so it needs no
+> passkey (K11) confirmation. It is **master-only**: the agents a policy governs
+> can't read or change it.
+
+The **plant prepared demo archive** button below is a **test/demo seed** — it
+imports a small fixed set of example memories (a trip, a profile) so the page has
+data to show. It is idempotent (re-planting is a no-op) and is not the production
+path; planting also only adds namespaces to your taxonomy, never removing the
+ones a preset authored. (Nothing is planted automatically — onboarding only
+authors the category index; memory entries appear only when **you** plant them.)
+
+## Credentials (parent-control)
+
+The **credentials** page is the same data-class abstraction as memory: it lists
+the credentials you've vaulted, **categorized by the shared catalog** (`stripe →
+payments`, `openrouter → ai-services`), with sensitive categories (payments,
+access-control, health, …) flagged — exactly like memory namespaces are grouped
+by category. Each is stored encrypted (AES-256-GCM, K3 KEK) at
+`bots/<you>/credentials/<service>.enc` through the real chain (cap-mint → STS →
+cred worker → S3); the secret is **decrypt-on-read and never shown** in the UI. An
+agent can fetch a credential only with a granted `cred:<service>` scope. **Vault a
+credential** with the form on that page (service id + secret). Listing is
+**master-only** — an agent's single-service cap can't enumerate your vault.

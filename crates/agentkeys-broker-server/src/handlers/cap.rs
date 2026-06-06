@@ -46,6 +46,12 @@ pub enum CapOp {
     Store,
     Fetch,
     Teardown,
+    /// Compute-gate op for the classifier-service worker (#178 §15.6, #207
+    /// items 2-3): a COMPILE or TAG call, NOT an S3 touch. `/v1/cap/classify`
+    /// mints this; storage workers reject it via `check_op`. `as_u8` = 3 is a
+    /// fresh code — the classifier audits via the tier-1 audit worker, NOT the
+    /// on-chain `CredentialAudit.OP_*` path, so no chain-enum change is needed.
+    Classify,
 }
 
 impl CapOp {
@@ -54,6 +60,7 @@ impl CapOp {
             CapOp::Store => 0,
             CapOp::Fetch => 1,
             CapOp::Teardown => 2,
+            CapOp::Classify => 3,
         }
     }
 }
@@ -236,6 +243,44 @@ pub async fn cap_config_fetch(
     Json(req): Json<CapRequest>,
 ) -> Result<Json<CapToken>, CapError> {
     mint_cap(state, headers, req, CapOp::Fetch, DataClass::Config)
+        .await
+        .map(Json)
+}
+
+/// Classifier-service cap-mint (#178 §15.6, #207 items 2-3). Unlike the storage
+/// endpoints — where the route fixes the data class — a classify cap spans data
+/// classes (you classify memory content, a credential service, a config entity),
+/// so `data_class` is an explicit SIGNED field of the request. The minted cap
+/// carries `{ op: Classify, data_class }`; the classifier worker rejects a cap
+/// whose `data_class` doesn't match the surface being classified (a Memory-classify
+/// cap can't TAG a credential), and the storage workers reject `op: Classify`.
+#[derive(Debug, Deserialize)]
+pub struct CapClassifyRequest {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub service: String,
+    pub device_key_hash: String,
+    #[serde(default = "default_ttl_seconds")]
+    pub ttl_seconds: u64,
+    /// The data class this classify cap authorizes (`memory` / `credentials` /
+    /// `config`). Signed into the payload; the worker binds on it.
+    pub data_class: DataClass,
+}
+
+pub async fn cap_classify(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapClassifyRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    let data_class = req.data_class;
+    let cap_req = CapRequest {
+        operator_omni: req.operator_omni,
+        actor_omni: req.actor_omni,
+        service: req.service,
+        device_key_hash: req.device_key_hash,
+        ttl_seconds: req.ttl_seconds,
+    };
+    mint_cap(state, headers, cap_req, CapOp::Classify, data_class)
         .await
         .map(Json)
 }
@@ -663,6 +708,10 @@ mod tests {
             serde_json::to_string(&CapOp::Teardown).unwrap(),
             "\"teardown\""
         );
+        assert_eq!(
+            serde_json::to_string(&CapOp::Classify).unwrap(),
+            "\"classify\""
+        );
     }
 
     #[test]
@@ -670,6 +719,23 @@ mod tests {
         assert_eq!(CapOp::Store.as_u8(), 0);
         assert_eq!(CapOp::Fetch.as_u8(), 1);
         assert_eq!(CapOp::Teardown.as_u8(), 2);
+        assert_eq!(CapOp::Classify.as_u8(), 3);
+    }
+
+    #[test]
+    fn cap_classify_request_carries_data_class() {
+        // The classify endpoint takes data_class in the body (it spans data
+        // classes), unlike the storage endpoints where the route fixes it.
+        let req: CapClassifyRequest = serde_json::from_value(serde_json::json!({
+            "operator_omni": format!("0x{}", "a".repeat(64)),
+            "actor_omni": format!("0x{}", "a".repeat(64)),
+            "service": "classify:memory",
+            "device_key_hash": format!("0x{}", "c".repeat(64)),
+            "data_class": "memory",
+        }))
+        .unwrap();
+        assert_eq!(req.data_class, DataClass::Memory);
+        assert_eq!(req.ttl_seconds, 300); // default
     }
 
     #[test]

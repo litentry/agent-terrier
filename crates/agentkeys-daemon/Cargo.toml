@@ -21,6 +21,7 @@ agentkeys-backend-client = { workspace = true }
 # across the worker POSTs, so they call this directly rather than through the
 # client's per-call sts_headers.
 agentkeys-provisioner = { path = "../agentkeys-provisioner" }
+agentkeys-catalog = { path = "../agentkeys-catalog" } # #207 shared category catalog (deterministic tier-0 for cred-categorize + auto-distribute)
 hex = "0.4"
 sha2 = "0.10" # ui-bridge master-memory content-hash dedup (§2 plant)
 tokio = { workspace = true }

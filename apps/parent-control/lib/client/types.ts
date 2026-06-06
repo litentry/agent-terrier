@@ -97,6 +97,85 @@ export interface MemoryCategory {
   label: string;
 }
 
+/** A bundled default taxonomy preset (#207 item 1A, config-init entry point A).
+ *  `categories` is the authored category tree the preset writes — the namespaces
+ *  become the memory data class's category axis (`memory:<ns>`). These are
+ *  shared bundled defaults (catalog ≠ policy: categories, never grants). */
+export interface ConfigPreset {
+  id: string;
+  label: string;
+  description: string;
+  categories: MemoryCategory[];
+}
+
+export interface ConfigPresetList {
+  /** The shipped default preset id (the rich adult-household profile). */
+  defaultId: string;
+  presets: ConfigPreset[];
+}
+
+export interface InitConfigResult {
+  /** The preset actually authored (the resolved default for an empty id). */
+  presetId: string;
+  /** `"ok"` (durable Config written) or `"cached"` (Config unconfigured —
+   *  authored into the daemon's in-memory mirror only, dev/no-infra). */
+  taxonomyStatus: string;
+  /** The merged category set now in effect (authored ∪ any pre-existing). */
+  categories: MemoryCategory[];
+}
+
+export type Sensitivity = 'safe' | 'sensitive';
+
+/** The classifier's TAG output (#207 items 5/7). The `sensitivity` is the
+ *  CATALOG's floor — never a vendor/telemetry prior (§3 invariant 2). An unknown
+ *  entity is `category: "unknown"`, `sensitive`, confidence 0 (deny-by-default). */
+export interface Classification {
+  category: string;
+  sensitivity: Sensitivity;
+  confidence: number;
+  source: string;
+}
+
+/** A credential categorization (#207 item 7). `service` is the `cred:<id>` /
+ *  service string a scope grant would be over; `audited` is true when the cap-gated
+ *  worker path ran (vs the local catalog tier-0). */
+export interface CredCategorization {
+  dataClass: string;
+  entity: string;
+  service: string;
+  classification: Classification;
+  audited: boolean;
+}
+
+/** A proposed scope from connect-time auto-distribution (#207 item 5). `gating`
+ *  is the sensitivity tier: `auto` (Safe → auto-confirm + daily review) or `k11`
+ *  (Sensitive → explicit per-grant K11 confirm). PROPOSED only — never granted
+ *  until the master confirms via the K11-gated scope path. */
+export interface ProposedScope {
+  dataClass: string;
+  entity: string;
+  service: string;
+  category: string;
+  sensitivity: Sensitivity;
+  gating: 'auto' | 'k11';
+  confidence: number;
+}
+
+/** One item of an agent's surface to classify: a cred service or a memory ns. */
+export interface SurfaceItem {
+  dataClass: string;
+  entity: string;
+}
+
+/** A stored master credential, categorized via the catalog — the cred parallel to
+ *  a memory category (#207). Credentials are a first-class data class in the app,
+ *  same list-then-categorize abstraction as memory. */
+export interface CredService {
+  service: string;
+  category: string;
+  sensitivity: Sensitivity;
+}
+
 export interface EmailVerifyStart {
   requestId: string;
 }
@@ -155,4 +234,30 @@ export interface AgentKeysClient {
   listMemoryCategories(): Promise<Result<MemoryCategory[]>>;
   getMemoryEntries(ns: string, key?: string): Promise<Result<MasterMemoryEntry[]>>;
   plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>>;
+
+  // §1A onboarding — config-init entry point A (default-preset bootstrap, #207
+  // item 1A). `listConfigPresets` returns the bundled default taxonomies + the
+  // shipped default id; `initConfigDefault` AUTHORS the master-only memory-types
+  // taxonomy from the chosen preset (master-self, no K11 — it writes the category
+  // INDEX, not scope grants). Entry point B (NL → COMPILE) is #207 item 1B,
+  // deferred.
+  listConfigPresets(): Promise<Result<ConfigPresetList>>;
+  initConfigDefault(presetId: string): Promise<Result<InitConfigResult>>;
+
+  // §classifier (#207 items 5/7). `classifyEntity` categorizes one entity (cred
+  // auto-categorize, item 7); `proposeScopes` classifies an agent's surface and
+  // returns sensitivity-tiered PROPOSED scopes (connect-time auto-distribute,
+  // item 5). Neither writes scope — granting stays on the K11-gated path.
+  classifyEntity(dataClass: string, entity: string): Promise<Result<CredCategorization>>;
+  proposeScopes(actorId: string, surface: SurfaceItem[]): Promise<Result<ProposedScope[]>>;
+  // Record a CONFIRMED auto-distribute grant (#207 items 5/7/8). Persists the
+  // memory-namespace / cred-service grant in actor state + audits; returns the
+  // updated actor. Reached ONLY after the master confirms (sensitive ⇒ K11).
+  grantScope(actorId: string, p: ProposedScope): Promise<Result<Actor>>;
+
+  // §credentials data class (#207). The SAME abstraction as memory: list the
+  // master's stored credential services (categorized via the catalog) and vault
+  // a new one. Real durable data — no in-memory stand-in.
+  listCredentials(): Promise<Result<CredService[]>>;
+  storeCredential(service: string, secret: string): Promise<Result<{ service: string; category: string }>>;
 }

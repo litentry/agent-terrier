@@ -32,6 +32,11 @@ pub enum CapOp {
     Store,
     Fetch,
     Teardown,
+    /// Compute-gate op for the classifier-service worker (#178 §15.6, #207
+    /// items 2-3). Authorizes a COMPILE (NL → policy) or TAG (entity →
+    /// category) call — NOT an S3 touch. The storage workers reject a
+    /// Classify cap via `check_op`; the classify worker accepts only this op.
+    Classify,
 }
 
 /// Data class the cap-token is bound to. Each worker MUST verify

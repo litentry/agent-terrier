@@ -96,6 +96,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-catalog"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "p256 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "agentkeys-cli"
 version = "0.1.0"
 dependencies = [
@@ -170,6 +182,7 @@ name = "agentkeys-daemon"
 version = "0.1.0"
 dependencies = [
  "agentkeys-backend-client",
+ "agentkeys-catalog",
  "agentkeys-cli",
  "agentkeys-core",
  "agentkeys-mcp",
@@ -365,6 +378,24 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "agentkeys-worker-classify"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-catalog",
+ "agentkeys-worker-creds",
+ "anyhow",
+ "axum",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

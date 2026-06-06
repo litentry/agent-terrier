@@ -64,6 +64,9 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/cap/config-fetch",
             post(handlers::cap::cap_config_fetch),
         )
+        // Classifier-service compute-gate cap (#178 §15.6, #207 items 2-3).
+        // op=Classify; data_class comes from the request body (spans data classes).
+        .route("/v1/cap/classify", post(handlers::cap::cap_classify))
         // Stage 7 §3.5 — pluggable auth surface.
         .route(
             "/v1/auth/wallet/start",

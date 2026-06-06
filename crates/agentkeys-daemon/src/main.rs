@@ -13,6 +13,7 @@ use tracing::info;
 mod companion;
 mod hardening;
 mod pairing;
+mod presets;
 mod proxy;
 mod session;
 mod ui_bridge;
@@ -236,6 +237,13 @@ struct Args {
     /// taxonomy chain; a partial config fails loud (issue #90 discipline).
     #[arg(long, env = "CONFIG_ROLE_ARN")]
     config_role_arn: Option<String>,
+
+    /// #207 classifier-service: the classify worker base URL (e.g. https://classify.litentry.org).
+    /// Set ⇒ classification (cred auto-categorize #207 item 7, connect-time auto-distribute
+    /// item 5) runs the cap-gated, audited worker TAG path. Unset ⇒ the daemon classifies
+    /// against the bundled `agentkeys-catalog` tier-0 locally (deterministic, dev/no-infra).
+    #[arg(long, env = "AGENTKEYS_WORKER_CLASSIFY_URL")]
+    classify_url: Option<String>,
 
     /// W3 real-memory: AWS region for the STS relay.
     #[arg(long, env = "REGION", default_value = "us-east-1")]
@@ -1140,6 +1148,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.memory_role_arn.clone(),
         args.config_url.clone(),
         args.config_role_arn.clone(),
+        args.classify_url.clone(),
         args.region.clone(),
         args.master_device_key_hash.clone(),
         args.register_master_script.clone(),
