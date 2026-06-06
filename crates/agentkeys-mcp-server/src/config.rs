@@ -28,10 +28,12 @@ pub struct Cli {
     #[arg(long, env = "MCP_ENDPOINT")]
     pub mcp_endpoint: Option<String>,
 
-    /// Backend mode: `http` (default — talks to real broker + workers via
-    /// `--broker-url` / `--memory-url` / `--audit-url`) or `in-memory`
-    /// (seeded with the three-act demo fixture; no external services
-    /// needed; for the fresh-laptop dev demo).
+    /// Backend mode. Only `http` is supported — the MCP server always talks to
+    /// the real broker + workers via `--broker-url` / `--memory-url` /
+    /// `--audit-url` (cap-mint → per-actor STS → worker → S3). The in-memory
+    /// fixture backend was removed (real-data-only): there is no fake/seeded
+    /// stand-in. The flag is retained so existing `--backend http` invocations
+    /// keep working; any other value is rejected.
     #[arg(long, env = "MCP_BACKEND", default_value = "http")]
     pub backend: String,
 
@@ -67,7 +69,8 @@ pub struct Cli {
     /// Ambient actor omni — used when the LLM-side `tools/call` doesn't
     /// supply an `actor`. In xiaozhi-hosted mode there's one agent per
     /// MCP server, so the LLM shouldn't need to know its own actor id.
-    /// Defaults to the demo actor when --backend=in-memory.
+    /// Operator-supplied (no default — the in-memory demo-actor seeding was
+    /// removed); `None` means the LLM must pass `actor` per call.
     #[arg(long, env = "MCP_DEFAULT_ACTOR")]
     pub default_actor: Option<String>,
 
@@ -146,10 +149,11 @@ pub enum Transport {
     McpEndpoint,
 }
 
+/// The MCP server has exactly one backend: the real HTTP chain (broker +
+/// workers). The in-memory fixture backend was removed (real-data-only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     Http,
-    InMemory,
 }
 
 impl Config {
@@ -171,8 +175,12 @@ impl Config {
 
         let backend = match cli.backend.as_str() {
             "http" => BackendKind::Http,
-            "in-memory" | "in_memory" => BackendKind::InMemory,
-            other => anyhow::bail!("unknown backend `{other}` (expected http|in-memory)"),
+            "in-memory" | "in_memory" => anyhow::bail!(
+                "the in-memory backend was removed (real-data-only). The MCP server \
+                 only supports `--backend http` — point it at a real broker + workers \
+                 via --broker-url / --memory-url / --audit-url."
+            ),
+            other => anyhow::bail!("unknown backend `{other}` (expected http)"),
         };
 
         let mut vendor_tokens = HashMap::new();
@@ -187,37 +195,12 @@ impl Config {
             vendor_tokens.insert(vendor.trim().to_string(), token.trim().to_string());
         }
 
-        // In-memory dev mode auto-seeds a default vendor token if the
-        // operator didn't supply one, so the runbook stays one-command.
-        if backend == BackendKind::InMemory && vendor_tokens.is_empty() {
-            vendor_tokens.insert("magiclick".into(), "demo-tok".into());
-        }
-
-        // In-memory dev mode also auto-seeds the demo identity so the
-        // LLM can call memory.get with just {"namespace": "travel"}.
-        // The DEMO_* constants come from backend/in_memory.rs and match
-        // what the three-act fixture seeds.
-        let (default_actor, default_operator_omni, default_device_key_hash) =
-            if backend == BackendKind::InMemory {
-                use crate::backend::in_memory::{DEMO_ACTOR, DEMO_DEVICE_KEY_HASH, DEMO_OPERATOR};
-                (
-                    Some(cli.default_actor.unwrap_or_else(|| DEMO_ACTOR.into())),
-                    Some(
-                        cli.default_operator_omni
-                            .unwrap_or_else(|| DEMO_OPERATOR.into()),
-                    ),
-                    Some(
-                        cli.default_device_key_hash
-                            .unwrap_or_else(|| DEMO_DEVICE_KEY_HASH.into()),
-                    ),
-                )
-            } else {
-                (
-                    cli.default_actor,
-                    cli.default_operator_omni,
-                    cli.default_device_key_hash,
-                )
-            };
+        // Real-data-only: the ambient identity is whatever the operator passes
+        // (or None — the LLM then supplies actor / operator / device per call).
+        // There is no seeded fixture identity anymore.
+        let default_actor = cli.default_actor;
+        let default_operator_omni = cli.default_operator_omni;
+        let default_device_key_hash = cli.default_device_key_hash;
 
         // Finding 2 (adversarial review): prefer the owner-only bearer FILE (the
         // in-sandbox daemon writes it 0600) over an inline bearer, so the JWT never

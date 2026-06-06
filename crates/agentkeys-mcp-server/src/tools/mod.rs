@@ -28,9 +28,9 @@ pub const TOOL_APPROVAL_REQUEST: &str = "agentkeys.approval.request";
 pub fn all_descriptors() -> Vec<ToolDescriptor> {
     // NOTE on schemas: `actor`, `operator_omni`, `device_key_hash` are
     // ambient identity fields the LLM has no way to fabricate. They're
-    // resolved server-side from MCP_DEFAULT_* env vars (auto-set to the
-    // demo fixture in --backend=in-memory mode). LLM-callable params
-    // (`namespace`, `content`, `scope`, etc.) stay in `required`.
+    // resolved server-side from MCP_DEFAULT_* env vars (operator-supplied;
+    // the former in-memory demo-fixture auto-seeding was removed). LLM-callable
+    // params (`namespace`, `content`, `scope`, etc.) stay in `required`.
     //
     // NOTE on descriptions: imperatives ("ALWAYS use this when …") +
     // bilingual EN/中 keywords trigger the xiaozhi cloud LLM's tool
