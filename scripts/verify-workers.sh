@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Verify the 4 co-located service workers are reachable end-to-end:
+# Verify the 5 co-located service workers are reachable end-to-end:
 # DNS resolves → TLS cert valid → /healthz returns 200.
 #
-# Runs from the OPERATOR WORKSTATION (laptop). Exits 0 only if all 4 are
+# Runs from the OPERATOR WORKSTATION (laptop). Exits 0 only if all 5 are
 # green; exits 1 with a diagnostic if any one fails.
 #
 # Usage:
@@ -39,6 +39,7 @@ WORKERS=(
   "email:${WORKER_EMAIL_HOST}:ok"
   "cred:${WORKER_CRED_HOST}:\"ok\":true"
   "memory:${WORKER_MEMORY_HOST}:\"ok\":true"
+  "config:${WORKER_CONFIG_HOST}:\"ok\":true"
 )
 
 for entry in "${WORKERS[@]}"; do
@@ -93,7 +94,7 @@ done
 
 echo
 if (( ERRORS == 0 )); then
-  ok "All 4 workers green (audit + email + cred + memory)"
+  ok "All 5 workers green (audit + email + cred + memory + config)"
   exit 0
 else
   fail "$ERRORS worker(s) failed — fix and re-run"

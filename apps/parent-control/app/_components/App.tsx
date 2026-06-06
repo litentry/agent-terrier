@@ -19,7 +19,7 @@ import { PairingPage } from './pairing';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
-import type { MasterMemoryEntry } from '@/lib/client/types';
+import type { MasterMemoryEntry, MemoryCategory } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
 
 type Page = 'actors' | 'detail' | 'memory' | 'pairing' | 'audit' | 'chain' | 'logo';
@@ -53,7 +53,11 @@ export function App() {
   const [onboarded, setOnboarded] = useState(false);
   const [identity, setIdentity] = useState<{ email?: string; omni?: string } | null>(null);
   const [maskEm, setMaskEm] = useState(true);
-  const [memories, setMemories] = useState<PreservedMemory[]>([]);
+  // #201 Phase 4: the list is CATEGORIES (from the durable taxonomy, no decrypt);
+  // per-namespace entries decrypt lazily into `entriesByNs` when a category opens
+  // ('loading' while in flight, the array once decrypted).
+  const [categories, setCategories] = useState<MemoryCategory[]>([]);
+  const [entriesByNs, setEntriesByNs] = useState<Record<string, PreservedMemory[] | 'loading'>>({});
   const [planting, setPlanting] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
@@ -80,17 +84,35 @@ export function App() {
 
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
 
-  // §2: list the master's real memory once onboarded. EmptyBackend returns
-  // disconnected → stays empty → the memory page renders its empty state.
+  // §2: list the master's memory CATEGORIES once onboarded (from the durable
+  // taxonomy, no decrypt). EmptyBackend returns disconnected → stays empty → the
+  // memory page renders its empty state.
   useEffect(() => {
     if (!onboarded) return;
     let cancelled = false;
     (async () => {
-      const r = await client.listMasterMemory();
-      if (!cancelled && r.ok) setMemories(r.data.map(toPreserved));
+      const r = await client.listMemoryCategories();
+      if (cancelled) return;
+      if (r.ok) {
+        setCategories(r.data);
+      } else if (r.status.reason !== 'no-backend-configured') {
+        // #201 codex finding 2: a configured-but-broken Config 502s here instead
+        // of reporting an empty store — surface it rather than show a bare list.
+        showToast(`Memory categories unavailable — ${r.status.detail ?? 'config worker error'}.`);
+      }
     })();
     return () => { cancelled = true; };
   }, [onboarded, client]);
+
+  // §2 lazy detail: decrypt a namespace's entries only when its category opens.
+  // Idempotent — a second open while loaded/loading is a no-op.
+  const loadCategory = async (ns: string) => {
+    if (entriesByNs[ns]) return;
+    setEntriesByNs((prev) => ({ ...prev, [ns]: 'loading' }));
+    const r = await client.getMemoryEntries(ns);
+    setEntriesByNs((prev) => ({ ...prev, [ns]: r.ok ? r.data.map(toPreserved) : [] }));
+    if (!r.ok) showToast(`Couldn't load ${ns} — ${r.status.detail ?? 'reload the page'}.`);
+  };
 
   // Actor tree + recent audit history from the client seam. Real daemon data;
   // empty with EmptyBackend → the pages render their empty states.
@@ -146,7 +168,8 @@ export function App() {
     setIdentity(null);
     setActors([]);
     setEvents([]);
-    setMemories([]);
+    setCategories([]);
+    setEntriesByNs({});
     setPlanting(false);
     setPairingRequests([]);
     setPairingCeremony(null);
@@ -167,22 +190,24 @@ export function App() {
   // §2 plant: import the PREPARED archive through the real client seam
   // (daemon content-hash dedup). Gated in the UI to connected + empty.
   const plantMemory = () => {
-    if (memories.length > 0) return; // dedup guard — already planted
+    if (categories.length > 0) return; // dedup guard — already planted
     setPlanting(true);
   };
   const plantDone = async () => {
     setPlanting(false);
     const r = await client.plantMemory(PREPARED_MEMORY);
     if (r.ok) {
-      const listed = await client.listMasterMemory();
+      // #201 codex finding 2: the memory blobs are durable, but if the category
+      // index (taxonomy) write failed, say so — the categories would be stale.
+      const taxFailed = r.data.taxonomyStatus.startsWith('failed');
+      const listed = await client.listMemoryCategories();
       if (listed.ok) {
-        setMemories(listed.data.map(toPreserved));
-        // Show BOTH counts: the plant wrote to S3 + the daemon cache; the list reads
-        // the cache. If "N new" but "0 in view", the cache wasn't repopulated (e.g.
-        // daemon restarted) — the data is still safe in S3.
-        showToast(`Planted · ${r.data.planted} new, ${r.data.skipped} deduped · ${listed.data.length} in the memory view.`);
+        setCategories(listed.data);
+        setEntriesByNs({}); // drop the lazy cache so an opened category re-decrypts fresh
+        const base = `Planted · ${r.data.planted} new, ${r.data.skipped} deduped · ${listed.data.length} categories.`;
+        showToast(taxFailed ? `${base} ⚠ category index didn't update — re-plant to retry.` : base);
       } else {
-        showToast(`Planted ${r.data.planted} new, but the memory list didn't load — ${listed.status.detail ?? 'reload the page'}.`);
+        showToast(`Planted ${r.data.planted} new, but the category list didn't load — ${listed.status.detail ?? 'reload the page'}.`);
       }
     } else {
       // The plant button only renders when the daemon is connected, so a failure
@@ -338,7 +363,7 @@ export function App() {
           <span className="marker">[•]</span> actors<span className="count">{actors.length}</span>
         </button>
         <button className={`nav-item ${page === 'memory' ? 'active' : ''}`} onClick={() => go('memory')}>
-          <span className="marker">[◇]</span> memory<span className="count">{memories.length || '∅'}</span>
+          <span className="marker">[◇]</span> memory<span className="count">{categories.length || '∅'}</span>
         </button>
         <button className={`nav-item ${page === 'pairing' ? 'active' : ''}`} onClick={() => go('pairing')}>
           <span className="marker">[⇄]</span> pairing
@@ -390,7 +415,7 @@ export function App() {
           <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onRevoke={handleRevokeDevice} recentEvents={events} />
         )}
         {page === 'memory' && (
-          <MemoryPage memories={memories} status={status} planting={planting} onPlant={plantMemory} onPlantDone={plantDone} onView={setMemoryView} />
+          <MemoryPage categories={categories} entriesByNs={entriesByNs} status={status} planting={planting} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
         )}
         {page === 'pairing' && (
           <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} justPaired={justPaired} onManage={(id) => go('detail', id)} />

@@ -1,5 +1,5 @@
-//! Memory worker HTTP surface — mirrors credentials worker but at the
-//! `memory/` prefix per arch.md §15.2 + §17 per-data-class buckets.
+//! Config worker HTTP surface — mirrors memory worker but at the
+//! `config/` prefix per arch.md §17.2 per-data-class buckets (#201).
 
 use axum::{
     extract::State,
@@ -8,33 +8,33 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::state::SharedMemoryWorkerState;
+use crate::state::SharedConfigWorkerState;
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds};
 use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::{err_400, err_403, err_404, err_500, err_502, ApiError};
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
 
-pub fn build_router(state: SharedMemoryWorkerState) -> Router {
+pub fn build_router(state: SharedConfigWorkerState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/memory/put", post(memory_put))
-        .route("/v1/memory/get", post(memory_get))
-        .route("/v1/memory/teardown", post(memory_teardown))
+        .route("/v1/config/put", post(config_put))
+        .route("/v1/config/get", post(config_get))
+        .route("/v1/config/teardown", post(config_teardown))
         .with_state(state)
 }
 
 #[derive(Debug, Serialize)]
 pub struct HealthBody {
     pub ok: bool,
-    pub memory_bucket: String,
+    pub config_bucket: String,
     pub chain_profile: String,
     pub version: &'static str,
 }
 
-async fn healthz(State(state): State<SharedMemoryWorkerState>) -> Json<HealthBody> {
+async fn healthz(State(state): State<SharedConfigWorkerState>) -> Json<HealthBody> {
     Json(HealthBody {
         ok: true,
-        memory_bucket: state.config.memory_bucket.clone(),
+        config_bucket: state.config.config_bucket.clone(),
         chain_profile: state.config.chain_profile.clone(),
         version: env!("CARGO_PKG_VERSION"),
     })
@@ -75,8 +75,8 @@ pub struct TeardownResponse {
     pub keys_deleted: usize,
 }
 
-async fn memory_put(
-    State(state): State<SharedMemoryWorkerState>,
+async fn config_put(
+    State(state): State<SharedConfigWorkerState>,
     OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<PutRequest>,
 ) -> Result<Json<PutResponse>, ApiError> {
@@ -99,7 +99,7 @@ async fn memory_put(
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
     let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
     s3.put_object()
-        .bucket(&state.config.memory_bucket)
+        .bucket(&state.config.config_bucket)
         .key(&key)
         .body(env_bytes.clone().into())
         .send()
@@ -112,8 +112,8 @@ async fn memory_put(
     }))
 }
 
-async fn memory_get(
-    State(state): State<SharedMemoryWorkerState>,
+async fn config_get(
+    State(state): State<SharedConfigWorkerState>,
     OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<GetRequest>,
 ) -> Result<Json<GetResponse>, ApiError> {
@@ -123,18 +123,19 @@ async fn memory_get(
     let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
     let resp = s3
         .get_object()
-        .bucket(&state.config.memory_bucket)
+        .bucket(&state.config.config_bucket)
         .key(&key)
         .send()
         .await
         .map_err(|e| {
-            // #201 Phase 4: a missing object is 404 (not 502), so a caller can
-            // distinguish "namespace never written" from an S3/transport error.
+            // #201 Phase 4: a missing taxonomy/config object is 404 (not 502), so
+            // the daemon can distinguish "never written" (cache fallback OK) from
+            // a real config-worker failure (which must surface, not silently hide).
             if e.as_service_error()
                 .map(|se| se.is_no_such_key())
                 .unwrap_or(false)
             {
-                err_404("memory object not found", "s3_no_such_key")
+                err_404("config object not found", "s3_no_such_key")
             } else {
                 err_502(e.to_string(), "s3_get")
             }
@@ -162,8 +163,8 @@ async fn memory_get(
     }))
 }
 
-async fn memory_teardown(
-    State(state): State<SharedMemoryWorkerState>,
+async fn config_teardown(
+    State(state): State<SharedConfigWorkerState>,
     OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<TeardownRequest>,
 ) -> Result<Json<TeardownResponse>, ApiError> {
@@ -173,7 +174,7 @@ async fn memory_teardown(
     let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
     let list = s3
         .list_objects_v2()
-        .bucket(&state.config.memory_bucket)
+        .bucket(&state.config.config_bucket)
         .prefix(&prefix)
         .send()
         .await
@@ -187,7 +188,7 @@ async fn memory_teardown(
     for k in &keys {
         if s3
             .delete_object()
-            .bucket(&state.config.memory_bucket)
+            .bucket(&state.config.config_bucket)
             .key(k)
             .send()
             .await
@@ -203,17 +204,17 @@ async fn memory_teardown(
 }
 
 async fn verify_cap(
-    state: &SharedMemoryWorkerState,
+    state: &SharedConfigWorkerState,
     cap: &CapToken,
     expected_op: CapOp,
 ) -> Result<(), ApiError> {
     verify::verify_signature(&state.config.broker_pubkey_pem, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
     verify::check_op(cap, expected_op).map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
-    // Per-data-class isolation gate (issue #90 followup): a credentials-class
-    // cap MUST NOT be honoured at the memory worker. Symmetric with the cred
-    // worker's check, defended in both directions.
-    verify::check_data_class(cap, DataClass::Memory)
+    // Per-data-class isolation gate (issue #90 followup / #201): a memory- or
+    // credentials-class cap MUST NOT be honoured at the config worker. Symmetric
+    // with the cred + memory workers' checks, defended in all directions.
+    verify::check_data_class(cap, DataClass::Config)
         .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
     verify::check_freshness(cap).map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
     verify::check_chain_device(
@@ -224,6 +225,9 @@ async fn verify_cap(
     )
     .await
     .map_err(err_403_or_502)?;
+    // Config is master-only (operator == actor): check_chain_scope SKIPS the
+    // on-chain isServiceInScope when operator == actor (mirrors broker cap-mint
+    // + memory worker), so the master reaches only its own bots/<O_master>/config/.
     verify::check_chain_scope(
         &state.http,
         &state.config.chain_rpc_http,
@@ -254,12 +258,13 @@ fn err_403_or_502(e: verify::VerifyError) -> ApiError {
     }
 }
 
-/// S3 key prefix per arch.md §15.2: `bots/<actor_omni_hex>/memory/<service>.enc`.
-/// Distinct from creds worker's `credentials/` prefix; same bucket-relative
-/// shape so a single audit pass covers both data classes.
+/// S3 key per arch.md §17.2: `bots/<actor_omni_hex>/config/<service>.enc`.
+/// Distinct from the memory worker's `memory/` prefix; same bucket-relative
+/// shape so a single audit pass covers every data class. For config the actor
+/// is the master itself (operator == actor), so this is `bots/<O_master>/config/`.
 fn s3_key(actor_omni: &str, service: &str) -> String {
     format!(
-        "bots/{}/memory/{}.enc",
+        "bots/{}/config/{}.enc",
         actor_omni.trim_start_matches("0x").to_lowercase(),
         service.to_lowercase()
     )
@@ -267,7 +272,7 @@ fn s3_key(actor_omni: &str, service: &str) -> String {
 
 fn s3_prefix(actor_omni: &str) -> String {
     format!(
-        "bots/{}/memory/",
+        "bots/{}/config/",
         actor_omni.trim_start_matches("0x").to_lowercase()
     )
 }
@@ -277,34 +282,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn s3_key_uses_memory_prefix_not_credentials() {
-        // arch.md §17 separation: memory worker writes to bots/<actor>/memory/...,
-        // NOT bots/<actor>/credentials/... A drift here would collapse the
-        // per-data-class blast-radius.
+    fn s3_key_uses_config_prefix_not_memory_or_credentials() {
+        // arch.md §17.2 separation: config worker writes to bots/<actor>/config/...,
+        // NOT bots/<actor>/memory/... nor .../credentials/... A drift here would
+        // collapse the per-data-class blast-radius.
         assert_eq!(
-            s3_key("0xABCDEF", "chat-history"),
-            "bots/abcdef/memory/chat-history.enc"
+            s3_key("0xABCDEF", "memory-taxonomy"),
+            "bots/abcdef/config/memory-taxonomy.enc"
         );
+        assert!(!s3_key("0xabc", "x").contains("memory/"));
         assert!(!s3_key("0xabc", "x").contains("credentials"));
     }
 
     #[test]
-    fn s3_prefix_uses_memory_path() {
-        assert_eq!(s3_prefix("0xABCDEF"), "bots/abcdef/memory/");
+    fn s3_prefix_uses_config_path() {
+        assert_eq!(s3_prefix("0xABCDEF"), "bots/abcdef/config/");
     }
 
     #[test]
-    fn namespace_folded_service_segregates_storage() {
-        // Issue #147 (approach B): the MCP mints memory caps with
-        // service="memory:<namespace>". Because the worker keys S3 off the
-        // SIGNED service, two namespaces land at distinct keys — a
-        // `memory:travel` cap physically cannot read/write the
-        // `memory:personal` object. This is the namespace-isolation gate,
-        // enforced by construction (signed service ⇒ key + scope + AAD).
-        let travel = s3_key("0xabc", "memory:travel");
-        let personal = s3_key("0xabc", "memory:personal");
-        assert_ne!(travel, personal);
-        assert_eq!(travel, "bots/abc/memory/memory:travel.enc");
-        assert!(personal.contains("memory:personal"));
+    fn distinct_services_segregate_storage() {
+        // The taxonomy and any future config object land at distinct keys —
+        // a `memory-taxonomy` cap physically cannot read/write a
+        // `grant-policy` object (signed service ⇒ key + AAD).
+        let taxonomy = s3_key("0xabc", "memory-taxonomy");
+        let grants = s3_key("0xabc", "grant-policy");
+        assert_ne!(taxonomy, grants);
+        assert_eq!(taxonomy, "bots/abc/config/memory-taxonomy.enc");
+        assert!(grants.contains("grant-policy"));
     }
 }
