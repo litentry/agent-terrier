@@ -12,6 +12,8 @@ export function PairingPage({
   onAccept,
   onDecline,
   onRefresh,
+  onClaim,
+  claiming,
   justPaired,
   onManage,
 }: {
@@ -20,11 +22,22 @@ export function PairingPage({
   onAccept: (req: PairingRequest) => void;
   onDecline: (id: string) => void;
   onRefresh: () => void;
+  onClaim: (input: { code: string; label: string }) => void;
+  claiming: boolean;
   justPaired: string | null;
   onManage?: (id: string) => void;
 }) {
   const [view, setView] = useState<'devices' | 'permissions'>('devices');
+  const [claimCode, setClaimCode] = useState('');
+  const [claimLabel, setClaimLabel] = useState('');
   const pairedAgents = actors.filter((a) => a.role === 'agent');
+
+  const submitClaim = () => {
+    if (claimCode.trim() && claimLabel.trim()) {
+      onClaim({ code: claimCode.trim(), label: claimLabel.trim() });
+      setClaimCode('');
+    }
+  };
 
   return (
     <>
@@ -34,6 +47,30 @@ export function PairingPage({
         desc="An agent on another machine shows a one-time pairing code; you claim it here (J1_master-gated), review the device + requested scope, then approve with one Touch ID — which submits registerAgentDevice + the scope grant. Granted scope becomes on-chain cap-tokens."
         actions={<button className="btn" onClick={onRefresh}>↻ check for codes</button>}
       />
+
+      {/* #214 §10.2 P.1 — the master claims the agent's one-time pairing code
+          (typed here, or scanned from the device's runtime QR). This binds the
+          agent under the label + declares its scope; it then drops into the
+          rendezvous below awaiting on-chain register + scope approval. */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', padding: '10px 0 18px', borderBottom: '1px solid var(--rule)', marginBottom: 18 }}>
+        <span className="pair-k" style={{ marginRight: 4 }}>claim a code</span>
+        <input
+          placeholder="pairing code (shown on the agent device)"
+          value={claimCode}
+          onChange={(e) => setClaimCode(e.target.value)}
+          style={{ flex: '1 1 240px', padding: '8px 10px', fontSize: 12.5, fontFamily: 'var(--mono)', letterSpacing: '0.05em', border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)' }}
+        />
+        <input
+          placeholder="agent label (e.g. demo-agent)"
+          value={claimLabel}
+          onChange={(e) => setClaimLabel(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') submitClaim(); }}
+          style={{ flex: '1 1 160px', padding: '8px 10px', fontSize: 12.5, border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)' }}
+        />
+        <button className="btn primary" disabled={claiming || !claimCode.trim() || !claimLabel.trim()} onClick={submitClaim}>
+          {claiming ? 'claiming…' : '⊕ claim'}
+        </button>
+      </div>
 
       {requests.length > 0 ? (
         requests.map((req) => (

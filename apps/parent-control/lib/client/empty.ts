@@ -22,7 +22,7 @@ import type {
   RevokeIntent,
   SurfaceItem,
 } from './types';
-import type { Actor, AuditEvent, Namespace, ScopeBits, Worker } from '@/app/_components/types';
+import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
 
 const DISCONNECTED: DisconnectedStatus = {
   kind: 'disconnected',
@@ -153,6 +153,18 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async grantScope(_actorId: string, _p: ProposedScope): Promise<Result<Actor>> {
+    return disconnected();
+  }
+
+  async listPairingRequests(): Promise<Result<PairingRequest[]>> {
+    return disconnected();
+  }
+
+  async claimPairing(_input: { code: string; label: string; scope?: string }): Promise<Result<void>> {
+    return disconnected();
+  }
+
+  async registerPairing(_requestId: string): Promise<Result<void>> {
     return disconnected();
   }
 

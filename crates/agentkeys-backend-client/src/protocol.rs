@@ -173,6 +173,24 @@ pub struct ConfigGetResp {
     pub plaintext_b64: String,
 }
 
+// ── cred worker (`/v1/cred/fetch`) — #216 agent-side vaulted-key fetch ────────
+
+/// Cred-worker `/v1/cred/fetch` request body. Mirrors
+/// `agentkeys_worker_creds::handlers::FetchRequest` — just the signed cap; the
+/// credential `service` rides INSIDE the cap payload (it can't be spoofed at the
+/// body level). The worker S3-GETs `bots/<actor>/credentials/<service>.enc`,
+/// decrypts (K3 KEK), and returns the plaintext.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredFetchBody {
+    pub cap: CapToken,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CredFetchResp {
+    pub ok: bool,
+    pub plaintext_b64: String,
+}
+
 // ── audit worker (`/v1/audit/append/v2`) ────────────────────────────────────
 
 /// Audit envelope version, pinned to `agentkeys_core::audit::ENVELOPE_VERSION`.
@@ -229,6 +247,17 @@ pub struct MemoryGetResult {
     pub ok: bool,
     pub plaintext_b64: String,
     pub namespace: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredFetchInput {
+    pub cap: CapToken,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredFetchResult {
+    pub ok: bool,
+    pub plaintext_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

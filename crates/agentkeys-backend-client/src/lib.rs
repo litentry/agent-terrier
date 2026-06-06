@@ -19,6 +19,7 @@ pub use client::{BackendClient, BackendError};
 pub use protocol::{
     normalize_omni_0x, service_memory, AuditAppendInput, AuditAppendResult, AuditAppendV2,
     AuditAppendV2Resp, BrokerCapRequest, CapMintOp, CapMintRequest, CapToken, ConfigGetBody,
-    ConfigGetResp, ConfigPutBody, MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult,
-    MemoryPutBody, MemoryPutInput, MemoryPutResp, MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
+    ConfigGetResp, ConfigPutBody, CredFetchBody, CredFetchInput, CredFetchResp, CredFetchResult,
+    MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult, MemoryPutBody, MemoryPutInput,
+    MemoryPutResp, MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
 };

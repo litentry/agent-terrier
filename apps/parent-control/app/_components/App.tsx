@@ -72,6 +72,7 @@ export function App() {
   // #207 credentials data class — the master's vaulted credentials (categorized).
   const [credentials, setCredentials] = useState<CredService[]>([]);
   const [storingCred, setStoringCred] = useState(false);
+  const [claiming, setClaiming] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
   const [justPaired, setJustPaired] = useState<string | null>(null);
@@ -350,33 +351,65 @@ export function App() {
     }
   };
 
-  // ─── Pairing: accept → K11 → ceremony → bind ───────────────────
-  const acceptPairing = (req: PairingRequest) => {
-    setPendingAction({
-      kind: 'pair-accept',
-      req,
-      intent: {
-        text: `Pair agent · ${req.agent}`,
-        fields: [
-          ['new actor', `O_master${req.derivation}`],
-          ['device pubkey', req.dpub],
-          ['pair-code', req.pairCode],
-          ['grant', req.requested.map((p) => p.cap).join(' · ')],
-          ['mutation', 'SidecarRegistry.registerDevice + setScope'],
-        ],
-      },
-    });
+  // ─── Pairing: accept → register on chain (§10.2 P.2) ───────────────
+  // #214: the daemon submits registerAgentDevice for the binding + acks the broker.
+  // The agent's scope grant (Touch ID, P.3) is the next step via its actor detail.
+  const acceptPairing = async (req: PairingRequest) => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to approve a pairing.');
+      return;
+    }
+    showToast(`Registering ${req.agent} on chain…`);
+    const r = await client.registerPairing(req.id);
+    if (!r.ok) {
+      showToast('Register failed — check your master session + chain config.');
+      return;
+    }
+    showToast(`Registered ${req.agent} on chain. Grant its scope next (Touch ID).`);
+    await refreshPairing();
   };
   const declinePairing = (id: string) => {
     setPairingRequests((prev) => prev.filter((r) => r.id !== id));
     showToast('Pairing request declined.');
   };
-  const refreshPairing = () => {
+  // #214: poll the REAL broker rendezvous (daemon GET /v1/agent/pairing/pending)
+  // for agents the master has claimed that await on-chain approval. Replaces the
+  // former local-state mock.
+  const refreshPairing = async () => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to poll for agent pairing codes.');
+      return;
+    }
+    const r = await client.listPairingRequests();
+    if (!r.ok) {
+      showToast('Could not reach the daemon to poll agent pairings.');
+      return;
+    }
+    setPairingRequests(r.data);
     showToast(
-      status.kind === 'connected'
-        ? 'Polled rendezvous · no pending pairing codes.'
-        : 'Connect a daemon to poll for agent pairing codes.',
+      r.data.length > 0
+        ? `${r.data.length} agent${r.data.length > 1 ? 's' : ''} awaiting on-chain approval.`
+        : 'Polled rendezvous · no pending agent pairings.',
     );
+  };
+
+  // #214 §10.2 P.1 — claim the agent's pairing code via the daemon → broker; on
+  // success, re-poll so the claimed agent appears in the rendezvous (awaiting
+  // on-chain register + scope approval).
+  const claimPairing = async (input: { code: string; label: string }) => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to claim a pairing code.');
+      return;
+    }
+    setClaiming(true);
+    const r = await client.claimPairing(input);
+    setClaiming(false);
+    if (!r.ok) {
+      showToast('Claim failed — check the code + that your master session is active.');
+      return;
+    }
+    showToast(`Claimed ${input.label} — now awaiting your on-chain approval.`);
+    await refreshPairing();
   };
 
   const handleRevokeDevice = (actor: Actor) => {
@@ -563,7 +596,7 @@ export function App() {
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
         )}
         {page === 'pairing' && (
-          <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} justPaired={justPaired} onManage={(id) => go('detail', id)} />
+          <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
