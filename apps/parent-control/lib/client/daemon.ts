@@ -10,6 +10,7 @@ import type {
   K11EnrollFinishInput,
   K11EnrollResult,
   MasterMemoryEntry,
+  MemoryCategory,
   OnboardingState,
   PlantResult,
   Result,
@@ -314,14 +315,25 @@ export class DaemonBackend implements AgentKeysClient {
     }
   }
 
-  async listMasterMemory(): Promise<Result<MasterMemoryEntry[]>> {
-    const r = await this.getJson<{ entries: ApiMemoryEntry[] }>('/v1/master/memory');
+  async listMemoryCategories(): Promise<Result<MemoryCategory[]>> {
+    const r = await this.getJson<{ categories: ApiMemoryCategory[] }>('/v1/master/memory');
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.categories.map((c) => ({ ns: c.ns, label: c.label })) };
+  }
+
+  async getMemoryEntries(ns: string, key?: string): Promise<Result<MasterMemoryEntry[]>> {
+    const qs = key
+      ? `?ns=${encodeURIComponent(ns)}&key=${encodeURIComponent(key)}`
+      : `?ns=${encodeURIComponent(ns)}`;
+    const r = await this.getJson<{ ns: string; entries: ApiMemoryEntry[] }>(
+      `/v1/master/memory/entry${qs}`,
+    );
     if (!r.ok) return r;
     return { ok: true, data: r.data.entries.map(apiToMemoryEntry) };
   }
 
   async plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>> {
-    const r = await this.postJson<{ planted: number; skipped: number; total: number }>(
+    const r = await this.postJson<{ planted: number; skipped: number; total: number; taxonomy_status?: string }>(
       '/v1/master/memory/plant',
       {
         entries: entries.map((m) => ({
@@ -332,7 +344,15 @@ export class DaemonBackend implements AgentKeysClient {
       },
     );
     if (!r.ok) return r;
-    return { ok: true, data: { planted: r.data.planted, skipped: r.data.skipped, total: r.data.total } };
+    return {
+      ok: true,
+      data: {
+        planted: r.data.planted,
+        skipped: r.data.skipped,
+        total: r.data.total,
+        taxonomyStatus: r.data.taxonomy_status ?? 'ok',
+      },
+    };
   }
 }
 
@@ -466,6 +486,11 @@ interface ApiMemoryEntry {
   preview: string;
   body: string;
   content_hash?: string;
+}
+
+interface ApiMemoryCategory {
+  ns: string;
+  label: string;
 }
 
 function apiToMemoryEntry(m: ApiMemoryEntry): MasterMemoryEntry {

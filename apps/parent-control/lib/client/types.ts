@@ -83,6 +83,18 @@ export interface PlantResult {
   planted: number;
   skipped: number;
   total: number;
+  /** Durable category-index outcome (#201 codex finding 2): `"ok"`,
+   *  `"unconfigured"`, `"failed: <reason>"` (memory saved but the category index
+   *  is stale → retry), or `"skipped: <reason>"`. */
+  taxonomyStatus: string;
+}
+
+/** A memory CATEGORY from the durable, master-only Config taxonomy (#178 §7 /
+ *  #201). The list resolves these WITHOUT decrypting any memory blob; the
+ *  per-entry detail is fetched lazily via `getMemoryEntries(ns)`. */
+export interface MemoryCategory {
+  ns: string;
+  label: string;
 }
 
 export interface EmailVerifyStart {
@@ -134,9 +146,13 @@ export interface AgentKeysClient {
   getOnboardingState(): Promise<Result<OnboardingState>>;
   logout(): Promise<Result<void>>;
 
-  // §2 — master memory (real list + idempotent plant; server dedups by content-hash).
-  // Per namespace; an agent reads a namespace only with a `memory:<ns>` scope
-  // (memoryService(ns)), and the configured engine ranks what's injected (#177).
-  listMasterMemory(): Promise<Result<MasterMemoryEntry[]>>;
+  // §2 — master memory (#201 Phase 4). The LIST resolves CATEGORIES from the
+  // durable, master-only Config taxonomy (zero memory decryption, survives daemon
+  // restarts); per-namespace ENTRIES decrypt lazily ON DEMAND when a category is
+  // opened. PLANT is idempotent (server dedups by content-hash). An agent reads a
+  // namespace only with a `memory:<ns>` scope (memoryService(ns)), and the
+  // configured engine ranks what's injected (#177).
+  listMemoryCategories(): Promise<Result<MemoryCategory[]>>;
+  getMemoryEntries(ns: string, key?: string): Promise<Result<MasterMemoryEntry[]>>;
   plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>>;
 }

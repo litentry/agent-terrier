@@ -225,6 +225,18 @@ struct Args {
     #[arg(long, env = "MEMORY_ROLE_ARN")]
     memory_role_arn: Option<String>,
 
+    /// #201 config data class: the config worker base URL (e.g. https://config.litentry.org).
+    /// Unset ⇒ the master-memory list derives categories from the in-memory cache instead of
+    /// the durable, master-only Config-class taxonomy (config/memory-taxonomy.enc); dev/no-infra.
+    #[arg(long, env = "AGENTKEYS_WORKER_CONFIG_URL")]
+    config_url: Option<String>,
+
+    /// #201 config data class: per-actor config IAM role ARN for the STS relay (CONFIG_ROLE_ARN,
+    /// sourced from operator-workstation.env). Required alongside --config-url for the real
+    /// taxonomy chain; a partial config fails loud (issue #90 discipline).
+    #[arg(long, env = "CONFIG_ROLE_ARN")]
+    config_role_arn: Option<String>,
+
     /// W3 real-memory: AWS region for the STS relay.
     #[arg(long, env = "REGION", default_value = "us-east-1")]
     region: String,
@@ -1126,6 +1138,8 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.init_chain_id,
         args.memory_url.clone(),
         args.memory_role_arn.clone(),
+        args.config_url.clone(),
+        args.config_role_arn.clone(),
         args.region.clone(),
         args.master_device_key_hash.clone(),
         args.register_master_script.clone(),

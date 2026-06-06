@@ -63,6 +63,7 @@ flowchart LR
   subgraph STORE["Per-data-class S3 buckets"]
     S3V["$VAULT_BUCKET<br/>bots/&lt;actor_omni&gt;/credentials/"]
     S3M["$MEMORY_BUCKET<br/>bots/&lt;actor_omni&gt;/memory/"]
+    S3C["$CONFIG_BUCKET<br/>bots/&lt;operator_omni&gt;/config/ (master-only)"]
     S3A["$AUDIT_BUCKET<br/>bots/&lt;actor_omni&gt;/audit/"]
     S3E["$EMAIL_BUCKET<br/>bots/&lt;actor_omni&gt;/inbound|sent/"]
   end
@@ -214,7 +215,8 @@ Pinned to disambiguate the same value showing up under different labels across c
 | `cap-token` | The bearer issued by broker authorizing one specific operation (cred-fetch / cred-store / memory-read / audit-append / payment / etc.). Carries K10 sig + K11 assertion (for master mutations) + broker's K1 co-signature. | `cap`, `capability_token`, `op_cap`. |
 | `credential_kek` | 32-byte AES-256 key for one operator's credentials. Derived as `HKDF-SHA256(salt="agentkeys.kek-salt.v2", ikm=K3_v[epoch], info="agentkeys.user.v1" \|\| actor_omni)`. | `KEK`, `cred_kek`. |
 | `credential_envelope` | Wire format of one stored credential: `1B version (0x04) \|\| 1B k3_epoch \|\| 12B nonce \|\| ciphertext \|\| 16B tag`. Stored at `s3://$VAULT_BUCKET/bots/<actor_omni_hex>/credentials/<service>.enc`. AAD binds `(actor_omni, service)`. | `envelope`, `AEAD blob`, `<service>.enc` (S3 key suffix). |
-| `vault_bucket` / `memory_bucket` / `audit_bucket` / `email_bucket` / `payment_audit_bucket` | One S3 bucket per data class per §17. Per-actor prefix at `bots/<actor_omni_hex>/`. | `$VAULT_BUCKET`, `$MEMORY_BUCKET`, `$AUDIT_BUCKET`, `$EMAIL_BUCKET`, `$PAYMENT_AUDIT_BUCKET`. |
+| `vault_bucket` / `memory_bucket` / `config_bucket` / `audit_bucket` / `email_bucket` / `payment_audit_bucket` | One S3 bucket per data class per §17. Per-actor prefix at `bots/<actor_omni_hex>/` (config is per-operator + master-only, #201). | `$VAULT_BUCKET`, `$MEMORY_BUCKET`, `$CONFIG_BUCKET`, `$AUDIT_BUCKET`, `$EMAIL_BUCKET`, `$PAYMENT_AUDIT_BUCKET`. |
+| `policy` / `scope` / `namespace` / `category` / `service` (the authorization vocabulary) | **Distinct pipeline stages, NOT synonyms:** **policy** (human intent, off-chain, `DataClass::Config`) → COMPILE → **scope** (on-chain `(operator, actor, serviceHash)` grant, `AgentKeysScope` §19) over **categories/attributes** (the classifier's tag) → **service** (the signed cap string; for memory `service = memory:<ns>`, where **namespace** = the memory category). The unifying unit is the **policy attribute (category)** ([`research/universal-gate-pattern.md`](research/universal-gate-pattern.md) four primitives). Full table + pipeline: [`wiki/policy-scope-namespace.md`](wiki/policy-scope-namespace.md). | Confusions this resolves: "scope" used to mean "namespace" or "policy"; **"tag" = classifier *category*** (≠ the AWS **PrincipalTag** of §17 / [`wiki/tag-based-access.md`](wiki/tag-based-access.md)). |
 
 The most common confusion this table resolves: **`actor_omni` ≠ `current_master_wallet`**. The first is the immutable cryptographic anchor (Layer 1); the second is the rotation-volatile chain identity (Layer 2). Both are derived from K3, but only `actor_omni` survives K3 rotation unchanged. PrincipalTag, S3 paths, AAD, scope index — everywhere v2 keys identity off — uses `actor_omni`, never `current_master_wallet`.
 
@@ -1419,7 +1421,7 @@ Each worker's IAM role line is `Resource: arn:aws:s3:::${BUCKET}/<actor_omni_hex
 - Audit's append-only property has to be expressed by IAM action filtering inside the same role — fiddly.
 - Trust levels across data classes become uniform — no least-privilege gradient.
 
-Separate buckets → separate roles → independent policy surfaces. `agentkeys-vault-role`, `agentkeys-memory-role`, `agentkeys-audit-role`, `agentkeys-email-role`, `agentkeys-payment-role`. Each role's OIDC JWT is minted by the broker scoped to what the call actually needs.
+Separate buckets → separate roles → independent policy surfaces. `agentkeys-vault-role`, `agentkeys-memory-role`, `agentkeys-config-role` (#201), `agentkeys-audit-role`, `agentkeys-email-role`, `agentkeys-payment-role`. Each role's OIDC JWT is minted by the broker scoped to what the call actually needs.
 
 ### 17.3 Bucket layout
 
@@ -1430,12 +1432,12 @@ $AUDIT_BUCKET           bots/<actor_omni_hex>/audit/<batch>
 $EMAIL_BUCKET           bots/<actor_omni_hex>/inbound/<msg_id>
                         bots/<actor_omni_hex>/sent/<yyyymm>/<msg_id>
 $PAYMENT_AUDIT_BUCKET   bots/<actor_omni_hex>/payments/<yyyymm>/<idempotency_key>
-$CONFIG_BUCKET          bots/<operator_omni_hex>/config/policy.enc      (planned — see below)
+$CONFIG_BUCKET          bots/<operator_omni_hex>/config/<service>.enc   (#201 — first object: memory-taxonomy.enc; master-only, see below)
 ```
 
 AWS PrincipalTag `agentkeys_actor_omni = <actor_omni_hex>` scopes IAM access to a single actor's prefix across all five buckets.
 
-**Planned — `$CONFIG_BUCKET` (the permission/policy config data class).** The permission config (the natural-language policy specs, the category taxonomy, device/service→category labels, and the readable scope grants the classifier-service compiles) is **more** sensitive than individual data lines — it maps a whole household/business. It is stored as **just another gated, encrypted data class** (K3-KEK, own bucket + IAM role per §17.2), but keyed by the **operator** omni and **master-only**: the agent a policy governs holds **no cap** for it (access-control on the access-control). This is the off-chain half of the policy; the on-chain scope (§19 / `AgentKeysScope`) is the minimal enforcement half. Design: [`plan/classifier-service.md`](plan/classifier-service.md) §7. The on-chain `serviceHash` is currently `keccak256(service)` (unsalted, low-entropy → brute-forceable, so the chain leaks the grant set); a **salted commitment** (`keccak256(operator_salt ‖ service)`, K3-derived salt) is the planned privacy hardening — phase 3, not early.
+**Landed (substrate) — `$CONFIG_BUCKET` (the permission/policy config data class, #201).** The permission config (the natural-language policy specs, the category taxonomy, device/service→category labels, and the readable scope grants the classifier-service compiles) is **more** sensitive than individual data lines — it maps a whole household/business. It is stored as **just another gated, encrypted data class** (K3-KEK, own bucket + IAM role per §17.2): own `$CONFIG_BUCKET` at `bots/<operator_omni_hex>/config/<service>.enc`, own `agentkeys-config-role`, the `agentkeys-worker-config` crate (mirror of `agentkeys-worker-memory`, `config/` prefix, port 9096), and the `Config` cap data class (§17.5). Keyed by the **operator** omni and **master-only**: the agent a policy governs holds **no cap** for it (access-control on the access-control), so its cap-mint + worker scope checks ride the §10.2.x master-self skip (`operator == actor`) — no on-chain scope grant. The first config object is `config/memory-taxonomy.enc` (the memory types `[{ns, label}]`). This is the off-chain half of the policy; the on-chain scope (§19 / `AgentKeysScope`) is the minimal enforcement half. **Landed** (#201 Phases 4-5): the daemon (`ui_bridge.rs`, `--config-url` + `--config-role-arn` / env `AGENTKEYS_WORKER_CONFIG_URL` + `CONFIG_ROLE_ARN`) writes the taxonomy on plant via config-store and reads it via config-fetch to drive the web `GET /v1/master/memory` **category** list (zero memory decryption, cache fallback when the substrate is absent); per-namespace entries decrypt lazily via `GET /v1/master/memory/entry?ns=&key=`. The plant now writes **per-namespace JSON arrays** (`memory:<ns>.enc` = `[{key,title,body,updated,bytes}]`, fixing the lossy single-body overwrite) as a **read-modify-write merge** under a plant lock (durable blob ∪ request, content-hash deduped — durable entries are never dropped on a restart-stale cache or a concurrent plant), taxonomy written last (no drift). To make the merge safe, the memory + config workers now return **404** (not 502) on `NoSuchKey`, so the daemon tells "never written" from a real failure; `GET /v1/master/memory` **502s** on a configured-but-broken Config rather than masking it as empty, and `plant` returns a `taxonomy_status`. Agent-read parity: CLI `hook memory-inject` renders the array shape, single-body blobs still inject. Design: [`plan/web-flow/config-data-class-memory-list.md`](plan/web-flow/config-data-class-memory-list.md) + [`plan/classifier-service.md`](plan/classifier-service.md) §7. The on-chain `serviceHash` is currently `keccak256(service)` (unsalted, low-entropy → brute-forceable, so the chain leaks the grant set); a **salted commitment** (`keccak256(operator_salt ‖ service)`, K3-derived salt) is the planned privacy hardening — phase 3, not early.
 
 ### 17.4 Why `$<CLASS>_BUCKET` is a variable
 
@@ -1443,7 +1445,7 @@ S3 bucket names are **globally unique across AWS**. Each operator account picks 
 
 ### 17.5 Per-data-class cap-token binding (issue #90)
 
-The cap-token carries a signed `data_class: Credentials | Memory | Audit` field. The broker mints one cap endpoint per (data-class, op-type) pair:
+The cap-token carries a signed `data_class: Credentials | Memory | Config | Audit` field. The broker mints one cap endpoint per (data-class, op-type) pair:
 
 | Endpoint | Mints CapPayload |
 |---|---|
@@ -1451,6 +1453,8 @@ The cap-token carries a signed `data_class: Credentials | Memory | Audit` field.
 | `POST /v1/cap/cred-fetch` | `{ op: Fetch, data_class: Credentials, ... }` |
 | `POST /v1/cap/memory-put` | `{ op: Store, data_class: Memory, ... }` |
 | `POST /v1/cap/memory-get` | `{ op: Fetch, data_class: Memory, ... }` |
+| `POST /v1/cap/config-store` | `{ op: Store, data_class: Config, ... }` (#201, master-only) |
+| `POST /v1/cap/config-fetch` | `{ op: Fetch, data_class: Config, ... }` (#201, master-only) |
 | `POST /v1/cap/audit-append` | `{ op: Append, data_class: Audit, ... }` |
 
 Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 403 `cap_data_class_mismatch`. This is the cap-layer isolation gate — symmetric with the AWS IAM cross-bucket gate (§17.2) but enforced at the broker-signed capability layer, **before** the worker touches AWS at all.
@@ -1461,12 +1465,12 @@ Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 4
 |---|---|---|---|
 | 1. Broker cap-mint | session JWT's omni == request's operator_omni; device-binding; ROLE_CAP_MINT; service in scope | `handlers/cap.rs` | `harness/v2-stage3-demo.sh` step 13 |
 | 2. Worker chain-verify | independent re-check of broker_sig + device + scope + k3_epoch + **data_class** | `verify::check_*` | steps 11+12+14+15 |
-| 3. AWS IAM PrincipalTag | per-actor STS creds scope S3 ARN via `${aws:PrincipalTag/agentkeys_actor_omni}` + `s3:prefix` condition on ListBucket | role inline + v3 bucket policy | steps 4-9 |
-| 4. Per-data-class buckets | vault-role can't reach memory bucket; memory-role can't reach vault bucket | per-data-class IAM roles | step 10 |
+| 3. AWS IAM PrincipalTag | per-actor STS creds scope S3 ARN via `${aws:PrincipalTag/agentkeys_actor_omni}` + `s3:prefix` condition on ListBucket | role inline + v3 bucket policy | steps 4-9 (cred + memory); step 19 (config) |
+| 4. Per-data-class buckets | vault-role can't reach memory bucket; memory-role can't reach vault bucket; config-role can't reach either (#201) | per-data-class IAM roles | step 10 (cred ↔ memory); step 19 (config) |
 
 **Test discipline:** any PR adding a new data class (e.g., payments-audit) MUST extend the cap-token enum, add two new broker endpoints, and extend the stage-3 demo with negative isolation tests for all four layers. CLAUDE.md codifies this rule.
 
-**Planned data class — `Config`** (the permission/policy config, §17.3): adds `/v1/cap/config-get` + `/v1/cap/config-put` minting `{ op, data_class: Config, ... }`, **master-only** (the governed agents hold no `Config` cap). The same four-layer discipline applies. Plus a separate planned `CapOp::Classify` + `/v1/cap/classify` for the classifier-service worker. Design: [`plan/classifier-service.md`](plan/classifier-service.md).
+**Landed data class — `Config`** (the permission/policy config, §17.3; #201): the broker mints `/v1/cap/config-store` + `/v1/cap/config-fetch` → `{ op, data_class: Config, ... }`, the `agentkeys-worker-config` worker accepts only `DataClass::Config` (rejecting cred/memory caps with `cap_data_class_mismatch`, and symmetrically rejected by the cred/memory workers). **Master-only** (the governed agents hold no `Config` cap), so cap-mint + worker scope checks ride the §10.2.x master-self skip. Stage-3 negatives: step 20 (config cap → memory + cred workers) + step 21 (memory + cred cap → config worker), all master-self. Still a separate planned `CapOp::Classify` + `/v1/cap/classify` for the classifier-service worker. Design: [`plan/web-flow/config-data-class-memory-list.md`](plan/web-flow/config-data-class-memory-list.md) + [`plan/classifier-service.md`](plan/classifier-service.md).
 
 **Why route-per-class beats a single endpoint with a `data_class` parameter:** the broker statically derives the variant from the URL, so a programmer error in the cap-mint handler cannot produce a cap with the wrong class. A query-param would carry the variant through user input, expanding the attack surface for nothing.
 

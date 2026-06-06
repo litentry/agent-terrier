@@ -10,6 +10,7 @@ import type {
   K11EnrollFinishInput,
   K11EnrollResult,
   MasterMemoryEntry,
+  MemoryCategory,
   OnboardingState,
   PlantResult,
   Result,
@@ -109,7 +110,11 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async listMasterMemory(): Promise<Result<MasterMemoryEntry[]>> {
+  async listMemoryCategories(): Promise<Result<MemoryCategory[]>> {
+    return disconnected();
+  }
+
+  async getMemoryEntries(_ns: string, _key?: string): Promise<Result<MasterMemoryEntry[]>> {
     return disconnected();
   }
 

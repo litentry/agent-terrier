@@ -34,6 +34,21 @@ pub fn err_403(msg: impl Into<String>, reason: &'static str) -> ApiError {
     )
 }
 
+/// 404 — used by the data-class workers' GET handlers when the requested object
+/// does not exist (S3 `NoSuchKey`). Distinct from `err_502` so a CALLER (e.g.
+/// the daemon's read-modify-write plant, #201 Phase 4) can tell "never written"
+/// apart from a real S3/transport failure and NOT overwrite durable data on a
+/// transient error.
+pub fn err_404(msg: impl Into<String>, reason: &'static str) -> ApiError {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorBody {
+            error: msg.into(),
+            reason,
+        }),
+    )
+}
+
 pub fn err_500(msg: impl Into<String>, reason: &'static str) -> ApiError {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
