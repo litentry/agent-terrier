@@ -94,6 +94,22 @@ path; planting also only adds namespaces to your taxonomy, never removing the
 ones a preset authored. (Nothing is planted automatically — onboarding only
 authors the category index; memory entries appear only when **you** plant them.)
 
+## Staying signed in across app restarts
+
+Once you've onboarded, restarting the desktop app — or a developer rebuild that
+relaunches the daemon — keeps you signed in. Your master session is saved locally
+(your public account coordinates plus the short-lived session bearer — **never a
+private key**) at `~/.agentkeys/daemon-<wallet>/master-session.json`, owner-only
+(`0600`), and restored on launch, so the memory and credentials pages keep working
+with **no prompts**.
+
+If the session has expired since you last used it, you're asked for a **single**
+Touch ID re-authentication — not a full re-onboarding. Signing out (the logout
+button) clears the saved session so the next launch starts fresh; signing back in
+with the same email returns you to the same account. (You no longer need the
+`--master-device-key-hash` developer flag for the normal web loop — the device is
+recovered from your account automatically.)
+
 ## Credentials (parent-control)
 
 The **credentials** page is the same data-class abstraction as memory: it lists

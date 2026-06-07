@@ -169,6 +169,20 @@ Agent/daemon side: **always silent**, no biometric. Agents run unattended.
 
 See [issue #11](https://github.com/litentry/agentKeys/issues/11) for the biometric gate design.
 
+### Master session persistence + restart-resumability (desktop daemon, #220)
+
+The desktop **master** plane runs as a daemon (the ui-bridge the web app talks to). Because that plane is **event-driven, never always-on** (see [`arch.md` §22c.3 "Master control-plane host model"](../arch.md)), a daemon restart — a dev rebuild, or Ctrl-C + rerun — used to drop the in-memory session and force a full re-onboarding ceremony, even though nothing durable was lost: the K11 passkey, K10, and the on-chain `SidecarRegistry` device binding all survive a restart.
+
+To fix this, the daemon persists the master **session coordinates** — `operator_omni`, the on-chain `device_key_hash`, and the bearer (J1) while it is valid — to `~/.agentkeys/daemon-<wallet>/master-session.json` (mode `0600`), and rehydrates them on startup:
+
+- **Still-valid bearer → zero prompts.** The session restores silently and the web memory/credentials pages work immediately — no re-onboarding, and no `--master-device-key-hash` developer flag. The device hash is re-derived `keccak(operator_omni)`; the on-chain `SidecarRegistry` binding is the source of truth, so the file is a convenience cache, never an authority.
+- **Expired bearer → exactly one re-auth.** The coordinates still load and `GET /v1/onboarding/state` reports `session: "expired"`, so the host prompts a **single** passkey re-authentication (`passkey-as-identity`) instead of a full setup. (The daemon-side seam + the one-prompt signal land in #220; the broker `passkey-as-identity` auth verb that re-mints the bearer from a WebAuthn assertion is follow-up work — until it ships, the host re-auths via the existing email path.)
+- **Logout = real reset.** Signing out clears the persisted file; the same email re-verifies to the same omni, so nothing is lost.
+
+**No secret key material is persisted** — only the public coordinates plus the bearer the daemon already holds in memory. K10/K11 stay in the OS keychain / Secure Enclave (see [`key-security.md`](./key-security.md)). The WASM / native-lib hosts reuse the same `lib/client` contract with IndexedDB / Keychain in place of the file.
+
+Implementation: `crates/agentkeys-daemon/src/master_session.rs` + `ui_bridge::{rehydrate_master_session, persist_master_session}` (issue [#220](https://github.com/litentry/agentKeys/issues/220)).
+
 ---
 
 ## 6. Revocation
@@ -230,6 +244,8 @@ After revocation, the agent's session token is cryptographically valid (the RSA 
 │  (future: add refresh token flow for smoother UX)            │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> **Master desktop daemon (#220):** a daemon *restart* (distinct from bearer *expiry*) no longer drops the session — the master coordinates + the bearer, while still valid, rehydrate from `master-session.json` with zero prompts; an *expired* bearer triggers exactly **one** passkey re-auth, not a full re-onboarding. See §5 → "Master session persistence + restart-resumability".
 
 ---
 

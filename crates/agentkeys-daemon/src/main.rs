@@ -13,6 +13,7 @@ use tracing::info;
 mod audit_decode;
 mod companion;
 mod hardening;
+mod master_session;
 mod pairing;
 mod presets;
 mod proxy;
@@ -1153,6 +1154,9 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.region.clone(),
         args.master_device_key_hash.clone(),
         args.register_master_script.clone(),
+        // Issue #220: root master-session persistence at ~/.agentkeys (None when no
+        // $HOME resolves → persistence disabled, never a surprising relative path).
+        master_session::MasterSessionStore::from_home_env(),
     )
     .with_context(|| {
         format!(
@@ -1160,14 +1164,18 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
             args.ui_bridge_rp_id, args.ui_bridge_origin
         )
     })?;
-    // Harness web-parity seam (v2-demo phase 6): seed the onboarding session from
-    // --ui-bridge-seed-* so the parity phase drives the REAL plant chain with the
-    // harness's already-registered master, without re-running interactive
-    // onboarding/WebAuthn. Pair with --master-device-key-hash. No-op otherwise.
+    // Issue #220: the harness seed (--ui-bridge-seed-*) and on-disk rehydration are
+    // mutually EXCLUSIVE. An explicit seed is authoritative, so we must NOT also
+    // rehydrate a (possibly stale) on-disk session whose omni / registered device
+    // would shadow the seed's omni and corrupt cap-mint. Seed XOR rehydrate.
     if let (Some(j1), Some(omni)) = (
         args.ui_bridge_seed_session_jwt.clone(),
         args.ui_bridge_seed_omni.clone(),
     ) {
+        // Harness web-parity seam (v2-demo phase 6): seed the onboarding session so
+        // the parity phase drives the REAL plant chain with the harness's already-
+        // registered master, without interactive onboarding/WebAuthn. Pair with
+        // --master-device-key-hash. The seed is ephemeral (never persisted).
         let omni = if omni.starts_with("0x") {
             omni
         } else {
@@ -1177,8 +1185,16 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
             email: "harness-web-parity@local".to_string(),
             omni,
             j1,
+            wallet: String::new(),
         });
         info!("ui-bridge: SEEDED onboarding session (harness web-parity seam) — interactive onboarding bypassed");
+    } else {
+        // Normal path: rehydrate the master session from disk BEFORE serving. A
+        // still-valid J1 → zero-prompt restore (no re-onboarding, no
+        // --master-device-key-hash); an expired J1 → the coords load so
+        // /v1/onboarding/state reports session: "expired" and the web app prompts
+        // exactly one passkey re-auth.
+        ui_bridge::rehydrate_master_session(&state).await;
     }
     let app = ui_bridge::build_router(state, &args.ui_bridge_origin);
 
