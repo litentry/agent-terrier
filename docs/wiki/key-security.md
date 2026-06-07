@@ -61,6 +61,8 @@ However, a session token is still a **bearer credential** — anyone with the st
 
 The v0 code's dual-path structure (`session_store.rs`: try keychain first, fall back to file) is correct and should be preserved for v0.1 — just storing a session token string instead of a session JSON blob.
 
+> **Master desktop *web* plane (#220):** the daemon ui-bridge — the master plane the parent-control web app talks to — additionally persists the master **session coordinates** (`operator_omni` + the on-chain `device_key_hash` + the bearer while valid) to `~/.agentkeys/daemon-<wallet>/master-session.json` (mode `0600`, **file-based**, separate from the agent daemon's `session.json`) so a daemon restart resumes with zero prompts and an expired bearer needs only one passkey re-auth — not a full re-onboarding. No secret key material is in the file; K10/K11 stay in the keychain / Secure Enclave. Details: [`session-token.md` §5 "Master session persistence + restart-resumability"](./session-token.md) and [`arch.md` §22c.3](../arch.md).
+
 What the session token model **does** eliminate (compared to the private-key model):
 
 - The client cannot **forge new tokens** (RSA signing key is in the TEE)

@@ -210,6 +210,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sha3",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tower 0.4.13",
