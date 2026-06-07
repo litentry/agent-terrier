@@ -48,6 +48,8 @@ use webauthn_rs::prelude::*;
 
 use agentkeys_core::init_flow;
 
+use crate::master_session::{self, MasterSessionStore, PersistedMasterSession};
+
 /// In-flight registration state. Keyed by `user_id` (the random opaque
 /// handle the browser echoes back). Cleared once a finish call consumes
 /// the entry, or on next start (in-memory only).
@@ -156,6 +158,16 @@ pub struct UiBridgeState {
     /// chain-info + audit-decode endpoints serve to the web UI (#153). Resolved
     /// from `$AGENTKEYS_CHAIN` (default `heima`) at `build_state`.
     pub chain_profile: agentkeys_core::chain_profile::ChainProfile,
+    /// Issue #220: the on-disk master-session store rooted at `~/.agentkeys/`.
+    /// `Some` ⇒ the master session coordinates persist across daemon restarts and
+    /// rehydrate on startup; `None` ⇒ persistence disabled (tests, or no `$HOME`).
+    pub master_session_store: Option<MasterSessionStore>,
+    /// Issue #220: the durable master session coordinates, in memory. Mirrors what
+    /// was persisted (or rehydrated) — present whether or not the J1 is still valid
+    /// (an expired record drives the `session: "expired"` re-auth signal without
+    /// re-onboarding). Distinct from `onboarding_session`, which is set ONLY while
+    /// the J1 is live (the "actively logged in" signal).
+    pub master_session: RwLock<Option<PersistedMasterSession>>,
 }
 
 /// Issue #196: outcome of the on-chain master-device registration shell-out.
@@ -552,6 +564,11 @@ pub struct OnboardingSession {
     /// lands (next W-phase); held now so onboarding establishes the real session.
     #[allow(dead_code)]
     pub j1: String,
+    /// The master's managed-wallet address (`0x` + 40 hex) — the persistence key
+    /// for `~/.agentkeys/daemon-<wallet>/master-session.json` (issue #220). Empty
+    /// for identity-only sessions (managed-wallet attestation skipped); those are
+    /// not persisted, so the persistence path falls back to the omni.
+    pub wallet: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -569,6 +586,14 @@ pub struct OnboardingStateResponse {
     /// else "none". This is the last onboarding gate before the memory plant
     /// button works end-to-end (real cap-mint resolves the on-chain device).
     pub chain: String,
+    /// Issue #220: the durable-session signal that drives restart-resume in the
+    /// web `lib/client`:
+    ///   - "active"  → a still-valid J1 is held (rehydrated or fresh) — the
+    ///     memory/config pages work with ZERO prompts;
+    ///   - "expired" → master coords are persisted but the J1 lapsed — the web app
+    ///     should prompt exactly ONE passkey re-auth (NOT a re-onboarding);
+    ///   - "none"    → no persisted master session — full onboarding required.
+    pub session: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -683,6 +708,7 @@ pub fn build_state(
     region: String,
     master_device_key_hash: Option<String>,
     register_master_script: Option<String>,
+    master_session_store: Option<MasterSessionStore>,
 ) -> anyhow::Result<SharedUiBridgeState> {
     let origin = Url::parse(rp_origin)?;
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
@@ -740,6 +766,8 @@ pub fn build_state(
         registered_master: RwLock::new(None),
         register_master_script,
         chain_profile,
+        master_session_store,
+        master_session: RwLock::new(None),
     }))
 }
 
@@ -866,6 +894,7 @@ async fn auth_email_status(
                         email,
                         omni: init.evm_omni,
                         j1: init.session.token,
+                        wallet: init.session.wallet.0,
                     },
                     Err(e) => {
                         tracing::warn!(
@@ -875,6 +904,7 @@ async fn auth_email_status(
                             email,
                             omni: identity_omni,
                             j1: String::new(),
+                            wallet: String::new(),
                         }
                     }
                 },
@@ -882,10 +912,16 @@ async fn auth_email_status(
                     email,
                     omni: identity_omni,
                     j1: String::new(),
+                    wallet: String::new(),
                 },
             };
             let omni = held.omni.clone();
             *state.onboarding_session.write().await = Some(held);
+            // Issue #220: persist the master coords so a daemon restart with a
+            // still-valid J1 rehydrates with zero prompts (no re-onboarding).
+            // No-op for identity-only sessions (empty J1) or when persistence is
+            // disabled. Done before returning so the file exists immediately.
+            persist_master_session(&state).await;
             EmailStatusResponse {
                 status: "verified".into(),
                 omni_account: Some(omni),
@@ -905,7 +941,7 @@ async fn auth_email_status(
 async fn onboarding_state(
     State(state): State<SharedUiBridgeState>,
 ) -> Json<OnboardingStateResponse> {
-    let session = state.onboarding_session.read().await.clone();
+    let live_session = state.onboarding_session.read().await.clone();
     let k11 = if state.enroll.read().await.registered.is_empty() {
         "none"
     } else {
@@ -916,7 +952,22 @@ async fn onboarding_state(
     } else {
         "none"
     };
-    let (identity, email, omni) = match session {
+    // Issue #220 durable-session signal: a live, non-empty J1 ⇒ "active"; else
+    // persisted-but-lapsed coords ⇒ "expired" (drives one passkey re-auth); else
+    // "none" (full onboarding). The web `lib/client` reads this to decide whether
+    // a restart needs zero / one / a full ceremony.
+    let session = if live_session
+        .as_ref()
+        .map(|s| !s.j1.is_empty())
+        .unwrap_or(false)
+    {
+        "active"
+    } else if state.master_session.read().await.is_some() {
+        "expired"
+    } else {
+        "none"
+    };
+    let (identity, email, omni) = match live_session {
         Some(s) => ("verified".to_string(), Some(s.email), Some(s.omni)),
         None => ("none".to_string(), None, None),
     };
@@ -926,6 +977,7 @@ async fn onboarding_state(
         omni,
         k11: k11.to_string(),
         chain: chain.to_string(),
+        session: session.to_string(),
     })
 }
 
@@ -936,7 +988,116 @@ async fn onboarding_state(
 async fn logout(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
     *state.onboarding_session.write().await = None;
     state.pending_email.write().await.clear();
+    // Issue #220: a logout is a real reset — drop the persisted coords too so the
+    // next start doesn't silently rehydrate a logged-out session. The same email
+    // re-verifies to the same omni (arch.md §6 re-testability), so nothing durable
+    // is lost. The master plane is singular per machine, so clear_all is a full
+    // reset, not a cross-wallet wipe.
+    if let Some(store) = state.master_session_store.as_ref() {
+        if let Err(e) = store.clear_all() {
+            tracing::warn!("ui-bridge #220: failed to clear persisted master session: {e}");
+        }
+    }
+    *state.master_session.write().await = None;
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// Persist the current master session coordinates to
+/// `~/.agentkeys/daemon-<wallet>/master-session.json` and refresh the in-memory
+/// `master_session` mirror (issue #220). No-op when persistence is disabled
+/// (`master_session_store == None`, e.g. tests) or the session is identity-only
+/// (no J1/omni to resume). Best-effort: a disk error is logged, never fatal to
+/// the live in-memory session.
+async fn persist_master_session(state: &UiBridgeState) {
+    let Some(store) = state.master_session_store.as_ref() else {
+        return;
+    };
+    let Some(session) = state.onboarding_session.read().await.clone() else {
+        return;
+    };
+    if session.j1.is_empty() || session.omni.is_empty() {
+        return; // identity-only — nothing durable to resume
+    }
+    let omni = agentkeys_backend_client::normalize_omni_0x(&session.omni);
+    // device_key_hash: the registered one when K11-finish ran this session, else
+    // the deterministic keccak(operator_omni) — the on-chain SidecarRegistry key,
+    // so the persisted hash matches what cap-mint resolves with no cached register.
+    let device_key_hash = match state.registered_master.read().await.as_ref() {
+        Some(rm) => rm.device_key_hash.clone(),
+        None => match agentkeys_core::device_crypto::device_key_hash_from_omni(&omni) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("ui-bridge #220: cannot derive device hash to persist: {e}");
+                return;
+            }
+        },
+    };
+    let created_at_unix = master_session::now_unix();
+    let record = PersistedMasterSession {
+        schema: 1,
+        wallet: session.wallet.clone(),
+        email: session.email.clone(),
+        operator_omni: omni,
+        device_key_hash,
+        j1: session.j1.clone(),
+        created_at_unix,
+        j1_exp_unix: master_session::j1_expiry_for(&session.j1, created_at_unix),
+    };
+    if let Err(e) = store.save(&record) {
+        tracing::warn!("ui-bridge #220: failed to persist master session: {e}");
+        return;
+    }
+    *state.master_session.write().await = Some(record);
+    tracing::info!(
+        target: "agentkeys.daemon.ui_bridge",
+        "issue #220: master session persisted (restart-resumable; zero-prompt while J1 valid)"
+    );
+}
+
+/// Rehydrate the master session from disk at daemon startup (issue #220). Loads
+/// the most-recent persisted record and, when the J1 is still valid, repopulates
+/// `onboarding_session` + `registered_master` so the web memory/config pages work
+/// with ZERO prompts — no re-onboarding, no `--master-device-key-hash`. An expired
+/// J1 still loads the coords into `master_session` (so `/v1/onboarding/state`
+/// reports `session: "expired"` and the web app can prompt exactly one passkey
+/// re-auth) but leaves `onboarding_session` empty (the dead J1 isn't usable).
+/// No-op when persistence is disabled.
+pub async fn rehydrate_master_session(state: &UiBridgeState) {
+    let Some(store) = state.master_session_store.as_ref() else {
+        return;
+    };
+    let Some(record) = store.load_latest() else {
+        return;
+    };
+    let now = master_session::now_unix();
+    let valid = record.j1_valid_at(now);
+    if valid {
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: record.email.clone(),
+            omni: record.operator_omni.clone(),
+            j1: record.j1.clone(),
+            wallet: record.wallet.clone(),
+        });
+        // The device is on chain (SidecarRegistry) under this omni — record it so
+        // cap-mint resolves it directly and onboarding-state reports it registered.
+        *state.registered_master.write().await = Some(RegisteredMaster {
+            device_key_hash: record.device_key_hash.clone(),
+            operator_omni: record.operator_omni.clone(),
+            tx_hash: None,
+        });
+        tracing::info!(
+            target: "agentkeys.daemon.ui_bridge",
+            wallet = %record.wallet,
+            "issue #220: master session rehydrated from disk (valid J1) — zero-prompt restore"
+        );
+    } else {
+        tracing::info!(
+            target: "agentkeys.daemon.ui_bridge",
+            wallet = %record.wallet,
+            "issue #220: master session found on disk but J1 expired — one passkey re-auth restores it (no re-onboarding)"
+        );
+    }
+    *state.master_session.write().await = Some(record);
 }
 
 async fn enroll_begin(
@@ -1123,6 +1284,10 @@ async fn finish_chain_register(
             );
             let tx = rm.tx_hash.clone();
             *state.registered_master.write().await = Some(rm);
+            // Issue #220: K11-finish is the richest onboarding moment (omni + J1 +
+            // on-chain device hash all known) — persist so a restart resumes with
+            // the registered device, zero prompts.
+            persist_master_session(state).await;
             (tx, "master-registered".to_string(), None)
         }
         Err(e) => {
@@ -2305,35 +2470,55 @@ async fn resolve_session_coords(state: &UiBridgeState) -> Result<SessionCoords, 
         .broker_url
         .clone()
         .ok_or("real chain: worker URL set but --broker-url missing")?;
-    // Prefer the device hash from the K11-finish register shell-out (issue #196)
-    // — it's the device actually on chain under this session omni. Fall back to
-    // the --master-device-key-hash CLI flag (pre-registered device / tests).
-    let device_key_hash = match state.registered_master.read().await.as_ref() {
-        Some(rm) => rm.device_key_hash.clone(),
-        None => state.master_device_key_hash.clone().ok_or(
-            "real chain: master device not registered on chain yet (finish K11 \
-             enrollment to register) and no --master-device-key-hash fallback set",
-        )?,
+    // Resolve the live session FIRST so the error can distinguish three cases
+    // (issue #220 — the old "master device not registered on chain yet" string was
+    // MISLEADING: it meant "not in daemon memory", not "not on chain"):
+    //   - no live session but coords ARE persisted → the J1 expired; one passkey
+    //     re-auth restores it (NOT a full re-onboarding);
+    //   - no session and nothing persisted → genuinely not onboarded;
+    //   - session present but identity-only → managed-wallet attestation skipped.
+    let session = match state.onboarding_session.read().await.clone() {
+        Some(s) => s,
+        None => {
+            if state.master_session.read().await.is_some() {
+                return Err("real chain: master session expired — re-authenticate \
+                    (one passkey prompt) to restore it (no re-onboarding needed)"
+                    .into());
+            }
+            return Err("real chain: no local master session — complete onboarding first".into());
+        }
     };
-    let session = state
-        .onboarding_session
-        .read()
-        .await
-        .clone()
-        .ok_or("real chain: no master session — complete onboarding first")?;
     if session.omni.is_empty() || session.j1.is_empty() {
         return Err("real chain: master session is identity-only (no EVM omni/J1)".into());
     }
+    // The broker cap-mint input-validates that operator_omni/actor_omni start with
+    // 0x, but the onboarding session stores the omni bare. Normalize via the ONE
+    // shared normalizer (issue #203) so every worker call (memory + config) sends
+    // a 0x-prefixed omni and this can't drift from the cap-mint body the
+    // MCP/harness paths send (the broker normalize_hex32's it either way).
+    let omni = agentkeys_backend_client::normalize_omni_0x(&session.omni);
+    // device_key_hash resolution, in precedence order:
+    //   1. the K11-finish register result (issue #196) — the device actually on
+    //      chain under this session omni;
+    //   2. the --master-device-key-hash CLI flag (pre-registered device / tests);
+    //   3. derive keccak(operator_omni) — the deterministic SidecarRegistry key
+    //      (issue #220), so a restart needs neither a cached register nor the flag.
+    //      The on-chain binding is the source of truth; this reproduces its key.
+    let device_key_hash =
+        match state.registered_master.read().await.as_ref() {
+            Some(rm) => rm.device_key_hash.clone(),
+            None => match state.master_device_key_hash.clone() {
+                Some(h) => h,
+                None => agentkeys_core::device_crypto::device_key_hash_from_omni(&omni).map_err(
+                    |e| format!("real chain: cannot derive master device hash from omni: {e}"),
+                )?,
+            },
+        };
     Ok(SessionCoords {
         broker,
         region: state.region.clone(),
         j1: session.j1,
-        // The broker cap-mint input-validates that operator_omni/actor_omni start with
-        // 0x, but the onboarding session stores the omni bare. Normalize via the ONE
-        // shared normalizer (issue #203) so every worker call (memory + config) sends
-        // a 0x-prefixed omni and this can't drift from the cap-mint body the
-        // MCP/harness paths send (the broker normalize_hex32's it either way).
-        omni: agentkeys_backend_client::normalize_omni_0x(&session.omni),
+        omni,
         device_key_hash,
     })
 }
@@ -3769,8 +3954,182 @@ mod tests {
             "us-east-1".into(),
             None,
             None,
+            None, // #220 master_session_store — tests never persist to $HOME
         )
         .unwrap()
+    }
+
+    // ─── issue #220: master session persistence + rehydrate ─────────────────
+
+    /// A real-ish ui-bridge state (broker configured) with an optional on-disk
+    /// master-session store — used by the #220 resolve/rehydrate tests.
+    fn make_state_real(store: Option<MasterSessionStore>) -> SharedUiBridgeState {
+        build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            Some("https://broker.example".into()),
+            None,
+            84532,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "us-east-1".into(),
+            None, // master_device_key_hash — deliberately UNSET (derivation path)
+            None,
+            store,
+        )
+        .unwrap()
+    }
+
+    fn persisted_record(omni: &str, j1_exp_unix: u64) -> PersistedMasterSession {
+        PersistedMasterSession {
+            schema: 1,
+            wallet: "0xMASTERWALLET".into(),
+            email: "master@example.com".into(),
+            operator_omni: omni.to_string(),
+            device_key_hash: agentkeys_core::device_crypto::device_key_hash_from_omni(omni)
+                .unwrap(),
+            j1: "eyJ.fake.jwt".into(),
+            created_at_unix: master_session::now_unix(),
+            j1_exp_unix,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_session_coords_derives_device_hash_from_omni() {
+        // No registered_master and no --master-device-key-hash flag, but a valid
+        // session omni ⇒ the device hash is DERIVED keccak(operator_omni). So the
+        // web loop needs neither a cached register nor the CLI flag after a restart.
+        let state = make_state_real(None);
+        let omni = format!("0x{}", "11".repeat(32));
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "m@x".into(),
+            omni: omni.clone(),
+            j1: "eyJ.fake.jwt".into(),
+            wallet: "0xWALLET".into(),
+        });
+        let coords = resolve_session_coords(&state)
+            .await
+            .expect("coords resolve");
+        let expected = agentkeys_core::device_crypto::device_key_hash_from_omni(&omni).unwrap();
+        assert_eq!(coords.device_key_hash, expected);
+        assert_eq!(coords.omni, omni);
+    }
+
+    #[tokio::test]
+    async fn resolve_session_coords_distinguishes_expired_from_absent() {
+        // No session AND nothing persisted ⇒ "no local master session" (onboard).
+        let state = make_state_real(None);
+        let e = match resolve_session_coords(&state).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected resolve_session_coords to error"),
+        };
+        assert!(e.contains("no local master session"), "got: {e}");
+        assert!(
+            !e.contains("not registered on chain"),
+            "must drop the old misleading wording: {e}"
+        );
+        // Persisted-but-expired coords (master_session present, no live session) ⇒
+        // "expired — re-authenticate", NOT "device not registered on chain".
+        *state.master_session.write().await =
+            Some(persisted_record(&format!("0x{}", "11".repeat(32)), 1));
+        let e = match resolve_session_coords(&state).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected resolve_session_coords to error"),
+        };
+        assert!(e.contains("expired") && e.contains("re-auth"), "got: {e}");
+        assert!(!e.contains("not registered on chain"), "got: {e}");
+    }
+
+    #[tokio::test]
+    async fn onboarding_state_reports_session_signal() {
+        let state = make_state();
+        // none initially.
+        assert_eq!(
+            onboarding_state(State(state.clone())).await.0.session,
+            "none"
+        );
+        // Persisted but no live session ⇒ "expired" (drives one passkey re-auth).
+        *state.master_session.write().await =
+            Some(persisted_record(&format!("0x{}", "22".repeat(32)), 1));
+        assert_eq!(
+            onboarding_state(State(state.clone())).await.0.session,
+            "expired"
+        );
+        // A live session with a non-empty J1 ⇒ "active".
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "m@x".into(),
+            omni: format!("0x{}", "22".repeat(32)),
+            j1: "eyJ.live.jwt".into(),
+            wallet: "0xW".into(),
+        });
+        assert_eq!(onboarding_state(State(state)).await.0.session, "active");
+    }
+
+    #[tokio::test]
+    async fn rehydrate_restores_valid_session_with_zero_prompts() {
+        // A persisted record with a still-valid J1 → onboarding_session +
+        // registered_master repopulate → identity verified, session active, chain
+        // master-registered: the web pages work with ZERO prompts after a restart.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MasterSessionStore::new(tmp.path().join(".agentkeys"));
+        let omni = format!("0x{}", "33".repeat(32));
+        let far_future = master_session::now_unix() + 10_000;
+        store
+            .save(&persisted_record(&omni, far_future))
+            .expect("save");
+
+        let state = make_state_real(Some(store));
+        rehydrate_master_session(&state).await;
+
+        let os = onboarding_state(State(state.clone())).await.0;
+        assert_eq!(os.identity, "verified");
+        assert_eq!(os.session, "active");
+        assert_eq!(os.chain, "master-registered");
+        let dkh = agentkeys_core::device_crypto::device_key_hash_from_omni(&omni).unwrap();
+        assert_eq!(
+            state
+                .registered_master
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .device_key_hash,
+            dkh
+        );
+        // And cap-mint coordinates resolve cleanly (no --master-device-key-hash).
+        let coords = resolve_session_coords(&state).await.expect("coords");
+        assert_eq!(coords.device_key_hash, dkh);
+    }
+
+    #[tokio::test]
+    async fn rehydrate_expired_session_loads_coords_but_not_live() {
+        // An expired J1 → coords load into master_session (so session: "expired")
+        // but onboarding_session stays empty (the dead J1 isn't usable). Exactly
+        // one passkey re-auth restores it — not a full re-onboarding.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MasterSessionStore::new(tmp.path().join(".agentkeys"));
+        let omni = format!("0x{}", "44".repeat(32));
+        let past = master_session::now_unix().saturating_sub(10);
+        store.save(&persisted_record(&omni, past)).expect("save");
+
+        let state = make_state_real(Some(store));
+        rehydrate_master_session(&state).await;
+
+        assert!(state.onboarding_session.read().await.is_none());
+        assert!(state.master_session.read().await.is_some());
+        let os = onboarding_state(State(state.clone())).await.0;
+        assert_eq!(os.identity, "none");
+        assert_eq!(os.session, "expired");
+        // resolve fails with the re-auth message, never the misleading old one.
+        let e = match resolve_session_coords(&state).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected resolve_session_coords to error"),
+        };
+        assert!(e.contains("expired"), "got: {e}");
     }
 
     fn cat(ns: &str, label: &str) -> MemoryCategory {
@@ -4041,6 +4400,7 @@ mod tests {
             "us-east-1".into(),
             Some("0xdkh".into()),
             None,
+            None, // #220 master_session_store
         )
         .unwrap();
         let err = match real_memory_ctx(&state).await {
@@ -4069,6 +4429,7 @@ mod tests {
             "us-east-1".into(),
             Some("0xdkh".into()),
             None,
+            None, // #220 master_session_store
         )
         .unwrap();
         let err = match real_memory_ctx(&state).await {
@@ -4131,6 +4492,7 @@ mod tests {
             email: "sara@example.com".into(),
             omni: "0xabc123".into(),
             j1: String::new(),
+            wallet: String::new(),
         });
         let s = onboarding_state(State(state.clone())).await;
         assert_eq!(s.0.identity, "verified");
@@ -4988,6 +5350,7 @@ mod tests {
             "us-east-1".into(),
             None,
             None,
+            None, // #220 master_session_store
         )
         .unwrap();
         let resp = list_master_memory(State(state)).await;
@@ -5240,6 +5603,7 @@ mod tests {
             "us-east-1".into(),
             None,
             Some(script),
+            None, // #220 master_session_store
         )
         .unwrap();
         let (tx, chain, err) = finish_chain_register(&state, "credid", Some("ignored")).await;

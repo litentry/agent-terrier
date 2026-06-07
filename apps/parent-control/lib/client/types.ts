@@ -194,6 +194,15 @@ export interface OnboardingState {
   omni?: string;
   /** "enrolled" if a K11 passkey was registered this session, else "none". */
   k11: string;
+  /** "master-registered" once the master device is on chain with CAP_MINT (#196); else "none". */
+  chain?: string;
+  /**
+   * Durable-session signal for restart-resume (issue #220):
+   *   - "active"  → a still-valid J1 is held (rehydrated or fresh): memory/config work with ZERO prompts;
+   *   - "expired" → master coords are persisted but the J1 lapsed: prompt exactly ONE passkey re-auth (NOT a re-onboarding);
+   *   - "none"    → no persisted master session: full onboarding required.
+   */
+  session?: string;
 }
 
 /** One deployed contract from `GET /v1/chain/info` (real address + explorer link). */

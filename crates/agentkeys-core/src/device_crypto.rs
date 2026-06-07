@@ -48,6 +48,31 @@ pub fn device_key_hash(addr: &str) -> Result<String> {
     Ok(format!("0x{}", hex::encode(keccak256(&addr_bytes))))
 }
 
+/// The MASTER device key hash, derived deterministically from the operator
+/// omni: `device_key_hash = keccak256(operator_omni_bytes)` as `0x` + 64 hex.
+///
+/// This mirrors the web/#164 register convention `cast keccak "0x$OPERATOR_OMNI"`
+/// (`harness/scripts/heima-register-first-master.sh` + `_lib.sh::resolve_active_master_dkh`)
+/// — `cast keccak` over a `0x`-prefixed value hashes the 32 RAW omni bytes, not
+/// the ASCII hex. Because the hash is derivable from the omni alone, the master
+/// session needs no cached `device_key_hash` to resolve cap-mint after a daemon
+/// restart (issue #220): the on-chain `SidecarRegistry` binding is the source of
+/// truth and `keccak(operator_omni)` reproduces its key with no re-onboarding.
+///
+/// `omni` may be `0x`/`0X`-prefixed or bare; it MUST decode to exactly 32 bytes.
+pub fn device_key_hash_from_omni(omni: &str) -> Result<String> {
+    let trimmed = omni.trim();
+    let hex_part = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let omni_bytes = hex::decode(hex_part).context("omni is not hex")?;
+    if omni_bytes.len() != 32 {
+        return Err(anyhow!("omni must be 32 bytes, got {}", omni_bytes.len()));
+    }
+    Ok(format!("0x{}", hex::encode(keccak256(&omni_bytes))))
+}
+
 /// The agent proof-of-possession preimage:
 /// `keccak256("agentkeys-agent-pop:" || device_key_hash_hex)`, where
 /// `device_key_hash_hex` is the `0x`-prefixed string from [`device_key_hash`].
@@ -246,6 +271,37 @@ impl DeviceKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // issue #220 — the master device hash must be derivable from the omni alone
+    // (no cached register result) so the daemon resolves cap-mint after a restart.
+    // Vector: keccak256(32 zero bytes) is the well-known constant
+    // 0x290decd9548b62a8d60345a988386fc84ba6bc95484008f6362f93160ef3e563.
+    #[test]
+    fn device_key_hash_from_omni_matches_cast_keccak() {
+        let zero_omni = format!("0x{}", "00".repeat(32));
+        assert_eq!(
+            device_key_hash_from_omni(&zero_omni).unwrap(),
+            "0x290decd9548b62a8d60345a988386fc84ba6bc95484008f6362f93160ef3e563"
+        );
+    }
+
+    #[test]
+    fn device_key_hash_from_omni_ignores_prefix_and_case() {
+        let bare = "11".repeat(32);
+        let with_0x = format!("0x{bare}");
+        let with_0x_upper = format!("0X{bare}");
+        let h = device_key_hash_from_omni(&bare).unwrap();
+        assert_eq!(h, device_key_hash_from_omni(&with_0x).unwrap());
+        assert_eq!(h, device_key_hash_from_omni(&with_0x_upper).unwrap());
+        assert!(h.starts_with("0x") && h.len() == 66);
+    }
+
+    #[test]
+    fn device_key_hash_from_omni_rejects_wrong_length() {
+        // A 20-byte address is NOT a valid 32-byte omni.
+        let addr = format!("0x{}", "ab".repeat(20));
+        assert!(device_key_hash_from_omni(&addr).is_err());
+    }
 
     #[test]
     fn eip191_round_trip_recovers_signer() {
