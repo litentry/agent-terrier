@@ -21,11 +21,22 @@
 //!    stale-epoch caps after rotation.
 //! 5. Cap payload includes an explicit `op` discriminator so the worker
 //!    can refuse a fetch-cap submitted to /store etc.
-//!
-//! Stage-1 simplification per arch.md §22b.4 (stage-1 simplifications inventory — no K10 signature requirement; issue #90 for the hardening): K10 signature over the
-//! cap-mint request is not yet required (stage 2 adds the daemon's
-//! per-call K10 signature). Until then, the session JWT + on-chain
-//! device binding are the auth surface.
+//! 6. **K10 proof-of-possession (issue #76 — the broker-SPOF fix).** When a
+//!    cap-mint request carries a `client_sig` (an EIP-191 signature by the
+//!    caller's K10 device key over `device_crypto::cap_pop_payload(operator,
+//!    actor, service, op, data_class, client_nonce, client_ts)`), the broker
+//!    validates that it recovers to an address whose `keccak == device_key_hash`
+//!    (which step 2 already bound on-chain to this operator/actor), then carries
+//!    the PoP in the returned `CapToken` so the WORKER re-verifies it
+//!    independently (`verify::check_client_pop`). The K10 private key never
+//!    reaches the broker, so a compromised broker cannot forge it. **OPTIONAL +
+//!    staged rollout:** the PoP is verified WHEN PRESENT here; a MISSING PoP is
+//!    rejected only at the worker under `AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`
+//!    (default off until every actor's K10 — incl. the master's, via
+//!    `heima-register-master-k10.sh` — is registered). Flipping that flag is the
+//!    point at which the broker SPOF is fully closed; until then the agent path
+//!    (which always signs) is already verified. Supersedes the former stage-1
+//!    simplification (§22b.4, "session JWT only, no K10 signature").
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -63,6 +74,18 @@ impl CapOp {
             CapOp::Classify => 3,
         }
     }
+
+    /// snake_case string used in the K10 cap-PoP preimage (issue #76). MUST
+    /// match `agentkeys_backend_client::CapMintOp::op_str` (client) and the
+    /// worker's `CapOp::as_str`, or the recomputed preimage won't agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapOp::Store => "store",
+            CapOp::Fetch => "fetch",
+            CapOp::Teardown => "teardown",
+            CapOp::Classify => "classify",
+        }
+    }
 }
 
 /// Data class the cap-token is bound to. Mirror of
@@ -80,6 +103,19 @@ pub enum DataClass {
     /// role per §17.2. `/v1/cap/config-*` mints this; cred + memory workers
     /// reject a Config cap via `verify::check_data_class`.
     Config,
+}
+
+impl DataClass {
+    /// snake_case string used in the K10 cap-PoP preimage (issue #76). MUST
+    /// match `agentkeys_backend_client::CapMintOp::data_class` (client) and the
+    /// worker's `DataClass::as_str`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DataClass::Credentials => "credentials",
+            DataClass::Memory => "memory",
+            DataClass::Config => "config",
+        }
+    }
 }
 
 /// Cap payload — the signed-over portion of a cap-token. The worker
@@ -105,6 +141,21 @@ pub struct CapPayload {
 pub struct CapToken {
     pub payload: CapPayload,
     pub broker_sig: String,
+    /// K10 cap-mint proof-of-possession (issue #76), carried alongside
+    /// `broker_sig` (NOT inside `payload`, so `broker_sig` is unchanged). The
+    /// worker recomputes `cap_pop_payload` from `payload` + `client_nonce`/
+    /// `client_ts` and asserts `keccak(ecrecover(client_sig)) ==
+    /// payload.device_key_hash`. `client_sig` integrity-protects the nonce/ts
+    /// (altering them breaks the recovered address), so they need not be in the
+    /// broker-signed payload. OPTIONAL (issue #76 staged rollout): omitted on the
+    /// wire when the cap carries no PoP, so a no-PoP cap is byte-identical to the
+    /// pre-#76 shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_sig: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ts: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +166,17 @@ pub struct CapRequest {
     pub device_key_hash: String,
     #[serde(default = "default_ttl_seconds")]
     pub ttl_seconds: u64,
+    /// K10 cap-mint proof-of-possession (issue #76) — OPTIONAL. When present, an
+    /// EIP-191 sig by the caller's K10 over `device_crypto::cap_pop_payload(...)`,
+    /// validated here + re-verified by the worker (a compromised broker can't
+    /// forge it). When absent, the cap carries no PoP; the worker accepts it
+    /// unless `AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`.
+    #[serde(default)]
+    pub client_sig: Option<String>,
+    #[serde(default)]
+    pub client_nonce: Option<String>,
+    #[serde(default)]
+    pub client_ts: Option<u64>,
 }
 
 fn default_ttl_seconds() -> u64 {
@@ -138,6 +200,9 @@ pub enum CapError {
     DeviceRevoked,
     ServiceNotInScope,
     OperatorMismatch,
+    /// K10 cap-mint proof-of-possession failed (issue #76): `client_sig` did not
+    /// recover to an address whose `keccak == device_key_hash`, or was stale.
+    CapPopInvalid(String),
     ChainRpc(String),
     Sign(String),
 }
@@ -156,6 +221,7 @@ impl IntoResponse for CapError {
             CapError::DeviceRevoked => (StatusCode::FORBIDDEN, "device_revoked"),
             CapError::ServiceNotInScope => (StatusCode::FORBIDDEN, "service_not_in_scope"),
             CapError::OperatorMismatch => (StatusCode::FORBIDDEN, "operator_mismatch"),
+            CapError::CapPopInvalid(_) => (StatusCode::FORBIDDEN, "cap_pop_invalid"),
             CapError::ChainRpc(_) => (StatusCode::BAD_GATEWAY, "chain_rpc_error"),
             CapError::Sign(_) => (StatusCode::INTERNAL_SERVER_ERROR, "sign_error"),
         };
@@ -171,6 +237,7 @@ impl IntoResponse for CapError {
             CapError::DeviceRevoked => "device is revoked on chain".to_string(),
             CapError::ServiceNotInScope => "requested service is not in agent's scope".to_string(),
             CapError::OperatorMismatch => "session JWT operator differs from request".to_string(),
+            CapError::CapPopInvalid(m) => m,
             CapError::ChainRpc(m) => m,
             CapError::Sign(m) => m,
         };
@@ -265,6 +332,13 @@ pub struct CapClassifyRequest {
     /// The data class this classify cap authorizes (`memory` / `credentials` /
     /// `config`). Signed into the payload; the worker binds on it.
     pub data_class: DataClass,
+    /// K10 cap-mint proof-of-possession (issue #76) — same as [`CapRequest`]; OPTIONAL.
+    #[serde(default)]
+    pub client_sig: Option<String>,
+    #[serde(default)]
+    pub client_nonce: Option<String>,
+    #[serde(default)]
+    pub client_ts: Option<u64>,
 }
 
 pub async fn cap_classify(
@@ -279,6 +353,9 @@ pub async fn cap_classify(
         service: req.service,
         device_key_hash: req.device_key_hash,
         ttl_seconds: req.ttl_seconds,
+        client_sig: req.client_sig,
+        client_nonce: req.client_nonce,
+        client_ts: req.client_ts,
     };
     mint_cap(state, headers, cap_req, CapOp::Classify, data_class)
         .await
@@ -345,6 +422,15 @@ async fn mint_cap(
         return Err(CapError::DeviceRoleMissing);
     }
 
+    // 1b. K10 proof-of-possession (issue #76 — the broker-SPOF fix). Step 1
+    //     bound `device_key_hash → (operator, actor)` on chain. When the caller
+    //     supplies a `client_sig`, validate it proves possession of that K10 (a
+    //     compromised broker cannot forge it). OPTIONAL during rollout — a cap
+    //     with no PoP is minted as-is; the WORKER is the authoritative gate that
+    //     rejects a missing PoP when AGENTKEYS_WORKER_REQUIRE_CAP_POP=1. The
+    //     worker re-verifies any supplied proof independently regardless.
+    verify_cap_pop(&req, op, data_class)?;
+
     // 2. AgentKeysScope.isServiceInScope(operator, actor, keccak(service)).
     //    SKIP when operator == actor — the master accessing its OWN data classes
     //    (memory / credentials / email). Scope gates AGENTS, not the operator over
@@ -398,7 +484,66 @@ async fn mint_cap(
     Ok(CapToken {
         payload,
         broker_sig,
+        client_sig: req.client_sig,
+        client_nonce: req.client_nonce,
+        client_ts: req.client_ts,
     })
+}
+
+/// Worker-side max age for a cap-PoP signature. Shared with the worker's
+/// `verify::check_client_pop` so the broker and worker agree on the freshness
+/// window. The broker also rejects far-future `client_ts` (clock-skew guard).
+const CAP_POP_MAX_AGE_SECS: u64 = 300;
+
+/// Validate the K10 cap-mint proof-of-possession (issue #76) when present.
+///
+/// OPTIONAL + verify-when-present (staged rollout): a cap-mint that carries no
+/// `client_sig` is a no-op here — the cap is minted without a PoP, and the WORKER
+/// is the authoritative gate that rejects a missing PoP when
+/// `AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`. When a PoP IS supplied, it must recover
+/// to an address whose `keccak == device_key_hash` (already bound on-chain to
+/// this operator/actor) and be fresh — what a compromised broker cannot forge.
+fn verify_cap_pop(req: &CapRequest, op: CapOp, data_class: DataClass) -> Result<(), CapError> {
+    let (Some(client_sig), Some(client_nonce), Some(client_ts)) = (
+        req.client_sig.as_deref(),
+        req.client_nonce.as_deref(),
+        req.client_ts,
+    ) else {
+        return Ok(()); // no PoP supplied — nothing to validate at the broker
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if client_ts > now + 60 {
+        return Err(CapError::CapPopInvalid(format!(
+            "client_ts {client_ts} is in the future (now {now})"
+        )));
+    }
+    if now.saturating_sub(client_ts) > CAP_POP_MAX_AGE_SECS {
+        return Err(CapError::CapPopInvalid(format!(
+            "client_ts {client_ts} is stale (now {now}, max age {CAP_POP_MAX_AGE_SECS}s)"
+        )));
+    }
+    let preimage = agentkeys_core::device_crypto::cap_pop_payload(
+        &req.operator_omni,
+        &req.actor_omni,
+        &req.service,
+        op.as_str(),
+        data_class.as_str(),
+        client_nonce,
+        client_ts,
+    );
+    let recovered = agentkeys_core::device_crypto::ecrecover_eip191(&preimage, client_sig)
+        .map_err(|e| CapError::CapPopInvalid(format!("client_sig recover: {e}")))?;
+    let recovered_hash = agentkeys_core::device_crypto::device_key_hash(&recovered)
+        .map_err(|e| CapError::CapPopInvalid(format!("recovered address hash: {e}")))?;
+    if strip_0x_lc(&recovered_hash) != strip_0x_lc(&req.device_key_hash) {
+        return Err(CapError::CapPopInvalid(
+            "client_sig does not match device_key_hash (K10 proof-of-possession failed)".into(),
+        ));
+    }
+    Ok(())
 }
 
 // ─── on-chain reads (raw eth_call over reqwest) ────────────────────────
@@ -732,10 +877,109 @@ mod tests {
             "service": "classify:memory",
             "device_key_hash": format!("0x{}", "c".repeat(64)),
             "data_class": "memory",
+            "client_sig": "0x00",
+            "client_nonce": "00",
+            "client_ts": 0,
         }))
         .unwrap();
         assert_eq!(req.data_class, DataClass::Memory);
         assert_eq!(req.ttl_seconds, 300); // default
+    }
+
+    fn cap_req_with(
+        dkh: &str,
+        client_sig: String,
+        client_nonce: String,
+        client_ts: u64,
+    ) -> CapRequest {
+        CapRequest {
+            operator_omni: format!("0x{}", "a".repeat(64)),
+            actor_omni: format!("0x{}", "b".repeat(64)),
+            service: "memory:travel".into(),
+            device_key_hash: dkh.to_string(),
+            ttl_seconds: 300,
+            client_sig: Some(client_sig),
+            client_nonce: Some(client_nonce),
+            client_ts: Some(client_ts),
+        }
+    }
+
+    #[test]
+    fn verify_cap_pop_accepts_valid_rejects_forged_and_wrong_op() {
+        use agentkeys_core::device_crypto::DeviceKey;
+        let dir = std::env::temp_dir();
+        let dk = DeviceKey::load_or_generate(dir.join("ak-cap-pop-a.key").to_str().unwrap(), true)
+            .unwrap();
+        let dkh = dk.device_key_hash().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let nonce = "00112233aabbccdd".to_string();
+        let (operator, actor, service) = (
+            format!("0x{}", "a".repeat(64)),
+            format!("0x{}", "b".repeat(64)),
+            "memory:travel",
+        );
+        let sig = dk
+            .cap_pop_sig(&operator, &actor, service, "store", "memory", &nonce, now)
+            .unwrap();
+
+        // Happy path: a real K10 sig over the right preimage → Ok.
+        let ok = cap_req_with(&dkh, sig.clone(), nonce.clone(), now);
+        assert!(verify_cap_pop(&ok, CapOp::Store, DataClass::Memory).is_ok());
+
+        // Wrong op → preimage differs → recovered address mismatches the hash.
+        assert!(matches!(
+            verify_cap_pop(&ok, CapOp::Fetch, DataClass::Memory),
+            Err(CapError::CapPopInvalid(_))
+        ));
+
+        // Forged: a valid signature from a DIFFERENT key (what a compromised
+        // broker that lacks the user's K10 could at best produce) → rejected
+        // because keccak(recovered) != device_key_hash. THIS is the SPOF fix.
+        let other =
+            DeviceKey::load_or_generate(dir.join("ak-cap-pop-b.key").to_str().unwrap(), true)
+                .unwrap();
+        let forged = other
+            .cap_pop_sig(&operator, &actor, service, "store", "memory", &nonce, now)
+            .unwrap();
+        let bad = cap_req_with(&dkh, forged, nonce.clone(), now);
+        assert!(matches!(
+            verify_cap_pop(&bad, CapOp::Store, DataClass::Memory),
+            Err(CapError::CapPopInvalid(_))
+        ));
+
+        // Stale timestamp → rejected.
+        let stale_ts = now.saturating_sub(CAP_POP_MAX_AGE_SECS + 60);
+        let stale_sig = dk
+            .cap_pop_sig(
+                &operator, &actor, service, "store", "memory", &nonce, stale_ts,
+            )
+            .unwrap();
+        let stale = cap_req_with(&dkh, stale_sig, nonce, stale_ts);
+        assert!(matches!(
+            verify_cap_pop(&stale, CapOp::Store, DataClass::Memory),
+            Err(CapError::CapPopInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn verify_cap_pop_is_noop_when_no_pop_supplied() {
+        // Staged rollout (issue #76): a cap-mint with NO PoP is accepted at the
+        // broker — the worker is the gate that rejects a missing PoP under
+        // AGENTKEYS_WORKER_REQUIRE_CAP_POP=1.
+        let req = CapRequest {
+            operator_omni: format!("0x{}", "a".repeat(64)),
+            actor_omni: format!("0x{}", "b".repeat(64)),
+            service: "memory:travel".into(),
+            device_key_hash: format!("0x{}", "c".repeat(64)),
+            ttl_seconds: 300,
+            client_sig: None,
+            client_nonce: None,
+            client_ts: None,
+        };
+        assert!(verify_cap_pop(&req, CapOp::Store, DataClass::Memory).is_ok());
     }
 
     #[test]

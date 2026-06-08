@@ -80,6 +80,50 @@ pub fn agent_pop_payload(device_key_hash_hex: &str) -> [u8; 32] {
     keccak256(format!("agentkeys-agent-pop:{device_key_hash_hex}").as_bytes())
 }
 
+/// Strip an optional `0x`/`0X` prefix and lowercase — the canonical omni form
+/// the broker + worker agree on. Local to the PoP preimage so both sides
+/// canonicalize identically regardless of the caller's `0x`/case.
+fn norm_omni(s: &str) -> String {
+    let t = s.trim().to_lowercase();
+    t.strip_prefix("0x").unwrap_or(&t).to_string()
+}
+
+/// The **per-request cap-mint** proof-of-possession preimage (issue #76 — the
+/// real broker-SPOF fix). The client signs this with its K10 device key on
+/// every cap-mint; the broker embeds the signature in the cap and the WORKER
+/// re-verifies it independently of the broker against the on-chain device→omni
+/// binding (`keccak(ecrecover(sig)) == device_key_hash`). Because the K10
+/// private key never reaches the broker, a compromised broker cannot mint a
+/// usable cap — it cannot produce this signature.
+///
+/// Preimage (domain-separated, request-bound):
+/// `keccak256("agentkeys-cap-pop:v1:" || operator || actor || keccak(service)
+///  || op || data_class || client_nonce || client_ts)`.
+///
+/// `service` is hashed (it may contain `:`, e.g. `memory:travel`) so the `:`
+/// field separator is unambiguous — every other field is fixed-charset
+/// (hex / snake_case enum / digits). `operator`/`actor` are canonicalized
+/// (strip `0x`, lowercase) so the client and worker agree byte-for-byte.
+/// `op` / `data_class` are the snake_case strings from `CapOp` / `DataClass`
+/// (`store`/`fetch`/… , `credentials`/`memory`/`config`).
+pub fn cap_pop_payload(
+    operator_omni: &str,
+    actor_omni: &str,
+    service: &str,
+    op: &str,
+    data_class: &str,
+    client_nonce: &str,
+    client_ts: u64,
+) -> [u8; 32] {
+    let operator = norm_omni(operator_omni);
+    let actor = norm_omni(actor_omni);
+    let service_hash = hex::encode(keccak256(service.trim().to_lowercase().as_bytes()));
+    let preimage = format!(
+        "agentkeys-cap-pop:v1:{operator}:{actor}:{service_hash}:{op}:{data_class}:{client_nonce}:{client_ts}"
+    );
+    keccak256(preimage.as_bytes())
+}
+
 /// EIP-191 `personal_sign` over `message`, producing 65-byte `r‖s‖v` hex
 /// (`v ∈ {27,28}`, low-s via k256). Matches the broker's ecrecover envelope.
 pub fn eip191_sign(sk: &SigningKey, message: &[u8]) -> Result<String> {
@@ -122,6 +166,23 @@ pub fn ecrecover_eip191(message: &[u8], signature_hex: &str) -> Result<String> {
     let vk = VerifyingKey::recover_from_prehash(&digest, &signature, recovery_id)
         .map_err(|e| anyhow!("recover failed: {e}"))?;
     Ok(evm_address(&vk))
+}
+
+/// Load the K10 device key from `AGENTKEYS_DEVICE_KEY_FILE` (default
+/// `~/.agentkeys/agent-device.key`) for cap-mint proof-of-possession signing
+/// (issue #76). Returns `None` when the file is absent — callers should warn +
+/// let cap-mint fail clearly, NOT generate a fresh key here (a fresh key is not
+/// registered on chain and the broker/worker would reject every cap it signs).
+/// This is the ONE place the cap-mint clients (MCP server, daemon ui-bridge)
+/// resolve the agent/master K10, so the path convention stays in sync.
+pub fn load_device_key_from_env() -> Option<DeviceKey> {
+    let path = std::env::var("AGENTKEYS_DEVICE_KEY_FILE")
+        .unwrap_or_else(|_| "~/.agentkeys/agent-device.key".to_string());
+    let expanded = expand_home(&path);
+    if !Path::new(&expanded).exists() {
+        return None;
+    }
+    DeviceKey::load_or_generate(&expanded, false).ok()
 }
 
 fn expand_home(p: &str) -> String {
@@ -266,6 +327,79 @@ impl DeviceKey {
         let dkh = self.device_key_hash()?;
         self.sign_eip191(&agent_pop_payload(&dkh))
     }
+
+    /// Per-request cap-mint proof-of-possession signature (issue #76). Signs
+    /// [`cap_pop_payload`] with this device key; the worker recovers the signer
+    /// and asserts `keccak(address) == device_key_hash`. See [`cap_pop_payload`]
+    /// for the threat model. Deterministic given its inputs (used in tests);
+    /// call sites should prefer [`DeviceKey::cap_pop_now`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn cap_pop_sig(
+        &self,
+        operator_omni: &str,
+        actor_omni: &str,
+        service: &str,
+        op: &str,
+        data_class: &str,
+        client_nonce: &str,
+        client_ts: u64,
+    ) -> Result<String> {
+        self.sign_eip191(&cap_pop_payload(
+            operator_omni,
+            actor_omni,
+            service,
+            op,
+            data_class,
+            client_nonce,
+            client_ts,
+        ))
+    }
+
+    /// Call-site helper: generate a fresh `(client_sig, client_nonce, client_ts)`
+    /// cap-PoP triple for a cap-mint request — random 16-byte nonce + current
+    /// unix time, signed with this device key. `op`/`data_class` are the
+    /// snake_case strings from the backend-client `CapMintOp` (`op_str()` /
+    /// `data_class()`). One-liner for the cap-mint callers (daemon proxy,
+    /// ui-bridge, MCP tools).
+    pub fn cap_pop_now(
+        &self,
+        operator_omni: &str,
+        actor_omni: &str,
+        service: &str,
+        op: &str,
+        data_class: &str,
+    ) -> Result<CapPop> {
+        let mut nonce_bytes = [0u8; 16];
+        use rand_core::RngCore;
+        rand_core::OsRng.fill_bytes(&mut nonce_bytes);
+        let client_nonce = hex::encode(nonce_bytes);
+        let client_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let client_sig = self.cap_pop_sig(
+            operator_omni,
+            actor_omni,
+            service,
+            op,
+            data_class,
+            &client_nonce,
+            client_ts,
+        )?;
+        Ok(CapPop {
+            client_sig,
+            client_nonce,
+            client_ts,
+        })
+    }
+}
+
+/// A fresh cap-mint proof-of-possession triple from [`DeviceKey::cap_pop_now`].
+#[derive(Debug, Clone)]
+pub struct CapPop {
+    pub client_sig: String,
+    pub client_nonce: String,
+    pub client_ts: u64,
 }
 
 #[cfg(test)]
@@ -334,6 +468,74 @@ mod tests {
         let a = DeviceKey::load_or_generate(kf.to_str().unwrap(), false).unwrap();
         let b = DeviceKey::load_or_generate(kf.to_str().unwrap(), false).unwrap();
         assert_eq!(a.address(), b.address());
+    }
+
+    #[test]
+    fn cap_pop_sig_recovers_to_device_and_matches_hash() {
+        // The worker-critical match: recover the signer from cap_pop_sig over
+        // cap_pop_payload(...) and check keccak(address) == device_key_hash.
+        let dir = tempfile::tempdir().unwrap();
+        let kf = dir.path().join("dev.key");
+        let dk = DeviceKey::load_or_generate(kf.to_str().unwrap(), true).unwrap();
+        let (operator, actor, service, op, dc, nonce, ts) = (
+            "0xAABB",
+            "ccdd",
+            "memory:travel",
+            "store",
+            "memory",
+            "0011223344556677",
+            1_767_300_000u64,
+        );
+        let sig = dk
+            .cap_pop_sig(operator, actor, service, op, dc, nonce, ts)
+            .unwrap();
+        let preimage = cap_pop_payload(operator, actor, service, op, dc, nonce, ts);
+        let recovered = ecrecover_eip191(&preimage, &sig).unwrap();
+        assert_eq!(recovered, dk.address());
+        assert_eq!(
+            device_key_hash(recovered.as_str()).unwrap(),
+            dk.device_key_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn cap_pop_payload_canonicalizes_omni_prefix_and_case() {
+        // 0x-prefix + case must not change the preimage (client and worker may
+        // hold the omni in different forms).
+        let a = cap_pop_payload(
+            "0xABCD",
+            "0xEF01",
+            "openrouter",
+            "fetch",
+            "credentials",
+            "ab",
+            9,
+        );
+        let b = cap_pop_payload(
+            "abcd",
+            "ef01",
+            "openrouter",
+            "fetch",
+            "credentials",
+            "ab",
+            9,
+        );
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cap_pop_payload_binds_op_and_data_class() {
+        // A different op or data_class → different preimage (defense-in-depth
+        // vs cross-op cap reuse).
+        let base = cap_pop_payload("a", "b", "s", "store", "credentials", "n", 1);
+        assert_ne!(
+            base,
+            cap_pop_payload("a", "b", "s", "fetch", "credentials", "n", 1)
+        );
+        assert_ne!(
+            base,
+            cap_pop_payload("a", "b", "s", "store", "memory", "n", 1)
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ dependencies = [
 name = "agentkeys-backend-client"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-core",
  "agentkeys-provisioner",
  "async-trait",
  "reqwest",
@@ -243,6 +244,7 @@ name = "agentkeys-mcp-server"
 version = "0.1.0"
 dependencies = [
  "agentkeys-backend-client",
+ "agentkeys-core",
  "agentkeys-types",
  "anyhow",
  "async-trait",
@@ -429,6 +431,7 @@ name = "agentkeys-worker-creds"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "agentkeys-core",
  "agentkeys-types",
  "anyhow",
  "aws-config",

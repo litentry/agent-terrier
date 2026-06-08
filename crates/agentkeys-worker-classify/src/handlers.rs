@@ -101,6 +101,9 @@ async fn verify_classify_cap(
 ) -> Result<(), ApiError> {
     verify::verify_signature(&state.config.broker_pubkey_pem, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
+    // K10 proof-of-possession (issue #76 — broker-SPOF defense). Same shared
+    // gate the storage workers run (verify::enforce_client_pop).
+    verify::enforce_client_pop(cap).map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
     verify::check_op(cap, CapOp::Classify)
         .map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
     verify::check_data_class(cap, expected_class)
@@ -167,6 +170,9 @@ mod tests {
                 nonce: "00".repeat(16),
             },
             broker_sig: String::new(),
+            client_sig: None,
+            client_nonce: None,
+            client_ts: None,
         }
     }
 

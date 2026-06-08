@@ -16,6 +16,8 @@ agentkeys-types = { workspace = true }
 # The broker/worker chain (cap-mint → STS relay → worker put/get) lives in ONE
 # place now (issue #203); `HttpBackend` is a thin delegate over it.
 agentkeys-backend-client = { workspace = true }
+# K10 device-key load for cap-mint proof-of-possession (issue #76).
+agentkeys-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -14,6 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 agentkeys-types = { workspace = true }
+# K10 cap-PoP verification (issue #76): ecrecover + cap_pop_payload + device_key_hash.
+agentkeys-core = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }
