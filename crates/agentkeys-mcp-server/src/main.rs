@@ -38,16 +38,31 @@ async fn main() -> anyhow::Result<()> {
     // `HttpBackend` delegate; `Backend` is impl'd directly on `BackendClient`).
     // The in-memory fixture backend was removed.
     let backend: Arc<dyn Backend> = match config.backend {
-        BackendKind::Http => Arc::new(BackendClient::new(
-            config.broker_url.clone(),
-            config.memory_url.clone(),
-            config.audit_url.clone(),
-            None, // cred_url — no MCP cred tool yet; #216 cred-fetch is the CLI path
-            config.agent_session_bearer.clone(),
-            config.memory_role_arn.clone(),
-            config.vault_role_arn.clone(),
-            config.aws_region.clone(),
-        )),
+        BackendKind::Http => {
+            let mut client = BackendClient::new(
+                config.broker_url.clone(),
+                config.memory_url.clone(),
+                config.audit_url.clone(),
+                None, // cred_url — no MCP cred tool yet; #216 cred-fetch is the CLI path
+                config.agent_session_bearer.clone(),
+                config.memory_role_arn.clone(),
+                config.vault_role_arn.clone(),
+                config.aws_region.clone(),
+            );
+            // K10 cap-mint proof-of-possession (issue #76). Load the agent's
+            // device key (the SAME owner-only file the in-sandbox daemon writes,
+            // ~/.agentkeys/agent-device.key) and sign every cap-mint with it, so
+            // a compromised broker can't mint a usable cap. Override the path with
+            // AGENTKEYS_DEVICE_KEY_FILE.
+            match agentkeys_core::device_crypto::load_device_key_from_env() {
+                Some(dk) => client = client.with_device_key(Arc::new(dk)),
+                None => tracing::warn!(
+                    "no K10 device key loaded — cap-mint will fail (set AGENTKEYS_DEVICE_KEY_FILE \
+                     to the agent's registered key; issue #76)"
+                ),
+            }
+            Arc::new(client)
+        }
     };
     let server = Arc::new(Server::new(config.clone(), backend));
 

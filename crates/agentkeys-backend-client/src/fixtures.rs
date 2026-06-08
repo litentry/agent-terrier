@@ -32,12 +32,19 @@ pub struct Fixture {
 /// real serde type. The `dump-protocol-fixtures` bin writes one `<name>.json`
 /// per entry.
 pub fn canonical_fixtures() -> Vec<Fixture> {
+    // The canonical minimal cap-mint body — the K10 cap-PoP (issue #76) is
+    // OPTIONAL (None here), so the fixture is the no-PoP shape that pre-#76
+    // hand-rolled bash bodies still match. A PoP-signed body adds the optional
+    // client_sig/client_nonce/client_ts keys.
     let cap = BrokerCapRequest {
         operator_omni: "0x<operator_omni>".into(),
         actor_omni: "0x<actor_omni>".into(),
         service: "memory:<namespace>".into(),
         device_key_hash: "0x<device_key_hash>".into(),
         ttl_seconds: 300,
+        client_sig: None,
+        client_nonce: None,
+        client_ts: None,
     };
     let memory_put = MemoryPutBody {
         cap: json!("<cap-token>"),
@@ -122,6 +129,9 @@ mod tests {
     /// fixtures (`cargo run -p agentkeys-backend-client --bin dump-protocol-fixtures`).
     #[test]
     fn cap_mint_request_keys_frozen() {
+        // The canonical (minimal) cap-mint body — PoP fields are OPTIONAL
+        // (issue #76) and omitted here; a PoP-signed body adds client_sig/
+        // client_nonce/client_ts.
         assert_eq!(
             keys_of("cap_mint_request"),
             vec![

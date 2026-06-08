@@ -69,6 +69,18 @@ impl CapMintOp {
             Self::ConfigStore | Self::ConfigFetch => "config",
         }
     }
+
+    /// The signed-cap `CapOp` snake_case string this endpoint mints — the value
+    /// that lands in `CapPayload.op` and must match the K10 cap-PoP preimage
+    /// (issue #76). Store-class endpoints → `"store"`, fetch-class → `"fetch"`.
+    /// Callers building the cap-PoP signature MUST use this so the worker's
+    /// recomputed preimage agrees byte-for-byte.
+    pub fn op_str(self) -> &'static str {
+        match self {
+            Self::CredStore | Self::MemoryPut | Self::ConfigStore => "store",
+            Self::CredFetch | Self::MemoryGet | Self::ConfigFetch => "fetch",
+        }
+    }
 }
 
 /// The cap-mint request as the *caller* constructs it (omni's, service,
@@ -85,8 +97,14 @@ pub struct CapMintRequest {
 }
 
 /// Broker cap-mint request body — the exact JSON
-/// `agentkeys_broker_server::handlers::cap` deserializes for all four
-/// `/v1/cap/*` endpoints.
+/// `agentkeys_broker_server::handlers::cap` deserializes for all `/v1/cap/*`
+/// endpoints. Carries the K10 cap-mint **proof-of-possession** (issue #76):
+/// `client_sig` is an EIP-191 signature by the caller's K10 device key over
+/// `device_crypto::cap_pop_payload(operator, actor, service, op, data_class,
+/// client_nonce, client_ts)`. The broker validates it and the WORKER re-verifies
+/// it independently — so a compromised broker (which lacks the K10 private key)
+/// cannot mint a usable cap. Built by [`BackendClient::cap_mint`] from an
+/// injected `DeviceKey`, NOT hand-set by callers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrokerCapRequest {
     pub operator_omni: String,
@@ -94,18 +112,19 @@ pub struct BrokerCapRequest {
     pub service: String,
     pub device_key_hash: String,
     pub ttl_seconds: u64,
-}
-
-impl From<CapMintRequest> for BrokerCapRequest {
-    fn from(r: CapMintRequest) -> Self {
-        Self {
-            operator_omni: r.operator_omni,
-            actor_omni: r.actor_omni,
-            service: r.service,
-            device_key_hash: r.device_key_hash,
-            ttl_seconds: r.ttl_seconds,
-        }
-    }
+    // The K10 cap-PoP is OPTIONAL on the wire (issue #76 staged rollout): a caller
+    // that holds the actor's K10 signs (the broker validates + the worker
+    // re-verifies); a caller without one (e.g. a master before its K10 is
+    // registered) omits these. Enforcement (reject-if-absent) is opt-in via the
+    // worker's AGENTKEYS_WORKER_REQUIRE_CAP_POP — until then the PoP is
+    // verified-when-present. `skip_serializing_if` keeps the no-PoP body
+    // byte-identical to the pre-#76 shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_sig: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ts: Option<u64>,
 }
 
 /// Opaque cap-token blob — the broker signs it and the worker verifies the
