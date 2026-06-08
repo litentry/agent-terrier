@@ -57,7 +57,6 @@ pub struct CachedCap {
     expires_at_unix: u64,
 }
 
-#[derive(Debug)]
 pub struct ProxyState {
     pub broker_url: String,
     pub session_jwt: String,
@@ -66,6 +65,11 @@ pub struct ProxyState {
     /// fails closed when (now - last_broker_contact) > BROKER_STALE_TTL.
     pub last_broker_contact: RwLock<Instant>,
     pub http: reqwest::Client,
+    /// The agent's K10 device key for cap-mint proof-of-possession (issue #76).
+    /// Loaded once from the owner-only key file; every cap-mint the proxy
+    /// forwards to the broker is signed with it, so a compromised broker can't
+    /// mint a usable cap. `None` (no key file) → cap-mint fails closed.
+    pub device_key: Option<Arc<agentkeys_core::device_crypto::DeviceKey>>,
 }
 
 pub type SharedProxyState = Arc<ProxyState>;
@@ -113,6 +117,8 @@ pub fn build_state(broker_url: String, session_jwt: String) -> SharedProxyState 
         // before any broker call has happened.
         last_broker_contact: RwLock::new(Instant::now()),
         http: reqwest::Client::new(),
+        // issue #76: load the agent's K10 once for cap-mint PoP signing.
+        device_key: agentkeys_core::device_crypto::load_device_key_from_env().map(Arc::new),
     })
 }
 
@@ -186,11 +192,64 @@ async fn handle_cap(
         state.broker_url.trim_end_matches('/'),
         upstream_path
     );
+
+    // K10 cap-mint proof-of-possession (issue #76 — broker-SPOF defense). When
+    // the agent's K10 is loaded, sign the request: the broker validates it and
+    // the worker re-verifies it independently, so a compromised broker can't mint
+    // a usable cap, and `device_key_hash` is derived from the SAME key we sign
+    // with. Graceful during rollout: with no K10 loaded, forward the caller's
+    // `device_key_hash` and no PoP — the worker accepts it unless
+    // AGENTKEYS_WORKER_REQUIRE_CAP_POP=1. The proxy serves only the creds class.
+    let outbound = match state.device_key.as_ref() {
+        Some(device_key) => {
+            let pop = match device_key.cap_pop_now(
+                &req.operator_omni,
+                &req.actor_omni,
+                &req.service,
+                op_label,
+                "credentials",
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    emit_audit_line(&req, op_label, "cap_pop_sign_error", false);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorBody {
+                            error: e.to_string(),
+                            reason: "cap_pop_sign_error",
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            agentkeys_backend_client::BrokerCapRequest {
+                operator_omni: req.operator_omni.clone(),
+                actor_omni: req.actor_omni.clone(),
+                service: req.service.clone(),
+                device_key_hash: device_key.device_key_hash().unwrap_or_default(),
+                ttl_seconds: req.ttl_seconds.unwrap_or(300),
+                client_sig: Some(pop.client_sig),
+                client_nonce: Some(pop.client_nonce),
+                client_ts: Some(pop.client_ts),
+            }
+        }
+        None => agentkeys_backend_client::BrokerCapRequest {
+            operator_omni: req.operator_omni.clone(),
+            actor_omni: req.actor_omni.clone(),
+            service: req.service.clone(),
+            device_key_hash: req.device_key_hash.clone(),
+            ttl_seconds: req.ttl_seconds.unwrap_or(300),
+            client_sig: None,
+            client_nonce: None,
+            client_ts: None,
+        },
+    };
+
     let resp = state
         .http
         .post(&upstream)
         .bearer_auth(&state.session_jwt)
-        .json(&req)
+        .json(&outbound)
         .send()
         .await;
     let resp = match resp {

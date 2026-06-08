@@ -21,6 +21,8 @@ path = "src/bin/dump_protocol_fixtures.rs"
 # shared piece. The client crate wraps it so cap-mint + STS + worker put/get
 # live behind ONE owner (issue #203).
 agentkeys-provisioner = { path = "../agentkeys-provisioner" }
+# K10 cap-mint proof-of-possession (issue #76): DeviceKey + cap_pop_now signing.
+agentkeys-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
