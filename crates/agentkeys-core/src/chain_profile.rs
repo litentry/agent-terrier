@@ -89,13 +89,23 @@ pub struct ChainProfile {
     pub finality: FinalityConfig,
     pub gas: GasConfig,
     pub deploy: DeployConfig,
-    /// Deployed stage-1 contract registry for this chain — the addresses the
+    /// Deployed contract registry for this chain — the addresses the
     /// broker/daemon/workers read and the parent-control UI displays (#153).
-    /// Empty for chains where AgentKeys contracts aren't deployed. This is the
-    /// single embedded source of truth (mirrors `docs/spec/deployed-contracts.md`);
-    /// operators targeting a custom deploy override it via a profile file.
+    /// Empty for chains where AgentKeys contracts aren't deployed. **This is the
+    /// single machine-readable source of truth for deployed addresses**; the
+    /// human view `docs/spec/deployed-contracts.md` points HERE, and
+    /// `scripts/heima-bring-up.sh` rewrites this array (+ `contract_set_version`)
+    /// programmatically on every fresh deploy. Operators targeting a custom
+    /// deploy override it via a profile file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contracts: Vec<ContractInfo>,
+    /// Version of the deployed contract SET for this chain (e.g. `"0.1"`). The
+    /// idempotency key: `crates/agentkeys-chain/VERSION` is the EXPECTED source
+    /// version; a deploy redeploys + bumps this only when they differ (no
+    /// bytecode comparison — Solidity metadata + immutables make it unreliable).
+    /// `None` for chains with no deployed contracts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_set_version: Option<String>,
     /// Present for dev/test chains; absent for production. See
     /// `DevEnvironment` doc-comment for the convention around
     /// `is_development_default`.
@@ -434,36 +444,53 @@ mod tests {
     }
 
     #[test]
-    fn heima_carries_stage1_contract_registry() {
+    fn heima_carries_full_contract_registry_and_version() {
         let p = ChainProfile::load_builtin("heima").unwrap();
-        // The 4 stage-1 core contracts the audit decode + UI reference must be
-        // present with the canonical mainnet addresses (mirrors
-        // docs/spec/deployed-contracts.md). Pin them so a profile edit that
-        // drops/renames one fails CI.
-        for (name, addr) in [
-            (
-                "AgentKeysScope",
-                "0xd44b375daefc65768f417d0f0125b68d5ba7df3b",
-            ),
-            (
-                "SidecarRegistry",
-                "0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE",
-            ),
-            (
-                "K3EpochCounter",
-                "0x6c9e675c699a06acefbc156afdee6bfbfe32ccb3",
-            ),
-            (
-                "CredentialAudit",
-                "0x63c4545ac01c77cc74044f25b8edea3880224577",
-            ),
-        ] {
+        // heima.json is now the machine-readable SOURCE OF TRUTH for deployed
+        // addresses (scripts/heima-bring-up.sh rewrites the contracts[] array +
+        // contract_set_version on every deploy). So pin SHAPE + COMPLETENESS,
+        // NOT exact address values: every expected contract present, a purpose,
+        // a well-formed 20-byte address, and a contract-set version. Pinning
+        // exact addresses here would just duplicate the JSON and break this test
+        // on every legitimate redeploy.
+        let expected = [
+            "AgentKeysScope",
+            "SidecarRegistry",
+            "K3EpochCounter",
+            "CredentialAudit",
+            "P256Verifier",
+            "K11Verifier",
+            "EntryPoint",
+            "P256AccountFactory",
+            "VerifyingPaymaster",
+        ];
+        for name in expected {
             let c = p
                 .contract(name)
                 .unwrap_or_else(|| panic!("heima profile must carry {name}"));
-            assert_eq!(c.address, addr, "{name} address drift");
             assert!(!c.purpose.is_empty(), "{name} must carry a purpose");
+            let hexpart = c.address.strip_prefix("0x").unwrap_or(&c.address);
+            assert_eq!(
+                hexpart.len(),
+                40,
+                "{name} address must be 20 bytes: {}",
+                c.address
+            );
+            assert!(
+                hexpart.chars().all(|ch| ch.is_ascii_hexdigit()),
+                "{name} address must be hex: {}",
+                c.address
+            );
         }
+        // The contract-set version (the deploy idempotency key) must be recorded.
+        let version = p
+            .contract_set_version
+            .as_deref()
+            .expect("heima profile must record contract_set_version");
+        assert!(
+            !version.is_empty(),
+            "contract_set_version must be non-empty"
+        );
         // Case-insensitive lookup + miss path.
         assert!(p.contract("credentialaudit").is_some());
         assert!(p.contract("NotAContract").is_none());
@@ -474,7 +501,7 @@ mod tests {
         // #153: the chain page + audit decode link to the live Heima EVM
         // explorer — contracts under /contract/, accounts under /address/.
         let p = ChainProfile::load_builtin("heima").unwrap();
-        let addr = "0x63c4545ac01c77cc74044f25b8edea3880224577";
+        let addr = "0x8336968273D26C4AcB7B29a76A442339FC10533D";
         assert_eq!(
             p.explorer.contract_url(addr),
             format!("https://explorer.heima.network/contract/{addr}")

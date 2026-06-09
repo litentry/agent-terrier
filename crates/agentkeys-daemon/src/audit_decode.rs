@@ -163,9 +163,13 @@ fn onchain_fn(kind: &str) -> Option<(&'static FnDef, &'static str)> {
         "cap.pair" | "device.paired" => "registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)",
         "device.revoked" => "revokeAgentDevice(bytes32)",
         "scope.grant" => {
-            // Deployed mainnet form — the K11Assertion struct expands in the
-            // selector (0x864ae93c), so the canonical signature carries it.
-            "setScopeWithWebauthn(bytes32,bytes32,bytes32[],bool,uint128,uint128,uint128,uint32,(bytes32,bytes,bytes,uint256,uint256,uint256))"
+            // Account-auth form (live since the #164/#225 cutover, 2026-06-08):
+            // AgentKeysScope.setScope (selector 0xd8e9e3c6) — no inline K11
+            // tuple; authorization moved upstream to the 4337 account's
+            // validateUserOp. (The pre-cutover setScopeWithWebauthn form,
+            // selector 0x864ae93c, is retained in calldata::REGISTRY only to
+            // decode orphaned pre-cutover calldata.)
+            "setScope(bytes32,bytes32,bytes32[],bool,uint128,uint128,uint128,uint32)"
         }
         _ => return None,
     };
@@ -282,6 +286,8 @@ fn calldata_args(
             ]
         }
         "device.revoked" => vec![json!(hash_hex(&event.actor_id))],
+        // Account-auth `setScope` (8 params, no inline K11 assertion tuple) —
+        // live since the #164/#225 cutover. Matches calldata::REGISTRY setScope.
         "scope.grant" => vec![
             op,
             ac,
@@ -291,7 +297,6 @@ fn calldata_args(
             json!(1u64),
             json!(10u64),
             json!(86400u64),
-            Value::Null, // assertion tuple — noted, not decoded
         ],
         _ => vec![],
     }
@@ -352,9 +357,12 @@ mod tests {
         assert_eq!(out["tier"], json!("tier-2"));
         let tx = &out["tx"];
         assert_eq!(tx["to_contract"], json!("CredentialAudit"));
+        // Redeploy-proof: assert against the SAME profile the decoder resolved from,
+        // not a pinned literal — the address changes on every contract redeploy
+        // (this test broke on the v0.2 redeploy because it hardcoded the v0.1 addr).
         assert_eq!(
             tx["to_address"],
-            json!("0x63c4545ac01c77cc74044f25b8edea3880224577")
+            json!(profile().contract("CredentialAudit").unwrap().address)
         );
         let dec = &tx["decoded"];
         assert_eq!(dec["selector"], json!("0xc1bf0e32"));
@@ -375,11 +383,11 @@ mod tests {
     fn scope_grant_decodes_static_args_and_notes_tuple() {
         let out = decode_event(&event("scope.grant"), None, None, &profile());
         let dec = &out["tx"]["decoded"];
-        assert_eq!(dec["function"], json!("setScopeWithWebauthn"));
+        // Live form since the #164/#225 account-auth cutover.
+        assert_eq!(dec["function"], json!("setScope"));
         assert_eq!(out["tx"]["to_contract"], json!("AgentKeysScope"));
         assert_eq!(dec["args"][3]["name"], json!("readOnly"));
         assert_eq!(dec["args"][3]["value"], json!(false));
-        assert!(dec["note"].as_str().is_some(), "tuple must be noted");
         assert_eq!(out["envelope"]["op_kind_label"], json!("scope.grant"));
     }
 

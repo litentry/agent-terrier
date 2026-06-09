@@ -113,6 +113,11 @@ pub struct PendingBinding {
     pub requested_scope: String,
     pub device_pubkey: String,
     pub pop_sig: String,
+    /// The agent's one-time `pairing_code` (the master claimed by it) — surfaced
+    /// so the operator can cross-reference the device's displayed code.
+    pub pairing_code: String,
+    /// Unix seconds when the agent requested pairing (`/request`). The UI formats it.
+    pub created_at: i64,
 }
 
 /// The `SELECT` shape `poll()` reads:
@@ -449,7 +454,7 @@ impl PairingRequestStore {
         let mut stmt = conn
             .prepare(
                 "SELECT request_id, child_omni, operator_omni, label, requested_scope,
-                        device_pubkey, pop_sig
+                        device_pubkey, pop_sig, pairing_code, created_at
                  FROM pairing_requests
                  WHERE operator_omni = ?1 AND claimed_at IS NOT NULL AND bound_at IS NULL
                  ORDER BY claimed_at ASC",
@@ -465,6 +470,8 @@ impl PairingRequestStore {
                     requested_scope: row.get(4)?,
                     device_pubkey: row.get(5)?,
                     pop_sig: row.get(6)?,
+                    pairing_code: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             })
             .map_err(|e| BrokerError::Internal(format!("query pending_bindings: {e}")))?;
@@ -494,6 +501,23 @@ impl PairingRequestStore {
                 params![now, request_id, operator_omni],
             )
             .map_err(|e| BrokerError::Internal(format!("mark_bound pairing_request: {e}")))?;
+        Ok(n)
+    }
+
+    /// Master DECLINES a claimed-but-unbound pairing request it owns — DELETE the
+    /// row so it leaves `pending_bindings` (the agent re-pairs). Scoped to the
+    /// claiming `operator_omni` so one master can't decline another's, and gated on
+    /// `bound_at IS NULL` (a device already bound on chain is unpaired, not
+    /// declined). Returns the row count (0 = unknown / not yours / already bound).
+    pub fn decline(&self, request_id: &str, operator_omni: &str) -> BrokerResult<usize> {
+        let conn = self.lock()?;
+        let n = conn
+            .execute(
+                "DELETE FROM pairing_requests
+                 WHERE request_id = ?1 AND operator_omni = ?2 AND bound_at IS NULL",
+                params![request_id, operator_omni],
+            )
+            .map_err(|e| BrokerError::Internal(format!("decline pairing_request: {e}")))?;
         Ok(n)
     }
 
