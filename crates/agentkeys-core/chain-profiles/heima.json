@@ -41,25 +41,25 @@
   "contracts": [
     {
       "name": "AgentKeysScope",
-      "address": "0xd44b375daefc65768f417d0f0125b68d5ba7df3b",
+      "address": "0xe6421A01C0469C034a25f561D01A62B520A3DB0b",
       "purpose": "per-actor scope grants — services, namespaces, spend/time windows",
       "deployed_at": "Heima mainnet · stage-1"
     },
     {
       "name": "SidecarRegistry",
-      "address": "0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE",
+      "address": "0xC63E6f6441A54093E3593d704a2Dc4E13382EF4E",
       "purpose": "D_pub ↔ (operator_omni, actor_omni, roles) device bindings + K11 cred storage",
       "deployed_at": "Heima mainnet · stage-1"
     },
     {
       "name": "K3EpochCounter",
-      "address": "0x6c9e675c699a06acefbc156afdee6bfbfe32ccb3",
+      "address": "0x9B872ccd570336164D78ea58ACbb060C8B4505D6",
       "purpose": "current K3 epoch; bumps trigger signer-side KEK + K4 derivation rotation",
       "deployed_at": "Heima mainnet · stage-1"
     },
     {
       "name": "CredentialAudit",
-      "address": "0x63c4545ac01c77cc74044f25b8edea3880224577",
+      "address": "0x49BD708A296df20Aa1aE6C938877A24Cae0BA153",
       "purpose": "per-actor append-only audit log + tier-2 Merkle root anchor every 2 min",
       "deployed_at": "Heima mainnet · stage-1"
     },
@@ -74,6 +74,25 @@
       "address": "0x5a441431f08e0f5f5ed10659620cb4e0e814e627",
       "purpose": "K11 WebAuthn assertion verifier used by scope + registry master mutations",
       "deployed_at": "Heima mainnet · pre-deployed"
+    },
+    {
+      "name": "EntryPoint",
+      "address": "0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9",
+      "purpose": "ERC-4337 v0.7 EntryPoint (canonical eth-infinitism) — handleOps entry for passkey-account master UserOps",
+      "deployed_at": "Heima mainnet · #164"
+    },
+    {
+      "name": "P256AccountFactory",
+      "address": "0x1ccCe65b22De81aDA4F378FeAf7503d93f5d27a3",
+      "purpose": "CREATE2 factory for P256Account passkey-master smart-accounts; constructor(entryPoint, k11Verifier)",
+      "deployed_at": "Heima mainnet · #164"
+    },
+    {
+      "name": "VerifyingPaymaster",
+      "address": "0xca36550d30e2E4dF927c53C3a5272A319D427602",
+      "purpose": "#164 E6 / #225 — broker-co-signed gas sponsorship for the K11-gated accept UserOp (one shared EntryPoint deposit; the J1 Sybil gate)",
+      "deployed_at": "Heima mainnet · #225"
     }
-  ]
+  ],
+  "contract_set_version": "0.3"
 }

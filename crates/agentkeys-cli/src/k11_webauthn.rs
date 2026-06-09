@@ -1025,6 +1025,70 @@ pub fn extract_chain_assertion(
     })
 }
 
+/// The 5 on-chain fields a browser WebAuthn `get()` assertion (over a UserOp
+/// hash) decodes into — what the registry/account verifier needs. The daemon
+/// web-flow register/accept submit path (issue #225 / E7) uses this.
+pub struct WebUserOpAssertion {
+    /// `0x` || hex(authenticatorData).
+    pub authenticator_data_hex: String,
+    /// `0x` || hex(clientDataJSON utf-8 bytes).
+    pub client_data_json_hex: String,
+    /// Byte offset of the challenge value in clientDataJSON (after `"challenge":"`).
+    pub challenge_location: u64,
+    /// `0x` || hex(r), 32-byte big-endian.
+    pub r_hex: String,
+    /// `0x` || hex(s), 32-byte big-endian.
+    pub s_hex: String,
+}
+
+/// Decode a browser WebAuthn `get()` assertion into the on-chain fields the
+/// `K11Verifier`/`P256Account` needs (DER → (r,s); challenge offset in the
+/// clientDataJSON). The three inputs are base64url, exactly as
+/// `apps/parent-control/lib/webauthn.ts::getAssertionOverHash` emits them. Does
+/// NOT verify the signature (the chain does) — it only extracts the fields.
+pub fn decode_web_userop_assertion(
+    authenticator_data_b64url: &str,
+    client_data_json_b64url: &str,
+    signature_der_b64url: &str,
+) -> Result<WebUserOpAssertion, WebauthnError> {
+    let b64 = |field: &str, s: &str| -> Result<Vec<u8>, WebauthnError> {
+        URL_SAFE_NO_PAD
+            .decode(s.trim())
+            .map_err(|e| WebauthnError::SerdeJson(format!("{field} base64url: {e}")))
+    };
+    let authenticator_data = b64("authenticator_data", authenticator_data_b64url)?;
+    let client_data_json = b64("client_data_json", client_data_json_b64url)?;
+    let signature_der = b64("signature", signature_der_b64url)?;
+
+    let sig = Signature::from_der(&signature_der)
+        .map_err(|e| WebauthnError::SigParse(format!("der → (r,s): {e}")))?;
+    let sig_bytes = sig.to_bytes();
+    if sig_bytes.len() != 64 {
+        return Err(WebauthnError::SigParse(format!(
+            "sig.to_bytes() returned {} bytes; expected 64",
+            sig_bytes.len()
+        )));
+    }
+
+    let cdj_utf8 = std::str::from_utf8(&client_data_json)
+        .map_err(|e| WebauthnError::SerdeJson(format!("cdj utf-8: {e}")))?;
+    let needle = "\"challenge\":\"";
+    let challenge_location = cdj_utf8
+        .find(needle)
+        .map(|p| (p + needle.len()) as u64)
+        .ok_or_else(|| {
+            WebauthnError::SerdeJson(format!("clientDataJSON missing {needle:?}: {cdj_utf8}"))
+        })?;
+
+    Ok(WebUserOpAssertion {
+        authenticator_data_hex: format!("0x{}", hex::encode(&authenticator_data)),
+        client_data_json_hex: format!("0x{}", hex::encode(&client_data_json)),
+        challenge_location,
+        r_hex: format!("0x{}", hex::encode(&sig_bytes[0..32])),
+        s_hex: format!("0x{}", hex::encode(&sig_bytes[32..64])),
+    })
+}
+
 struct AttestedCredential {
     rp_id_hash: Vec<u8>,
     flags: u8,

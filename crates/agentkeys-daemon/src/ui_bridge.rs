@@ -168,6 +168,30 @@ pub struct UiBridgeState {
     /// re-onboarding). Distinct from `onboarding_session`, which is set ONLY while
     /// the J1 is live (the "actively logged in" signal).
     pub master_session: RwLock<Option<PersistedMasterSession>>,
+    /// #225 / E7: the master register is two-phase (the browser passkey signs the
+    /// register UserOp BETWEEN build + submit). K11-finish runs the `build`
+    /// (deploy the P256Account + assemble the register UserOp) and stashes the
+    /// build context HERE; `POST /v1/master/register/submit` consumes it after the
+    /// browser signs `userop_hash`. `None` ⇒ no register in flight. Single-master,
+    /// so one slot suffices.
+    pub pending_register: RwLock<Option<PendingMasterRegister>>,
+}
+
+/// #225 / E7: build-phase output of the two-phase master register, held between
+/// `/v1/k11/enroll/finish` (build) and `/v1/master/register/submit`.
+#[derive(Clone, Debug)]
+pub struct PendingMasterRegister {
+    /// `erc4337-register-master.sh build` state file (ACCOUNT/NONCE/CALLDATA/…),
+    /// read back by the `submit` sub-command.
+    pub state_file: String,
+    /// The deployed P256Account (the operatorMasterWallet-to-be).
+    pub account: String,
+    /// `master_cred_id_hash(omni)` — the account's signer key + a submit arg.
+    pub cred_id_hash: String,
+    /// `keccak(operator_omni)` — what cap-mint sends once registered.
+    pub device_key_hash: String,
+    /// The session omni the master registers under.
+    pub operator_omni: String,
 }
 
 /// Issue #196: outcome of the on-chain master-device registration shell-out.
@@ -183,6 +207,9 @@ pub struct RegisteredMaster {
     /// `registerFirstMasterDevice` tx hash. `None` on idempotent skip (the device
     /// was already on chain from a prior login).
     pub tx_hash: Option<String>,
+    /// #225 / E7: the master's on-chain P256Account address (`operatorMasterWallet[omni]`),
+    /// surfaced on the actor page. `None` for a pre-E7 / EOA-bound master.
+    pub account: Option<String>,
 }
 
 /// A master-actor memory entry. `content_hash` is the dedup key —
@@ -523,6 +550,15 @@ pub struct EnrollFinishResponse {
     /// hitting a confusing cap-mint failure at plant time (issue #90 fail-loud).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_error: Option<String>,
+    /// #225 / E7: when `chain == "register-pending"`, the userOpHash the browser
+    /// passkey must sign (a second Touch ID) and POST to `/v1/master/register/submit`
+    /// to finish binding the master P256Account. `None` on skip/error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub register_userop_hash: Option<String>,
+    /// #225 / E7: the deployed master P256Account address (operatorMasterWallet-to-be),
+    /// shown in the ceremony UI. Present on both `register-pending` + skip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub register_account: Option<String>,
 }
 
 // ── W1 onboarding: real email magic-link verify (broker-backed) ──
@@ -643,6 +679,8 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/healthz", get(healthz))
         .route("/v1/k11/enroll/begin", post(enroll_begin))
         .route("/v1/k11/enroll/finish", post(enroll_finish))
+        .route("/v1/master/register/submit", post(master_register_submit))
+        .route("/v1/master/reset", post(master_reset))
         .route("/v1/auth/email/start", post(auth_email_start))
         .route("/v1/auth/email/status", get(auth_email_status))
         .route("/v1/onboarding/state", get(onboarding_state))
@@ -679,7 +717,12 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         // (agents it claimed, awaiting on-chain register) for the pairing screen.
         .route("/v1/agent/pairing/pending", get(list_pairing_requests))
         .route("/v1/agent/pairing/claim", post(claim_pairing))
+        .route("/v1/agent/pairing/decline", post(decline_pairing))
+        .route("/v1/agent/pairing/ack", post(ack_pairing))
         .route("/v1/agent/pairing/register", post(register_pairing))
+        // #225 E7 — the Touch-ID-gated accept (browser K11-signs the userOpHash):
+        .route("/v1/accept/build", post(accept_build_proxy))
+        .route("/v1/accept/submit", post(accept_submit_proxy))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -768,6 +811,7 @@ pub fn build_state(
         chain_profile,
         master_session_store,
         master_session: RwLock::new(None),
+        pending_register: RwLock::new(None),
     }))
 }
 
@@ -1002,6 +1046,111 @@ async fn logout(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Va
     Json(serde_json::json!({ "ok": true }))
 }
 
+/// `POST /v1/master/reset` (#225 E7) — fully unbind the master so the operator can
+/// re-onboard with a FRESH passkey (used when the bound master passkey was deleted in
+/// the OS password manager, or got out of sync via a re-onboard). Two parts:
+///
+/// 1. **ON-CHAIN** — shell out to `heima-reset-master.sh`, which calls the registry's
+///    owner-gated `resetMaster(operatorOmni)` (the deployer key) to clear
+///    `operatorMasterWallet[omni]`. This is the part that actually lets a fresh passkey
+///    re-bind: `registerFirstMasterDevice` is first-master-ONLY, so WITHOUT this the
+///    immutable binding keeps the new passkey from binding and accept keeps failing
+///    SIG_VALIDATION. Best-effort + surfaced: a failure (registry pre-VERSION-0.3 / no
+///    `resetMaster`, missing deployer key) is reported in the response, not swallowed.
+/// 2. **LOCAL** — clear `registered_master` + any in-flight `pending_register` + the
+///    persisted master-session coords, so `GET /v1/onboarding/state` drops back to
+///    `chain: "none"` and the onboarding ceremony enrolls fresh (it normally SKIPS when
+///    a master is bound). Always runs, even if (1) fails, so the UI isn't stuck.
+///
+/// KEEPS the email/J1 session (re-onboard needs no re-verify). CANNOT touch the **OS
+/// passkey** (WebAuthn forbids a site from deleting a credential) — the UI must tell the
+/// operator to delete the master passkey in System Settings → Passwords.
+async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
+    // Capture the operator omni BEFORE clearing local state (the on-chain reset needs
+    // it). Prefer the registered-master omni (what's actually bound on chain), then the
+    // persisted session, then the live onboarding session. Each read guard is dropped at
+    // its statement end — none held across an await.
+    let from_registered = state
+        .registered_master
+        .read()
+        .await
+        .as_ref()
+        .map(|rm| rm.operator_omni.clone());
+    let from_session = state
+        .master_session
+        .read()
+        .await
+        .as_ref()
+        .map(|ms| ms.operator_omni.clone());
+    let from_onboarding = state
+        .onboarding_session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.omni.clone());
+    let operator_omni = [from_registered, from_session, from_onboarding]
+        .into_iter()
+        .flatten()
+        .find(|o| !o.is_empty())
+        .map(|o| agentkeys_backend_client::normalize_omni_0x(&o));
+
+    // (1) ON-CHAIN unbind via the deployer-owned resetMaster.
+    let onchain = match (state.register_master_script.clone(), operator_omni.clone()) {
+        (Some(script), Some(omni)) => match reset_master_onchain(&script, &omni).await {
+            Ok(v) if v.get("skipped").is_some() => {
+                tracing::info!(target: "agentkeys.daemon.ui_bridge", omni = %omni, "master reset — on-chain already unbound");
+                serde_json::json!({ "status": "skipped", "reason": "already-unbound", "operator_omni": omni })
+            }
+            Ok(v) => {
+                let tx = v
+                    .get("tx_hash")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default();
+                tracing::info!(target: "agentkeys.daemon.ui_bridge", omni = %omni, tx = %tx, "master reset — on-chain operatorMasterWallet cleared");
+                serde_json::json!({ "status": "reset", "tx_hash": tx, "operator_omni": omni })
+            }
+            Err(e) => {
+                tracing::warn!(target: "agentkeys.daemon.ui_bridge", omni = %omni, "master reset — on-chain unbind FAILED: {e}");
+                serde_json::json!({ "status": "failed", "error": e, "operator_omni": omni })
+            }
+        },
+        (None, _) => {
+            serde_json::json!({ "status": "skipped", "reason": "no-register-script-configured" })
+        }
+        (_, None) => serde_json::json!({ "status": "skipped", "reason": "no-operator-omni-known" }),
+    };
+
+    // (2) LOCAL clear (always — even if the on-chain step failed, so the UI isn't stuck).
+    *state.registered_master.write().await = None;
+    *state.pending_register.write().await = None;
+    *state.master_session.write().await = None;
+    if let Some(store) = state.master_session_store.as_ref() {
+        if let Err(e) = store.clear_all() {
+            tracing::warn!("ui-bridge: master reset failed to clear persisted session: {e}");
+        }
+    }
+    tracing::info!(
+        target: "agentkeys.daemon.ui_bridge",
+        "master reset — local binding cleared; the OS passkey is NOT touched (WebAuthn forbids site deletion)"
+    );
+
+    let status = onchain.get("status").and_then(|s| s.as_str());
+    let onchain_cleared = status == Some("reset")
+        || (status == Some("skipped")
+            && onchain.get("reason").and_then(|s| s.as_str()) == Some("already-unbound"));
+    let note = if onchain_cleared {
+        "local + ON-CHAIN master binding cleared — delete the master passkey in your OS password \
+         manager (System Settings ▸ Passwords), then re-onboard with a fresh passkey."
+    } else {
+        "LOCAL master binding cleared, but the ON-CHAIN binding was NOT cleared (see onchain.error / \
+         onchain.reason). Re-onboarding will still fail with SIG_VALIDATION until it is — confirm the \
+         registry is VERSION>=0.3 (has resetMaster) and the deployer key is available, then retry, or \
+         run scripts/heima-reset-master.sh --operator-omni <omni> manually."
+    };
+
+    Json(serde_json::json!({ "ok": true, "onchain": onchain, "note": note }))
+}
+
 /// Persist the current master session coordinates to
 /// `~/.agentkeys/daemon-<wallet>/master-session.json` and refresh the in-memory
 /// `master_session` mirror (issue #220). No-op when persistence is disabled
@@ -1084,6 +1233,9 @@ pub async fn rehydrate_master_session(state: &UiBridgeState) {
             device_key_hash: record.device_key_hash.clone(),
             operator_omni: record.operator_omni.clone(),
             tx_hash: None,
+            // The account address isn't persisted in the #220 session record yet;
+            // list_actors reads it from chain when absent (E7 actor-page follow-up).
+            account: None,
         });
         tracing::info!(
             target: "agentkeys.daemon.ui_bridge",
@@ -1210,7 +1362,7 @@ async fn enroll_finish(
     // passkey just enrolled. Best-effort: a chain failure does NOT void the
     // passkey enrollment — it surfaces in `chain_error` so the operator funds +
     // retries instead of hitting a confusing cap-mint failure at plant time.
-    let (chain_tx_hash, chain, chain_error) = finish_chain_register(
+    let build = finish_chain_register(
         &state,
         &credential_id_b64,
         attestation_object_b64.as_deref(),
@@ -1220,9 +1372,11 @@ async fn enroll_finish(
     Ok(Json(EnrollFinishResponse {
         credential_id: credential_id_b64,
         registered_at_unix,
-        chain_tx_hash,
-        chain,
-        chain_error,
+        chain_tx_hash: build.chain_tx_hash,
+        chain: build.chain,
+        chain_error: build.chain_error,
+        register_userop_hash: build.register_userop_hash,
+        register_account: build.register_account,
     }))
 }
 
@@ -1232,69 +1386,196 @@ async fn enroll_finish(
 /// — `("none", None)` with no error — when no register script is configured
 /// (dev / no-infra). A missing session or a shell-out failure returns a
 /// `chain_error` so the web UI can surface "fund + retry".
+/// #225 / E7 build-phase result. `chain`: `"register-pending"` (account built;
+/// the browser must sign `register_userop_hash` next via `/v1/master/register/submit`),
+/// `"master-registered"` (idempotent skip — the operator already has a master),
+/// or `"none"` (no script / error in `chain_error`).
+struct ChainRegisterBuild {
+    register_userop_hash: Option<String>,
+    register_account: Option<String>,
+    chain_tx_hash: Option<String>,
+    chain: String,
+    chain_error: Option<String>,
+}
+
 async fn finish_chain_register(
     state: &SharedUiBridgeState,
-    credential_id_b64url: &str,
+    _credential_id_b64url: &str,
     attestation_object_b64: Option<&str>,
-) -> (Option<String>, String, Option<String>) {
-    let Some(script) = state.register_master_script.clone() else {
-        return (None, "none".to_string(), None);
+) -> ChainRegisterBuild {
+    let none = |chain: &str, err: Option<String>| ChainRegisterBuild {
+        register_userop_hash: None,
+        register_account: None,
+        chain_tx_hash: None,
+        chain: chain.to_string(),
+        chain_error: err,
     };
-    let session = state.onboarding_session.read().await.clone();
-    let Some(session) = session else {
+    let Some(script) = state.register_master_script.clone() else {
+        return none("none", None);
+    };
+    let Some(session) = state.onboarding_session.read().await.clone() else {
         let msg = "K11 enrolled but no onboarding session — verify email first, \
                    then re-enroll to register the master device on chain"
             .to_string();
         tracing::warn!("ui-bridge register-master: {msg}");
-        return (None, "none".to_string(), Some(msg));
+        return none("none", Some(msg));
     };
     if session.omni.is_empty() {
-        return (
-            None,
-            "none".to_string(),
+        return none(
+            "none",
             Some("onboarding session has no EVM omni (managed-wallet attestation skipped)".into()),
         );
     }
     let Some(att_b64) = attestation_object_b64 else {
-        return (
-            None,
-            "none".to_string(),
+        return none(
+            "none",
             Some("credential missing response.attestationObject — cannot derive K11 pubkey".into()),
         );
     };
     let k11 = match decode_web_k11(att_b64) {
         Ok(k) => k,
+        Err(e) => return none("none", Some(format!("K11 pubkey extract: {e}"))),
+    };
+    let (pub_x, pub_y) = match split_cose_xy(&k11.cose_pubkey_hex) {
+        Ok(xy) => xy,
+        Err(e) => return none("none", Some(e)),
+    };
+    let cred_id_hash = match master_cred_id_hash_hex(&session.omni) {
+        Ok(h) => h,
+        Err(e) => return none("none", Some(format!("cred-id-hash: {e}"))),
+    };
+    let omni0x = if session.omni.starts_with("0x") {
+        session.omni.clone()
+    } else {
+        format!("0x{}", session.omni)
+    };
+    let state_file = register_state_file(&session.omni);
+
+    // BUILD: deploy the P256Account + fund the 5-HEI deposit + assemble the
+    // register UserOp (deployer pays gas; the passkey authorizes). Returns the
+    // userOpHash the browser signs, OR a {skipped:"already-registered"}.
+    let json = match register_master_build(
+        &script,
+        &omni0x,
+        &pub_x,
+        &pub_y,
+        &cred_id_hash,
+        &k11.rp_id_hash_hex,
+        &state_file,
+    )
+    .await
+    {
+        Ok(v) => v,
         Err(e) => {
-            return (
-                None,
-                "none".to_string(),
-                Some(format!("K11 pubkey extract: {e}")),
-            )
+            tracing::error!("ui-bridge register-master build failed: {e}");
+            return none("none", Some(e));
         }
     };
 
-    match register_master_device(&script, &session.omni, &k11, credential_id_b64url).await {
-        Ok(rm) => {
-            tracing::info!(
-                target: "agentkeys.daemon.ui_bridge",
-                operator_omni = %rm.operator_omni,
-                device_key_hash = %rm.device_key_hash,
-                tx = rm.tx_hash.as_deref().unwrap_or("(already-registered)"),
-                "issue #196: master device registered on chain (CAP_MINT) — cap-mint will resolve this device"
-            );
-            let tx = rm.tx_hash.clone();
-            *state.registered_master.write().await = Some(rm);
-            // Issue #220: K11-finish is the richest onboarding moment (omni + J1 +
-            // on-chain device hash all known) — persist so a restart resumes with
-            // the registered device, zero prompts.
-            persist_master_session(state).await;
-            (tx, "master-registered".to_string(), None)
-        }
-        Err(e) => {
-            tracing::error!("ui-bridge register-master shell-out failed: {e}");
-            (None, "none".to_string(), Some(e))
-        }
+    let device_key_hash = json
+        .get("device_key_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let account = json
+        .get("account")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let operator_omni = json
+        .get("operator_omni")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&omni0x)
+        .to_string();
+
+    // Idempotent skip: the operator already has a master on chain (no re-register).
+    if json.get("skipped").is_some() {
+        *state.registered_master.write().await = Some(RegisteredMaster {
+            device_key_hash,
+            operator_omni,
+            tx_hash: None,
+            account: (!account.is_empty()).then_some(account.clone()),
+        });
+        persist_master_session(state).await;
+        return ChainRegisterBuild {
+            register_userop_hash: None,
+            register_account: (!account.is_empty()).then_some(account),
+            chain_tx_hash: None,
+            chain: "master-registered".to_string(),
+            chain_error: None,
+        };
     }
+
+    // Built: stash the pending register; the browser signs userop_hash next.
+    let userop_hash = json
+        .get("userop_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if userop_hash.is_empty() || account.is_empty() {
+        return none(
+            "none",
+            Some(format!("build returned no userop_hash/account: {json}")),
+        );
+    }
+    *state.pending_register.write().await = Some(PendingMasterRegister {
+        state_file,
+        account: account.clone(),
+        cred_id_hash,
+        device_key_hash,
+        operator_omni,
+    });
+    tracing::info!(
+        target: "agentkeys.daemon.ui_bridge",
+        account = %account,
+        "E7: master P256Account built + funded — awaiting the browser register signature"
+    );
+    ChainRegisterBuild {
+        register_userop_hash: Some(userop_hash),
+        register_account: Some(account),
+        chain_tx_hash: None,
+        chain: "register-pending".to_string(),
+        chain_error: None,
+    }
+}
+
+/// Split a SEC1 uncompressed COSE pubkey (`04 || X || Y`, 130 hex) → (0xX, 0xY).
+fn split_cose_xy(cose_pubkey_hex: &str) -> Result<(String, String), String> {
+    let h = cose_pubkey_hex.trim().trim_start_matches("0x");
+    if h.len() != 130 || !h.starts_with("04") {
+        return Err(format!(
+            "cose pubkey expected 130 hex (04||X||Y); got {} chars",
+            h.len()
+        ));
+    }
+    Ok((format!("0x{}", &h[2..66]), format!("0x{}", &h[66..130])))
+}
+
+/// `master_cred_id_hash(omni)` as `0x`-hex — the P256Account signer key (matches
+/// the accept's assertion; NOT `keccak(rawId)`).
+fn master_cred_id_hash_hex(operator_omni: &str) -> Result<String, String> {
+    let bare = operator_omni.trim().trim_start_matches("0x");
+    let bytes = hex::decode(bare).map_err(|e| format!("omni hex: {e}"))?;
+    let omni: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "omni must be 32 bytes".to_string())?;
+    Ok(format!(
+        "0x{}",
+        hex::encode(agentkeys_core::erc4337::master_cred_id_hash(&omni))
+    ))
+}
+
+/// Per-omni temp state-file path for the register `build`→`submit` handoff.
+fn register_state_file(operator_omni: &str) -> String {
+    let short: String = operator_omni
+        .trim_start_matches("0x")
+        .chars()
+        .take(16)
+        .collect();
+    std::env::temp_dir()
+        .join(format!("agentkeys-register-{short}"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Decode the attestationObject (b64url) → the on-chain K11 material (pubkey +
@@ -1314,35 +1595,20 @@ fn decode_web_k11(
 /// submit `registerFirstMasterDevice` under the session omni, signed by the
 /// local deployer key (msg.sender). Parses the trailing JSON line for the
 /// device_key_hash (what cap-mint sends) + tx_hash (None on idempotent skip).
-async fn register_master_device(
-    script: &str,
-    session_omni: &str,
-    k11: &agentkeys_cli::k11_webauthn::WebK11Material,
-    credential_id_b64url: &str,
-) -> Result<RegisteredMaster, String> {
+async fn run_register_script(script: &str, args: &[&str]) -> Result<serde_json::Value, String> {
     let output = tokio::process::Command::new("bash")
         .arg(script)
-        .arg("--operator-omni")
-        .arg(session_omni)
-        .arg("--actor-omni")
-        .arg(session_omni)
-        .arg("--k11-cose-hex")
-        .arg(&k11.cose_pubkey_hex)
-        .arg("--k11-cred-id")
-        .arg(credential_id_b64url)
-        .arg("--rp-id-hash")
-        .arg(&k11.rp_id_hash_hex)
+        .args(args)
         .output()
         .await
         .map_err(|e| format!("spawn {script}: {e}"))?;
-
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Surface the last few stderr lines (the script logs `fail <reason>`).
         let tail: String = stderr
             .lines()
             .rev()
-            .take(6)
+            .take(8)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -1350,7 +1616,6 @@ async fn register_master_device(
             .join("\n");
         return Err(format!("register script exited {}: {tail}", output.status));
     }
-
     // The script prints human logs on stderr and a single JSON line on stdout.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json_line = stdout
@@ -1358,29 +1623,175 @@ async fn register_master_device(
         .rev()
         .find(|l| l.trim_start().starts_with('{'))
         .ok_or_else(|| format!("register script produced no JSON on stdout: {stdout}"))?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(json_line.trim()).map_err(|e| format!("register JSON parse: {e}"))?;
+    serde_json::from_str(json_line.trim()).map_err(|e| format!("register JSON parse: {e}"))
+}
 
-    let device_key_hash = parsed
-        .get("device_key_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("register JSON missing device_key_hash: {json_line}"))?
-        .to_string();
-    let operator_omni = parsed
-        .get("operator_omni")
-        .and_then(|v| v.as_str())
-        .unwrap_or(session_omni)
-        .to_string();
-    let tx_hash = parsed
-        .get("tx_hash")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+/// E7 BUILD: `erc4337-register-master.sh build` — deploy the P256Account + fund
+/// its EntryPoint deposit (5 HEI, deployer-paid) + assemble the register UserOp.
+/// Returns the JSON: `{userop_hash, account, device_key_hash}` OR
+/// `{skipped:"already-registered", …}` (operator already has a master).
+async fn register_master_build(
+    script: &str,
+    operator_omni: &str,
+    pub_x: &str,
+    pub_y: &str,
+    cred_id_hash: &str,
+    rpid_hash: &str,
+    state_file: &str,
+) -> Result<serde_json::Value, String> {
+    run_register_script(
+        script,
+        &[
+            "build",
+            "--operator-omni",
+            operator_omni,
+            "--pubx",
+            pub_x,
+            "--puby",
+            pub_y,
+            "--cred-id-hash",
+            cred_id_hash,
+            "--rpid-hash",
+            rpid_hash,
+            "--state-file",
+            state_file,
+        ],
+    )
+    .await
+}
 
-    Ok(RegisteredMaster {
-        device_key_hash,
-        operator_omni,
-        tx_hash,
-    })
+/// E7 SUBMIT: `erc4337-register-master.sh submit` — encode the browser assertion
+/// into the UserOp signature + `EntryPoint.handleOps`. Returns `{tx_hash, account, …}`.
+#[allow(clippy::too_many_arguments)]
+async fn register_master_submit(
+    script: &str,
+    state_file: &str,
+    cred_id_hash: &str,
+    authdata: &str,
+    clientdata: &str,
+    challenge_loc: &str,
+    r: &str,
+    s: &str,
+) -> Result<serde_json::Value, String> {
+    run_register_script(
+        script,
+        &[
+            "submit",
+            "--state-file",
+            state_file,
+            "--cred-id-hash",
+            cred_id_hash,
+            "--authdata",
+            authdata,
+            "--clientdata",
+            clientdata,
+            "--challenge-loc",
+            challenge_loc,
+            "--r",
+            r,
+            "--s",
+            s,
+        ],
+    )
+    .await
+}
+
+/// `POST /v1/master/register/submit` body (#225 / E7).
+#[derive(Debug, Deserialize)]
+pub struct MasterRegisterSubmitRequest {
+    pub assertion: BrowserRegisterAssertion,
+}
+
+/// The raw browser `get()` assertion (base64url), exactly as
+/// `apps/parent-control/lib/webauthn.ts::getAssertionOverHash` emits it over the
+/// register `userop_hash`.
+#[derive(Debug, Deserialize)]
+pub struct BrowserRegisterAssertion {
+    pub authenticator_data: String,
+    pub client_data_json: String,
+    pub signature: String,
+    // `credential_id` (b64url) may also be present on the wire (serde ignores it) —
+    // the signer key is `cred_id_hash` from the pending build, not the raw id.
+}
+
+/// `POST /v1/master/register/submit` (#225 / E7) — phase 2 of the master register.
+/// The browser passkey signed the `userop_hash` from K11-finish's build; encode
+/// the assertion into the UserOp signature and land `EntryPoint.handleOps`, binding
+/// `operatorMasterWallet[omni]` = the master P256Account.
+async fn master_register_submit(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<MasterRegisterSubmitRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let pending = state.pending_register.read().await.clone().ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "no master register in flight — finish K11 enrollment (build) first",
+            "no-pending-register",
+        )
+    })?;
+    let script = state.register_master_script.clone().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "on-chain register not configured (no --register-master-script)",
+            "no-register-script",
+        )
+    })?;
+
+    let a = req.assertion;
+    let dec = agentkeys_cli::k11_webauthn::decode_web_userop_assertion(
+        &a.authenticator_data,
+        &a.client_data_json,
+        &a.signature,
+    )
+    .map_err(|e| {
+        err(
+            StatusCode::BAD_REQUEST,
+            format!("assertion decode: {e}"),
+            "assertion-decode",
+        )
+    })?;
+
+    let loc = dec.challenge_location.to_string();
+    let json = register_master_submit(
+        &script,
+        &pending.state_file,
+        &pending.cred_id_hash,
+        &dec.authenticator_data_hex,
+        &dec.client_data_json_hex,
+        &loc,
+        &dec.r_hex,
+        &dec.s_hex,
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_GATEWAY, e, "register-submit-failed"))?;
+
+    let registered = RegisteredMaster {
+        device_key_hash: pending.device_key_hash.clone(),
+        operator_omni: pending.operator_omni.clone(),
+        tx_hash: json
+            .get("tx_hash")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        account: Some(pending.account.clone()),
+    };
+    tracing::info!(
+        target: "agentkeys.daemon.ui_bridge",
+        account = %pending.account,
+        operator_omni = %registered.operator_omni,
+        tx = registered.tx_hash.as_deref().unwrap_or("(none)"),
+        "E7: master P256Account registered — operatorMasterWallet bound"
+    );
+    let resp = serde_json::json!({
+        "ok": true,
+        "chain": "master-registered",
+        "tx_hash": registered.tx_hash,
+        "account": pending.account,
+        "device_key_hash": pending.device_key_hash,
+    });
+    *state.registered_master.write().await = Some(registered);
+    *state.pending_register.write().await = None;
+    persist_master_session(&state).await;
+    Ok(Json(resp))
 }
 
 fn base64url_encode(bytes: &[u8]) -> String {
@@ -1411,25 +1822,74 @@ fn now_ts_hms() -> String {
 async fn list_actors(State(state): State<SharedUiBridgeState>) -> impl IntoResponse {
     let guard = state.actors.read().await;
     let mut actors: Vec<ApiActor> = guard.values().cloned().collect();
+    drop(guard);
     // Stable order: master first, then by id.
     actors.sort_by(|a, b| {
         let a_master = if a.role == "master" { 0 } else { 1 };
         let b_master = if b.role == "master" { 0 } else { 1 };
         a_master.cmp(&b_master).then_with(|| a.id.cmp(&b.id))
     });
+    let master_account = master_account_address(&state).await;
+    let actors: Vec<serde_json::Value> = actors
+        .iter()
+        .map(|a| enrich_actor_account(a, master_account.as_deref()))
+        .collect();
     Json(serde_json::json!({ "actors": actors }))
 }
 
 async fn get_actor(
     State(state): State<SharedUiBridgeState>,
     Path(id): Path<String>,
-) -> Result<Json<ApiActor>, (StatusCode, Json<ErrorBody>)> {
-    let guard = state.actors.read().await;
-    guard
-        .get(&id)
-        .cloned()
-        .map(Json)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let actor = {
+        let guard = state.actors.read().await;
+        guard.get(&id).cloned()
+    }
+    .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
+    let master_account = master_account_address(&state).await;
+    Ok(Json(enrich_actor_account(
+        &actor,
+        master_account.as_deref(),
+    )))
+}
+
+/// The master's on-chain P256Account (`operatorMasterWallet[omni]`), from the
+/// register flow. `None` for a pre-E7 / not-yet-registered / restored-from-disk
+/// master (the actor page then shows the register CTA).
+async fn master_account_address(state: &SharedUiBridgeState) -> Option<String> {
+    state
+        .registered_master
+        .read()
+        .await
+        .as_ref()
+        .and_then(|m| m.account.clone())
+}
+
+/// #225 / E7: attach the actor's on-chain account address + type to its serialized
+/// JSON for the actor page. master → its passkey **P256Account** (the smart account
+/// that holds master authority); agents → their K10 **device** identity. The
+/// `account_type` lets the UI distinguish a bound smart-account master (`p256account`)
+/// from an unbound one (`none` → "register on chain" CTA).
+fn enrich_actor_account(a: &ApiActor, master_account: Option<&str>) -> serde_json::Value {
+    let mut v = serde_json::to_value(a).unwrap_or_else(|_| serde_json::json!({}));
+    let (addr, ty): (Option<String>, &str) = if a.role == "master" {
+        match master_account {
+            Some(acc) => (Some(acc.to_string()), "p256account"),
+            None => (None, "none"),
+        }
+    } else {
+        // Agents are K10 devices (not ERC-4337 accounts) — surface the omni identity.
+        (Some(a.omni_hex.clone()), "device")
+    };
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "account_address".into(),
+            addr.map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        obj.insert("account_type".into(), serde_json::Value::from(ty));
+    }
+    v
 }
 
 async fn list_caps(
@@ -1615,17 +2075,58 @@ async fn revoke_device(
     Path(id): Path<String>,
     Json(req): Json<RevokeDeviceRequest>,
 ) -> Result<Json<ApiActor>, (StatusCode, Json<ErrorBody>)> {
-    let mut guard = state.actors.write().await;
-    let actor = guard
-        .get_mut(&id)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
-    actor.status = "bad".into();
-    actor.last_active = "revoked".into();
-    if !actor.label.ends_with(" (revoked)") {
-        actor.label.push_str(" (revoked)");
-    }
-    let snapshot = actor.clone();
-    drop(guard);
+    // Read the actor's on-chain device key hash + label first. The revoke must land
+    // ON CHAIN before we flip local state — a binding is not gone until
+    // SidecarRegistry.revokeAgentDevice says so (the "also need on-chain" rule).
+    let label = {
+        let guard = state.actors.read().await;
+        let actor = guard
+            .get(&id)
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
+        actor.label.clone()
+    };
+
+    // On-chain revokeAgentDevice via heima-device-revoke.sh (resolved the same way
+    // register_pairing resolves heima-agent-create.sh). Agent-tier needs no K11; the
+    // script is idempotent (skips when already revoked).
+    let master_script = state.register_master_script.clone().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chain not configured (no --register-master-script) — cannot revoke on chain",
+            "chain-unconfigured",
+        )
+    })?;
+    let revoke_script =
+        resolve_repo_script(&master_script, "heima-device-revoke.sh").ok_or_else(|| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "heima-device-revoke.sh not found (looked next to --register-master-script and in <repo>/scripts/)",
+                "revoke-script-missing",
+            )
+        })?;
+    let tx = revoke_agent_device(&revoke_script, &label)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("on-chain revoke failed: {e}"),
+                "revoke-onchain-failed",
+            )
+        })?;
+
+    // On-chain revoke landed (or idempotent-skip) → flip local state + drop caps.
+    let snapshot = {
+        let mut guard = state.actors.write().await;
+        let actor = guard
+            .get_mut(&id)
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
+        actor.status = "bad".into();
+        actor.last_active = "revoked".into();
+        if !actor.label.ends_with(" (revoked)") {
+            actor.label.push_str(" (revoked)");
+        }
+        actor.clone()
+    };
 
     // Invalidate every cap minted for this actor (TTL → 0).
     state.caps.write().await.remove(&id);
@@ -1637,8 +2138,9 @@ async fn revoke_device(
         actor: "master".into(),
         kind: "device.revoked".into(),
         detail: format!(
-            "{} · intent='{}' · fields={}",
+            "{} · on-chain revokeAgentDevice{} · intent='{}' · fields={}",
             id,
+            tx.map(|h| format!(" tx={h}")).unwrap_or_default(),
             req.intent_text,
             req.intent_fields.len()
         ),
@@ -1963,8 +2465,10 @@ async fn list_pairing_requests(
 
 /// Map one broker `PendingBinding` row → the web UI's `PairingRequest` JSON
 /// (`apps/parent-control/app/_components/types.ts`). These rows are POST-claim
-/// (the one-time code was consumed at claim), so `pairCode` carries the real
-/// request handle and the UI presents them as "awaiting your on-chain approval".
+/// (awaiting on-chain approval); `pairCode` carries the agent's REAL one-time
+/// pairing code (the master claimed by it) so the operator can confirm it matches
+/// the device, and `requestedAt` carries the broker `created_at` unix seconds (the
+/// UI formats it).
 fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
     let field = |k: &str| {
         b.get(k)
@@ -1975,8 +2479,15 @@ fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
     let request_id = field("request_id");
     let label = field("label");
     let device_pubkey = field("device_pubkey");
+    let device_key_hash = field("device_key_hash");
     let pop_sig = field("pop_sig");
     let requested_scope = field("requested_scope");
+    let pairing_code = field("pairing_code");
+    // created_at: broker unix seconds (the agent's /request). The UI formats it.
+    let created_at = b
+        .get("created_at")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
     // char-safe head…tail elision for long hex handles.
     let short = |v: &str| -> String {
         let n = v.chars().count();
@@ -2013,10 +2524,17 @@ fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
         "runtime": "hermes",
         "dpub": short(&device_pubkey),
         "dpubFull": device_pubkey,
-        "pairCode": short(&request_id),
+        // #224: the operator cross-checks `deviceKeyHash` (+ `dpubFull`, both printed
+        // by the agent's `--request-pairing`) before `accept · Touch ID`. `id` is the
+        // full request_id (the master-side handle). `pairCode` is now the agent's REAL
+        // one-time code (the master claimed by it) — shown so the operator can confirm
+        // it matches the code on the agent device.
+        "deviceKeyHash": device_key_hash.clone(),
+        "deviceKeyHashShort": short(&device_key_hash),
+        "pairCode": pairing_code,
         "derivation": format!("//{label}"),
         "requested": requested,
-        "requestedAt": "awaiting on-chain approval",
+        "requestedAt": created_at,
         "attestation": format!("PoP verified · {}", short(&pop_sig)),
     })
 }
@@ -2027,6 +2545,46 @@ struct ClaimPairingRequest {
     label: String,
     #[serde(default)]
     requested_scope: String,
+}
+
+/// POST /v1/agent/pairing/decline — forward the master's decline to the broker
+/// (removes the pending rendezvous row so it stops reappearing). J1-gated, **no
+/// Touch ID** — declining isn't an on-chain mutation. Untyped relay, like the
+/// accept proxies.
+async fn decline_pairing(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    forward_to_broker(&broker, "/v1/agent/pairing/decline", &j1, &body).await
+}
+
+/// POST /v1/agent/pairing/ack — mark a claimed pairing as BOUND so the broker drops
+/// it from the pending list. The E7 accept (`/v1/accept/{build,submit}`) registers the
+/// agent on-chain but its `SubmitAcceptRequest` carries no `request_id`, so the broker
+/// can't drop the rendezvous row itself — the master acks it here (the same
+/// `mark_bound` the legacy `register_pairing` path runs). Without this, an accepted
+/// request keeps reappearing in `GET /v1/agent/pairing/pending`. J1-gated, **no Touch
+/// ID** (acking isn't an on-chain mutation — the accept already did that). Forwards
+/// `{request_id}` to the broker's `/v1/agent/pending-bindings/ack`.
+async fn ack_pairing(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    forward_to_broker(&broker, "/v1/agent/pending-bindings/ack", &j1, &body).await
 }
 
 /// POST /v1/agent/pairing/claim — the master claims an agent's one-time pairing
@@ -2095,6 +2653,125 @@ struct RegisterPairingRequest {
     request_id: String,
 }
 
+/// #225 / #164 E7 — the Touch-ID-gated accept (slice 4: daemon proxy). The browser
+/// calls `build` (→ broker assembles the sponsored executeBatch UserOp + returns the
+/// `userOpHash`), does `navigator.credentials.get()` (Touch ID) over that hash, then
+/// calls `submit` with the signed op. The daemon forwards both to the broker with the
+/// master J1; the device fields come from the broker's AUTHORITATIVE binding (never
+/// the browser), the scope from the master's UI approval.
+#[derive(Debug, Deserialize)]
+pub struct DaemonAcceptBuildRequest {
+    pub request_id: String,
+    pub services: Vec<String>,
+    pub read_only: bool,
+    pub max_per_call: String,
+    pub max_per_period: String,
+    pub max_total: String,
+    pub period_seconds: u32,
+}
+
+/// POST /v1/accept/build — resolve the binding + forward to the broker's
+/// `/v1/accept/build`, returning the `userOpHash` the browser K11-signs.
+async fn accept_build_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<DaemonAcceptBuildRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let bindings = match agentkeys_cli::agent_admin::agent_pending_value(&broker, &j1).await {
+        Ok(v) => v,
+        Err(e) => return pairing_err(StatusCode::BAD_GATEWAY, &format!("broker pending: {e:#}")),
+    };
+    let row = bindings
+        .get("pending")
+        .and_then(|p| p.as_array())
+        .and_then(|rows| {
+            rows.iter()
+                .find(|r| {
+                    r.get("request_id").and_then(|v| v.as_str()) == Some(req.request_id.as_str())
+                })
+                .cloned()
+        });
+    let Some(row) = row else {
+        return pairing_err(
+            StatusCode::NOT_FOUND,
+            "no pending binding for that request_id",
+        );
+    };
+    let field = |k: &str| {
+        row.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let body = serde_json::json!({
+        "operator_omni": operator_omni,
+        "actor_omni": field("child_omni"),
+        "device_key_hash": field("device_key_hash"),
+        "agent_pop_sig": field("pop_sig"),
+        "link_code_redemption": "0x", // accepted-but-unused by registerAgentDevice
+        "services": req.services,
+        "read_only": req.read_only,
+        "max_per_call": req.max_per_call,
+        "max_per_period": req.max_per_period,
+        "max_total": req.max_total,
+        "period_seconds": req.period_seconds,
+    });
+    forward_to_broker(&broker, "/v1/accept/build", &j1, &body).await
+}
+
+/// POST /v1/accept/submit — forward the K11-signed op to the broker's
+/// `/v1/accept/submit` (→ EntryPoint.handleOps).
+async fn accept_submit_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    forward_to_broker(&broker, "/v1/accept/submit", &j1, &body).await
+}
+
+/// POST `body` to `<broker><path>` with the master J1 bearer; relay the broker's
+/// status + JSON body back to the browser verbatim.
+async fn forward_to_broker(
+    broker: &str,
+    path: &str,
+    j1: &str,
+    body: &serde_json::Value,
+) -> axum::response::Response {
+    let url = format!("{}{}", broker.trim_end_matches('/'), path);
+    match reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(j1)
+        .json(body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let st =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let txt = resp.text().await.unwrap_or_default();
+            (
+                st,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                txt,
+            )
+                .into_response()
+        }
+        Err(e) => pairing_err(StatusCode::BAD_GATEWAY, &format!("broker {path}: {e}")),
+    }
+}
+
 /// POST /v1/agent/pairing/register — the master approves a claimed agent: submit
 /// `registerAgentDevice` on chain for its sandbox-generated device key, then ack
 /// the broker so it clears from pending (#214, §10.2 P.2). The device fields come
@@ -2129,14 +2806,32 @@ async fn register_pairing(
             "on-chain register not configured (--register-master-script) — cannot register the agent device",
         );
     };
-    let agent_script = match std::path::Path::new(&master_script).parent() {
-        Some(dir) => dir.join("heima-agent-create.sh"),
-        None => {
-            return pairing_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot derive heima-agent-create.sh path",
-            )
-        }
+    // `heima-agent-create.sh` canonically lives in `<repo>/scripts/`, while the
+    // master register script (`--register-master-script`) may be in
+    // `<repo>/harness/scripts/` (dev.sh) — so it is NOT always a sibling. Try the
+    // sibling first (co-located case), then `<repo>/scripts/` derived from the
+    // master script path. (#214 register-pairing path-mismatch fix — a missing
+    // script otherwise surfaced as a confusing 502 on `accept pairing`.)
+    let master_path = std::path::Path::new(&master_script);
+    let agent_script_candidates = [
+        master_path
+            .parent()
+            .map(|d| d.join("heima-agent-create.sh")),
+        master_path
+            .parent()
+            .and_then(|d| d.parent())
+            .and_then(|d| d.parent())
+            .map(|repo| repo.join("scripts").join("heima-agent-create.sh")),
+    ];
+    let Some(agent_script) = agent_script_candidates
+        .into_iter()
+        .flatten()
+        .find(|p| p.exists())
+    else {
+        return pairing_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "heima-agent-create.sh not found (looked next to --register-master-script and in <repo>/scripts/)",
+        );
     };
     // Pull the authoritative binding from the broker (device fields, never the UI).
     let bindings = match agentkeys_cli::agent_admin::agent_pending_value(broker, &j1).await {
@@ -2302,6 +2997,99 @@ async fn register_agent_device(
         .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .and_then(|v| v.get("tx_hash").and_then(|t| t.as_str()).map(String::from));
     Ok(tx)
+}
+
+/// Resolve a `<repo>/scripts/<name>` helper the same way `register_pairing` finds
+/// `heima-agent-create.sh`: a sibling of the master register script first
+/// (co-located dev case), then `<repo>/scripts/<name>` derived from it.
+fn resolve_repo_script(master_script: &str, name: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(master_script);
+    [
+        p.parent().map(|d| d.join(name)),
+        p.parent()
+            .and_then(|d| d.parent())
+            .and_then(|d| d.parent())
+            .map(|repo| repo.join("scripts").join(name)),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|c| c.exists())
+}
+
+/// Shell out to `heima-device-revoke.sh --agent <label>` to submit
+/// `revokeAgentDevice` on chain (the script reads `~/.agentkeys/agents/<label>.json`
+/// and derives the device-key-hash itself). Agent-tier revocation needs no K11; the
+/// script is idempotent (skips when already revoked). Returns the tx hash (None on
+/// idempotent skip).
+async fn revoke_agent_device(
+    script: &std::path::Path,
+    label: &str,
+) -> Result<Option<String>, String> {
+    let output = tokio::process::Command::new("bash")
+        .arg(script)
+        .arg("--agent")
+        .arg(label.trim_end_matches(" (revoked)"))
+        .output()
+        .await
+        .map_err(|e| format!("spawn heima-device-revoke.sh: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut lines: Vec<&str> = stderr.lines().rev().take(6).collect();
+        lines.reverse();
+        return Err(format!(
+            "heima-device-revoke.sh exited {}: {}",
+            output.status,
+            lines.join("\n")
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let tx = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .and_then(|v| v.get("tx_hash").and_then(|t| t.as_str()).map(String::from));
+    Ok(tx)
+}
+
+/// Shell out to `heima-reset-master.sh --operator-omni <omni>` to clear the
+/// operator's ON-CHAIN `operatorMasterWallet` binding via the registry deployer
+/// (the owner-gated `resetMaster`). Without this the local reset alone cannot let
+/// the operator re-onboard: `registerFirstMasterDevice` is first-master-only, so
+/// the immutable binding would keep a fresh passkey from re-binding and accept
+/// would keep failing SIG_VALIDATION (#225 E7). Resolves the sibling script the
+/// same way agent revoke does. Returns the parsed JSON (`{ok, tx_hash, …}` or
+/// `{skipped:"already-unbound", …}`) or an error string the caller surfaces.
+async fn reset_master_onchain(
+    master_script: &str,
+    operator_omni: &str,
+) -> Result<serde_json::Value, String> {
+    let script = resolve_repo_script(master_script, "heima-reset-master.sh")
+        .ok_or_else(|| "heima-reset-master.sh not found next to the register script".to_string())?;
+    let output = tokio::process::Command::new("bash")
+        .arg(&script)
+        .arg("--operator-omni")
+        .arg(operator_omni)
+        .output()
+        .await
+        .map_err(|e| format!("spawn heima-reset-master.sh: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut lines: Vec<&str> = stderr.lines().rev().take(8).collect();
+        lines.reverse();
+        return Err(format!(
+            "heima-reset-master.sh exited {}: {}",
+            output.status,
+            lines.join("\n")
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .ok_or_else(|| format!("reset script produced no JSON on stdout: {stdout}"))?;
+    serde_json::from_str(json_line.trim()).map_err(|e| format!("reset JSON parse: {e}"))
 }
 
 async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
@@ -3773,9 +4561,11 @@ async fn store_master_credential_inner(
         .header("x-aws-access-key-id", creds.access_key_id)
         .header("x-aws-secret-access-key", creds.secret_access_key)
         .header("x-aws-session-token", creds.session_token)
-        .json(
-            &serde_json::json!({ "cap": cap, "plaintext_b64": STANDARD.encode(secret.as_bytes()) }),
-        )
+        // Crate-owned body shape (#204) — a drifted field is a compile error.
+        .json(&agentkeys_backend_client::CredStoreBody {
+            cap,
+            plaintext_b64: STANDARD.encode(secret.as_bytes()),
+        })
         .send()
         .await
         .map_err(|e| {
@@ -3843,6 +4633,7 @@ mod tests {
             "label": "demo-agent",
             "requested_scope": "memory:travel,memory:family",
             "device_pubkey": "0x04aabbccddeeff00112233445566778899aabbcc",
+            "device_key_hash": "0x6d02e352b9bd71d3aa35677c35492bfdc39bacda89cc7d0506d31e2754abf2a5",
             "pop_sig": "0xsignaturedeadbeef0011223344556677",
         });
         let pr = pending_binding_to_request(&row);
@@ -3850,6 +4641,11 @@ mod tests {
         assert_eq!(pr["agent"], "demo-agent");
         assert_eq!(pr["derivation"], "//demo-agent");
         assert_eq!(pr["dpubFull"], "0x04aabbccddeeff00112233445566778899aabbcc");
+        // #224 — the cross-verifiable device identity must be surfaced full.
+        assert_eq!(
+            pr["deviceKeyHash"],
+            "0x6d02e352b9bd71d3aa35677c35492bfdc39bacda89cc7d0506d31e2754abf2a5"
+        );
         let requested = pr["requested"].as_array().expect("requested is an array");
         assert_eq!(requested.len(), 2, "two scope tokens");
         assert_eq!(requested[0]["cap"], "memory");
@@ -3969,6 +4765,30 @@ mod tests {
     }
 
     // ─── issue #220: master session persistence + rehydrate ─────────────────
+
+    /// Like [`make_state`] but with `register_master_script` set, so handlers that
+    /// shell out to chain helpers (e.g. `revoke_device` → `heima-device-revoke.sh`,
+    /// resolved as a sibling) can run against a fake script in tests.
+    fn make_state_with_script(register_master_script: String) -> SharedUiBridgeState {
+        build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            None,
+            None,
+            84532,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "us-east-1".into(),
+            None,
+            Some(register_master_script),
+            None,
+        )
+        .unwrap()
+    }
 
     /// A real-ish ui-bridge state (broker configured) with an optional on-disk
     /// master-session store — used by the #220 resolve/rehydrate tests.
@@ -4826,7 +5646,9 @@ mod tests {
         let resp = get_actor(State(state), Path("agent-folotoy".into()))
             .await
             .unwrap();
-        assert_eq!(resp.0.label, "FoloToy bear");
+        assert_eq!(resp.0["label"], "FoloToy bear");
+        // E7 actor-page: an agent surfaces its device identity (not a P256Account).
+        assert_eq!(resp.0["account_type"], "device");
     }
 
     #[tokio::test]
@@ -4947,7 +5769,17 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_device_flips_status_and_clears_caps() {
-        let state = make_state();
+        // revoke_device now goes ON CHAIN (heima-device-revoke.sh, resolved as a
+        // sibling of register_master_script). Point at a tempdir with a fake script
+        // that exits 0 so the test exercises the on-chain-then-local-flip path.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("heima-device-revoke.sh"),
+            "#!/usr/bin/env bash\necho '{\"ok\":true,\"skipped\":\"already-revoked\"}'\n",
+        )
+        .unwrap();
+        let state =
+            make_state_with_script(tmp.path().join("master.sh").to_string_lossy().into_owned());
         seed_actor_async(&state).await;
         // Pre-seed some caps so we can verify they're cleared.
         state.caps.write().await.insert(
@@ -5513,58 +6345,68 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    fn dummy_k11() -> agentkeys_cli::k11_webauthn::WebK11Material {
-        // Values are opaque to register_master_device (it just forwards them as
-        // args; the fake scripts ignore them).
-        agentkeys_cli::k11_webauthn::WebK11Material {
-            cose_pubkey_hex: format!("04{}", "ab".repeat(64)),
-            rp_id_hash_hex: "cd".repeat(32),
-        }
-    }
-
     #[tokio::test]
-    async fn register_master_device_parses_success() {
+    async fn run_register_script_parses_success() {
+        // E7 build output: userop_hash + account the daemon stashes as pending.
         let script = write_temp_script(
             "ok",
             "#!/usr/bin/env bash\necho 'human log' >&2\n\
-             echo '{\"ok\":true,\"device_key_hash\":\"0xdeadbeef\",\"operator_omni\":\"0xfeed\",\"actor_omni\":\"0xfeed\",\"tx_hash\":\"0xTX\",\"block_number\":\"42\"}'\n",
+             echo '{\"ok\":true,\"userop_hash\":\"0xUOH\",\"account\":\"0xACC\",\"device_key_hash\":\"0xdeadbeef\",\"operator_omni\":\"0xfeed\"}'\n",
         );
-        let rm = register_master_device(&script, "0xfeed", &dummy_k11(), "credid")
+        let json = run_register_script(&script, &["build"])
             .await
             .expect("parse success JSON");
-        assert_eq!(rm.device_key_hash, "0xdeadbeef");
-        assert_eq!(rm.operator_omni, "0xfeed");
-        assert_eq!(rm.tx_hash.as_deref(), Some("0xTX"));
+        assert_eq!(
+            json.get("userop_hash").and_then(|v| v.as_str()),
+            Some("0xUOH")
+        );
+        assert_eq!(json.get("account").and_then(|v| v.as_str()), Some("0xACC"));
+        assert_eq!(
+            json.get("device_key_hash").and_then(|v| v.as_str()),
+            Some("0xdeadbeef")
+        );
     }
 
     #[tokio::test]
-    async fn register_master_device_parses_idempotent_skip() {
-        // Already-registered skip: device_key_hash present, NO tx_hash.
+    async fn run_register_script_parses_idempotent_skip() {
+        // Already-registered skip: a `skipped` marker, NO userop_hash/tx_hash.
         let script = write_temp_script(
             "skip",
             "#!/usr/bin/env bash\n\
-             echo '{\"ok\":true,\"skipped\":\"already-registered\",\"device_key_hash\":\"0xabc\",\"operator_omni\":\"0xfeed\",\"actor_omni\":\"0xfeed\"}'\n",
+             echo '{\"ok\":true,\"skipped\":\"already-registered\",\"device_key_hash\":\"0xabc\",\"operator_omni\":\"0xfeed\"}'\n",
         );
-        let rm = register_master_device(&script, "0xfeed", &dummy_k11(), "credid")
+        let json = run_register_script(&script, &["build"])
             .await
             .expect("parse skip JSON");
-        assert_eq!(rm.device_key_hash, "0xabc");
-        assert!(rm.tx_hash.is_none(), "idempotent skip carries no tx_hash");
+        assert_eq!(
+            json.get("skipped").and_then(|v| v.as_str()),
+            Some("already-registered")
+        );
+        assert!(json.get("tx_hash").is_none());
     }
 
     #[tokio::test]
-    async fn register_master_device_errors_on_nonzero_exit() {
+    async fn run_register_script_errors_on_nonzero_exit() {
         let script = write_temp_script(
             "fail",
             "#!/usr/bin/env bash\necho '    fail cast send failed' >&2\nexit 1\n",
         );
-        let err = register_master_device(&script, "0xfeed", &dummy_k11(), "credid")
+        let err = run_register_script(&script, &["build"])
             .await
             .expect_err("non-zero exit must be an Err");
         assert!(
             err.contains("exited") || err.contains("cast send failed"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn split_cose_xy_splits_uncompressed_pubkey() {
+        let cose = format!("04{}{}", "ab".repeat(32), "cd".repeat(32));
+        let (x, y) = split_cose_xy(&cose).expect("valid cose");
+        assert_eq!(x, format!("0x{}", "ab".repeat(32)));
+        assert_eq!(y, format!("0x{}", "cd".repeat(32)));
+        assert!(split_cose_xy("0xdead").is_err(), "short pubkey rejected");
     }
 
     #[tokio::test]
@@ -5576,6 +6418,7 @@ mod tests {
             device_key_hash: "0xabc".into(),
             operator_omni: "0xfeed".into(),
             tx_hash: Some("0xTX".into()),
+            account: Some("0xACC0000000000000000000000000000000000001".into()),
         });
         let after = onboarding_state(State(state.clone())).await;
         assert_eq!(after.0.chain, "master-registered");
@@ -5586,10 +6429,14 @@ mod tests {
         // No --register-master-script ⇒ on-chain register disabled (dev/no-infra),
         // a CLEAN skip (chain "none", no error), not a failure.
         let state = make_state();
-        let (tx, chain, err) = finish_chain_register(&state, "credid", Some("ignored")).await;
-        assert!(tx.is_none());
-        assert_eq!(chain, "none");
-        assert!(err.is_none(), "no-script is a clean skip: {err:?}");
+        let build = finish_chain_register(&state, "credid", Some("ignored")).await;
+        assert!(build.register_userop_hash.is_none());
+        assert_eq!(build.chain, "none");
+        assert!(
+            build.chain_error.is_none(),
+            "no-script is a clean skip: {:?}",
+            build.chain_error
+        );
     }
 
     #[tokio::test]
@@ -5615,12 +6462,17 @@ mod tests {
             None, // #220 master_session_store
         )
         .unwrap();
-        let (tx, chain, err) = finish_chain_register(&state, "credid", Some("ignored")).await;
-        assert!(tx.is_none());
-        assert_eq!(chain, "none");
+        let build = finish_chain_register(&state, "credid", Some("ignored")).await;
+        assert!(build.register_userop_hash.is_none());
+        assert_eq!(build.chain, "none");
         assert!(
-            err.as_deref().unwrap_or("").contains("session"),
-            "should explain the missing session: {err:?}"
+            build
+                .chain_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("session"),
+            "should explain the missing session: {:?}",
+            build.chain_error
         );
     }
 }

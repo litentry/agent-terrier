@@ -25,6 +25,7 @@
 //! chain agent self-revoke is out of this PR (→ #155).
 
 pub mod claim;
+pub mod decline;
 pub mod pending;
 pub mod poll;
 pub mod request;

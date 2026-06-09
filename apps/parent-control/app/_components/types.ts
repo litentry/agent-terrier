@@ -19,6 +19,12 @@ export interface Actor {
   status: StatusKind;
   vendor: string;
   k11: boolean;
+  /** #225 E7: on-chain account address — the master's passkey P256Account
+   *  (operatorMasterWallet), or an agent's K10 device omni. */
+  accountAddress?: string;
+  /** "p256account" (bound smart-account master) | "device" (agent) | "none"
+   *  (master not yet registered on chain — show the register CTA). */
+  accountType?: string;
   children?: string[];
   scope?: Record<Namespace, ScopeBits>;
   paymentCap?: { perTx: number; daily: number; currency: string };
@@ -48,6 +54,10 @@ export interface CeremonyStep {
   label: string;
   sub: string;
   onchain?: boolean;
+  /** When set (e.g. "1 of 2"), renders a "Touch ID · <n of m>" badge so the user
+   *  expects the biometric prompt — the master onboarding fires TWO (create the
+   *  passkey, then sign its on-chain registration), which surprises people. */
+  touchId?: string;
   fn?: string;
   /** Optional real async work the runner awaits while this step is "running"
    *  (e.g. the WebAuthn Touch ID at the §9 Stage-2 binding step). */
@@ -91,10 +101,15 @@ export interface PairingRequest {
   runtime: string;
   dpub: string;
   dpubFull: string;
+  // #224 — the cross-verifiable device identity: the agent's `--request-pairing`
+  // prints `device_key_hash`, so the operator confirms it matches before approving.
+  deviceKeyHash: string;
+  deviceKeyHashShort: string;
   pairCode: string;
   derivation: string;
   requested: RequestedPerm[];
-  requestedAt: string;
+  /** Unix seconds the agent requested pairing (`created_at`). Formatted in the UI. */
+  requestedAt: number;
   attestation: string;
 }
 

@@ -76,6 +76,11 @@ contract SidecarRegistry {
     }
 
     K11Verifier public immutable k11Verifier;
+    /// @notice The deployer (captured at construction). The ONLY caller allowed to
+    ///         `resetMaster` — a dev/recovery affordance to unbind a stranded operator
+    ///         (lost/deleted master passkey) WITHOUT redeploying the whole contract set.
+    ///         registerFirstMasterDevice is otherwise first-master-only + immutable.
+    address public immutable owner;
 
     mapping(bytes32 => DeviceEntry) public devices;
     mapping(bytes32 => bytes32[]) private operatorDevices;
@@ -94,12 +99,15 @@ contract SidecarRegistry {
     event DeviceRevoked(bytes32 indexed deviceKeyHash, bytes32 indexed operatorOmni);
     event OperatorBootstrapped(bytes32 indexed operatorOmni, address indexed masterWallet);
     event RecoveryThresholdSet(bytes32 indexed operatorOmni, uint8 newThreshold);
+    event MasterReset(bytes32 indexed operatorOmni, address indexed clearedMaster, uint256 deviceCount);
 
     error DeviceAlreadyRegistered(bytes32 deviceKeyHash);
+    error NotOwner(address caller);
     error DeviceNotRegistered(bytes32 deviceKeyHash);
     error DeviceAlreadyRevoked(bytes32 deviceKeyHash);
     error OperatorNotRegistered(bytes32 operatorOmni);
     error NotAuthorized(address caller, address expected);
+    error MasterMustBeAccount(address caller);
     error K11VerificationFailed();
     error InvalidAttestingDevice(bytes32 deviceKeyHash);
     error InsufficientQuorum(uint8 got, uint8 required);
@@ -110,22 +118,51 @@ contract SidecarRegistry {
 
     constructor(address k11VerifierAddr) {
         k11Verifier = K11Verifier(k11VerifierAddr);
+        owner = msg.sender; // the deployer — the only resetMaster caller
+    }
+
+    /// @notice **Dev/recovery affordance** — unbind an operator's master so a fresh
+    ///         `registerFirstMasterDevice` can re-bind (e.g. the operator deleted/lost
+    ///         the master passkey, so the on-chain account is unusable). Without this,
+    ///         first-master-only makes `operatorMasterWallet` immutable and the ONLY
+    ///         recovery is redeploying the whole contract set. Deletes EVERY device for
+    ///         the operator (master + agents) and clears the wallet/threshold/nonce, so
+    ///         the operator re-onboards from scratch.
+    /// @dev    OWNER-ONLY (the deployer). This is a privileged escape hatch: the owner
+    ///         can wipe any operator's binding. Acceptable for the dev/test deployment;
+    ///         a production registry would gate this on M-of-N guardian recovery (the
+    ///         account's `recover()` path) instead. The local daemon's
+    ///         `POST /v1/master/reset` calls this via the deployer key.
+    function resetMaster(bytes32 operatorOmni) external {
+        if (msg.sender != owner) revert NotOwner(msg.sender);
+        address cleared = operatorMasterWallet[operatorOmni];
+        bytes32[] storage dks = operatorDevices[operatorOmni];
+        uint256 n = dks.length;
+        for (uint256 i = 0; i < n; ++i) {
+            emit DeviceRevoked(dks[i], operatorOmni);
+            delete devices[dks[i]]; // registeredAt → 0, so re-register passes its guard
+        }
+        delete operatorDevices[operatorOmni];
+        operatorMasterWallet[operatorOmni] = address(0);
+        recoveryThreshold[operatorOmni] = 0;
+        operatorNonce[operatorOmni] = 0;
+        emit MasterReset(operatorOmni, cleared, n);
     }
 
     // ─── Master device registration ──────────────────────────────────────
     /// @notice Register the FIRST master device for an operator. First call wins;
     ///         subsequent master mutations need this sender.
-    /// @dev    Bootstrap requires a K11 **self-attestation**: the new device's own
-    ///         platform authenticator signs a challenge that binds `msg.sender` +
-    ///         the operator/actor omni + device-key-hash + the K11 pubkey being
-    ///         registered + chainid + this contract. This defeats the mempool
-    ///         front-run (issue #165): a captured attestation cannot be replayed by
-    ///         a different sender — the contract rebinds the challenge to the new
-    ///         `msg.sender`, so the embedded clientDataJSON challenge no longer
-    ///         matches and `verifyAssertion` rejects — and an attacker cannot forge
-    ///         the operator's K11 signature. There is no chicken-and-egg: the
-    ///         attesting key IS the key being registered (a *self*-attestation),
-    ///         which exists by bootstrap time (enrolled in stage 2 per arch.md §9).
+    /// @dev    Account model (#164 E3/E7): the caller MUST be the operator's
+    ///         ERC-4337 P-256 `P256Account` — a deployed contract reached via
+    ///         `account.execute` from a passkey-signed UserOp. The account's
+    ///         `validateUserOp` (run by the EntryPoint) already verified the passkey
+    ///         signed the userOpHash, which commits THIS `registerFirstMasterDevice`
+    ///         calldata — so the call itself proves the passkey authorized
+    ///         registering this `operatorOmni`, and `msg.sender` is the
+    ///         passkey-controlled account we record as `operatorMasterWallet`. The
+    ///         explicit #166 self-attestation is subsumed by the account model for
+    ///         the dev system (see docs/plan/web-flow/onboarding-p256account-master.md
+    ///         §8); an EOA `msg.sender` is rejected (no `validateUserOp`).
     function registerFirstMasterDevice(
         bytes32 deviceKeyHash,
         bytes32 operatorOmni,
@@ -134,8 +171,7 @@ contract SidecarRegistry {
         bytes32 k11RpIdHash,
         uint256 k11PubX,
         uint256 k11PubY,
-        uint8 roles,
-        K11Assertion calldata selfAttestation
+        uint8 roles
     ) external {
         if (devices[deviceKeyHash].registeredAt != 0) {
             revert DeviceAlreadyRegistered(deviceKeyHash);
@@ -144,37 +180,18 @@ contract SidecarRegistry {
             // Operator already has a first master; use registerAdditionalMasterDevice.
             revert DeviceAlreadyRegistered(deviceKeyHash);
         }
-
-        // ── Anti-front-run (issue #165): K11 self-attestation bound to msg.sender ──
-        // Verified against the pubkey BEING registered (k11PubX/k11PubY) — there is
-        // no prior device to attest with at bootstrap. The challenge commits the
-        // sender so a captured assertion is non-transferable to another sender.
-        bytes32 expectedChallenge = keccak256(
-            abi.encode(
-                OP_REGISTER_1ST_MASTER,
-                operatorOmni,
-                actorOmni,
-                deviceKeyHash,
-                k11PubX,
-                k11PubY,
-                roles,
-                msg.sender,
-                block.chainid,
-                address(this)
-            )
-        );
-        bool ok = k11Verifier.verifyAssertion(
-            expectedChallenge,
-            k11RpIdHash,
-            selfAttestation.authenticatorData,
-            selfAttestation.clientDataJSON,
-            selfAttestation.challengeLocation,
-            selfAttestation.r,
-            selfAttestation.s,
-            k11PubX,
-            k11PubY
-        );
-        if (!ok) revert K11VerificationFailed();
+        // Account model (#164 E3/E7): the master MUST be a smart-contract account
+        // (the operator's P256Account), never an EOA. The caller reaches here via
+        // account.execute from a passkey-signed UserOp, so the EntryPoint already
+        // verified the passkey signed THIS calldata (committing operatorOmni) —
+        // msg.sender IS the passkey-authorized account; record it as the master.
+        // An EOA has no validateUserOp, so an EOA master could never sign the
+        // downstream ERC-4337 master mutations (scope grant / agent accept) — reject
+        // it at the source (this structurally retires the deprecated EOA register).
+        // The explicit #166 self-attestation is SUBSUMED by the account model for
+        // the dev system; the first-master front-run binding is a production-
+        // hardening follow-up — see docs/plan/web-flow/onboarding-p256account-master.md §8.
+        if (msg.sender.code.length == 0) revert MasterMustBeAccount(msg.sender);
 
         operatorMasterWallet[operatorOmni] = msg.sender;
         recoveryThreshold[operatorOmni] = 1;
@@ -190,7 +207,7 @@ contract SidecarRegistry {
             tier: TIER_MASTER,
             roles: roles,
             registeredAt: uint64(block.timestamp),
-            lastSignCount: k11Verifier.readSignCount(selfAttestation.authenticatorData),
+            lastSignCount: 0,
             revoked: false
         });
         operatorDevices[operatorOmni].push(deviceKeyHash);

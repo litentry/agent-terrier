@@ -17,6 +17,7 @@ agentkeys-core = { workspace = true }
 agentkeys-memory-engine = { workspace = true }
 agentkeys-memory-openviking = { workspace = true }
 agentkeys-provisioner = { path = "../agentkeys-provisioner" }
+agentkeys-backend-client = { workspace = true } # #216 cred-fetch primitive (agent vaulted-key)
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }

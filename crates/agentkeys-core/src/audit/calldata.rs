@@ -183,15 +183,16 @@ pub const REGISTRY: &[FnDef] = &[
             ("assertion", "(bytes32,bytes,bytes,uint256,uint256,uint256)"),
         ],
     },
-    // src↔deploy divergence (codex review #153): the DEPLOYED AgentKeysScope
-    // (mainnet 0xd44b375…, bytecode-verified) + the operator scripts use the
+    // Account-auth cutover landed 2026-06-08 (#164 E3 / #225): the LIVE
+    // AgentKeysScope (address in the chain profile) is now the no-tuple `setScope`
+    // (sel 0xd8e9e3c6) / `revokeScope(bytes32,bytes32)` (sel 0xdcff8c5b) form
+    // below — authorization moved upstream to the 4337 account's
+    // validateUserOp. The pre-cutover tuple forms
     // `setScopeWithWebauthn(...,K11Assertion)` / `revokeScope(...,K11Assertion)`
-    // forms above — selectors 0x864ae93c / 0x6f37dd80 (the struct expands in the
-    // selector). `src/AgentKeysScope.sol` (#164) has since moved to the no-tuple
-    // `setScope` /
-    // `revokeScope(bytes32,bytes32)`. Register BOTH so the decoder recognizes
-    // live calldata today AND post-redeploy calldata tomorrow (distinct
-    // selectors, no collision). Drop the tuple forms once the redeploy lands.
+    // (selectors 0x864ae93c / 0x6f37dd80) are retained here — distinct
+    // selectors, no collision — ONLY so this decoder can still resolve orphaned
+    // pre-cutover calldata at the old address 0xd44b375…. The daemon's LIVE
+    // scope.grant mapping (audit_decode::onchain_fn) points at `setScope`.
     FnDef {
         contract: "AgentKeysScope",
         name: "setScope",

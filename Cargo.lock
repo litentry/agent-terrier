@@ -112,6 +112,7 @@ dependencies = [
 name = "agentkeys-cli"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-backend-client",
  "agentkeys-core",
  "agentkeys-memory-engine",
  "agentkeys-memory-openviking",

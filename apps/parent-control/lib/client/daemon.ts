@@ -16,7 +16,10 @@ import type {
   K11EnrollBegin,
   K11EnrollFinishInput,
   K11EnrollResult,
+  RegisterMasterAssertion,
+  RegisterMasterResult,
   MasterMemoryEntry,
+  MasterResetResult,
   MemoryCategory,
   OnboardingState,
   PlantResult,
@@ -262,6 +265,10 @@ export class DaemonBackend implements AgentKeysClient {
     return r.ok ? { ok: true, data: undefined } : r;
   }
 
+  async resetMaster(): Promise<Result<MasterResetResult>> {
+    return this.postJson<MasterResetResult>('/v1/master/reset', {});
+  }
+
   async enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>> {
     try {
       const resp = await fetch(`${this.baseUrl}/v1/k11/enroll/begin`, {
@@ -326,10 +333,37 @@ export class DaemonBackend implements AgentKeysClient {
           credentialId: body.credential_id,
           registeredAt: body.registered_at_unix,
           chainTxHash: body.chain_tx_hash ?? undefined,
+          chain: body.chain ?? undefined,
+          registerUserOpHash: body.register_userop_hash ?? undefined,
+          registerAccount: body.register_account ?? undefined,
         },
       };
     } catch (e) {
       return { ok: false, status: unreachable(`enroll/finish fetch failed: ${(e as Error).message}`) };
+    }
+  }
+
+  // #225 E7: phase 2 of the master register. The browser passkey signed the
+  // register userOpHash (from enrollK11Finish); relay the assertion so the daemon
+  // lands handleOps and binds operatorMasterWallet = the master P256Account.
+  async registerMasterSubmit(assertion: RegisterMasterAssertion): Promise<Result<RegisterMasterResult>> {
+    try {
+      const resp = await fetch(`${this.baseUrl}/v1/master/register/submit`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assertion }),
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        return { ok: false, status: unreachable(`register/submit returned ${resp.status}: ${text}`) };
+      }
+      const body = await resp.json();
+      return {
+        ok: true,
+        data: { ok: body.ok ?? true, txHash: body.tx_hash ?? undefined, account: body.account ?? undefined },
+      };
+    } catch (e) {
+      return { ok: false, status: unreachable(`register/submit fetch failed: ${(e as Error).message}`) };
     }
   }
 
@@ -489,6 +523,48 @@ export class DaemonBackend implements AgentKeysClient {
     return { ok: true, data: undefined };
   }
 
+  // #225: decline a claimed pairing request — broker drops the pending row (J1, no Touch ID).
+  async declinePairing(requestId: string): Promise<Result<void>> {
+    const r = await this.postJson<unknown>('/v1/agent/pairing/decline', { request_id: requestId });
+    if (!r.ok) return r;
+    return { ok: true, data: undefined };
+  }
+
+  // #225 E7: after the on-chain accept lands, mark the binding BOUND so the broker drops
+  // it from pending (the accept/submit body has no request_id, so the broker can't do it
+  // itself). J1-gated, no Touch ID. Without this the accepted request keeps reappearing.
+  async ackPairing(requestId: string): Promise<Result<void>> {
+    const r = await this.postJson<unknown>('/v1/agent/pairing/ack', { request_id: requestId });
+    if (!r.ok) return r;
+    return { ok: true, data: undefined };
+  }
+
+  async acceptBuild(input: {
+    requestId: string;
+    services: string[];
+    readOnly: boolean;
+    maxPerCall: string;
+    maxPerPeriod: string;
+    maxTotal: string;
+    periodSeconds: number;
+  }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  > {
+    return this.postJson('/v1/accept/build', {
+      request_id: input.requestId,
+      services: input.services,
+      read_only: input.readOnly,
+      max_per_call: input.maxPerCall,
+      max_per_period: input.maxPerPeriod,
+      max_total: input.maxTotal,
+      period_seconds: input.periodSeconds,
+    });
+  }
+
+  async acceptSubmit(body: unknown): Promise<Result<unknown>> {
+    return this.postJson('/v1/accept/submit', body);
+  }
+
   async listCredentials(): Promise<Result<CredService[]>> {
     const r = await this.getJson<{
       credentials: { service: string; category: string; sensitivity: 'safe' | 'sensitive' }[];
@@ -544,6 +620,9 @@ interface ApiActor {
   payment_cap?: { per_tx: number; daily: number; currency: string };
   time_window?: { start: string; end: string; tz: string };
   services?: string[];
+  // #225 E7: on-chain account (master → P256Account address; agent → device omni).
+  account_address?: string | null;
+  account_type?: string; // "p256account" | "device" | "none"
 }
 
 interface ApiAuditEvent {
@@ -585,6 +664,8 @@ function apiToActor(a: ApiActor): Actor {
     status: normalizeStatus(a.status),
     vendor: a.vendor,
     k11: a.k11,
+    accountAddress: a.account_address ?? undefined,
+    accountType: a.account_type ?? undefined,
     scope: a.scope as Actor['scope'],
     paymentCap: a.payment_cap
       ? { perTx: a.payment_cap.per_tx, daily: a.payment_cap.daily, currency: a.payment_cap.currency }

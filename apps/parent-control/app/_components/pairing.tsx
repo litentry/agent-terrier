@@ -16,6 +16,7 @@ export function PairingPage({
   claiming,
   justPaired,
   onManage,
+  onUnpair,
 }: {
   requests: PairingRequest[];
   actors: Actor[];
@@ -26,6 +27,7 @@ export function PairingPage({
   claiming: boolean;
   justPaired: string | null;
   onManage?: (id: string) => void;
+  onUnpair?: (a: Actor) => void;
 }) {
   const [view, setView] = useState<'devices' | 'permissions'>('devices');
   const [claimCode, setClaimCode] = useState('');
@@ -82,7 +84,7 @@ export function PairingPage({
                   <div style={{ fontWeight: 600, fontSize: 14 }}>
                     Pairing request · <span className="serif" style={{ fontStyle: 'italic' }}>{req.agent}</span>
                   </div>
-                  <div className="muted" style={{ fontSize: 11.5 }}>{req.vendor} · {req.requestedAt}</div>
+                  <div className="muted" style={{ fontSize: 11.5 }}>{req.vendor} · requested {req.requestedAt ? new Date(req.requestedAt * 1000).toLocaleString() : '—'}</div>
                 </div>
               </div>
               <span className="chip warn">action required</span>
@@ -90,6 +92,12 @@ export function PairingPage({
 
             <div className="pair-req-grid">
               <div>
+                {/* DECLARED — self-reported by the runtime, NOT cryptographically
+                    attested. Cosmetic context only; never a basis for trust. The
+                    only verifiable identity is the attested column on the right. */}
+                <div className="pair-k" style={{ fontStyle: 'italic', opacity: 0.85, marginBottom: 6, color: 'var(--warn, #b8860b)' }}>
+                  ⚠ declared by the runtime · self-reported, NOT attested
+                </div>
                 <div className="pair-k">device</div>
                 <div className="pair-v">{req.device}</div>
                 <div className="pair-k">machine</div>
@@ -98,12 +106,24 @@ export function PairingPage({
                 <div className="pair-v">{req.runtime}</div>
               </div>
               <div>
-                <div className="pair-k">pair-code</div>
-                <div className="pair-v mono" style={{ fontSize: 16, letterSpacing: '0.1em' }}>{req.pairCode}</div>
+                {/* ATTESTED — the cryptographic device identity (proved by the
+                    agent's pop_sig over its K10 key). #224: cross-check
+                    device_key_hash + D_pub against the agent's `--request-pairing`
+                    output before approving. pairing code + request id are broker-
+                    minted handles (not attested, but tamper-evident on claim). */}
+                <div className="pair-k" style={{ fontStyle: 'italic', opacity: 0.85, marginBottom: 6 }}>
+                  ✓ attested cryptographic identity · cross-check on the agent
+                </div>
+                <div className="pair-k">device key hash · verify on agent</div>
+                <div className="pair-v mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>{req.deviceKeyHash || req.deviceKeyHashShort}</div>
+                <div className="pair-k">device public address · verify on agent</div>
+                <div className="pair-v mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{req.dpubFull || req.dpub}</div>
+                <div className="pair-k">pairing code · matches the agent device</div>
+                <div className="pair-v mono" style={{ fontSize: 13, letterSpacing: '0.04em', wordBreak: 'break-all' }}>{req.pairCode || '—'}</div>
+                <div className="pair-k">request id · master handle</div>
+                <div className="pair-v mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{req.id}</div>
                 <div className="pair-k">derivation</div>
                 <div className="pair-v mono">O_master{req.derivation}</div>
-                <div className="pair-k">D_pub</div>
-                <div className="pair-v mono" style={{ fontSize: 11 }}>{req.dpub}</div>
               </div>
             </div>
 
@@ -164,6 +184,15 @@ export function PairingPage({
                 </dd>
                 <dt>active</dt><dd className="muted">{a.lastActive}</dd>
               </dl>
+              {a.status !== 'bad' && onUnpair && (
+                <button
+                  className="btn"
+                  style={{ marginTop: 10, width: '100%', fontSize: 11.5 }}
+                  onClick={() => onUnpair(a)}
+                >
+                  unpair · revoke on-chain
+                </button>
+              )}
             </div>
           ))}
         </div>

@@ -22,20 +22,24 @@ Two distinct EVM accounts deploy AgentKeys contracts. They are **different keys*
 
 ## Heima mainnet (chain_id = 212013)
 
-### v2 stage-1 set (current live — prod deployer)
+### v2 stage-1 set — **contract_set_version 0.3** (current live — prod deployer; account-auth #164 E3 + #225 E7 account-model master register + owner-gated `resetMaster`)
 
-| Contract | Address | Bytecode |
-|---|---|---|
-| `AgentKeysScope` | `0xd44b375daefc65768f417d0f0125b68d5ba7df3b` | 4572 bytes · ⚠ **source ≠ `src/` — see note below** |
-| `SidecarRegistry` | `0x1Ac62f1C2D828476a5D784e850a700dC1f17e0bE` | 7200 bytes |
-| `K3EpochCounter` | `0x6c9e675c699a06acefbc156afdee6bfbfe32ccb3` | 591 bytes |
-| `CredentialAudit` | `0x63c4545ac01c77cc74044f25b8edea3880224577` | 2584 bytes |
-| `P256Verifier` | `0xda5b772f9d6c09abe80414eea908612df9b54749` | 3428 bytes (pre-deployed verifier) |
-| `K11Verifier` | `0x5a441431f08e0f5f5ed10659620cb4e0e814e627` | 2033 bytes (pre-deployed verifier) |
+> **0.3 deployed 2026-06-09** (FORCE_DEPLOY full-set redeploy — fresh `SidecarRegistry` `0xC63E6f64…` + `AgentKeysScope` / `K3EpochCounter` / `CredentialAudit`, replacing the orphaned 0.2 `0xF50ef960…` set). Adds the owner-gated `SidecarRegistry.resetMaster(bytes32 operatorOmni)` recovery escape hatch (+ the `owner` immutable, captured at construction = the deployer). `registerFirstMasterDevice` is first-master-ONLY, so without `resetMaster` an operator who loses/deletes the master passkey could only recover by redeploying the whole set; `resetMaster` lets the deployer unbind one operator in place. `crates/agentkeys-chain/VERSION` == the profile's `contract_set_version` == `0.3` (in sync). **After ANY such redeploy the broker MUST be rebuilt from the SAME committed profile** — `setup-broker-host.sh --ref main` — or the broker reads `operatorMasterWallet` from the orphaned old registry while the daemon onboards into the new one (the #225 split-registry accept failure: handleOps reverts `SIG_VALIDATION_FAILED` because the broker built the UserOp for the old master account). Commit `heima.json` + `operator-workstation.env` in the SAME change as the deploy so the broker host can never lag.
 
-> **Also embedded in the chain profile.** These six addresses are mirrored in [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) `contracts[]`, which the daemon serves to the parent-control web UI via `GET /v1/chain/info` and uses for audit-decode (#153). **When an address changes here, update `heima.json` in the same commit** — `chain_profile::tests::heima_carries_stage1_contract_registry` pins the four stage-1 cores so the two can't silently drift.
+> **Source of truth = the chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json).** Its `contracts[]` array holds the live addresses; `contract_set_version` holds the deployed SET version. `scripts/heima-bring-up.sh` rewrites it programmatically on every fresh deploy (step 6b), and the typed `ChainProfile` struct + `chain_profile::tests::heima_carries_full_contract_registry_and_version` enforce its shape — that is the strict-typed JSON registry. The *expected* source version lives in [`../../crates/agentkeys-chain/VERSION`](../../crates/agentkeys-chain/VERSION); a deploy redeploys + bumps the profile only when the two differ (no bytecode comparison — see "Re-deploy / replace"). **This `.md` is human PROSE only — it no longer carries an address table** (that duplication was the drift source).
 
-> ⚠ **`AgentKeysScope` source ≠ `src/AgentKeysScope.sol` (intentional, until the #164 redeploy).** The contract **live at `0xd44b375…` is the pre-#164 stage-1 design** (`setScopeWithWebauthn(...,K11Assertion)`, sel `0x864ae93c`; `revokeScope(...,K11Assertion)`, sel `0x6f37dd80`) — scope mutations gated by an inline on-chain WebAuthn assertion. The current [`src/AgentKeysScope.sol`](../../crates/agentkeys-chain/src/AgentKeysScope.sol) is the **#164 ERC-4337 rewrite** (`setScope(...)` sel `0xd8e9e3c6`; `revokeScope(bytes32,bytes32)` sel `0xdcff8c5b`) — the inline K11 gate is **removed** because authorization moves upstream to the 4337 account's `validateUserOp`. It is deliberately **NOT deployed**: shipping the thinned scope before the registry stores 4337 accounts as masters would let a raw EOA mutate scope with no biometric (see the `src/` header's ⚠ DEPLOYMENT ORDER warning + [`docs/plan/chain/erc4337-master-account.md`](../plan/chain/erc4337-master-account.md)). The live source is preserved at [`crates/agentkeys-chain/archived/AgentKeysScope.deployed-stage1.sol`](../../crates/agentkeys-chain/archived/AgentKeysScope.deployed-stage1.sol) so the on-chain bytecode has a matching, findable source. **At the coordinated cutover redeploy: update this row's address, refresh `heima.json`, delete the archived file, and drop the `setScopeWithWebauthn` entry from the audit decoder registry.**
+**Read the live addresses from the profile** (don't hand-maintain them here):
+
+```bash
+jq -r '"contract_set_version \(.contract_set_version)", (.contracts[] | "  \(.name): \(.address)")' \
+  crates/agentkeys-core/chain-profiles/heima.json
+# Verify the profile ⟷ operator-workstation.env mirror:
+bash scripts/check-deployed-contracts-sync.sh
+```
+
+The set: the 4 stage-1 cores `AgentKeysScope` / `SidecarRegistry` / `K3EpochCounter` / `CredentialAudit` (account-auth #164 E3 — redeployed 2026-06-08, replacing the pre-#164 `0xd44b375…` / `0x1Ac62f1C…` / `0x6c9e675c…` / `0x63c4545a…` set, now orphaned), the pre-deployed `P256Verifier` / `K11Verifier`, the #164 ERC-4337 infra `EntryPoint` / `P256AccountFactory`, and the `VerifyingPaymaster` (`0xca36550d30e2E4dF927c53C3a5272A319D427602`, #225 — broker-co-signed gas sponsorship for the K11-gated accept UserOp; one shared EntryPoint deposit, the J1 Sybil gate). The parent-control web UI reads the same profile via `GET /v1/chain/info` (#153).
+
+> ✅ **`AgentKeysScope` + `SidecarRegistry` are the #164 account-auth design — cutover landed 2026-06-08.** The live `AgentKeysScope` at `0x5E94f76E…` is the [`src/AgentKeysScope.sol`](../../crates/agentkeys-chain/src/AgentKeysScope.sol) ERC-4337 rewrite: `setScope(...)` (sel `0xd8e9e3c6`, no inline K11 tuple) / `revokeScope(bytes32,bytes32)` (sel `0xdcff8c5b`), with master writes gated by `msg.sender == operatorMasterWallet` (the operator's `P256Account`) — biometric authorization moved upstream to the 4337 account's `validateUserOp`. **Source now matches the deployed bytecode** (the earlier intentional `src/` ≠ deployed divergence is resolved). The pre-cutover stage-1 design (`setScopeWithWebauthn(...,K11Assertion)`, sel `0x864ae93c`; `revokeScope(...,K11Assertion)`, sel `0x6f37dd80`) is now **orphaned at the old address `0xd44b375…`** (no production state — dev-only); its source is retained at [`crates/agentkeys-chain/archived/AgentKeysScope.deployed-stage1.sol`](../../crates/agentkeys-chain/archived/AgentKeysScope.deployed-stage1.sol) (kept per the repo's "move stale to archived, don't delete" policy) so the orphaned bytecode still has findable source. The audit decoder's **live** `scope.grant` mapping ([`audit_decode.rs::onchain_fn`](../../crates/agentkeys-daemon/src/audit_decode.rs)) is now `setScope`; `calldata::REGISTRY` keeps the `setScopeWithWebauthn` FnDef only so the decoder can still resolve orphaned pre-cutover calldata.
 
 ### ERC-4337 master infra (#164, deployed 2026-06-02 — prod deployer)
 
@@ -108,23 +112,33 @@ The verify script checks, per contract: (1) **bytecode presence** (`eth_getCode`
 
 ## Re-deploy / replace
 
-Re-running `bash harness/v2-stage1-demo.sh --only-step 9` is **idempotent**: it calls `cast code` on each stored address and skips the deploy if all four already have on-chain bytecode. Re-deploys only fire when the stored address is the `0x0` sentinel / absent, or has no bytecode on-chain (chain reset, address corrupted). To **force** a fresh deploy at new addresses (e.g. after a contract patch), clear the address entries from `operator-workstation.env` (or set them to `0x0`) and re-run. After any re-deploy, **update this doc** with the new addresses + bytecode sizes + deploy date — the deploy operator owns the doc bump; the bring-up script handles `operator-workstation.env` automatically but doesn't touch markdown.
+`bash scripts/heima-bring-up.sh` is **idempotent**, by VERSION not bytecode:
+
+1. **Skip** when all four cores have on-chain code AND `crates/agentkeys-chain/VERSION` == the chain profile's `contract_set_version` (the recorded deployed version).
+2. **Redeploy** when the stored address is the `0x0` sentinel / absent or has no on-chain bytecode (chain reset). A bumped `VERSION` ≠ the recorded version is a hard stop that prints the mismatch and asks for an explicit opt-in (it orphans state + costs mainnet gas — see below) rather than auto-redeploying.
+3. **Force** a fresh deploy at new addresses (contract patch): bump `crates/agentkeys-chain/VERSION`, then re-run with `FORCE_DEPLOY=1` (blind) — or, for the #164 account-auth cutover, use [`../../scripts/heima-cutover-account-auth.sh`](../../scripts/heima-cutover-account-auth.sh) (probes the live `setScope` selector + skips when already live).
+
+On a fresh deploy the bring-up script **auto-writes the chain profile** (`contracts[]` + `contract_set_version`, step 6b — the source of truth) **and `operator-workstation.env`** (step 6). It does NOT touch this markdown — so update **only the human prose here** (the version line + any ABI/cutover/historical note) when the design or version changes; the addresses live in the profile, not a table here. Confirm the two mirrors agree: `bash scripts/check-deployed-contracts-sync.sh`. No bytecode comparison anywhere — Solidity metadata + immutables make it unreliable, so the human-asserted `VERSION` is the comparison key.
 
 ## ABI summary
 
 Full ABIs in [`crates/agentkeys-chain/src/*.sol`](../../crates/agentkeys-chain/src/). The functions broker + workers + CLI read on hot paths:
 
-### `SidecarRegistry`
-- `registerMasterDevice(bytes32 deviceKeyHash, bytes32 operatorOmni, bytes32 actorOmni, bytes32 k11CredId, bytes attestation, uint8 roles, bytes k11Assertion)` — first call bootstraps `operatorMasterWallet[operatorOmni] = msg.sender`; subsequent require existing master + K11
-- `registerAgentDevice(bytes32 deviceKeyHash, bytes32 operatorOmni, bytes32 actorOmni, bytes linkCodeRedemption, bytes agentPopSig)` — master-only; agents get `ROLE_CAP_MINT` only
-- `revokeDevice(bytes32 deviceKeyHash, bytes k11Assertion)` — master-only; K11 required for master tier
+### `SidecarRegistry` (account-auth design, #164 E3 — live since the 2026-06-08 cutover; #225 E7 account-model + resetMaster)
+- `registerFirstMasterDevice(bytes32 deviceKeyHash, bytes32 operatorOmni, bytes32 actorOmni, bytes32 k11CredId, bytes32 k11RpIdHash, uint256 k11PubX, uint256 k11PubY, uint8 roles)` — sel `0x93b14d7c`; bootstraps `operatorMasterWallet[operatorOmni] = msg.sender`. **#225 E7 account model:** the embedded `K11Assertion selfAttestation` was DROPPED — the passkey proof is the account's `validateUserOp` over the `userOpHash` (which commits this calldata). **Rejects an EOA `msg.sender`** (`MasterMustBeAccount`) — the master must be the operator's `P256Account`. **First-master-ONLY** (reverts `DeviceAlreadyRegistered` once `operatorMasterWallet[omni] != 0`).
+- `registerAdditionalMasterDevice(bytes32 newDeviceKeyHash, bytes32 operatorOmni, bytes32 newActorOmni, bytes32 newK11CredId, bytes32 newK11RpIdHash, uint256 newK11PubX, uint256 newK11PubY, bytes attestation, uint8 newRoles, K11Assertion existingMasterAssertion)` — requires existing master; `msg.sender == operatorMasterWallet`
+- `registerAgentDevice(bytes32 deviceKeyHash, bytes32 operatorOmni, bytes32 actorOmni, bytes linkCodeRedemption, bytes agentPopSig)` — master-only (`msg.sender == operatorMasterWallet`); agents get `ROLE_CAP_MINT` only
+- `revokeAgentDevice(bytes32 deviceKeyHash)` — master-only (`msg.sender == operatorMasterWallet[entry.operatorOmni]`)
+- `revokeMasterDevice(bytes32 targetDeviceKeyHash, K11Assertion[] recoveryAssertions)` — M-of-N recovery quorum (`recoveryThreshold[operator]`); refuses to strand the operator
+- `resetMaster(bytes32 operatorOmni)` — **#225 E7, owner-ONLY** (the deployer captured at construction). Dev/recovery escape hatch: wipes the operator's whole device list + clears `operatorMasterWallet`/`recoveryThreshold`/`operatorNonce`, so a FRESH `registerFirstMasterDevice` can re-bind WITHOUT redeploying the set (needed because first-master-only makes the binding otherwise immutable). The daemon's `POST /v1/master/reset` calls this via `scripts/heima-reset-master.sh`. Emits `MasterReset(operatorOmni, clearedMaster, deviceCount)`.
 - `getDevice(bytes32 deviceKeyHash) → DeviceEntry` — view
 - `isActive(bytes32 deviceKeyHash) → bool` — hot-path view for workers
 - `operatorMasterWallet(bytes32 operatorOmni) → address` — auto-generated getter
+- `owner() → address` — auto-generated getter (the deployer; the only `resetMaster` caller). **Probing `owner()` is how `heima-reset-master.sh` detects a pre-0.3 registry** (the call reverts / returns empty there).
 
-### `AgentKeysScope`
-- `setScopeWithWebauthn(bytes32 operatorOmni, bytes32 agentOmni, bytes32[] services, bool readOnly, uint128 maxPerCall, uint128 maxPerPeriod, uint128 maxTotal, uint32 periodSeconds, bytes k11Assertion)` — master-only, K11-gated
-- `revokeScope(bytes32 operatorOmni, bytes32 agentOmni, bytes k11Assertion)` — master-only, K11-gated
+### `AgentKeysScope` (account-auth design, #164 E3 — live since the 2026-06-08 cutover)
+- `setScope(bytes32 operatorOmni, bytes32 agentOmni, bytes32[] services, bool readOnly, uint128 maxPerCall, uint128 maxPerPeriod, uint128 maxTotal, uint32 periodSeconds)` — sel `0xd8e9e3c6`; gated by `msg.sender == operatorMasterWallet[operatorOmni]` (the operator's `P256Account`). No inline K11 tuple — biometric authorization is the 4337 account's `validateUserOp`.
+- `revokeScope(bytes32 operatorOmni, bytes32 agentOmni)` — sel `0xdcff8c5b`; same `msg.sender == operatorMasterWallet` gate.
 - `getScope(bytes32 operatorOmni, bytes32 agentOmni) → Scope` — view
 - `isServiceInScope(bytes32 operatorOmni, bytes32 agentOmni, bytes32 serviceHash) → bool` — hot-path view
 
@@ -141,9 +155,9 @@ Full ABIs in [`crates/agentkeys-chain/src/*.sol`](../../crates/agentkeys-chain/s
 
 ## When this doc needs to change
 
-1. **New deploy on any chain** — update the table for that chain (addresses + bytecode sizes + date + deployer + tx hash if known)
+1. **New deploy on any chain** — addresses are written **automatically** by `heima-bring-up.sh` to the chain profile (`contracts[]` + `contract_set_version`) + `operator-workstation.env`; this doc only needs a PROSE touch (the version line + a one-line note) if the design changed. No address table to edit.
 2. **Constructor re-wiring** — any change to the deploy script's constructor args; re-record the "Constructor wiring" section
 3. **K3 epoch advance** — `currentEpoch` monotonically increases; update the "Constructor wiring" line for the latest value
 4. **`signerGovernance` transfer** — when handoff from deployer → operational signer (or → multisig in stage 2) happens, record the new address + tx hash
-5. **Re-deploy** at fresh addresses — replace the table row entirely; old addresses move to the "Historical deploys" section for audit-trail
+5. **Re-deploy** at fresh addresses — the chain profile is rewritten automatically; mention the old → orphaned addresses in the prose / "Historical deploys" section for the audit-trail (no table row to replace)
 6. **Test deploy pinned** — when the test stack's persistent (non-anvil) addresses are deployed, replace the placeholders in `operator-workstation.test.env` and record them in the "Test / CI deploy" section above

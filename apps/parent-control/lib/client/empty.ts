@@ -13,7 +13,10 @@ import type {
   K11EnrollBegin,
   K11EnrollFinishInput,
   K11EnrollResult,
+  RegisterMasterAssertion,
+  RegisterMasterResult,
   MasterMemoryEntry,
+  MasterResetResult,
   MemoryCategory,
   OnboardingState,
   PlantResult,
@@ -53,6 +56,10 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async logout(): Promise<Result<void>> {
+    return disconnected();
+  }
+
+  async resetMaster(): Promise<Result<MasterResetResult>> {
     return disconnected();
   }
 
@@ -124,6 +131,10 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
+  async registerMasterSubmit(_assertion: RegisterMasterAssertion): Promise<Result<RegisterMasterResult>> {
+    return disconnected();
+  }
+
   async listMemoryCategories(): Promise<Result<MemoryCategory[]>> {
     return disconnected();
   }
@@ -165,6 +176,32 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async registerPairing(_requestId: string): Promise<Result<void>> {
+    return disconnected();
+  }
+
+  async declinePairing(_requestId: string): Promise<Result<void>> {
+    return disconnected();
+  }
+
+  async ackPairing(_requestId: string): Promise<Result<void>> {
+    return disconnected();
+  }
+
+  async acceptBuild(_input: {
+    requestId: string;
+    services: string[];
+    readOnly: boolean;
+    maxPerCall: string;
+    maxPerPeriod: string;
+    maxTotal: string;
+    periodSeconds: number;
+  }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  > {
+    return disconnected();
+  }
+
+  async acceptSubmit(_body: unknown): Promise<Result<unknown>> {
     return disconnected();
   }
 

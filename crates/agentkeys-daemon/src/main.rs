@@ -654,12 +654,20 @@ fn acquire_pairing_lock(path: &str) -> anyhow::Result<std::fs::File> {
 /// `(request_id, device_pubkey, pop_sig)`); it is written only to the 0600
 /// `state_file`, which `--retrieve-pairing` reads by default and from which an
 /// explicit workflow can source it.
+/// Default broker for the agent-side pairing one-shots (`--request-pairing` /
+/// `--retrieve-pairing`) when neither `--broker-url` nor `AGENTKEYS_BROKER_URL` is
+/// given. These commands ALWAYS need a broker, so prod is the sane default (override
+/// with the flag/env for a test broker). Deliberately NOT applied to `--ui-bridge`,
+/// where an unset `broker_url` means "fall back to pre-sourced AWS creds" (§191).
+const DEFAULT_PAIRING_BROKER_URL: &str = "https://broker.litentry.org";
+
 async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     use agentkeys_core::device_crypto::DeviceKey;
 
-    let broker_url = args.broker_url.clone().ok_or_else(|| {
-        anyhow::anyhow!("--broker-url (or AGENTKEYS_BROKER_URL) required for --request-pairing")
-    })?;
+    let broker_url = args
+        .broker_url
+        .clone()
+        .unwrap_or_else(|| DEFAULT_PAIRING_BROKER_URL.to_string());
     let base = broker_url.trim_end_matches('/').to_string();
 
     // Serialize the ENTIRE --request-pairing flow (K10 load/generate → guard →
@@ -775,7 +783,8 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     info!(
         target: "agentkeys.daemon.init",
         device = %device_pubkey,
-        "agentkeys-daemon opened §10.2 pairing request — show this code to your owner to claim: {pairing_code}"
+        device_key_hash = %device_key_hash,
+        "agentkeys-daemon opened §10.2 pairing request — show your owner the code to claim: {pairing_code}; they cross-check device_key_hash={device_key_hash} on the master before approving (#224)"
     );
 
     // Machine artifact on STDOUT (logs are on stderr). The owner reads
@@ -806,9 +815,10 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
 async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
     use agentkeys_core::device_crypto::DeviceKey;
 
-    let broker_url = args.broker_url.clone().ok_or_else(|| {
-        anyhow::anyhow!("--broker-url (or AGENTKEYS_BROKER_URL) required for --retrieve-pairing")
-    })?;
+    let broker_url = args
+        .broker_url
+        .clone()
+        .unwrap_or_else(|| DEFAULT_PAIRING_BROKER_URL.to_string());
     let base = broker_url.trim_end_matches('/').to_string();
 
     // Load the device key FIRST: its device_pubkey keys the per-device state file

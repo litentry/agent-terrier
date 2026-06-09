@@ -679,6 +679,16 @@ a:hover { text-decoration-color: var(--ink); }
   font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--info); border: 1px solid var(--info); padding: 0 5px;
 }
+.clog-touch {
+  font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--accent); border: 1px solid var(--accent); padding: 0 5px;
+}
+.touchid-notice {
+  font-size: 11.5px; line-height: 1.55; color: var(--ink-dim);
+  border: 1px dashed var(--accent); background: var(--accent-soft);
+  padding: 9px 12px; margin-bottom: 14px;
+}
+.touchid-notice strong { color: var(--ink); }
 .clog-sub { font-size: 11px; color: var(--ink-dim); margin-top: 1px; }
 .clog-tx { font-size: 10.5px; color: var(--ok); margin-top: 3px; }
 

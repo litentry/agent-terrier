@@ -20,6 +20,7 @@ pub use protocol::{
     normalize_omni_0x, service_memory, AuditAppendInput, AuditAppendResult, AuditAppendV2,
     AuditAppendV2Resp, BrokerCapRequest, CapMintOp, CapMintRequest, CapToken, ConfigGetBody,
     ConfigGetResp, ConfigPutBody, CredFetchBody, CredFetchInput, CredFetchResp, CredFetchResult,
-    MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult, MemoryPutBody, MemoryPutInput,
-    MemoryPutResp, MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
+    CredStoreBody, CredStoreInput, CredStoreResp, CredStoreResult, MemoryGetBody, MemoryGetInput,
+    MemoryGetResp, MemoryGetResult, MemoryPutBody, MemoryPutInput, MemoryPutResp, MemoryPutResult,
+    RevokeResult, ENVELOPE_VERSION,
 };

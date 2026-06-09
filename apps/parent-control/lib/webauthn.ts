@@ -80,6 +80,80 @@ export function webauthnAvailable(): boolean {
   );
 }
 
+function hexToBytes(hex: string): Uint8Array {
+  const h = hex.replace(/^0x/, '');
+  const out = new Uint8Array(Math.floor(h.length / 2));
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+// #225 E7 — the raw WebAuthn assertion over the accept UserOp hash. The broker
+// encodes these into the P256Account UserOp signature (abi.encode(credIdHash,
+// authData, clientDataJSON, loc, r, s); same format as the Rust CLI's
+// `k11 webauthn-userop-sign`) before EntryPoint.handleOps.
+export interface AcceptAssertion {
+  authenticator_data: string; // base64url
+  client_data_json: string; // base64url
+  signature: string; // base64url (DER ECDSA)
+  credential_id: string; // base64url
+}
+
+/** Touch ID over the accept `userOpHash`. The hash IS the WebAuthn challenge —
+ *  raw, no sha256 wrap (arch.md §22b.1) — so the passkey signs the full intent. */
+export async function getAssertionOverHash(
+  userOpHashHex: string,
+  allowCredentialIdsB64Url?: string[],
+): Promise<AcceptAssertion> {
+  const challenge = hexToBytes(userOpHashHex);
+  // Pin the master passkey so the browser auto-selects it (and the user can't
+  // accidentally sign with the wrong key → on-chain rejection). Empty/absent ⇒
+  // the browser shows its full picker (legacy behavior).
+  const allowCredentials = (allowCredentialIdsB64Url ?? [])
+    .filter(Boolean)
+    .map((id) => ({ type: 'public-key' as const, id: base64UrlDecode(id) }));
+  const cred = (await navigator.credentials.get({
+    publicKey: {
+      challenge,
+      userVerification: 'required',
+      timeout: 60_000,
+      ...(allowCredentials.length ? { allowCredentials } : {}),
+    },
+  })) as PublicKeyCredential | null;
+  if (!cred) throw new Error('no assertion (Touch ID cancelled)');
+  const a = cred.response as AuthenticatorAssertionResponse;
+  return {
+    authenticator_data: base64UrlEncode(a.authenticatorData),
+    client_data_json: base64UrlEncode(a.clientDataJSON),
+    signature: base64UrlEncode(a.signature),
+    credential_id: base64UrlEncode(cred.rawId),
+  };
+}
+
+/**
+ * #225 E7 — best-effort check that the master passkey still EXISTS (the operator may
+ * have deleted it in the OS password manager → System Settings ▸ Passwords). WebAuthn
+ * has no SILENT existence API (privacy by design), so this does a real `get()` and WILL
+ * prompt Touch ID. Returns true if the credential signs, false if the authenticator
+ * reports no such credential (NotAllowedError) — or the user cancels. Use only when an
+ * explicit check is worth a prompt (before "reset master", or after an accept fails).
+ */
+export async function masterPasskeyPresent(credentialIdB64Url: string): Promise<boolean> {
+  if (!webauthnAvailable() || !credentialIdB64Url) return false;
+  try {
+    const cred = await navigator.credentials.get({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        allowCredentials: [{ type: 'public-key', id: base64UrlDecode(credentialIdB64Url) }],
+        userVerification: 'discouraged',
+        timeout: 60_000,
+      },
+    });
+    return !!cred;
+  } catch {
+    return false; // NotAllowedError ⇒ no matching credential (deleted) or cancelled
+  }
+}
+
 export async function platformAuthenticatorAvailable(): Promise<boolean> {
   if (!webauthnAvailable()) return false;
   try {

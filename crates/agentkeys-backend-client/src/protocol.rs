@@ -210,6 +210,23 @@ pub struct CredFetchResp {
     pub plaintext_b64: String,
 }
 
+/// Cred-worker `/v1/cred/store` request body. Mirrors
+/// `agentkeys_worker_creds::handlers::StoreRequest` — the signed cap (the
+/// credential `service` rides INSIDE the cap payload) plus the base64 plaintext.
+/// The worker encrypts (K3 KEK) + S3-PUTs `bots/<actor>/credentials/<service>.enc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreBody {
+    pub cap: CapToken,
+    pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CredStoreResp {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
+}
+
 // ── audit worker (`/v1/audit/append/v2`) ────────────────────────────────────
 
 /// Audit envelope version, pinned to `agentkeys_core::audit::ENVELOPE_VERSION`.
@@ -280,6 +297,19 @@ pub struct CredFetchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreInput {
+    pub cap: CapToken,
+    pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreResult {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditAppendInput {
     pub operator_omni: String,
     pub actor_omni: String,
@@ -303,6 +333,95 @@ pub struct RevokeResult {
     /// kind of revocation actually happened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+// ── #225 / #164 E7 — on-chain K11-gated agent accept (sponsored executeBatch) ─
+//
+// The accept becomes ONE P256Account.executeBatch UserOp that lands the device
+// binding (P.2) + the scope grant (P.3) atomically, gated by one master K11
+// signature. Two broker endpoints, J1_master-gated: `build` assembles + co-signs
+// the sponsored op and returns the userOpHash; the daemon K11-signs it; `submit`
+// relays the signed op to `EntryPoint.handleOps`. The broker mirrors these shapes
+// server-side (it doesn't depend on this crate); the frozen key-set tests in
+// `crate::fixtures` pin them so the two sides can't drift.
+
+/// Daemon → broker `POST /v1/accept/build`. The granted scope (`services` +
+/// caps) is what the master approved in the pairing UI; the register fields bind
+/// the agent device. `operator_omni`/`actor_omni` are `0x`-omni
+/// ([`normalize_omni_0x`]); the `u128` caps ride as decimal strings (wire-safe
+/// past 2^53; `"0"` = unset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildAcceptUserOpRequest {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub device_key_hash: String,
+    pub agent_pop_sig: String,
+    pub link_code_redemption: String,
+    pub services: Vec<String>,
+    pub read_only: bool,
+    pub max_per_call: String,
+    pub max_per_period: String,
+    pub max_total: String,
+    pub period_seconds: u32,
+}
+
+/// ERC-4337 v0.7 `PackedUserOperation`, hex-encoded for the wire. Mirrors
+/// `agentkeys_broker_server::sponsor::PackedUserOp`; the daemon fills `signature`
+/// with the master's K11 assertion over `user_op_hash`, then returns the whole op
+/// to `/v1/accept/submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireUserOp {
+    pub sender: String,
+    pub nonce: String,
+    pub init_code: String,
+    pub call_data: String,
+    pub account_gas_limits: String,
+    pub pre_verification_gas: String,
+    pub gas_fees: String,
+    pub paymaster_and_data: String,
+    pub signature: String,
+}
+
+/// Broker → daemon response to `/v1/accept/build`. The master signs
+/// `user_op_hash` (the `EntryPoint.getUserOpHash` of `user_op`) with K11.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildAcceptUserOpResponse {
+    pub user_op: WireUserOp,
+    pub user_op_hash: String,
+    pub entry_point: String,
+    pub chain_id: u64,
+}
+
+/// The raw browser WebAuthn assertion (base64url) over the accept `user_op_hash`,
+/// as `apps/parent-control/lib/webauthn.ts::getAssertionOverHash` emits it. The
+/// broker encodes it into the P256Account UserOp signature; it derives the
+/// master's `credIdHash` from `operator_omni`, so the raw `credential_id` here is
+/// for cross-checks/audit, not the signer key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptAssertion {
+    pub authenticator_data: String,
+    pub client_data_json: String,
+    pub signature: String,
+    pub credential_id: String,
+}
+
+/// Daemon → broker `POST /v1/accept/submit` — the op from `build` + the master's
+/// browser WebAuthn `assertion` over `user_op_hash`. The broker encodes the
+/// assertion into `user_op.signature` (binding the `credIdHash` it derives from
+/// the verified J1 session omni, not a body field), then relays to
+/// `EntryPoint.handleOps` (Stage B).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitAcceptUserOpRequest {
+    pub user_op: WireUserOp,
+    pub assertion: AcceptAssertion,
+}
+
+/// Broker → daemon response to `/v1/accept/submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitAcceptUserOpResponse {
+    pub ok: bool,
+    pub tx_hash: String,
+    pub block_number: String,
 }
 
 // ── shared protocol helpers (the omni-normalization bug site, centralized) ───

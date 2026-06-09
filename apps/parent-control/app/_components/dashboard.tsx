@@ -102,6 +102,7 @@ export function ActorDetail({
   onPropose,
   onConfirmProposal,
   onConfirmSafe,
+  onResetMaster,
 }: {
   actor: Actor;
   onBack: () => void;
@@ -113,6 +114,8 @@ export function ActorDetail({
   onPropose: (a: Actor) => void;
   onConfirmProposal: (a: Actor, p: ProposedScope) => void;
   onConfirmSafe: (a: Actor, ps: ProposedScope[]) => void;
+  /** #225 E7: unbind the master (local + on-chain) so a fresh passkey re-binds. Master only. */
+  onResetMaster?: () => void;
 }) {
   const events = recentEvents.filter((e) => e.actorId === actor.id).slice(0, 6);
   const isMaster = actor.role === 'master';
@@ -137,6 +140,17 @@ export function ActorDetail({
           <>
             <button className="btn" onClick={onBack}>← back</button>
             {!isMaster && <button className="btn danger" onClick={() => onRevoke(actor)}>revoke device</button>}
+            {isMaster && onResetMaster && (
+              <button
+                className="btn danger"
+                title="Unbind the master so you can re-onboard a fresh passkey (e.g. after deleting the master passkey in your OS password manager). Clears BOTH the local binding AND the on-chain operatorMasterWallet (owner-gated resetMaster). Does NOT delete the OS passkey — do that manually."
+                onClick={() => {
+                  if (window.confirm('Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?')) onResetMaster();
+                }}
+              >
+                reset master
+              </button>
+            )}
           </>
         }
       />
@@ -144,6 +158,18 @@ export function ActorDetail({
       <Panel title="── binding">
         <dl className="kvs">
           <dt>actor_omni</dt><dd className="mono">{actor.omni} <span className="muted">({actor.omniHex})</span></dd>
+          {actor.role === 'master' && (
+            <>
+              <dt>account</dt>
+              <dd className="mono">
+                {actor.accountType === 'p256account' && actor.accountAddress ? (
+                  <>{actor.accountAddress} <span className="muted">· passkey P256Account (ERC-4337 · operatorMasterWallet)</span></>
+                ) : (
+                  <span className="muted">not yet bound on chain — complete onboarding to register your master P256Account</span>
+                )}
+              </dd>
+            </>
+          )}
           <dt>derivation</dt><dd className="mono">{actor.derivation} <span className="muted">(hard / HDKD)</span></dd>
           <dt>device pubkey</dt><dd className="mono">{actor.devicePubkey} <span className="muted">· K10 secp256k1</span></dd>
           <dt>vendor</dt><dd>{actor.vendor}</dd>

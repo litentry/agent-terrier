@@ -63,6 +63,11 @@ contract AgentKeysV1Test is Test {
 
     function setUp() public {
         master = makeAddr("master");
+        // Account model (#164 E7): the master is the operator's P256Account — a
+        // contract. Give `master` code so the registry's account guard
+        // (msg.sender.code.length > 0) passes; the registry never calls into it,
+        // so a stub byte suffices. `attacker` stays an EOA (no code).
+        vm.etch(master, hex"00");
         attacker = makeAddr("attacker");
         p256 = new P256Verifier();
         k11 = new K11Verifier(address(p256));
@@ -104,19 +109,21 @@ contract AgentKeysV1Test is Test {
             k11RpIdHash,
             k11PubX,
             k11PubY,
-            7,
-            _bogusAssertion(bytes32(0))
+            7
         );
     }
 
-    /// @notice Issue #165: the bootstrap is no longer unauthenticated. Without a
-    ///         valid K11 self-attestation the call reverts — closing the
-    ///         first-call-wins front-run's enabler.
-    function test_RegisterFirstMaster_RejectsBogusSelfAttestation() public {
-        // No mock → the real K11Verifier runs against a bogus self-attestation and
-        // reverts (challenge/P-256 mismatch).
-        vm.prank(master);
-        vm.expectRevert();
+    /// @notice Account model (#164 E7): the master MUST be a smart-contract account
+    ///         (the operator's P256Account), never an EOA. An EOA `msg.sender` has
+    ///         no `validateUserOp`, so it could never sign the downstream ERC-4337
+    ///         master mutations — the registry rejects it at bootstrap. `attacker`
+    ///         is an EOA (no code). This structurally retires the EOA-master class
+    ///         of bug (an EOA master made the #225 accept's handleOps revert).
+    function test_RegisterFirstMaster_RejectsEoaMaster() public {
+        vm.prank(attacker); // EOA — no code
+        vm.expectRevert(
+            abi.encodeWithSelector(SidecarRegistry.MasterMustBeAccount.selector, attacker)
+        );
         registry.registerFirstMasterDevice(
             deviceKeyHashMaster,
             operatorOmni,
@@ -125,88 +132,74 @@ contract AgentKeysV1Test is Test {
             k11RpIdHash,
             k11PubX,
             k11PubY,
-            7,
-            _bogusAssertion(bytes32(0))
+            7
         );
         assertEq(registry.operatorMasterWallet(operatorOmni), address(0));
     }
 
-    /// @notice Issue #165: a captured self-attestation is non-transferable to a
-    ///         different sender. The challenge binds msg.sender, so a front-runner
-    ///         replaying the victim's assertion with their own sender is rejected,
-    ///         while the legitimate operator still bootstraps.
-    function test_RegisterFirstMaster_RejectsFrontRunWithDifferentSender() public {
-        uint8 roles = 7;
-        SidecarRegistry.K11Assertion memory att = _bogusAssertion(bytes32(0));
-        // The verifier accepts ONLY the challenge that binds `master` as the sender.
-        bytes32 victimChallenge = keccak256(
-            abi.encode(
-                registry.OP_REGISTER_1ST_MASTER(),
-                operatorOmni,
-                actorOmniMaster,
-                deviceKeyHashMaster,
-                k11PubX,
-                k11PubY,
-                roles,
-                master,
-                block.chainid,
-                address(registry)
-            )
-        );
-        vm.mockCall(
-            address(k11),
-            abi.encodeWithSelector(
-                K11Verifier.verifyAssertion.selector,
-                victimChallenge,
-                k11RpIdHash,
-                att.authenticatorData,
-                att.clientDataJSON,
-                att.challengeLocation,
-                att.r,
-                att.s,
-                k11PubX,
-                k11PubY
-            ),
-            abi.encode(true)
-        );
-        vm.mockCall(
-            address(k11),
-            abi.encodeWithSelector(K11Verifier.readSignCount.selector),
-            abi.encode(uint32(0))
-        );
+    // NOTE: the former `test_RegisterFirstMaster_RejectsFrontRunWithDifferentSender`
+    // (#165 self-attestation front-run) was REMOVED — E7 subsumes the explicit
+    // self-attestation into the account model (the master is a passkey-controlled
+    // P256Account; the UserOp signature is the passkey proof). The first-master
+    // front-run binding is a documented production-hardening follow-up — see
+    // docs/plan/web-flow/onboarding-p256account-master.md §8.
 
-        // Attacker front-runs with the victim's omni/pubkey/assertion but their own
-        // sender → contract recomputes the challenge with msg.sender = attacker →
-        // no mock match → real verifier → revert. Victim's omni stays unclaimed.
+    // ─── SidecarRegistry: resetMaster (dev/recovery escape hatch, #225 E7) ─
+    /// @notice resetMaster is OWNER-ONLY (the deployer). An attacker cannot wipe
+    ///         another operator's binding; the binding stays put.
+    function test_ResetMaster_RejectsNonOwner() public {
+        _registerFirstMaster();
         vm.prank(attacker);
-        vm.expectRevert();
-        registry.registerFirstMasterDevice(
-            deviceKeyHashMaster,
-            operatorOmni,
-            actorOmniMaster,
-            k11CredId,
-            k11RpIdHash,
-            k11PubX,
-            k11PubY,
-            roles,
-            att
-        );
-        assertEq(registry.operatorMasterWallet(operatorOmni), address(0));
-
-        // The legitimate operator bootstraps — its challenge matches the mock.
-        vm.prank(master);
-        registry.registerFirstMasterDevice(
-            deviceKeyHashMaster,
-            operatorOmni,
-            actorOmniMaster,
-            k11CredId,
-            k11RpIdHash,
-            k11PubX,
-            k11PubY,
-            roles,
-            att
-        );
+        vm.expectRevert(abi.encodeWithSelector(SidecarRegistry.NotOwner.selector, attacker));
+        registry.resetMaster(operatorOmni);
         assertEq(registry.operatorMasterWallet(operatorOmni), master);
+    }
+
+    /// @notice The deployer unbinds a stranded operator (lost/deleted master
+    ///         passkey) so a FRESH first-master registration re-binds — without
+    ///         redeploying the contract set. This is what the daemon's
+    ///         `POST /v1/master/reset` does via the deployer key (#225 E7). The
+    ///         reset wipes the WHOLE device list (master + agents) and clears
+    ///         wallet/threshold/nonce, so a fresh passkey → fresh P256Account →
+    ///         fresh deviceKeyHash re-onboards from scratch.
+    function test_ResetMaster_ClearsBindingAndAllowsReRegister() public {
+        _registerFirstMaster();
+        vm.prank(master);
+        registry.registerAgentDevice(
+            deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"deadbeef", hex"cafe"
+        );
+        assertEq(registry.getOperatorDevices(operatorOmni).length, 2);
+
+        // The test contract deployed the registry in setUp → it IS `owner`, so a
+        // direct (un-pranked) call passes the owner gate.
+        registry.resetMaster(operatorOmni);
+        assertEq(registry.operatorMasterWallet(operatorOmni), address(0));
+        assertEq(uint256(registry.recoveryThreshold(operatorOmni)), 0);
+        assertEq(uint256(registry.operatorNonce(operatorOmni)), 0);
+        assertEq(registry.getOperatorDevices(operatorOmni).length, 0);
+        // devices deleted → registeredAt 0 → the re-register guard passes.
+        assertEq(uint256(registry.getDevice(deviceKeyHashMaster).registeredAt), 0);
+        assertFalse(registry.isActive(deviceKeyHashAgentA));
+
+        // A fresh passkey → fresh P256Account → fresh device re-binds cleanly.
+        address freshMaster = makeAddr("fresh-master");
+        vm.etch(freshMaster, hex"00");
+        bytes32 freshDeviceHash = keccak256("D_pub_master_fresh");
+        uint8 fullRoles =
+            registry.ROLE_CAP_MINT() | registry.ROLE_RECOVERY() | registry.ROLE_SCOPE_MGMT();
+        vm.prank(freshMaster);
+        registry.registerFirstMasterDevice(
+            freshDeviceHash,
+            operatorOmni,
+            actorOmniMaster,
+            k11CredId,
+            k11RpIdHash,
+            k11PubX,
+            k11PubY,
+            fullRoles
+        );
+        assertEq(registry.operatorMasterWallet(operatorOmni), freshMaster);
+        assertEq(uint256(registry.recoveryThreshold(operatorOmni)), 1);
     }
 
     // ─── SidecarRegistry: 2nd master device requires K11 ────────────────
@@ -540,20 +533,11 @@ contract AgentKeysV1Test is Test {
     function _registerFirstMaster() internal {
         uint8 fullRoles =
             registry.ROLE_CAP_MINT() | registry.ROLE_RECOVERY() | registry.ROLE_SCOPE_MGMT();
-        // Real P-256 verification is covered by K11Verifier.t.sol / P256Verifier.t.sol;
-        // here we mock the verifier so registry liveness tests don't need a real
-        // self-attestation. Mocks are cleared after bootstrap so later assertions
-        // (e.g. RejectsInvalidK11) exercise the real verifier.
-        vm.mockCall(
-            address(k11),
-            abi.encodeWithSelector(K11Verifier.verifyAssertion.selector),
-            abi.encode(true)
-        );
-        vm.mockCall(
-            address(k11),
-            abi.encodeWithSelector(K11Verifier.readSignCount.selector),
-            abi.encode(uint32(0))
-        );
+        // Account model (#164 E7): no self-attestation — the master is the
+        // operator's P256Account (a contract; `master` is etched in setUp), and the
+        // call records operatorMasterWallet = msg.sender. Real passkey verification
+        // is the account's validateUserOp (EntryPoint), exercised in the Rust/CLI
+        // integration tests; the registry only gates on msg.sender being a contract.
         vm.prank(master);
         registry.registerFirstMasterDevice(
             deviceKeyHashMaster,
@@ -563,10 +547,8 @@ contract AgentKeysV1Test is Test {
             k11RpIdHash,
             k11PubX,
             k11PubY,
-            fullRoles,
-            _bogusAssertion(bytes32(0))
+            fullRoles
         );
-        vm.clearMockedCalls();
     }
 
     /// @dev Bogus assertion for SidecarRegistry — fails challenge or P-256
