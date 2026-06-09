@@ -45,6 +45,8 @@ pub async fn pending_bindings(
                 "device_pubkey": b.device_pubkey,
                 "pop_sig": b.pop_sig,
                 "device_key_hash": device_key_hash,
+                "pairing_code": b.pairing_code,
+                "created_at": b.created_at,
             })
         })
         .collect();

@@ -1,3 +1,4 @@
+pub mod accept_assertion;
 pub mod audit;
 pub mod auth;
 pub mod boot;
@@ -11,6 +12,7 @@ pub mod metrics;
 pub mod oidc;
 pub mod plugins;
 pub mod sponsor;
+pub mod sponsored_accept;
 pub mod state;
 pub mod storage;
 pub mod sts;
@@ -67,6 +69,10 @@ pub fn create_router(state: SharedState) -> Router {
         // Classifier-service compute-gate cap (#178 §15.6, #207 items 2-3).
         // op=Classify; data_class comes from the request body (spans data classes).
         .route("/v1/cap/classify", post(handlers::cap::cap_classify))
+        // #225 / #164 E7 — Touch-ID-gated agent accept: assemble the sponsored
+        // executeBatch([registerAgentDevice, setScope]) UserOp + return the userOpHash.
+        .route("/v1/accept/build", post(handlers::accept::accept_build))
+        .route("/v1/accept/submit", post(handlers::accept::accept_submit))
         // Stage 7 §3.5 — pluggable auth surface.
         .route(
             "/v1/auth/wallet/start",
@@ -87,6 +93,10 @@ pub fn create_router(state: SharedState) -> Router {
         .route(
             "/v1/agent/pairing/claim",
             post(handlers::agent::claim::pairing_claim),
+        )
+        .route(
+            "/v1/agent/pairing/decline",
+            post(handlers::agent::decline::pairing_decline),
         )
         .route(
             "/v1/agent/pairing/poll",

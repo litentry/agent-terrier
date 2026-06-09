@@ -13,8 +13,9 @@ use reqwest::Client;
 use crate::protocol::{
     AuditAppendInput, AuditAppendResult, AuditAppendV2, AuditAppendV2Resp, BrokerCapRequest,
     CapMintOp, CapMintRequest, CapToken, CredFetchBody, CredFetchInput, CredFetchResp,
-    CredFetchResult, MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult, MemoryPutBody,
-    MemoryPutInput, MemoryPutResp, MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
+    CredFetchResult, CredStoreBody, CredStoreInput, CredStoreResp, CredStoreResult, MemoryGetBody,
+    MemoryGetInput, MemoryGetResp, MemoryGetResult, MemoryPutBody, MemoryPutInput, MemoryPutResp,
+    MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -374,6 +375,41 @@ impl BackendClient {
         Ok(CredFetchResult {
             ok: parsed.ok,
             plaintext_b64: parsed.plaintext_b64,
+        })
+    }
+
+    /// `POST /v1/cred/store` — vault a credential (#216). The signed cap carries
+    /// the `service` + data-class; the per-actor STS creds (vault role) scope the
+    /// S3 PUT to `bots/<actor>/credentials/`. The plaintext is base64 in the body
+    /// (the worker encrypts with the K3 KEK).
+    pub async fn cred_store(&self, input: CredStoreInput) -> Result<CredStoreResult, BackendError> {
+        let url = format!("{}/v1/cred/store", self.cred()?);
+        let mut req = self.client.post(&url).json(&CredStoreBody {
+            cap: input.cap,
+            plaintext_b64: input.plaintext_b64,
+        });
+        if let Some(headers) = self.sts_headers(self.vault_role_arn.as_ref()).await? {
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        let parsed: CredStoreResp = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))?;
+        Ok(CredStoreResult {
+            ok: parsed.ok,
+            s3_key: parsed.s3_key,
+            envelope_size: parsed.envelope_size,
         })
     }
 

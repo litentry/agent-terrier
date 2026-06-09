@@ -56,6 +56,28 @@ export interface K11EnrollResult {
   credentialId: string;
   registeredAt: number;
   chainTxHash?: string;
+  /** #225 E7: "register-pending" (browser must sign + submit), "master-registered"
+   *  (idempotent skip — already on chain), or "none". */
+  chain?: string;
+  /** #225 E7: when chain === "register-pending", the userOpHash the browser passkey
+   *  must sign (second Touch ID) and POST to register/submit. */
+  registerUserOpHash?: string;
+  /** #225 E7: the deployed master P256Account address (operatorMasterWallet-to-be). */
+  registerAccount?: string;
+}
+
+/** #225 E7: the browser `get()` assertion over the register userOpHash. */
+export interface RegisterMasterAssertion {
+  authenticator_data: string;
+  client_data_json: string;
+  signature: string;
+  credential_id: string;
+}
+
+export interface RegisterMasterResult {
+  ok: boolean;
+  txHash?: string;
+  account?: string;
 }
 
 export interface RevokeIntent {
@@ -205,6 +227,26 @@ export interface OnboardingState {
   session?: string;
 }
 
+/** On-chain half of `POST /v1/master/reset` (#225 E7) — the owner-gated resetMaster. */
+export interface MasterResetOnchain {
+  /** "reset" = operatorMasterWallet cleared this call; "skipped" = nothing to do / not wired; "failed" = on-chain unbind errored. */
+  status: 'reset' | 'skipped' | 'failed';
+  /** Present on "skipped" — "already-unbound" | "no-register-script-configured" | "no-operator-omni-known". */
+  reason?: string;
+  /** Present on "failed" — the script/cast error (e.g. registry pre-VERSION-0.3 has no resetMaster). */
+  error?: string;
+  tx_hash?: string;
+  operator_omni?: string;
+}
+
+/** Result of `POST /v1/master/reset` (#225 E7). */
+export interface MasterResetResult {
+  ok: boolean;
+  /** Operator guidance — adapts to whether the on-chain unbind landed. */
+  note?: string;
+  onchain?: MasterResetOnchain;
+}
+
 /** One deployed contract from `GET /v1/chain/info` (real address + explorer link). */
 export interface ChainContract {
   name: string;
@@ -312,6 +354,9 @@ export interface AgentKeysClient {
 
   enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>>;
   enrollK11Finish(input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>>;
+  // #225 E7: phase 2 of the master register — submit the browser assertion over
+  // the register userOpHash → handleOps binds operatorMasterWallet = the P256Account.
+  registerMasterSubmit(assertion: RegisterMasterAssertion): Promise<Result<RegisterMasterResult>>;
 
   // §1 onboarding — real email magic-link verify (broker-backed, W1). The
   // browser starts it, then polls until the operator clicks the link.
@@ -320,6 +365,13 @@ export interface AgentKeysClient {
   // Real "logged in" state, held by the daemon (replaces the ak_onboarded flag).
   getOnboardingState(): Promise<Result<OnboardingState>>;
   logout(): Promise<Result<void>>;
+  // #225 E7: fully unbind the master so the operator can re-onboard a fresh passkey —
+  // used when the bound master passkey was deleted in the OS password manager. Clears
+  // BOTH the LOCAL binding (registered_master + persisted coords) AND the ON-CHAIN
+  // operatorMasterWallet (owner-gated resetMaster via the deployer). `onchain` reports
+  // whether the on-chain unbind landed; `note` carries the operator guidance. Cannot
+  // delete the OS passkey (WebAuthn) — the operator does that manually.
+  resetMaster(): Promise<Result<MasterResetResult>>;
 
   // §2 — master memory (#201 Phase 4). The LIST resolves CATEGORIES from the
   // durable, master-only Config taxonomy (zero memory decryption, survives daemon
@@ -365,6 +417,29 @@ export interface AgentKeysClient {
   // on chain for the binding's request_id, then acks the broker. (The Touch-ID scope
   // grant is the separate grantScope step, P.3.)
   registerPairing(requestId: string): Promise<Result<void>>;
+  // Decline a claimed pairing request (J1-gated, NO Touch ID) — the daemon tells the
+  // broker to drop the pending rendezvous row so it stops reappearing on refresh.
+  declinePairing(requestId: string): Promise<Result<void>>;
+  // #225 E7: after the on-chain accept lands, mark the binding bound so the broker drops
+  // it from pending (the accept/submit body carries no request_id). J1-gated, no Touch ID.
+  ackPairing(requestId: string): Promise<Result<void>>;
+
+  // #225 E7 — the Touch-ID-gated accept. `acceptBuild` → broker assembles the
+  // sponsored executeBatch([registerAgentDevice, setScope]) UserOp + returns the
+  // userOpHash the browser K11-signs; `acceptSubmit` relays the signed op (+ the
+  // assertion) → EntryPoint.handleOps.
+  acceptBuild(input: {
+    requestId: string;
+    services: string[];
+    readOnly: boolean;
+    maxPerCall: string;
+    maxPerPeriod: string;
+    maxTotal: string;
+    periodSeconds: number;
+  }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  >;
+  acceptSubmit(body: unknown): Promise<Result<unknown>>;
 
   // §credentials data class (#207). The SAME abstraction as memory: list the
   // master's stored credential services (categorized via the catalog) and vault

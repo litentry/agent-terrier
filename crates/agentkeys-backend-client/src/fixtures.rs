@@ -18,7 +18,8 @@
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    AuditAppendV2, BrokerCapRequest, ConfigGetBody, ConfigPutBody, MemoryGetBody, MemoryPutBody,
+    AcceptAssertion, AuditAppendV2, BrokerCapRequest, BuildAcceptUserOpRequest, ConfigGetBody,
+    ConfigPutBody, MemoryGetBody, MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp,
     ENVELOPE_VERSION,
 };
 
@@ -73,6 +74,39 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         intent_text: Some("<intent>".into()),
         intent_commitment: None,
     };
+    let build_accept = BuildAcceptUserOpRequest {
+        operator_omni: "0x<operator_omni>".into(),
+        actor_omni: "0x<actor_omni>".into(),
+        device_key_hash: "0x<device_key_hash>".into(),
+        agent_pop_sig: "0x<agent_pop_sig>".into(),
+        link_code_redemption: "0x<link_code_redemption>".into(),
+        services: vec!["memory:<namespace>".into()],
+        read_only: true,
+        max_per_call: "0".into(),
+        max_per_period: "0".into(),
+        max_total: "0".into(),
+        period_seconds: 0,
+    };
+    let wire_user_op = WireUserOp {
+        sender: "0x<sender>".into(),
+        nonce: "0x<nonce>".into(),
+        init_code: "0x".into(),
+        call_data: "0x<executeBatch>".into(),
+        account_gas_limits: "0x<account_gas_limits>".into(),
+        pre_verification_gas: "0x<pre_verification_gas>".into(),
+        gas_fees: "0x<gas_fees>".into(),
+        paymaster_and_data: "0x<paymaster_and_data>".into(),
+        signature: "0x<k11_assertion>".into(),
+    };
+    let submit_accept = SubmitAcceptUserOpRequest {
+        user_op: wire_user_op.clone(),
+        assertion: AcceptAssertion {
+            authenticator_data: "<authenticator_data_b64url>".into(),
+            client_data_json: "<client_data_json_b64url>".into(),
+            signature: "<der_signature_b64url>".into(),
+            credential_id: "<credential_id_b64url>".into(),
+        },
+    };
     vec![
         Fixture {
             name: "cap_mint_request",
@@ -97,6 +131,18 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         Fixture {
             name: "audit_append_v2",
             body: serde_json::to_value(&audit).expect("audit serializes"),
+        },
+        Fixture {
+            name: "build_accept_userop_request",
+            body: serde_json::to_value(&build_accept).expect("build_accept serializes"),
+        },
+        Fixture {
+            name: "wire_user_op",
+            body: serde_json::to_value(&wire_user_op).expect("wire_user_op serializes"),
+        },
+        Fixture {
+            name: "submit_accept_userop_request",
+            body: serde_json::to_value(&submit_accept).expect("submit_accept serializes"),
         },
     ]
 }
@@ -182,6 +228,52 @@ mod tests {
                 "ts_unix",
                 "version",
             ]
+        );
+    }
+
+    #[test]
+    fn build_accept_userop_request_keys_frozen() {
+        assert_eq!(
+            keys_of("build_accept_userop_request"),
+            vec![
+                "actor_omni",
+                "agent_pop_sig",
+                "device_key_hash",
+                "link_code_redemption",
+                "max_per_call",
+                "max_per_period",
+                "max_total",
+                "operator_omni",
+                "period_seconds",
+                "read_only",
+                "services",
+            ]
+        );
+    }
+
+    #[test]
+    fn wire_user_op_keys_frozen() {
+        assert_eq!(
+            keys_of("wire_user_op"),
+            vec![
+                "account_gas_limits",
+                "call_data",
+                "gas_fees",
+                "init_code",
+                "nonce",
+                "paymaster_and_data",
+                "pre_verification_gas",
+                "sender",
+                "signature",
+            ]
+        );
+    }
+
+    #[test]
+    fn submit_accept_userop_request_keys_frozen() {
+        assert_eq!(
+            keys_of("submit_accept_userop_request"),
+            vec!["assertion", "user_op"]
         );
     }
 }

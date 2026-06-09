@@ -16,6 +16,8 @@ import { LogoPage } from './logos';
 import { MemoryPage } from './memory';
 import { CredentialsPage } from './credentials';
 import { PairingPage } from './pairing';
+import { getAssertionOverHash } from '@/lib/webauthn';
+import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
@@ -48,7 +50,7 @@ export function App() {
   const [paused, setPaused] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [eventDetail, setEventDetail] = useState<AuditEvent | null>(null);
-  const [toast, setToast] = useState<{ msg: string; sticky?: boolean } | null>(null);
+  const [toast, setToast] = useState<{ msg: string; sticky?: boolean; action?: { label: string; fn: () => void } } | null>(null);
 
   const [onboarded, setOnboarded] = useState(false);
   const [identity, setIdentity] = useState<{ email?: string; omni?: string } | null>(null);
@@ -171,10 +173,52 @@ export function App() {
     return stop;
   }, [onboarded, paused, client]);
 
-  const showToast = (msg: string, sticky = false) => {
-    setToast({ msg, sticky });
+  const showToast = (msg: string, sticky = false, action?: { label: string; fn: () => void }) => {
+    setToast({ msg, sticky, action });
     // Sticky toasts (e.g. post-onboarding next-steps) stay until dismissed.
     if (!sticky) setTimeout(() => setToast(null), 2600);
+  };
+
+  // #225 E7 — fully unbind the master so the operator can re-onboard a fresh passkey
+  // (used when the bound passkey was deleted in the OS password manager, or an accept
+  // fails with a wrong-passkey signature after a re-onboard). The daemon clears BOTH
+  // local state AND the on-chain operatorMasterWallet (owner-gated resetMaster), which
+  // is what actually lets the fresh passkey re-bind. Cannot delete the OS passkey
+  // (WebAuthn) — the toast tells the operator to do that manually.
+  const resetMaster = async () => {
+    if (status.kind !== 'connected') { showToast('Connect a daemon first.'); return; }
+    let cleared: string | null = null;
+    try { cleared = localStorage.getItem('ak_master_cred_id'); } catch {}
+    akLog('reset: clearing master binding (local + on-chain; OS passkey untouched)', {
+      clearedCredentialId: cleared,
+    });
+    try { localStorage.removeItem('ak_master_cred_id'); } catch {}
+    try { localStorage.removeItem('ak_onboarded'); } catch {}
+    const r = await client.resetMaster();
+    if (!r.ok) {
+      akLog('reset: FAILED ❌', { detail: r.status?.detail });
+      showToast(`Reset failed — ${r.status?.detail ?? 'daemon error'}`);
+      return;
+    }
+    const onchain = r.data.onchain;
+    akLog('reset: done', { onchain });
+    const onchainCleared =
+      onchain?.status === 'reset' ||
+      (onchain?.status === 'skipped' && onchain?.reason === 'already-unbound');
+    if (onchainCleared) {
+      showToast(
+        'Master unbound (local + on-chain). Delete the master passkey in System Settings ▸ Passwords, then re-onboard once.',
+        true,
+      );
+    } else {
+      // On-chain unbind didn't land — re-onboarding will still SIG_VALIDATION-fail until
+      // it does. Surface the reason so the operator (or dev) can fix it.
+      const why = onchain?.error ?? onchain?.reason ?? 'unknown';
+      showToast(
+        `Local binding cleared, but the ON-CHAIN unbind did NOT land (${why}). Re-onboarding will still fail until it does — ensure the registry has resetMaster (VERSION ≥ 0.3) + the deployer key, then retry.`,
+        true,
+      );
+    }
   };
 
   const go = (p: Page, id: string | null = null) => {
@@ -359,18 +403,116 @@ export function App() {
       showToast('Connect a daemon to approve a pairing.');
       return;
     }
-    showToast(`Registering ${req.agent} on chain…`);
-    const r = await client.registerPairing(req.id);
-    if (!r.ok) {
-      showToast('Register failed — check your master session + chain config.');
+    // #225 E7 — the real Touch-ID gate: build the sponsored executeBatch UserOp on
+    // the broker, sign its userOpHash with K11 (Touch ID), submit → handleOps. This
+    // does BOTH registerAgentDevice (P.2) + setScope (P.3) atomically, in one block.
+    const services = req.requested.flatMap((p) => p.ns).map((ns) => `memory:${ns}`);
+    showToast(`Building accept for ${req.agent}…`);
+    const built = await client.acceptBuild({
+      requestId: req.id,
+      services,
+      readOnly: false,
+      maxPerCall: '0',
+      maxPerPeriod: '0',
+      maxTotal: '0',
+      periodSeconds: 0,
+    });
+    if (!built.ok) {
+      showToast(`Accept build failed — ${built.status?.detail ?? 'check master session + chain (cutover?)'}`);
       return;
     }
-    showToast(`Registered ${req.agent} on chain. Grant its scope next (Touch ID).`);
+    showToast('Approve with Touch ID…');
+    const masterAccount = built.data.user_op?.sender;
+    akLog('accept: built UserOp — master account = operatorMasterWallet', {
+      masterAccount,
+      userOpHash: built.data.user_op_hash,
+      entryPoint: built.data.entry_point,
+    });
+    let assertion;
+    try {
+      // Auto-select the master passkey (stored at K11 enrollment) so the browser
+      // skips its picker and the right key signs. Absent ⇒ full picker (fallback).
+      let masterCred: string | null = null;
+      try { masterCred = localStorage.getItem('ak_master_cred_id'); } catch {}
+      akLog('accept: signing userOpHash (Touch ID)', {
+        masterAccount,
+        requestedCredentialId: masterCred ?? '(none — full picker)',
+        userOpHash: built.data.user_op_hash,
+      });
+      assertion = await getAssertionOverHash(
+        built.data.user_op_hash,
+        masterCred ? [masterCred] : undefined,
+      );
+      // THE key diagnostic: the passkey that actually signed vs the one we requested.
+      // If signingCredentialId ≠ the credential bound at onboarding, the accept will
+      // SIG_VALIDATION_FAILED on chain (the account verifies only the bound pubkey).
+      akLog('accept: assertion produced', {
+        masterAccount,
+        requestedCredentialId: masterCred ?? '(none)',
+        signingCredentialId: assertion.credential_id,
+        autoSelectMatched: !masterCred || assertion.credential_id === masterCred,
+      });
+    } catch {
+      // Either the operator cancelled, OR the bound master passkey was deleted in the
+      // OS password manager (the picker then has nothing to sign with).
+      showToast(
+        'Touch ID cancelled — or your master passkey was deleted. If you deleted it, reset + re-onboard once.',
+        true,
+        { label: 'Reset master', fn: resetMaster },
+      );
+      return;
+    }
+    const submitted = await client.acceptSubmit({ user_op: built.data.user_op, assertion });
+    if (!submitted.ok) {
+      const detail = submitted.status?.detail ?? 'handleOps error';
+      akLog('accept: submit FAILED ❌', {
+        masterAccount,
+        signingCredentialId: assertion.credential_id,
+        detail,
+      });
+      // A SIG_VALIDATION_FAILED / on-chain revert here almost always means the signing
+      // passkey ≠ the one bound to the master account — typically a stale binding after a
+      // passkey was deleted/regenerated. The reset path now unbinds on-chain (owner-gated
+      // resetMaster) so a fresh enroll CAN re-bind. Offer the reset + re-onboard path.
+      if (/SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+        showToast(
+          `Accept failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
+          true,
+          { label: 'Reset master', fn: resetMaster },
+        );
+      } else {
+        showToast(`Accept submit failed — ${detail}`);
+      }
+      return;
+    }
+    akLog('accept: submit OK ✅', {
+      masterAccount,
+      signingCredentialId: assertion.credential_id,
+      txHash: (submitted.data as { tx_hash?: string } | undefined)?.tx_hash,
+    });
+    showToast(`${req.agent} accepted on chain (Touch ID · register + scope, one block).`);
+    // Drop it from the pending list. The accept registered the agent on-chain, but the
+    // broker only clears the rendezvous row on an explicit ack (the accept/submit body
+    // carries no request_id) — without this the request reappears on every refresh.
+    // Remove locally for instant feedback, then ack the broker so it stays gone.
+    setPairingRequests((prev) => prev.filter((r) => r.id !== req.id));
+    const acked = await client.ackPairing(req.id);
+    if (!acked.ok) akLog('accept: ack pending-binding failed (request may reappear)', { detail: acked.status?.detail });
     await refreshPairing();
+    const a = await client.listActors();
+    if (a.ok) setActors(a.data);
   };
-  const declinePairing = (id: string) => {
-    setPairingRequests((prev) => prev.filter((r) => r.id !== id));
+  const declinePairing = async (id: string) => {
+    // Actually drop the request on the broker (J1-gated, no Touch ID) — not just
+    // the local list, or it reappears on the next refresh.
+    const r = await client.declinePairing(id);
+    if (!r.ok) {
+      showToast(`Decline failed — ${r.status?.detail ?? 'check the master session'}`);
+      return;
+    }
+    setPairingRequests((prev) => prev.filter((req) => req.id !== id));
     showToast('Pairing request declined.');
+    await refreshPairing();
   };
   // #214: poll the REAL broker rendezvous (daemon GET /v1/agent/pairing/pending)
   // for agents the master has claimed that await on-chain approval. Replaces the
@@ -429,7 +571,7 @@ export function App() {
     });
   };
 
-  const confirmAction = () => {
+  const confirmAction = async () => {
     const action = pendingAction;
     setPendingAction(null);
     if (!action) return;
@@ -439,9 +581,18 @@ export function App() {
     }
     if (action.kind === 'revoke-device') {
       const actor = action.actor;
-      void client.revokeDevice(actor.id, action.intent);
-      setActors((prev) => prev.map((a) => (a.id === actor.id ? { ...a, status: 'bad', lastActive: 'revoked', label: a.label + ' (revoked)' } : a)));
-      showToast(`${actor.label} revoked. SSE drop event broadcast.`);
+      // On-chain revokeAgentDevice (daemon → heima-device-revoke.sh). Await it — the
+      // binding isn't gone until SidecarRegistry says so — then re-fetch the
+      // authoritative actor tree instead of optimistically flipping local state.
+      showToast(`Revoking ${actor.label} on chain…`);
+      const r = await client.revokeDevice(actor.id, action.intent);
+      if (!r.ok) {
+        showToast(`Revoke failed — ${r.status?.detail ?? 'check the daemon + chain config'}`);
+        return;
+      }
+      const a = await client.listActors();
+      if (a.ok) setActors(a.data);
+      showToast(`${actor.label} revoked on chain.`);
       go('audit');
     }
   };
@@ -557,6 +708,16 @@ export function App() {
         <button className="nav-item" onClick={logout}>
           <span className="marker">[◆]</span> log out · replay onboarding
         </button>
+        <button
+          className="nav-item"
+          style={{ color: 'var(--danger)' }}
+          title="Unbind the master (local + on-chain) so you can re-onboard a fresh passkey — e.g. after the master passkey was deleted in your OS password manager, or an accept fails with SIG_VALIDATION."
+          onClick={() => {
+            if (window.confirm('Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?')) resetMaster();
+          }}
+        >
+          <span className="marker">[⟲]</span> reset master · re-onboard passkey
+        </button>
 
         <div className="nav-section">brand</div>
         <button className={`nav-item ${page === 'logo' ? 'active' : ''}`} onClick={() => go('logo')}>
@@ -587,7 +748,7 @@ export function App() {
       <main className="app-main" data-section={sectionAttr}>
         {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {page === 'detail' && currentActor && (
-          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} />
+          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} />
         )}
         {page === 'memory' && (
           <MemoryPage categories={categories} entriesByNs={entriesByNs} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
@@ -596,7 +757,7 @@ export function App() {
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
         )}
         {page === 'pairing' && (
-          <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} />
+          <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
@@ -642,6 +803,14 @@ export function App() {
       {toast && (
         <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', display: 'flex', alignItems: 'center', gap: 14, maxWidth: 'min(92vw, 560px)', background: 'var(--ink)', color: 'var(--bg)', padding: '10px 14px 10px 18px', fontSize: 12, border: '1px solid var(--ink)', zIndex: 200, animation: 'pop 0.22s cubic-bezier(.2,.8,.2,1)' }}>
           <span>{toast.msg}</span>
+          {toast.action && (
+            <button
+              onClick={() => { toast.action!.fn(); }}
+              style={{ background: 'var(--bg)', color: 'var(--ink)', border: '1px solid var(--bg)', cursor: 'pointer', fontSize: 11, lineHeight: 1, padding: '5px 9px', flexShrink: 0, whiteSpace: 'nowrap' }}
+            >
+              {toast.action.label}
+            </button>
+          )}
           {toast.sticky && (
             <button
               onClick={() => setToast(null)}
