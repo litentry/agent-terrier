@@ -151,6 +151,60 @@ fn env_profile(base: &str) -> Result<String, String> {
         .map_err(|_| format!("env {base}[_{p}] not set"))
 }
 
+/// #231 drift guard — the accept-env vs compiled-chain-profile cross-check
+/// `load_accept_config` enforces.
+///
+/// The compiled-in chain profile (`include_str!`'d `heima.json`) is the source of
+/// truth for the deployed contract set; the accept env is whatever the broker host
+/// was last deployed with. A mismatch means the broker is on a STALE deployment,
+/// and every accept it builds is doomed to revert against the wrong contracts —
+/// surfacing as a misleading "wrong passkey (SIG_VALIDATION_FAILED)" (two real
+/// incidents, 2026-06-09). Pure (no env reads) so unit tests avoid process-global
+/// env races.
+///
+/// `checks` is `(env var name, profile contract name, env-parsed address)`. A
+/// contract the profile doesn't carry is skipped — a chain with no deployed
+/// registry has nothing to drift from. `allow_override` (CI/test stacks whose own
+/// contract deploy legitimately differs from the compiled prod profile) downgrades
+/// the hard error to a `tracing::warn!`.
+fn enforce_profile_drift_guard(
+    profile: &agentkeys_core::chain_profile::ChainProfile,
+    checks: &[(&str, &str, [u8; 20])],
+    allow_override: bool,
+) -> Result<(), String> {
+    let mut mismatches = Vec::new();
+    for (env_name, contract_name, env_addr) in checks {
+        let Some(deployed) = profile.contract(contract_name) else {
+            continue;
+        };
+        match addr20(&deployed.address, contract_name) {
+            Ok(profile_addr) if &profile_addr == env_addr => {}
+            Ok(_) => mismatches.push(format!(
+                "accept-env {env_name}=0x{} != chain profile {} ({contract_name})",
+                hex::encode(env_addr),
+                deployed.address
+            )),
+            Err(e) => mismatches.push(format!("chain profile {contract_name}: {e}")),
+        }
+    }
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+    let detail = mismatches.join("; ");
+    if allow_override {
+        tracing::warn!(
+            "accept contract-address drift overridden by AGENTKEYS_ACCEPT_ALLOW_ADDR_OVERRIDE=1: {detail}"
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{detail} — the broker is on a STALE deployment; re-sync: setup-broker-host.sh \
+         --ref <branch> (or set AGENTKEYS_ACCEPT_ALLOW_ADDR_OVERRIDE=1 only if this \
+         env's own contract deploy legitimately differs from the compiled profile, \
+         e.g. the CI/test stack)"
+    ))
+}
+
 /// Load the chain config + the broker submitter key from env.
 ///
 /// `BROKER_SPONSOR_SIGNER_KEY` (hex secp256k1) is the broker EVM identity that
@@ -192,20 +246,55 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
         }
     };
 
+    let entry_point = addr20(&env_profile("ENTRYPOINT_ADDRESS")?, "ENTRYPOINT_ADDRESS")?;
+    let registry = addr20(
+        &env_profile("SIDECAR_REGISTRY_ADDRESS")?,
+        "SIDECAR_REGISTRY_ADDRESS",
+    )?;
+    let scope = addr20(
+        &env_profile("SCOPE_CONTRACT_ADDRESS")?,
+        "SCOPE_CONTRACT_ADDRESS",
+    )?;
+
+    // #231 drift guard: refuse to serve /v1/accept/* when the accept env disagrees
+    // with the compiled-in chain profile — fail loud with the re-sync command
+    // instead of building doomed UserOps that surface as "wrong passkey". Profile
+    // resolution mirrors env_profile's chain pick ($AGENTKEYS_CHAIN, default
+    // heima); $AGENTKEYS_CHAIN_PROFILE_FILE wins when set.
+    match agentkeys_core::chain_profile::ChainProfile::resolve(
+        None,
+        std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
+        std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
+            .ok()
+            .as_deref(),
+    ) {
+        Ok((chain_profile, _src)) => {
+            let allow_override = std::env::var("AGENTKEYS_ACCEPT_ALLOW_ADDR_OVERRIDE")
+                .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            enforce_profile_drift_guard(
+                &chain_profile,
+                &[
+                    ("ENTRYPOINT_ADDRESS", "EntryPoint", entry_point),
+                    ("SIDECAR_REGISTRY_ADDRESS", "SidecarRegistry", registry),
+                    ("SCOPE_CONTRACT_ADDRESS", "AgentKeysScope", scope),
+                ],
+                allow_override,
+            )?;
+        }
+        // An unresolvable profile (operator-custom chain name with no built-in
+        // JSON) has no registry to drift-check against — don't take accept down.
+        Err(e) => tracing::warn!("accept drift guard skipped — chain profile unresolved: {e}"),
+    }
+
     let cfg = AcceptConfig {
         rpc_url,
         chain_id,
-        entry_point: addr20(&env_profile("ENTRYPOINT_ADDRESS")?, "ENTRYPOINT_ADDRESS")?,
+        entry_point,
         paymaster,
         broker_signer,
-        registry: addr20(
-            &env_profile("SIDECAR_REGISTRY_ADDRESS")?,
-            "SIDECAR_REGISTRY_ADDRESS",
-        )?,
-        scope: addr20(
-            &env_profile("SCOPE_CONTRACT_ADDRESS")?,
-            "SCOPE_CONTRACT_ADDRESS",
-        )?,
+        registry,
+        scope,
         account_gas_limits: crate::sponsor::pack_u128_pair(
             DEF_VERIFICATION_GAS_LIMIT,
             DEF_CALL_GAS_LIMIT,
@@ -799,5 +888,92 @@ mod tests {
             cast_handleops_arg(&op),
             "[(0xaa,0x07,0x,0xdeadbeef,0xagl,0x60,0xfee,0xpmd,0xsig)]"
         );
+    }
+
+    // ─── #231 drift guard: accept-env vs compiled chain profile ─────────────
+
+    fn heima_profile() -> agentkeys_core::chain_profile::ChainProfile {
+        agentkeys_core::chain_profile::ChainProfile::load_builtin("heima").unwrap()
+    }
+
+    fn profile_addr20(
+        profile: &agentkeys_core::chain_profile::ChainProfile,
+        name: &str,
+    ) -> [u8; 20] {
+        addr20(&profile.contract(name).unwrap().address, name).unwrap()
+    }
+
+    #[test]
+    fn drift_guard_passes_when_env_matches_profile() {
+        let p = heima_profile();
+        let checks = [
+            (
+                "ENTRYPOINT_ADDRESS",
+                "EntryPoint",
+                profile_addr20(&p, "EntryPoint"),
+            ),
+            (
+                "SIDECAR_REGISTRY_ADDRESS",
+                "SidecarRegistry",
+                profile_addr20(&p, "SidecarRegistry"),
+            ),
+            (
+                "SCOPE_CONTRACT_ADDRESS",
+                "AgentKeysScope",
+                profile_addr20(&p, "AgentKeysScope"),
+            ),
+        ];
+        assert!(enforce_profile_drift_guard(&p, &checks, false).is_ok());
+    }
+
+    #[test]
+    fn drift_guard_fails_loud_on_mismatch_naming_both_addresses() {
+        let p = heima_profile();
+        // the incident shape: the broker env still on a stale (pre-cutover) registry
+        let stale = [0x1a; 20];
+        let err = enforce_profile_drift_guard(
+            &p,
+            &[("SIDECAR_REGISTRY_ADDRESS", "SidecarRegistry", stale)],
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(&format!(
+                "SIDECAR_REGISTRY_ADDRESS=0x{}",
+                hex::encode(stale)
+            )),
+            "{err}"
+        );
+        assert!(
+            err.contains(&p.contract("SidecarRegistry").unwrap().address),
+            "{err}"
+        );
+        assert!(err.contains("STALE deployment"), "{err}");
+        assert!(err.contains("setup-broker-host.sh --ref"), "{err}");
+    }
+
+    #[test]
+    fn drift_guard_override_downgrades_mismatch_to_warn_not_fail() {
+        let p = heima_profile();
+        assert!(enforce_profile_drift_guard(
+            &p,
+            &[("SIDECAR_REGISTRY_ADDRESS", "SidecarRegistry", [0x1a; 20])],
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn drift_guard_skips_contracts_the_profile_does_not_carry() {
+        // A chain profile with no deployed-contract registry (e.g. a local dev
+        // chain) has nothing to drift from — the guard must not block accept.
+        let mut p = heima_profile();
+        p.contracts.clear();
+        assert!(enforce_profile_drift_guard(
+            &p,
+            &[("SIDECAR_REGISTRY_ADDRESS", "SidecarRegistry", [0x1a; 20])],
+            false,
+        )
+        .is_ok());
     }
 }
