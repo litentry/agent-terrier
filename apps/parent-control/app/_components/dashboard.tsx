@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CHIP_STYLES, NAMESPACES } from '@/lib/constants';
 import type { ConnectionStatus } from '@/lib/client/types';
 import { AutoDistributePanel, PermissionList } from './permissions';
@@ -95,6 +95,7 @@ export function ActorDetail({
   actor,
   onBack,
   onUpdate,
+  onCommitScope,
   onRevoke,
   recentEvents,
   proposals,
@@ -107,6 +108,9 @@ export function ActorDetail({
   actor: Actor;
   onBack: () => void;
   onUpdate: (id: string, patch: Partial<Actor>) => void;
+  /** #248: commit the staged memory grant on chain — ONE setScope UserOp signed
+   *  by the master K11 (Touch ID). Resolves true on success (clears staging). */
+  onCommitScope: (a: Actor, services: string[], readOnly: boolean) => Promise<boolean>;
   onRevoke: (a: Actor) => void;
   recentEvents: AuditEvent[];
   proposals: ProposedScope[] | null;
@@ -120,6 +124,18 @@ export function ActorDetail({
   const events = recentEvents.filter((e) => e.actorId === actor.id).slice(0, 6);
   const isMaster = actor.role === 'master';
 
+  // #248 — memory toggles STAGE locally (the chain mirror would overwrite an
+  // optimistic write on the next refetch); the commit bar lands them on chain
+  // with one Touch ID. `null` = no staged changes (panel shows the chain truth).
+  const [stagedScope, setStagedScope] = useState<Record<Namespace, ScopeBits> | null>(null);
+  const [committing, setCommitting] = useState(false);
+  useEffect(() => {
+    setStagedScope(null); // switching actors drops any uncommitted staging
+  }, [actor.id]);
+
+  const chainScope = (actor.scope ?? {}) as Record<Namespace, ScopeBits>;
+  const effectiveScope = stagedScope ?? chainScope;
+
   const setScope = (ns: Namespace | '__email', v: ScopeBits | boolean) => {
     if (ns === '__email') {
       const services = new Set(actor.services ?? []);
@@ -127,7 +143,34 @@ export function ActorDetail({
       onUpdate(actor.id, { services: [...services] });
       return;
     }
-    onUpdate(actor.id, { scope: { ...(actor.scope as Record<Namespace, ScopeBits>), [ns]: v as ScopeBits } });
+    setStagedScope({ ...effectiveScope, [ns]: v as ScopeBits });
+  };
+
+  // The staged grant as on-chain services: every namespace with read or write.
+  // The chain grant carries ONE read-only bit for the whole set, so any staged
+  // r+w commits the set as read+write (the bar says which before Touch ID).
+  const stagedGranted = stagedScope
+    ? NAMESPACES.filter((ns) => stagedScope[ns]?.read || stagedScope[ns]?.write)
+    : [];
+  const stagedReadOnly = stagedScope ? !stagedGranted.some((ns) => stagedScope[ns]?.write) : true;
+  const stagedDirty =
+    stagedScope !== null &&
+    NAMESPACES.some((ns) => {
+      const a = chainScope[ns] ?? { read: false, write: false };
+      const b = stagedScope[ns] ?? { read: false, write: false };
+      return a.read !== b.read || a.write !== b.write;
+    });
+
+  const commitStaged = async () => {
+    if (!stagedScope || committing) return;
+    setCommitting(true);
+    const ok = await onCommitScope(
+      actor,
+      stagedGranted.map((ns) => `memory:${ns}`),
+      stagedReadOnly,
+    );
+    setCommitting(false);
+    if (ok) setStagedScope(null); // the refetched chain mirror now shows the grant
   };
 
   return (
@@ -135,7 +178,7 @@ export function ActorDetail({
       <PageHead
         crumb={<><a onClick={onBack} style={{ cursor: 'pointer' }}>actors</a> <span className="muted">/</span> {actor.derivation}</>}
         title={<><span className="muted serif">/</span> {actor.label}</>}
-        desc={`Bound at ${actor.omni}. All scope + payment-cap settings are master-mutations — each save triggers K11 + chain commit.`}
+        desc={`Bound at ${actor.omni}. Memory scope changes stage locally, then commit on chain with one master Touch ID (setScope · K11).`}
         actions={
           <>
             <button className="btn" onClick={onBack}>← back</button>
@@ -182,9 +225,30 @@ export function ActorDetail({
       {!isMaster && (
         <Panel title="── permissions · scoped (mobile-style)">
           <div className="muted" style={{ fontSize: 11, marginBottom: 12 }}>
-            Maps to ScopeContract[O_master][{actor.omni}]. Changes commit to chain via master K11.
+            Maps to ScopeContract[O_master][{actor.omni}]. Memory toggles stage below; <strong>commit · Touch ID</strong> lands
+            them on chain (one setScope, master K11) — until then the chain grant is unchanged.
           </div>
-          <PermissionList actor={actor} editable onScopeChange={setScope} />
+          <PermissionList actor={{ ...actor, scope: effectiveScope }} editable onScopeChange={setScope} />
+          {stagedDirty && (
+            <div
+              className="banner"
+              style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}
+            >
+              <span className="lbl">staged</span>
+              <span style={{ fontSize: 11.5, flex: '1 1 auto' }}>
+                {stagedGranted.length === 0
+                  ? 'Revokes EVERY memory namespace on chain.'
+                  : `Grants ${stagedGranted.map((ns) => `memory:${ns}`).join(' · ')} · ${stagedReadOnly ? 'read-only' : 'read + write'}.`}
+                {' '}One on-chain setScope; the grant carries a single read-only bit for the whole set.
+              </span>
+              <span style={{ display: 'flex', gap: 8 }}>
+                <button className="btn" disabled={committing} onClick={() => setStagedScope(null)}>discard</button>
+                <button className="btn primary" disabled={committing} onClick={commitStaged}>
+                  {committing ? 'committing…' : 'commit · Touch ID'}
+                </button>
+              </span>
+            </div>
+          )}
         </Panel>
       )}
 

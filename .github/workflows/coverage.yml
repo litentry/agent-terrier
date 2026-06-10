@@ -49,6 +49,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The instrumented workspace target/ cache is multi-GB; restoring it on a
+      # stock ubuntu-latest runner has hit "No space left on device" mid-restore
+      # (two PR #256 runs died at the Cache step before any test ran). Drop the
+      # ~14 GB of preinstalled toolchains we never use BEFORE the restore.
+      - name: Free runner disk (android/dotnet/ghc/codeql)
+        run: |
+          set -euo pipefail
+          df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

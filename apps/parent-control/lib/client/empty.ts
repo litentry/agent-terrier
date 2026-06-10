@@ -125,7 +125,11 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async revokeDevice(_actorId: string, _intent: RevokeIntent): Promise<Result<void>> {
+  async revokeDevice(
+    _actorId: string,
+    _intent: RevokeIntent,
+    _onchain?: { txHash?: string },
+  ): Promise<Result<void>> {
     return disconnected();
   }
 
@@ -212,6 +216,31 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async acceptSubmit(_body: unknown): Promise<Result<unknown>> {
+    return disconnected();
+  }
+
+  async scopeBuild(_input: {
+    actorOmni: string;
+    services: string[];
+    preserveServiceIds?: string[];
+    readOnly: boolean;
+  }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  > {
+    return disconnected();
+  }
+
+  async scopeSubmit(_body: unknown): Promise<Result<unknown>> {
+    return disconnected();
+  }
+
+  async revokeBuild(_input: { deviceKeyHash: string }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  > {
+    return disconnected();
+  }
+
+  async revokeSubmit(_body: unknown): Promise<Result<unknown>> {
     return disconnected();
   }
 

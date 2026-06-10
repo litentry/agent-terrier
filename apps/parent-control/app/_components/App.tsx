@@ -324,7 +324,86 @@ export function App() {
 
   const updateActor = (id: string, patch: Partial<Actor>) => {
     setActors((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
-    showToast('scope updated · K11 assertion queued for next save');
+  };
+
+  // #249/#248 — the memory namespaces the operator can grant: the loaded
+  // taxonomy categories when available (the real per-master namespace set),
+  // else the canonical four. Drives the pairing accept picker, the claim's
+  // default requested scope, and the permissions panel.
+  const availableNamespaces =
+    categories.length > 0 ? categories.map((c) => c.ns) : (NAMESPACES as readonly string[]).slice();
+
+  // #248 — commit the permissions panel's staged memory grant on chain: ONE
+  // setScope (set-replace) UserOp signed by the master K11 (Touch ID), relayed
+  // via the broker → bundler → EntryPoint.handleOps. Returns true on success so
+  // the panel clears its staged state; the #233 mirror then re-reads the grant
+  // from chain on the refetch below (persistence across refetch + restart).
+  const commitScope = async (actor: Actor, services: string[], readOnly: boolean): Promise<boolean> => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to commit scope changes.');
+      return false;
+    }
+    if (services.length === 0) {
+      const proceed = window.confirm(
+        `Commit ZERO grants for ${actor.label}? This revokes every memory namespace on chain — the agent will be denied everywhere.\n\nRevoke all?`,
+      );
+      if (!proceed) return false;
+    }
+    showToast(`Building setScope for ${actor.label}…`);
+    // setScope is set-replace — echo the mirror's unmatched on-chain service ids
+    // (e.g. cred:<service> granted at accept) so a memory toggle can't wipe them.
+    const built = await client.scopeBuild({
+      actorOmni: actor.omniHex,
+      services,
+      preserveServiceIds: actor.scopeUnknownServiceIds ?? [],
+      readOnly,
+    });
+    if (!built.ok) {
+      showToast(`Scope build failed — ${built.status?.detail ?? 'check master session + chain'}`);
+      return false;
+    }
+    showToast('Approve with Touch ID…');
+    let assertion;
+    try {
+      let masterCred: string | null = null;
+      try { masterCred = localStorage.getItem('ak_master_cred_id'); } catch {}
+      akLog('scope: signing userOpHash (Touch ID)', {
+        actor: actor.id,
+        services,
+        readOnly,
+        userOpHash: built.data.user_op_hash,
+      });
+      assertion = await getAssertionOverHash(
+        built.data.user_op_hash,
+        masterCred ? [masterCred] : undefined,
+      );
+    } catch {
+      showToast('Touch ID cancelled — scope unchanged on chain.');
+      return false;
+    }
+    const submitted = await client.scopeSubmit({ user_op: built.data.user_op, assertion });
+    if (!submitted.ok) {
+      const detail = submitted.status?.detail ?? 'handleOps error';
+      akLog('scope: submit FAILED ❌', { actor: actor.id, detail });
+      if (/SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+        showToast(
+          `Scope commit failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
+          true,
+          { label: 'Reset master', fn: resetMaster },
+        );
+      } else {
+        showToast(`Scope commit failed — ${detail}`);
+      }
+      return false;
+    }
+    akLog('scope: submit OK ✅', {
+      actor: actor.id,
+      txHash: (submitted.data as { tx_hash?: string } | undefined)?.tx_hash,
+    });
+    showToast(`${actor.label} scope committed on chain (Touch ID · setScope).`);
+    const a = await client.listActors();
+    if (a.ok) setActors(a.data);
+    return true;
   };
 
   // #207 item 1A — config-init entry point A: author the taxonomy from a bundled
@@ -414,7 +493,12 @@ export function App() {
   // ─── Pairing: accept → register on chain (§10.2 P.2) ───────────────
   // #214: the daemon submits registerAgentDevice for the binding + acks the broker.
   // The agent's scope grant (Touch ID, P.3) is the next step via its actor detail.
-  const acceptPairing = async (req: PairingRequest) => {
+  //
+  // #249: `services` is the operator's SELECTION from the accept card's namespace
+  // picker (default = the requested tokens), not a blind compile of the request —
+  // the operator adjusts the grant BEFORE Touch ID, so §B's "review the device +
+  // requested scope → accept" actually ends with the agent scoped.
+  const acceptPairing = async (req: PairingRequest, services: string[]) => {
     if (status.kind !== 'connected') {
       showToast('Connect a daemon to approve a pairing.');
       return;
@@ -422,22 +506,17 @@ export function App() {
     // #225 E7 — the real Touch-ID gate: build the sponsored executeBatch UserOp on
     // the broker, sign its userOpHash with K11 (Touch ID), submit → handleOps. This
     // does BOTH registerAgentDevice (P.2) + setScope (P.3) atomically, in one block.
-    //
-    // #243 follow-up (real 2026-06-10 incident): compile services CAP-PRESERVINGLY.
-    // The old `.map(ns => `memory:${ns}`)` discarded p.cap (a `cred:x` request became
-    // `memory:x`) and silently dropped bare ns-less tokens — an accept could land
-    // `setScope([])` on chain while the operator believed memory was granted, and the
-    // permission panel then showed DENY everywhere (chain-accurately).
-    const services = req.requested.flatMap((p) => p.ns.map((ns) => `${p.cap}:${ns}`));
-    const bareTokens = req.requested.filter((p) => p.ns.length === 0).map((p) => p.cap);
-    if (bareTokens.length > 0) {
-      akLog('accept: ns-less requested tokens cannot compile to scope services', { bareTokens });
-    }
     if (services.length === 0) {
       // Binding with zero grants is legitimate (grant later from the actor page),
-      // but it must NEVER be silent — that is exactly the deny-everywhere trap.
+      // but it must NEVER be silent (#245 floor) — and per #249 it now needs an
+      // EXPLICIT confirmation, because zero grants is exactly the deny-everywhere
+      // trap the runbook's pairing story does not expect.
+      const proceed = window.confirm(
+        `${req.agent} would be bound with ZERO scope grants — it cannot read any memory or credentials until you grant scopes from its actor page.\n\nBind with zero grants?`,
+      );
+      if (!proceed) return;
       showToast(
-        `Heads-up: ${req.agent} requested no namespace-qualified scopes${bareTokens.length ? ` (bare: ${bareTokens.join(', ')})` : ''} — this accept binds the device with ZERO grants. Grant scopes from its actor page afterwards.`,
+        `Heads-up: this accept binds ${req.agent} with ZERO grants. Grant scopes from its actor page afterwards (permissions · commit · Touch ID).`,
         true,
       );
     }
@@ -572,13 +651,20 @@ export function App() {
   // #214 §10.2 P.1 — claim the agent's pairing code via the daemon → broker; on
   // success, re-poll so the claimed agent appears in the rendezvous (awaiting
   // on-chain register + scope approval).
+  //
+  // #249: the claim declares a NAMESPACE-QUALIFIED default scope (`memory:<ns>`
+  // per known namespace) — never a bare `memory`. A bare token can't compile to
+  // an on-chain service, which is how an accept silently landed `setScope([])`;
+  // with qualified defaults the accept card's picker has the real namespaces
+  // preselected and §B ends with the agent actually scoped.
   const claimPairing = async (input: { code: string; label: string }) => {
     if (status.kind !== 'connected') {
       showToast('Connect a daemon to claim a pairing code.');
       return;
     }
     setClaiming(true);
-    const r = await client.claimPairing(input);
+    const scope = availableNamespaces.map((ns) => `memory:${ns}`).join(',');
+    const r = await client.claimPairing({ ...input, scope });
     setClaiming(false);
     if (!r.ok) {
       showToast('Claim failed — check the code + that your master session is active.');
@@ -615,13 +701,90 @@ export function App() {
     }
     if (action.kind === 'revoke-device') {
       const actor = action.actor;
-      // On-chain revokeAgentDevice (daemon → heima-device-revoke.sh). Await it — the
-      // binding isn't gone until SidecarRegistry says so — then re-fetch the
-      // authoritative actor tree instead of optimistically flipping local state.
-      showToast(`Revoking ${actor.label} on chain…`);
-      const r = await client.revokeDevice(actor.id, action.intent);
-      if (!r.ok) {
-        showToast(`Revoke failed — ${r.status?.detail ?? 'check the daemon + chain config'}`);
+      // The binding isn't gone until SidecarRegistry says so. revokeAgentDevice
+      // requires msg.sender == operatorMasterWallet — for an account-master
+      // operator that's the passkey P256Account, so the unpair is a Touch-ID
+      // UserOp (build → K11-sign → submit), NOT the deployer-signed script
+      // (which reverts NotAuthorized — real 2026-06-11 incident).
+      //
+      // Gate ONLY on having the device hash. Whether the master is a
+      // P256Account is the BROKER's chain read (operatorMasterWallet +
+      // has-code) — the local accountType field can be stale (`none` on a
+      // restored session, real 2026-06-11 follow-up incident) and gating on it
+      // silently sent account-master operators down the doomed script path.
+      // A genuine legacy-EOA master gets the broker's 409 → script fallback.
+      const legacyRevoke = async (): Promise<boolean> => {
+        showToast(`Revoking ${actor.label} on chain…`);
+        const r = await client.revokeDevice(actor.id, action.intent);
+        if (!r.ok) {
+          showToast(`Revoke failed — ${r.status?.detail ?? 'check the daemon + chain config'}`);
+          return false;
+        }
+        return true;
+      };
+      if (actor.deviceKeyHash) {
+        showToast(`Building revoke for ${actor.label}…`);
+        const built = await client.revokeBuild({ deviceKeyHash: actor.deviceKeyHash });
+        if (!built.ok) {
+          const buildDetail = built.status?.detail ?? '';
+          if (/legacy EOA/i.test(buildDetail)) {
+            // The broker chain-read says the master IS an EOA — the script can
+            // sign this revoke; take the legacy path instead.
+            akLog('revoke: master is a legacy EOA — falling back to the script path', { actor: actor.id });
+            if (!(await legacyRevoke())) return;
+            const a0 = await client.listActors();
+            if (a0.ok) setActors(a0.data);
+            showToast(`${actor.label} revoked on chain.`);
+            go('audit');
+            return;
+          }
+          showToast(`Revoke build failed — ${buildDetail || 'check master session + chain'}`);
+          return;
+        }
+        showToast('Approve with Touch ID…');
+        let assertion;
+        try {
+          let masterCred: string | null = null;
+          try { masterCred = localStorage.getItem('ak_master_cred_id'); } catch {}
+          akLog('revoke: signing userOpHash (Touch ID)', {
+            actor: actor.id,
+            deviceKeyHash: actor.deviceKeyHash,
+            userOpHash: built.data.user_op_hash,
+          });
+          assertion = await getAssertionOverHash(
+            built.data.user_op_hash,
+            masterCred ? [masterCred] : undefined,
+          );
+        } catch {
+          showToast('Touch ID cancelled — the device is still bound.');
+          return;
+        }
+        const submitted = await client.revokeSubmit({ user_op: built.data.user_op, assertion });
+        if (!submitted.ok) {
+          const detail = submitted.status?.detail ?? 'handleOps error';
+          akLog('revoke: submit FAILED ❌', { actor: actor.id, detail });
+          if (/SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+            showToast(
+              `Revoke failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
+              true,
+              { label: 'Reset master', fn: resetMaster },
+            );
+          } else {
+            showToast(`Revoke submit failed — ${detail}`);
+          }
+          return;
+        }
+        const txHash = (submitted.data as { tx_hash?: string } | undefined)?.tx_hash;
+        akLog('revoke: submit OK ✅', { actor: actor.id, txHash });
+        // The daemon re-reads the registry (device must read `revoked`) before
+        // flipping local state — the chain stays the source of truth.
+        const r = await client.revokeDevice(actor.id, action.intent, { txHash });
+        if (!r.ok) {
+          showToast(`Revoke landed on chain but the daemon verify failed — ${r.status?.detail ?? 'refresh'}`);
+          return;
+        }
+      } else if (!(await legacyRevoke())) {
+        // No on-chain device hash recorded (legacy local-only row) — script path.
         return;
       }
       const a = await client.listActors();
@@ -785,7 +948,7 @@ export function App() {
       <main className="app-main" data-section={sectionAttr}>
         {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {page === 'detail' && currentActor && (
-          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} />
+          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} />
         )}
         {page === 'memory' && (
           <MemoryPage categories={categories} entriesByNs={entriesByNs} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
@@ -794,7 +957,7 @@ export function App() {
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
         )}
         {page === 'pairing' && (
-          <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} />
+          <PairingPage requests={pairingRequests} actors={actors} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}

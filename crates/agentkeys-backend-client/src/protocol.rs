@@ -424,6 +424,51 @@ pub struct SubmitAcceptUserOpResponse {
     pub block_number: String,
 }
 
+// ── #248 — on-chain K11-gated scope re-grant for an ALREADY-bound agent ──────
+//
+// The permissions panel's setScope becomes ONE `P256Account.executeBatch([setScope])`
+// UserOp, gated by the master's K11 Touch ID — the scope-only sibling of the accept
+// batch (no register; the device binding already exists). Broker endpoints
+// `/v1/scope/build` + `/v1/scope/submit`, J1_master-gated; `build` returns the
+// `userOpHash` the master K11-signs, `submit` reuses the accept relay shape
+// ([`SubmitAcceptUserOpRequest`] → bundler → `EntryPoint.handleOps`). The response
+// to `build` is the same [`BuildAcceptUserOpResponse`].
+
+/// Daemon → broker `POST /v1/scope/build`. `services` is the FULL replacement
+/// list (`AgentKeysScope.setScope` is set-replace, not incremental); an empty
+/// list revokes every grant. `preserve_service_ids` are raw on-chain service
+/// ids (`0x`-hex keccak-32) echoed from the scope mirror — grants the panel
+/// can't name (e.g. `cred:<service>`) that must SURVIVE a memory-toggle commit;
+/// the broker unions them into the new grant. Field conventions match
+/// [`BuildAcceptUserOpRequest`] (`0x`-omnis, decimal-string `u128` caps).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildScopeUserOpRequest {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub services: Vec<String>,
+    #[serde(default)]
+    pub preserve_service_ids: Vec<String>,
+    pub read_only: bool,
+    pub max_per_call: String,
+    pub max_per_period: String,
+    pub max_total: String,
+    pub period_seconds: u32,
+}
+
+/// Daemon → broker `POST /v1/revoke/build` — the Touch-ID **unpair**.
+/// `SidecarRegistry.revokeAgentDevice` requires `msg.sender ==
+/// operatorMasterWallet`, so for an account-master operator the revoke is a
+/// master-account UserOp (`executeBatch([revokeAgentDevice])`); no EOA — incl.
+/// the deployer script — can sign it. Response reuses
+/// [`BuildAcceptUserOpResponse`]; submit reuses [`SubmitAcceptUserOpRequest`]
+/// at `/v1/revoke/submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildRevokeUserOpRequest {
+    pub operator_omni: String,
+    /// The agent's on-chain `SidecarRegistry` device key hash (`0x` + 64 hex).
+    pub device_key_hash: String,
+}
+
 // ── shared protocol helpers (the omni-normalization bug site, centralized) ───
 
 /// Build the signed cap **service** string for a memory namespace —

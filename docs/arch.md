@@ -482,19 +482,19 @@ Per §9 stages 0–4. Identity ceremonies vary per identity type but converge on
 |---|---|---|---|
 | Register first master | `SidecarRegistry.registerFirstMasterDevice` | onboarding | ✅ CLI hardware; browser E7 pending |
 | Add a master device | `SidecarRegistry.registerAdditionalMasterDevice` | multi-master | ✅ `msg.sender == account` |
-| **Bind an agent** | `SidecarRegistry.registerAgentDevice` | **accept pairing** | ⏳ #225 — deployer-signed today |
-| **Unbind an agent** | `SidecarRegistry.revokeAgentDevice` | **unpair** | ⏳ #225 — deployer-signed today |
+| **Bind an agent** | `SidecarRegistry.registerAgentDevice` | **accept pairing** | ✅ #225 E7 — the web accept is ONE master `P256Account.executeBatch([registerAgentDevice, setScope])` UserOp, K11-signed (Touch ID) via broker `/v1/accept/{build,submit}` → bundler → `handleOps`. The operator picks the granted namespaces in the accept card (#249); a zero-grant accept needs an explicit confirm. |
+| **Unbind an agent** | `SidecarRegistry.revokeAgentDevice` | **unpair** | ✅ — the web unpair is a master `P256Account.executeBatch([revokeAgentDevice])` UserOp, K11-signed (Touch ID) via broker `/v1/revoke/{build,submit}`; the daemon flips local state only after re-reading the registry (`revoked == true`). The contract enforces `msg.sender == operatorMasterWallet`, so NO EOA (incl. the deployer) can sign it for an account-master operator — `heima-device-revoke.sh` reverts `NotAuthorized` there and remains valid only for legacy EOA-master operators (e.g. the master-reset fleet teardown under the deployer-omni model). |
 | Revoke a master device | `SidecarRegistry.revokeMasterDevice` (M-of-N) | recovery | ✅ on-chain |
 | Set recovery threshold | `SidecarRegistry.setRecoveryThreshold` | recovery config | ✅ on-chain |
 | **Reset master (unbind)** | `SidecarRegistry.resetMaster` (owner-only) | **reset master** (re-onboard a lost passkey) | 🔧 **deployer-gated dev escape hatch** — NOT Touch-ID. First-master-only makes `operatorMasterWallet` immutable, so a lost/deleted master passkey is unrecoverable without this; the registry deployer unbinds in place ([`heima-reset-master.sh`](../scripts/heima-reset-master.sh) ← daemon `POST /v1/master/reset`). The daemon's reset also tears down the FLEET (#243): declines every pending pairing at the broker, revokes every paired agent device on chain (agent-tier [`heima-device-revoke.sh`](../scripts/heima-device-revoke.sh) — no K11, the master binding dies in the same call), and clears the local actor + K11-enroll state; outcomes (incl. anything NOT torn down) ride the response's `fleet` field. Production would gate this on M-of-N guardian recovery (`P256Account.recover`) instead. |
-| **Grant / replace scope** | `AgentKeysScope.setScope` | **scope grant** | ⏳ #225 — needs the account-auth cutover |
+| **Grant / replace scope** | `AgentKeysScope.setScope` | **scope grant** | ✅ #225/#248 — granted at accept (the batch above), and RE-granted any time from the permissions panel: stage toggles → **commit · Touch ID** → `executeBatch([setScope])` UserOp via broker `/v1/scope/{build,submit}` (set-replace; the panel echoes unmatched on-chain service ids so a memory commit can't wipe `cred:*` grants). CLI equivalent: `heima-scope-set.sh --webauthn`. |
 | **Revoke scope** | `AgentKeysScope.revokeScope` | scope revoke | ⏳ #225 — post-cutover |
 | Add / remove passkey | `P256Account.addSigner` / `removeSigner` | signer mgmt | ✅ account-self UserOp |
 | Guardian recovery | `P256Account.recover` (M-of-N guardians) | recovery | ✅ guardian K11s |
 | Audit-row mint | `CredentialAudit.appendRoot` | audit append | ✅ master-gated |
 | Typed-data sign (EIP-712/191) | off-chain (signer) | signing | ✅ K11 intent ceremony |
 
-**Status key:** ✅ = the gate is real (an account UserOp, or K11-gated on-chain). **⏳ #225** = currently **deployer-signed (no Touch ID)** — `accept` / `unpair` / `scope grant` are being migrated to the account UserOp by #225 (E7 browser ceremony + the account-auth cutover, [`plan/chain/account-auth-cutover.md`](plan/chain/account-auth-cutover.md)). Until #225 lands those three rows are the gap between this rule and the running code, and the UI's "· Touch ID" labels on `accept`/`unpair` are aspirational for them.
+**Status key:** ✅ = the gate is real (an account UserOp, or K11-gated on-chain). `accept`, `scope grant`, and `unpair` all migrated to the master-account UserOp (#225 E7, #248, and the unpair revoke flow); **⏳ #225** marks the remaining post-cutover row (`revokeScope` — the panel's empty-services `setScope` covers the same effect today).
 
 **Deliberately NOT per-op Touch-ID-gated:** cap-mint + worker reads/writes (memory/cred/config) are gated by the **session J1** + the broker-signed **cap-token**, not a per-call Touch ID — they are high-frequency agent operations and re-prompting Touch ID per memory read would be unusable. K11 is the **authority boundary** (who may *change* what an agent can do), not the **usage boundary** (the agent *using* its granted scope). The lone exception: payments above `ScopeContract.payment_k11_threshold` require K11 at cap-mint (§13 "K11 user-presence required for high-value payments").
 
@@ -555,12 +555,16 @@ ON AGENT MACHINE (continues polling from step 5):
 MASTER APPROVAL (async; the iOS/Android "first launch → grant permissions" moment):
 12. The master pulls the pending binding (GET /v1/agent/pending-bindings, J1_master-gated)
     → sees D_pub_agent + pop_sig it never generated (also returned inline at claim, step 8).
-13. The master, with ONE K11/Touch ID approval, submits BOTH on chain:
+13. The master, with ONE K11/Touch ID approval, submits BOTH on chain as a single
+    master-account UserOp — P256Account.executeBatch([
     - SidecarRegistry.registerAgentDevice(D_pub_hash, O_master, O_agent_A,
         link_code_redemption, agent_pop_sig)   [msg.sender == operatorMasterWallet;
-        tier=AGENT, roles=CAP_MINT, k11_cred_id=0 — no biometric on this tx]
-    - AgentKeysScope.setScopeWithWebauthn(... requested_scope ...)  [the K11 gesture]
-    The CLI exposes these as two deterministic steps (test automation); the
+        tier=AGENT, roles=CAP_MINT, k11_cred_id=0]
+    - AgentKeysScope.setScope(O_master, O_agent_A, services…)   [the SAME UserOp]
+    ]) — K11 signs the userOpHash (the Touch ID); broker /v1/accept/{build,submit}
+    assembles + relays it (#225 E7). The services are the operator's selection in
+    the accept card (default = the requested `memory:<ns>` tokens, #249). The CLI
+    exposes register + grant as two deterministic steps (test automation); the
     operator experiences one approval. Install + permissions = one gesture.
 14. Master acks the binding (POST /v1/agent/pending-bindings/ack, by request_id) → the
     broker marks it bound so it drops out of the pending list (the rendezvous self-cleans;
@@ -842,7 +846,9 @@ The broker is the cap-mint authority. It does NOT hold credentials, K3, or any c
 /v1/cap/audit-append                          — cap-mint for audit appends
 /v1/cap/email-{send,receive}                  — cap-mint for email ops
 /v1/cap/payment                               — cap-mint for payments (CAS-burn, K11 if high-value)
-/v1/scope/{set,revoke}                        — relay to ScopeContract (sovereign-direct alt)
+/v1/accept/{build,submit}                     — Touch-ID accept (#225 E7): build assembles the master executeBatch([registerAgentDevice, setScope]) UserOp + returns the userOpHash K11 signs; submit relays the signed op → bundler → EntryPoint.handleOps (J1_master)
+/v1/scope/{build,submit}                      — Touch-ID scope RE-grant for a bound agent (#248): same shape, scope-only executeBatch([setScope]) (set-replace; submit shares the accept relay) (J1_master)
+/v1/revoke/{build,submit}                     — Touch-ID agent UNPAIR: executeBatch([revokeAgentDevice]) (the registry requires msg.sender == operatorMasterWallet — no EOA can sign it; submit shares the accept relay) (J1_master)
 /v1/sse/operator/<actor_omni>                 — drop event stream to daemons
 /v1/mint-oidc-jwt                             — OIDC JWT for STS
 /.well-known/jwks.json                        — K1 + K2 pubkeys
