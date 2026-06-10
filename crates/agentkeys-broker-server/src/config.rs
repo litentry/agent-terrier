@@ -16,6 +16,20 @@ pub struct BrokerConfig {
     pub oidc_keypair_path: PathBuf,
     /// TTL of OIDC JWTs minted for STS.
     pub oidc_jwt_ttl_seconds: u64,
+    /// `BROKER_DEV_MODE=true` relaxes the https-only OIDC issuer rule.
+    ///
+    /// Read once here (like the three fields below) so boot paths never
+    /// re-read process env — tests inject values via this struct instead
+    /// of `std::env::set_var`, which leaks across parallel test threads
+    /// (same bug class as the daemon's PR #258 deflake).
+    pub dev_mode: bool,
+    /// Comma-separated auth-method plugin names (`BROKER_AUTH_METHODS`).
+    pub auth_methods: String,
+    /// Comma-separated audit-anchor plugin names (`BROKER_AUDIT_ANCHORS`).
+    pub audit_anchors: String,
+    /// `BROKER_REFUSE_TO_BOOT_STRICT=true` collapses Tier-2 reachability
+    /// probes into Tier-1 hard boot fails.
+    pub refuse_to_boot_strict: bool,
 }
 
 impl BrokerConfig {
@@ -80,6 +94,13 @@ impl BrokerConfig {
             );
         }
 
+        let dev_mode = bool_env(env::BROKER_DEV_MODE);
+        let auth_methods =
+            std::env::var(env::BROKER_AUTH_METHODS).unwrap_or_else(|_| "wallet_sig".to_string());
+        let audit_anchors =
+            std::env::var(env::BROKER_AUDIT_ANCHORS).unwrap_or_else(|_| "sqlite".to_string());
+        let refuse_to_boot_strict = bool_env(env::BROKER_REFUSE_TO_BOOT_STRICT);
+
         Ok(Self {
             data_role_arn,
             audit_db_path,
@@ -89,8 +110,17 @@ impl BrokerConfig {
             oidc_issuer,
             oidc_keypair_path,
             oidc_jwt_ttl_seconds,
+            dev_mode,
+            auth_methods,
+            audit_anchors,
+            refuse_to_boot_strict,
         })
     }
+}
+
+/// True iff the env var is set to exactly `"true"`.
+fn bool_env(name: &str) -> bool {
+    std::env::var(name).map(|v| v == "true").unwrap_or(false)
 }
 
 fn required_env(name: &str) -> anyhow::Result<String> {

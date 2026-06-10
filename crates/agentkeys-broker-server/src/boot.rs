@@ -85,11 +85,10 @@ fn boot_fail(
 /// listener. Returns the constructed `BootArtifacts` (plugin registry,
 /// keypairs, store handles) for `main` to wire into `AppState`.
 pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
-    // 1. Validate OIDC issuer URL (https in non-dev mode).
-    let dev_mode = std::env::var(env::BROKER_DEV_MODE)
-        .map(|v| v == "true")
-        .unwrap_or(false);
-    if !dev_mode && !config.oidc_issuer.starts_with("https://") {
+    // 1. Validate OIDC issuer URL (https in non-dev mode). `dev_mode` was
+    //    read once into BrokerConfig — never re-read from process env here
+    //    (parallel tests inject it via the config struct).
+    if !config.dev_mode && !config.oidc_issuer.starts_with("https://") {
         return Err(boot_fail(
             env::BROKER_OIDC_ISSUER,
             &config.oidc_issuer,
@@ -97,7 +96,7 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
             "oidc-issuer",
         ));
     }
-    if dev_mode {
+    if config.dev_mode {
         tracing::warn!(
             "{}=true — relaxing https-only OIDC issuer rule. NEVER use in production.",
             env::BROKER_DEV_MODE
@@ -199,13 +198,9 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
         })?,
     );
 
-    // 5. Validate + parse plugin selection env vars. Every name in each
-    //    list must resolve at compile time (i.e. the corresponding
-    //    feature must be enabled).
-    let auth_methods_raw =
-        std::env::var(env::BROKER_AUTH_METHODS).unwrap_or_else(|_| "wallet_sig".to_string());
-    let audit_anchors_raw =
-        std::env::var(env::BROKER_AUDIT_ANCHORS).unwrap_or_else(|_| "sqlite".to_string());
+    // 5. Validate + parse plugin selection. Every name in each list must
+    //    resolve at compile time (i.e. the corresponding feature must be
+    //    enabled). `auth_methods` + `audit_anchors` come from BrokerConfig.
     let wallet_provisioner_name = std::env::var(env::BROKER_WALLET_PROVISIONER)
         .unwrap_or_else(|_| "client_keystore".to_string());
 
@@ -223,9 +218,9 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
 
     // 7. Build the PluginRegistry. v0 default is wallet_sig + client_keystore + sqlite.
     let built = build_registry(
-        &auth_methods_raw,
+        &config.auth_methods,
         &wallet_provisioner_name,
-        &audit_anchors_raw,
+        &config.audit_anchors,
         Arc::clone(&nonce_store),
         Arc::clone(&wallet_store),
         config,
@@ -268,18 +263,17 @@ pub struct Tier2Profile {
 }
 
 impl Tier2Profile {
-    pub fn from_config(_config: &BrokerConfig) -> Self {
-        let strict = std::env::var(env::BROKER_REFUSE_TO_BOOT_STRICT)
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        let methods =
-            std::env::var(env::BROKER_AUTH_METHODS).unwrap_or_else(|_| "wallet_sig".to_string());
-        let anchors =
-            std::env::var(env::BROKER_AUDIT_ANCHORS).unwrap_or_else(|_| "sqlite".to_string());
+    pub fn from_config(config: &BrokerConfig) -> Self {
         Self {
-            strict,
-            email_link_enabled: methods.split(',').any(|m| m.trim() == "email_link"),
-            audit_evm_enabled: anchors.split(',').any(|a| a.trim() == "evm_testnet"),
+            strict: config.refuse_to_boot_strict,
+            email_link_enabled: config
+                .auth_methods
+                .split(',')
+                .any(|m| m.trim() == "email_link"),
+            audit_evm_enabled: config
+                .audit_anchors
+                .split(',')
+                .any(|a| a.trim() == "evm_testnet"),
         }
     }
 }
@@ -763,6 +757,10 @@ mod tests {
             oidc_issuer: oidc_issuer.to_string(),
             oidc_keypair_path: oidc_kp_path,
             oidc_jwt_ttl_seconds: 300,
+            dev_mode: false,
+            auth_methods: "wallet_sig".into(),
+            audit_anchors: "sqlite".into(),
+            refuse_to_boot_strict: false,
         }
     }
 
@@ -777,8 +775,9 @@ mod tests {
             "http://oidc.local",
             oidc_kp,
         );
-        // Ensure dev mode env var is not set.
-        std::env::remove_var(env::BROKER_DEV_MODE);
+        // config_with sets dev_mode: false explicitly — ambient
+        // BROKER_DEV_MODE never reaches run_tier1, so no env mutation
+        // (process env is global; set/remove_var races parallel tests).
         let res = run_tier1(&config);
         let err = match res {
             Err(e) => e,
@@ -820,18 +819,17 @@ mod tests {
 
     #[test]
     fn tier2_profile_detects_email_link_enabled() {
-        let tmp = TempDir::new().unwrap();
-        let oidc_kp = tmp.path().join("oidc.json");
-        OidcKeypair::generate_and_persist(&oidc_kp).unwrap();
-        let config = config_with(
-            tmp.path().join("audit.sqlite"),
+        // from_config reads only BrokerConfig fields (no filesystem, no
+        // process env), so dummy paths suffice and nothing is set_var'd.
+        let mut config = config_with(
+            PathBuf::from("unused-audit.sqlite"),
             "https://broker.example.com",
-            oidc_kp,
+            PathBuf::from("unused-oidc.json"),
         );
-        std::env::set_var(env::BROKER_AUTH_METHODS, "wallet_sig,email_link");
+        config.auth_methods = "wallet_sig,email_link".into();
         let p = Tier2Profile::from_config(&config);
+        assert!(!p.strict);
         assert!(p.email_link_enabled);
         assert!(!p.audit_evm_enabled);
-        std::env::remove_var(env::BROKER_AUTH_METHODS);
     }
 }
