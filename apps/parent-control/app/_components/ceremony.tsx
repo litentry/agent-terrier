@@ -5,6 +5,7 @@ import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
 import type { AgentKeysClient, ConfigPreset } from '@/lib/client/types';
 import { credentialToFinishPayload, getAssertionOverHash, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
+import type { AcceptAssertion } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
 import type { CeremonyStep } from './types';
 import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
@@ -17,8 +18,22 @@ function readMasterCredId(): string {
   try { return localStorage.getItem('ak_master_cred_id') || ''; } catch { return ''; }
 }
 
-async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'real' | 'fallback'> {
-  if (!webauthnAvailable()) return 'fallback';
+/** The on-chain register still owed after the Stage-2 K11 bind (#225 E7 /
+ *  #232): the "Register master" ceremony step signs `userOpHash` with the SAME
+ *  passkey (2nd Touch ID) and submits it — so the prompt fires at the step the
+ *  progress bar actually shows, not during "Bind passkey". */
+interface PendingMasterRegister {
+  userOpHash: string;
+  account?: string;
+  credentialId: string;
+}
+
+type EnrollOutcome =
+  | { mode: 'fallback' }
+  | { mode: 'real'; register?: PendingMasterRegister };
+
+async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<EnrollOutcome> {
+  if (!webauthnAvailable()) return { mode: 'fallback' };
 
   // #225 E7 idempotency: if the master is ALREADY bound on chain, do NOT mint a new
   // passkey. `navigator.credentials.create()` always makes a BRAND-NEW credential,
@@ -34,7 +49,7 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'r
         boundCredentialId: existingCred,
         omni: st.data.omni,
       });
-      return 'real'; // already onboarded; the bound-passkey pointer is intact
+      return { mode: 'real' }; // already onboarded; the bound-passkey pointer is intact
     }
     akLog('onboarding: master bound on chain but NO local passkey pointer — reset + re-onboard needed', {
       omni: st.data.omni,
@@ -42,11 +57,11 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'r
     // Bound on chain but NO local pointer (storage cleared / different browser): we
     // can't safely re-enroll (first-master-only can't re-bind) — surface so the UI
     // offers "reset master + re-onboard" rather than minting an unusable passkey.
-    return 'fallback';
+    return { mode: 'fallback' };
   }
 
   const begin = await client.enrollK11Begin({ userName: email, userDisplayName: email });
-  if (!begin.ok) return 'fallback'; // EmptyBackend → disconnected → narrated fallback
+  if (!begin.ok) return { mode: 'fallback' }; // EmptyBackend → disconnected → narrated fallback
   try {
     // The macOS/Safari passkey dialog quotes user.name ("A passkey for '…'") and
     // the saved Passwords.app entry uses these fields. When the privacy toggle is
@@ -66,7 +81,7 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'r
       authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
     });
     const cred = (await navigator.credentials.create({ publicKey: opts })) as PublicKeyCredential | null;
-    if (!cred) return 'fallback';
+    if (!cred) return { mode: 'fallback' };
     const payload = credentialToFinishPayload(cred);
     akLog('onboarding: K11 passkey CREATED (generated)', {
       generatedCredentialId: payload.credentialId,
@@ -88,51 +103,127 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'r
       // #225 E7: the master binds as a passkey **P256Account** (operatorMasterWallet
       // = the smart account), not an EOA. K11-finish built + funded the account and
       // returned the register userOpHash; a SECOND Touch ID signs it, then the
-      // daemon lands handleOps. allowCredentials pins the master passkey just made.
+      // daemon lands handleOps. The signing itself is the SEPARATE "Register
+      // master" ceremony step (#232) — handed off so the 2nd Touch ID fires when
+      // the progress bar says "register", not while it still shows "bind".
       if (fin.data.chain === 'register-pending' && fin.data.registerUserOpHash) {
-        try {
-          akLog('onboarding: signing REGISTER userOpHash (2nd Touch ID)', {
+        return {
+          mode: 'real',
+          register: {
+            userOpHash: fin.data.registerUserOpHash,
             account: fin.data.registerAccount,
-            registerUserOpHash: fin.data.registerUserOpHash,
-            signingCredentialId: payload.credentialId,
-          });
-          const assertion = await getAssertionOverHash(fin.data.registerUserOpHash, [payload.credentialId]);
-          const sub = await client.registerMasterSubmit(assertion);
-          // Persist the auto-select pointer ONLY when the register actually BOUND the
-          // account (B2). A stored-but-unbound pointer is exactly the wrong-passkey
-          // trap: the accept would auto-select this key while the chain master is a
-          // different one → SIG_VALIDATION_FAILED.
-          if (sub.ok) {
-            try { localStorage.setItem('ak_master_cred_id', payload.credentialId); } catch {}
-            akLog('onboarding: master REGISTERED + signer persisted ✅', {
-              account: sub.data.account ?? fin.data.registerAccount,
-              txHash: sub.data.txHash,
-              boundCredentialId: payload.credentialId,
-            });
-          } else {
-            akLog('onboarding: register submit FAILED — pointer NOT persisted', {
-              detail: sub.status?.detail,
-              account: fin.data.registerAccount,
-            });
-          }
-        } catch (e) {
-          // Register submit failed (Touch ID cancelled / chain error): the passkey is
-          // enrolled + the account deployed, but the master is NOT bound — do NOT
-          // persist the pointer. The operator retries; surfaced via onboarding state.
-          akLog('onboarding: register Touch ID/submit threw — pointer NOT persisted', {
-            error: (e as Error)?.message,
-            account: fin.data.registerAccount,
-          });
-        }
+            credentialId: payload.credentialId,
+          },
+        };
       }
       // If fin.data.chain === 'master-registered' here, the daemon found the master
       // ALREADY bound (register build skipped) — we just minted a passkey we CANNOT
       // bind, so we deliberately do NOT overwrite ak_master_cred_id with it.
-      return 'real';
+      return { mode: 'real' };
     }
-    return 'fallback';
+    return { mode: 'fallback' };
   } catch {
-    return 'fallback';
+    return { mode: 'fallback' };
+  }
+}
+
+// #232: how often the register step re-checks `GET /v1/onboarding/state`, and
+// the hard ceiling before the step gives up (handleOps lands in 10–30 s; the
+// cap only bounds a daemon that stops answering entirely).
+const REGISTER_POLL_INTERVAL_MS = 3000;
+const REGISTER_CONFIRM_TIMEOUT_MS = 120_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// #232: the "Register master P256Account" ceremony step — sign the register
+// userOpHash (2nd Touch ID) and land it on chain. The slow Heima handleOps
+// (10–30 s) can outrun the browser's `await` (the HTTP response gets lost while
+// the tx still lands), so the in-flight submit RACES an onboarding-state poll:
+// whichever first proves `chain == "master-registered"` advances the ceremony.
+// The chain state — not the HTTP response — is the ground truth.
+async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterRegister): Promise<void> {
+  akLog('onboarding: signing REGISTER userOpHash (2nd Touch ID)', {
+    account: reg.account,
+    registerUserOpHash: reg.userOpHash,
+    signingCredentialId: reg.credentialId,
+  });
+
+  let assertion: AcceptAssertion;
+  try {
+    assertion = await getAssertionOverHash(reg.userOpHash, [reg.credentialId]);
+  } catch (e) {
+    // Touch ID cancelled/failed: nothing was signed, so nothing can land. The
+    // passkey is enrolled + the account deployed, but the master is NOT bound —
+    // do NOT persist the pointer. The operator retries; surfaced via onboarding state.
+    akLog('onboarding: register Touch ID threw — pointer NOT persisted', {
+      error: (e as Error)?.message,
+      account: reg.account,
+    });
+    return;
+  }
+
+  let settled = false;
+  const submit = (async () => {
+    try {
+      const sub = await client.registerMasterSubmit(assertion);
+      return sub.ok
+        ? { via: 'submit' as const, ok: true as const, txHash: sub.data.txHash }
+        : { via: 'submit' as const, ok: false as const, detail: sub.status.detail ?? 'submit failed' };
+    } catch (e) {
+      return { via: 'submit' as const, ok: false as const, detail: (e as Error)?.message ?? 'submit threw' };
+    }
+  })();
+  const statePoll = (async () => {
+    for (;;) {
+      await sleep(REGISTER_POLL_INTERVAL_MS);
+      if (settled) return { via: 'poll-stopped' as const };
+      const st = await client.getOnboardingState();
+      if (st.ok && st.data.chain === 'master-registered') return { via: 'state-poll' as const };
+    }
+  })();
+  const timeout = sleep(REGISTER_CONFIRM_TIMEOUT_MS).then(() => ({ via: 'timeout' as const }));
+
+  const first = await Promise.race([submit, statePoll, timeout]);
+  settled = true;
+
+  let registered = false;
+  let txHash: string | undefined;
+  let failDetail = '';
+  if (first.via === 'submit') {
+    if (first.ok) {
+      registered = true;
+      txHash = first.txHash;
+    } else {
+      // The HTTP submit failed — but handleOps may still have landed (the
+      // response can be dropped after the tx went out). The chain state decides.
+      const st = await client.getOnboardingState();
+      registered = !!(st.ok && st.data.chain === 'master-registered');
+      failDetail = first.detail;
+    }
+  } else if (first.via === 'state-poll') {
+    registered = true; // the await lost the race but the register landed
+  } else {
+    // 'timeout' — or the defensive 'poll-stopped' arm that can't win the race.
+    failDetail = `no register confirmation within ${REGISTER_CONFIRM_TIMEOUT_MS / 1000} s`;
+  }
+
+  // Persist the auto-select pointer ONLY when the register actually BOUND the
+  // account (B2). A stored-but-unbound pointer is exactly the wrong-passkey
+  // trap: the accept would auto-select this key while the chain master is a
+  // different one → SIG_VALIDATION_FAILED.
+  if (registered) {
+    try { localStorage.setItem('ak_master_cred_id', reg.credentialId); } catch {}
+    akLog('onboarding: master REGISTERED + signer persisted ✅', {
+      account: reg.account,
+      txHash,
+      confirmedVia: first.via,
+      boundCredentialId: reg.credentialId,
+    });
+  } else {
+    akLog('onboarding: register submit FAILED — pointer NOT persisted', {
+      detail: failDetail,
+      account: reg.account,
+    });
   }
 }
 
@@ -233,6 +324,9 @@ export function OnboardingScreen({
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
   const [maskEm, setMaskEm] = useState(true);
+  // #232: the on-chain register handed from the K11-bind step to the "Register
+  // master" step (a ref — the `stages` closures are rebuilt per render).
+  const pendingRegister = useRef<PendingMasterRegister | null>(null);
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
 
@@ -397,11 +491,27 @@ export function OnboardingScreen({
       touchId: '1 of 2',
       action: async () => {
         const outcome = await tryRealEnroll(client, email.trim());
-        setEnrollMode(outcome === 'real' ? 'real' : 'demo');
+        pendingRegister.current = outcome.mode === 'real' ? outcome.register ?? null : null;
+        setEnrollMode(outcome.mode === 'real' ? 'real' : 'demo');
       },
     },
     { label: 'Activate managed wallet → session', sub: 'the signer derives + attests your managed wallet (EIP-191) and mints your session (J1) — no wallet app, no MetaMask. No Touch ID here.' },
-    { label: 'Register master P256Account on chain', sub: 'the SAME passkey signs the register UserOp → handleOps binds operatorMasterWallet = your passkey smart account. This is the SECOND Touch ID prompt — expected, not an error.', touchId: '2 of 2', onchain: true, fn: 'P256Account.registerFirstMasterDevice(...)' },
+    {
+      label: 'Register master P256Account on chain',
+      sub: 'the SAME passkey signs the register UserOp → handleOps binds operatorMasterWallet = your passkey smart account. This is the SECOND Touch ID prompt — expected, not an error. The on-chain confirm can take ~30 s.',
+      touchId: '2 of 2',
+      onchain: true,
+      fn: 'P256Account.registerFirstMasterDevice(...)',
+      // #232: the 2nd Touch ID fires HERE — at the step the bar shows — and the
+      // step tolerates slow handleOps (submit raced against the state poll).
+      // No-op when there's nothing to register (demo fallback / already bound).
+      action: async () => {
+        const reg = pendingRegister.current;
+        if (!reg) return;
+        pendingRegister.current = null;
+        await submitMasterRegister(client, reg);
+      },
+    },
   ];
 
   return (
