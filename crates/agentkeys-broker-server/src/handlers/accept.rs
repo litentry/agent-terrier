@@ -422,30 +422,6 @@ pub(crate) async fn eth_address_has_code(
     Ok(code != "0x" && !code.is_empty())
 }
 
-/// `eth_getTransactionReceipt(tx).status` read directly (NOT via cast/alloy, so
-/// Heima's mixHash-less receipt doesn't break parsing). `Some(true)` = success
-/// (`0x1`), `Some(false)` = reverted (`0x0`), `None` = no receipt yet / RPC error.
-async fn eth_receipt_status(http: &reqwest::Client, rpc: &str, tx_hash: &str) -> Option<bool> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionReceipt", "params": [tx_hash]
-    });
-    let resp: serde_json::Value = http
-        .post(rpc)
-        .json(&body)
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let receipt = resp.get("result")?;
-    if receipt.is_null() {
-        return None;
-    }
-    let status = receipt.get("status")?.as_str()?;
-    Some(status == "0x1")
-}
-
 /// `SidecarRegistry.operatorMasterWallet(bytes32) -> address`. Zero address ⇒ no master.
 pub(crate) async fn call_operator_master_wallet(
     http: &reqwest::Client,
@@ -589,32 +565,72 @@ pub struct SubmitAcceptRequest {
     pub assertion: BrowserAssertion,
 }
 
-const HANDLE_OPS_SIG: &str =
-    "handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)";
+// Receipt-poll defaults for the bundler relay (env-overridable; the bundler's
+// outer tx typically mines within one Heima block ≈ 12s).
+const DEF_RECEIPT_TIMEOUT_SECS: u64 = 90;
+const RECEIPT_POLL_INTERVAL_SECS: u64 = 2;
 
-/// Build the `cast send` tuple arg for `handleOps` from a signed `WireUserOp`. The
-/// hex fields map directly to the `PackedUserOperation` tuple (nonce +
-/// preVerificationGas are uint256 — cast accepts 0x-hex). Pure + deterministic.
-fn cast_handleops_arg(op: &WireUserOp) -> String {
-    format!(
-        "[({},{},{},{},{},{},{},{},{})]",
-        op.sender,
-        op.nonce,
-        op.init_code,
-        op.call_data,
-        op.account_gas_limits,
-        op.pre_verification_gas,
-        op.gas_fees,
-        op.paymaster_and_data,
-        op.signature,
-    )
+/// Parse a `WireUserOp` (0x-hex packed fields) into the typed `PackedUserOp` —
+/// the inverse of `WireUserOp::from_packed`. Pure.
+fn wire_to_packed(op: &WireUserOp) -> Result<crate::sponsor::PackedUserOp, String> {
+    let raw = |s: &str, name: &str| -> Result<Vec<u8>, String> {
+        hex::decode(s.trim().trim_start_matches("0x")).map_err(|e| format!("{name} hex: {e}"))
+    };
+    let w32 = |s: &str, name: &str| -> Result<[u8; 32], String> {
+        raw(s, name)?
+            .try_into()
+            .map_err(|_| format!("{name} must be 32 bytes"))
+    };
+    Ok(crate::sponsor::PackedUserOp {
+        sender: raw(&op.sender, "sender")?
+            .try_into()
+            .map_err(|_| "sender must be a 20-byte address".to_string())?,
+        nonce: w32(&op.nonce, "nonce")?,
+        init_code: raw(&op.init_code, "init_code")?,
+        call_data: raw(&op.call_data, "call_data")?,
+        account_gas_limits: w32(&op.account_gas_limits, "account_gas_limits")?,
+        pre_verification_gas: w32(&op.pre_verification_gas, "pre_verification_gas")?,
+        gas_fees: w32(&op.gas_fees, "gas_fees")?,
+        paymaster_and_data: raw(&op.paymaster_and_data, "paymaster_and_data")?,
+        signature: raw(&op.signature, "signature")?,
+    })
 }
 
-/// `POST /v1/accept/submit` (J1_master) — relay the K11-signed op to
-/// `EntryPoint.handleOps`. The broker is the sponsor + submitter: the
-/// VerifyingPaymaster covers the account gas, the broker EOA fronts the outer tx
-/// (reimbursed). The broker host ships foundry (setup-broker-host.sh), so we relay
-/// via `cast send` — the repo's chain-mutation pattern, E8-proven for handleOps.
+/// JSON-RPC call to the bundler (`AGENTKEYS_BUNDLER_URL`). Returns `result`.
+async fn bundler_rpc(
+    http: &reqwest::Client,
+    bundler_url: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let resp: serde_json::Value = http
+        .post(bundler_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("bundler {method} send: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("bundler {method} decode: {e}"))?;
+    if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown bundler error");
+        return Err(format!("bundler {method}: {msg}"));
+    }
+    resp.get("result")
+        .cloned()
+        .ok_or_else(|| format!("bundler {method}: no result"))
+}
+
+/// `POST /v1/accept/submit` (J1_master) — relay the K11-signed op to the
+/// ERC-4337 **bundler** via the standard `eth_sendUserOperation` (#230). The
+/// broker keeps only the policy it owns (J1 auth + the build-side paymaster
+/// co-sign); the bundler (`AGENTKEYS_BUNDLER_URL` — in-house `agentkeys-bundler`
+/// or any stock one) owns the submitter EOA, nonce, gas, and the
+/// `EntryPoint.handleOps` broadcast. No more `cast` spawn / foundry dependency.
 pub async fn accept_submit(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -629,12 +645,12 @@ pub async fn accept_submit(
     .map_err(|e| aerr(StatusCode::UNAUTHORIZED, format!("session jwt: {e}")))?;
 
     let (cfg, _sk) = load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
-    // NOTE: `--private-key` is ps-visible; production should move the submitter to a
-    // keystore (the broker fee-payer keystore) — tracked as a follow-up.
-    let key = std::env::var("BROKER_SPONSOR_SIGNER_KEY").map_err(|_| {
+    let bundler_url = std::env::var("AGENTKEYS_BUNDLER_URL").map_err(|_| {
         aerr(
             StatusCode::SERVICE_UNAVAILABLE,
-            "BROKER_SPONSOR_SIGNER_KEY not set",
+            "AGENTKEYS_BUNDLER_URL not set — point the broker at an ERC-4337 bundler \
+             (the in-house agentkeys-bundler, wired by setup-broker-host.sh, or any \
+             eth_sendUserOperation-speaking service)",
         )
     })?;
 
@@ -650,94 +666,94 @@ pub async fn accept_submit(
     };
     let sig = encode_browser_assertion_signature(&req.assertion, &operator_omni)
         .map_err(|e| aerr(StatusCode::BAD_REQUEST, format!("assertion: {e}")))?;
-    let mut user_op = req.user_op;
-    user_op.signature = format!("0x{}", hex::encode(&sig));
+    let mut packed = wire_to_packed(&req.user_op).map_err(|e| aerr(StatusCode::BAD_REQUEST, e))?;
+    packed.signature = sig;
 
+    // Relay in the CANONICAL unpacked v0.7 JSON shape (what every bundler speaks)
+    // so swapping self-hosted ↔ 3rd-party needs no broker code change.
+    let rpc_op = agentkeys_core::erc4337::RpcUserOp::from_packed(&packed);
     let ep = format!("0x{}", hex::encode(cfg.entry_point));
-    let beneficiary = format!("0x{}", hex::encode(cfg.broker_signer));
-    let arg = cast_handleops_arg(&user_op);
+    let user_op_hash = bundler_rpc(
+        &state.http,
+        &bundler_url,
+        "eth_sendUserOperation",
+        serde_json::json!([rpc_op, ep]),
+    )
+    .await
+    .map_err(|e| {
+        aerr(
+            StatusCode::BAD_GATEWAY,
+            format!("handleOps did not broadcast: {e}"),
+        )
+    })?
+    .as_str()
+    .ok_or_else(|| {
+        aerr(
+            StatusCode::BAD_GATEWAY,
+            "bundler returned non-string userOpHash",
+        )
+    })?
+    .to_string();
 
-    // Resolve `cast`: the broker runs as a systemd service whose PATH need not
-    // include a user-dir foundry (and ProtectHome=true hides $HOME/.foundry).
-    // AGENTKEYS_CAST_BIN (pinned by setup-broker-host.sh to an absolute path)
-    // overrides; the bare default works when cast is on PATH (e.g. /usr/local/bin).
-    let cast_bin = std::env::var("AGENTKEYS_CAST_BIN").unwrap_or_else(|_| "cast".to_string());
-
-    // cast send handleOps — Heima-robust (mirrors erc4337-register-master.sh):
-    //  • `--gas-limit` (NOT eth_estimateGas): Heima reverts the handleOps gas
-    //    estimation with a bare `0x` ("Failed to estimate gas: … revert, data: 0x"),
-    //    so pin the limit and skip estimation.
-    //  • NO `--json`: Heima's mixHash-less receipt makes cast/alloy fail to PARSE the
-    //    receipt though the tx LANDS — so read the tx hash from the human output and
-    //    verify the OUTCOME via a direct eth_getTransactionReceipt, never cast's exit.
-    let gas_limit =
-        std::env::var("AGENTKEYS_HANDLEOPS_GAS_LIMIT").unwrap_or_else(|_| "4000000".to_string());
-    let out = tokio::process::Command::new(&cast_bin)
-        .args([
-            "send",
-            &ep,
-            HANDLE_OPS_SIG,
-            &arg,
-            &beneficiary,
-            "--private-key",
-            &key,
-            "--rpc-url",
-            &cfg.rpc_url,
-            "--legacy",
-            "--gas-limit",
-            &gas_limit,
-        ])
-        .output()
+    // Poll the bundler for the UserOperation receipt until mined or timeout.
+    let timeout_secs = std::env::var("AGENTKEYS_BUNDLER_RECEIPT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEF_RECEIPT_TIMEOUT_SECS);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        match bundler_rpc(
+            &state.http,
+            &bundler_url,
+            "eth_getUserOperationReceipt",
+            serde_json::json!([user_op_hash]),
+        )
         .await
-        .map_err(|e| {
-            aerr(
-                StatusCode::BAD_GATEWAY,
-                format!(
-                    "spawn {cast_bin}: {e} — install foundry on the broker host \
-                     (curl -L https://foundry.paradigm.xyz | bash; foundryup) and/or set \
-                     AGENTKEYS_CAST_BIN to cast's absolute path"
-                ),
-            )
-        })?;
-
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    // cast prints `transactionHash 0x…` before the receipt-parse may error.
-    let tx_hash = combined
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("transactionHash").map(str::trim))
-        .filter(|h| h.starts_with("0x") && h.len() >= 66)
-        .map(|h| h[..66].to_string())
-        .unwrap_or_default();
-
-    if tx_hash.is_empty() {
-        // Never broadcast (bad nonce, submitter unfunded, malformed op, RPC down…).
-        let tail: Vec<&str> = combined.lines().rev().take(6).collect();
-        return Err(aerr(
-            StatusCode::BAD_GATEWAY,
-            format!(
-                "handleOps did not broadcast: {}",
-                tail.into_iter().rev().collect::<Vec<_>>().join(" ")
-            ),
-        ));
-    }
-
-    // cast waited for the receipt before its parse errored, so the tx is mined now —
-    // read the status directly (mixHash-receipt-proof).
-    match eth_receipt_status(&state.http, &cfg.rpc_url, &tx_hash).await {
-        Some(false) => Err(aerr(
-            StatusCode::BAD_GATEWAY,
-            format!(
-                "handleOps reverted on-chain (tx {tx_hash}) — most likely the WRONG passkey \
-                 (P256Account SIG_VALIDATION_FAILED), an unregistered master, or a paymaster/scope issue"
-            ),
-        )),
-        // Some(true) = success; None = mined-but-receipt-not-yet-visible (rare) —
-        // treat as submitted (the UI can confirm on chain).
-        _ => Ok(Json(serde_json::json!({ "ok": true, "tx_hash": tx_hash, "block_number": "" }))),
+        {
+            Ok(serde_json::Value::Null) => {} // not mined yet — keep polling
+            Ok(receipt) => {
+                let success = receipt
+                    .get("success")
+                    .and_then(|s| s.as_bool())
+                    .unwrap_or(false);
+                let tx_hash = receipt
+                    .pointer("/receipt/transactionHash")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let block_number = receipt
+                    .pointer("/receipt/blockNumber")
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !success {
+                    return Err(aerr(
+                        StatusCode::BAD_GATEWAY,
+                        format!(
+                            "handleOps reverted on-chain (tx {tx_hash}) — most likely the WRONG \
+                             passkey (P256Account SIG_VALIDATION_FAILED), an unregistered master, \
+                             or a paymaster/scope issue"
+                        ),
+                    ));
+                }
+                return Ok(Json(serde_json::json!({
+                    "ok": true, "tx_hash": tx_hash, "block_number": block_number,
+                    "user_op_hash": user_op_hash,
+                })));
+            }
+            // Transient bundler/RPC hiccup mid-poll: tolerate until the deadline.
+            Err(_) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            // Broadcast but unconfirmed — surface the hashes so the UI can confirm
+            // on chain; NOT an error (the tx may still mine).
+            return Ok(Json(serde_json::json!({
+                "ok": true, "tx_hash": "", "block_number": "",
+                "user_op_hash": user_op_hash,
+                "pending": true,
+            })));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(RECEIPT_POLL_INTERVAL_SECS)).await;
     }
 }
 
@@ -885,22 +901,59 @@ mod tests {
     }
 
     #[test]
-    fn cast_handleops_arg_formats_the_packed_tuple() {
-        let op = WireUserOp {
-            sender: "0xaa".into(),
-            nonce: "0x07".into(),
+    fn wire_to_packed_roundtrips_the_build_output() {
+        // The submit path re-types the wire op into the SAME PackedUserOp the
+        // build produced, so the bundler relay (RpcUserOp::from_packed) starts
+        // from byte-identical fields.
+        let sk = SigningKey::random(&mut rand_core::OsRng);
+        let cfg = AcceptConfig {
+            rpc_url: "http://localhost".into(),
+            chain_id: 212_013,
+            entry_point: [0x66; 20],
+            paymaster: Some([0x55; 20]),
+            broker_signer: [0x77; 20],
+            registry: [0xa1; 20],
+            scope: [0xa2; 20],
+            account_gas_limits: crate::sponsor::pack_u128_pair(600_000, 2_000_000),
+            pre_verification_gas: u256_word(100_000),
+            gas_fees: crate::sponsor::pack_u128_pair(1_000_000_000, 2_000_000_000),
+            paymaster_verification_gas_limit: 200_000,
+            paymaster_post_op_gas_limit: 50_000,
+        };
+        let mut nonce = [0u8; 32];
+        nonce[31] = 7;
+        let resp = build_accept_response(&sample(), [0x99u8; 20], nonce, &cfg, &sk, 9_999_999_999)
+            .unwrap();
+        let packed = wire_to_packed(&resp.user_op).unwrap();
+        // Recomputing the userOpHash from the re-typed op matches the build's.
+        assert_eq!(
+            format!(
+                "0x{}",
+                hex::encode(packed.user_op_hash(&cfg.entry_point, cfg.chain_id))
+            ),
+            resp.user_op_hash
+        );
+        // And the canonical RPC shape round-trips it losslessly.
+        let rpc = agentkeys_core::erc4337::RpcUserOp::from_packed(&packed);
+        assert_eq!(rpc.to_packed().unwrap(), packed);
+    }
+
+    #[test]
+    fn wire_to_packed_rejects_bad_fields() {
+        let mut op = WireUserOp {
+            sender: format!("0x{}", "aa".repeat(20)),
+            nonce: format!("0x{}", "00".repeat(32)),
             init_code: "0x".into(),
             call_data: "0xdeadbeef".into(),
-            account_gas_limits: "0xagl".into(),
-            pre_verification_gas: "0x60".into(),
-            gas_fees: "0xfee".into(),
-            paymaster_and_data: "0xpmd".into(),
-            signature: "0xsig".into(),
+            account_gas_limits: format!("0x{}", "11".repeat(32)),
+            pre_verification_gas: format!("0x{}", "00".repeat(32)),
+            gas_fees: format!("0x{}", "22".repeat(32)),
+            paymaster_and_data: "0x".into(),
+            signature: "0x".into(),
         };
-        assert_eq!(
-            cast_handleops_arg(&op),
-            "[(0xaa,0x07,0x,0xdeadbeef,0xagl,0x60,0xfee,0xpmd,0xsig)]"
-        );
+        assert!(wire_to_packed(&op).is_ok());
+        op.nonce = "0x1234".into(); // not 32 bytes
+        assert!(wire_to_packed(&op).is_err());
     }
 
     // ─── #231 drift guard: accept-env vs compiled chain profile ─────────────

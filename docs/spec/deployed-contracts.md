@@ -2,7 +2,7 @@
 
 **Single source of truth** for every on-chain contract address AgentKeys has deployed, per chain, plus the EVM deployer wallets (prod vs test/CI). Answers "what's the live address of `SidecarRegistry` / the ERC-4337 `EntryPoint` on Heima mainnet right now?" and "which EVM account deployed it?"
 
-Mirrored into [`scripts/operator-workstation.env`](../../scripts/operator-workstation.env) (the shell-consumable form, written by `scripts/heima-bring-up.sh` step 6 via `env_set`). When the two diverge, **this doc is authoritative for human reads, the env file for tooling**; the bring-up script keeps both in sync. Indexed from [`arch.md`](../arch.md) §5. (`docs/contracts.md` is a redirect to this file.)
+Mirrored into [`scripts/operator-workstation.env`](../../scripts/operator-workstation.env) (the shell-consumable form, written by `scripts/heima-bring-up.sh` step 6 via `env_set`). When the two diverge, **this doc is authoritative for human reads, the env file for tooling**; the bring-up script keeps both in sync. Indexed from [`arch.md`](../arch.md) §5. (`docs/contracts.md` is a redirect to this file.) The operator-facing **wallet/funding map** — key custody tiers, prod-vs-test sets side by side, the funding-flow diagram, "which wallet do I fund" — is [`chain-setup.md` §Wallets](../chain-setup.md#wallets-contracts--funding-map-prod--test); update it in the same commit as any redeploy/rotation recorded here.
 
 ---
 
