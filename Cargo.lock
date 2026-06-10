@@ -97,6 +97,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-bundler"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-core",
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "k256",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentkeys-catalog"
 version = "0.1.0"
 dependencies = [
