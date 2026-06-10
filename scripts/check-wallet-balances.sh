@@ -37,9 +37,14 @@ ENTRYPOINT="$(prof_addr EntryPoint)"
 PAYMASTER="$(prof_addr VerifyingPaymaster)"
 SET_VERSION="$(jq -r '.contract_set_version // "?"' "$CHAIN_PROFILE")"
 
-# Test deployer EOA — read WITHOUT sourcing the test env (its empty ERC-4337
-# keys would clobber the prod ones we just loaded).
-TEST_DEPLOYER="$(grep -E '^HEIMA_DEPLOYER_ADDR_HEIMA=' "$TEST_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+# Test-stack values — read WITHOUT sourcing the test env (sourcing would
+# clobber the prod vars we just loaded). The test stack runs its OWN ERC-4337
+# EntryPoint/factory (+ optional paymaster) since #250 — separate instances
+# from prod, recorded only in the test env file + the TEST_* GH secrets.
+test_env_val() { grep -E "^$1=" "$TEST_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 || true; }
+TEST_DEPLOYER="$(test_env_val HEIMA_DEPLOYER_ADDR_HEIMA)"
+TEST_ENTRYPOINT="$(test_env_val ENTRYPOINT_ADDRESS_HEIMA)"
+TEST_PAYMASTER="$(test_env_val PAYMASTER_ADDRESS_HEIMA)"
 
 # Retry up to 3x so a transient RPC blip degrades to one `n/a` cell, not a crash.
 rpc() {
@@ -74,6 +79,18 @@ printf '  %s\n' "$(printf '%.0s-' {1..86})"
 printf '  %-26s %-44s %14s\n' "paymaster DEPOSIT" \
   "in EntryPoint, key ${PAYMASTER:0:12}…" \
   "$(hei "$(deposit_wei "$ENTRYPOINT" "$PAYMASTER")")"
+# Test-stack ERC-4337 (#250 — separate instances; rows appear once deployed).
+if [ -n "$TEST_ENTRYPOINT" ]; then
+  printf '  %s\n' "$(printf '%.0s-' {1..86})"
+  row "TEST EntryPoint  [test-env]" "$TEST_ENTRYPOINT"
+  if [ -n "$TEST_PAYMASTER" ]; then
+    row "TEST paymaster raw  [test-env]" "$TEST_PAYMASTER"
+    printf '  %-26s %-44s %14s\n' "TEST paymaster DEPOSIT" \
+      "in TEST EntryPoint, key ${TEST_PAYMASTER:0:12}…" \
+      "$(hei "$(deposit_wei "$TEST_ENTRYPOINT" "$TEST_PAYMASTER")")"
+  fi
+fi
 printf '\n  The DEPOSIT row is the sponsored-gas pool (drawn down per accept).\n'
 printf '  The sponsor/bundler EOA fronts handleOps gas and is refunded from it.\n'
-printf '  [profile] = versioned, from the chain profile; [env] = operator EOA.\n\n'
+printf '  [profile] = versioned, from the chain profile; [env] = operator EOA;\n'
+printf '  [test-env] = the test stack'"'"'s own instance (operator-workstation.test.env).\n\n'
