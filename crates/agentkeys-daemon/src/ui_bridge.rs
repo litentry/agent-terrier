@@ -6922,6 +6922,31 @@ mod tests {
 
     // ─── issue #243: master reset tears down the whole fleet ────────────────
 
+    /// Stub JSON-RPC chain holding an EMPTY fleet: `getOperatorDevices` → `[]`,
+    /// everything else (`operatorMasterWallet`, `getScope`) → one zero word.
+    /// Keeps the #233 reconciliation inside `master_reset` deterministic and
+    /// offline — without it the test eth_calls whatever RPC the built-in
+    /// profile names.
+    async fn spawn_empty_chain_stub() -> std::net::SocketAddr {
+        let app = Router::new().route(
+            "/",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let data = body["params"][0]["data"].as_str().unwrap_or("");
+                let sel_devices = chain_selector("getOperatorDevices(bytes32)");
+                let result = if data.starts_with(&format!("0x{sel_devices}")) {
+                    format!("0x{:0>64x}{:0>64x}", 0x20, 0) // offset, len = 0
+                } else {
+                    format!("0x{:0>64x}", 0)
+                };
+                Json(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
     #[tokio::test]
     async fn master_reset_tears_down_the_fleet() {
         // Reset must leave NOTHING attached: pending pairings declined at the
@@ -6954,8 +6979,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let chain = spawn_empty_chain_stub().await;
 
-        let state = build_state(
+        let mut state = build_state(
             "localhost",
             "http://localhost:3113",
             "AgentKeys Test",
@@ -6973,6 +6999,7 @@ mod tests {
             None,
         )
         .unwrap();
+        set_chain_rpc(&mut state, &format!("http://{chain}"));
         *state.onboarding_session.write().await = Some(OnboardingSession {
             email: "m@x".into(),
             omni: format!("0x{}", "77".repeat(32)),
@@ -7149,16 +7176,20 @@ mod tests {
         addr
     }
 
-    /// Write a chain-profile file pointing at the stub + select it via
-    /// `$AGENTKEYS_CHAIN_PROFILE_FILE` (process-global env — the suite runs
-    /// `--test-threads=1`, same convention as the broker env tests).
-    fn point_chain_profile_at(rpc: &str, dir: &std::path::Path) -> std::path::PathBuf {
-        let mut p = agentkeys_core::chain_profile::ChainProfile::load_builtin("heima").unwrap();
-        p.rpc.http = rpc.to_string();
-        let path = dir.join("test-chain-profile.json");
-        std::fs::write(&path, serde_json::to_string(&p).unwrap()).unwrap();
-        std::env::set_var("AGENTKEYS_CHAIN_PROFILE_FILE", &path);
-        path
+    /// Point a freshly-built state's chain profile at a test RPC stub — a
+    /// direct field override on the still-unshared `Arc`, NEVER
+    /// `$AGENTKEYS_CHAIN_PROFILE_FILE`. Env is process-global and the suite
+    /// runs on parallel threads: a `set_var` here leaks into every concurrent
+    /// `build_state`, whose state then eth_calls a stub whose owning test —
+    /// runtime, server task, listener — may already be gone (the intermittent
+    /// `master_reset_tears_down_the_fleet` connection-refused flake), or worse,
+    /// still alive and serving a foreign fleet.
+    fn set_chain_rpc(state: &mut SharedUiBridgeState, rpc: &str) {
+        Arc::get_mut(state)
+            .expect("set_chain_rpc must run before the state Arc is cloned")
+            .chain_profile
+            .rpc
+            .http = rpc.to_string();
     }
 
     #[tokio::test]
@@ -7168,10 +7199,8 @@ mod tests {
         // (account backfilled from operatorMasterWallet), active agent restored
         // with its device hash, revoked agent excluded.
         let addr = spawn_chain_stub().await;
-        let tmp = tempfile::tempdir().unwrap();
-        point_chain_profile_at(&format!("http://{addr}"), tmp.path());
-        let state = make_state_real(None);
-        std::env::remove_var("AGENTKEYS_CHAIN_PROFILE_FILE");
+        let mut state = make_state_real(None);
+        set_chain_rpc(&mut state, &format!("http://{addr}"));
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
             operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
@@ -7228,7 +7257,6 @@ mod tests {
         // exists for a reconstructed actor).
         let addr = spawn_chain_stub().await;
         let tmp = tempfile::tempdir().unwrap();
-        point_chain_profile_at(&format!("http://{addr}"), tmp.path());
         let args_file = tmp.path().join("revoke-args.txt");
         std::fs::write(
             tmp.path().join("heima-device-revoke.sh"),
@@ -7238,7 +7266,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let state = build_state(
+        let mut state = build_state(
             "localhost",
             "http://localhost:3113",
             "AgentKeys Test",
@@ -7256,7 +7284,7 @@ mod tests {
             None,
         )
         .unwrap();
-        std::env::remove_var("AGENTKEYS_CHAIN_PROFILE_FILE");
+        set_chain_rpc(&mut state, &format!("http://{addr}"));
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
             operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
