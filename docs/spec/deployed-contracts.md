@@ -4,6 +4,8 @@
 
 Mirrored into [`scripts/operator-workstation.env`](../../scripts/operator-workstation.env) (the shell-consumable form, written by `scripts/heima-bring-up.sh` step 6 via `env_set`). When the two diverge, **this doc is authoritative for human reads, the env file for tooling**; the bring-up script keeps both in sync. Indexed from [`arch.md`](../arch.md) §5. (`docs/contracts.md` is a redirect to this file.) The operator-facing **wallet/funding map** — key custody tiers, prod-vs-test sets side by side, the funding-flow diagram, "which wallet do I fund" — is [`chain-setup.md` §Wallets](../chain-setup.md#wallets-contracts--funding-map-prod--test); update it in the same commit as any redeploy/rotation recorded here.
 
+> **Source-of-truth note (see [#251](https://github.com/litentry/agentKeys/issues/251)):** the **machine-readable, versioned** source of truth for prod contract addresses is the chain profile [`../../crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) (`.contracts[]` + `contract_set_version`); test addresses live in `scripts/operator-workstation.test.env`. This doc is the human registry — prefer ABI/cutover/version **prose** over re-listing addresses, and new docs should **anchor** to the chain profile rather than copy literals. #251 tracks sweeping remaining literal-address duplication out of the docs and adding a CI guard.
+
 ---
 
 ## EVM deployer wallets (prod vs test/CI)
@@ -13,7 +15,7 @@ Two distinct EVM accounts deploy AgentKeys contracts. They are **different keys*
 | Role | Deployer EVM address | Key location | Source of truth |
 |---|---|---|---|
 | **Local / prod deploy** | `0xdE644936D5B7d5d42032fd08bbA42Fbbfd6663Bc` | `$HEIMA_DEPLOYER_KEY_FILE` (default `~/.agentkeys/heima-deployer.key`, never committed) | [`scripts/operator-workstation.env`](../../scripts/operator-workstation.env) `HEIMA_DEPLOYER_ADDR_HEIMA` |
-| **Test / CI deploy** | `0x9FE9e6c208e9e75D2A19a5c2683127c33896F259` | `~/.agentkeys/heima-deployer-test.key` (operator-provided; wired into GitHub Actions secrets via [`scripts/ci-set-github-secrets.sh`](../../scripts/ci-set-github-secrets.sh)) | [`scripts/operator-workstation.test.env`](../../scripts/operator-workstation.test.env) `HEIMA_DEPLOYER_ADDR_HEIMA` |
+| **Test / CI deploy** | `0x051eFD0C16943c38a6E95D14fb5Cda78735b475e` | `~/.agentkeys/heima-deployer-test.key` (operator-provided; wired into GitHub Actions secrets via [`scripts/ci-set-github-secrets.sh`](../../scripts/ci-set-github-secrets.sh)) | [`scripts/operator-workstation.test.env`](../../scripts/operator-workstation.test.env) `HEIMA_DEPLOYER_ADDR_HEIMA` |
 
 - The prod deployer's Substrate twin (SS58 prefix 31) is `47NGSq6JE5ZSnymGNa4nFVjWbsuhTfoSKN2jtpk28mUyC1M3` — fund the EVM side via the twin, see [`scripts/evm-to-substrate-address.mjs`](../../scripts/evm-to-substrate-address.mjs).
 - Heima Paseo testnet uses its own deployer `0xeBdE9E5F8c0495e87a871BF4f17Fb85e1bFE827F` (`HEIMA_PASEO_DEPLOYER_ADDR`) — currently unused (chain halted, see below).
@@ -54,7 +56,7 @@ Foundation plumbing for the P-256 smart-account master ([plan](../plan/chain/erc
 
 ### Test / CI deploy (Heima mainnet — test deployer)
 
-The test stack deploys the **same four contracts** with the test deployer key (`0x9FE9…F259`), landing them at **different addresses** (distinct `(deployer, nonce)` derivation). It shares the prod AWS account but uses distinct IAM roles, S3 buckets, OIDC issuer, and `-test` DNS — a leaked test cred cannot reach prod data.
+The test stack deploys the **same four contracts** with the test deployer key (`0x051e…475e`), landing them at **different addresses** (distinct `(deployer, nonce)` derivation). It shares the prod AWS account but uses distinct IAM roles, S3 buckets, OIDC issuer, and `-test` DNS — a leaked test cred cannot reach prod data.
 
 - **Tier-1 CI** (the no-LLM gate from #66/#98) runs against an **ephemeral anvil** chain — fresh contracts per run, no persistent mainnet addresses.
 - **Tier-2 / persistent test deploy** addresses are pinned in [`scripts/operator-workstation.test.env`](../../scripts/operator-workstation.test.env) (`*_ADDRESS_HEIMA`). **The values there today are placeholders** — that file's own header says "replace with real test addresses post-deploy." Pin the real ones after a one-shot test deploy:
