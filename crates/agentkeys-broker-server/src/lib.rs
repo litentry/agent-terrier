@@ -73,6 +73,18 @@ pub fn create_router(state: SharedState) -> Router {
         // executeBatch([registerAgentDevice, setScope]) UserOp + return the userOpHash.
         .route("/v1/accept/build", post(handlers::accept::accept_build))
         .route("/v1/accept/submit", post(handlers::accept::accept_submit))
+        // #248 — Touch-ID-gated scope re-grant for an ALREADY-bound agent:
+        // executeBatch([setScope]) only (set-replace; empty services = revoke all).
+        // Submit reuses the accept relay — the assertion→signature→bundler hop
+        // carries nothing accept-specific.
+        .route("/v1/scope/build", post(handlers::scope::scope_build))
+        .route("/v1/scope/submit", post(handlers::accept::accept_submit))
+        // Touch-ID-gated agent unpair: executeBatch([revokeAgentDevice]). The
+        // registry requires msg.sender == operatorMasterWallet, so for an
+        // account-master operator the revoke MUST be a master-account UserOp
+        // (no EOA — incl. the deployer script — can sign it).
+        .route("/v1/revoke/build", post(handlers::revoke::revoke_build))
+        .route("/v1/revoke/submit", post(handlers::accept::accept_submit))
         // Stage 7 §3.5 — pluggable auth surface.
         .route(
             "/v1/auth/wallet/start",

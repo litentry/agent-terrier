@@ -79,17 +79,59 @@ pub struct AssembledAcceptUserOp {
 
 /// Assemble the sponsored accept UserOp: build the batch callData, co-sign the
 /// paymaster, fill `paymasterAndData`, and compute the `userOpHash`.
-///
-/// The paymaster `getHash` commits `paymasterAndData[20:52]` (the gas limits), so
-/// we set those bytes BEFORE hashing — a provisional `paymaster ‖ gasWord` — then
-/// rebuild `paymasterAndData` with the real broker signature appended. The two
-/// always agree on the gas word, which is what the on-chain `getHash` re-derives.
 pub fn assemble_accept_userop(
     p: &AcceptUserOpParams,
     broker_sk: &SigningKey,
 ) -> Result<AssembledAcceptUserOp> {
     let call_data = accept_batch_calldata(&p.registry, &p.scope, p.register, p.grant);
+    assemble_userop_with_calldata(p, call_data, broker_sk)
+}
 
+/// **The #248 sibling** — assemble the scope-only re-grant UserOp
+/// (`executeBatch([setScope])`, no register; the device binding already exists).
+/// `p.register` supplies only the omni pair (`operator_omni` + `actor_omni`);
+/// its device fields are unused, and `p.registry` is never called.
+pub fn assemble_scope_userop(
+    p: &AcceptUserOpParams,
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = agentkeys_core::erc4337::scope_batch_calldata(
+        &p.scope,
+        &p.register.operator_omni,
+        &p.register.actor_omni,
+        p.grant,
+    );
+    assemble_userop_with_calldata(p, call_data, broker_sk)
+}
+
+/// **The unpair sibling** — assemble the agent-revoke UserOp
+/// (`executeBatch([revokeAgentDevice])`). The registry enforces
+/// `msg.sender == operatorMasterWallet[device.operatorOmni]`, so the master
+/// `P256Account` MUST be the sender (no EOA can sign this — the deployer-signed
+/// script path reverts `NotAuthorized` for account-master operators). Only
+/// `p.register.device_key_hash` + `p.registry` feed the callData; `p.grant` and
+/// the remaining register fields are unused, and `p.scope` is never called.
+pub fn assemble_revoke_userop(
+    p: &AcceptUserOpParams,
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data =
+        agentkeys_core::erc4337::revoke_batch_calldata(&p.registry, &p.register.device_key_hash);
+    assemble_userop_with_calldata(p, call_data, broker_sk)
+}
+
+/// Shared envelope assembly: wrap `call_data` in the master-account UserOp,
+/// co-sign the paymaster, fill `paymasterAndData`, compute the `userOpHash`.
+///
+/// The paymaster `getHash` commits `paymasterAndData[20:52]` (the gas limits), so
+/// we set those bytes BEFORE hashing — a provisional `paymaster ‖ gasWord` — then
+/// rebuild `paymasterAndData` with the real broker signature appended. The two
+/// always agree on the gas word, which is what the on-chain `getHash` re-derives.
+fn assemble_userop_with_calldata(
+    p: &AcceptUserOpParams,
+    call_data: Vec<u8>,
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
     let mut user_op = PackedUserOp {
         sender: p.master_account,
         nonce: p.nonce,
@@ -375,6 +417,42 @@ mod tests {
             .unwrap()
             .user_op_hash;
         assert_ne!(out.user_op_hash, sponsored);
+    }
+
+    #[test]
+    fn scope_userop_carries_only_the_set_scope_batch() {
+        // #248: same envelope (sender, paymaster co-sign, hash discipline), but the
+        // callData is the scope-only batch — no registerAgentDevice inside.
+        let sk = SigningKey::random(&mut rand_core::OsRng);
+        let broker_addr = evm_address(&VerifyingKey::from(&sk));
+        let broker_bytes: [u8; 20] = hex::decode(broker_addr.trim_start_matches("0x"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let reg = sample_register();
+        let grant = sample_grant();
+        let p = params(&reg, &grant, broker_bytes);
+        let out = assemble_scope_userop(&p, &sk).unwrap();
+
+        assert_eq!(out.user_op.sender, p.master_account);
+        assert_eq!(
+            out.user_op.call_data,
+            agentkeys_core::erc4337::scope_batch_calldata(
+                &p.scope,
+                &reg.operator_omni,
+                &reg.actor_omni,
+                &grant,
+            )
+        );
+        // Scope-only ≠ accept batch (no register half) ⇒ different intent ⇒ different hash.
+        let accept = assemble_accept_userop(&p, &sk).unwrap();
+        assert_ne!(out.user_op.call_data, accept.user_op.call_data);
+        assert_ne!(out.user_op_hash, accept.user_op_hash);
+        assert_eq!(
+            out.user_op_hash,
+            out.user_op.user_op_hash(&p.entry_point, p.chain_id)
+        );
+        assert!(out.user_op.signature.is_empty());
     }
 
     #[test]

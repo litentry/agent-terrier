@@ -394,7 +394,7 @@ export interface AgentKeysClient {
 
   updateScope(actorId: string, ns: Namespace, value: ScopeBits): Promise<Result<void>>;
   updatePaymentCap(actorId: string, perTx: number, daily: number): Promise<Result<void>>;
-  revokeDevice(actorId: string, intent: RevokeIntent): Promise<Result<void>>;
+  revokeDevice(actorId: string, intent: RevokeIntent, onchain?: { txHash?: string }): Promise<Result<void>>;
   revokeCap(actorId: string, capName: string, intent: RevokeIntent): Promise<Result<void>>;
 
   enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>>;
@@ -491,6 +491,34 @@ export interface AgentKeysClient {
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   >;
   acceptSubmit(body: unknown): Promise<Result<unknown>>;
+
+  // #248 — the Touch-ID-gated scope re-grant for an ALREADY-bound agent (the
+  // permissions panel's commit). `scopeBuild` → broker assembles the
+  // executeBatch([setScope]) UserOp + returns the userOpHash the browser
+  // K11-signs; `scopeSubmit` relays the signed op → EntryPoint.handleOps.
+  // `services` is the FULL replacement list (setScope is set-replace; empty
+  // revokes every grant).
+  scopeBuild(input: {
+    actorOmni: string;
+    services: string[];
+    /** `Actor.scopeUnknownServiceIds` echoed back — grants the panel can't name
+     *  (e.g. `cred:<service>`) that must survive the set-replace. */
+    preserveServiceIds?: string[];
+    readOnly: boolean;
+  }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  >;
+  scopeSubmit(body: unknown): Promise<Result<unknown>>;
+
+  // The Touch-ID unpair: `revokeAgentDevice` requires msg.sender ==
+  // operatorMasterWallet, so for an account-master operator the revoke is a
+  // master-account UserOp the browser K11-signs. After submit, call
+  // `revokeDevice(actorId, intent, { txHash })` — the daemon then VERIFIES the
+  // registry reads `revoked` and flips local state without the legacy script.
+  revokeBuild(input: { deviceKeyHash: string }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  >;
+  revokeSubmit(body: unknown): Promise<Result<unknown>>;
 
   // §credentials data class (#207). The SAME abstraction as memory: list the
   // master's stored credential services (categorized via the catalog) and vault

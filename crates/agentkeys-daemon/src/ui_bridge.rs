@@ -456,6 +456,11 @@ pub struct ApiActor {
     pub device_key_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<HashMap<String, ApiScopeBits>>,
+    /// #248: on-chain scope service ids (0x-hex keccak) that aren't a known
+    /// `memory:<ns>` — e.g. `cred:<service>` granted at accept. The panel's
+    /// set-replace commit echoes these back so a memory toggle can't wipe them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_unknown_service_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_cap: Option<ApiPaymentCap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -752,6 +757,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         // #225 E7 — the Touch-ID-gated accept (browser K11-signs the userOpHash):
         .route("/v1/accept/build", post(accept_build_proxy))
         .route("/v1/accept/submit", post(accept_submit_proxy))
+        .route("/v1/scope/build", post(scope_build_proxy))
+        .route("/v1/scope/submit", post(scope_submit_proxy))
+        .route("/v1/revoke/build", post(revoke_build_proxy))
+        .route("/v1/revoke/submit", post(revoke_submit_proxy))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -2342,12 +2351,18 @@ const SCOPE_NAMESPACES: [&str; 4] = ["personal", "family", "work", "travel"];
 /// panel's data source). The chain is the source of truth for scope — without
 /// this, a granted agent showed DENY on every namespace because nothing ever
 /// populated the local map from `AgentKeysScope` (real 2026-06-10 incident).
+///
+/// Also returns the **unmatched** on-chain service ids (`0x`-hex keccak hashes
+/// that aren't `memory:<known-ns>` — e.g. `cred:openrouter` from the accept, or
+/// a custom namespace). The #248 panel commit is a set-REPLACE `setScope`, so
+/// the web must echo these back (`preserve_service_ids`) or a memory-toggle
+/// commit would silently wipe the agent's credential grants.
 async fn fetch_actor_scope_from_chain(
     rpc: &str,
     scope_contract: &str,
     operator_omni_0x: &str,
     actor_omni_0x: &str,
-) -> Result<Option<HashMap<String, ApiScopeBits>>, String> {
+) -> Result<(Option<HashMap<String, ApiScopeBits>>, Vec<String>), String> {
     let bare = |o: &str| o.trim().trim_start_matches("0x").to_lowercase();
     let (op, act) = (bare(operator_omni_0x), bare(actor_omni_0x));
     if op.len() != 64 || act.len() != 64 {
@@ -2357,22 +2372,34 @@ async fn fetch_actor_scope_from_chain(
     let raw = daemon_eth_call(rpc, scope_contract, &data).await?;
     let (services, read_only, exists) = parse_scope_return(&raw)?;
     if !exists || services.is_empty() {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     }
+    let known: Vec<([u8; 32], &str)> = SCOPE_NAMESPACES
+        .iter()
+        .map(|ns| {
+            (
+                agentkeys_core::device_crypto::keccak256(format!("memory:{ns}").as_bytes()),
+                *ns,
+            )
+        })
+        .collect();
     let mut map = HashMap::new();
-    for ns in SCOPE_NAMESPACES {
-        let h = agentkeys_core::device_crypto::keccak256(format!("memory:{ns}").as_bytes());
-        if services.contains(&h) {
-            map.insert(
-                ns.to_string(),
-                ApiScopeBits {
-                    read: true,
-                    write: !read_only,
-                },
-            );
+    let mut unknown = Vec::new();
+    for h in &services {
+        match known.iter().find(|(kh, _)| kh == h) {
+            Some((_, ns)) => {
+                map.insert(
+                    (*ns).to_string(),
+                    ApiScopeBits {
+                        read: true,
+                        write: !read_only,
+                    },
+                );
+            }
+            None => unknown.push(format!("0x{}", hex::encode(h))),
         }
     }
-    Ok((!map.is_empty()).then_some(map))
+    Ok(((!map.is_empty()).then_some(map), unknown))
 }
 
 /// The operator omni this daemon serves: the registered master, else the
@@ -2451,17 +2478,7 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
     // The master's P256Account address (operatorMasterWallet[omni]) — backfill
     // it when the in-memory register record lost it (restart), so the actor
     // page shows the real account instead of the register CTA.
-    let omni_bare = omni.trim_start_matches("0x").to_lowercase();
-    let data = format!(
-        "0x{}{omni_bare}",
-        chain_selector("operatorMasterWallet(bytes32)")
-    );
-    let master_account = match daemon_eth_call(&rpc, &registry, &data).await {
-        Ok(raw) if raw.len() >= 32 && raw[12..32].iter().any(|b| *b != 0) => {
-            Some(format!("0x{}", hex::encode(&raw[12..32])))
-        }
-        _ => None,
-    };
+    let master_account = fetch_operator_master_wallet(&rpc, &registry, &omni).await;
     if let Some(acc) = master_account.as_ref() {
         let mut rm = state.registered_master.write().await;
         if let Some(rm) = rm.as_mut() {
@@ -2510,6 +2527,7 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
                         k11: true,
                         device_key_hash: Some(d.device_key_hash.clone()),
                         scope: None,
+                        scope_unknown_service_ids: None,
                         payment_cap: None,
                         time_window: None,
                         services: None,
@@ -2543,6 +2561,7 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
                 k11: false,
                 device_key_hash: Some(d.device_key_hash.clone()),
                 scope: None,
+                scope_unknown_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services: None,
@@ -2568,9 +2587,11 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
             .collect();
         for (id, actor_omni) in agent_rows {
             match fetch_actor_scope_from_chain(&rpc, &scope_contract, &omni, &actor_omni).await {
-                Ok(scope) => {
+                Ok((scope, unknown_ids)) => {
                     if let Some(a) = state.actors.write().await.get_mut(&id) {
                         a.scope = scope;
+                        a.scope_unknown_service_ids =
+                            (!unknown_ids.is_empty()).then_some(unknown_ids);
                     }
                 }
                 Err(e) => tracing::debug!(
@@ -2652,16 +2673,47 @@ async fn get_actor(
     )))
 }
 
-/// The master's on-chain P256Account (`operatorMasterWallet[omni]`), from the
-/// register flow. `None` for a pre-E7 / not-yet-registered / restored-from-disk
-/// master (the actor page then shows the register CTA).
+/// The master's on-chain P256Account (`operatorMasterWallet[omni]`). Prefers
+/// the in-memory register record; when a RESTORED session lost it, backfills
+/// live from the registry and caches — a stale `None` here made the actor page
+/// claim "not yet bound" AND sent the unpair down the doomed EOA script path
+/// while the master WAS a bound P256Account (real 2026-06-11 incident).
 async fn master_account_address(state: &SharedUiBridgeState) -> Option<String> {
-    state
+    if let Some(acc) = state
         .registered_master
         .read()
         .await
         .as_ref()
         .and_then(|m| m.account.clone())
+    {
+        return Some(acc);
+    }
+    let omni = held_operator_omni(state).await?;
+    let registry = registry_address(state)?;
+    let rpc = state.chain_profile.rpc.http.clone();
+    let acc = fetch_operator_master_wallet(&rpc, &registry, &omni).await?;
+    if let Some(rm) = state.registered_master.write().await.as_mut() {
+        if rm.account.is_none() {
+            rm.account = Some(acc.clone());
+        }
+    }
+    Some(acc)
+}
+
+/// `operatorMasterWallet[omni]` — `None` when unset (zero address) or the read
+/// fails. Shared by the #233 reconcile backfill and the live actor-page read.
+async fn fetch_operator_master_wallet(rpc: &str, registry: &str, omni_0x: &str) -> Option<String> {
+    let omni_bare = omni_0x.trim_start_matches("0x").to_lowercase();
+    let data = format!(
+        "0x{}{omni_bare}",
+        chain_selector("operatorMasterWallet(bytes32)")
+    );
+    match daemon_eth_call(rpc, registry, &data).await {
+        Ok(raw) if raw.len() >= 32 && raw[12..32].iter().any(|b| *b != 0) => {
+            Some(format!("0x{}", hex::encode(&raw[12..32])))
+        }
+        _ => None,
+    }
 }
 
 /// #225 / E7: attach the actor's on-chain account address + type to its serialized
@@ -2707,6 +2759,10 @@ pub struct UpdateScopeRequest {
     pub write: bool,
 }
 
+/// `POST /v1/actors/:id/scope` — a LOCAL-VIEW write only (daemon map + audit
+/// row); it never touches chain, and the #233 mirror overwrites it on the next
+/// `list_actors`. The REAL on-chain commit is the #248 Touch-ID flow
+/// (`/v1/scope/build` + `/v1/scope/submit`), which the permissions panel drives.
 async fn update_scope(
     State(state): State<SharedUiBridgeState>,
     Path(id): Path<String>,
@@ -2758,9 +2814,11 @@ pub struct GrantScopeRequest {
 /// `POST /v1/actors/:id/scope/grant` (#207 items 5/7/8) — record a CONFIRMED
 /// auto-distribute grant: a memory namespace the agent inherits (read) or a
 /// credential service it may use. Same daemon-state + audit posture as
-/// `update_scope` — the ui-bridge owns the scope VIEW; the on-chain `setScope`
-/// is the operator's `heima-scope-set.sh` (a master `SCOPE_MGMT` + K11 mutation),
-/// which the web surface deliberately does NOT drive (mirrors `update_scope`).
+/// `update_scope` — a scope VIEW write; the on-chain `setScope` paths are the
+/// #248 web Touch-ID flow (`/v1/scope/{build,submit}`) and the operator CLI
+/// `heima-scope-set.sh` (a master `SCOPE_MGMT` + K11 mutation). Wiring the
+/// auto-distribute confirm into the #248 flow is a follow-up; until then the
+/// #233 mirror overwrites this view on the next `list_actors`.
 ///
 /// A `Sensitive` grant only reaches this endpoint after an explicit per-grant K11
 /// confirm in the UI; a `Safe` one after the reviewed-set confirm. `propose` never
@@ -2867,6 +2925,16 @@ async fn update_payment_cap(
 pub struct RevokeDeviceRequest {
     pub intent_text: String,
     pub intent_fields: Vec<(String, String)>,
+    /// `true` ⇒ the browser already landed `revokeAgentDevice` ON CHAIN via the
+    /// Touch-ID UserOp (`/v1/revoke/{build,submit}`); the daemon VERIFIES the
+    /// device entry reads `revoked` from the registry and only then flips local
+    /// state — no script shell-out. `false` (default) ⇒ legacy script path
+    /// (works only when `operatorMasterWallet` is the script's EOA).
+    #[serde(default)]
+    pub onchain: bool,
+    /// The submit's tx hash (audit trail only; the chain re-read is the proof).
+    #[serde(default)]
+    pub onchain_tx_hash: Option<String>,
 }
 
 async fn revoke_device(
@@ -2877,41 +2945,104 @@ async fn revoke_device(
     // Read the actor's on-chain device key hash + label first. The revoke must land
     // ON CHAIN before we flip local state — a binding is not gone until
     // SidecarRegistry.revokeAgentDevice says so (the "also need on-chain" rule).
-    let label = {
+    let (label, device_key_hash) = {
         let guard = state.actors.read().await;
         let actor = guard
             .get(&id)
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
-        actor.label.clone()
+        (actor.label.clone(), actor.device_key_hash.clone())
     };
 
-    // On-chain revokeAgentDevice via heima-device-revoke.sh (resolved the same way
-    // register_pairing resolves heima-agent-create.sh). Agent-tier needs no K11; the
-    // script is idempotent (skips when already revoked).
-    let master_script = state.register_master_script.clone().ok_or_else(|| {
-        err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "chain not configured (no --register-master-script) — cannot revoke on chain",
-            "chain-unconfigured",
-        )
-    })?;
-    let revoke_script =
-        resolve_repo_script(&master_script, "heima-device-revoke.sh").ok_or_else(|| {
+    let tx = if req.onchain {
+        // The browser already executed revokeAgentDevice as the master-account
+        // Touch-ID UserOp (/v1/revoke/{build,submit}) — the only signer the
+        // registry accepts for an account-master operator. Don't trust the
+        // client: re-read the device entry and require `revoked` before
+        // flipping local state.
+        let hash = device_key_hash.clone().ok_or_else(|| {
             err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "heima-device-revoke.sh not found (looked next to --register-master-script and in <repo>/scripts/)",
-                "revoke-script-missing",
+                StatusCode::CONFLICT,
+                "actor has no on-chain device_key_hash to verify the revoke against",
+                "device-hash-missing",
             )
         })?;
-    let tx = revoke_agent_device(&revoke_script, &label)
-        .await
+        let registry = registry_address(&state).ok_or_else(|| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chain profile carries no SidecarRegistry — cannot verify the revoke",
+                "chain-unconfigured",
+            )
+        })?;
+        let rpc = state.chain_profile.rpc.http.clone();
+        let bare = hash.trim_start_matches("0x").to_lowercase();
+        let hash32: [u8; 32] = hex::decode(&bare)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| {
+                err(
+                    StatusCode::CONFLICT,
+                    "actor device_key_hash is not 32-byte hex",
+                    "device-hash-malformed",
+                )
+            })?;
+        let data = format!("0x{}{bare}", chain_selector("getDevice(bytes32)"));
+        let raw = daemon_eth_call(&rpc, &registry, &data).await.map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("revoke verify read failed: {e}"),
+                "revoke-verify-failed",
+            )
+        })?;
+        let entry = parse_device_entry(&raw, &hash32).map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("revoke verify parse failed: {e}"),
+                "revoke-verify-failed",
+            )
+        })?;
+        if !entry.revoked {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "chain says the device is still active — the revoke UserOp did not land",
+                "revoke-not-onchain",
+            ));
+        }
+        req.onchain_tx_hash.clone()
+    } else {
+        // Legacy script path (heima-device-revoke.sh, EOA-signed) — works only
+        // when operatorMasterWallet IS the script's EOA (pre-#225 operators).
+        let master_script = state.register_master_script.clone().ok_or_else(|| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chain not configured (no --register-master-script) — cannot revoke on chain",
+                "chain-unconfigured",
+            )
+        })?;
+        let revoke_script =
+            resolve_repo_script(&master_script, "heima-device-revoke.sh").ok_or_else(|| {
+                err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "heima-device-revoke.sh not found (looked next to --register-master-script and in <repo>/scripts/)",
+                    "revoke-script-missing",
+                )
+            })?;
+        // Prefer the on-chain device key hash — it works for chain-reconstructed
+        // actors (#233) that never had a ~/.agentkeys/agents/<label>.json record
+        // on this machine (the label-file path died with "no agent file" — real
+        // 2026-06-11 unpair incident). Label fallback covers legacy rows only.
+        // Same selection as the #243 master-reset fleet teardown.
+        match &device_key_hash {
+            Some(hash) => revoke_agent_device_by_hash(&revoke_script, hash).await,
+            None => revoke_agent_device(&revoke_script, &label).await,
+        }
         .map_err(|e| {
             err(
                 StatusCode::BAD_GATEWAY,
                 format!("on-chain revoke failed: {e}"),
                 "revoke-onchain-failed",
             )
-        })?;
+        })?
+    };
 
     // On-chain revoke landed (or idempotent-skip) → flip local state + drop caps.
     let snapshot = {
@@ -3449,6 +3580,7 @@ async fn ack_pairing(
                         }
                     }),
                     scope: None,
+                    scope_unknown_service_ids: None,
                     payment_cap: None,
                     time_window: None,
                     services: None,
@@ -3627,6 +3759,152 @@ async fn accept_submit_proxy(
     if resp.status().is_success() {
         // The accept just registered an agent on chain — un-latch the #233 sync
         // so the actor tree reflects it even if the follow-up ack is skipped.
+        state
+            .fleet_synced
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    resp
+}
+
+/// #248 — the Touch-ID-gated scope re-grant for an ALREADY-bound agent (the
+/// permissions panel's commit). The browser stages the new namespace set, calls
+/// `build` (→ broker assembles the `executeBatch([setScope])` UserOp + returns
+/// the `userOpHash`), K11-signs it (Touch ID), then calls `submit`. The daemon
+/// fills `operator_omni` from the master session (never the browser) and pins
+/// the caps to 0 — the panel grants access, not payment limits.
+#[derive(Debug, Deserialize)]
+pub struct DaemonScopeBuildRequest {
+    /// The agent's actor omni (`ApiActor.omni_hex`).
+    pub actor_omni: String,
+    /// FULL replacement service list (`memory:<ns>` canonical encoding);
+    /// `setScope` is set-replace, so an empty list revokes every grant.
+    pub services: Vec<String>,
+    /// `ApiActor.scope_unknown_service_ids` echoed back — on-chain grants the
+    /// panel can't name (e.g. `cred:<service>`) that must survive the replace.
+    #[serde(default)]
+    pub preserve_service_ids: Vec<String>,
+    pub read_only: bool,
+}
+
+/// POST /v1/scope/build — forward to the broker's `/v1/scope/build`, returning
+/// the `userOpHash` the browser K11-signs. Body shape is crate-owned
+/// (`agentkeys_backend_client::protocol::BuildScopeUserOpRequest`, #203).
+async fn scope_build_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<DaemonScopeBuildRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let body = agentkeys_backend_client::protocol::BuildScopeUserOpRequest {
+        operator_omni,
+        actor_omni: req.actor_omni,
+        services: req.services,
+        preserve_service_ids: req.preserve_service_ids,
+        read_only: req.read_only,
+        max_per_call: "0".into(),
+        max_per_period: "0".into(),
+        max_total: "0".into(),
+        period_seconds: 0,
+    };
+    let body = match serde_json::to_value(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return pairing_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("scope build body: {e}"),
+            )
+        }
+    };
+    forward_to_broker(&broker, "/v1/scope/build", &j1, &body).await
+}
+
+/// POST /v1/scope/submit — forward the K11-signed setScope op to the broker's
+/// `/v1/scope/submit` (the shared accept relay → EntryPoint.handleOps). On
+/// success, un-latch the #233 sync so the next `list_actors` re-reads the grant
+/// from chain (the mirror is what makes the committed change stick in the panel
+/// instead of being reverted by a stale local map).
+async fn scope_submit_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let resp = forward_to_broker(&broker, "/v1/scope/submit", &j1, &body).await;
+    if resp.status().is_success() {
+        state
+            .fleet_synced
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    resp
+}
+
+/// The Touch-ID-gated agent **unpair** — the revoke sibling of the scope
+/// proxies. `revokeAgentDevice` requires `msg.sender == operatorMasterWallet`,
+/// so for an account-master operator the browser builds + K11-signs the
+/// master-account UserOp; the legacy `heima-device-revoke.sh` EOA path reverts
+/// `NotAuthorized` for those operators (real 2026-06-11 incident).
+#[derive(Debug, Deserialize)]
+pub struct DaemonRevokeBuildRequest {
+    /// The agent's on-chain `SidecarRegistry` device key hash (`ApiActor.device_key_hash`).
+    pub device_key_hash: String,
+}
+
+/// POST /v1/revoke/build — forward to the broker's `/v1/revoke/build`, returning
+/// the `userOpHash` the browser K11-signs. Body shape is crate-owned
+/// (`agentkeys_backend_client::protocol::BuildRevokeUserOpRequest`, #203).
+async fn revoke_build_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<DaemonRevokeBuildRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let body = agentkeys_backend_client::protocol::BuildRevokeUserOpRequest {
+        operator_omni,
+        device_key_hash: req.device_key_hash,
+    };
+    let body = match serde_json::to_value(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return pairing_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("revoke build body: {e}"),
+            )
+        }
+    };
+    forward_to_broker(&broker, "/v1/revoke/build", &j1, &body).await
+}
+
+/// POST /v1/revoke/submit — forward the K11-signed revoke op to the broker's
+/// `/v1/revoke/submit` (the shared accept relay). On success, un-latch the #233
+/// sync so the next `list_actors` reconciles the revoked device from chain.
+async fn revoke_submit_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let resp = forward_to_broker(&broker, "/v1/revoke/submit", &j1, &body).await;
+    if resp.status().is_success() {
         state
             .fleet_synced
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -3834,6 +4112,7 @@ async fn register_pairing(
             format!("0x{device_key_hash}")
         }),
         scope: None,
+        scope_unknown_service_ids: None,
         payment_cap: None,
         time_window: None,
         services: None,
@@ -6629,6 +6908,7 @@ mod tests {
             k11: false,
             device_key_hash: None,
             scope: None,
+            scope_unknown_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -6659,6 +6939,7 @@ mod tests {
             k11: false,
             device_key_hash: None,
             scope: None,
+            scope_unknown_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -6700,6 +6981,7 @@ mod tests {
                 k11: false,
                 device_key_hash: None,
                 scope: None,
+                scope_unknown_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services: None,
@@ -6723,6 +7005,7 @@ mod tests {
                 k11: true,
                 device_key_hash: None,
                 scope: None,
+                scope_unknown_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services: None,
@@ -6909,6 +7192,8 @@ mod tests {
             Json(RevokeDeviceRequest {
                 intent_text: "Revoke FoloToy".into(),
                 intent_fields: vec![("actor".into(), "agent-folotoy".into())],
+                onchain: false,
+                onchain_tx_hash: None,
             }),
         )
         .await
@@ -6918,6 +7203,119 @@ mod tests {
         assert!(state.caps.read().await.get("agent-folotoy").is_none());
         let audit = state.audit.read().await;
         assert!(audit.iter().any(|e| e.kind == "device.revoked"));
+    }
+
+    #[tokio::test]
+    async fn revoke_device_prefers_the_onchain_hash_over_the_label_file() {
+        // Chain-reconstructed actors (#233) have NO ~/.agentkeys/agents/<label>.json,
+        // so the label path dies with "no agent file" (real 2026-06-11 unpair
+        // incident). When device_key_hash is known, the revoke must shell
+        // `--device-key-hash <hash>` — never `--agent <label>`.
+        let tmp = tempfile::tempdir().unwrap();
+        let args_file = tmp.path().join("revoke-args.txt");
+        std::fs::write(
+            tmp.path().join("heima-device-revoke.sh"),
+            format!(
+                "#!/usr/bin/env bash\necho \"$@\" > {}\necho '{{\"ok\":true,\"tx_hash\":\"0xrevoketx\"}}'\n",
+                args_file.display()
+            ),
+        )
+        .unwrap();
+        let state =
+            make_state_with_script(tmp.path().join("master.sh").to_string_lossy().into_owned());
+        seed_actor_async(&state).await;
+        let hash = format!("0x{}", "ab".repeat(32));
+        state
+            .actors
+            .write()
+            .await
+            .get_mut("agent-folotoy")
+            .unwrap()
+            .device_key_hash = Some(hash.clone());
+
+        let resp = revoke_device(
+            State(state.clone()),
+            Path("agent-folotoy".into()),
+            Json(RevokeDeviceRequest {
+                intent_text: "Revoke FoloToy".into(),
+                intent_fields: vec![],
+                onchain: false,
+                onchain_tx_hash: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.status, "bad");
+
+        let recorded = std::fs::read_to_string(&args_file).unwrap();
+        assert!(
+            recorded.contains("--device-key-hash") && recorded.contains(&hash),
+            "expected by-hash revoke, got: {recorded}"
+        );
+        assert!(!recorded.contains("--agent"), "got: {recorded}");
+    }
+
+    #[tokio::test]
+    async fn revoke_device_onchain_mode_verifies_the_registry_and_skips_the_script() {
+        // The Touch-ID unpair: the browser already landed the revoke UserOp
+        // (/v1/revoke/{build,submit}); the daemon must VERIFY the device reads
+        // `revoked` from SidecarRegistry (never trust the client), flip local
+        // state WITHOUT shelling heima-device-revoke.sh, and 409 when the chain
+        // still says active.
+        let addr = spawn_chain_stub().await;
+        let mut state = make_state_real(None);
+        set_chain_rpc(&mut state, &format!("http://{addr}"));
+        seed_actor_async(&state).await;
+        // The stub's getDevice: unknown hashes → a REVOKED agent entry.
+        state
+            .actors
+            .write()
+            .await
+            .get_mut("agent-folotoy")
+            .unwrap()
+            .device_key_hash = Some(format!("0x{}", T233_REVOKED_HASH.repeat(32)));
+
+        let resp = revoke_device(
+            State(state.clone()),
+            Path("agent-folotoy".into()),
+            Json(RevokeDeviceRequest {
+                intent_text: "Unpair".into(),
+                intent_fields: vec![],
+                onchain: true,
+                onchain_tx_hash: Some("0xdeadbeef".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.status, "bad");
+        assert!(state
+            .audit
+            .read()
+            .await
+            .iter()
+            .any(|e| e.kind == "device.revoked" && e.detail.contains("0xdeadbeef")));
+
+        // ACTIVE on chain (the stub's 0x22… agent) → refuse to flip local state.
+        state
+            .actors
+            .write()
+            .await
+            .get_mut("agent-folotoy")
+            .unwrap()
+            .device_key_hash = Some(format!("0x{}", T233_AGENT_HASH.repeat(32)));
+        let denied = revoke_device(
+            State(state.clone()),
+            Path("agent-folotoy".into()),
+            Json(RevokeDeviceRequest {
+                intent_text: "Unpair".into(),
+                intent_fields: vec![],
+                onchain: true,
+                onchain_tx_hash: None,
+            }),
+        )
+        .await;
+        let (status, _) = denied.expect_err("active device must be refused");
+        assert_eq!(status, StatusCode::CONFLICT);
     }
 
     // ─── issue #243: master reset tears down the whole fleet ────────────────
@@ -7461,6 +7859,7 @@ mod tests {
                     k11: false,
                     device_key_hash: None,
                     scope: None,
+                    scope_unknown_service_ids: None,
                     payment_cap: None,
                     time_window: None,
                     services: None,

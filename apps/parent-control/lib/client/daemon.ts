@@ -230,12 +230,33 @@ export class DaemonBackend implements AgentKeysClient {
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
-  async revokeDevice(actorId: string, intent: RevokeIntent): Promise<Result<void>> {
+  async revokeDevice(
+    actorId: string,
+    intent: RevokeIntent,
+    onchain?: { txHash?: string },
+  ): Promise<Result<void>> {
     const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/revoke`, {
       intent_text: intent.text,
       intent_fields: intent.fields,
+      // Touch-ID path: the revoke UserOp already landed; the daemon verifies the
+      // registry reads `revoked` and flips local state without the script.
+      onchain: !!onchain,
+      onchain_tx_hash: onchain?.txHash ?? null,
     });
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
+  }
+
+  // The Touch-ID unpair: build + submit the master-account
+  // executeBatch([revokeAgentDevice]) UserOp (the only signer the registry
+  // accepts for an account-master operator).
+  async revokeBuild(input: { deviceKeyHash: string }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  > {
+    return this.postJson('/v1/revoke/build', { device_key_hash: input.deviceKeyHash });
+  }
+
+  async revokeSubmit(body: unknown): Promise<Result<unknown>> {
+    return this.postJson('/v1/revoke/submit', body);
   }
 
   async revokeCap(actorId: string, capName: string, intent: RevokeIntent): Promise<Result<void>> {
@@ -576,6 +597,29 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson('/v1/accept/submit', body);
   }
 
+  // #248: build + submit the scope-only setScope UserOp for a bound agent. The
+  // daemon fills operator_omni from the master session and forwards to the
+  // broker /v1/scope/{build,submit}.
+  async scopeBuild(input: {
+    actorOmni: string;
+    services: string[];
+    preserveServiceIds?: string[];
+    readOnly: boolean;
+  }): Promise<
+    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
+  > {
+    return this.postJson('/v1/scope/build', {
+      actor_omni: input.actorOmni,
+      services: input.services,
+      preserve_service_ids: input.preserveServiceIds ?? [],
+      read_only: input.readOnly,
+    });
+  }
+
+  async scopeSubmit(body: unknown): Promise<Result<unknown>> {
+    return this.postJson('/v1/scope/submit', body);
+  }
+
   async listCredentials(): Promise<Result<CredService[]>> {
     const r = await this.getJson<{
       credentials: { service: string; category: string; sensitivity: 'safe' | 'sensitive' }[];
@@ -628,6 +672,11 @@ interface ApiActor {
   vendor: string;
   k11: boolean;
   scope?: Record<string, { read: boolean; write: boolean }>;
+  // #248: on-chain scope service ids (keccak hex) that aren't a known memory:<ns>
+  // (e.g. cred:<service>); echoed back on commit so set-replace can't wipe them.
+  scope_unknown_service_ids?: string[];
+  // On-chain SidecarRegistry device key hash — the Touch-ID unpair's target.
+  device_key_hash?: string;
   payment_cap?: { per_tx: number; daily: number; currency: string };
   time_window?: { start: string; end: string; tz: string };
   services?: string[];
@@ -678,6 +727,8 @@ function apiToActor(a: ApiActor): Actor {
     accountAddress: a.account_address ?? undefined,
     accountType: a.account_type ?? undefined,
     scope: a.scope as Actor['scope'],
+    scopeUnknownServiceIds: a.scope_unknown_service_ids,
+    deviceKeyHash: a.device_key_hash ?? undefined,
     paymentCap: a.payment_cap
       ? { perTx: a.payment_cap.per_tx, daily: a.payment_cap.daily, currency: a.payment_cap.currency }
       : undefined,

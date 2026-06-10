@@ -6,4 +6,6 @@ pub mod cap;
 pub mod grant;
 pub mod metrics;
 pub mod oidc;
+pub mod revoke;
+pub mod scope;
 pub mod wallet;
