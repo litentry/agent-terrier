@@ -82,6 +82,19 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/auth/wallet/verify",
             post(handlers::auth::wallet_verify::wallet_verify),
         )
+        // #242 master passkey re-auth: the bound K11 signs a broker challenge;
+        // the CHAIN (operatorMasterWallet + the account's live signer set +
+        // K11Verifier.verifyAssertion as a view call) is the credential
+        // registry. Mints a session JWT scoped to the chain-verified omni —
+        // the no-email re-login the web onboarding offers after a logout.
+        .route(
+            "/v1/auth/passkey/start",
+            post(handlers::auth::passkey_start::passkey_start),
+        )
+        .route(
+            "/v1/auth/passkey/verify",
+            post(handlers::auth::passkey_verify::passkey_verify),
+        )
         // §10.2 agent-initiated pairing ceremony (issue #144, method A). The
         // agent opens an unbound request (proving K10 possession) + displays a
         // pairing_code; the master claims the code → derives the HDKD child omni;

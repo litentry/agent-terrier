@@ -121,11 +121,21 @@ private key**) at `~/.agentkeys/daemon-<wallet>/master-session.json`, owner-only
 with **no prompts**.
 
 If the session has expired since you last used it, you're asked for a **single**
-Touch ID re-authentication — not a full re-onboarding. Signing out (the logout
-button) clears the saved session so the next launch starts fresh; signing back in
-with the same email returns you to the same account. (You no longer need the
-`--master-device-key-hash` developer flag for the normal web loop — the device is
-recovered from your account automatically.)
+Touch ID re-authentication — not a full re-onboarding.
+
+**Signing out** (the logout button) drops the session but **remembers who you
+are**: your on-chain master binding and your passkey are untouched, so the login
+screen offers **"Sign back in with Touch ID"** — one prompt, zero emails. Your
+passkey signs a fresh challenge and it's verified against your **on-chain master
+account** (the chain is the credential registry, not a server-side password
+table). You can always pick **"sign in with a different email"** instead — that
+is a fresh, separate account.
+
+The real forget-this-machine action is **reset master** (the reset button): it
+clears the saved identity AND the on-chain binding so a fresh passkey can
+re-onboard. After a reset, Touch ID sign-in is gone until you onboard again.
+(You no longer need the `--master-device-key-hash` developer flag for the normal
+web loop — the device is recovered from your account automatically.)
 
 ## Credentials (parent-control)
 

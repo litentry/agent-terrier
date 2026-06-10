@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
-import type { AgentKeysClient, ConfigPreset } from '@/lib/client/types';
+import type { AgentKeysClient, ConfigPreset, ReloginInfo } from '@/lib/client/types';
 import { credentialToFinishPayload, getAssertionOverHash, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
 import type { AcceptAssertion } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
@@ -17,6 +17,16 @@ import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
 function readMasterCredId(): string {
   try { return localStorage.getItem('ak_master_cred_id') || ''; } catch { return ''; }
 }
+
+// #242: the omni the local passkey pointer belongs to — written alongside
+// ak_master_cred_id at register time. Guards the pointer against a DIFFERENT
+// identity's session (cross-email reuse would sign with the wrong key).
+function readMasterOmni(): string {
+  try { return localStorage.getItem('ak_master_omni') || ''; } catch { return ''; }
+}
+
+const omniEq = (a: string, b: string) =>
+  a.trim().replace(/^0x/, '').toLowerCase() === b.trim().replace(/^0x/, '').toLowerCase();
 
 /** The on-chain register still owed after the Stage-2 K11 bind (#225 E7 /
  *  #232): the "Register master" ceremony step signs `userOpHash` with the SAME
@@ -44,19 +54,37 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
   const existingCred = readMasterCredId();
   const st = await client.getOnboardingState();
   if (st.ok && st.data.chain === 'master-registered') {
-    if (existingCred) {
+    // #242: the pointer must belong to THIS session's identity. A stored omni
+    // from a different identity means the pointer's passkey is NOT the one bound
+    // for this omni — reusing it would sign with the wrong key. (No stored omni
+    // = a pre-#242 pointer; the daemon's omni-keyed `chain` already vouches that
+    // the binding is this session's, so accept + backfill.)
+    const pointerOmni = readMasterOmni();
+    const pointerMatches = !pointerOmni || !st.data.omni || omniEq(pointerOmni, st.data.omni);
+    if (existingCred && pointerMatches) {
+      if (!pointerOmni && st.data.omni) {
+        try { localStorage.setItem('ak_master_omni', st.data.omni); } catch {}
+      }
       akLog('onboarding: master already bound — REUSING passkey (no new create)', {
         boundCredentialId: existingCred,
         omni: st.data.omni,
       });
       return { mode: 'real' }; // already onboarded; the bound-passkey pointer is intact
     }
-    akLog('onboarding: master bound on chain but NO local passkey pointer — reset + re-onboard needed', {
-      omni: st.data.omni,
-    });
-    // Bound on chain but NO local pointer (storage cleared / different browser): we
-    // can't safely re-enroll (first-master-only can't re-bind) — surface so the UI
-    // offers "reset master + re-onboard" rather than minting an unusable passkey.
+    if (existingCred && !pointerMatches) {
+      akLog('onboarding: passkey pointer belongs to a DIFFERENT identity — not reusing', {
+        pointerOmni,
+        sessionOmni: st.data.omni,
+      });
+    } else {
+      akLog('onboarding: master bound on chain but NO local passkey pointer — reset + re-onboard needed', {
+        omni: st.data.omni,
+      });
+    }
+    // Bound on chain but no USABLE pointer (storage cleared / different browser /
+    // another identity's key): we can't safely re-enroll (first-master-only can't
+    // re-bind) — surface so the UI offers "reset master + re-onboard" rather than
+    // minting an unusable passkey.
     return { mode: 'fallback' };
   }
 
@@ -213,6 +241,12 @@ async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterR
   // different one → SIG_VALIDATION_FAILED.
   if (registered) {
     try { localStorage.setItem('ak_master_cred_id', reg.credentialId); } catch {}
+    // #242: key the pointer to the identity it was bound for (the live session
+    // omni), so a later different-email session can never auto-select this key.
+    const st = await client.getOnboardingState();
+    if (st.ok && st.data.omni) {
+      try { localStorage.setItem('ak_master_omni', st.data.omni); } catch {}
+    }
     akLog('onboarding: master REGISTERED + signer persisted ✅', {
       account: reg.account,
       txHash,
@@ -327,6 +361,59 @@ export function OnboardingScreen({
   // #232: the on-chain register handed from the K11-bind step to the "Register
   // master" step (a ref — the `stages` closures are rebuilt per render).
   const pendingRegister = useRef<PendingMasterRegister | null>(null);
+  // #242: the one-Touch-ID re-login offer. Shown on the login screen when the
+  // daemon still knows who the master is (logout-surviving coords) AND this
+  // browser holds the matching passkey pointer.
+  const [relogin, setRelogin] = useState<ReloginInfo | null>(null);
+  const [reloginBusy, setReloginBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const st = await client.getOnboardingState();
+      if (cancelled || !st.ok || !st.data.relogin) return;
+      const cred = readMasterCredId();
+      if (!cred) return; // no local passkey pointer — nothing to auto-select
+      const pointerOmni = readMasterOmni();
+      if (pointerOmni && !omniEq(pointerOmni, st.data.relogin.omni)) return; // another identity's key
+      setRelogin(st.data.relogin);
+    })();
+    return () => { cancelled = true; };
+  }, [client]);
+
+  // #242: ONE Touch ID restores the session — reloginStart mints a chain-bound
+  // broker challenge, the BOUND passkey signs it, reloginFinish verifies on
+  // chain + restores the daemon session, and we route straight into the app.
+  const doRelogin = async () => {
+    if (reloginBusy) return;
+    setReloginBusy(true);
+    setNote('');
+    const start = await client.reloginStart();
+    if (!start.ok) {
+      setReloginBusy(false);
+      setNote(`Couldn't start the passkey sign-in — ${start.status.detail ?? 'daemon unreachable'}. Use email below.`);
+      return;
+    }
+    try {
+      akLog('relogin: signing broker challenge with the bound passkey', {
+        account: start.data.account,
+        omni: start.data.omni,
+      });
+      const assertion = await getAssertionOverHash(start.data.challenge, [readMasterCredId()]);
+      const fin = await client.reloginFinish(start.data.challenge, assertion);
+      if (fin.ok) {
+        akLog('relogin: master session restored via passkey ✅', { omni: fin.data.omni });
+        onComplete();
+        return;
+      }
+      setNote(
+        `Passkey sign-in failed — ${fin.status.detail ?? 'rejected'}. Use email below; if your master passkey was deleted, reset the master and re-onboard.`,
+      );
+    } catch (e) {
+      setNote(`Touch ID cancelled or failed — ${(e as Error)?.message ?? ''}. Use email below.`);
+    }
+    setReloginBusy(false);
+  };
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
 
@@ -541,7 +628,28 @@ export function OnboardingScreen({
 
         {phase === 'email' && (
           <div className="onboard-login">
-            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your master identity.</h1>
+            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>
+              {relogin ? 'Welcome back.' : 'Set up your master identity.'}
+            </h1>
+            {relogin && (
+              <>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 14, maxWidth: 400 }}>
+                  Your master identity{relogin.email ? <> (<strong>{maskEmail(relogin.email, maskEm)}</strong>)</> : ''} is
+                  still bound on chain. One Touch ID signs you back in — no email needed.
+                </p>
+                <button
+                  className="btn primary"
+                  style={{ width: '100%', justifyContent: 'center', padding: '12px', marginBottom: 8 }}
+                  disabled={reloginBusy}
+                  onClick={doRelogin}
+                >
+                  {reloginBusy ? '▸ confirming with Touch ID…' : '🔐 Sign back in with Touch ID'}
+                </button>
+                <div className="hr-ascii" style={{ margin: '14px 0', fontSize: 10.5, color: 'var(--ink-faint)', textAlign: 'center' }}>
+                  — or sign in with a different email —
+                </div>
+              </>
+            )}
             <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 18, maxWidth: 400 }}>
               Enter the email you&apos;ll use as your account. We send a one-time magic link there to verify it&apos;s
               yours — your master identity is anchored to it. No password, no seed phrase.
@@ -583,6 +691,7 @@ export function OnboardingScreen({
             >
               Continue →
             </button>
+            {note && <div style={{ fontSize: 11.5, color: '#b00', marginTop: 12 }}>{note}</div>}
             <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginTop: 14, textAlign: 'center' }}>
               first login creates O_master · HDKD root at /
             </div>

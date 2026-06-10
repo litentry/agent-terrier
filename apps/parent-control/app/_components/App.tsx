@@ -193,6 +193,7 @@ export function App() {
       clearedCredentialId: cleared,
     });
     try { localStorage.removeItem('ak_master_cred_id'); } catch {}
+    try { localStorage.removeItem('ak_master_omni'); } catch {}
     try { localStorage.removeItem('ak_onboarded'); } catch {}
     const r = await client.resetMaster();
     if (!r.ok) {

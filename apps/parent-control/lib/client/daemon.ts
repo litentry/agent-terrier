@@ -18,6 +18,8 @@ import type {
   K11EnrollResult,
   RegisterMasterAssertion,
   RegisterMasterResult,
+  ReloginResult,
+  ReloginStart,
   MasterMemoryEntry,
   MasterResetResult,
   MemoryCategory,
@@ -263,6 +265,15 @@ export class DaemonBackend implements AgentKeysClient {
   async logout(): Promise<Result<void>> {
     const r = await this.postJson<{ ok: boolean }>('/v1/auth/logout', {});
     return r.ok ? { ok: true, data: undefined } : r;
+  }
+
+  // #242 — one-Touch-ID master re-login (no email round-trip).
+  async reloginStart(): Promise<Result<ReloginStart>> {
+    return this.postJson<ReloginStart>('/v1/auth/relogin/start', {});
+  }
+
+  async reloginFinish(challenge: string, assertion: RegisterMasterAssertion): Promise<Result<ReloginResult>> {
+    return this.postJson<ReloginResult>('/v1/auth/relogin/finish', { challenge, assertion });
   }
 
   async resetMaster(): Promise<Result<MasterResetResult>> {
