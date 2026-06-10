@@ -48,6 +48,23 @@ Remove it any time with `agentkeys wire <runtime> --unwire`.
 > keeping the hooks data. `agentkeys wire` detects a de-sentineled block and
 > re-wraps it on the next run, so re-running wire is always safe.
 
+## Onboarding asks for Touch ID twice (parent-control)
+
+The first-run ceremony prompts **Touch ID twice with the same passkey**: once at
+**"Bind passkey (K11)"** to *create* it, and once at **"Register master
+P256Account on chain"** to *authorize* its on-chain registration. The second
+prompt is expected — not a retry or an error — and the progress bar shows which
+step each prompt belongs to.
+
+The register step then waits for the on-chain confirmation, which on Heima takes
+**~10–30 seconds** — the step sits on "running" while `handleOps` lands. The page
+also polls the daemon's onboarding state in the background, so the ceremony
+advances as soon as the chain reports the master registered even if the in-flight
+request is lost (#232); no reload needed. If nothing confirms within ~2 minutes
+the step gives up and the ceremony continues — check the daemon logs /
+`GET /v1/onboarding/state`, then re-run onboarding (it is idempotent: an
+already-registered master is detected and never re-bound).
+
 ## Setting up your categories (parent-control)
 
 Onboarding ends with a **"Set up your categories"** step (right after you bind
