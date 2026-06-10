@@ -56,14 +56,17 @@ Foundation plumbing for the P-256 smart-account master ([plan](../plan/chain/erc
 
 ### Test / CI deploy (Heima mainnet — test deployer)
 
-The test stack deploys the **same four contracts** with the test deployer key (`0x051e…475e`), landing them at **different addresses** (distinct `(deployer, nonce)` derivation). It shares the prod AWS account but uses distinct IAM roles, S3 buckets, OIDC issuer, and `-test` DNS — a leaked test cred cannot reach prod data.
+The test stack deploys the **same four contracts** with the test deployer key (`0x051e…475e`), landing them at **different addresses** (distinct `(deployer, nonce)` derivation), **plus its own ERC-4337 set since #250 — a separate EntryPoint v0.7 + P256AccountFactory** (deployed by [`scripts/heima-deploy-erc4337.sh`](../../scripts/heima-deploy-erc4337.sh), invoked from `setup-heima.sh --ci` step 6; the test EC2 also runs its own `agentkeys-bundler`). Full per-env isolation: a test-stack compromise or mis-pointed bundler can never touch prod's EntryPoint deposits/nonces. It shares the prod AWS account but uses distinct IAM roles, S3 buckets, OIDC issuer, and `-test` DNS — a leaked test cred cannot reach prod data. The test addresses are recorded ONLY in [`scripts/operator-workstation.test.env`](../../scripts/operator-workstation.test.env) + the `TEST_*` GitHub secrets — **never in the chain profile** (it records the prod set; `heima-bring-up.sh` enforces this).
 
 - **Tier-1 CI** (the no-LLM gate from #66/#98) runs against an **ephemeral anvil** chain — fresh contracts per run, no persistent mainnet addresses.
 - **Tier-2 / persistent test deploy** addresses are pinned in [`scripts/operator-workstation.test.env`](../../scripts/operator-workstation.test.env) (`*_ADDRESS_HEIMA`). **The values there today are placeholders** — that file's own header says "replace with real test addresses post-deploy." Pin the real ones after a one-shot test deploy:
 
   ```bash
-  AGENTKEYS_CHAIN=heima HEIMA_DEPLOYER_KEY_FILE=~/.agentkeys/heima-deployer-test.key \
-    MAINNET_CONFIRM=1 bash scripts/setup-heima.sh --from-step 4 --to-step 8
+  # --ci selects operator-workstation.test.env AND auto-defaults the deployer
+  # key to ~/.agentkeys/heima-deployer-test.key. Add FORCE_DEPLOY=1 when
+  # refreshing over a live-but-outdated test set.
+  AGENTKEYS_CHAIN=heima MAINNET_CONFIRM=1 \
+    bash scripts/setup-heima.sh --ci --from-step 4 --to-step 8
   ```
 
 - The `P256Verifier` + `K11Verifier` are **shared pre-deployed** contracts — same address on prod and test (mirror the prod values above).

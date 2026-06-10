@@ -122,6 +122,28 @@ issue) are out of scope — they apply to eth too.
 - **On eth:** with a RIP-7212 precompile the verify is ~3.5k gas → `verificationGasLimit` can drop
   back to ~100–200k and `maxFee` tracks the target chain's base fee.
 
+### 8. Existential Deposit bricks low-balance EntryPoints → `AA91 failed send to beneficiary`
+
+- **Why:** Substrate's `pallet_balances` enforces an **ExistentialDeposit** (~0.1 HEI): an account
+  whose free balance drops below it is **reaped to 0**, and value sends out of (or leaving the
+  account below) the ED fail. The ERC-4337 EntryPoint holds every actor's deposit as its OWN native
+  balance and pays each op's gas compensation out of it — so a fresh EntryPoint whose total deposits
+  drain near the ED has its beneficiary payout fail **inside `handleOps`**, reverting the whole tx.
+- **Symptom (real 2026-06-10 incident, the fresh TEST EntryPoint):** every UserOp reverts with
+  outer `status 0` at ~820k gas (validation completes, payout fails); `eth_call` decodes
+  **`AA91 failed send to beneficiary`**; the account nonce does not advance. Worse: once below the
+  ED the EntryPoint's native account is REAPED — `cast balance` shows **0** while the internal
+  `deposits` mapping still shows the escrowed amounts. Prod never hit this only because its
+  EntryPoint balance is ~13 HEI across many deposits.
+- **Workaround:** keep a standing **native ED buffer** in every EntryPoint —
+  [`scripts/heima-deploy-erc4337.sh`](../../scripts/heima-deploy-erc4337.sh) ensures balance ≥
+  `ERC4337_EP_BUFFER_WEI` (default 1 HEI) on every run, sent via the EntryPoint's `receive()` (which
+  credits the **deployer's own withdrawable deposit** — nothing is burned). Note the recreation
+  quirk: topping up a reaped account can land ~the ED short of the sent value, so the top-up is
+  deficit-based with headroom.
+- **On eth:** no ED exists — drop the buffer (it stays harmless if kept; it is a withdrawable
+  deposit).
+
 ## Migration checklist (Heima → standard Ethereum / EVM L2)
 
 Lift each workaround in lock-step with the chain swap:
@@ -132,6 +154,8 @@ Lift each workaround in lock-step with the chain swap:
   on-chain re-checks become belt-and-braces; `cast send --json` is usable again.
 - [ ] **#3 deploys** — `forge create` works; the `cast send --create` deterministic-address path is
   still fine to keep.
+- [ ] **#8 ED buffer** — optional to remove (`ERC4337_EP_BUFFER_WEI=0`); the buffer is a
+  withdrawable deposit, not a cost.
 - [ ] **#4/#5 foundry.toml** — bump `evm_version` past `london` (header now valid; opcode level
   unchanged).
 - [ ] **#6 chain profile** — new `chain_id` / RPC / explorer; redeploy contracts; re-record the

@@ -1744,13 +1744,82 @@ pub fn software_webauthn_keygen(
     key_file: &str,
     rp_id: &str,
 ) -> Result<(String, String, String), WebauthnError> {
+    software_webauthn_keygen_with_derive(key_file, rp_id, None)
+}
+
+/// Deterministically derive a P-256 scalar from the bytes of `seed_file`
+/// (e.g. the deployer EVM key file) under a fixed domain-separation tag.
+/// Hash-to-scalar with a retry counter: candidate_i =
+/// SHA-256("agentkeys-software-passkey:v1:" || trimmed_file_bytes || ":" || i);
+/// the first candidate that is a valid non-zero scalar < n wins (rejection
+/// probability per round is ~2^-32 on P-256, so i=0 wins essentially always —
+/// the loop only makes the derivation total).
+///
+/// SECURITY: the derived passkey is exactly as strong as custody of the seed
+/// file — the intended trust model for CI (#250): the deployer key is already
+/// the CI trust anchor, and deriving from it lets an ephemeral runner
+/// re-create the SAME software passkey on every run (the P256Account master is
+/// bound to this pubkey at register time) without a second secret.
+fn derive_p256_signing_key_from_seed_file(
+    seed_file: &str,
+) -> Result<p256::ecdsa::SigningKey, WebauthnError> {
+    use p256::ecdsa::SigningKey;
+    let raw = fs::read(seed_file)
+        .map_err(|e| WebauthnError::Io(format!("derive-from {seed_file}: {e}")))?;
+    // Trim ASCII whitespace so `printf '%s\n' $KEY > file` and the no-newline
+    // variant derive identically (same wallet → same passkey).
+    let start = raw
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(0);
+    let end = raw
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let trimmed = &raw[start..end];
+    if trimmed.is_empty() {
+        return Err(WebauthnError::Io(format!(
+            "derive-from {seed_file}: file is empty"
+        )));
+    }
+    for counter in 0u8..=255 {
+        let mut hasher = Sha256::new();
+        hasher.update(b"agentkeys-software-passkey:v1:");
+        hasher.update(trimmed);
+        hasher.update(b":");
+        hasher.update([counter]);
+        let candidate = hasher.finalize();
+        if let Ok(sk) = SigningKey::from_slice(&candidate) {
+            return Ok(sk);
+        }
+    }
+    Err(WebauthnError::Io(
+        "derive-from: no valid P-256 scalar in 256 rounds".into(),
+    ))
+}
+
+/// Like [`software_webauthn_keygen`], but when the key file does NOT exist and
+/// `derive_from` is given, the new key is derived deterministically from the
+/// seed file instead of `OsRng` — same seed file → same passkey → same
+/// P256Account CREATE2 address on every (ephemeral CI) run. An EXISTING key
+/// file always wins (never overwritten, never re-derived), preserving masters
+/// registered under a random pre-#250 key.
+pub fn software_webauthn_keygen_with_derive(
+    key_file: &str,
+    rp_id: &str,
+    derive_from: Option<&str>,
+) -> Result<(String, String, String), WebauthnError> {
     use p256::ecdsa::SigningKey;
     use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
     let signing = if std::path::Path::new(key_file).exists() {
         let pem = fs::read_to_string(key_file).map_err(|e| WebauthnError::Io(e.to_string()))?;
         SigningKey::from_pkcs8_pem(&pem).map_err(|e| WebauthnError::Io(format!("load key: {e}")))?
     } else {
-        let sk = SigningKey::random(&mut rand_core::OsRng);
+        let sk = match derive_from {
+            Some(seed_file) => derive_p256_signing_key_from_seed_file(seed_file)?,
+            None => SigningKey::random(&mut rand_core::OsRng),
+        };
         if let Some(parent) = std::path::Path::new(key_file).parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).map_err(|e| WebauthnError::Io(e.to_string()))?;
@@ -1990,5 +2059,101 @@ mod tests {
             .expect("software passkey assertion must verify (mirror of K11Verifier)");
 
         let _ = fs::remove_file(&key);
+    }
+
+    // #250: deterministic software-passkey derivation from a seed file (the
+    // deployer EVM key). Ephemeral CI runners must re-create the SAME passkey
+    // on every run, or the registered P256Account master becomes unsignable.
+    #[test]
+    fn software_passkey_derive_from_is_deterministic_and_seed_separated() {
+        let dir = std::env::temp_dir();
+        let seed_a = dir.join("ak-derive-seed-a");
+        let seed_b = dir.join("ak-derive-seed-b");
+        // Raw-hex deployer-key shape; trailing newline on one write exercises trimming.
+        fs::write(&seed_a, format!("0x{}\n", "11".repeat(32))).unwrap();
+        fs::write(&seed_b, format!("0x{}", "22".repeat(32))).unwrap();
+
+        let kf1 = dir.join("ak-derive-kf1.key");
+        let kf2 = dir.join("ak-derive-kf2.key");
+        let kf3 = dir.join("ak-derive-kf3.key");
+        for f in [&kf1, &kf2, &kf3] {
+            let _ = fs::remove_file(f);
+        }
+
+        let seed_a_s = seed_a.to_string_lossy().to_string();
+        let seed_b_s = seed_b.to_string_lossy().to_string();
+        let (x1, y1, _) = software_webauthn_keygen_with_derive(
+            &kf1.to_string_lossy(),
+            "localhost",
+            Some(&seed_a_s),
+        )
+        .expect("derive 1");
+        // Fresh key file + same seed → identical pubkey (the CI re-run case).
+        let (x2, y2, _) = software_webauthn_keygen_with_derive(
+            &kf2.to_string_lossy(),
+            "localhost",
+            Some(&seed_a_s),
+        )
+        .expect("derive 2");
+        assert_eq!(
+            (&x1, &y1),
+            (&x2, &y2),
+            "same seed must derive the same passkey"
+        );
+
+        // Different seed → different passkey (domain separation across wallets).
+        let (x3, y3, _) = software_webauthn_keygen_with_derive(
+            &kf3.to_string_lossy(),
+            "localhost",
+            Some(&seed_b_s),
+        )
+        .expect("derive 3");
+        assert_ne!(
+            (&x1, &y1),
+            (&x3, &y3),
+            "different seed must derive a different passkey"
+        );
+
+        // Existing key file wins over derive_from (pre-#250 random keys preserved):
+        // re-keygen kf3 with seed_a — must STILL return kf3's (seed_b) pubkey.
+        let (x4, y4, _) = software_webauthn_keygen_with_derive(
+            &kf3.to_string_lossy(),
+            "localhost",
+            Some(&seed_a_s),
+        )
+        .expect("derive 4");
+        assert_eq!(
+            (&x3, &y3),
+            (&x4, &y4),
+            "existing key file must never be re-derived"
+        );
+
+        // Whitespace-trim invariance: seed content equal modulo trailing newline
+        // derives the same key as seed_a (kf1 was derived from "…\n").
+        let seed_a_nolf = dir.join("ak-derive-seed-a-nolf");
+        fs::write(&seed_a_nolf, format!("0x{}", "11".repeat(32))).unwrap();
+        let kf5 = dir.join("ak-derive-kf5.key");
+        let _ = fs::remove_file(&kf5);
+        let (x5, y5, _) = software_webauthn_keygen_with_derive(
+            &kf5.to_string_lossy(),
+            "localhost",
+            Some(seed_a_nolf.to_string_lossy().as_ref()),
+        )
+        .expect("derive 5");
+        assert_eq!(
+            (&x1, &y1),
+            (&x5, &y5),
+            "derivation must trim seed whitespace"
+        );
+
+        // The derived key signs a verifiable assertion (same math as the
+        // roundtrip test — guards against a derive path that writes a corrupt PEM).
+        let uoh = format!("0x{}", "cd".repeat(32));
+        software_webauthn_sign(&kf1.to_string_lossy(), &uoh, "localhost")
+            .expect("derived key must sign");
+
+        for f in [&kf1, &kf2, &kf3, &kf5, &seed_a, &seed_b, &seed_a_nolf] {
+            let _ = fs::remove_file(f);
+        }
     }
 }
