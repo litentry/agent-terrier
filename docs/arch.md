@@ -1885,7 +1885,7 @@ Codebase rule: any source file that takes a stage-1 shortcut **must** cite this 
 **What ships in stage 1**:
 - `agentkeys k11 enroll/assert` CLI subcommand defaults to a deterministic stub that produces the bytes `"stage1-k11-stub:" || sha256(label || omni || ":" || message)`. The on-chain `SidecarRegistry`/`AgentKeysScope` contracts gate on `k11Assertion.length != 0` only — they do NOT verify a P-256 signature, so the stub bytes satisfy the gate.
 - **Real WebAuthn ceremony available via `--webauthn`** — `agentkeys k11 enroll --webauthn` brings up a localhost axum server, opens the operator's default browser, and runs the platform-authenticator ceremony. On macOS this triggers the Touch ID prompt against the Secure Enclave-resident passkey; on Windows it triggers Windows Hello; on Linux it depends on the available authenticator. `agentkeys k11 assert --webauthn --message-hex 0x...` produces a real WebAuthn assertion cryptographically bound to the message via the WebAuthn challenge = `sha256(message)` trick.
-- The bash helpers (`heima-scope-set.sh`, `heima-device-register.sh`, etc.) still pass stub bytes for now — wiring them to the `--webauthn` flow is a stage-1.5 follow-up so the demo runs in CI / non-attested envs by default.
+- The bash helpers (`heima-scope-set.sh`, `heima-agent-create.sh`, etc.) still pass stub bytes for now — wiring them to the `--webauthn` flow is a stage-1.5 follow-up so the demo runs in CI / non-attested envs by default. (The master *register* no longer rides this path: every orchestrator registers via the #164 passkey-account ERC-4337 flow — `register_first_master` in `harness/scripts/_lib.sh` — where the passkey itself signs the UserOp.)
 
 **What stage 2 (#90) adds**:
 - On-chain P-256 verification via the EIP-7212 P-256 precompile (when Heima ships it; tracked at the Heima parachain level).
@@ -1985,7 +1985,7 @@ Known sites at HEAD:
 - `crates/agentkeys-worker-creds/src/state.rs` — `AGENTKEYS_WORKER_KEK_HEX` (§22b.2).
 - `crates/agentkeys-worker-memory/src/state.rs` — `AGENTKEYS_MEMORY_KEK_HEX` (§22b.2).
 - `crates/agentkeys-broker-server/src/handlers/cap.rs` — K10 cap-PoP **validated when present** (`verify_cap_pop`); the worker re-verifies + enforces presence under `AGENTKEYS_WORKER_REQUIRE_CAP_POP` (`verify::enforce_client_pop`). The shortcut is closed once that flag is flipped after the master-K10 rollout (§22b.4) — staged, not a permanent stage-1 omission.
-- `scripts/heima-device-register.sh` — empty attestation + empty K11 assertion on first call (§22b.1, §22b.3).
+- `scripts/heima-device-register.sh` — empty attestation + empty K11 assertion on first call (§22b.1, §22b.3). **DEPRECATED escape-only** (old-model EOA wrapper, no orchestrator callers): the supported register is the #164 passkey-account path (`register_first_master` → `harness/scripts/erc4337-register-master.sh`).
 - `scripts/heima-agent-create.sh` — empty K11 / link-code-redemption stubs (§22b.3).
 - `scripts/heima-scope-set.sh` — stub K11 assertion (§22b.1).
 
