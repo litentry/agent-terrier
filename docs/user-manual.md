@@ -121,7 +121,10 @@ private key**) at `~/.agentkeys/daemon-<wallet>/master-session.json`, owner-only
 with **no prompts**.
 
 If the session has expired since you last used it, you're asked for a **single**
-Touch ID re-authentication — not a full re-onboarding.
+Touch ID re-authentication — not a full re-onboarding. Your **agents survive
+restarts too**: the actor page rebuilds itself from the chain (the master plus
+every bound agent device; revoked ones excluded), so a daemon restart never
+shows an empty fleet that is actually still bound.
 
 **Signing out** (the logout button) drops the session but **remembers who you
 are**: your on-chain master binding and your passkey are untouched, so the login
@@ -133,9 +136,17 @@ is a fresh, separate account.
 
 The real forget-this-machine action is **reset master** (the reset button): it
 clears the saved identity AND the on-chain binding so a fresh passkey can
-re-onboard. After a reset, Touch ID sign-in is gone until you onboard again.
-(You no longer need the `--master-device-key-hash` developer flag for the normal
-web loop — the device is recovered from your account automatically.)
+re-onboard, **and it tears down your whole fleet** — every paired agent's
+on-chain device binding is revoked, every pending pairing request is declined,
+and the local agent list is cleared, so a re-onboarded master starts clean and
+re-pairing an old agent requires a fresh pairing ceremony. The confirm dialog
+states exactly how many agents and pending requests it will disconnect, and the
+result message spells out anything that could **not** be torn down remotely
+(e.g. the chain helper isn't configured) so a partially-disconnected fleet never
+reads as fully disconnected. After a reset, Touch ID sign-in is gone until you
+onboard again. (You no longer need the `--master-device-key-hash` developer flag
+for the normal web loop — the device is recovered from your account
+automatically.)
 
 ## Credentials (parent-control)
 
