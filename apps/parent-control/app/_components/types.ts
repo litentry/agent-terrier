@@ -27,6 +27,13 @@ export interface Actor {
   accountType?: string;
   children?: string[];
   scope?: Record<Namespace, ScopeBits>;
+  /** #248: on-chain scope service ids (keccak hex) that aren't a known
+   *  `memory:<ns>` (e.g. `cred:<service>` from the accept). The panel's
+   *  set-replace commit echoes these back so a memory toggle can't wipe them. */
+  scopeUnknownServiceIds?: string[];
+  /** On-chain SidecarRegistry device key hash — the Touch-ID unpair's target
+   *  (revokeAgentDevice must run as the master-account UserOp). */
+  deviceKeyHash?: string;
   paymentCap?: { perTx: number; daily: number; currency: string };
   timeWindow?: { start: string; end: string; tz: string };
   services?: string[];

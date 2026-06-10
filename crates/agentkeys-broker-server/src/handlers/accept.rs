@@ -33,10 +33,18 @@ pub struct BuildAcceptRequest {
     pub period_seconds: u32,
 }
 
-/// Parse the wire request into the typed register + scope-grant args. A scope
-/// `service` string becomes a `bytes32` via `keccak256(lowercase(service))` — the
-/// SAME hash `heima-scope-set.sh` writes, so a service id is byte-identical on every
-/// path (the terminology-source-of-truth rule, at the encoding level). The `u128`
+/// On-chain scope service ids: `keccak256(lowercase(service))` per service — the
+/// SAME hash `heima-scope-set.sh` writes, so a service id is byte-identical on
+/// every path (the terminology-source-of-truth rule, at the encoding level).
+/// Shared by the accept batch and the #248 scope-only re-grant.
+pub(crate) fn service_ids(services: &[String]) -> Vec<[u8; 32]> {
+    services
+        .iter()
+        .map(|s| agentkeys_core::device_crypto::keccak256(s.to_lowercase().as_bytes()))
+        .collect()
+}
+
+/// Parse the wire request into the typed register + scope-grant args. The `u128`
 /// caps ride as decimal strings (wire-safe past 2^53).
 pub fn parse_register_and_grant(
     req: &BuildAcceptRequest,
@@ -59,13 +67,8 @@ pub fn parse_register_and_grant(
         link_code_redemption: raw(&req.link_code_redemption, "link_code_redemption")?,
         agent_pop_sig: raw(&req.agent_pop_sig, "agent_pop_sig")?,
     };
-    let services: Vec<[u8; 32]> = req
-        .services
-        .iter()
-        .map(|s| agentkeys_core::device_crypto::keccak256(s.to_lowercase().as_bytes()))
-        .collect();
     let grant = ScopeGrant {
-        services,
+        services: service_ids(&req.services),
         read_only: req.read_only,
         max_per_call: cap(&req.max_per_call, "max_per_call")?,
         max_per_period: cap(&req.max_per_period, "max_per_period")?,
@@ -105,7 +108,7 @@ const DEF_MAX_PRIORITY_FEE: u128 = 1_000_000_000;
 const DEF_MAX_FEE: u128 = 40_000_000_000;
 const DEF_PAYMASTER_VERIFICATION_GAS: u128 = 200_000;
 const DEF_PAYMASTER_POST_OP_GAS: u128 = 50_000;
-const SPONSOR_WINDOW_SECS: u64 = 3600;
+pub(crate) const SPONSOR_WINDOW_SECS: u64 = 3600;
 
 /// Sponsor + chain config the build handler needs beyond the request, read from the
 /// broker process env (wired by setup-broker-host.sh). All addresses 20-byte.
@@ -355,11 +358,14 @@ pub(crate) fn load_chain_read_config() -> Result<(String, [u8; 20]), String> {
     Ok((rpc_url, registry))
 }
 
-fn aerr(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn aerr(
+    status: StatusCode,
+    msg: impl Into<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({ "error": msg.into() })))
 }
 
-fn norm_omni(s: &str) -> String {
+pub(crate) fn norm_omni(s: &str) -> String {
     s.trim().trim_start_matches("0x").to_lowercase()
 }
 
@@ -440,7 +446,7 @@ pub(crate) async fn call_operator_master_wallet(
 }
 
 /// `EntryPoint.getNonce(address sender, uint192 key=0) -> uint256`.
-async fn call_entrypoint_nonce(
+pub(crate) async fn call_entrypoint_nonce(
     http: &reqwest::Client,
     rpc: &str,
     entry_point: &[u8; 20],
@@ -463,7 +469,7 @@ async fn call_entrypoint_nonce(
     Ok(w)
 }
 
-fn bearer(headers: &HeaderMap) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

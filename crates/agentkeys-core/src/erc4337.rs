@@ -223,6 +223,45 @@ pub fn accept_batch_calldata(
     )
 }
 
+/// **The #248 sibling** — the scope-only re-grant as one `executeBatch` callData.
+///
+/// For an ALREADY-bound agent: a single-call batch over `[scope]` carrying just
+/// `setScope` (set-replace — `grant.services` is the FULL new list; empty
+/// revokes everything). Same master-UserOp posture as [`accept_batch_calldata`],
+/// minus the register — the device binding exists, only the grant changes.
+pub fn scope_batch_calldata(
+    scope: &[u8; 20],
+    operator_omni: &[u8; 32],
+    agent_omni: &[u8; 32],
+    grant: &ScopeGrant,
+) -> Vec<u8> {
+    let scope_cd = set_scope_calldata(operator_omni, agent_omni, grant);
+    execute_batch_calldata(&[*scope], &[0u128], &[scope_cd])
+}
+
+/// `revokeAgentDevice(bytes32)` calldata — the unpair.
+pub fn revoke_agent_device_calldata(device_key_hash: &[u8; 32]) -> Vec<u8> {
+    let sel = selector("revokeAgentDevice(bytes32)");
+    let mut out = Vec::with_capacity(4 + WORD);
+    out.extend_from_slice(&sel);
+    out.extend_from_slice(device_key_hash);
+    out
+}
+
+/// The unpair as one `executeBatch` callData: a single-call batch over
+/// `[registry]` carrying `revokeAgentDevice`. The registry enforces
+/// `msg.sender == operatorMasterWallet[device.operatorOmni]`, so this MUST run
+/// as the master `P256Account` UserOp (no EOA — incl. the deployer — can sign
+/// it; `NotAuthorized(caller, master)` otherwise, the real 2026-06-11 unpair
+/// incident).
+pub fn revoke_batch_calldata(registry: &[u8; 20], device_key_hash: &[u8; 32]) -> Vec<u8> {
+    execute_batch_calldata(
+        &[*registry],
+        &[0u128],
+        &[revoke_agent_device_calldata(device_key_hash)],
+    )
+}
+
 /// `abi.encode(bytes32 credIdHash, bytes authenticatorData, bytes clientDataJSON,
 /// uint256 challengeLocation, uint256 r, uint256 s)` — the **P256Account UserOp
 /// signature** (`P256Account.sol::validateUserOp`, identical to the byte spec the
@@ -704,6 +743,43 @@ mod tests {
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    #[test]
+    fn revoke_batch_is_a_single_call_batch_of_revoke_agent_device() {
+        // selector pinned via `cast sig "revokeAgentDevice(bytes32)"`.
+        let inner = revoke_agent_device_calldata(&b32(0x11));
+        assert_eq!(hex::encode(&inner[..4]), "b269f9fb");
+        assert_eq!(&inner[4..36], &b32(0x11));
+        assert_eq!(inner.len(), 36);
+
+        let batch = revoke_batch_calldata(&addr(0xa1), &b32(0x11));
+        assert_eq!(
+            batch,
+            execute_batch_calldata(&[addr(0xa1)], &[0u128], std::slice::from_ref(&inner))
+        );
+        assert_eq!(hex::encode(&batch[..4]), "47e1da2a"); // executeBatch
+        assert!(find_subslice(&batch[4..], &inner).is_some());
+    }
+
+    #[test]
+    fn scope_batch_is_a_single_call_batch_of_set_scope() {
+        // #248: the scope-only batch is executeBatch over [scope] with exactly the
+        // setScope callData — byte-identical to composing the encoders by hand, so
+        // a panel re-grant writes the SAME wire bytes as the accept's P.3 half.
+        let grant = sample_grant();
+        let scope_cd = set_scope_calldata(&b32(0x22), &b32(0x33), &grant);
+        let batch = scope_batch_calldata(&addr(0xa2), &b32(0x22), &b32(0x33), &grant);
+        assert_eq!(
+            batch,
+            execute_batch_calldata(&[addr(0xa2)], &[0u128], std::slice::from_ref(&scope_cd))
+        );
+        assert!(find_subslice(&batch, &scope_cd).is_some());
+        // executeBatch selector — the same entry the golden-tested accept batch uses.
+        assert_eq!(hex::encode(&batch[..4]), "47e1da2a");
+        // no registerAgentDevice inside (scope-only, the binding already exists).
+        let register_sel = selector("registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)");
+        assert!(find_subslice(&batch[4..], &register_sel).is_none());
     }
 
     #[test]

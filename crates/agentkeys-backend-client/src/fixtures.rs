@@ -18,9 +18,9 @@
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    AcceptAssertion, AuditAppendV2, BrokerCapRequest, BuildAcceptUserOpRequest, ConfigGetBody,
-    ConfigPutBody, MemoryGetBody, MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp,
-    ENVELOPE_VERSION,
+    AcceptAssertion, AuditAppendV2, BrokerCapRequest, BuildAcceptUserOpRequest,
+    BuildRevokeUserOpRequest, BuildScopeUserOpRequest, ConfigGetBody, ConfigPutBody, MemoryGetBody,
+    MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp, ENVELOPE_VERSION,
 };
 
 /// One canonical fixture: the on-disk file stem + the sample body.
@@ -107,6 +107,21 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
             credential_id: "<credential_id_b64url>".into(),
         },
     };
+    let build_scope = BuildScopeUserOpRequest {
+        operator_omni: "0x<operator_omni>".into(),
+        actor_omni: "0x<actor_omni>".into(),
+        services: vec!["memory:<namespace>".into()],
+        preserve_service_ids: vec!["0x<service_id_keccak32>".into()],
+        read_only: true,
+        max_per_call: "0".into(),
+        max_per_period: "0".into(),
+        max_total: "0".into(),
+        period_seconds: 0,
+    };
+    let build_revoke = BuildRevokeUserOpRequest {
+        operator_omni: "0x<operator_omni>".into(),
+        device_key_hash: "0x<device_key_hash>".into(),
+    };
     vec![
         Fixture {
             name: "cap_mint_request",
@@ -143,6 +158,14 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         Fixture {
             name: "submit_accept_userop_request",
             body: serde_json::to_value(&submit_accept).expect("submit_accept serializes"),
+        },
+        Fixture {
+            name: "build_scope_userop_request",
+            body: serde_json::to_value(&build_scope).expect("build_scope serializes"),
+        },
+        Fixture {
+            name: "build_revoke_userop_request",
+            body: serde_json::to_value(&build_revoke).expect("build_revoke serializes"),
         },
     ]
 }
@@ -274,6 +297,32 @@ mod tests {
         assert_eq!(
             keys_of("submit_accept_userop_request"),
             vec!["assertion", "user_op"]
+        );
+    }
+
+    #[test]
+    fn build_scope_userop_request_keys_frozen() {
+        assert_eq!(
+            keys_of("build_scope_userop_request"),
+            vec![
+                "actor_omni",
+                "max_per_call",
+                "max_per_period",
+                "max_total",
+                "operator_omni",
+                "period_seconds",
+                "preserve_service_ids",
+                "read_only",
+                "services",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_revoke_userop_request_keys_frozen() {
+        assert_eq!(
+            keys_of("build_revoke_userop_request"),
+            vec!["device_key_hash", "operator_omni"]
         );
     }
 }

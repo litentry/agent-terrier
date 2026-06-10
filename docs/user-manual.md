@@ -148,6 +148,53 @@ onboard again. (You no longer need the `--master-device-key-hash` developer flag
 for the normal web loop — the device is recovered from your account
 automatically.)
 
+## Pairing an agent + granting its permissions (parent-control)
+
+When you accept a pairing, the request card shows a **grant permissions picker**:
+every namespace the agent asked for comes **preselected** (an agent that asked
+for "memory" generally preselects all of your namespaces), and you can check or
+uncheck before approving. The single **accept · Touch ID** then performs BOTH
+acts on chain in one block — the device binding *and* exactly the scope grants
+you selected. The permissions panel reflects the real on-chain grant immediately
+afterwards; there is no separate "now open permissions" step. Unchecking
+everything is allowed but never silent: the app asks you to explicitly confirm a
+zero-grant bind (the agent would be denied everywhere until you grant later).
+
+To change a bound agent's permissions later, open its actor page: the memory
+toggles **stage** your changes (nothing happens on chain yet), then a
+**commit · Touch ID** bar lands them as one on-chain `setScope`. Two things to
+know about that commit:
+
+- The on-chain grant carries a **single read-only bit for the whole set** — if
+  any staged namespace is read+write, the committed grant is read+write for
+  every granted namespace. The staged bar tells you which it will be before you
+  Touch ID.
+- The commit **replaces** the grant set on chain, but the app preserves grants
+  it can't show in the memory list (e.g. an agent's `cred:<service>` from
+  pairing) — toggling memory namespaces never silently revokes credentials.
+
+Discarding the staged bar (or navigating away) leaves the chain untouched. If
+the panel ever shows DENY everywhere, that *is* the real on-chain state — use
+the toggles + commit to re-grant.
+
+**Unpairing an agent also prompts Touch ID.** The registry only accepts the
+revoke from your master account itself, so "unpair · revoke on-chain" (or
+"revoke device" on the actor page) builds the revoke, asks for one Touch ID,
+submits it, and marks the agent revoked only after re-reading the registry —
+if the prompt is cancelled, the device stays bound and nothing changes.
+
+## Dev stack: a red "Failed to connect to MetaMask" overlay (harmless)
+
+If you run the dev stack (`dev.sh`) with the MetaMask extension installed, the
+first page load can show a red Next.js error overlay: *"Failed to connect to
+MetaMask"* with a `chrome-extension://…/inpage.js` call stack. That error is
+MetaMask's own injected script failing to wake its service worker — AgentKeys
+never uses MetaMask or `window.ethereum` (identity is your passkey). The dev
+overlay simply surfaces *every* unhandled rejection on the page, including
+extension ones; production builds have no overlay. Dismiss it (✕) or set
+MetaMask's site access to "On click" for localhost. It typically doesn't
+reappear on refresh, and nothing in the app is affected.
+
 ## Credentials (parent-control)
 
 The **credentials** page is the same data-class abstraction as memory: it lists
