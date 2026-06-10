@@ -561,6 +561,11 @@ enum K11Action {
         key_file: String,
         #[arg(long, default_value = "localhost", help = "WebAuthn RP ID")]
         rp_id: String,
+        #[arg(
+            long = "derive-from",
+            help = "Derive the new key DETERMINISTICALLY from this seed file's bytes (e.g. the deployer EVM key file) instead of OsRng — same seed → same passkey → same P256Account address, so an ephemeral CI runner can re-create the registered master passkey on every run (#250). Only used when --key-file does not exist yet (an existing key file always wins). The derived passkey is exactly as strong as custody of the seed file."
+        )]
+        derive_from: Option<String>,
     },
     #[command(
         name = "software-sign",
@@ -950,9 +955,17 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
         );
     }
     match action {
-        K11Action::SoftwareKeygen { key_file, rp_id } => {
-            let (x, y, h) = agentkeys_cli::k11_webauthn::software_webauthn_keygen(key_file, rp_id)
-                .map_err(|e| anyhow::anyhow!("software-keygen: {e}"))?;
+        K11Action::SoftwareKeygen {
+            key_file,
+            rp_id,
+            derive_from,
+        } => {
+            let (x, y, h) = agentkeys_cli::k11_webauthn::software_webauthn_keygen_with_derive(
+                key_file,
+                rp_id,
+                derive_from.as_deref(),
+            )
+            .map_err(|e| anyhow::anyhow!("software-keygen: {e}"))?;
             return Ok(format!("PUBX=0x{x}\nPUBY=0x{y}\nRPIDHASH=0x{h}"));
         }
         K11Action::SoftwareSign {
