@@ -1,0 +1,30 @@
+[package]
+name = "agentkeys-bundler"
+version = "0.1.0"
+edition = "2021"
+description = "Thin in-house ERC-4337 v0.7 bundler (#230) — eth_sendUserOperation → signed legacy handleOps tx, Heima-robust"
+
+[[bin]]
+name = "agentkeys-bundler"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_bundler"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-core = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+k256 = { version = "0.13", features = ["ecdsa", "sha2"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

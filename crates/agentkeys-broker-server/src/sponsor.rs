@@ -16,104 +16,15 @@
 //! ERC-4337 v0.7 `PackedUserOperation` — see
 //! `crates/agentkeys-chain/src/IERC4337.sol` + `VerifyingPaymaster.sol`.
 
-use agentkeys_core::device_crypto::{eip191_sign, keccak256};
 use anyhow::{anyhow, Result};
 use k256::ecdsa::SigningKey;
 
-/// v0.7 `PackedUserOperation`. Fixed-word fields are stored as raw big-endian
-/// bytes so the ABI encoding is unambiguous (uint256 → 32-byte word; the address
-/// → 20 bytes; the packed gas pairs → their on-chain 32-byte form).
-#[derive(Clone, Debug)]
-pub struct PackedUserOp {
-    pub sender: [u8; 20],
-    pub nonce: [u8; 32],
-    pub init_code: Vec<u8>,
-    pub call_data: Vec<u8>,
-    /// verificationGasLimit(16) ‖ callGasLimit(16)
-    pub account_gas_limits: [u8; 32],
-    pub pre_verification_gas: [u8; 32],
-    /// maxPriorityFeePerGas(16) ‖ maxFeePerGas(16)
-    pub gas_fees: [u8; 32],
-    pub paymaster_and_data: Vec<u8>,
-    pub signature: Vec<u8>,
-}
-
-/// Left-pad a 20-byte address into a 32-byte ABI word.
-fn addr_word(a: &[u8; 20]) -> [u8; 32] {
-    let mut w = [0u8; 32];
-    w[12..].copy_from_slice(a);
-    w
-}
-
-/// A `u64` as a 32-byte ABI word (covers chainId + the uint48 validity fields).
-fn u64_word(n: u64) -> [u8; 32] {
-    let mut w = [0u8; 32];
-    w[24..].copy_from_slice(&n.to_be_bytes());
-    w
-}
-
-impl PackedUserOp {
-    /// `userOpHash` per EntryPoint v0.7:
-    /// `keccak( keccak(abi.encode(packed)) ‖ entryPoint ‖ chainId )`.
-    /// `paymaster_and_data` MUST already carry the broker sponsorship signature
-    /// (the account signs over the complete op).
-    pub fn user_op_hash(&self, entry_point: &[u8; 20], chain_id: u64) -> [u8; 32] {
-        let mut packed = Vec::with_capacity(8 * 32);
-        packed.extend_from_slice(&addr_word(&self.sender));
-        packed.extend_from_slice(&self.nonce);
-        packed.extend_from_slice(&keccak256(&self.init_code));
-        packed.extend_from_slice(&keccak256(&self.call_data));
-        packed.extend_from_slice(&self.account_gas_limits);
-        packed.extend_from_slice(&self.pre_verification_gas);
-        packed.extend_from_slice(&self.gas_fees);
-        packed.extend_from_slice(&keccak256(&self.paymaster_and_data));
-        let inner = keccak256(&packed);
-
-        let mut outer = Vec::with_capacity(3 * 32);
-        outer.extend_from_slice(&inner);
-        outer.extend_from_slice(&addr_word(entry_point));
-        outer.extend_from_slice(&u64_word(chain_id));
-        keccak256(&outer)
-    }
-
-    /// `paymasterAndData[20:52]` (the gas limits the broker approved), or zero
-    /// when shorter — matches `VerifyingPaymaster.getHash`'s guard.
-    fn paymaster_gas_word(&self) -> [u8; 32] {
-        let mut w = [0u8; 32];
-        if self.paymaster_and_data.len() >= 52 {
-            w.copy_from_slice(&self.paymaster_and_data[20..52]);
-        }
-        w
-    }
-
-    /// `VerifyingPaymaster.getHash(userOp, validUntil, validAfter)` — the digest
-    /// the broker EIP-191-signs. Excludes the paymaster signature (no circularity)
-    /// but binds every other field + chainId + paymaster + brokerSigner + window.
-    pub fn paymaster_get_hash(
-        &self,
-        valid_until: u64,
-        valid_after: u64,
-        paymaster: &[u8; 20],
-        broker_signer: &[u8; 20],
-        chain_id: u64,
-    ) -> [u8; 32] {
-        let mut e = Vec::with_capacity(13 * 32);
-        e.extend_from_slice(&addr_word(&self.sender));
-        e.extend_from_slice(&self.nonce);
-        e.extend_from_slice(&keccak256(&self.init_code));
-        e.extend_from_slice(&keccak256(&self.call_data));
-        e.extend_from_slice(&self.account_gas_limits);
-        e.extend_from_slice(&self.pre_verification_gas);
-        e.extend_from_slice(&self.gas_fees);
-        e.extend_from_slice(&self.paymaster_gas_word());
-        e.extend_from_slice(&u64_word(chain_id));
-        e.extend_from_slice(&addr_word(paymaster));
-        e.extend_from_slice(&addr_word(broker_signer));
-        e.extend_from_slice(&u64_word(valid_until));
-        e.extend_from_slice(&u64_word(valid_after));
-        keccak256(&e)
-    }
-}
+// The packed-op shape, `userOpHash`, `paymaster_get_hash`, the gas-pair packing,
+// and the `handleOps` calldata moved to `agentkeys_core::erc4337` (#230) so the
+// broker and the in-house bundler (`agentkeys-bundler`) share one owner.
+// Re-exported so existing `crate::sponsor::*` paths keep compiling.
+use agentkeys_core::device_crypto::eip191_sign;
+pub use agentkeys_core::erc4337::{pack_u128_pair, unpack_u128_pair, PackedUserOp};
 
 /// Broker EIP-191 co-sign over the paymaster `getHash` → 65-byte `r‖s‖v` hex.
 /// `VerifyingPaymaster._recover(_ethSignedHash(getHash), sig)` recovers
@@ -148,20 +59,17 @@ pub fn assemble_paymaster_and_data(
     Ok(out)
 }
 
-/// Pack `(verificationGasLimit, callGasLimit)` into the on-chain
-/// `accountGasLimits` word (each 16 bytes, hi ‖ lo). Also used for `gasFees`.
-pub fn pack_u128_pair(hi: u128, lo: u128) -> [u8; 32] {
-    let mut w = [0u8; 32];
-    w[..16].copy_from_slice(&hi.to_be_bytes());
-    w[16..].copy_from_slice(&lo.to_be_bytes());
-    w
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use agentkeys_core::device_crypto::{ecrecover_eip191, evm_address};
     use k256::ecdsa::VerifyingKey;
+
+    fn u64_word(n: u64) -> [u8; 32] {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&n.to_be_bytes());
+        w
+    }
 
     fn sample_op() -> PackedUserOp {
         PackedUserOp {
@@ -181,32 +89,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn word_helpers_left_pad() {
-        let a = addr_word(&[0xab; 20]);
-        assert_eq!(&a[..12], &[0u8; 12]);
-        assert_eq!(&a[12..], &[0xab; 20]);
-        assert_eq!(u64_word(0x010203)[24..], [0, 0, 0, 0, 0, 0x01, 0x02, 0x03]);
-    }
-
-    #[test]
-    fn pack_pair_is_hi_lo() {
-        let w = pack_u128_pair(1, 2);
-        assert_eq!(w[15], 1); // hi's last byte
-        assert_eq!(w[31], 2); // lo's last byte
-    }
-
-    #[test]
-    fn user_op_hash_is_deterministic_and_paymaster_sensitive() {
-        let ep = [0x66; 20];
-        let mut op = sample_op();
-        let h1 = op.user_op_hash(&ep, 212_013);
-        assert_eq!(h1, op.user_op_hash(&ep, 212_013));
-        // Changing chainId or any field changes the hash.
-        assert_ne!(h1, op.user_op_hash(&ep, 1));
-        op.paymaster_and_data = vec![0u8; 80];
-        assert_ne!(h1, op.user_op_hash(&ep, 212_013));
-    }
+    // (word-helper + userOpHash unit tests moved to agentkeys-core::erc4337 with
+    // the PackedUserOp itself, #230.)
 
     // The load-bearing property: the broker co-sign recovers to brokerSigner under
     // the SAME EIP-191(getHash) envelope the VerifyingPaymaster checks on-chain.

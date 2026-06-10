@@ -200,7 +200,7 @@ flowchart TB
 
 Pinned to disambiguate the same value showing up under different labels across components. **Use the canonical column** in every new doc, runbook, CLI output, and commit message; the alias column lists every spelling that exists today so a reader chasing one of them can find their way back. Per `CLAUDE.md` → "Terminology-source-of-truth rule", if you introduce a name not in this table, either add the alias row here or rename the call site to match the canonical name in the same change.
 
-> **Deployed addresses** for every contract named here (per chain — Heima mainnet v2 set, the ERC-4337 master infra #164, historical v1) plus the prod/test EVM deployer wallets live in [`spec/deployed-contracts.md`](spec/deployed-contracts.md), the canonical address registry. Mirrored to `scripts/operator-workstation.env` for tooling.
+> **Deployed addresses** for every contract named here (per chain — Heima mainnet v2 set, the ERC-4337 master infra #164, historical v1) plus the prod/test EVM deployer wallets live in [`spec/deployed-contracts.md`](spec/deployed-contracts.md), the canonical address registry. Mirrored to `scripts/operator-workstation.env` for tooling. The operator-facing **wallet/contract/funding map** (key custody tiers, prod-vs-test sets side by side, the funding-flow diagram, "which wallet do I fund") is [`chain-setup.md` §Wallets](chain-setup.md#wallets-contracts--funding-map-prod--test).
 
 | Canonical name | Identity | Aliases seen in the codebase / docs |
 |---|---|---|
@@ -2193,6 +2193,9 @@ agentkeys/                                  # repo root
 │   │                                       #   actor_omni helper
 │   ├── agentkeys-broker-server/            # K1/K2 cap-mint authority; auth ceremonies;
 │   │                                       #   chain reader; SSE drop events
+│   ├── agentkeys-bundler/                  # thin in-house ERC-4337 v0.7 bundler (#230)
+│   │                                       #   — eth_sendUserOperation → signed legacy
+│   │                                       #   handleOps tx; loopback-only, broker-fed
 │   ├── agentkeys-signer/                   # TEE-attested signer binary (replaces
 │   │                                       #   dev_key_service from pre-v2);
 │   │                                       #   typed RPC over mTLS
@@ -2239,7 +2242,8 @@ agentkeys/                                  # repo root
 |---|---|
 | `agentkeys-types` | Shared types — `Session`, `WalletAddress`, `Scope`, `ActorOmni`, audit + provision events |
 | `agentkeys-core` | The library: `CredentialBackend` trait (now backed by sidecar), `SignerClient`, `SidecarClient`, `init_flow`, `session_store`, `actor_omni` helper |
-| `agentkeys-broker-server` | Broker: `/v1/auth/*`, `/v1/cap/*`, `/v1/mint-oidc-jwt`, `/v1/sse/*`, `/.well-known/*` |
+| `agentkeys-broker-server` | Broker: `/v1/auth/*`, `/v1/cap/*`, `/v1/accept/*`, `/v1/mint-oidc-jwt`, `/v1/sse/*`, `/.well-known/*` |
+| `agentkeys-bundler` | Thin in-house ERC-4337 v0.7 bundler (#230): the broker relays signed accept UserOps to it via the standard `eth_sendUserOperation`; it owns the submitter EOA, nonce, gas (pinned — Heima can't estimate `handleOps`), and the `EntryPoint.handleOps` broadcast as a raw-signed legacy tx. PRIVATE (loopback `:9098`, broker-fed, `--unsafe`-equivalent — Heima has no `debug` namespace for ERC-7562 validation). Swappable behind `AGENTKEYS_BUNDLER_URL` for a stock/3rd-party bundler with no broker change. On a host without sponsorship provisioning (no submitter key / no EntryPoint in env — e.g. the CI test stack) it boots DEGRADED, mirroring the broker's unsponsored degradation: `/healthz` 200 + `ready:false`, RPC answers an actionable not-configured error; malformed values still fail fast. |
 | `agentkeys-signer` | TEE-attested signer: `/derive-address`, `/derive-cred-kek`, `/sts-credentials`, `/sign/*`, `/verify/*` |
 | `agentkeys-worker-{creds,memory,audit,email,payment}` | Per-data-class workers per §15 |
 | `agentkeys-cli` | The `agentkeys` binary — `init`, `agent claim`, `scope`, `device`, `recovery`, `whoami`, `signer ...` |

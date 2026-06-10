@@ -254,6 +254,369 @@ pub fn encode_webauthn_signature(
     out
 }
 
+// ─── v0.7 PackedUserOperation + EntryPoint envelope (#230) ───────────────────
+//
+// Moved here from `agentkeys-broker-server::sponsor` so the broker AND the
+// in-house bundler (`agentkeys-bundler`) share ONE owner of the packed shape,
+// the `userOpHash`, and the `handleOps` calldata — the same single-owner
+// discipline as the rest of this module (issue #203 applied to the 4337 layer).
+
+/// A `u64` as a 32-byte ABI word (covers chainId + the uint48 validity fields).
+fn u64_word(n: u64) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[24..].copy_from_slice(&n.to_be_bytes());
+    w
+}
+
+/// Pack `(verificationGasLimit, callGasLimit)` into the on-chain
+/// `accountGasLimits` word (each 16 bytes, hi ‖ lo). Also used for `gasFees`
+/// (`maxPriorityFeePerGas ‖ maxFeePerGas`).
+pub fn pack_u128_pair(hi: u128, lo: u128) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[..16].copy_from_slice(&hi.to_be_bytes());
+    w[16..].copy_from_slice(&lo.to_be_bytes());
+    w
+}
+
+/// Split a packed `hi(16) ‖ lo(16)` word back into its two u128 halves —
+/// the inverse of [`pack_u128_pair`] (the bundler/broker RPC boundary uses
+/// the standard *unpacked* v0.7 JSON fields).
+pub fn unpack_u128_pair(w: &[u8; 32]) -> (u128, u128) {
+    let hi = u128::from_be_bytes(w[..16].try_into().expect("16 bytes"));
+    let lo = u128::from_be_bytes(w[16..].try_into().expect("16 bytes"));
+    (hi, lo)
+}
+
+/// v0.7 `PackedUserOperation`. Fixed-word fields are stored as raw big-endian
+/// bytes so the ABI encoding is unambiguous (uint256 → 32-byte word; the address
+/// → 20 bytes; the packed gas pairs → their on-chain 32-byte form).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedUserOp {
+    pub sender: [u8; 20],
+    pub nonce: [u8; 32],
+    pub init_code: Vec<u8>,
+    pub call_data: Vec<u8>,
+    /// verificationGasLimit(16) ‖ callGasLimit(16)
+    pub account_gas_limits: [u8; 32],
+    pub pre_verification_gas: [u8; 32],
+    /// maxPriorityFeePerGas(16) ‖ maxFeePerGas(16)
+    pub gas_fees: [u8; 32],
+    pub paymaster_and_data: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+impl PackedUserOp {
+    /// `userOpHash` per EntryPoint v0.7:
+    /// `keccak( keccak(abi.encode(packed)) ‖ entryPoint ‖ chainId )`.
+    /// `paymaster_and_data` MUST already carry the broker sponsorship signature
+    /// (the account signs over the complete op).
+    pub fn user_op_hash(&self, entry_point: &[u8; 20], chain_id: u64) -> [u8; 32] {
+        let mut packed = Vec::with_capacity(8 * 32);
+        packed.extend_from_slice(&addr_word(&self.sender));
+        packed.extend_from_slice(&self.nonce);
+        packed.extend_from_slice(&keccak256(&self.init_code));
+        packed.extend_from_slice(&keccak256(&self.call_data));
+        packed.extend_from_slice(&self.account_gas_limits);
+        packed.extend_from_slice(&self.pre_verification_gas);
+        packed.extend_from_slice(&self.gas_fees);
+        packed.extend_from_slice(&keccak256(&self.paymaster_and_data));
+        let inner = keccak256(&packed);
+
+        let mut outer = Vec::with_capacity(3 * 32);
+        outer.extend_from_slice(&inner);
+        outer.extend_from_slice(&addr_word(entry_point));
+        outer.extend_from_slice(&u64_word(chain_id));
+        keccak256(&outer)
+    }
+
+    /// `paymasterAndData[20:52]` (the gas limits the broker approved), or zero
+    /// when shorter — matches `VerifyingPaymaster.getHash`'s guard.
+    fn paymaster_gas_word(&self) -> [u8; 32] {
+        let mut w = [0u8; 32];
+        if self.paymaster_and_data.len() >= 52 {
+            w.copy_from_slice(&self.paymaster_and_data[20..52]);
+        }
+        w
+    }
+
+    /// `VerifyingPaymaster.getHash(userOp, validUntil, validAfter)` — the digest
+    /// the broker EIP-191-signs. Excludes the paymaster signature (no circularity)
+    /// but binds every other field + chainId + paymaster + brokerSigner + window.
+    pub fn paymaster_get_hash(
+        &self,
+        valid_until: u64,
+        valid_after: u64,
+        paymaster: &[u8; 20],
+        broker_signer: &[u8; 20],
+        chain_id: u64,
+    ) -> [u8; 32] {
+        let mut e = Vec::with_capacity(13 * 32);
+        e.extend_from_slice(&addr_word(&self.sender));
+        e.extend_from_slice(&self.nonce);
+        e.extend_from_slice(&keccak256(&self.init_code));
+        e.extend_from_slice(&keccak256(&self.call_data));
+        e.extend_from_slice(&self.account_gas_limits);
+        e.extend_from_slice(&self.pre_verification_gas);
+        e.extend_from_slice(&self.gas_fees);
+        e.extend_from_slice(&self.paymaster_gas_word());
+        e.extend_from_slice(&u64_word(chain_id));
+        e.extend_from_slice(&addr_word(paymaster));
+        e.extend_from_slice(&addr_word(broker_signer));
+        e.extend_from_slice(&u64_word(valid_until));
+        e.extend_from_slice(&u64_word(valid_after));
+        keccak256(&e)
+    }
+
+    /// ABI-encode this op as one element of the `PackedUserOperation[]` array —
+    /// a dynamic tuple: 9-word head (offsets relative to the struct start) +
+    /// the four `bytes` tails in field order.
+    fn abi_encode_struct(&self) -> Vec<u8> {
+        let enc_init = enc_bytes(&self.init_code);
+        let enc_call = enc_bytes(&self.call_data);
+        let enc_pmd = enc_bytes(&self.paymaster_and_data);
+        let enc_sig = enc_bytes(&self.signature);
+
+        let head = 9 * WORD;
+        let off_init = head;
+        let off_call = off_init + enc_init.len();
+        let off_pmd = off_call + enc_call.len();
+        let off_sig = off_pmd + enc_pmd.len();
+
+        let mut out = Vec::with_capacity(off_sig + enc_sig.len());
+        out.extend_from_slice(&addr_word(&self.sender));
+        out.extend_from_slice(&self.nonce);
+        out.extend_from_slice(&word_u128(off_init as u128));
+        out.extend_from_slice(&word_u128(off_call as u128));
+        out.extend_from_slice(&self.account_gas_limits);
+        out.extend_from_slice(&self.pre_verification_gas);
+        out.extend_from_slice(&self.gas_fees);
+        out.extend_from_slice(&word_u128(off_pmd as u128));
+        out.extend_from_slice(&word_u128(off_sig as u128));
+        out.extend_from_slice(&enc_init);
+        out.extend_from_slice(&enc_call);
+        out.extend_from_slice(&enc_pmd);
+        out.extend_from_slice(&enc_sig);
+        out
+    }
+}
+
+// ─── standard v0.7 `eth_sendUserOperation` wire shape (#230) ────────────────
+//
+// The broker→bundler boundary speaks the CANONICAL unpacked v0.7 JSON userOp
+// (what eth-infinitism / rundler / Pimlico accept), so swapping the in-house
+// bundler for a third-party one needs no broker code change. One owner here;
+// the broker serializes, the bundler deserializes.
+
+/// Hex quantity (`0x`-minimal) from a u128 — eth JSON-RPC quantity style.
+fn qty(n: u128) -> String {
+    format!("0x{n:x}")
+}
+
+fn parse_qty(s: &str, name: &str) -> Result<u128, String> {
+    let t = s.trim().trim_start_matches("0x");
+    if t.is_empty() {
+        return Ok(0);
+    }
+    u128::from_str_radix(t, 16).map_err(|e| format!("{name}: {e}"))
+}
+
+fn parse_hex(s: &str, name: &str) -> Result<Vec<u8>, String> {
+    let t = s.trim().trim_start_matches("0x");
+    let padded = if t.len() % 2 == 1 {
+        format!("0{t}")
+    } else {
+        t.to_string()
+    };
+    hex::decode(&padded).map_err(|e| format!("{name} hex: {e}"))
+}
+
+fn parse_addr(s: &str, name: &str) -> Result<[u8; 20], String> {
+    parse_hex(s, name)?
+        .try_into()
+        .map_err(|_| format!("{name} must be a 20-byte address"))
+}
+
+/// The standard ERC-4337 v0.7 JSON userOp (unpacked fields, camelCase) as sent
+/// to `eth_sendUserOperation`. Quantities are `0x`-hex strings; optional
+/// factory/paymaster groups are omitted when absent.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcUserOp {
+    pub sender: String,
+    pub nonce: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factory_data: Option<String>,
+    pub call_data: String,
+    pub call_gas_limit: String,
+    pub verification_gas_limit: String,
+    pub pre_verification_gas: String,
+    pub max_fee_per_gas: String,
+    pub max_priority_fee_per_gas: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paymaster: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paymaster_verification_gas_limit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paymaster_post_op_gas_limit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paymaster_data: Option<String>,
+    pub signature: String,
+}
+
+impl RpcUserOp {
+    /// Unpack a [`PackedUserOp`] into the standard RPC shape (broker side).
+    pub fn from_packed(op: &PackedUserOp) -> Self {
+        let (verification_gas, call_gas) = unpack_u128_pair(&op.account_gas_limits);
+        let (max_priority_fee, max_fee) = unpack_u128_pair(&op.gas_fees);
+        let pvg = {
+            let (hi, lo) = unpack_u128_pair(&op.pre_verification_gas);
+            debug_assert_eq!(hi, 0, "preVerificationGas over u128 is unrealistic");
+            lo
+        };
+        let (factory, factory_data) = if op.init_code.len() >= 20 {
+            (
+                Some(format!("0x{}", hex::encode(&op.init_code[..20]))),
+                Some(format!("0x{}", hex::encode(&op.init_code[20..]))),
+            )
+        } else {
+            (None, None)
+        };
+        let (paymaster, pm_vgl, pm_pogl, pm_data) = if op.paymaster_and_data.len() >= 52 {
+            let p = &op.paymaster_and_data;
+            let vgl = u128::from_be_bytes(p[20..36].try_into().expect("16 bytes"));
+            let pogl = u128::from_be_bytes(p[36..52].try_into().expect("16 bytes"));
+            (
+                Some(format!("0x{}", hex::encode(&p[..20]))),
+                Some(qty(vgl)),
+                Some(qty(pogl)),
+                Some(format!("0x{}", hex::encode(&p[52..]))),
+            )
+        } else {
+            (None, None, None, None)
+        };
+        let (nonce_hi, nonce_lo) = unpack_u128_pair(&op.nonce);
+        let nonce = if nonce_hi == 0 {
+            qty(nonce_lo)
+        } else {
+            format!("0x{}", hex::encode(op.nonce))
+        };
+        Self {
+            sender: format!("0x{}", hex::encode(op.sender)),
+            nonce,
+            factory,
+            factory_data,
+            call_data: format!("0x{}", hex::encode(&op.call_data)),
+            call_gas_limit: qty(call_gas),
+            verification_gas_limit: qty(verification_gas),
+            pre_verification_gas: qty(pvg),
+            max_fee_per_gas: qty(max_fee),
+            max_priority_fee_per_gas: qty(max_priority_fee),
+            paymaster,
+            paymaster_verification_gas_limit: pm_vgl,
+            paymaster_post_op_gas_limit: pm_pogl,
+            paymaster_data: pm_data,
+            signature: format!("0x{}", hex::encode(&op.signature)),
+        }
+    }
+
+    /// Re-pack the standard RPC shape into the on-chain [`PackedUserOp`]
+    /// (bundler side). Lossless inverse of [`Self::from_packed`].
+    pub fn to_packed(&self) -> Result<PackedUserOp, String> {
+        let nonce: [u8; 32] = {
+            let raw = parse_hex(&self.nonce, "nonce")?;
+            if raw.len() > 32 {
+                return Err("nonce over 32 bytes".into());
+            }
+            let mut w = [0u8; 32];
+            w[32 - raw.len()..].copy_from_slice(&raw);
+            w
+        };
+        let init_code = match (&self.factory, &self.factory_data) {
+            (Some(f), fd) => {
+                let mut v = parse_addr(f, "factory")?.to_vec();
+                if let Some(fd) = fd {
+                    v.extend_from_slice(&parse_hex(fd, "factoryData")?);
+                }
+                v
+            }
+            (None, _) => Vec::new(),
+        };
+        let paymaster_and_data = match &self.paymaster {
+            Some(p) => {
+                let mut v = parse_addr(p, "paymaster")?.to_vec();
+                let vgl = parse_qty(
+                    self.paymaster_verification_gas_limit
+                        .as_deref()
+                        .unwrap_or("0x0"),
+                    "paymasterVerificationGasLimit",
+                )?;
+                let pogl = parse_qty(
+                    self.paymaster_post_op_gas_limit.as_deref().unwrap_or("0x0"),
+                    "paymasterPostOpGasLimit",
+                )?;
+                v.extend_from_slice(&vgl.to_be_bytes());
+                v.extend_from_slice(&pogl.to_be_bytes());
+                if let Some(pd) = &self.paymaster_data {
+                    v.extend_from_slice(&parse_hex(pd, "paymasterData")?);
+                }
+                v
+            }
+            None => Vec::new(),
+        };
+        Ok(PackedUserOp {
+            sender: parse_addr(&self.sender, "sender")?,
+            nonce,
+            init_code,
+            call_data: parse_hex(&self.call_data, "callData")?,
+            account_gas_limits: pack_u128_pair(
+                parse_qty(&self.verification_gas_limit, "verificationGasLimit")?,
+                parse_qty(&self.call_gas_limit, "callGasLimit")?,
+            ),
+            pre_verification_gas: word_u128(parse_qty(
+                &self.pre_verification_gas,
+                "preVerificationGas",
+            )?),
+            gas_fees: pack_u128_pair(
+                parse_qty(&self.max_priority_fee_per_gas, "maxPriorityFeePerGas")?,
+                parse_qty(&self.max_fee_per_gas, "maxFeePerGas")?,
+            ),
+            paymaster_and_data,
+            signature: parse_hex(&self.signature, "signature")?,
+        })
+    }
+}
+
+/// `EntryPoint.handleOps(PackedUserOperation[] ops, address payable beneficiary)`
+/// calldata — what the bundler's outer tx carries. Golden-tested vs `cast calldata`.
+pub fn handle_ops_calldata(ops: &[PackedUserOp], beneficiary: &[u8; 20]) -> Vec<u8> {
+    let sel = selector(
+        "handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)",
+    );
+    let elems: Vec<Vec<u8>> = ops.iter().map(PackedUserOp::abi_encode_struct).collect();
+
+    // ops array tail: len ‖ per-element offsets (relative to after the len word) ‖ elems.
+    let mut enc_ops = Vec::new();
+    enc_ops.extend_from_slice(&word_u128(ops.len() as u128));
+    let mut running = ops.len() * WORD;
+    for e in &elems {
+        enc_ops.extend_from_slice(&word_u128(running as u128));
+        running += e.len();
+    }
+    for e in &elems {
+        enc_ops.extend_from_slice(e);
+    }
+
+    // Head: offset-to-ops (2 words of head) + beneficiary.
+    let mut out = Vec::with_capacity(4 + 2 * WORD + enc_ops.len());
+    out.extend_from_slice(&sel);
+    out.extend_from_slice(&word_u128((2 * WORD) as u128));
+    out.extend_from_slice(&addr_word(beneficiary));
+    out.extend_from_slice(&enc_ops);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +727,88 @@ mod tests {
             &s,
         ));
         assert_eq!(got, golden);
+    }
+
+    fn sample_packed_op() -> PackedUserOp {
+        PackedUserOp {
+            sender: [0x11; 20],
+            nonce: {
+                let mut n = [0u8; 32];
+                n[31] = 7;
+                n
+            },
+            init_code: vec![],
+            call_data: vec![0xde, 0xad, 0xbe, 0xef],
+            account_gas_limits: pack_u128_pair(200_000, 100_000),
+            pre_verification_gas: {
+                let mut w = [0u8; 32];
+                w[24..].copy_from_slice(&60_000u64.to_be_bytes());
+                w
+            },
+            gas_fees: pack_u128_pair(1_000_000_000, 2_000_000_000),
+            paymaster_and_data: vec![],
+            signature: vec![0xab; 65],
+        }
+    }
+
+    #[test]
+    fn handle_ops_calldata_matches_cast() {
+        // cast calldata "handleOps((address,uint256,bytes,bytes,bytes32,uint256,
+        //   bytes32,bytes,bytes)[],address)" "[(0x11…11,7,0x,0xdeadbeef,<agl>,
+        //   60000,<fees>,0x,0xab×65)]" 0x77…77 — the authoritative ABI encoder.
+        let golden = norm(include_str!("testdata/erc4337_handle_ops.hex"));
+        let got = hex::encode(handle_ops_calldata(&[sample_packed_op()], &[0x77; 20]));
+        assert_eq!(got, golden);
+    }
+
+    #[test]
+    fn rpc_user_op_roundtrips_packed_form() {
+        // sponsored op (paymasterAndData = pm ‖ vgl ‖ pogl ‖ sig) survives the
+        // unpack → standard-RPC-JSON → re-pack roundtrip byte-exactly.
+        let mut op = sample_packed_op();
+        let mut pmd = vec![0x55; 20];
+        pmd.extend_from_slice(&200_000u128.to_be_bytes());
+        pmd.extend_from_slice(&50_000u128.to_be_bytes());
+        pmd.extend_from_slice(&[0xcd; 77]); // window(12) + sig(65)
+        op.paymaster_and_data = pmd;
+        let rpc = RpcUserOp::from_packed(&op);
+        assert_eq!(rpc.verification_gas_limit, "0x30d40");
+        assert_eq!(rpc.call_gas_limit, "0x186a0");
+        assert_eq!(
+            rpc.paymaster.as_deref(),
+            Some("0x5555555555555555555555555555555555555555")
+        );
+        assert!(rpc.factory.is_none());
+        assert_eq!(rpc.to_packed().unwrap(), op);
+
+        // unsponsored (empty paymasterAndData) roundtrips too.
+        let bare = sample_packed_op();
+        let rpc2 = RpcUserOp::from_packed(&bare);
+        assert!(rpc2.paymaster.is_none());
+        assert_eq!(rpc2.to_packed().unwrap(), bare);
+
+        // serde wire shape is camelCase (the standard bundler RPC field names).
+        let v = serde_json::to_value(&rpc).unwrap();
+        assert!(v.get("callGasLimit").is_some());
+        assert!(v.get("maxFeePerGas").is_some());
+        assert!(v.get("factory").is_none());
+    }
+
+    #[test]
+    fn pack_unpack_u128_pair_roundtrips() {
+        let w = pack_u128_pair(1_500_000, 2_000_000);
+        assert_eq!(unpack_u128_pair(&w), (1_500_000, 2_000_000));
+    }
+
+    #[test]
+    fn user_op_hash_is_deterministic_and_field_sensitive() {
+        let ep = [0x66; 20];
+        let mut op = sample_packed_op();
+        let h1 = op.user_op_hash(&ep, 212_013);
+        assert_eq!(h1, op.user_op_hash(&ep, 212_013));
+        assert_ne!(h1, op.user_op_hash(&ep, 1));
+        op.paymaster_and_data = vec![0u8; 80];
+        assert_ne!(h1, op.user_op_hash(&ep, 212_013));
     }
 
     #[test]

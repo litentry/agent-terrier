@@ -21,6 +21,7 @@ members = [
     "crates/agentkeys-worker-classify",
     "crates/agentkeys-worker-audit",
     "crates/agentkeys-worker-email",
+    "crates/agentkeys-bundler",
 ]
 
 [workspace.dependencies]

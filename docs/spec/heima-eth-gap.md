@@ -29,8 +29,9 @@ issue) are out of scope — they apply to eth too.
   structured `FailedOp` reason).
 - **Workaround:** pin an explicit `--gas-limit` and **skip estimation**. The account / paymaster
   only pays `actualGasUsed`; the limit is a cap the submitter fronts and is refunded for unused.
-- **Code:** [`accept_submit`](../../crates/agentkeys-broker-server/src/handlers/accept.rs)
-  (`AGENTKEYS_HANDLEOPS_GAS_LIMIT`, default `4_000_000`);
+- **Code:** [`agentkeys-bundler`](../../crates/agentkeys-bundler/src/server.rs)
+  (`AGENTKEYS_HANDLEOPS_GAS_LIMIT`, default `4_000_000` — the broker's `accept_submit` now relays
+  to the bundler per #230, which owns the pinned-gas legacy tx);
   [`erc4337-register-master.sh`](../../harness/scripts/erc4337-register-master.sh)
   (`--gas-limit 3000000`); [`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh)
   (`--gas-limit 2000000`).
@@ -46,9 +47,10 @@ issue) are out of scope — they apply to eth too.
   the *outcome* on chain: `cast code <addr>` (deploy landed), `isActive(deviceKeyHash)` /
   `operatorMasterWallet(omni)` (register landed), or a **direct `eth_getTransactionReceipt`** read
   (parse `.status` yourself, not via alloy's strict deser).
-- **Code:** [`accept_submit`](../../crates/agentkeys-broker-server/src/handlers/accept.rs)
-  (`eth_receipt_status` reads `.status` directly + extracts the tx hash from cast's human output,
-  not `--json`); [`erc4337-register-master.sh`](../../harness/scripts/erc4337-register-master.sh)
+- **Code:** [`agentkeys-bundler`](../../crates/agentkeys-bundler/src/server.rs) (#230 — ALL chain
+  reads are raw `serde_json::Value`, no alloy/ethers; it signs + RLP-encodes the legacy `handleOps`
+  tx itself and reads `eth_getTransactionReceipt.status` directly, which is also WHY a stock
+  bundler/cast is not in the submit path anymore); [`erc4337-register-master.sh`](../../harness/scripts/erc4337-register-master.sh)
   (`|| true` + `isActive`); [`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh)
   (`|| true` + `cast code`); [`heima-bring-up.sh`](../../scripts/heima-bring-up.sh) (`cast code`
   per deployed address).
