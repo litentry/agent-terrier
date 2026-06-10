@@ -630,6 +630,22 @@ pub struct OnboardingStateResponse {
     ///     should prompt exactly ONE passkey re-auth (NOT a re-onboarding);
     ///   - "none"    → no persisted master session — full onboarding required.
     pub session: String,
+    /// Issue #242: present when the daemon still knows WHO the master is (the
+    /// logout-surviving coords) — the login screen offers "sign back in with
+    /// Touch ID" against `/v1/auth/relogin/{start,finish}` instead of a full
+    /// email re-onboarding. Display hints only; the broker re-verifies the
+    /// passkey against the CHAIN before minting anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relogin: Option<ReloginInfo>,
+}
+
+/// The identity hint for the #242 passkey re-login button (who would be signed
+/// back in). Sourced from the persisted master coords.
+#[derive(Debug, Serialize)]
+pub struct ReloginInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub omni: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -685,6 +701,9 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/auth/email/status", get(auth_email_status))
         .route("/v1/onboarding/state", get(onboarding_state))
         .route("/v1/auth/logout", post(logout))
+        // #242 — one-Touch-ID master re-login (no email round-trip).
+        .route("/v1/auth/relogin/start", post(relogin_start))
+        .route("/v1/auth/relogin/finish", post(relogin_finish))
         .route("/v1/actors", get(list_actors))
         .route("/v1/actors/:id", get(get_actor))
         .route("/v1/actors/:id/caps", get(list_caps))
@@ -991,10 +1010,25 @@ async fn onboarding_state(
     } else {
         "enrolled"
     };
-    let chain = if state.registered_master.read().await.is_some() {
-        "master-registered"
-    } else {
-        "none"
+    // Issue #242 cross-email guard: "master-registered" must mean registered for
+    // THE LIVE SESSION's omni. A new-email login while the previous binding is
+    // still held used to mis-report the OLD master as the new identity's (the
+    // ceremony then reused the wrong passkey pointer). No live session ⇒ report
+    // the held binding as-is (pre-login surfaces key off `relogin`, not `chain`).
+    let chain = match (
+        state.registered_master.read().await.as_ref(),
+        live_session.as_ref(),
+    ) {
+        (Some(rm), Some(s)) if !s.omni.is_empty() => {
+            let norm = |o: &str| o.trim().trim_start_matches("0x").to_lowercase();
+            if norm(&rm.operator_omni) == norm(&s.omni) {
+                "master-registered"
+            } else {
+                "none"
+            }
+        }
+        (Some(_), _) => "master-registered",
+        (None, _) => "none",
     };
     // Issue #220 durable-session signal: a live, non-empty J1 ⇒ "active"; else
     // persisted-but-lapsed coords ⇒ "expired" (drives one passkey re-auth); else
@@ -1011,6 +1045,19 @@ async fn onboarding_state(
     } else {
         "none"
     };
+    // Issue #242: the logout-surviving identity hint for the re-login button.
+    // Coords present (valid OR expired J1) ⇒ the daemon knows who the master is;
+    // the broker re-verifies the passkey against the chain before minting.
+    let relogin = state
+        .master_session
+        .read()
+        .await
+        .as_ref()
+        .filter(|r| !r.operator_omni.is_empty())
+        .map(|r| ReloginInfo {
+            email: (!r.email.is_empty()).then(|| r.email.clone()),
+            omni: r.operator_omni.clone(),
+        });
     let (identity, email, omni) = match live_session {
         Some(s) => ("verified".to_string(), Some(s.email), Some(s.omni)),
         None => ("none".to_string(), None, None),
@@ -1022,28 +1069,183 @@ async fn onboarding_state(
         k11: k11.to_string(),
         chain: chain.to_string(),
         session: session.to_string(),
+        relogin,
     })
 }
 
-/// W1: clear the held onboarding session (logout / reset) so re-onboarding
-/// starts clean. Re-testability per arch.md §6: the same email re-verifies to the
-/// same `actor_omni`, and the device key + encryption are untouched — only the
-/// session is dropped.
+/// W1: drop the live session (logout) — the J1 + the in-memory identity go
+/// away, so nothing can act as the master until a re-auth. Since #242 the
+/// logout is a *sign-out*, not a forget-account: the persisted master coords
+/// (email/omni/wallet — public identity hints, never key material) are KEPT,
+/// downgraded to an EXPIRED record (`j1: ""`), so:
+///   - a restart can NEVER silently rehydrate a logged-out session (the #220
+///     guarantee — `j1_valid_at` is false for an empty J1);
+///   - the login screen can offer the one-Touch-ID passkey re-login
+///     (`/v1/auth/relogin/*`) instead of forcing a full email re-onboarding.
+///
+/// The REAL forget-account is `POST /v1/master/reset` (clears coords + the
+/// on-chain binding). Re-testability per arch.md §6 is unchanged: the same
+/// email re-verifies to the same `actor_omni` either way.
 async fn logout(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
     *state.onboarding_session.write().await = None;
     state.pending_email.write().await.clear();
-    // Issue #220: a logout is a real reset — drop the persisted coords too so the
-    // next start doesn't silently rehydrate a logged-out session. The same email
-    // re-verifies to the same omni (arch.md §6 re-testability), so nothing durable
-    // is lost. The master plane is singular per machine, so clear_all is a full
-    // reset, not a cross-wallet wipe.
-    if let Some(store) = state.master_session_store.as_ref() {
-        if let Err(e) = store.clear_all() {
-            tracing::warn!("ui-bridge #220: failed to clear persisted master session: {e}");
+    let downgraded = state.master_session.read().await.clone().map(|mut r| {
+        r.j1 = String::new();
+        r.j1_exp_unix = 0;
+        r
+    });
+    if let (Some(store), Some(record)) = (state.master_session_store.as_ref(), downgraded.as_ref())
+    {
+        if let Err(e) = store.save(record) {
+            tracing::warn!("ui-bridge #242: failed to persist logged-out master coords: {e}");
         }
     }
-    *state.master_session.write().await = None;
+    *state.master_session.write().await = downgraded;
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// `POST /v1/auth/relogin/start` (#242) — begin the one-Touch-ID master
+/// re-login. Uses the logout-surviving coords (`master_session`) to ask the
+/// broker for a chain-bound challenge; the browser signs it with the BOUND
+/// passkey (`getAssertionOverHash(challenge, [ak_master_cred_id])`) and posts
+/// the assertion to `/v1/auth/relogin/finish`. The daemon supplies only the
+/// CLAIM (the omni); the broker verifies the assertion against the chain.
+async fn relogin_start(
+    State(state): State<SharedUiBridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<ReloginStartResponse>, (StatusCode, Json<ErrorBody>)> {
+    reject_cross_origin(&state, &headers)?;
+    let Some(broker) = state.broker_url.clone() else {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "passkey re-login disabled (daemon started without --broker-url)",
+            "broker-not-configured",
+        ));
+    };
+    let coords = state.master_session.read().await.clone();
+    let Some(coords) = coords.filter(|c| !c.operator_omni.is_empty()) else {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "no master identity held — onboard via email first",
+            "no-master-identity",
+        ));
+    };
+    let start = init_flow::passkey_reauth_start(&broker, &coords.operator_omni)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("broker passkey/start failed: {e}"),
+                "broker-passkey-start-failed",
+            )
+        })?;
+    Ok(Json(ReloginStartResponse {
+        challenge: start.challenge,
+        account: start.account,
+        email: coords.email,
+        omni: coords.operator_omni,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct ReloginStartResponse {
+    /// `0x` + 64 hex — the browser signs THIS via `getAssertionOverHash`.
+    challenge: String,
+    /// The on-chain master P256Account the assertion must satisfy (display).
+    account: String,
+    email: String,
+    omni: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReloginFinishRequest {
+    challenge: String,
+    /// The browser WebAuthn assertion, passed to the broker verbatim
+    /// (`{ authenticator_data, client_data_json, signature, credential_id }`).
+    assertion: serde_json::Value,
+}
+
+/// `POST /v1/auth/relogin/finish` (#242) — submit the assertion; on the
+/// broker's chain-verified OK, restore the full master session: the fresh J1
+/// becomes the live `onboarding_session`, `registered_master` is repopulated
+/// from the coords (the binding never left the chain), and the #220 store is
+/// re-persisted so restart-resume works again. ONE Touch ID, zero emails.
+async fn relogin_finish(
+    State(state): State<SharedUiBridgeState>,
+    headers: HeaderMap,
+    Json(req): Json<ReloginFinishRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    reject_cross_origin(&state, &headers)?;
+    let Some(broker) = state.broker_url.clone() else {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "passkey re-login disabled (daemon started without --broker-url)",
+            "broker-not-configured",
+        ));
+    };
+    let coords = state.master_session.read().await.clone();
+    let Some(coords) = coords.filter(|c| !c.operator_omni.is_empty()) else {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "no master identity held — onboard via email first",
+            "no-master-identity",
+        ));
+    };
+    let verified = init_flow::passkey_reauth_verify(&broker, &req.challenge, req.assertion)
+        .await
+        .map_err(|e| match e {
+            init_flow::InitFlowError::BrokerRejected {
+                status: 401, body, ..
+            } => err(
+                StatusCode::UNAUTHORIZED,
+                format!("passkey re-auth rejected: {body}"),
+                "assertion-rejected",
+            ),
+            other => err(
+                StatusCode::BAD_GATEWAY,
+                format!("broker passkey/verify failed: {other}"),
+                "broker-passkey-verify-failed",
+            ),
+        })?;
+    // The broker minted for the CHAIN-verified omni; it must be the identity we
+    // hold, or the session would silently switch masters.
+    let norm = |o: &str| o.trim().trim_start_matches("0x").to_lowercase();
+    if norm(&verified.omni_account) != norm(&coords.operator_omni) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "broker verified omni {} but the held master identity is {}",
+                verified.omni_account, coords.operator_omni
+            ),
+            "omni-mismatch",
+        ));
+    }
+    *state.onboarding_session.write().await = Some(OnboardingSession {
+        email: coords.email.clone(),
+        omni: coords.operator_omni.clone(),
+        j1: verified.session_jwt,
+        wallet: coords.wallet.clone(),
+    });
+    // The on-chain binding never left — repopulate the local record so cap-mint
+    // + onboarding-state see the registered master without a re-probe. The
+    // account address is read from chain by list_actors when absent.
+    *state.registered_master.write().await = Some(RegisteredMaster {
+        device_key_hash: coords.device_key_hash.clone(),
+        operator_omni: coords.operator_omni.clone(),
+        tx_hash: None,
+        account: None,
+    });
+    persist_master_session(&state).await;
+    tracing::info!(
+        target: "agentkeys.daemon.ui_bridge",
+        omni = %coords.operator_omni,
+        "issue #242: master re-login complete — session restored with one passkey prompt"
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "omni": coords.operator_omni,
+        "email": coords.email,
+    })))
 }
 
 /// `POST /v1/master/reset` (#225 E7) — fully unbind the master so the operator can
@@ -4959,6 +5161,195 @@ mod tests {
             Ok(_) => panic!("expected resolve_session_coords to error"),
         };
         assert!(e.contains("expired"), "got: {e}");
+    }
+
+    // ─── issue #242: logout keeps identity; passkey re-login restores it ─────
+
+    #[tokio::test]
+    async fn logout_downgrades_to_expired_and_offers_relogin() {
+        // Login (rehydrated valid session) → logout: the live session + J1 are
+        // GONE, but the identity coords survive as an EXPIRED record — the state
+        // reports session: "expired" + the relogin hint, and a restart can never
+        // silently rehydrate the logged-out session (#220 guarantee preserved).
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".agentkeys");
+        let omni = format!("0x{}", "55".repeat(32));
+        let far_future = master_session::now_unix() + 10_000;
+        let store = MasterSessionStore::new(base.clone());
+        store
+            .save(&persisted_record(&omni, far_future))
+            .expect("save");
+        let state = make_state_real(Some(store));
+        rehydrate_master_session(&state).await;
+        assert_eq!(
+            onboarding_state(State(state.clone())).await.0.session,
+            "active"
+        );
+
+        let _ = logout(State(state.clone())).await;
+
+        assert!(state.onboarding_session.read().await.is_none());
+        let held = state.master_session.read().await.clone().expect("coords");
+        assert!(held.j1.is_empty(), "logout must drop the J1");
+        let os = onboarding_state(State(state.clone())).await.0;
+        assert_eq!(os.identity, "none");
+        assert_eq!(os.session, "expired");
+        let relogin = os.relogin.expect("relogin hint after logout");
+        assert_eq!(relogin.omni, omni);
+        assert_eq!(relogin.email.as_deref(), Some("master@example.com"));
+
+        // A fresh daemon over the same store: coords-only, never a live session.
+        let state2 = make_state_real(Some(MasterSessionStore::new(base)));
+        rehydrate_master_session(&state2).await;
+        assert!(state2.onboarding_session.read().await.is_none());
+        assert_eq!(onboarding_state(State(state2)).await.0.session, "expired");
+    }
+
+    #[tokio::test]
+    async fn onboarding_state_chain_is_keyed_on_the_live_session_omni() {
+        // #242 cross-email guard: a held binding for omni A must NOT be reported
+        // as "master-registered" to a live session for omni B (the new-email
+        // onboarding would skip the enroll + reuse the WRONG passkey pointer).
+        let state = make_state();
+        let omni_a = format!("0x{}", "0a".repeat(32));
+        let omni_b = format!("0x{}", "0b".repeat(32));
+        *state.registered_master.write().await = Some(RegisteredMaster {
+            device_key_hash: "0xdkh".into(),
+            operator_omni: omni_a.clone(),
+            tx_hash: None,
+            account: None,
+        });
+
+        // No live session: the held binding is reported as-is.
+        assert_eq!(
+            onboarding_state(State(state.clone())).await.0.chain,
+            "master-registered"
+        );
+        // Live session for the SAME omni: registered.
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "a@x".into(),
+            omni: omni_a.clone(),
+            j1: "eyJ.j1".into(),
+            wallet: "0xA".into(),
+        });
+        assert_eq!(
+            onboarding_state(State(state.clone())).await.0.chain,
+            "master-registered"
+        );
+        // Live session for a DIFFERENT omni: the old binding must not leak in.
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "b@x".into(),
+            omni: omni_b,
+            j1: "eyJ.j1".into(),
+            wallet: "0xB".into(),
+        });
+        assert_eq!(onboarding_state(State(state.clone())).await.0.chain, "none");
+    }
+
+    #[tokio::test]
+    async fn relogin_requires_held_identity() {
+        // No coords (fresh machine / after master reset) → CONFLICT with the
+        // onboard-first reason; the email path is the only way in.
+        let state = make_state_real(None);
+        let e = relogin_start(State(state), HeaderMap::new())
+            .await
+            .expect_err("expected relogin_start to fail");
+        assert_eq!(e.0, StatusCode::CONFLICT);
+        assert_eq!(e.1 .0.reason, "no-master-identity");
+    }
+
+    #[tokio::test]
+    async fn relogin_finish_restores_the_session_from_a_verified_assertion() {
+        // Stub broker: verify succeeds for the held omni → the daemon restores
+        // onboarding_session (fresh J1) + registered_master + re-persists. ONE
+        // passkey prompt, zero emails, working session.
+        let omni = format!("0x{}", "66".repeat(32));
+        let omni_resp = omni.clone();
+        let app = Router::new().route(
+            "/v1/auth/passkey/verify",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let omni = omni_resp.clone();
+                async move {
+                    assert!(body.get("challenge").is_some());
+                    assert!(body.get("assertion").is_some());
+                    Json(serde_json::json!({
+                        "status": "verified",
+                        "session_jwt": "eyJ.fresh.relogin.jwt",
+                        "omni_account": omni,
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MasterSessionStore::new(tmp.path().join(".agentkeys"));
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            Some(format!("http://{addr}")),
+            None,
+            84532,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "us-east-1".into(),
+            None,
+            None,
+            Some(store),
+        )
+        .unwrap();
+        // Logged-out coords (expired record) — what the login screen sees.
+        let mut record = persisted_record(&omni, 0);
+        record.j1 = String::new();
+        *state.master_session.write().await = Some(record);
+
+        let resp = relogin_finish(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(ReloginFinishRequest {
+                challenge: format!("0x{}", "77".repeat(32)),
+                assertion: serde_json::json!({
+                    "authenticator_data": "AA",
+                    "client_data_json": "e30",
+                    "signature": "AA",
+                    "credential_id": "AA",
+                }),
+            }),
+        )
+        .await
+        .expect("relogin_finish ok");
+        assert_eq!(resp.0.get("ok"), Some(&serde_json::Value::Bool(true)));
+
+        let session = state
+            .onboarding_session
+            .read()
+            .await
+            .clone()
+            .expect("live session restored");
+        assert_eq!(session.j1, "eyJ.fresh.relogin.jwt");
+        assert_eq!(session.omni, omni);
+        assert_eq!(session.email, "master@example.com");
+        assert_eq!(session.wallet, "0xMASTERWALLET");
+        assert_eq!(
+            state
+                .registered_master
+                .read()
+                .await
+                .as_ref()
+                .expect("registered_master restored")
+                .operator_omni,
+            omni
+        );
+        let os = onboarding_state(State(state)).await.0;
+        assert_eq!(os.identity, "verified");
+        assert_eq!(os.session, "active");
+        assert_eq!(os.chain, "master-registered");
     }
 
     fn cat(ns: &str, label: &str) -> MemoryCategory {

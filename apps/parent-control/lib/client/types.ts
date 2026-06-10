@@ -209,6 +209,14 @@ export interface EmailVerifyStatus {
   omniAccount?: string;
 }
 
+/** #242: the logout-surviving identity hint — who the "Sign back in with
+ *  Touch ID" button would sign back in. Display only; the broker re-verifies
+ *  the passkey against the CHAIN before minting anything. */
+export interface ReloginInfo {
+  email?: string;
+  omni: string;
+}
+
 export interface OnboardingState {
   /** "verified" once the magic link is clicked + held by the daemon; else "none". */
   identity: string;
@@ -216,7 +224,8 @@ export interface OnboardingState {
   omni?: string;
   /** "enrolled" if a K11 passkey was registered this session, else "none". */
   k11: string;
-  /** "master-registered" once the master device is on chain with CAP_MINT (#196); else "none". */
+  /** "master-registered" once the master device is on chain with CAP_MINT (#196)
+   *  FOR THE LIVE SESSION's omni (#242 cross-email guard); else "none". */
   chain?: string;
   /**
    * Durable-session signal for restart-resume (issue #220):
@@ -225,6 +234,25 @@ export interface OnboardingState {
    *   - "none"    → no persisted master session: full onboarding required.
    */
   session?: string;
+  /** #242: present when the daemon still knows who the master is (survives
+   *  logout; cleared by master reset) — drives the Touch ID re-login button. */
+  relogin?: ReloginInfo;
+}
+
+/** `POST /v1/auth/relogin/start` (#242): the challenge the bound passkey signs. */
+export interface ReloginStart {
+  /** `0x` + 64 hex — sign via `getAssertionOverHash(challenge, [credId])`. */
+  challenge: string;
+  /** The on-chain master P256Account the assertion must satisfy. */
+  account: string;
+  email: string;
+  omni: string;
+}
+
+/** `POST /v1/auth/relogin/finish` (#242): the restored identity. */
+export interface ReloginResult {
+  omni: string;
+  email?: string;
 }
 
 /** On-chain half of `POST /v1/master/reset` (#225 E7) — the owner-gated resetMaster. */
@@ -365,6 +393,12 @@ export interface AgentKeysClient {
   // Real "logged in" state, held by the daemon (replaces the ak_onboarded flag).
   getOnboardingState(): Promise<Result<OnboardingState>>;
   logout(): Promise<Result<void>>;
+  // #242 — one-Touch-ID master re-login after a logout (no email round-trip).
+  // start → broker challenge for the held identity; the browser signs it with
+  // the BOUND passkey; finish → the broker chain-verifies the assertion and the
+  // daemon restores the full master session.
+  reloginStart(): Promise<Result<ReloginStart>>;
+  reloginFinish(challenge: string, assertion: RegisterMasterAssertion): Promise<Result<ReloginResult>>;
   // #225 E7: fully unbind the master so the operator can re-onboard a fresh passkey —
   // used when the bound master passkey was deleted in the OS password manager. Clears
   // BOTH the LOCAL binding (registered_master + persisted coords) AND the ON-CHAIN

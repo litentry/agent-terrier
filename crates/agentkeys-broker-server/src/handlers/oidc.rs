@@ -238,13 +238,20 @@ pub(crate) fn build_oidc_jwt_claims(
         .unwrap_or(0);
     let exp = now + ttl_seconds as i64;
     let wallet_lc = wallet.to_lowercase();
-    // `actor_omni` is supplied VERBATIM from the verified session claim (issue
+    // `actor_omni`'s VALUE is supplied from the verified session claim (issue
     // #144) — the broker signed it at session-mint time, so it's trusted and is
-    // NOT re-derived here. For a wallet/master session it equals
-    // SHA256("agentkeys"||"evm"||wallet_lc) (what the old code computed); for an
-    // agent J1 it is the HDKD child omni. The v1 `agentkeys_user_wallet` tag
-    // falls back to the actor_omni when there's no wallet so it's never empty
-    // (a v1 policy keyed on it then resolves to the same `bots/<actor>/` prefix).
+    // NOT re-derived here. Its FORM is normalized to the bare lowercase 64-hex
+    // shape: the principal tag interpolates into the bare `bots/<omni>/` S3
+    // prefixes, so a `0x`-prefixed claim (e.g. a pre-fix #242 passkey J1; real
+    // 2026-06-10 incident) would tag the session with a prefix that matches
+    // nothing → AccessDenied on every read. For a wallet/master session the
+    // value equals SHA256("agentkeys"||"evm"||wallet_lc); for an agent J1 it is
+    // the HDKD child omni — both already bare, byte-unchanged here. The v1
+    // `agentkeys_user_wallet` tag falls back to the actor_omni when there's no
+    // wallet so it's never empty (a v1 policy keyed on it then resolves to the
+    // same `bots/<actor>/` prefix).
+    let actor_omni = actor_omni.trim().trim_start_matches("0x").to_lowercase();
+    let actor_omni = actor_omni.as_str();
     let user_wallet = if wallet_lc.is_empty() {
         actor_omni
     } else {
@@ -294,6 +301,24 @@ mod tests {
         let tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
         assert_eq!(tags["agentkeys_actor_omni"][0], actor_omni);
         assert_eq!(tags["agentkeys_user_wallet"][0], wallet_lc);
+    }
+
+    #[test]
+    fn prefixed_omni_claim_normalizes_to_the_bare_tag_shape() {
+        // #242 regression (real 2026-06-10 incident): a 0x-prefixed omni claim
+        // (the pre-fix passkey J1 form) must land in the principal tags as the
+        // bare lowercase 64-hex S3-prefix shape — a 0x tag interpolates a
+        // `bots/0x<omni>/` prefix that matches nothing → AccessDenied on every
+        // config/memory read after a passkey re-login.
+        let omni_0x = format!("0x{}", "AB".repeat(32));
+        let bare = "ab".repeat(32);
+        let (claims, _n, _e) = build_oidc_jwt_claims("https://issuer", &omni_0x, "", 300);
+        assert_eq!(claims["agentkeys_actor_omni"], bare.as_str());
+        let tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
+        assert_eq!(tags["agentkeys_actor_omni"][0], bare.as_str());
+        // Empty wallet → the v1 tag falls back to the SAME normalized omni.
+        assert_eq!(tags["agentkeys_user_wallet"][0], bare.as_str());
+        assert_eq!(claims["sub"], format!("agentkeys:agent:{bare}"));
     }
 
     #[test]

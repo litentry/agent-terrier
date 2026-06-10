@@ -342,6 +342,19 @@ pub fn build_accept_response(
     Ok(assembled.into_build_response(&cfg.entry_point, cfg.chain_id))
 }
 
+/// Chain-READ config for handlers that only query state (no submit key): the
+/// passkey re-auth verb (#242) needs rpc + registry but must not fail because
+/// the sponsor submit key is absent. Same env surface as `load_accept_config`.
+pub(crate) fn load_chain_read_config() -> Result<(String, [u8; 20]), String> {
+    let rpc_url = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
+        .map_err(|_| "env AGENTKEYS_CHAIN_RPC_HTTP not set".to_string())?;
+    let registry = addr20(
+        &env_profile("SIDECAR_REGISTRY_ADDRESS")?,
+        "SIDECAR_REGISTRY_ADDRESS",
+    )?;
+    Ok((rpc_url, registry))
+}
+
 fn aerr(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({ "error": msg.into() })))
 }
@@ -351,7 +364,7 @@ fn norm_omni(s: &str) -> String {
 }
 
 /// Minimal JSON-RPC `eth_call` (the broker already uses reqwest for reads).
-async fn eth_call(
+pub(crate) async fn eth_call(
     http: &reqwest::Client,
     rpc: &str,
     to: &[u8; 20],
@@ -376,7 +389,7 @@ async fn eth_call(
         .ok_or_else(|| format!("eth_call no result: {resp}"))
 }
 
-fn selector(sig: &str) -> String {
+pub(crate) fn selector(sig: &str) -> String {
     hex::encode(&agentkeys_core::device_crypto::keccak256(sig.as_bytes())[..4])
 }
 
@@ -384,7 +397,7 @@ fn selector(sig: &str) -> String {
 /// is an ERC-4337 `P256Account` UserOp, so the master MUST be a passkey-controlled
 /// smart account, NOT a legacy EOA (the deprecated `heima-register-first-master.sh`
 /// binds `operatorMasterWallet` to the deployer EOA, which has no `validateUserOp`).
-async fn eth_address_has_code(
+pub(crate) async fn eth_address_has_code(
     http: &reqwest::Client,
     rpc: &str,
     addr: &[u8; 20],
@@ -434,7 +447,7 @@ async fn eth_receipt_status(http: &reqwest::Client, rpc: &str, tx_hash: &str) ->
 }
 
 /// `SidecarRegistry.operatorMasterWallet(bytes32) -> address`. Zero address ⇒ no master.
-async fn call_operator_master_wallet(
+pub(crate) async fn call_operator_master_wallet(
     http: &reqwest::Client,
     rpc: &str,
     registry: &[u8; 20],
