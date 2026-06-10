@@ -48,6 +48,10 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         oidc_issuer: TEST_ISSUER.into(),
         oidc_keypair_path: keypair_path,
         oidc_jwt_ttl_seconds: 300,
+        dev_mode: false,
+        auth_methods: "wallet_sig".into(),
+        audit_anchors: "sqlite".into(),
+        refuse_to_boot_strict: false,
     };
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
