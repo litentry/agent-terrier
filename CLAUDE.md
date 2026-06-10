@@ -89,6 +89,19 @@ Do not bury skipped work in a footnote, in a note partway through prose, or in a
 
 Also: never gloss over a partial implementation in a demo doc or runbook. If the demo walks through a flow that is only half-shipped, the doc must state which half is shipped and which still requires manual setup or a follow-up PR. Operators reading the doc cannot tell which is which from prose alone.
 
+## Deploy-surface callout policy (every finished task)
+
+**Every end-of-task / end-of-PR summary MUST end with an explicit "To test this" callout** naming which deploy surfaces the diff touched and the exact update command for each — **including the explicit negative** ("no broker update needed") for the surfaces it did NOT touch. Never leave the operator to infer the redeploy set from the diff. The surfaces:
+
+| Surface | Changed when the diff touches | Operator update command |
+|---|---|---|
+| **Remote broker host** (broker server, workers, bundler, hosted MCP, nginx/systemd/env) | `crates/agentkeys-broker-server`, `crates/agentkeys-worker-*`, `crates/agentkeys-bundler`, hosted `crates/agentkeys-mcp-server`, broker-side `scripts/` | `bash scripts/setup-broker-host.sh --ref <branch|main>` on the broker host |
+| **Local daemon + web app** | `crates/agentkeys-daemon`, `apps/parent-control` | local rebuild via `dev.sh` (no broker redeploy) |
+| **Chain contracts** | `crates/agentkeys-chain/src/*.sol` (+ `VERSION` bump) | the deliberate redeploy ceremony (`heima-bring-up.sh` / cutover script) — never silent |
+| **Cloud (AWS / DNS / IAM)** | `scripts/setup-cloud.sh` + its provision/apply helpers | `bash scripts/setup-cloud.sh` (laptop, `agentkeys-admin`) |
+
+Shared crates (`agentkeys-core`, `agentkeys-types`, `agentkeys-backend-client`, `agentkeys-cli` as a lib) link into BOTH the broker and the daemon — when one changes, call out BOTH surfaces. (Why this is a hard rule: a fix that lands on the branch but not on the running broker host reproduces the exact bug it fixed — the #242 live test failed twice on stale-broker confusion before this was made explicit.)
+
 ## Three idempotent deployment entry points — the ONLY scripts an operator/CI runs directly
 
 Deployment has exactly **three** idempotent orchestrators. An operator (or CI) runs ONLY these three; every other setup/provision/DNS/cert/chain mutation is **wired into** one of them as a delegated step — never run standalone in a runbook.

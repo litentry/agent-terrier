@@ -267,12 +267,29 @@ export interface MasterResetOnchain {
   operator_omni?: string;
 }
 
-/** Result of `POST /v1/master/reset` (#225 E7). */
+/** Fleet-teardown half of `POST /v1/master/reset` (#243): what the reset
+ *  disconnected beyond the master binding. Best-effort — anything that could
+ *  not be torn down remotely lands in `failures`, never silently dropped. */
+export interface MasterResetFleet {
+  /** Pending pairing requests declined at the broker. */
+  pending_declined: number;
+  /** Paired agents revoked on chain (SidecarRegistry.revokeAgentDevice). */
+  agents_revoked: { id: string; label: string; tx_hash?: string }[];
+  /** Local actor records cleared (agents + master view rows). */
+  actors_cleared: number;
+  /** The daemon's K11 enroll record was cleared (state reports k11: "none"). */
+  k11_enroll_cleared: boolean;
+  /** What could NOT be torn down (no chain script, broker error, …). */
+  failures: string[];
+}
+
+/** Result of `POST /v1/master/reset` (#225 E7, fleet teardown #243). */
 export interface MasterResetResult {
   ok: boolean;
   /** Operator guidance — adapts to whether the on-chain unbind landed. */
   note?: string;
   onchain?: MasterResetOnchain;
+  fleet?: MasterResetFleet;
 }
 
 /** One deployed contract from `GET /v1/chain/info` (real address + explorer link). */

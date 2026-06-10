@@ -202,13 +202,28 @@ export function App() {
       return;
     }
     const onchain = r.data.onchain;
-    akLog('reset: done', { onchain });
+    const fleet = r.data.fleet;
+    akLog('reset: done', { onchain, fleet });
+    // #243: the daemon tore the fleet down too — mirror it in the view state so
+    // the UI doesn't show ghost agents/pairings until the next refetch.
+    setActors([]);
+    setPairingRequests([]);
+    setProposals(null);
+    // The fleet summary rides every outcome toast; failures are spelled out —
+    // a partially-torn-down fleet must never read as fully disconnected.
+    const fleetBits: string[] = [];
+    if (fleet) {
+      fleetBits.push(`${fleet.agents_revoked.length} agent(s) revoked on chain`);
+      fleetBits.push(`${fleet.pending_declined} pending pairing(s) declined`);
+      if (fleet.failures.length > 0) fleetBits.push(`⚠ ${fleet.failures.join(' · ')}`);
+    }
+    const fleetNote = fleetBits.length ? `  Fleet: ${fleetBits.join(', ')}.` : '';
     const onchainCleared =
       onchain?.status === 'reset' ||
       (onchain?.status === 'skipped' && onchain?.reason === 'already-unbound');
     if (onchainCleared) {
       showToast(
-        'Master unbound (local + on-chain). Delete the master passkey in System Settings ▸ Passwords, then re-onboard once.',
+        `Master unbound (local + on-chain).${fleetNote} Delete the master passkey in System Settings ▸ Passwords, then re-onboard once.`,
         true,
       );
     } else {
@@ -216,7 +231,7 @@ export function App() {
       // it does. Surface the reason so the operator (or dev) can fix it.
       const why = onchain?.error ?? onchain?.reason ?? 'unknown';
       showToast(
-        `Local binding cleared, but the ON-CHAIN unbind did NOT land (${why}). Re-onboarding will still fail until it does — ensure the registry has resetMaster (VERSION ≥ 0.3) + the deployer key, then retry.`,
+        `Local binding cleared, but the ON-CHAIN unbind did NOT land (${why}).${fleetNote} Re-onboarding will still fail until it does — ensure the registry has resetMaster (VERSION ≥ 0.3) + the deployer key, then retry.`,
         true,
       );
     }
@@ -407,7 +422,25 @@ export function App() {
     // #225 E7 — the real Touch-ID gate: build the sponsored executeBatch UserOp on
     // the broker, sign its userOpHash with K11 (Touch ID), submit → handleOps. This
     // does BOTH registerAgentDevice (P.2) + setScope (P.3) atomically, in one block.
-    const services = req.requested.flatMap((p) => p.ns).map((ns) => `memory:${ns}`);
+    //
+    // #243 follow-up (real 2026-06-10 incident): compile services CAP-PRESERVINGLY.
+    // The old `.map(ns => `memory:${ns}`)` discarded p.cap (a `cred:x` request became
+    // `memory:x`) and silently dropped bare ns-less tokens — an accept could land
+    // `setScope([])` on chain while the operator believed memory was granted, and the
+    // permission panel then showed DENY everywhere (chain-accurately).
+    const services = req.requested.flatMap((p) => p.ns.map((ns) => `${p.cap}:${ns}`));
+    const bareTokens = req.requested.filter((p) => p.ns.length === 0).map((p) => p.cap);
+    if (bareTokens.length > 0) {
+      akLog('accept: ns-less requested tokens cannot compile to scope services', { bareTokens });
+    }
+    if (services.length === 0) {
+      // Binding with zero grants is legitimate (grant later from the actor page),
+      // but it must NEVER be silent — that is exactly the deny-everywhere trap.
+      showToast(
+        `Heads-up: ${req.agent} requested no namespace-qualified scopes${bareTokens.length ? ` (bare: ${bareTokens.join(', ')})` : ''} — this accept binds the device with ZERO grants. Grant scopes from its actor page afterwards.`,
+        true,
+      );
+    }
     showToast(`Building accept for ${req.agent}…`);
     const built = await client.acceptBuild({
       requestId: req.id,
@@ -714,7 +747,10 @@ export function App() {
           style={{ color: 'var(--danger)' }}
           title="Unbind the master (local + on-chain) so you can re-onboard a fresh passkey — e.g. after the master passkey was deleted in your OS password manager, or an accept fails with SIG_VALIDATION."
           onClick={() => {
-            if (window.confirm('Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?')) resetMaster();
+            // #243: state the blast radius — reset tears down the whole fleet.
+            const agentCount = actors.filter((a) => a.role === 'agent').length;
+            const pendingCount = pairingRequests.length;
+            if (window.confirm(`Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Disconnects your whole fleet: revokes ${agentCount} paired agent(s) on chain + declines ${pendingCount} pending pairing request(s) — re-pairing needs a fresh ceremony\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?`)) resetMaster();
           }}
         >
           <span className="marker">[⟲]</span> reset master · re-onboard passkey
