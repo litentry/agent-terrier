@@ -2,6 +2,8 @@
 //!
 //! - `POST /v1/auth/wallet/start` — SIWE challenge.
 //! - `POST /v1/auth/wallet/verify` — SIWE verify → session JWT.
+//! - `POST /v1/auth/passkey/start` — master passkey re-auth challenge (#242).
+//! - `POST /v1/auth/passkey/verify` — chain-verified assertion → session JWT.
 
 #[cfg(feature = "auth-email-link")]
 pub mod email_landing;
@@ -17,6 +19,8 @@ pub mod oauth2_callback;
 pub mod oauth2_start;
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth2_status;
+pub mod passkey_start;
+pub mod passkey_verify;
 pub mod wallet_start;
 pub mod wallet_verify;
 

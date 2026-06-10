@@ -827,6 +827,7 @@ The broker is the cap-mint authority. It does NOT hold credentials, K3, or any c
 /v1/auth/email/{request,verify,status}        — email-link flow (stage 1)
 /v1/auth/oauth2/{start,callback,status}       — OAuth2 flow (stage 1)
 /v1/auth/wallet/{start,verify}                — managed-wallet attestation round-trip (stage 3; SIWE / EIP-191, signer-performed)
+/v1/auth/passkey/{start,verify}               — master passkey re-auth (#242): the bound K11 signs a broker challenge; verified against operatorMasterWallet + the account's live signer set via the on-chain K11Verifier (view call) → session JWT scoped to the chain-verified omni. The no-email web re-login after a logout.
 /v1/auth/bind/<request_id>                    — WebAuthn enrollment (stage 2)
 /v1/agent/pairing/request                     — agent opens an UNBOUND pairing request → {request_id, pairing_code} (§10.2 method A; no bearer, pop_sig-gated)
 /v1/agent/pairing/claim                       — master claims the pairing_code → binds HDKD child omni (J1_master-gated; K11 NOT at broker — §10.2 method A)

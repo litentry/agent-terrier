@@ -35,25 +35,30 @@ fn b64u(field: &str, s: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("{field} base64url: {e}"))
 }
 
-/// Decode + ABI-encode the browser assertion into the P256Account UserOp
-/// signature, binding the master's operator-derived `credIdHash`:
-///   1. `cred_id_hash = master_cred_id_hash(operator_omni)` (NOT `keccak(rawId)`).
-///   2. `(r, s) = DER-decode(signature)` → 32-byte big-endian each (p256;
-///      mirrors the mainnet-proven `extract_chain_assertion` — no low-s renorm,
-///      the authenticator already emits low-s for P-256/WebAuthn).
-///   3. `challenge_location` = byte offset of the challenge value in
-///      `clientDataJSON` (right after the literal `"challenge":"`).
-///   4. `encode_webauthn_signature(cred_id_hash, authData, clientDataJSON, loc, r, s)`.
-pub fn encode_browser_assertion_signature(
-    a: &BrowserAssertion,
-    operator_omni: &[u8; 32],
-) -> Result<Vec<u8>, String> {
+/// The decoded pieces of a [`BrowserAssertion`] — raw bytes + DER-extracted
+/// `(r, s)` + the challenge byte-offset in `clientDataJSON`. Shared by the
+/// accept path (ABI-encoded into the UserOp signature) and the #242 passkey
+/// re-auth verb (fed to the on-chain `K11Verifier.verifyAssertion` view call).
+pub struct AssertionParts {
+    pub authenticator_data: Vec<u8>,
+    pub client_data_json: Vec<u8>,
+    /// Byte offset of the challenge VALUE in `clientDataJSON` (right after the
+    /// literal `"challenge":"`).
+    pub challenge_location: usize,
+    pub r: [u8; 32],
+    pub s: [u8; 32],
+}
+
+/// Decode a browser assertion into its verification parts:
+///   - base64url-decode the three blobs;
+///   - `(r, s) = DER-decode(signature)` → 32-byte big-endian each (p256;
+///     mirrors the mainnet-proven `extract_chain_assertion` — no low-s renorm,
+///     the authenticator already emits low-s for P-256/WebAuthn);
+///   - `challenge_location` via the `"challenge":"` needle.
+pub fn decode_assertion_parts(a: &BrowserAssertion) -> Result<AssertionParts, String> {
     let authenticator_data = b64u("authenticator_data", &a.authenticator_data)?;
     let client_data_json = b64u("client_data_json", &a.client_data_json)?;
     let signature_der = b64u("signature", &a.signature)?;
-
-    // The signer key is operator-derived (the value the account was created with).
-    let cred_id_hash = master_cred_id_hash(operator_omni);
 
     // DER → (r, s). p256 `Signature::to_bytes()` = r(32) ‖ s(32), big-endian.
     let sig =
@@ -75,13 +80,35 @@ pub fn encode_browser_assertion_signature(
         .map(|p| p + NEEDLE.len())
         .ok_or_else(|| format!("clientDataJSON missing {NEEDLE:?}"))?;
 
+    Ok(AssertionParts {
+        authenticator_data,
+        client_data_json,
+        challenge_location,
+        r,
+        s,
+    })
+}
+
+/// Decode + ABI-encode the browser assertion into the P256Account UserOp
+/// signature, binding the master's operator-derived `credIdHash`:
+///   1. `cred_id_hash = master_cred_id_hash(operator_omni)` (NOT `keccak(rawId)`).
+///   2. [`decode_assertion_parts`] for the raw blobs + `(r, s)` + challenge offset.
+///   3. `encode_webauthn_signature(cred_id_hash, authData, clientDataJSON, loc, r, s)`.
+pub fn encode_browser_assertion_signature(
+    a: &BrowserAssertion,
+    operator_omni: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    // The signer key is operator-derived (the value the account was created with).
+    let cred_id_hash = master_cred_id_hash(operator_omni);
+    let parts = decode_assertion_parts(a)?;
+
     Ok(encode_webauthn_signature(
         &cred_id_hash,
-        &authenticator_data,
-        &client_data_json,
-        challenge_location as u128,
-        &r,
-        &s,
+        &parts.authenticator_data,
+        &parts.client_data_json,
+        parts.challenge_location as u128,
+        &parts.r,
+        &parts.s,
     ))
 }
 

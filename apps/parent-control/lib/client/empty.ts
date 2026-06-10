@@ -15,6 +15,8 @@ import type {
   K11EnrollResult,
   RegisterMasterAssertion,
   RegisterMasterResult,
+  ReloginResult,
+  ReloginStart,
   MasterMemoryEntry,
   MasterResetResult,
   MemoryCategory,
@@ -56,6 +58,14 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async logout(): Promise<Result<void>> {
+    return disconnected();
+  }
+
+  async reloginStart(): Promise<Result<ReloginStart>> {
+    return disconnected();
+  }
+
+  async reloginFinish(_challenge: string, _assertion: RegisterMasterAssertion): Promise<Result<ReloginResult>> {
     return disconnected();
   }
 

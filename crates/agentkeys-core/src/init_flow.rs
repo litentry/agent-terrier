@@ -202,6 +202,73 @@ pub async fn finish_email_session(
     .await
 }
 
+// ── Master passkey re-auth (issue #242) ────────────────────────────────────
+//
+// The no-email re-login: the operator's BOUND K11 passkey signs a broker
+// challenge and the broker verifies it against the CHAIN (operatorMasterWallet
+// + the account's live signer set + K11Verifier.verifyAssertion as a view
+// call), then mints a session JWT scoped to that omni. These two helpers are
+// the one source of truth for the broker contract — the daemon's
+// /v1/auth/relogin/{start,finish} endpoints drive them.
+
+/// `POST /v1/auth/passkey/start` response: the single-use challenge the
+/// browser passkey signs (`getAssertionOverHash(challenge, [credId])`).
+#[derive(Debug, Clone)]
+pub struct PasskeyReauthStart {
+    /// `0x` + 64 hex — doubles as the verify-time lookup key.
+    pub challenge: String,
+    /// The on-chain master P256Account the assertion must satisfy.
+    pub account: String,
+}
+
+/// `POST /v1/auth/passkey/verify` response: the fresh session JWT (J1) for the
+/// chain-verified omni.
+#[derive(Debug, Clone)]
+pub struct PasskeyReauthVerified {
+    pub session_jwt: String,
+    pub omni_account: String,
+}
+
+/// Stage 1 of the passkey re-auth: ask the broker for a challenge bound to
+/// `omni` (`0x` + 64 hex; the EVM operator omni the master registered under).
+pub async fn passkey_reauth_start(broker_url: &str, omni: &str) -> FlowResult<PasskeyReauthStart> {
+    let http = reqwest::Client::new();
+    let broker = broker_url.trim_end_matches('/');
+    let resp = post_json(
+        &http,
+        &format!("{broker}/v1/auth/passkey/start"),
+        json!({ "omni_account": omni }),
+    )
+    .await?;
+    Ok(PasskeyReauthStart {
+        challenge: string_field(&resp, "/v1/auth/passkey/start", "challenge")?,
+        account: string_field(&resp, "/v1/auth/passkey/start", "account")?,
+    })
+}
+
+/// Stage 2: submit the browser WebAuthn assertion over the challenge. The
+/// `assertion` is passed through verbatim (`{ authenticator_data,
+/// client_data_json, signature, credential_id }`, base64url — exactly as the
+/// web `getAssertionOverHash` emits it).
+pub async fn passkey_reauth_verify(
+    broker_url: &str,
+    challenge: &str,
+    assertion: serde_json::Value,
+) -> FlowResult<PasskeyReauthVerified> {
+    let http = reqwest::Client::new();
+    let broker = broker_url.trim_end_matches('/');
+    let resp = post_json(
+        &http,
+        &format!("{broker}/v1/auth/passkey/verify"),
+        json!({ "challenge": challenge, "assertion": assertion }),
+    )
+    .await?;
+    Ok(PasskeyReauthVerified {
+        session_jwt: string_field(&resp, "/v1/auth/passkey/verify", "session_jwt")?,
+        omni_account: string_field(&resp, "/v1/auth/passkey/verify", "omni_account")?,
+    })
+}
+
 /// OAuth2/Google bootstrap. Returns `(authorization_url, request_id)` after
 /// `/v1/auth/oauth2/start`; the caller prints the URL and waits for the
 /// operator. Then call `complete_oauth2_google(...)` with the request_id.
