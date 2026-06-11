@@ -248,18 +248,25 @@ pub fn revoke_agent_device_calldata(device_key_hash: &[u8; 32]) -> Vec<u8> {
     out
 }
 
-/// The unpair as one `executeBatch` callData: a single-call batch over
-/// `[registry]` carrying `revokeAgentDevice`. The registry enforces
+/// The unpair as one `executeBatch` callData: an N-call batch over
+/// `[registry; N]` carrying one `revokeAgentDevice` per device. One element is
+/// the single unpair; many is the #260 master-reset fleet teardown (every
+/// paired agent revoked in ONE UserOp = ONE Touch ID, BEFORE the master unbind
+/// strands the bindings). The registry enforces
 /// `msg.sender == operatorMasterWallet[device.operatorOmni]`, so this MUST run
 /// as the master `P256Account` UserOp (no EOA — incl. the deployer — can sign
 /// it; `NotAuthorized(caller, master)` otherwise, the real 2026-06-11 unpair
-/// incident).
-pub fn revoke_batch_calldata(registry: &[u8; 20], device_key_hash: &[u8; 32]) -> Vec<u8> {
-    execute_batch_calldata(
-        &[*registry],
-        &[0u128],
-        &[revoke_agent_device_calldata(device_key_hash)],
-    )
+/// incident). Callers MUST pass deduplicated, still-active hashes — the
+/// contract reverts `DeviceAlreadyRevoked` on a repeat, which dooms the whole
+/// batch.
+pub fn revoke_batch_calldata(registry: &[u8; 20], device_key_hashes: &[[u8; 32]]) -> Vec<u8> {
+    let dests = vec![*registry; device_key_hashes.len()];
+    let values = vec![0u128; device_key_hashes.len()];
+    let calls: Vec<Vec<u8>> = device_key_hashes
+        .iter()
+        .map(revoke_agent_device_calldata)
+        .collect();
+    execute_batch_calldata(&dests, &values, &calls)
 }
 
 /// `abi.encode(bytes32 credIdHash, bytes authenticatorData, bytes clientDataJSON,
@@ -809,13 +816,31 @@ mod tests {
         assert_eq!(&inner[4..36], &b32(0x11));
         assert_eq!(inner.len(), 36);
 
-        let batch = revoke_batch_calldata(&addr(0xa1), &b32(0x11));
+        let batch = revoke_batch_calldata(&addr(0xa1), &[b32(0x11)]);
         assert_eq!(
             batch,
             execute_batch_calldata(&[addr(0xa1)], &[0u128], std::slice::from_ref(&inner))
         );
         assert_eq!(hex::encode(&batch[..4]), "47e1da2a"); // executeBatch
         assert!(find_subslice(&batch[4..], &inner).is_some());
+    }
+
+    #[test]
+    fn fleet_revoke_batch_is_one_execute_batch_over_n_revokes() {
+        // #260: the master-reset fleet teardown — N revokeAgentDevice calls in
+        // ONE executeBatch (one Touch ID), byte-identical to composing the
+        // per-device encoders by hand over [registry; N].
+        let hashes = [b32(0x11), b32(0x22), b32(0x33)];
+        let inners: Vec<Vec<u8>> = hashes.iter().map(revoke_agent_device_calldata).collect();
+        let batch = revoke_batch_calldata(&addr(0xa1), &hashes);
+        assert_eq!(
+            batch,
+            execute_batch_calldata(&[addr(0xa1); 3], &[0u128; 3], &inners)
+        );
+        assert_eq!(hex::encode(&batch[..4]), "47e1da2a"); // executeBatch
+        for inner in &inners {
+            assert!(find_subslice(&batch[4..], inner).is_some());
+        }
     }
 
     #[test]

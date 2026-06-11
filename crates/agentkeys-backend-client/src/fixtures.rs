@@ -120,7 +120,7 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
     };
     let build_revoke = BuildRevokeUserOpRequest {
         operator_omni: "0x<operator_omni>".into(),
-        device_key_hash: "0x<device_key_hash>".into(),
+        device_key_hashes: vec!["0x<device_key_hash>".into()],
     };
     vec![
         Fixture {
@@ -322,7 +322,7 @@ mod tests {
     fn build_revoke_userop_request_keys_frozen() {
         assert_eq!(
             keys_of("build_revoke_userop_request"),
-            vec!["device_key_hash", "operator_omni"]
+            vec!["device_key_hashes", "operator_omni"]
         );
     }
 }

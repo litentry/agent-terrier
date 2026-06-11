@@ -105,18 +105,21 @@ pub fn assemble_scope_userop(
 }
 
 /// **The unpair sibling** — assemble the agent-revoke UserOp
-/// (`executeBatch([revokeAgentDevice])`). The registry enforces
+/// (`executeBatch([revokeAgentDevice × N])`; one hash = the single unpair, many
+/// = the #260 master-reset fleet teardown, ONE Touch ID). The registry enforces
 /// `msg.sender == operatorMasterWallet[device.operatorOmni]`, so the master
 /// `P256Account` MUST be the sender (no EOA can sign this — the deployer-signed
 /// script path reverts `NotAuthorized` for account-master operators). Only
-/// `p.register.device_key_hash` + `p.registry` feed the callData; `p.grant` and
-/// the remaining register fields are unused, and `p.scope` is never called.
+/// `device_key_hashes` + `p.registry` feed the callData; `p.grant`, the
+/// register fields, and `p.scope` are unused. Hashes MUST be pre-filtered to
+/// active, deduplicated, operator-owned agent devices — `revokeAgentDevice`
+/// reverts on already-revoked/unregistered entries, dooming the whole batch.
 pub fn assemble_revoke_userop(
     p: &AcceptUserOpParams,
+    device_key_hashes: &[[u8; 32]],
     broker_sk: &SigningKey,
 ) -> Result<AssembledAcceptUserOp> {
-    let call_data =
-        agentkeys_core::erc4337::revoke_batch_calldata(&p.registry, &p.register.device_key_hash);
+    let call_data = agentkeys_core::erc4337::revoke_batch_calldata(&p.registry, device_key_hashes);
     assemble_userop_with_calldata(p, call_data, broker_sk)
 }
 

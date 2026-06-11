@@ -480,18 +480,23 @@ pub struct BuildScopeUserOpRequest {
     pub period_seconds: u32,
 }
 
-/// Daemon → broker `POST /v1/revoke/build` — the Touch-ID **unpair**.
+/// Daemon → broker `POST /v1/revoke/build` — the Touch-ID **unpair** and the
+/// #260 master-reset **fleet teardown** (same endpoint, N hashes).
 /// `SidecarRegistry.revokeAgentDevice` requires `msg.sender ==
 /// operatorMasterWallet`, so for an account-master operator the revoke is a
-/// master-account UserOp (`executeBatch([revokeAgentDevice])`); no EOA — incl.
-/// the deployer script — can sign it. Response reuses
-/// [`BuildAcceptUserOpResponse`]; submit reuses [`SubmitAcceptUserOpRequest`]
-/// at `/v1/revoke/submit`.
+/// master-account UserOp (`executeBatch([revokeAgentDevice × N])`); no EOA —
+/// incl. the deployer script — can sign it. One hash = the single unpair; many
+/// = every paired agent revoked in ONE UserOp (one Touch ID) BEFORE the master
+/// unbind strands the bindings. The broker skips already-revoked/unregistered
+/// hashes (the contract would revert the whole batch on them) and rejects
+/// cross-operator ones. Response reuses [`BuildAcceptUserOpResponse`]; submit
+/// reuses [`SubmitAcceptUserOpRequest`] at `/v1/revoke/submit`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildRevokeUserOpRequest {
     pub operator_omni: String,
-    /// The agent's on-chain `SidecarRegistry` device key hash (`0x` + 64 hex).
-    pub device_key_hash: String,
+    /// The agents' on-chain `SidecarRegistry` device key hashes (`0x` + 64 hex
+    /// each).
+    pub device_key_hashes: Vec<String>,
 }
 
 // ── shared protocol helpers (the omni-normalization bug site, centralized) ───

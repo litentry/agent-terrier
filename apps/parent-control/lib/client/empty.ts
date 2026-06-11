@@ -234,7 +234,7 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async revokeBuild(_input: { deviceKeyHash: string }): Promise<
+  async revokeBuild(_input: { deviceKeyHashes: string[] }): Promise<
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   > {
     return disconnected();
