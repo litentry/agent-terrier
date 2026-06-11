@@ -18,7 +18,7 @@ bash scripts/setup-dev-env.sh
 The script is idempotent (safe to re-run), detects macOS vs Linux (apt / dnf / pacman), and handles:
 
 - Homebrew (macOS) or the system package manager (Linux)
-- `rustup` + stable toolchain
+- `rustup` + the repo-pinned Rust toolchain ([`rust-toolchain.toml`](../rust-toolchain.toml) — see "Toolchain pin + bump ritual" below)
 - Node 20+ (Homebrew `node@20`, NodeSource on apt/dnf, distro package on Arch)
 - `jj` (Homebrew / pacman, or `cargo install jj-cli` as fallback) — also seeds the required `Hanwen Cheng <heawen.cheng@gmail.com>` jj identity if unset
 - `jq`
@@ -43,7 +43,7 @@ Two things the script intentionally does **not** do:
 
 | Tool | Why | Install |
 |---|---|---|
-| Rust (stable, edition 2021+) | Workspace crates | `rustup toolchain install stable && rustup default stable` |
+| Rust (pinned by [`rust-toolchain.toml`](../rust-toolchain.toml)) | Workspace crates | `rustup toolchain install` from the repo root — rustup reads the pin (channel + clippy/rustfmt) |
 | Node 20+ | `provisioner-scripts/` (TypeScript scrapers, tsx) | nvm / asdf / system install |
 | Google Chrome | CDP scrapers connect to real Chrome to bypass Turnstile | Standard download |
 | AWS CLI v2 | Operator-only — SES + S3 inbound email and `sts:AssumeRole` | `brew install awscli` |
@@ -53,6 +53,24 @@ Two things the script intentionally does **not** do:
 Optional but recommended:
 
 - **chrome-devtools-mcp** — auto-wired via `.mcp.json` when you open this repo in Claude Code / Cursor / Zed / Continue.dev. Gives the workflow-collection skill tool-level access to a live Chrome for diagnosing provider-side changes.
+
+### Toolchain pin + bump ritual
+
+[`rust-toolchain.toml`](../rust-toolchain.toml) pins the **exact** Rust version (plus the `clippy` + `rustfmt` components) for every surface — local dev, all CI jobs, and the broker-host build. rustup resolves the file automatically for any cargo command run inside the repo; nothing floats on "latest stable". CI installs via plain `rustup toolchain install` (which reads the pin), and [`scripts/check-toolchain-pin.sh`](../scripts/check-toolchain-pin.sh) (run by the `rust-checks` CI job) fails the build if the pin is loosened to a floating channel or a workflow installs around it (e.g. `dtolnay/rust-toolchain@stable`, which sets `RUSTUP_TOOLCHAIN` and bypasses the file).
+
+**Why pinned:** CI runs `cargo clippy --workspace --all-targets -- -D warnings`. With a floating `stable`, a clippy lint introduced in a newer stable fails CI while passing on an older local toolchain (real case: PR #270's `needless_lifetimes` — local 1.94 green, CI latest-stable red). The pin makes local and CI identical.
+
+**Bump ritual** (all steps in ONE change):
+
+1. Edit `channel = "X.Y.Z"` in `rust-toolchain.toml` to the new version.
+2. From the repo root, run the exact CI gate — rustup auto-downloads the new toolchain on first use:
+
+   ```bash
+   cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
+   ```
+
+3. Fix any lints the new version introduces; commit the pin bump + lint fixes together.
+4. Nothing else to touch: CI, `setup-dev-env.sh`, and `setup-broker-host.sh` all read the same file. The broker host downloads the new toolchain on its next `setup-broker-host.sh --ref main` deploy (one-time ~1–2 min; old toolchains are reclaimed by `--reclaim-toolchain`).
 
 ## 2. Build everything (everyone)
 

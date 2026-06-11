@@ -1,2 +1,13 @@
+# Single source of truth for the Rust toolchain — local dev, CI, and the broker
+# host all resolve this file via rustup. Pin a CONCRETE version (never a floating
+# "stable"): CI runs `cargo clippy -- -D warnings`, so a floating channel makes
+# lints introduced in a newer stable fail CI while passing on older local
+# toolchains (the PR #270 needless_lifetimes skew).
+#
+# Bump ritual (see docs/dev-setup.md "Toolchain pin + bump ritual"):
+#   1. Edit `channel` below to the new version.
+#   2. cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
+#   3. Fix any new lints in the same change; commit the pin + fixes together.
 [toolchain]
-channel = "stable"
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
