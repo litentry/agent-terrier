@@ -187,6 +187,74 @@ export function App() {
   // (WebAuthn) — the toast tells the operator to do that manually.
   const resetMaster = async () => {
     if (status.kind !== 'connected') { showToast('Connect a daemon first.'); return; }
+    // #260 — an account-master's agents can ONLY be revoked by the master
+    // P256Account itself, and resetMaster clears operatorMasterWallet (after
+    // which NOBODY can revoke them). So revoke the whole fleet FIRST: ONE
+    // executeBatch([revokeAgentDevice × N]) UserOp, ONE Touch ID, before the
+    // unbind. This also runs before the localStorage clear below — the
+    // assertion wants the stored master cred id.
+    const fleetHashes = actors
+      .filter((a) => a.role === 'agent' && a.deviceKeyHash)
+      .map((a) => a.deviceKeyHash as string);
+    if (fleetHashes.length > 0) {
+      akLog('reset: building fleet revoke (one Touch ID for all paired agents)', {
+        count: fleetHashes.length,
+      });
+      const built = await client.revokeBuild({ deviceKeyHashes: fleetHashes });
+      if (built.ok) {
+        showToast(`Approve with Touch ID — one approval revokes ${fleetHashes.length} paired agent(s)…`);
+        let assertion;
+        try {
+          let masterCred: string | null = null;
+          try { masterCred = localStorage.getItem('ak_master_cred_id'); } catch {}
+          assertion = await getAssertionOverHash(
+            built.data.user_op_hash,
+            masterCred ? [masterCred] : undefined,
+          );
+        } catch {
+          showToast('Touch ID cancelled — reset aborted; the fleet is still bound.');
+          return;
+        }
+        const submitted = await client.revokeSubmit({ user_op: built.data.user_op, assertion });
+        if (!submitted.ok) {
+          const detail = submitted.status?.detail ?? 'handleOps error';
+          akLog('reset: fleet revoke submit FAILED ❌', { detail });
+          showToast(`Fleet revoke failed — reset aborted (${detail}). The agents are still bound; retry.`);
+          return;
+        }
+        akLog('reset: fleet revoke landed ✅', {
+          txHash: (submitted.data as { tx_hash?: string } | undefined)?.tx_hash,
+        });
+      } else {
+        const detail = built.status?.detail ?? '';
+        // legacy EOA master → the daemon's script teardown signs these;
+        // nothing-to-revoke → the fleet is already revoked on chain. Anything
+        // else would strand the bindings once the master unbinds — abort.
+        if (!/legacy EOA|nothing to revoke/i.test(detail)) {
+          akLog('reset: fleet revoke build FAILED ❌', { detail });
+          showToast(`Fleet revoke build failed — reset aborted (${detail || 'check master session + chain'}).`);
+          return;
+        }
+        akLog('reset: no Touch-ID fleet revoke needed', { detail });
+      }
+    }
+    const r = await client.resetMaster();
+    if (!r.ok) {
+      akLog('reset: FAILED ❌', { detail: r.status?.detail });
+      showToast(`Reset failed — ${r.status?.detail ?? 'daemon error'}`);
+      return;
+    }
+    if (r.data.ok === false) {
+      // #260 hard stop: the daemon refused the unbind (account-master agents
+      // still bound on chain) and mutated NOTHING — keep the view intact so the
+      // operator can run the fleet revoke and retry.
+      akLog('reset: daemon aborted — fleet still bound', { fleet: r.data.fleet });
+      showToast(
+        `Reset blocked — ${r.data.note ?? 'agents are still bound on chain; approve the Touch-ID fleet revoke, then reset again.'}`,
+        true,
+      );
+      return;
+    }
     let cleared: string | null = null;
     try { cleared = localStorage.getItem('ak_master_cred_id'); } catch {}
     akLog('reset: clearing master binding (local + on-chain; OS passkey untouched)', {
@@ -195,12 +263,6 @@ export function App() {
     try { localStorage.removeItem('ak_master_cred_id'); } catch {}
     try { localStorage.removeItem('ak_master_omni'); } catch {}
     try { localStorage.removeItem('ak_onboarded'); } catch {}
-    const r = await client.resetMaster();
-    if (!r.ok) {
-      akLog('reset: FAILED ❌', { detail: r.status?.detail });
-      showToast(`Reset failed — ${r.status?.detail ?? 'daemon error'}`);
-      return;
-    }
     const onchain = r.data.onchain;
     const fleet = r.data.fleet;
     akLog('reset: done', { onchain, fleet });
@@ -724,13 +786,15 @@ export function App() {
       };
       if (actor.deviceKeyHash) {
         showToast(`Building revoke for ${actor.label}…`);
-        const built = await client.revokeBuild({ deviceKeyHash: actor.deviceKeyHash });
+        const built = await client.revokeBuild({ deviceKeyHashes: [actor.deviceKeyHash] });
         if (!built.ok) {
           const buildDetail = built.status?.detail ?? '';
-          if (/legacy EOA/i.test(buildDetail)) {
-            // The broker chain-read says the master IS an EOA — the script can
-            // sign this revoke; take the legacy path instead.
-            akLog('revoke: master is a legacy EOA — falling back to the script path', { actor: actor.id });
+          if (/legacy EOA|nothing to revoke/i.test(buildDetail)) {
+            // legacy EOA: the broker chain-read says the master IS an EOA — the
+            // script can sign this revoke. nothing-to-revoke: the chain already
+            // reads `revoked` — the script's read-only pre-check converges
+            // local state without signing anything. Either way: legacy path.
+            akLog('revoke: falling back to the script path', { actor: actor.id, detail: buildDetail });
             if (!(await legacyRevoke())) return;
             const a0 = await client.listActors();
             if (a0.ok) setActors(a0.data);
@@ -913,7 +977,7 @@ export function App() {
             // #243: state the blast radius — reset tears down the whole fleet.
             const agentCount = actors.filter((a) => a.role === 'agent').length;
             const pendingCount = pairingRequests.length;
-            if (window.confirm(`Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Disconnects your whole fleet: revokes ${agentCount} paired agent(s) on chain + declines ${pendingCount} pending pairing request(s) — re-pairing needs a fresh ceremony\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?`)) resetMaster();
+            if (window.confirm(`Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Disconnects your whole fleet: revokes ${agentCount} paired agent(s) on chain (ONE Touch ID approval covers all of them, asked first) + declines ${pendingCount} pending pairing request(s) — re-pairing needs a fresh ceremony\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?`)) resetMaster();
           }}
         >
           <span className="marker">[⟲]</span> reset master · re-onboard passkey

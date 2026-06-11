@@ -139,14 +139,19 @@ clears the saved identity AND the on-chain binding so a fresh passkey can
 re-onboard, **and it tears down your whole fleet** — every paired agent's
 on-chain device binding is revoked, every pending pairing request is declined,
 and the local agent list is cleared, so a re-onboarded master starts clean and
-re-pairing an old agent requires a fresh pairing ceremony. The confirm dialog
-states exactly how many agents and pending requests it will disconnect, and the
-result message spells out anything that could **not** be torn down remotely
-(e.g. the chain helper isn't configured) so a partially-disconnected fleet never
-reads as fully disconnected. After a reset, Touch ID sign-in is gone until you
-onboard again. (You no longer need the `--master-device-key-hash` developer flag
-for the normal web loop — the device is recovered from your account
-automatically.)
+re-pairing an old agent requires a fresh pairing ceremony. **If you have paired
+agents, the reset asks for ONE extra Touch ID first**: only your master account
+can revoke its agents on chain, so the reset batches every revoke into a single
+approval *before* the master binding is destroyed (afterwards nobody could
+revoke them). Cancelling that prompt cancels the whole reset — nothing is
+unbound, your agents stay connected, and you can simply retry. The confirm
+dialog states exactly how many agents and pending requests it will disconnect,
+and the result message spells out anything that could **not** be torn down
+remotely (e.g. the chain helper isn't configured) so a partially-disconnected
+fleet never reads as fully disconnected. After a reset, Touch ID sign-in is
+gone until you onboard again. (You no longer need the
+`--master-device-key-hash` developer flag for the normal web loop — the device
+is recovered from your account automatically.)
 
 ## Pairing an agent + granting its permissions (parent-control)
 

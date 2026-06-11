@@ -246,13 +246,16 @@ export class DaemonBackend implements AgentKeysClient {
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
-  // The Touch-ID unpair: build + submit the master-account
-  // executeBatch([revokeAgentDevice]) UserOp (the only signer the registry
-  // accepts for an account-master operator).
-  async revokeBuild(input: { deviceKeyHash: string }): Promise<
+  // The Touch-ID unpair + the #260 reset fleet revoke: build + submit the
+  // master-account executeBatch([revokeAgentDevice × N]) UserOp (the only
+  // signer the registry accepts for an account-master operator). One hash =
+  // the per-agent unpair; every paired agent = the pre-reset fleet teardown
+  // (ONE Touch ID). The broker skips already-revoked hashes; all-skipped
+  // returns 409 "nothing to revoke".
+  async revokeBuild(input: { deviceKeyHashes: string[] }): Promise<
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   > {
-    return this.postJson('/v1/revoke/build', { device_key_hash: input.deviceKeyHash });
+    return this.postJson('/v1/revoke/build', { device_key_hashes: input.deviceKeyHashes });
   }
 
   async revokeSubmit(body: unknown): Promise<Result<unknown>> {
