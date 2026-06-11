@@ -1,0 +1,219 @@
+<svg viewBox="0 0 1480 1100" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d4ed8"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1480" height="1100" fill="#ffffff"/>
+
+  <!-- ======================= TITLE ======================= -->
+  <text x="40" y="42" font-size="22" font-weight="bold" fill="#111827">AgentKeys key map — how keys are generated, bound, and why privacy &amp; security hold</text>
+  <text x="40" y="66" font-size="12" fill="#6b7280">Worked example: agentkeys init --email test@litentry.org, then pair agent "hermes". All hashes real; the wallet is illustrative (only the TEE can produce it). Companion to arch.md §4.1.</text>
+
+  <!-- ======================= BOX A: IDENTITY (transient) ======================= -->
+  <rect x="40" y="110" width="270" height="210" rx="10" fill="#f3f4f6" stroke="#6b7280" stroke-width="2"/>
+  <text x="58" y="136" font-size="14" font-weight="bold" fill="#374151">1 · IDENTITY — transient</text>
+  <text x="58" y="156" font-size="11" fill="#6b7280">who logged in (email / OAuth / passkey)</text>
+  <text x="58" y="186" font-size="11.5" font-family="Menlo, monospace" fill="#111827">test@litentry.org</text>
+  <text x="58" y="210" font-size="10.5" fill="#374151">SHA256("agentkeys"||"email"||value)</text>
+  <text x="58" y="230" font-size="10.5" font-family="Menlo, monospace" fill="#111827">identity_omni = 25264bfa…c59b</text>
+  <text x="58" y="262" font-size="10.5" font-style="italic" fill="#6b7280">an auth-event handle only —</text>
+  <text x="58" y="278" font-size="10.5" font-style="italic" fill="#6b7280">used once at bootstrap, then discarded;</text>
+  <text x="58" y="294" font-size="10.5" font-style="italic" fill="#6b7280">never stored on chain, S3, or in J1</text>
+  <circle cx="288" cy="132" r="11" fill="#be185d"/>
+  <text x="288" y="136" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">P1</text>
+
+  <!-- arrow A -> B -->
+  <line x1="310" y1="215" x2="368" y2="215" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="339" y="200" font-size="10" fill="#374151" text-anchor="middle">stage-3 derive</text>
+  <text x="339" y="232" font-size="9.5" font-style="italic" fill="#6b7280" text-anchor="middle">the ONLY</text>
+  <text x="339" y="244" font-size="9.5" font-style="italic" fill="#6b7280" text-anchor="middle">identity-keyed step</text>
+
+  <!-- ======================= BOX B: SIGNER TEE ======================= -->
+  <rect x="370" y="90" width="410" height="250" rx="10" fill="#fef2f2" stroke="#b91c1c" stroke-width="2.5"/>
+  <text x="388" y="116" font-size="14" font-weight="bold" fill="#b91c1c">2 · SIGNER TEE — sealed; K3 never leaves</text>
+  <text x="388" y="142" font-size="11.5" font-family="Menlo, monospace" fill="#111827">K3_v[epoch] — 32-byte master secret</text>
+  <line x1="388" y1="154" x2="762" y2="154" stroke="#fca5a5" stroke-width="1"/>
+  <text x="388" y="172" font-size="10.5" fill="#6b7280" font-style="italic">derived on demand, RAM only — never persisted, never logged:</text>
+  <text x="388" y="196" font-size="10.5" font-family="Menlo, monospace" fill="#111827">initial_master_wallet_K3_v1 = HKDF(K3_v1, identity_omni)</text>
+  <text x="388" y="212" font-size="10.5" font-family="Menlo, monospace" fill="#6b7280">  → 0x7c41e8a3…c6e4d21b   (illustrative)</text>
+  <text x="388" y="236" font-size="10.5" font-family="Menlo, monospace" fill="#111827">K4 current_master_wallet = HKDF(K3_v[e], O_master)</text>
+  <text x="388" y="256" font-size="10.5" font-family="Menlo, monospace" fill="#111827">K4 wallet_hermes         = HKDF(K3_v[e], O_hermes)</text>
+  <text x="388" y="276" font-size="10.5" font-family="Menlo, monospace" fill="#111827">credential_kek = HKDF(K3_v[e], "agentkeys.user.v1"||omni)</text>
+  <text x="388" y="304" font-size="10.5" font-style="italic" fill="#b91c1c">broker, daemon, workers, even host root: none can read K3 or K4</text>
+  <text x="388" y="320" font-size="10.5" font-style="italic" fill="#b91c1c">— they only see addresses and signatures</text>
+  <circle cx="758" cy="112" r="11" fill="#0f172a"/>
+  <text x="758" y="116" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S1</text>
+
+  <!-- arrow B -> C -->
+  <line x1="780" y1="190" x2="838" y2="190" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="809" y="175" font-size="10" fill="#374151" text-anchor="middle">SHA256 + FREEZE</text>
+  <text x="809" y="206" font-size="9.5" font-style="italic" fill="#6b7280" text-anchor="middle">at attestation</text>
+
+  <!-- back-edge C -> B (dashed) -->
+  <line x1="838" y1="290" x2="782" y2="290" stroke="#1d4ed8" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowBlue)"/>
+  <text x="810" y="308" font-size="9.5" font-style="italic" fill="#1d4ed8" text-anchor="middle">every later HKDF</text>
+  <text x="810" y="320" font-size="9.5" font-style="italic" fill="#1d4ed8" text-anchor="middle">keys off anchors</text>
+
+  <!-- ======================= BOX C: PUBLIC ANCHORS ======================= -->
+  <rect x="840" y="110" width="340" height="210" rx="10" fill="#eff6ff" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="858" y="136" font-size="14" font-weight="bold" fill="#1d4ed8">3 · PUBLIC ANCHORS — frozen forever</text>
+  <text x="858" y="160" font-size="10.5" font-family="Menlo, monospace" fill="#111827">O_master = SHA256("agentkeys"||"evm"||wallet)</text>
+  <text x="858" y="176" font-size="10.5" font-family="Menlo, monospace" fill="#6b7280">  = a8fde0c5…5d81d9</text>
+  <text x="858" y="192" font-size="9.5" font-style="italic" fill="#6b7280">= the wallet's own identity omni — email not in the preimage</text>
+  <text x="858" y="216" font-size="10.5" font-family="Menlo, monospace" fill="#111827">O_hermes = SHA256("agentkeys-hdkd-v1"||</text>
+  <text x="858" y="232" font-size="10.5" font-family="Menlo, monospace" fill="#111827">           O_master||"//hermes")</text>
+  <text x="858" y="248" font-size="10.5" font-family="Menlo, monospace" fill="#6b7280">  = a152e6b3…54f7a1</text>
+  <text x="858" y="272" font-size="10.5" font-style="italic" fill="#1d4ed8">public + recomputable by design — zero secrets;</text>
+  <text x="858" y="288" font-size="10.5" font-style="italic" fill="#1d4ed8">knowing an omni grants NOTHING (see bindings ↓)</text>
+  <circle cx="1158" cy="132" r="11" fill="#0f172a"/>
+  <text x="1158" y="136" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S2</text>
+
+  <!-- arrow C -> D -->
+  <line x1="1180" y1="215" x2="1238" y2="215" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ======================= BOX D: ANCHOR CONSUMERS ======================= -->
+  <rect x="1240" y="110" width="200" height="210" rx="10" fill="#ecfeff" stroke="#0e7490" stroke-width="2"/>
+  <text x="1258" y="136" font-size="13" font-weight="bold" fill="#0e7490">everything keys</text>
+  <text x="1258" y="152" font-size="13" font-weight="bold" fill="#0e7490">off the anchors</text>
+  <text x="1258" y="178" font-size="10.5" font-family="Menlo, monospace" fill="#111827">bots/&lt;omni&gt;/ S3</text>
+  <text x="1258" y="198" font-size="10.5" font-family="Menlo, monospace" fill="#111827">IAM PrincipalTag</text>
+  <text x="1258" y="218" font-size="10.5" font-family="Menlo, monospace" fill="#111827">scope-grant index</text>
+  <text x="1258" y="238" font-size="10.5" font-family="Menlo, monospace" fill="#111827">AEAD AAD binding</text>
+  <text x="1258" y="258" font-size="10.5" font-family="Menlo, monospace" fill="#111827">audit attribution</text>
+  <text x="1258" y="288" font-size="10" font-style="italic" fill="#0e7490">per-actor isolation at</text>
+  <text x="1258" y="302" font-size="10" font-style="italic" fill="#0e7490">every storage layer</text>
+  <circle cx="1418" cy="132" r="11" fill="#0f172a"/>
+  <text x="1418" y="136" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S3</text>
+
+  <!-- vertical arrows into row 2 -->
+  <line x1="1010" y1="320" x2="920" y2="438" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <text x="1000" y="385" font-size="9.5" font-style="italic" fill="#7c3aed">registry + scope rows keyed by omnis</text>
+  <line x1="1340" y1="320" x2="1300" y2="438" stroke="#b45309" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <text x="1330" y="385" font-size="9.5" font-style="italic" fill="#b45309">claims carry omnis only</text>
+
+  <!-- ======================= BOX E: MASTER MACHINE ======================= -->
+  <rect x="40" y="440" width="300" height="190" rx="10" fill="#f0fdf4" stroke="#15803d" stroke-width="2"/>
+  <text x="58" y="466" font-size="14" font-weight="bold" fill="#15803d">4 · MASTER MACHINE</text>
+  <text x="58" y="492" font-size="11" font-weight="bold" fill="#111827">K10 — device key (OS keychain)</text>
+  <text x="58" y="508" font-size="10.5" fill="#374151">signs every request; no biometric needed</text>
+  <text x="58" y="534" font-size="11" font-weight="bold" fill="#111827">K11 — WebAuthn passkey (Secure Enclave)</text>
+  <text x="58" y="550" font-size="10.5" fill="#374151">Touch ID gesture; cannot be exfiltrated,</text>
+  <text x="58" y="566" font-size="10.5" fill="#374151">even by host-OS root</text>
+  <text x="58" y="592" font-size="10.5" font-style="italic" fill="#15803d">K11 demanded ONLY at mutations:</text>
+  <text x="58" y="608" font-size="10.5" font-style="italic" fill="#15803d">device add/revoke, scope grant/revoke</text>
+  <circle cx="318" cy="462" r="11" fill="#0f172a"/>
+  <text x="318" y="466" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S4</text>
+
+  <!-- arrow E -> G -->
+  <line x1="340" y1="520" x2="438" y2="520" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="389" y="505" font-size="10" fill="#374151" text-anchor="middle">register_master_device</text>
+  <text x="389" y="536" font-size="9.5" font-style="italic" fill="#6b7280" text-anchor="middle">K11 Touch ID UserOp</text>
+
+  <!-- ======================= BOX G: ON-CHAIN ======================= -->
+  <rect x="440" y="440" width="420" height="190" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="458" y="466" font-size="14" font-weight="bold" fill="#7c3aed">5 · ON-CHAIN — single source of truth, default-deny</text>
+  <text x="458" y="492" font-size="10.5" font-family="Menlo, monospace" fill="#111827">SidecarRegistry: device_key_hash →</text>
+  <text x="458" y="508" font-size="10.5" font-family="Menlo, monospace" fill="#111827">  (operator_omni, actor_omni, roles)</text>
+  <text x="458" y="532" font-size="10.5" font-family="Menlo, monospace" fill="#111827">AgentKeysScope: (O_master, O_hermes) →</text>
+  <text x="458" y="548" font-size="10.5" font-family="Menlo, monospace" fill="#111827">  {services…}   — no row = NO access</text>
+  <text x="458" y="576" font-size="10.5" font-style="italic" fill="#7c3aed">a paired device with no scope grant can authenticate</text>
+  <text x="458" y="592" font-size="10.5" font-style="italic" fill="#7c3aed">but do nothing — installed ≠ permitted</text>
+  <text x="458" y="614" font-size="10.5" font-style="italic" fill="#7c3aed">unpair = revoke the BINDING (omnis are facts, not grants)</text>
+  <circle cx="838" cy="462" r="11" fill="#0f172a"/>
+  <text x="838" y="466" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S5</text>
+
+  <!-- arrow F -> G -->
+  <line x1="958" y1="520" x2="862" y2="520" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="910" y="505" font-size="10" fill="#374151" text-anchor="middle">registerAgentDevice</text>
+  <text x="910" y="536" font-size="9.5" font-style="italic" fill="#6b7280" text-anchor="middle">submitted by the MASTER,</text>
+  <text x="910" y="548" font-size="9.5" font-style="italic" fill="#6b7280" text-anchor="middle">never by the agent</text>
+
+  <!-- ======================= BOX F: AGENT MACHINES ======================= -->
+  <rect x="960" y="440" width="240" height="190" rx="10" fill="#f0fdf4" stroke="#15803d" stroke-width="2"/>
+  <text x="978" y="466" font-size="14" font-weight="bold" fill="#15803d">6 · AGENT MACHINE(S)</text>
+  <text x="978" y="492" font-size="11" font-weight="bold" fill="#111827">K10 — agent device key(s)</text>
+  <text x="978" y="508" font-size="10.5" fill="#374151">one per VM / sandbox; many</text>
+  <text x="978" y="524" font-size="10.5" fill="#374151">concurrent under one agent omni</text>
+  <text x="978" y="552" font-size="10.5" font-style="italic" fill="#15803d">no K11 — agents have no</text>
+  <text x="978" y="568" font-size="10.5" font-style="italic" fill="#15803d">human-presence credential;</text>
+  <text x="978" y="584" font-size="10.5" font-style="italic" fill="#15803d">every privileged act routes</text>
+  <text x="978" y="600" font-size="10.5" font-style="italic" fill="#15803d">through the master's gesture</text>
+
+  <!-- ======================= BOX H: BEARER CHAIN ======================= -->
+  <rect x="1240" y="440" width="200" height="190" rx="10" fill="#fffbeb" stroke="#b45309" stroke-width="2"/>
+  <text x="1258" y="466" font-size="14" font-weight="bold" fill="#b45309">7 · BEARERS</text>
+  <text x="1258" y="490" font-size="10.5" font-family="Menlo, monospace" fill="#111827">J1 (K6) — 5 h</text>
+  <text x="1258" y="505" font-size="9.5" fill="#6b7280">session JWT, signed K1</text>
+  <text x="1262" y="521" font-size="10" fill="#b45309">↓ /v1/mint-oidc-jwt</text>
+  <text x="1258" y="540" font-size="10.5" font-family="Menlo, monospace" fill="#111827">OIDC (K7) — 300 s</text>
+  <text x="1258" y="555" font-size="9.5" fill="#6b7280">signed K2, omni claim</text>
+  <text x="1262" y="571" font-size="10" fill="#b45309">↓ STS AssumeRole</text>
+  <text x="1258" y="590" font-size="10.5" font-family="Menlo, monospace" fill="#111827">K8 creds — 1 h</text>
+  <text x="1258" y="605" font-size="9.5" fill="#6b7280">PrincipalTag = omni</text>
+  <text x="1258" y="622" font-size="9.5" font-style="italic" fill="#b45309">workers re-check chain per call</text>
+  <circle cx="1418" cy="462" r="11" fill="#0f172a"/>
+  <text x="1418" y="466" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S6</text>
+
+  <!-- ======================= BOTTOM BAND: GUARANTEES ======================= -->
+  <rect x="40" y="670" width="1400" height="400" rx="10" fill="#f9fafb" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="60" y="700" font-size="15" font-weight="bold" fill="#111827">How privacy &amp; security are preserved</text>
+
+  <!-- column 1 -->
+  <circle cx="72" cy="730" r="11" fill="#be185d"/>
+  <text x="72" y="734" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">P1</text>
+  <text x="94" y="727" font-size="11.5" font-weight="bold" fill="#111827">No PII in anything durable.</text>
+  <text x="94" y="743" font-size="10.5" fill="#374151">The email exists only inside the transient identity_omni. Chain rows, S3 paths, JWTs and</text>
+  <text x="94" y="758" font-size="10.5" fill="#374151">audit rows carry wallet-derived omnis — one-way SHA-256, email not in any stored preimage.</text>
+
+  <circle cx="72" cy="790" r="11" fill="#0f172a"/>
+  <text x="72" y="794" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S1</text>
+  <text x="94" y="787" font-size="11.5" font-weight="bold" fill="#111827">Root secret sealed; nothing derived is stored.</text>
+  <text x="94" y="803" font-size="10.5" fill="#374151">K3 never leaves the TEE; every wallet/KEK is re-derived per use and never persisted or logged.</text>
+  <text x="94" y="818" font-size="10.5" fill="#374151">Compromising broker, daemon, workers or host shell yields addresses, not keys.</text>
+
+  <circle cx="72" cy="850" r="11" fill="#0f172a"/>
+  <text x="72" y="854" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S2</text>
+  <text x="94" y="847" font-size="11.5" font-weight="bold" fill="#111827">Public anchors, gated bindings.</text>
+  <text x="94" y="863" font-size="10.5" fill="#374151">Omnis carry zero secrets — anyone can compute O_hermes, nobody can bind to it: a binding</text>
+  <text x="94" y="878" font-size="10.5" fill="#374151">requires the master's J1-gated pairing claim plus the master's K11 Touch ID UserOp on chain.</text>
+
+  <circle cx="72" cy="910" r="11" fill="#0f172a"/>
+  <text x="72" y="914" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S3</text>
+  <text x="94" y="907" font-size="11.5" font-weight="bold" fill="#111827">Per-actor blast radius.</text>
+  <text x="94" y="923" font-size="10.5" fill="#374151">Each actor gets its own K4 wallet, S3 prefix (enforced by IAM PrincipalTag), scope row and audit</text>
+  <text x="94" y="938" font-size="10.5" fill="#374151">identity. A compromised hermes VM touches bots/a152e6b3…/ only — master and siblings unreachable.</text>
+
+  <!-- column 2 -->
+  <circle cx="772" cy="730" r="11" fill="#0f172a"/>
+  <text x="772" y="734" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S4</text>
+  <text x="794" y="727" font-size="11.5" font-weight="bold" fill="#111827">Two-tier human gate.</text>
+  <text x="794" y="743" font-size="10.5" fill="#374151">K10 signs every request frictionlessly; the hardware-sealed K11 (Touch ID) is demanded only</text>
+  <text x="794" y="758" font-size="10.5" fill="#374151">for mutations — device add/revoke, scope grant/revoke. Theft of K10 alone cannot re-permission.</text>
+
+  <circle cx="772" cy="790" r="11" fill="#0f172a"/>
+  <text x="772" y="794" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S5</text>
+  <text x="794" y="787" font-size="11.5" font-weight="bold" fill="#111827">Chain is the source of truth, default-deny, checked twice.</text>
+  <text x="794" y="803" font-size="10.5" fill="#374151">No scope row → no JWT, no cap. The broker checks the chain at mint AND every worker</text>
+  <text x="794" y="818" font-size="10.5" fill="#374151">independently re-verifies device + scope + epoch per call — a lying broker changes nothing.</text>
+
+  <circle cx="772" cy="850" r="11" fill="#0f172a"/>
+  <text x="772" y="854" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S6</text>
+  <text x="794" y="847" font-size="11.5" font-weight="bold" fill="#111827">Short-lived bearers; rotation without migration.</text>
+  <text x="794" y="863" font-size="10.5" fill="#374151">OIDC 300 s, STS 1 h, session 5 h — leaks age out fast. K3 epoch bump re-keys every wallet while</text>
+  <text x="794" y="878" font-size="10.5" fill="#374151">the frozen anchors keep S3 / IAM / scope / AAD untouched: rotation is a zero-migration event.</text>
+
+  <circle cx="772" cy="910" r="11" fill="#374151"/>
+  <text x="772" y="914" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">∑</text>
+  <text x="794" y="907" font-size="11.5" font-weight="bold" fill="#111827">Defense in depth, end to end.</text>
+  <text x="794" y="923" font-size="10.5" fill="#374151">Identity (transient) → TEE-held secrets → public anchors → chain-gated bindings → short-lived</text>
+  <text x="794" y="938" font-size="10.5" fill="#374151">bearers → per-actor IAM. Each layer assumes the previous one failed.</text>
+
+  <!-- footer -->
+  <text x="60" y="1000" font-size="10" fill="#9ca3af">Formulas pinned by tests: crates/agentkeys-core/src/actor_omni.rs · crates/agentkeys-broker-server/src/identity/omni_account.rs · key inventory: docs/arch.md §4–§6</text>
+  <text x="60" y="1016" font-size="10" fill="#9ca3af">Generated 2026-06-11 · source of truth is arch.md §4.1 (mermaid) — keep this illustration in sync when the derivations change</text>
+</svg>
