@@ -247,6 +247,16 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_WORKER_CLASSIFY_URL")]
     classify_url: Option<String>,
 
+    /// #97 — the audit worker the web decode view fetches REAL `AuditEnvelope`s
+    /// from (by the submit receipt hashes). Defaults to the public worker; set
+    /// empty to disable (decode falls back to the synthesized preview).
+    #[arg(
+        long,
+        env = "AGENTKEYS_AUDIT_WORKER_URL",
+        default_value = "https://audit.litentry.org"
+    )]
+    audit_worker_url: String,
+
     /// W3 real-memory: AWS region for the STS relay.
     #[arg(long, env = "REGION", default_value = "us-east-1")]
     region: String,
@@ -1161,6 +1171,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.config_url.clone(),
         args.config_role_arn.clone(),
         args.classify_url.clone(),
+        Some(args.audit_worker_url.clone()).filter(|u| !u.trim().is_empty()),
         args.region.clone(),
         args.master_device_key_hash.clone(),
         args.register_master_script.clone(),

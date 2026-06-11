@@ -123,24 +123,37 @@ pub struct PaymentDirectBody {
 }
 
 // ── 40..49 — scope family ──────────────────────────────────────────────
+//
+// Bodies mirror the post-#164/#225 on-chain `setScope(bytes32,bytes32,
+// bytes32[],bool,uint128,uint128,uint128,uint32)` — set-replace semantics:
+// a grant carries the FULL replacement service set; an empty set is the
+// revoke-all. (Aligned before first emit — bytes 40/41 were never emitted
+// under the pre-cutover per-service schema, so this is not a break.)
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScopeGrantBody {
     /// 32-byte hex — the agent whose scope was just granted.
     pub agent_omni: String,
-    /// Service name the scope authorizes.
-    pub service: String,
-    /// Per-cap max-call cap configured on the grant. `0` = unlimited.
-    pub max_calls: u32,
-    /// Per-cap max-amount cap (string-encoded U256) for spend-bounded
-    /// scopes. `"0"` = unlimited.
-    pub max_amount: String,
+    /// The FULL replacement set of on-chain service ids (`0x<64 hex>` each,
+    /// `keccak256(service_name)` — names are hashed on-chain and not
+    /// recoverable here). Auditors diff consecutive grants for per-service
+    /// changes.
+    pub service_ids: Vec<String>,
+    pub read_only: bool,
+    /// u128 caps, string-encoded (JSON numbers are only i53-safe).
+    /// `"0"` = unlimited.
+    pub max_per_call: String,
+    pub max_per_period: String,
+    pub max_total: String,
+    pub period_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScopeRevokeBody {
+    /// 32-byte hex — the agent whose ENTIRE grant was revoked (`setScope`
+    /// with an empty service set, or `revokeScope`). There is no
+    /// per-service revoke in the set-replace model.
     pub agent_omni: String,
-    pub service: String,
 }
 
 // ── 50..59 — device family ─────────────────────────────────────────────
@@ -322,6 +335,115 @@ mod tests {
             AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
         match decoded.typed_body().unwrap() {
             TypedAuditBody::ConfigTeardown(b) => assert_eq!(b, td),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+    }
+
+    /// §15.3b step-5 worker test for the scope family (#97 control-plane
+    /// wiring): canonical CBOR roundtrip + typed decode for the set-replace
+    /// grant/revoke shapes.
+    #[test]
+    fn scope_family_cbor_roundtrip_and_typed_decode() {
+        use crate::audit::{envelope_for, AuditEnvelope, AuditOpKind, AuditResult, TypedAuditBody};
+
+        let grant = ScopeGrantBody {
+            agent_omni: format!("0x{}", "33".repeat(32)),
+            service_ids: vec![
+                format!("0x{}", "c1".repeat(32)),
+                format!("0x{}", "c2".repeat(32)),
+            ],
+            read_only: true,
+            max_per_call: "1000".into(),
+            max_per_period: "0".into(),
+            max_total: "340282366920938463463374607431768211455".into(), // u128::MAX
+            period_seconds: 86400,
+        };
+        let env = envelope_for(
+            [0x33; 32],
+            [0x22; 32],
+            AuditOpKind::ScopeGrant,
+            grant.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(AuditOpKind::ScopeGrant.label(), "scope.grant");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::ScopeGrant(b) => assert_eq!(b, grant),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        let revoke = ScopeRevokeBody {
+            agent_omni: format!("0x{}", "33".repeat(32)),
+        };
+        let env = envelope_for(
+            [0x33; 32],
+            [0x22; 32],
+            AuditOpKind::ScopeRevoke,
+            revoke.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::ScopeRevoke(b) => assert_eq!(b, revoke),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+    }
+
+    /// §15.3b step-5 worker test for the device family (#97 control-plane
+    /// wiring): DeviceAdd (agent bind — ROLE_CAP_MINT, zero attestation) +
+    /// DeviceRevoke roundtrip.
+    #[test]
+    fn device_family_cbor_roundtrip_and_typed_decode() {
+        use crate::audit::{envelope_for, AuditEnvelope, AuditOpKind, AuditResult, TypedAuditBody};
+
+        let add = DeviceAddBody {
+            device_key_hash: format!("0x{}", "11".repeat(32)),
+            role_bits: 1, // SidecarRegistry.ROLE_CAP_MINT — what agent binds get
+            attestation_hash: format!("0x{}", "00".repeat(32)),
+        };
+        let env = envelope_for(
+            [0x33; 32],
+            [0x22; 32],
+            AuditOpKind::DeviceAdd,
+            add.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(AuditOpKind::DeviceAdd.label(), "device.add");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::DeviceAdd(b) => assert_eq!(b, add),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        let rev = DeviceRevokeBody {
+            device_key_hash: format!("0x{}", "11".repeat(32)),
+        };
+        let env = envelope_for(
+            [0x22; 32],
+            [0x22; 32],
+            AuditOpKind::DeviceRevoke,
+            rev.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::DeviceRevoke(b) => assert_eq!(b, rev),
             other => panic!("unexpected typed body: {other:?}"),
         }
     }
