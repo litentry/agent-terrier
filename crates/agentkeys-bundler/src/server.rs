@@ -6,7 +6,7 @@
 
 use crate::legacy_tx::LegacyTx;
 use agentkeys_core::device_crypto::evm_address;
-use agentkeys_core::erc4337::{handle_ops_calldata, RpcUserOp};
+use agentkeys_core::erc4337::{decode_entrypoint_revert, handle_ops_calldata, RpcUserOp};
 use anyhow::{anyhow, Context, Result};
 use axum::extract::State;
 use axum::routing::{get, post};
@@ -141,11 +141,19 @@ impl BundlerBoot {
     }
 }
 
+/// What `eth_sendUserOperation` recorded per userOpHash — enough to find the
+/// outer tx AND to replay its calldata as `eth_call` when the receipt comes
+/// back reverted (#247: recover the `FailedOp` `AAxx` reason).
+struct SubmittedTx {
+    tx_hash: String,
+    call_data: Vec<u8>,
+}
+
 pub struct BundlerState {
     pub boot: BundlerBoot,
     pub http: reqwest::Client,
-    /// userOpHash (0x-hex) → outer tx hash (0x-hex).
-    submitted: Mutex<HashMap<String, String>>,
+    /// userOpHash (0x-hex) → the broadcast outer tx.
+    submitted: Mutex<HashMap<String, SubmittedTx>>,
     /// Serializes submits so two concurrent ops can't race the same EOA nonce.
     submit_lock: Mutex<()>,
 }
@@ -190,16 +198,18 @@ fn degraded_message(missing: &[String]) -> String {
     )
 }
 
-/// Raw JSON-RPC call to the chain node. Raw `Value` reads only — Heima's
-/// mixHash-less receipts/headers crash typed eth parsers.
-async fn chain_rpc(
+/// POST a JSON-RPC request and return the FULL response envelope. Raw `Value`
+/// reads only — Heima's mixHash-less receipts/headers crash typed eth parsers.
+/// Callers that need the raw `error` object (eth_call revert data) use this
+/// directly; everyone else goes through [`chain_rpc`].
+async fn chain_rpc_response(
     state: &BundlerState,
     cfg: &BundlerConfig,
     method: &str,
     params: Value,
 ) -> Result<Value> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    let resp: Value = state
+    state
         .http
         .post(&cfg.rpc_url)
         .json(&body)
@@ -208,13 +218,73 @@ async fn chain_rpc(
         .map_err(|e| anyhow!("{method} send: {e}"))?
         .json()
         .await
-        .map_err(|e| anyhow!("{method} decode: {e}"))?;
+        .map_err(|e| anyhow!("{method} decode: {e}"))
+}
+
+/// JSON-RPC call to the chain node returning `result`; a JSON-RPC `error`
+/// becomes `Err`.
+async fn chain_rpc(
+    state: &BundlerState,
+    cfg: &BundlerConfig,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let resp = chain_rpc_response(state, cfg, method, params).await?;
     if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
         return Err(anyhow!("{method} error: {err}"));
     }
     resp.get("result")
         .cloned()
         .ok_or_else(|| anyhow!("{method} no result"))
+}
+
+/// Extract the revert blob from an `eth_call` JSON-RPC response. Geth and
+/// Frontier (Heima) both put the `0x`-hex revert bytes at `error.data`;
+/// absent on success and on non-revert errors (pruned state, transport).
+fn rpc_revert_data(resp: &Value) -> Option<Vec<u8>> {
+    let data = resp.get("error")?.get("data")?.as_str()?;
+    hex::decode(data.trim().trim_start_matches("0x")).ok()
+}
+
+/// #247: replay a reverted `handleOps` tx's calldata as `eth_call` and decode
+/// the EntryPoint `FailedOp` revert into its verbatim `AAxx ...` reason, so the
+/// broker can report "AA31 paymaster deposit too low" instead of guessing
+/// "wrong passkey" (the real 2026-06-10 incident). Tries the failing tx's
+/// PARENT block first (the faithful pre-state), then `latest` (covers pruned
+/// historical state and same-block interference). `None` when the replay no
+/// longer reverts or yields no decodable data — never an error (best-effort
+/// diagnostics must not mask the receipt itself).
+async fn replay_revert_reason(
+    state: &BundlerState,
+    cfg: &BundlerConfig,
+    call_data: &[u8],
+    receipt: &Value,
+) -> Option<String> {
+    let call = json!({
+        "from": format!("0x{}", hex::encode(cfg.beneficiary)),
+        "to": format!("0x{}", hex::encode(cfg.entry_point)),
+        "gas": format!("0x{:x}", cfg.gas_limit),
+        "data": format!("0x{}", hex::encode(call_data)),
+    });
+    let parent_block = receipt
+        .get("blockNumber")
+        .and_then(|b| b.as_str())
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .filter(|n| *n > 0)
+        .map(|n| format!("0x{:x}", n - 1));
+    for block in parent_block.into_iter().chain(["latest".to_string()]) {
+        let Ok(resp) = chain_rpc_response(state, cfg, "eth_call", json!([call, block])).await
+        else {
+            continue;
+        };
+        if let Some(data) = rpc_revert_data(&resp) {
+            return Some(
+                decode_entrypoint_revert(&data)
+                    .unwrap_or_else(|| format!("unrecognized revert 0x{}", hex::encode(&data))),
+            );
+        }
+    }
+    None
 }
 
 fn parse_qty_u128(v: &Value, name: &str) -> Result<u128> {
@@ -349,17 +419,21 @@ async fn send_user_operation(
         user_op_hash,
         tx_hash, nonce, gas_price, "handleOps broadcast"
     );
-    state
-        .submitted
-        .lock()
-        .await
-        .insert(user_op_hash.clone(), tx_hash);
+    state.submitted.lock().await.insert(
+        user_op_hash.clone(),
+        SubmittedTx {
+            tx_hash,
+            call_data: tx.data,
+        },
+    );
     Ok(user_op_hash)
 }
 
 /// `eth_getUserOperationReceipt([userOpHash])` — `null` until the outer tx is
 /// mined; then `{ userOpHash, entryPoint, success, receipt }` with the RAW
 /// chain receipt embedded (the broker reads `success` + `receipt.transactionHash`).
+/// A reverted tx additionally carries `reason`: the `eth_call`-replayed
+/// `FailedOp` string (#247), when recoverable.
 async fn get_user_operation_receipt(
     state: &BundlerState,
     cfg: &BundlerConfig,
@@ -371,8 +445,8 @@ async fn get_user_operation_receipt(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("missing userOpHash param"))?
         .to_lowercase();
-    let tx_hash = match state.submitted.lock().await.get(&hash) {
-        Some(t) => t.clone(),
+    let (tx_hash, call_data) = match state.submitted.lock().await.get(&hash) {
+        Some(t) => (t.tx_hash.clone(), t.call_data.clone()),
         None => return Ok(Value::Null),
     };
     let receipt = chain_rpc(state, cfg, "eth_getTransactionReceipt", json!([tx_hash])).await?;
@@ -380,12 +454,22 @@ async fn get_user_operation_receipt(
         return Ok(Value::Null);
     }
     let success = receipt.get("status").and_then(|s| s.as_str()) == Some("0x1");
-    Ok(json!({
+    let mut out = json!({
         "userOpHash": hash,
         "entryPoint": format!("0x{}", hex::encode(cfg.entry_point)),
         "success": success,
         "receipt": receipt,
-    }))
+    });
+    if !success {
+        if let Some(reason) = replay_revert_reason(state, cfg, &call_data, &out["receipt"]).await {
+            warn!(
+                user_op_hash = hash,
+                reason, "handleOps reverted — replayed FailedOp"
+            );
+            out["reason"] = json!(reason);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -455,6 +539,108 @@ mod tests {
         .await;
         let msg = resp.0["error"]["message"].as_str().unwrap();
         assert!(msg.contains("unsupported entryPoint"), "{msg}");
+    }
+
+    #[test]
+    fn rpc_revert_data_extracts_only_error_data_hex() {
+        // revert: error.data carries the 0x-hex blob
+        let revert = json!({"jsonrpc":"2.0","id":1,"error":{
+            "code":3,"message":"execution reverted","data":"0xdeadbeef"}});
+        assert_eq!(rpc_revert_data(&revert), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        // success response → None
+        let ok = json!({"jsonrpc":"2.0","id":1,"result":"0x"});
+        assert_eq!(rpc_revert_data(&ok), None);
+        // non-revert error (no data) → None
+        let pruned = json!({"jsonrpc":"2.0","id":1,"error":{
+            "code":-32000,"message":"state already discarded"}});
+        assert_eq!(rpc_revert_data(&pruned), None);
+        // malformed data hex → None
+        let bad = json!({"jsonrpc":"2.0","id":1,"error":{"code":3,"data":"0xZZ"}});
+        assert_eq!(rpc_revert_data(&bad), None);
+    }
+
+    /// `cast abi-encode "f(uint256,string)" 0 "AA31 paymaster deposit too low"`
+    /// behind the `FailedOp` selector — the exact blob the 2026-06-10 incident
+    /// would have replayed.
+    const FAILED_OP_AA31_BLOB: &str = "0x220266b600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000001e41413331207061796d6173746572206465706f73697420746f6f206c6f770000";
+
+    /// Mock chain node: receipts come back with the given `status`; every
+    /// `eth_call` reverts with the `FailedOp(0, "AA31 ...")` blob.
+    async fn spawn_mock_chain(status: &'static str) -> String {
+        use axum::routing::post;
+        async fn handle(
+            axum::extract::State(status): axum::extract::State<&'static str>,
+            Json(req): Json<Value>,
+        ) -> Json<Value> {
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            match req.get("method").and_then(|m| m.as_str()).unwrap_or("") {
+                "eth_getTransactionReceipt" => Json(json!({"jsonrpc":"2.0","id":id,"result":{
+                    "transactionHash":"0xfeed","blockNumber":"0x10","status":status}})),
+                "eth_call" => Json(json!({"jsonrpc":"2.0","id":id,"error":{
+                    "code":3,"message":"execution reverted","data":FAILED_OP_AA31_BLOB}})),
+                m => Json(json!({"jsonrpc":"2.0","id":id,"error":{
+                    "code":-32601,"message":format!("unexpected {m}")}})),
+            }
+        }
+        let app = Router::new().route("/", post(handle)).with_state(status);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/")
+    }
+
+    async fn state_with_submitted(rpc_url: String) -> Arc<BundlerState> {
+        let cfg = BundlerConfig {
+            rpc_url,
+            chain_id: 212_013,
+            entry_point: [0x66; 20],
+            signer: SigningKey::from_slice(&[0x46; 32]).unwrap(),
+            beneficiary: [0x77; 20],
+            gas_limit: 4_000_000,
+            gas_price: Some(40_000_000_000),
+        };
+        let st = Arc::new(BundlerState::new(BundlerBoot::Ready(Box::new(cfg))));
+        st.submitted.lock().await.insert(
+            format!("0x{}", "ab".repeat(32)),
+            SubmittedTx {
+                tx_hash: "0xfeed".into(),
+                call_data: vec![0xde, 0xad],
+            },
+        );
+        st
+    }
+
+    #[tokio::test]
+    async fn reverted_receipt_carries_the_replayed_failed_op_reason() {
+        let st = state_with_submitted(spawn_mock_chain("0x0").await).await;
+        let resp = rpc_handler(
+            State(st),
+            Json(
+                json!({"jsonrpc":"2.0","id":8,"method":"eth_getUserOperationReceipt",
+                        "params":[format!("0x{}", "ab".repeat(32))]}),
+            ),
+        )
+        .await;
+        let r = &resp.0["result"];
+        assert_eq!(r["success"], false);
+        assert_eq!(r["reason"], "AA31 paymaster deposit too low");
+        assert_eq!(r["receipt"]["transactionHash"], "0xfeed");
+    }
+
+    #[tokio::test]
+    async fn successful_receipt_has_no_reason_and_skips_the_replay() {
+        let st = state_with_submitted(spawn_mock_chain("0x1").await).await;
+        let resp = rpc_handler(
+            State(st),
+            Json(
+                json!({"jsonrpc":"2.0","id":9,"method":"eth_getUserOperationReceipt",
+                        "params":[format!("0x{}", "ab".repeat(32))]}),
+            ),
+        )
+        .await;
+        let r = &resp.0["result"];
+        assert_eq!(r["success"], true);
+        assert!(r.get("reason").is_none(), "{r}");
     }
 
     #[tokio::test]
