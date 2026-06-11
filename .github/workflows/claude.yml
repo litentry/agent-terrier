@@ -53,7 +53,8 @@ jobs:
 
           # Repo-specific allow-list so @claude requests can actually run
           # tests / lint / diff without hitting permission prompts.
-          # `--test-threads=1` is required because our test suites mutate
-          # shared process env (HOME, keyring accounts).
+          # Parallel `cargo test` is safe: the #258/#259/#264 sweep removed
+          # all process-env mutation from tests, and
+          # scripts/check-no-env-mutation-in-tests.sh gates reintroduction.
           claude_args: |
             --allowed-tools Bash(cargo check:*),Bash(cargo test:*),Bash(cargo clippy:*),Bash(cargo fmt:*),Bash(git diff:*),Bash(git log:*),Bash(git blame:*),Bash(gh pr:*),Bash(gh issue view:*),Bash(gh pr comment:*),Bash(gh pr edit:*)

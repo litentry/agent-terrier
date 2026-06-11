@@ -114,10 +114,17 @@ impl DevKeyService {
     /// malformed (wrong length, non-hex) — that is an operator error and
     /// should fail the boot, not silently disable the signer.
     pub fn from_env() -> Result<Option<Self>, String> {
-        let raw = match std::env::var(MASTER_SECRET_ENV_VAR) {
-            Ok(s) if s.is_empty() => return Ok(None),
-            Ok(s) => s,
-            Err(_) => return Ok(None),
+        Self::from_optional_secret_hex(std::env::var(MASTER_SECRET_ENV_VAR).ok())
+    }
+
+    /// Value half of `from_env`, split out so the unset / malformed / valid
+    /// branches are testable by injection — process env is global, and
+    /// `set_var`/`remove_var` in one test leaks into parallel siblings.
+    fn from_optional_secret_hex(raw: Option<String>) -> Result<Option<Self>, String> {
+        let raw = match raw {
+            Some(s) if s.is_empty() => return Ok(None),
+            Some(s) => s,
+            None => return Ok(None),
         };
         let bytes = hex::decode(raw.trim_start_matches("0x"))
             .map_err(|e| format!("{MASTER_SECRET_ENV_VAR} is not valid hex: {e}"))?;
@@ -427,37 +434,36 @@ mod tests {
         assert_eq!(recovered, derived_addr);
     }
 
-    /// Combined serial test for `from_env`. Tests that mutate process-global
-    /// env vars cannot run in parallel — a sibling test inside the same
-    /// binary would observe the wrong state. We sequence all three branches
-    /// (unset, malformed, valid) inside a single test and use a process-wide
-    /// `Mutex` to serialize against any future `from_env` call sites.
+    // `from_env` branch coverage goes through `from_optional_secret_hex`
+    // (the value half) — injection instead of `set_var`/`remove_var`, so
+    // the three branches are independent parallel-safe tests.
+
     #[test]
-    fn from_env_unset_then_invalid_then_valid() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
+    fn master_secret_unset_or_empty_is_ok_none() {
+        assert!(matches!(
+            DevKeyService::from_optional_secret_hex(None),
+            Ok(None)
+        ));
+        assert!(matches!(
+            DevKeyService::from_optional_secret_hex(Some(String::new())),
+            Ok(None)
+        ));
+    }
 
-        let prev = std::env::var(MASTER_SECRET_ENV_VAR).ok();
+    #[test]
+    fn master_secret_malformed_is_err() {
+        // Too short (8 bytes, not 32).
+        assert!(DevKeyService::from_optional_secret_hex(Some("deadbeef".into())).is_err());
+        // Not hex at all.
+        assert!(DevKeyService::from_optional_secret_hex(Some("zz".repeat(32))).is_err());
+    }
 
-        // Branch 1: unset → Ok(None).
-        std::env::remove_var(MASTER_SECRET_ENV_VAR);
-        assert!(matches!(DevKeyService::from_env(), Ok(None)));
-
-        // Branch 2: malformed (too short hex) → Err.
-        std::env::set_var(MASTER_SECRET_ENV_VAR, "deadbeef");
-        assert!(DevKeyService::from_env().is_err());
-
-        // Branch 3: valid 32-byte hex → Ok(Some(svc)) and derive succeeds.
-        std::env::set_var(MASTER_SECRET_ENV_VAR, "00".repeat(32));
-        let svc = DevKeyService::from_env().unwrap().unwrap();
+    #[test]
+    fn master_secret_valid_hex_constructs_signer() {
+        let svc = DevKeyService::from_optional_secret_hex(Some("00".repeat(32)))
+            .unwrap()
+            .unwrap();
         let _ = svc.derive_address(&fixed_omni()).unwrap();
-
-        // Restore prior env state.
-        match prev {
-            Some(p) => std::env::set_var(MASTER_SECRET_ENV_VAR, p),
-            None => std::env::remove_var(MASTER_SECRET_ENV_VAR),
-        }
     }
 
     #[test]
