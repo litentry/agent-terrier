@@ -257,8 +257,10 @@ export interface ReloginResult {
 
 /** On-chain half of `POST /v1/master/reset` (#225 E7) — the owner-gated resetMaster. */
 export interface MasterResetOnchain {
-  /** "reset" = operatorMasterWallet cleared this call; "skipped" = nothing to do / not wired; "failed" = on-chain unbind errored. */
-  status: 'reset' | 'skipped' | 'failed';
+  /** "reset" = operatorMasterWallet cleared this call; "skipped" = nothing to do / not wired;
+   *  "failed" = on-chain unbind errored; "aborted" = #260 hard stop — account-master agents
+   *  still bound, nothing mutated (run the Touch-ID fleet revoke, then reset again). */
+  status: 'reset' | 'skipped' | 'failed' | 'aborted';
   /** Present on "skipped" — "already-unbound" | "no-register-script-configured" | "no-operator-omni-known". */
   reason?: string;
   /** Present on "failed" — the script/cast error (e.g. registry pre-VERSION-0.3 has no resetMaster). */
@@ -273,19 +275,27 @@ export interface MasterResetOnchain {
 export interface MasterResetFleet {
   /** Pending pairing requests declined at the broker. */
   pending_declined: number;
-  /** Paired agents revoked on chain (SidecarRegistry.revokeAgentDevice). */
-  agents_revoked: { id: string; label: string; tx_hash?: string }[];
+  /** Paired agents revoked on chain (SidecarRegistry.revokeAgentDevice).
+   *  `already_revoked` rows were found revoked on chain (the pre-reset
+   *  Touch-ID fleet revoke landed them) — no script tx this call. */
+  agents_revoked: { id: string; label: string; tx_hash?: string; already_revoked?: boolean }[];
   /** Local actor records cleared (agents + master view rows). */
   actors_cleared: number;
   /** The daemon's K11 enroll record was cleared (state reports k11: "none"). */
   k11_enroll_cleared: boolean;
   /** What could NOT be torn down (no chain script, broker error, …). */
   failures: string[];
+  /** #260 abort only: agents still bound on chain that only the master
+   *  P256Account can revoke — feed their hashes to the Touch-ID fleet revoke. */
+  agents_still_bound?: { id: string; label: string; device_key_hash?: string | null }[];
 }
 
-/** Result of `POST /v1/master/reset` (#225 E7, fleet teardown #243). */
+/** Result of `POST /v1/master/reset` (#225 E7, fleet teardown #243, #260 guard). */
 export interface MasterResetResult {
   ok: boolean;
+  /** #260: true when the reset aborted because account-master agents are still
+   *  bound — run the one-Touch-ID fleet revoke, then reset again. */
+  needs_fleet_revoke?: boolean;
   /** Operator guidance — adapts to whether the on-chain unbind landed. */
   note?: string;
   onchain?: MasterResetOnchain;
@@ -512,10 +522,12 @@ export interface AgentKeysClient {
 
   // The Touch-ID unpair: `revokeAgentDevice` requires msg.sender ==
   // operatorMasterWallet, so for an account-master operator the revoke is a
-  // master-account UserOp the browser K11-signs. After submit, call
-  // `revokeDevice(actorId, intent, { txHash })` — the daemon then VERIFIES the
-  // registry reads `revoked` and flips local state without the legacy script.
-  revokeBuild(input: { deviceKeyHash: string }): Promise<
+  // master-account UserOp the browser K11-signs (one hash = the per-agent
+  // unpair; every paired agent = the #260 pre-reset fleet teardown, ONE Touch
+  // ID). After submit, call `revokeDevice(actorId, intent, { txHash })` — the
+  // daemon then VERIFIES the registry reads `revoked` and flips local state
+  // without the legacy script.
+  revokeBuild(input: { deviceKeyHashes: string[] }): Promise<
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   >;
   revokeSubmit(body: unknown): Promise<Result<unknown>>;
