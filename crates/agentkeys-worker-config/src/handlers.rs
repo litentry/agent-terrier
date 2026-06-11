@@ -9,7 +9,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::state::SharedConfigWorkerState;
-use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds};
+use agentkeys_core::audit::{
+    AuditOpKind, AuditResult, ConfigGetBody, ConfigPutBody, ConfigTeardownBody,
+};
+use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
+use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::{err_400, err_403, err_404, err_500, err_502, ApiError};
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
@@ -51,6 +55,10 @@ pub struct PutResponse {
     pub ok: bool,
     pub s3_key: String,
     pub envelope_size: usize,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the audit
+    /// worker stored for this op (the `CredentialAudit.appendV2` anchor
+    /// commitment). `null` when the emit failed in best-effort mode.
+    pub audit_envelope_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +70,8 @@ pub struct GetRequest {
 pub struct GetResponse {
     pub ok: bool,
     pub plaintext_b64: String,
+    /// Durable-audit receipt (#229) — see [`PutResponse::audit_envelope_hash`].
+    pub audit_envelope_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +83,8 @@ pub struct TeardownRequest {
 pub struct TeardownResponse {
     pub ok: bool,
     pub keys_deleted: usize,
+    /// Durable-audit receipt (#229) — see [`PutResponse::audit_envelope_hash`].
+    pub audit_envelope_hash: Option<String>,
 }
 
 async fn config_put(
@@ -82,6 +94,39 @@ async fn config_put(
 ) -> Result<Json<PutResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Store).await?;
 
+    let outcome = config_put_inner(&state, creds.as_ref(), &req).await;
+    // Durable audit (#229): after cap-verify, before the success response.
+    // payload_hash covers the stored CIPHERTEXT — never plaintext.
+    let audit_body = ConfigPutBody {
+        key: s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service),
+        payload_hash: match &outcome {
+            Ok((_, env_bytes)) => keccak_hex(env_bytes),
+            Err(_) => zero_hash(),
+        },
+    };
+    let audit_result = if outcome.is_ok() {
+        AuditResult::Success
+    } else {
+        AuditResult::Failure
+    };
+    let audited = state
+        .audit
+        .emit(&req.cap, AuditOpKind::ConfigPut, audit_body, audit_result)
+        .await;
+    let (key, env_bytes) = outcome?; // op error wins over an emit error
+    Ok(Json(PutResponse {
+        ok: true,
+        s3_key: key,
+        envelope_size: env_bytes.len(),
+        audit_envelope_hash: audited?,
+    }))
+}
+
+async fn config_put_inner(
+    state: &SharedConfigWorkerState,
+    creds: Option<&StsCreds>,
+    req: &PutRequest,
+) -> Result<(String, Vec<u8>), ApiError> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let plaintext = STANDARD
         .decode(&req.plaintext_b64)
@@ -97,7 +142,7 @@ async fn config_put(
         .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     s3.put_object()
         .bucket(&state.config.config_bucket)
         .key(&key)
@@ -105,11 +150,7 @@ async fn config_put(
         .send()
         .await
         .map_err(|e| err_502(format!("s3 PutObject: {}", s3_err_detail(&e)), "s3_put"))?;
-    Ok(Json(PutResponse {
-        ok: true,
-        s3_key: key,
-        envelope_size: env_bytes.len(),
-    }))
+    Ok((key, env_bytes))
 }
 
 async fn config_get(
@@ -119,8 +160,41 @@ async fn config_get(
 ) -> Result<Json<GetResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Fetch).await?;
 
+    let outcome = config_get_inner(&state, creds.as_ref(), &req).await;
+    // Durable audit (#229): the config-release record, emitted BEFORE the
+    // plaintext leaves the worker. cap_hash binds the row to the cap that
+    // authorized this read.
+    let audit_body = ConfigGetBody {
+        key: s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service),
+        cap_hash: cap_hash(&req.cap),
+    };
+    let audit_result = if outcome.is_ok() {
+        AuditResult::Success
+    } else {
+        AuditResult::Failure
+    };
+    let audited = state
+        .audit
+        .emit(&req.cap, AuditOpKind::ConfigGet, audit_body, audit_result)
+        .await;
+    let plaintext = outcome?;
+    let audit_envelope_hash = audited?;
+
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    Ok(Json(GetResponse {
+        ok: true,
+        plaintext_b64: STANDARD.encode(&plaintext),
+        audit_envelope_hash,
+    }))
+}
+
+async fn config_get_inner(
+    state: &SharedConfigWorkerState,
+    creds: Option<&StsCreds>,
+    req: &GetRequest,
+) -> Result<Vec<u8>, ApiError> {
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let resp = s3
         .get_object()
         .bucket(&state.config.config_bucket)
@@ -157,14 +231,8 @@ async fn config_get(
         &req.cap.payload.service,
         req.cap.payload.k3_epoch,
     );
-    let plaintext = envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
-        .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))?;
-
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    Ok(Json(GetResponse {
-        ok: true,
-        plaintext_b64: STANDARD.encode(&plaintext),
-    }))
+    envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
+        .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
 }
 
 async fn config_teardown(
@@ -174,8 +242,39 @@ async fn config_teardown(
 ) -> Result<Json<TeardownResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Teardown).await?;
 
+    let outcome = config_teardown_inner(&state, creds.as_ref(), &req).await;
+    let audit_body = ConfigTeardownBody {
+        actor_target: req.cap.payload.actor_omni.clone(),
+    };
+    let audit_result = if outcome.is_ok() {
+        AuditResult::Success
+    } else {
+        AuditResult::Failure
+    };
+    let audited = state
+        .audit
+        .emit(
+            &req.cap,
+            AuditOpKind::ConfigTeardown,
+            audit_body,
+            audit_result,
+        )
+        .await;
+    let deleted = outcome?;
+    Ok(Json(TeardownResponse {
+        ok: true,
+        keys_deleted: deleted,
+        audit_envelope_hash: audited?,
+    }))
+}
+
+async fn config_teardown_inner(
+    state: &SharedConfigWorkerState,
+    creds: Option<&StsCreds>,
+    req: &TeardownRequest,
+) -> Result<usize, ApiError> {
     let prefix = s3_prefix(&req.cap.payload.actor_omni);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let list = s3
         .list_objects_v2()
         .bucket(&state.config.config_bucket)
@@ -201,10 +300,7 @@ async fn config_teardown(
             deleted += 1;
         }
     }
-    Ok(Json(TeardownResponse {
-        ok: true,
-        keys_deleted: deleted,
-    }))
+    Ok(deleted)
 }
 
 async fn verify_cap(

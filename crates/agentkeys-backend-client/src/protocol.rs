@@ -158,12 +158,22 @@ pub struct MemoryPutResp {
     pub ok: bool,
     pub s3_key: String,
     pub envelope_size: usize,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MemoryGetResp {
     pub ok: bool,
     pub plaintext_b64: String,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
 }
 
 // ── config worker (`/v1/config/{put,get}`) — #201 config data class ──────────
@@ -190,6 +200,11 @@ pub struct ConfigGetBody {
 pub struct ConfigGetResp {
     pub ok: bool,
     pub plaintext_b64: String,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
 }
 
 // ── cred worker (`/v1/cred/fetch`) — #216 agent-side vaulted-key fetch ────────
@@ -208,6 +223,11 @@ pub struct CredFetchBody {
 pub struct CredFetchResp {
     pub ok: bool,
     pub plaintext_b64: String,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
 }
 
 /// Cred-worker `/v1/cred/store` request body. Mirrors
@@ -225,6 +245,11 @@ pub struct CredStoreResp {
     pub ok: bool,
     pub s3_key: String,
     pub envelope_size: usize,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
 }
 
 // ── audit worker (`/v1/audit/append/v2`) ────────────────────────────────────

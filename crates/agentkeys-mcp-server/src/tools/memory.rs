@@ -103,7 +103,9 @@ pub async fn put(
         .await
         .map_err(|e| McpError::Backend(format!("memory_put failed: {e}")))?;
 
-    // Audit trail: every memory write is logged (actor + namespace + size).
+    // Local observability only — the DURABLE audit trail is emitted
+    // worker-side (#229): the memory worker appends an `AuditEnvelope`
+    // (MemoryPut) to the audit-service worker after cap-verify.
     tracing::info!(
         op = "memory.put",
         actor = %actor,
@@ -186,7 +188,9 @@ pub async fn get(
     let content = String::from_utf8(plaintext)
         .map_err(|e| McpError::Internal(format!("plaintext utf8: {e}")))?;
 
-    // Audit trail: every memory read is logged (actor + namespace + size).
+    // Local observability only — the DURABLE audit trail is emitted
+    // worker-side (#229): the memory worker appends an `AuditEnvelope`
+    // (MemoryGet) to the audit-service worker after cap-verify.
     tracing::info!(
         op = "memory.get",
         actor = %actor,

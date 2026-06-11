@@ -18,6 +18,7 @@ path = "src/lib.rs"
 # S3-PUT flow as memory/creds; only the S3 path prefix + bucket + the
 # DataClass it accepts (Config) differ.
 agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+agentkeys-core = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }

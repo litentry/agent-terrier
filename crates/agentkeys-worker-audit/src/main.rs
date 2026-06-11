@@ -75,6 +75,23 @@ async fn main() -> anyhow::Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::error!(error=%e, "flush failed"),
                 }
+                // V2 envelope batches (#229) — anchor inputs for appendRootV2.
+                match state.flush_v2_all().await {
+                    Ok(rs) if !rs.is_empty() => {
+                        for r in rs {
+                            info!(
+                                operator_omni = %r.operator_omni,
+                                entries = r.entry_count,
+                                root = %r.merkle_root_hex,
+                                op_kind_bitmap = %r.op_kind_bitmap_hex,
+                                leaves = %r.leaves_path,
+                                "auto-flush: V2 Merkle root ready for on-chain appendRootV2"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::error!(error=%e, "v2 flush failed"),
+                }
             }
         });
     }

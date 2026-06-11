@@ -18,6 +18,7 @@
 //! Stage-1 simplification: KEK is injected via env. Stage 2 (#90)
 //! replaces with mTLS-derived KEK from the signer enclave.
 
+pub mod audit;
 pub mod aws_creds;
 pub mod envelope;
 pub mod errors;

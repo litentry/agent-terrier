@@ -111,6 +111,9 @@ pub struct WorkerState {
     pub config: WorkerConfig,
     pub s3: S3Client,
     pub http: reqwest::Client,
+    /// Durable audit emitter (#229) — every store/fetch/teardown emits an
+    /// `AuditEnvelope` to the audit-service worker after cap-verify.
+    pub audit: crate::audit::AuditEmitter,
 }
 
 pub type SharedWorkerState = Arc<WorkerState>;
@@ -126,6 +129,7 @@ impl WorkerState {
             config,
             s3,
             http: reqwest::Client::new(),
+            audit: crate::audit::AuditEmitter::from_env(),
         })
     }
 }

@@ -14,7 +14,8 @@
 //! - 50-59 device family (DeviceAdd=50, DeviceRevoke=51, K10Rotate=52; 53-59 reserved)
 //! - 60-69 email family (EmailSend=60, EmailReceive=61; 62-69 reserved)
 //! - 70-79 K3 family (K3EpochAdvance=70; 71-79 reserved)
-//! - 80-255 reserved for future families
+//! - 80-89 config family (ConfigPut=80, ConfigGet=81, ConfigTeardown=82; 83-89 reserved)
+//! - 90-255 reserved for future families
 
 /// Canonical op_kind enum. The byte value MUST match the row in arch.md
 /// §15.3a. The enum is `repr(u8)` so `as u8` gives the canonical byte.
@@ -43,6 +44,9 @@ pub enum AuditOpKind {
     EmailSend = 60,
     EmailReceive = 61,
     K3EpochAdvance = 70,
+    ConfigPut = 80,
+    ConfigGet = 81,
+    ConfigTeardown = 82,
 }
 
 impl AuditOpKind {
@@ -68,6 +72,9 @@ impl AuditOpKind {
             60 => Self::EmailSend,
             61 => Self::EmailReceive,
             70 => Self::K3EpochAdvance,
+            80 => Self::ConfigPut,
+            81 => Self::ConfigGet,
+            82 => Self::ConfigTeardown,
             _ => return None,
         })
     }
@@ -95,6 +102,9 @@ impl AuditOpKind {
             Self::EmailSend => "email.send",
             Self::EmailReceive => "email.receive",
             Self::K3EpochAdvance => "k3.epoch_advance",
+            Self::ConfigPut => "config.put",
+            Self::ConfigGet => "config.get",
+            Self::ConfigTeardown => "config.teardown",
         }
     }
 }
@@ -127,6 +137,9 @@ mod tests {
             AuditOpKind::EmailSend,
             AuditOpKind::EmailReceive,
             AuditOpKind::K3EpochAdvance,
+            AuditOpKind::ConfigPut,
+            AuditOpKind::ConfigGet,
+            AuditOpKind::ConfigTeardown,
         ];
         for k in all {
             let byte = k as u8;
@@ -142,7 +155,9 @@ mod tests {
     /// invariant #1 (open enum). 250 is the reserved-future canary.
     #[test]
     fn unknown_bytes_return_none() {
-        for byte in [3u8, 9, 13, 19, 22, 32, 42, 53, 62, 71, 80, 200, 250, 255] {
+        for byte in [
+            3u8, 9, 13, 19, 22, 32, 42, 53, 62, 71, 83, 89, 90, 200, 250, 255,
+        ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),
                 None,
@@ -175,6 +190,9 @@ mod tests {
             AuditOpKind::EmailSend as u8,
             AuditOpKind::EmailReceive as u8,
             AuditOpKind::K3EpochAdvance as u8,
+            AuditOpKind::ConfigPut as u8,
+            AuditOpKind::ConfigGet as u8,
+            AuditOpKind::ConfigTeardown as u8,
         ];
         let s: HashSet<_> = all.iter().copied().collect();
         assert_eq!(s.len(), all.len(), "duplicate byte assignment");

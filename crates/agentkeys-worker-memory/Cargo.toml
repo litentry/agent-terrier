@@ -17,6 +17,7 @@ path = "src/lib.rs"
 # worker. Per arch.md §15.2 the memory worker has the same cap-mint /
 # AES-GCM / S3-PUT flow; only the S3 path prefix + bucket differ.
 agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+agentkeys-core = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }
