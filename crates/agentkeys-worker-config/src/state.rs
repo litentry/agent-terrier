@@ -95,6 +95,9 @@ pub struct ConfigWorkerState {
     pub config: ConfigWorkerConfig,
     pub s3: S3Client,
     pub http: reqwest::Client,
+    /// Durable audit emitter (#229) — every put/get/teardown emits an
+    /// `AuditEnvelope` to the audit-service worker after cap-verify.
+    pub audit: agentkeys_worker_creds::audit::AuditEmitter,
 }
 
 pub type SharedConfigWorkerState = Arc<ConfigWorkerState>;
@@ -110,6 +113,7 @@ impl ConfigWorkerState {
             config,
             s3,
             http: reqwest::Client::new(),
+            audit: agentkeys_worker_creds::audit::AuditEmitter::from_env(),
         })
     }
 }

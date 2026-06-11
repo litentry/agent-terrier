@@ -45,3 +45,5 @@ clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# In-process audit worker for the #229 durable-audit integration test.
+agentkeys-worker-audit = { path = "../agentkeys-worker-audit" }

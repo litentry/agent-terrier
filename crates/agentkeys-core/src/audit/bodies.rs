@@ -200,6 +200,29 @@ pub struct K3EpochAdvanceBody {
     pub gov_tx: String,
 }
 
+// ── 80..89 — config family (#201 data class, audited per #229) ─────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigPutBody {
+    /// S3 object key the config worker wrote (`bots/<actor>/config/<service>.enc`).
+    pub key: String,
+    /// `keccak256(envelope_ciphertext)` — the stored bytes, never plaintext.
+    pub payload_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigGetBody {
+    pub key: String,
+    /// `keccak256(cap payload canonical bytes)` — binds the read to the
+    /// cap-token that authorized it.
+    pub cap_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigTeardownBody {
+    pub actor_target: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +253,77 @@ mod tests {
         let body: SignEip712Body = serde_json::from_value(json).unwrap();
         assert_eq!(body.chain_id, 1);
         assert_eq!(body.primary_type, "Permit");
+    }
+
+    /// §15.3b step-5 worker test for the config family (#229): canonical
+    /// CBOR encode + decode roundtrip, typed_body decodes, label matches.
+    #[test]
+    fn config_family_cbor_roundtrip_and_typed_decode() {
+        use crate::audit::{envelope_for, AuditEnvelope, AuditOpKind, AuditResult, TypedAuditBody};
+
+        let body = ConfigGetBody {
+            key: "bots/abc/config/memory-taxonomy.enc".into(),
+            cap_hash: format!("0x{}", "ab".repeat(32)),
+        };
+        let env = envelope_for(
+            [0x11; 32],
+            [0x11; 32],
+            AuditOpKind::ConfigGet,
+            body.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let cbor = env.to_canonical_cbor().unwrap();
+        let decoded = AuditEnvelope::from_canonical_cbor(&cbor).unwrap();
+        assert_eq!(decoded.op_kind, AuditOpKind::ConfigGet as u8);
+        assert_eq!(AuditOpKind::ConfigGet.label(), "config.get");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::ConfigGet(b) => assert_eq!(b, body),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        let put = ConfigPutBody {
+            key: "bots/abc/config/memory-taxonomy.enc".into(),
+            payload_hash: format!("0x{}", "cd".repeat(32)),
+        };
+        let env = envelope_for(
+            [0x11; 32],
+            [0x11; 32],
+            AuditOpKind::ConfigPut,
+            put.clone(),
+            AuditResult::Failure,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::ConfigPut(b) => assert_eq!(b, put),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        let td = ConfigTeardownBody {
+            actor_target: format!("0x{}", "11".repeat(32)),
+        };
+        let env = envelope_for(
+            [0x11; 32],
+            [0x11; 32],
+            AuditOpKind::ConfigTeardown,
+            td.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::ConfigTeardown(b) => assert_eq!(b, td),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
     }
 
     #[test]
