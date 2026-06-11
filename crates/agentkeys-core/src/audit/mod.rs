@@ -54,10 +54,11 @@ use sha3::{Digest, Keccak256};
 use thiserror::Error;
 
 pub use bodies::{
-    CredFetchBody, CredStoreBody, CredTeardownBody, DeviceAddBody, DeviceRevokeBody,
-    EmailReceiveBody, EmailSendBody, K10RotateBody, K3EpochAdvanceBody, MemoryGetBody,
-    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody, ScopeGrantBody,
-    ScopeRevokeBody, SignEip191Body, SignEip712Body,
+    ConfigGetBody, ConfigPutBody, ConfigTeardownBody, CredFetchBody, CredStoreBody,
+    CredTeardownBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody, EmailSendBody,
+    K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryPutBody, MemoryTeardownBody,
+    PaymentDirectBody, PaymentEscrowRedeemBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body,
+    SignEip712Body,
 };
 pub use op_kind::AuditOpKind;
 
@@ -234,6 +235,9 @@ pub enum TypedAuditBody {
     EmailSend(EmailSendBody),
     EmailReceive(EmailReceiveBody),
     K3EpochAdvance(K3EpochAdvanceBody),
+    ConfigPut(ConfigPutBody),
+    ConfigGet(ConfigGetBody),
+    ConfigTeardown(ConfigTeardownBody),
 }
 
 impl TypedAuditBody {
@@ -267,6 +271,11 @@ impl TypedAuditBody {
             AuditOpKind::EmailReceive => Self::EmailReceive(serde_json::from_value(value).ok()?),
             AuditOpKind::K3EpochAdvance => {
                 Self::K3EpochAdvance(serde_json::from_value(value).ok()?)
+            }
+            AuditOpKind::ConfigPut => Self::ConfigPut(serde_json::from_value(value).ok()?),
+            AuditOpKind::ConfigGet => Self::ConfigGet(serde_json::from_value(value).ok()?),
+            AuditOpKind::ConfigTeardown => {
+                Self::ConfigTeardown(serde_json::from_value(value).ok()?)
             }
         })
     }

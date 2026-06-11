@@ -21,6 +21,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use agentkeys_core::audit::{
+    AuditOpKind, AuditResult, CredFetchBody, CredStoreBody, CredTeardownBody,
+};
+
+use crate::audit::{cap_hash, keccak_hex, zero_hash};
 use crate::aws_creds::{s3_for_request, OptionalStsCreds};
 use crate::envelope;
 use crate::errors::{err_400, err_403, err_500, err_502, ApiError};
@@ -124,6 +129,11 @@ pub struct StoreResponse {
     pub ok: bool,
     pub s3_key: String,
     pub envelope_size: usize,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the audit
+    /// worker stored for this op — the exact 32-byte commitment
+    /// `CredentialAudit.appendV2` anchors. `null` when the emit failed in
+    /// best-effort mode (`AGENTKEYS_WORKER_REQUIRE_AUDIT` unset).
+    pub audit_envelope_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +145,8 @@ pub struct FetchRequest {
 pub struct FetchResponse {
     pub ok: bool,
     pub plaintext_b64: String,
+    /// Durable-audit receipt (#229) — see [`StoreResponse::audit_envelope_hash`].
+    pub audit_envelope_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +158,8 @@ pub struct TeardownRequest {
 pub struct TeardownResponse {
     pub ok: bool,
     pub keys_deleted: usize,
+    /// Durable-audit receipt (#229) — see [`StoreResponse::audit_envelope_hash`].
+    pub audit_envelope_hash: Option<String>,
 }
 
 async fn cred_store(
@@ -155,6 +169,40 @@ async fn cred_store(
 ) -> Result<Json<StoreResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Store).await?;
 
+    let outcome = cred_store_inner(&state, creds.as_ref(), &req).await;
+    // Durable audit (#229): after cap-verify, before the success response.
+    // payload_hash covers the stored CIPHERTEXT (never plaintext); failures
+    // after cap-verify are audited too, with a zero placeholder hash.
+    let audit_body = CredStoreBody {
+        service: req.cap.payload.service.clone(),
+        payload_hash: match &outcome {
+            Ok((_, env_bytes)) => keccak_hex(env_bytes),
+            Err(_) => zero_hash(),
+        },
+    };
+    let audit_result = if outcome.is_ok() {
+        AuditResult::Success
+    } else {
+        AuditResult::Failure
+    };
+    let audited = state
+        .audit
+        .emit(&req.cap, AuditOpKind::CredStore, audit_body, audit_result)
+        .await;
+    let (key, env_bytes) = outcome?; // op error wins over an emit error
+    Ok(Json(StoreResponse {
+        ok: true,
+        s3_key: key,
+        envelope_size: env_bytes.len(),
+        audit_envelope_hash: audited?,
+    }))
+}
+
+async fn cred_store_inner(
+    state: &SharedWorkerState,
+    creds: Option<&crate::aws_creds::StsCreds>,
+    req: &StoreRequest,
+) -> Result<(String, Vec<u8>), ApiError> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let plaintext = STANDARD
         .decode(&req.plaintext_b64)
@@ -170,7 +218,7 @@ async fn cred_store(
         .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     s3.put_object()
         .bucket(&state.config.vault_bucket)
         .key(&key)
@@ -178,11 +226,7 @@ async fn cred_store(
         .send()
         .await
         .map_err(|e| err_502(e.to_string(), "s3_put"))?;
-    Ok(Json(StoreResponse {
-        ok: true,
-        s3_key: key,
-        envelope_size: env_bytes.len(),
-    }))
+    Ok((key, env_bytes))
 }
 
 async fn cred_fetch(
@@ -192,8 +236,41 @@ async fn cred_fetch(
 ) -> Result<Json<FetchResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Fetch).await?;
 
+    let outcome = cred_fetch_inner(&state, creds.as_ref(), &req).await;
+    // Durable audit (#229): the secret-release record. cap_hash binds the
+    // row to the exact cap that authorized this fetch; emitted BEFORE the
+    // plaintext leaves the worker.
+    let audit_body = CredFetchBody {
+        service: req.cap.payload.service.clone(),
+        cap_hash: cap_hash(&req.cap),
+    };
+    let audit_result = if outcome.is_ok() {
+        AuditResult::Success
+    } else {
+        AuditResult::Failure
+    };
+    let audited = state
+        .audit
+        .emit(&req.cap, AuditOpKind::CredFetch, audit_body, audit_result)
+        .await;
+    let plaintext = outcome?;
+    let audit_envelope_hash = audited?;
+
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    Ok(Json(FetchResponse {
+        ok: true,
+        plaintext_b64: STANDARD.encode(&plaintext),
+        audit_envelope_hash,
+    }))
+}
+
+async fn cred_fetch_inner(
+    state: &SharedWorkerState,
+    creds: Option<&crate::aws_creds::StsCreds>,
+    req: &FetchRequest,
+) -> Result<Vec<u8>, ApiError> {
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let resp = s3
         .get_object()
         .bucket(&state.config.vault_bucket)
@@ -214,14 +291,8 @@ async fn cred_fetch(
         &req.cap.payload.service,
         req.cap.payload.k3_epoch,
     );
-    let plaintext = envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
-        .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))?;
-
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    Ok(Json(FetchResponse {
-        ok: true,
-        plaintext_b64: STANDARD.encode(&plaintext),
-    }))
+    envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
+        .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
 }
 
 async fn cred_teardown(
@@ -231,8 +302,39 @@ async fn cred_teardown(
 ) -> Result<Json<TeardownResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Teardown).await?;
 
+    let outcome = cred_teardown_inner(&state, creds.as_ref(), &req).await;
+    let audit_body = CredTeardownBody {
+        actor_target: req.cap.payload.actor_omni.clone(),
+    };
+    let audit_result = if outcome.is_ok() {
+        AuditResult::Success
+    } else {
+        AuditResult::Failure
+    };
+    let audited = state
+        .audit
+        .emit(
+            &req.cap,
+            AuditOpKind::CredTeardown,
+            audit_body,
+            audit_result,
+        )
+        .await;
+    let deleted = outcome?;
+    Ok(Json(TeardownResponse {
+        ok: true,
+        keys_deleted: deleted,
+        audit_envelope_hash: audited?,
+    }))
+}
+
+async fn cred_teardown_inner(
+    state: &SharedWorkerState,
+    creds: Option<&crate::aws_creds::StsCreds>,
+    req: &TeardownRequest,
+) -> Result<usize, ApiError> {
     let prefix = s3_prefix(&req.cap.payload.actor_omni);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let list = s3
         .list_objects_v2()
         .bucket(&state.config.vault_bucket)
@@ -258,10 +360,7 @@ async fn cred_teardown(
             deleted += 1;
         }
     }
-    Ok(Json(TeardownResponse {
-        ok: true,
-        keys_deleted: deleted,
-    }))
+    Ok(deleted)
 }
 
 async fn verify_cap(

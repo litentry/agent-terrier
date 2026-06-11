@@ -22,7 +22,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::state::{AuditEvent, FlushResult, SharedState};
+use crate::state::{AuditEvent, FlushResult, FlushV2Result, SharedState, V2QueueEntry};
 
 #[derive(Deserialize)]
 pub struct AppendRequest {
@@ -52,6 +52,10 @@ pub async fn append(
 pub struct FlushResponse {
     pub ok: bool,
     pub flushed: Vec<FlushResult>,
+    /// V2 envelope batches drained in the same flush (#229) — each carries
+    /// the `appendRootV2(operatorOmni, merkleRoot, opKindBitmap, entryCount)`
+    /// inputs for the on-chain anchor.
+    pub flushed_v2: Vec<FlushV2Result>,
 }
 
 pub async fn flush_one(
@@ -62,9 +66,14 @@ pub async fn flush_one(
         .flush(&operator_omni)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let r2 = state
+        .flush_v2(&operator_omni.to_lowercase())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(FlushResponse {
         ok: true,
         flushed: r.into_iter().collect(),
+        flushed_v2: r2.into_iter().collect(),
     }))
 }
 
@@ -75,9 +84,14 @@ pub async fn flush_all(
         .flush_all()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let r2 = state
+        .flush_v2_all()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(FlushResponse {
         ok: true,
         flushed: r,
+        flushed_v2: r2,
     }))
 }
 
@@ -197,6 +211,19 @@ pub async fn append_v2(
     let hash_hex = format!("0x{}", hex::encode(envelope_hash));
 
     state.store_envelope(hash_hex.clone(), cbor).await;
+    // Tier-A anchor feed (#229): queue the envelope hash for the next
+    // `appendRootV2` Merkle batch alongside the by-hash store above.
+    state
+        .queue_v2(
+            format!("0x{}", hex::encode(operator_omni)),
+            V2QueueEntry {
+                envelope_hash: hash_hex.clone(),
+                op_kind: req.op_kind,
+                actor_omni: format!("0x{}", hex::encode(actor_omni)),
+                ts_unix: envelope.ts_unix,
+            },
+        )
+        .await;
 
     Ok(Json(AppendV2Response {
         ok: true,

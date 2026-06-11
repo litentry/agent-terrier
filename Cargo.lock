@@ -428,6 +428,7 @@ dependencies = [
 name = "agentkeys-worker-config"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-core",
  "agentkeys-worker-creds",
  "anyhow",
  "aws-config",
@@ -452,6 +453,7 @@ dependencies = [
  "aes-gcm",
  "agentkeys-core",
  "agentkeys-types",
+ "agentkeys-worker-audit",
  "anyhow",
  "aws-config",
  "aws-credential-types",
@@ -497,6 +499,7 @@ dependencies = [
 name = "agentkeys-worker-memory"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-core",
  "agentkeys-worker-creds",
  "anyhow",
  "aws-config",

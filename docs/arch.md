@@ -1068,8 +1068,30 @@ and never reordered**. Grouped by 10s leaves room for related ops.
 | `EmailSend` | 60 | `{to_hash: [u8;32], subject_hash: [u8;32], message_id: string}` | email-service |
 | `EmailReceive` | 61 | `{from_hash: [u8;32], message_id: string, payload_hash: [u8;32]}` | email-service |
 | `K3EpochAdvance` | 70 | `{old_epoch: u64, new_epoch: u64, gov_tx: [u8;32]}` | K3EpochCounter hook |
+| `ConfigPut` | 80 | `{key: string, payload_hash: [u8;32]}` | config-service (#201, #229) |
+| `ConfigGet` | 81 | `{key: string, cap_hash: [u8;32]}` | config-service (#201, #229) |
+| `ConfigTeardown` | 82 | `{actor_target: [u8;32]}` | config-service (#201, #229) |
 
-Byte ranges `8-9`, `13-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `80-255` are reserved for future extensions in the same family.
+Byte ranges `3-9`, `13-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `83-89`, `90-255` are reserved for future extensions in the same family (config claimed `80-89` per #229).
+
+**Data-plane emit sites are LIVE (#229).** The cred / memory / config workers
+emit one envelope per store / fetch / teardown — after cap-verify, before the
+success response releases data — via the shared
+[`AuditEmitter`](../crates/agentkeys-worker-creds/src/audit.rs)
+(`AGENTKEYS_AUDIT_WORKER_URL`, default the co-located audit worker). Bodies
+carry the service/S3 key + a `cap_hash` (reads) or ciphertext `payload_hash`
+(writes) — **never plaintext**; failures after cap-verify emit `result:
+Failure`. Worker responses return the `envelope_hash` as `audit_envelope_hash`
+(the operator's audit receipt). Cap-verify *failures* do NOT emit (an
+unauthenticated request must not be able to flood the feed). Posture is staged
+like the K10 cap-PoP: best-effort by default (loud WARN on emit failure);
+`AGENTKEYS_WORKER_REQUIRE_AUDIT=1` fails closed — no success response without
+a durable append. The audit worker queues every V2 envelope hash per operator
+and its flush emits the `appendRootV2(operatorOmni, merkleRoot, opKindBitmap,
+entryCount)` inputs (each Merkle leaf IS an `envelope_hash`), committed
+on-chain by the operator master — exercised end-to-end by
+[`scripts/heima-worker-smoke.sh`](../scripts/heima-worker-smoke.sh) and
+asserted per-data-class in `harness/v2-stage3-demo.sh` steps 11-12.
 
 #### Forward-compat / non-break design
 
