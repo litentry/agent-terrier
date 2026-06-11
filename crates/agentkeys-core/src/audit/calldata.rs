@@ -428,7 +428,7 @@ fn uint_word(v: &Value, name: &str) -> Result<[u8; 32], CalldataError> {
 }
 
 /// Read the 32-byte word at `offset` from `data`, or `None` if out of range.
-fn read_word(data: &[u8], offset: usize) -> Option<[u8; 32]> {
+pub(crate) fn read_word(data: &[u8], offset: usize) -> Option<[u8; 32]> {
     let end = offset.checked_add(32)?;
     if end > data.len() {
         return None;
@@ -506,7 +506,7 @@ fn decode_bytes32_array(args: &[u8], head: &[u8; 32]) -> Result<Value, CalldataE
 }
 
 /// Interpret a 32-byte word as a usize offset/length; `None` if it exceeds usize.
-fn word_to_usize(word: &[u8; 32]) -> Option<usize> {
+pub(crate) fn word_to_usize(word: &[u8; 32]) -> Option<usize> {
     if word[..24].iter().any(|&b| b != 0) {
         return None;
     }

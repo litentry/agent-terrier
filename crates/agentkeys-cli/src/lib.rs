@@ -1483,6 +1483,105 @@ pub async fn cmd_signer_derive(
 /// The saved session JWT is attached as a bearer token so the signer can
 /// verify the request. If no session is saved, the command fails with a
 /// clear message to run `agentkeys init` first.
+/// `keccak256("\x19Ethereum Signed Message:\n<len>" || message)` — the exact
+/// digest the signer's EIP-191 sign covers. Recorded in the `SignEip191`
+/// audit body so an auditor can verify the signature against it.
+fn eip191_digest(message: &[u8]) -> [u8; 32] {
+    let mut preimage = format!("\x19Ethereum Signed Message:\n{}", message.len()).into_bytes();
+    preimage.extend_from_slice(message);
+    agentkeys_core::device_crypto::keccak256(&preimage)
+}
+
+/// Build the `SignEip712` audit body from the signer's digests + the
+/// typed-data domain (chainId / verifyingContract come from the raw
+/// EIP-712 domain JSON; absent fields use the schema's zero defaults).
+fn sign_eip712_audit_body(
+    typed_data: &agentkeys_core::clear_signing::TypedData,
+    signed: &agentkeys_core::signer_client::SignedTypedData,
+) -> agentkeys_core::audit::SignEip712Body {
+    let chain_id = match typed_data.domain.get("chainId") {
+        Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0),
+        Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
+        _ => 0,
+    };
+    let verifying_contract = typed_data
+        .domain
+        .get("verifyingContract")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("0x{}", "00".repeat(20)));
+    agentkeys_core::audit::SignEip712Body {
+        chain_id,
+        verifying_contract,
+        primary_type: typed_data.primary_type.clone(),
+        type_hash: signed.primary_type_hash.clone(),
+        domain_separator: signed.domain_separator.clone(),
+        digest: signed.digest.clone(),
+    }
+}
+
+/// Emit a `SignEip191`/`SignEip712` audit envelope after a successful sign
+/// (#97 phase F). The signing account's omni is both actor and operator —
+/// the CLI session carries no separate operator identity, and the op touches
+/// the account's own signing authority. Best-effort by design: the signature
+/// already exists, so a down audit worker degrades to a loud stderr warning,
+/// never a failed sign. Returns the `envelope_hash` receipt when emitted.
+async fn emit_sign_audit(
+    omni_account: &str,
+    op_kind: agentkeys_core::audit::AuditOpKind,
+    body: impl serde::Serialize,
+    intent: Option<(String, [u8; 32])>,
+) -> Option<String> {
+    use agentkeys_core::audit::{envelope_for, AuditClient, AuditResult};
+
+    let omni: [u8; 32] = {
+        let trimmed = omni_account.trim().trim_start_matches("0x");
+        let raw = match hex::decode(trimmed) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("agentkeys signer: audit emit skipped (omni decode: {e})");
+                return None;
+            }
+        };
+        match raw.try_into() {
+            Ok(o) => o,
+            Err(_) => {
+                eprintln!("agentkeys signer: audit emit skipped (omni must be 32 bytes)");
+                return None;
+            }
+        }
+    };
+    let (intent_text, intent_commitment) = match intent {
+        Some((t, c)) => (Some(t), Some(c)),
+        None => (None, None),
+    };
+    let envelope = match envelope_for(
+        omni,
+        omni,
+        op_kind,
+        body,
+        AuditResult::Success,
+        intent_text,
+        intent_commitment,
+    ) {
+        Ok(env) => env,
+        Err(e) => {
+            eprintln!("agentkeys signer: audit emit skipped (envelope build: {e})");
+            return None;
+        }
+    };
+    match AuditClient::from_env().append(&envelope).await {
+        Ok(resp) => Some(resp.envelope_hash),
+        Err(e) => {
+            eprintln!(
+                "agentkeys signer: durable audit append FAILED (best-effort — the sign \
+                 succeeded but is NOT in the audit feed): {e}"
+            );
+            None
+        }
+    }
+}
+
 pub async fn cmd_signer_sign(
     ctx: &CommandContext,
     signer_url: &str,
@@ -1497,17 +1596,35 @@ pub async fn cmd_signer_sign(
         .sign_eip191(omni_account, message.as_bytes())
         .await
         .map_err(format_signer_error)?;
+
+    // #97 phase F (SignEip191): one audit envelope per completed sign.
+    let audit_body = agentkeys_core::audit::SignEip191Body {
+        message_digest: format!("0x{}", hex::encode(eip191_digest(message.as_bytes()))),
+        wallet: signed.address.clone(),
+    };
+    let audit_envelope_hash = emit_sign_audit(
+        omni_account,
+        agentkeys_core::audit::AuditOpKind::SignEip191,
+        audit_body,
+        None,
+    )
+    .await;
+
     if ctx.json_output {
         Ok(serde_json::to_string_pretty(&json!({
             "signature":   signed.signature,
             "address":     signed.address,
             "key_version": signed.key_version,
+            "audit_envelope_hash": audit_envelope_hash,
         }))
         .unwrap())
     } else {
         Ok(format!(
-            "signature={} address={} key_version={}",
-            signed.signature, signed.address, signed.key_version
+            "signature={} address={} key_version={} audit_envelope_hash={}",
+            signed.signature,
+            signed.address,
+            signed.key_version,
+            audit_envelope_hash.as_deref().unwrap_or("unavailable")
         ))
     }
 }
@@ -1555,6 +1672,21 @@ pub async fn cmd_signer_sign_typed_data(
         .await
         .map_err(format_signer_error)?;
 
+    // #97 phase F (SignEip712): one audit envelope per completed sign,
+    // carrying the PR #95 operator intent + commitment when the ERC-7730
+    // preview rendered one.
+    let audit_body = sign_eip712_audit_body(&typed_data, &signed);
+    let intent = preview_block
+        .as_ref()
+        .map(|p| (p.intent_text.clone(), p.intent_commitment));
+    let audit_envelope_hash = emit_sign_audit(
+        omni_account,
+        agentkeys_core::audit::AuditOpKind::SignEip712,
+        audit_body,
+        intent,
+    )
+    .await;
+
     if ctx.json_output {
         let mut body = json!({
             "signature":          signed.signature,
@@ -1563,6 +1695,7 @@ pub async fn cmd_signer_sign_typed_data(
             "domain_separator":   signed.domain_separator,
             "digest":             signed.digest,
             "key_version":        signed.key_version,
+            "audit_envelope_hash": audit_envelope_hash,
         });
         if let Some(p) = preview_block.as_ref() {
             body["intent_text"] = json!(p.intent_text);
@@ -1584,13 +1717,14 @@ pub async fn cmd_signer_sign_typed_data(
             ));
         }
         out.push_str(&format!(
-            "signature={}\naddress={}\nprimary_type_hash={}\ndomain_separator={}\ndigest={}\nkey_version={}",
+            "signature={}\naddress={}\nprimary_type_hash={}\ndomain_separator={}\ndigest={}\nkey_version={}\naudit_envelope_hash={}",
             signed.signature,
             signed.address,
             signed.primary_type_hash,
             signed.domain_separator,
             signed.digest,
             signed.key_version,
+            audit_envelope_hash.as_deref().unwrap_or("unavailable"),
         ));
         Ok(out)
     }
@@ -1803,5 +1937,98 @@ pub fn cmd_feedback() -> String {
         format!("Opening {} in your browser", url)
     } else {
         format!("Visit: {}", url)
+    }
+}
+
+#[cfg(test)]
+mod sign_audit_tests {
+    use super::*;
+
+    /// Golden vector pinned via `cast hash-message "hello"` (2026-06-11).
+    #[test]
+    fn eip191_digest_matches_cast_hash_message() {
+        assert_eq!(
+            format!("0x{}", hex::encode(eip191_digest(b"hello"))),
+            "0x50b2c43fd39106bafbba0da34fc430e1f91e3c96ea2acee2bc34119f92b37750"
+        );
+    }
+
+    /// The 712 audit body carries the signer's digests verbatim and pulls
+    /// chainId / verifyingContract from the raw EIP-712 domain (zero
+    /// defaults when absent — domains aren't required to carry either).
+    #[test]
+    fn sign_eip712_audit_body_maps_domain_and_digests() {
+        let typed: agentkeys_core::clear_signing::TypedData =
+            serde_json::from_value(serde_json::json!({
+                "domain": {
+                    "name": "USDC",
+                    "chainId": 1,
+                    "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+                },
+                "types": { "Permit": [ {"name": "value", "type": "uint256"} ] },
+                "primaryType": "Permit",
+                "message": { "value": "1" }
+            }))
+            .unwrap();
+        let signed = agentkeys_core::signer_client::SignedTypedData {
+            signature: format!("0x{}", "ab".repeat(65)),
+            address: "0x1111111111111111111111111111111111111111".into(),
+            primary_type_hash: format!("0x{}", "de".repeat(32)),
+            domain_separator: format!("0x{}", "ad".repeat(32)),
+            digest: format!("0x{}", "be".repeat(32)),
+            key_version: 1,
+        };
+        let body = sign_eip712_audit_body(&typed, &signed);
+        assert_eq!(body.chain_id, 1);
+        assert_eq!(
+            body.verifying_contract,
+            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        );
+        assert_eq!(body.primary_type, "Permit");
+        assert_eq!(body.type_hash, signed.primary_type_hash);
+        assert_eq!(body.domain_separator, signed.domain_separator);
+        assert_eq!(body.digest, signed.digest);
+
+        // string-encoded chainId + missing verifyingContract → parsed / zero default
+        let sparse: agentkeys_core::clear_signing::TypedData =
+            serde_json::from_value(serde_json::json!({
+                "domain": { "chainId": "212013" },
+                "types": { "T": [ {"name": "x", "type": "uint8"} ] },
+                "primaryType": "T",
+                "message": { "x": 1 }
+            }))
+            .unwrap();
+        let body = sign_eip712_audit_body(&sparse, &signed);
+        assert_eq!(body.chain_id, 212013);
+        assert_eq!(body.verifying_contract, format!("0x{}", "00".repeat(20)));
+    }
+
+    /// The body roundtrips through the canonical envelope (the §15.3b
+    /// worker-test requirement for the signs family, here at the emit site).
+    #[test]
+    fn sign_bodies_roundtrip_through_envelope() {
+        use agentkeys_core::audit::{
+            envelope_for, AuditEnvelope, AuditOpKind, AuditResult, SignEip191Body, TypedAuditBody,
+        };
+        let body = SignEip191Body {
+            message_digest: format!("0x{}", hex::encode(eip191_digest(b"hello"))),
+            wallet: "0x1111111111111111111111111111111111111111".into(),
+        };
+        let env = envelope_for(
+            [0x44; 32],
+            [0x44; 32],
+            AuditOpKind::SignEip191,
+            body.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::SignEip191(b) => assert_eq!(b, body),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
     }
 }

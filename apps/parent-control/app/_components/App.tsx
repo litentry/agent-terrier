@@ -223,7 +223,8 @@ export function App() {
           return;
         }
         akLog('reset: fleet revoke landed ✅', {
-          txHash: (submitted.data as { tx_hash?: string } | undefined)?.tx_hash,
+          txHash: submitted.data.txHash,
+          auditEnvelopeHashes: submitted.data.auditEnvelopeHashes,
         });
       } else {
         const detail = built.status?.detail ?? '';
@@ -460,9 +461,14 @@ export function App() {
     }
     akLog('scope: submit OK ✅', {
       actor: actor.id,
-      txHash: (submitted.data as { tx_hash?: string } | undefined)?.tx_hash,
+      txHash: submitted.data.txHash,
+      auditEnvelopeHashes: submitted.data.auditEnvelopeHashes,
     });
-    showToast(`${actor.label} scope committed on chain (Touch ID · setScope).`);
+    const scopeReceipt = submitted.data.auditEnvelopeHashes?.[0];
+    showToast(
+      `${actor.label} scope committed on chain (Touch ID · setScope).` +
+        (scopeReceipt ? ` Audit receipt ${scopeReceipt.slice(0, 10)}….` : ''),
+    );
     const a = await client.listActors();
     if (a.ok) setActors(a.data);
     return true;
@@ -663,9 +669,14 @@ export function App() {
     akLog('accept: submit OK ✅', {
       masterAccount,
       signingCredentialId: assertion.credential_id,
-      txHash: (submitted.data as { tx_hash?: string } | undefined)?.tx_hash,
+      txHash: submitted.data.txHash,
+      auditEnvelopeHashes: submitted.data.auditEnvelopeHashes,
     });
-    showToast(`${req.agent} accepted on chain (Touch ID · register + scope, one block).`);
+    const acceptReceipts = submitted.data.auditEnvelopeHashes?.length ?? 0;
+    showToast(
+      `${req.agent} accepted on chain (Touch ID · register + scope, one block).` +
+        (acceptReceipts > 0 ? ` ${acceptReceipts} audit receipt${acceptReceipts > 1 ? 's' : ''} recorded.` : ''),
+    );
     // Drop it from the pending list. The accept registered the agent on-chain, but the
     // broker only clears the rendezvous row on an explicit ack (the accept/submit body
     // carries no request_id) — without this the request reappears on every refresh.
@@ -838,11 +849,13 @@ export function App() {
           }
           return;
         }
-        const txHash = (submitted.data as { tx_hash?: string } | undefined)?.tx_hash;
-        akLog('revoke: submit OK ✅', { actor: actor.id, txHash });
+        const txHash = submitted.data.txHash;
+        const auditEnvelopeHashes = submitted.data.auditEnvelopeHashes;
+        akLog('revoke: submit OK ✅', { actor: actor.id, txHash, auditEnvelopeHashes });
         // The daemon re-reads the registry (device must read `revoked`) before
-        // flipping local state — the chain stays the source of truth.
-        const r = await client.revokeDevice(actor.id, action.intent, { txHash });
+        // flipping local state — the chain stays the source of truth. The #97
+        // receipts ride along so the feed event carries the real envelope hash.
+        const r = await client.revokeDevice(actor.id, action.intent, { txHash, auditEnvelopeHashes });
         if (!r.ok) {
           showToast(`Revoke landed on chain but the daemon verify failed — ${r.status?.detail ?? 'refresh'}`);
           return;
@@ -1122,6 +1135,10 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
   const onchain = ONCHAIN_KINDS.has(event.kind);
   const tx = decoded?.tx ?? null;
   const env = decoded?.envelope ?? null;
+  // #97: real decodes carry EVERY fetched envelope (an accept has two:
+  // DeviceAdd + ScopeGrant); synthesized previews keep the single one.
+  const envs = decoded?.envelopes?.length ? decoded.envelopes : env ? [env] : [];
+  const realTxHash = event.txHash ?? decoded?.tx_hash;
   const tier = decoded?.tier_label ?? (onchain ? 'tier-2 · committed on-chain' : 'tier-1 (sse) · folds into next 2-min anchor');
   const signer = event.actor === 'Sara (master)' ? 'D_pub_master_iphone' : 'D_pub_' + event.actor.toLowerCase().replace(/[^a-z]/g, '');
 
@@ -1153,6 +1170,11 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
           ⚠ preview decode — reconstructed from the audit row. The shape is real (verified-ABI calldata + canonical CBOR), but the values + hashes are derived, not yet fetched from a stored envelope / on-chain tx.
         </div>
       )}
+      {decoded && decoded.synthesized === false && (
+        <div style={{ fontSize: 11, color: 'var(--ok, #2e7d32)', border: '1px solid var(--ok, #2e7d32)', padding: '8px 12px', marginBottom: 16 }}>
+          ✓ {decoded.provenance ?? 'real decode — envelope(s) fetched from the audit worker by the submit receipt hashes.'}
+        </div>
+      )}
 
       <div className="panel">
         <div className="panel-head"><span>── event</span></div>
@@ -1165,26 +1187,35 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
             <dt>worker</dt><dd className="mono">{event.chip}-service</dd>
             <dt>tier</dt><dd>{tier}</dd>
             <dt>K10 signer</dt><dd className="mono">{signer}…</dd>
+            {realTxHash && (<><dt>tx</dt><dd className="mono" style={{ wordBreak: 'break-all' }}>{realTxHash}</dd></>)}
+            {event.auditEnvelopeHashes && event.auditEnvelopeHashes.length > 0 && (
+              <>
+                <dt>audit receipts</dt>
+                <dd className="mono" style={{ wordBreak: 'break-all' }}>
+                  {event.auditEnvelopeHashes.join(' · ')}
+                </dd>
+              </>
+            )}
           </dl>
         </div>
       </div>
 
-      {/* ── CBOR AuditEnvelope (decoded) ── */}
-      {env && (
-        <div className="panel">
-          <div className="panel-head"><span>── decoded audit envelope · cbor v{env.version}</span></div>
+      {/* ── CBOR AuditEnvelope(s) (decoded) — one panel per fetched envelope ── */}
+      {envs.map((e, i) => (
+        <div className="panel" key={e.envelope_hash || i}>
+          <div className="panel-head"><span>── decoded audit envelope{envs.length > 1 ? ` ${i + 1}/${envs.length}` : ''} · cbor v{e.version}</span></div>
           <div className="panel-body">
             <div className="tx-decode">
-              <div className="tx-row"><span className="tx-k">op_kind</span><span className="tx-v mono">{env.op_kind}{env.op_kind_label ? ` · ${env.op_kind_label}` : ' · Unknown(byte)'}</span></div>
-              {env.intent_text && <div className="tx-row"><span className="tx-k">intent</span><span className="tx-v">{env.intent_text}</span></div>}
-              {Object.entries(env.op_body || {}).map(([k, v]) => (
+              <div className="tx-row"><span className="tx-k">op_kind</span><span className="tx-v mono">{e.op_kind}{e.op_kind_label ? ` · ${e.op_kind_label}` : ' · Unknown(byte)'}</span></div>
+              {e.intent_text && <div className="tx-row"><span className="tx-k">intent</span><span className="tx-v">{e.intent_text}</span></div>}
+              {Object.entries(e.op_body || {}).map(([k, v]) => (
                 <div className="tx-row" key={k}><span className="tx-k">{k}</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{argValue(v)}</span></div>
               ))}
-              <div className="tx-row"><span className="tx-k">envelope_hash</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{env.envelope_hash}</span></div>
+              <div className="tx-row"><span className="tx-k">envelope_hash</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{e.envelope_hash}</span></div>
             </div>
           </div>
         </div>
-      )}
+      ))}
 
       {/* ── on-chain transaction (calldata decoded against the verified ABI) ── */}
       <div className="panel">

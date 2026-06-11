@@ -201,6 +201,112 @@ pub fn execute_batch_calldata(dest: &[[u8; 20]], values: &[u128], func: &[Vec<u8
     out
 }
 
+/// One inner call of a decoded `executeBatch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchCall {
+    pub dest: [u8; 20],
+    pub value: u128,
+    pub calldata: Vec<u8>,
+}
+
+/// Decode `executeBatch(address[],uint256[],bytes[])` calldata into its inner
+/// calls — the exact inverse of [`execute_batch_calldata`], roundtrip-tested
+/// against it. The broker's submit relay uses this to derive the audit
+/// envelopes for what ACTUALLY landed on chain (issue #97 phase F: scope +
+/// device op_kinds) instead of trusting a client-claimed summary.
+///
+/// Hardened like `audit::calldata` (codex #153 lesson): every offset/length is
+/// bounds-checked BEFORE any allocation, so crafted length words error with a
+/// message instead of driving an OOM.
+pub fn decode_execute_batch(calldata: &[u8]) -> Result<Vec<BatchCall>, String> {
+    use crate::audit::calldata::{read_word, word_to_usize};
+
+    let sel = selector("executeBatch(address[],uint256[],bytes[])");
+    if calldata.len() < 4 {
+        return Err(format!("calldata too short: {} bytes", calldata.len()));
+    }
+    if calldata[..4] != sel {
+        return Err(format!(
+            "not executeBatch: selector 0x{}",
+            hex::encode(&calldata[..4])
+        ));
+    }
+    let args = &calldata[4..];
+    let usize_at = |at: usize, what: &str| -> Result<usize, String> {
+        read_word(args, at)
+            .as_ref()
+            .and_then(word_to_usize)
+            .ok_or_else(|| format!("{what}: word out of range"))
+    };
+
+    // A dynamic array at head-offset `slot`: returns (element-count, offset of
+    // the first element word). Bounds the COUNT region only — element bodies
+    // are checked per element type below.
+    let array_at = |slot: usize, what: &str| -> Result<(usize, usize), String> {
+        let off = usize_at(slot, what)?;
+        let count = usize_at(off, &format!("{what}.len"))?;
+        Ok((count, off + WORD))
+    };
+
+    let (dest_count, dest_at) = array_at(0, "dest")?;
+    let (value_count, value_at) = array_at(WORD, "values")?;
+    let (func_count, func_at) = array_at(2 * WORD, "func")?;
+    if dest_count != value_count || dest_count != func_count {
+        return Err(format!(
+            "array length mismatch: dest={dest_count} values={value_count} func={func_count}"
+        ));
+    }
+    // Bound the static regions before iterating (no allocation yet).
+    let static_end = |start: usize, count: usize| -> Result<usize, String> {
+        count
+            .checked_mul(WORD)
+            .and_then(|n| start.checked_add(n))
+            .filter(|&e| e <= args.len())
+            .ok_or_else(|| "array body out of range".to_string())
+    };
+    static_end(dest_at, dest_count)?;
+    static_end(value_at, value_count)?;
+    static_end(func_at, func_count)?;
+
+    let mut out = Vec::with_capacity(dest_count);
+    for i in 0..dest_count {
+        let dest_word = read_word(args, dest_at + i * WORD).expect("bounded above");
+        if dest_word[..12].iter().any(|&b| b != 0) {
+            return Err(format!("dest[{i}]: not a 20-byte address"));
+        }
+        let mut dest = [0u8; 20];
+        dest.copy_from_slice(&dest_word[12..]);
+
+        let value_word = read_word(args, value_at + i * WORD).expect("bounded above");
+        if value_word[..16].iter().any(|&b| b != 0) {
+            return Err(format!("value[{i}]: exceeds u128"));
+        }
+        let mut low = [0u8; 16];
+        low.copy_from_slice(&value_word[16..]);
+        let value = u128::from_be_bytes(low);
+
+        // bytes[] element offsets are relative to AFTER the func len word
+        // (i.e. to `func_at`), per standard ABI + the encoder above.
+        let elem_rel = usize_at(func_at + i * WORD, &format!("func[{i}].offset"))?;
+        let elem_at = func_at
+            .checked_add(elem_rel)
+            .ok_or_else(|| format!("func[{i}].offset overflow"))?;
+        let elem_len = usize_at(elem_at, &format!("func[{i}].len"))?;
+        let body_start = elem_at + WORD;
+        let body_end = body_start
+            .checked_add(elem_len)
+            .filter(|&e| e <= args.len())
+            .ok_or_else(|| format!("func[{i}].body out of range"))?;
+
+        out.push(BatchCall {
+            dest,
+            value,
+            calldata: args[body_start..body_end].to_vec(),
+        });
+    }
+    Ok(out)
+}
+
 /// **The #225 headline** — the atomic accept batch as one `executeBatch` callData.
 ///
 /// Composes `registerAgentDevice` (P.2) + `setScope` (P.3) into a single
@@ -861,6 +967,88 @@ mod tests {
         // no registerAgentDevice inside (scope-only, the binding already exists).
         let register_sel = selector("registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)");
         assert!(find_subslice(&batch[4..], &register_sel).is_none());
+    }
+
+    // ── decode_execute_batch — the #97 submit-relay audit decoder ────────
+
+    #[test]
+    fn decode_execute_batch_round_trips_the_accept_batch() {
+        let reg = sample_register();
+        let grant = sample_grant();
+        let batch = accept_batch_calldata(&addr(0xa1), &addr(0xa2), &reg, &grant);
+        let calls = decode_execute_batch(&batch).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].dest, addr(0xa1));
+        assert_eq!(calls[1].dest, addr(0xa2));
+        assert_eq!(calls[0].value, 0);
+        assert_eq!(calls[0].calldata, register_agent_device_calldata(&reg));
+        assert_eq!(
+            calls[1].calldata,
+            set_scope_calldata(&reg.operator_omni, &reg.actor_omni, &grant)
+        );
+        // the inner calls feed the existing audit::calldata decoder directly —
+        // the path the broker submit relay uses to build the audit envelopes.
+        let inner = crate::audit::calldata::decode_calldata(&calls[0].calldata).unwrap();
+        assert_eq!(inner.function, "registerAgentDevice");
+        let inner = crate::audit::calldata::decode_calldata(&calls[1].calldata).unwrap();
+        assert_eq!(inner.function, "setScope");
+    }
+
+    #[test]
+    fn decode_execute_batch_round_trips_scope_and_revoke_batches() {
+        let grant = sample_grant();
+        let scope_batch = scope_batch_calldata(&addr(0xa2), &b32(0x22), &b32(0x33), &grant);
+        let calls = decode_execute_batch(&scope_batch).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].calldata,
+            set_scope_calldata(&b32(0x22), &b32(0x33), &grant)
+        );
+
+        // #260 fleet revoke: one batch, one revokeAgentDevice per hash.
+        let revoke_batch = revoke_batch_calldata(&addr(0xa1), &[b32(0x11), b32(0x12)]);
+        let calls = decode_execute_batch(&revoke_batch).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].calldata, revoke_agent_device_calldata(&b32(0x11)));
+        assert_eq!(calls[1].calldata, revoke_agent_device_calldata(&b32(0x12)));
+    }
+
+    #[test]
+    fn decode_execute_batch_handles_empty_inner_calldata_and_values() {
+        // A batch with a value-carrying empty-calldata call (plain transfer).
+        let batch = execute_batch_calldata(&[addr(0x01)], &[42u128], &[Vec::new()]);
+        let calls = decode_execute_batch(&batch).unwrap();
+        assert_eq!(calls[0].value, 42);
+        assert!(calls[0].calldata.is_empty());
+    }
+
+    #[test]
+    fn decode_execute_batch_rejects_malformed_input() {
+        // wrong selector
+        let err = decode_execute_batch(&[0xde, 0xad, 0xbe, 0xef]).unwrap_err();
+        assert!(err.contains("not executeBatch"), "{err}");
+        // too short
+        assert!(decode_execute_batch(&[0x47]).is_err());
+        // length mismatch: hand-craft dest len 2 but values/func len 1
+        let good = execute_batch_calldata(&[addr(0x01)], &[0u128], &[vec![0x01]]);
+        let mut bad = good.clone();
+        // dest array len word sits at args[3*32..4*32]; bump it to 2.
+        bad[4 + 3 * WORD + 31] = 2;
+        let err = decode_execute_batch(&bad).unwrap_err();
+        assert!(
+            err.contains("mismatch") || err.contains("out of range"),
+            "{err}"
+        );
+        // truncated body: chop past the trailing zero-pad into the func
+        // element's length word (chopping pad alone decodes fine — padding
+        // is decorative in ABI encoding).
+        let err = decode_execute_batch(&good[..good.len() - 40]).unwrap_err();
+        assert!(err.contains("out of range"), "{err}");
+        // crafted huge func element length must error, not OOM (codex #153 lesson)
+        let mut huge = good;
+        let len = huge.len();
+        huge[len - 33] = 0xff; // inflate the elem len word
+        assert!(decode_execute_batch(&huge).is_err());
     }
 
     #[test]

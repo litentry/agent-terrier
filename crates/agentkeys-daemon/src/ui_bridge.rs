@@ -139,6 +139,10 @@ pub struct UiBridgeState {
     /// locally (deterministic, dev/no-infra). Drives cred auto-categorize (#207 item 7)
     /// + connect-time auto-distribute (#207 item 5).
     pub classify_url: Option<String>,
+    /// #97 — the audit worker the decode view fetches REAL envelopes from
+    /// (by the submit receipt hashes on feed events). `None` ⇒ the decode
+    /// stays a synthesized preview (dev / no-infra / tests).
+    pub audit_worker_url: Option<String>,
     /// AWS region for the STS relay (`REGION`).
     pub region: String,
     /// The on-chain-registered master device key hash, sent as `device_key_hash` in
@@ -490,6 +494,15 @@ pub struct ApiAuditEvent {
     pub detail: String,
     pub chip: String,
     pub sev: String,
+    /// #97: the confirmed on-chain tx for control-plane ops (accept / scope /
+    /// revoke submits). `None` for synthesized / local events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+    /// #97: the `AuditEnvelope v1` receipt hashes the broker emitted for this
+    /// op — the decode view fetches the REAL envelopes by these instead of
+    /// synthesizing a preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_envelope_hashes: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -786,6 +799,7 @@ pub fn build_state(
     config_url: Option<String>,
     config_role_arn: Option<String>,
     classify_url: Option<String>,
+    audit_worker_url: Option<String>,
     region: String,
     master_device_key_hash: Option<String>,
     register_master_script: Option<String>,
@@ -843,6 +857,7 @@ pub fn build_state(
         config_url,
         config_role_arn,
         classify_url,
+        audit_worker_url,
         region,
         master_device_key_hash,
         registered_master: RwLock::new(None),
@@ -1492,6 +1507,8 @@ async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_js
                         ),
                         chip: "revoke".into(),
                         sev: "bad".into(),
+                        tx_hash: None,
+                        audit_envelope_hashes: None,
                     },
                 )
                 .await;
@@ -1582,6 +1599,8 @@ async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_js
                                         ),
                                         chip: "revoke".into(),
                                         sev: "bad".into(),
+                                        tx_hash: None,
+                                        audit_envelope_hashes: None,
                                     },
                                 )
                                 .await;
@@ -2957,6 +2976,8 @@ async fn update_scope(
         ),
         chip: "broker".into(),
         sev: "ok".into(),
+        tx_hash: None,
+        audit_envelope_hashes: None,
     };
     push_audit(&state, evt).await;
     Ok(Json(snapshot))
@@ -3039,6 +3060,8 @@ async fn grant_service_scope(
         detail,
         chip: chip.into(),
         sev: "ok".into(),
+        tx_hash: None,
+        audit_envelope_hashes: None,
     };
     push_audit(&state, evt).await;
     Ok(Json(snapshot))
@@ -3078,6 +3101,8 @@ async fn update_payment_cap(
         detail: format!("{} · per_tx={} daily={}", id, req.per_tx, req.daily),
         chip: "broker".into(),
         sev: "ok".into(),
+        tx_hash: None,
+        audit_envelope_hashes: None,
     };
     push_audit(&state, evt).await;
     Ok(Json(snapshot))
@@ -3097,6 +3122,11 @@ pub struct RevokeDeviceRequest {
     /// The submit's tx hash (audit trail only; the chain re-read is the proof).
     #[serde(default)]
     pub onchain_tx_hash: Option<String>,
+    /// #97: the `AuditEnvelope v1` receipt hashes from the broker's
+    /// `/v1/revoke/submit` response — attached to the feed event so the decode
+    /// view fetches the REAL DeviceRevoke envelope instead of synthesizing.
+    #[serde(default)]
+    pub audit_envelope_hashes: Option<Vec<String>>,
 }
 
 async fn revoke_device(
@@ -3232,12 +3262,18 @@ async fn revoke_device(
         detail: format!(
             "{} · on-chain revokeAgentDevice{} · intent='{}' · fields={}",
             id,
-            tx.map(|h| format!(" tx={h}")).unwrap_or_default(),
+            tx.as_deref()
+                .map(|h| format!(" tx={h}"))
+                .unwrap_or_default(),
             req.intent_text,
             req.intent_fields.len()
         ),
         chip: "revoke".into(),
         sev: "bad".into(),
+        // #97: real coordinates from the Touch-ID revoke submit — the decode
+        // view fetches the DeviceRevoke envelope by hash when present.
+        tx_hash: tx.clone(),
+        audit_envelope_hashes: req.audit_envelope_hashes.clone().filter(|h| !h.is_empty()),
     };
     push_audit(&state, evt).await;
     Ok(Json(snapshot))
@@ -3279,6 +3315,8 @@ async fn revoke_cap(
         detail: format!("{} · cap={} · intent='{}'", id, req.cap, req.intent_text),
         chip: "revoke".into(),
         sev: "bad".into(),
+        tx_hash: None,
+        audit_envelope_hashes: None,
     };
     push_audit(&state, evt).await;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -3401,12 +3439,78 @@ async fn decode_audit_event(
         (actor_omni, operator_omni)
     };
 
-    Ok(Json(crate::audit_decode::decode_event(
+    let mut decoded = crate::audit_decode::decode_event(
         &event,
         actor_omni.as_deref(),
         operator_omni.as_deref(),
         &state.chain_profile,
-    )))
+    );
+
+    // #97: when the event carries real submit receipts, fetch the ACTUAL
+    // envelopes from the audit worker by hash and replace the synthesized
+    // preview. Best-effort — any fetch/decode failure keeps the preview (the
+    // decode endpoint never hard-fails on worker downtime).
+    if let (Some(worker_url), Some(hashes)) = (
+        state.audit_worker_url.as_ref(),
+        event
+            .audit_envelope_hashes
+            .as_ref()
+            .filter(|h| !h.is_empty()),
+    ) {
+        let client = agentkeys_core::audit::AuditClient::new(worker_url.as_str());
+        let mut real = Vec::new();
+        for h in hashes {
+            match client.get_envelope(h).await {
+                Ok(Some(cbor)) => {
+                    match agentkeys_core::audit::AuditEnvelope::from_canonical_cbor(&cbor) {
+                        Ok(env) => real.push(env.to_json()),
+                        Err(e) => tracing::warn!(
+                            hash = %h, error = %e,
+                            "audit decode: fetched envelope failed to decode — keeping preview"
+                        ),
+                    }
+                }
+                Ok(None) => tracing::warn!(
+                    hash = %h,
+                    "audit decode: envelope not found at the audit worker — keeping preview"
+                ),
+                Err(e) => tracing::warn!(
+                    hash = %h, error = %e,
+                    "audit decode: envelope fetch failed — keeping preview"
+                ),
+            }
+        }
+        overlay_real_envelopes(&mut decoded, real, event.tx_hash.as_deref());
+    } else if let Some(tx) = event.tx_hash.as_deref() {
+        decoded["tx_hash"] = serde_json::json!(tx);
+    }
+
+    Ok(Json(decoded))
+}
+
+/// #97: overlay REAL fetched envelopes onto a synthesized decode preview. The
+/// envelope half becomes authoritative (`synthesized: false`); the calldata
+/// half stays a reconstruction (noted in the provenance line). No-op when
+/// nothing was fetched, so a worker outage degrades to the preview.
+fn overlay_real_envelopes(
+    base: &mut serde_json::Value,
+    envelopes: Vec<serde_json::Value>,
+    tx_hash: Option<&str>,
+) {
+    if let Some(tx) = tx_hash {
+        base["tx_hash"] = serde_json::json!(tx);
+    }
+    if envelopes.is_empty() {
+        return;
+    }
+    base["synthesized"] = serde_json::json!(false);
+    base["provenance"] = serde_json::json!(
+        "real · envelope(s) fetched from the audit worker by the submit receipt \
+         hashes (verify: keccak256(canonical_cbor) == envelope_hash); the decoded \
+         calldata panel remains a reconstruction"
+    );
+    base["envelope"] = envelopes[0].clone();
+    base["envelopes"] = serde_json::json!(envelopes);
 }
 
 async fn list_workers(State(state): State<SharedUiBridgeState>) -> impl IntoResponse {
@@ -3917,13 +4021,38 @@ async fn accept_submit_proxy(
         Some(s) if !s.j1.is_empty() => s.j1.clone(),
         _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
     };
-    let resp = forward_to_broker(&broker, "/v1/accept/submit", &j1, &body).await;
+    let (resp, parsed) = forward_to_broker_value(&broker, "/v1/accept/submit", &j1, &body).await;
     if resp.status().is_success() {
         // The accept just registered an agent on chain — un-latch the #233 sync
         // so the actor tree reflects it even if the follow-up ack is skipped.
         state
             .fleet_synced
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // #97: the broker's submit relay decoded the landed executeBatch and
+        // emitted the DeviceAdd + ScopeGrant envelopes — record the confirmed
+        // chain commit in the audit feed with the REAL receipts (the decode
+        // view fetches the envelopes by these hashes instead of synthesizing).
+        let (tx_hash, audit_envelope_hashes) =
+            parsed.as_ref().map(submit_receipts).unwrap_or((None, None));
+        let evt = ApiAuditEvent {
+            id: format!("e-accept-{}", now_unix()),
+            ts: now_ts_hms(),
+            actor_id: "master".into(),
+            actor: "master".into(),
+            kind: "device.paired".into(),
+            detail: format!(
+                "agent accept landed on chain (registerAgentDevice + setScope, one block){}",
+                tx_hash
+                    .as_deref()
+                    .map(|h| format!(" · tx={h}"))
+                    .unwrap_or_default()
+            ),
+            chip: "pairing".into(),
+            sev: "ok".into(),
+            tx_hash,
+            audit_envelope_hashes,
+        };
+        push_audit(&state, evt).await;
     }
     resp
 }
@@ -4001,11 +4130,35 @@ async fn scope_submit_proxy(
         Some(s) if !s.j1.is_empty() => s.j1.clone(),
         _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
     };
-    let resp = forward_to_broker(&broker, "/v1/scope/submit", &j1, &body).await;
+    let (resp, parsed) = forward_to_broker_value(&broker, "/v1/scope/submit", &j1, &body).await;
     if resp.status().is_success() {
         state
             .fleet_synced
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // #97: record the confirmed set-replace commit with the broker's real
+        // receipts. The envelope (fetched by hash in the decode view) carries
+        // the FULL replacement grant — incl. whether it was a revoke-all.
+        let (tx_hash, audit_envelope_hashes) =
+            parsed.as_ref().map(submit_receipts).unwrap_or((None, None));
+        let evt = ApiAuditEvent {
+            id: format!("e-scope-commit-{}", now_unix()),
+            ts: now_ts_hms(),
+            actor_id: "master".into(),
+            actor: "master".into(),
+            kind: "scope.grant".into(),
+            detail: format!(
+                "setScope committed on chain (set-replace — full grant in the audit envelope){}",
+                tx_hash
+                    .as_deref()
+                    .map(|h| format!(" · tx={h}"))
+                    .unwrap_or_default()
+            ),
+            chip: "broker".into(),
+            sev: "ok".into(),
+            tx_hash,
+            audit_envelope_hashes,
+        };
+        push_audit(&state, evt).await;
     }
     resp
 }
@@ -4074,6 +4227,68 @@ async fn revoke_submit_proxy(
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
     resp
+}
+
+/// [`forward_to_broker`] that ALSO hands back the parsed success JSON, so the
+/// submit proxies can read the #97 receipts (`tx_hash` +
+/// `audit_envelope_hashes`) before re-wrapping the response for the browser.
+async fn forward_to_broker_value(
+    broker: &str,
+    path: &str,
+    j1: &str,
+    body: &serde_json::Value,
+) -> (axum::response::Response, Option<serde_json::Value>) {
+    let url = format!("{}{}", broker.trim_end_matches('/'), path);
+    match reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(j1)
+        .json(body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let st =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let txt = resp.text().await.unwrap_or_default();
+            let parsed = st
+                .is_success()
+                .then(|| serde_json::from_str::<serde_json::Value>(&txt).ok())
+                .flatten();
+            let response = (
+                st,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                txt,
+            )
+                .into_response();
+            (response, parsed)
+        }
+        Err(e) => (
+            pairing_err(StatusCode::BAD_GATEWAY, &format!("broker {path}: {e}")),
+            None,
+        ),
+    }
+}
+
+/// Pull the #97 submit receipts out of a broker submit response: the confirmed
+/// `tx_hash` + the `audit_envelope_hashes` the broker emitted for the landed
+/// batch. Empty / missing values normalize to `None` (a `pending: true`
+/// response carries neither).
+fn submit_receipts(v: &serde_json::Value) -> (Option<String>, Option<Vec<String>>) {
+    let tx_hash = v
+        .get("tx_hash")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    let hashes = v
+        .get("audit_envelope_hashes")
+        .and_then(|h| h.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .filter(|h| !h.is_empty());
+    (tx_hash, hashes)
 }
 
 /// POST `body` to `<broker><path>` with the master J1 bearer; relay the broker's
@@ -5236,6 +5451,8 @@ async fn plant_master_memory_inner(
             detail: format!("planted preserved memory · {planted} entries · {skipped} duplicates"),
             chip: "memory".into(),
             sev: "ok".into(),
+            tx_hash: None,
+            audit_envelope_hashes: None,
         };
         push_audit(state, evt).await;
     }
@@ -5405,6 +5622,8 @@ async fn init_config_default_inner(
         ),
         chip: "memory".into(),
         sev: "ok".into(),
+        tx_hash: None,
+        audit_envelope_hashes: None,
     };
     push_audit(state, evt).await;
 
@@ -5876,6 +6095,8 @@ async fn store_master_credential(
                 detail: format!("vaulted credential · {service} · {category}"),
                 chip: "creds".into(),
                 sev: "ok".into(),
+                tx_hash: None,
+                audit_envelope_hashes: None,
             };
             push_audit(&state, evt).await;
             (
@@ -6115,6 +6336,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             None,
@@ -6141,6 +6363,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             Some(register_master_script),
@@ -6164,6 +6387,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None, // master_device_key_hash — deliberately UNSET (derivation path)
             None,
@@ -6455,6 +6679,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             None,
@@ -6774,6 +6999,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             Some("0xdkh".into()),
             None,
@@ -6803,6 +7029,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             Some("0xdkh".into()),
             None,
@@ -7358,6 +7585,7 @@ mod tests {
                 intent_fields: vec![("actor".into(), "agent-folotoy".into())],
                 onchain: false,
                 onchain_tx_hash: None,
+                audit_envelope_hashes: None,
             }),
         )
         .await
@@ -7405,6 +7633,7 @@ mod tests {
                 intent_fields: vec![],
                 onchain: false,
                 onchain_tx_hash: None,
+                audit_envelope_hashes: None,
             }),
         )
         .await
@@ -7447,6 +7676,7 @@ mod tests {
                 intent_fields: vec![],
                 onchain: true,
                 onchain_tx_hash: Some("0xdeadbeef".into()),
+                audit_envelope_hashes: None,
             }),
         )
         .await
@@ -7475,6 +7705,7 @@ mod tests {
                 intent_fields: vec![],
                 onchain: true,
                 onchain_tx_hash: None,
+                audit_envelope_hashes: None,
             }),
         )
         .await;
@@ -7555,6 +7786,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
@@ -7851,6 +8083,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
@@ -7916,6 +8149,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
@@ -7989,6 +8223,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
@@ -8087,6 +8322,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             None,
@@ -8507,6 +8743,7 @@ mod tests {
             Some("https://config.example".into()), // config_url set
             None,                                  // CONFIG_ROLE_ARN missing → partial config
             None,                                  // classify_url
+            None,                                  // audit_worker_url
             "us-east-1".into(),
             None,
             None,
@@ -8564,6 +8801,8 @@ mod tests {
                 detail: format!("event {i}"),
                 chip: "audit".into(),
                 sev: "ok".into(),
+                tx_hash: None,
+                audit_envelope_hashes: None,
             };
             push_audit(&state, evt).await;
         }
@@ -8588,6 +8827,8 @@ mod tests {
             detail: "broadcast".into(),
             chip: "audit".into(),
             sev: "ok".into(),
+            tx_hash: None,
+            audit_envelope_hashes: None,
         };
         push_audit(&state, evt.clone()).await;
         let received = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
@@ -8612,6 +8853,8 @@ mod tests {
             detail: "stored a credential".into(),
             chip: "credentials".into(),
             sev: "ok".into(),
+            tx_hash: None,
+            audit_envelope_hashes: None,
         };
         push_audit(&state, evt).await;
 
@@ -8636,6 +8879,131 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    /// #97: receipt extraction from broker submit responses — confirmed,
+    /// pending, and junk shapes.
+    #[test]
+    fn submit_receipts_extracts_tx_and_envelope_hashes() {
+        let confirmed = serde_json::json!({
+            "ok": true, "tx_hash": "0xabc", "block_number": "0x1",
+            "user_op_hash": "0xdef",
+            "audit_envelope_hashes": ["0x11", "0x22"],
+        });
+        let (tx, hashes) = submit_receipts(&confirmed);
+        assert_eq!(tx.as_deref(), Some("0xabc"));
+        assert_eq!(hashes, Some(vec!["0x11".to_string(), "0x22".to_string()]));
+
+        // pending: empty tx, no hashes → both None
+        let pending = serde_json::json!({
+            "ok": true, "tx_hash": "", "block_number": "",
+            "user_op_hash": "0xdef", "pending": true,
+        });
+        assert_eq!(submit_receipts(&pending), (None, None));
+
+        // empty hash array normalizes to None
+        let empty = serde_json::json!({ "tx_hash": "0xabc", "audit_envelope_hashes": [] });
+        let (tx, hashes) = submit_receipts(&empty);
+        assert_eq!(tx.as_deref(), Some("0xabc"));
+        assert_eq!(hashes, None);
+    }
+
+    /// #97: the overlay replaces the synthesized preview with the fetched
+    /// envelope(s) and flips the provenance; an empty fetch is a no-op
+    /// (preview survives a down audit worker).
+    #[test]
+    fn overlay_real_envelopes_replaces_preview() {
+        use agentkeys_core::audit::{envelope_for, AuditOpKind, AuditResult, ScopeRevokeBody};
+
+        let real = envelope_for(
+            [0x33; 32],
+            [0x22; 32],
+            AuditOpKind::ScopeRevoke,
+            ScopeRevokeBody {
+                agent_omni: format!("0x{}", "33".repeat(32)),
+            },
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap()
+        .to_json();
+
+        let mut base = serde_json::json!({
+            "synthesized": true, "provenance": "preview",
+            "envelope": { "op_kind_label": "synthetic" }, "tx": null,
+        });
+        overlay_real_envelopes(&mut base, vec![real.clone()], Some("0xfeed"));
+        assert_eq!(base["synthesized"], serde_json::json!(false));
+        assert_eq!(base["tx_hash"], serde_json::json!("0xfeed"));
+        assert_eq!(
+            base["envelope"]["op_kind_label"],
+            serde_json::json!("scope.revoke")
+        );
+        assert_eq!(base["envelopes"].as_array().map(Vec::len), Some(1));
+        assert!(base["provenance"].as_str().unwrap().starts_with("real"));
+
+        // nothing fetched → preview untouched (tx still recorded)
+        let mut untouched = serde_json::json!({ "synthesized": true, "envelope": null });
+        overlay_real_envelopes(&mut untouched, Vec::new(), Some("0xfeed"));
+        assert_eq!(untouched["synthesized"], serde_json::json!(true));
+        assert_eq!(untouched["tx_hash"], serde_json::json!("0xfeed"));
+        assert!(untouched.get("envelopes").is_none());
+    }
+
+    /// #97: an event carrying receipt hashes but an UNREACHABLE audit worker
+    /// degrades to the synthesized preview (with the tx recorded) — the decode
+    /// endpoint never hard-fails on worker downtime. Hermetic: 127.0.0.1:9 is
+    /// a closed port, connection-refused instantly.
+    #[tokio::test]
+    async fn decode_with_unreachable_audit_worker_falls_back_to_preview() {
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            None,
+            None,
+            84532,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("http://127.0.0.1:9".into()), // audit_worker_url — closed port
+            "us-east-1".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let evt = ApiAuditEvent {
+            id: "dec-real-1".into(),
+            ts: "00:00:00".into(),
+            actor_id: "master".into(),
+            actor: "master".into(),
+            kind: "scope.grant".into(),
+            detail: "setScope committed on chain".into(),
+            chip: "broker".into(),
+            sev: "ok".into(),
+            tx_hash: Some("0xfeed".into()),
+            audit_envelope_hashes: Some(vec![format!("0x{}", "ab".repeat(32))]),
+        };
+        push_audit(&state, evt).await;
+
+        let resp = decode_audit_event(State(state), Path("dec-real-1".into()))
+            .await
+            .expect("decode must succeed despite the unreachable worker");
+        let v = resp.0;
+        assert_eq!(
+            v["synthesized"],
+            serde_json::json!(true),
+            "preview fallback"
+        );
+        assert_eq!(v["tx_hash"], serde_json::json!("0xfeed"));
+        assert_eq!(
+            v["envelope"]["op_kind_label"],
+            serde_json::json!("scope.grant")
+        );
     }
 
     #[tokio::test]
@@ -8775,6 +9143,7 @@ mod tests {
             None,
             None,
             None,
+            None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
             Some(script),

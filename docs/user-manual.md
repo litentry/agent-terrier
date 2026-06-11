@@ -212,3 +212,25 @@ cred worker → S3); the secret is **decrypt-on-read and never shown** in the UI
 agent can fetch a credential only with a granted `cred:<service>` scope. **Vault a
 credential** with the form on that page (service id + secret). Listing is
 **master-only** — an agent's single-service cap can't enumerate your vault.
+
+## Audit receipts (parent-control)
+
+Every Touch-ID chain action — **accepting an agent**, **committing a scope
+change**, and **unpairing a device** — now returns **audit receipts**: the
+`AuditEnvelope` hashes the broker recorded for exactly what landed on chain
+(an accept yields two — the device bind + the scope grant). You'll see them
+in the success toast and on the matching row of the **audit** page.
+
+Opening a receipt-carrying row's **decode** view shows the **real** audit
+envelope, fetched from the audit worker by hash (a green "real" banner;
+verify independently with
+`curl https://audit.litentry.org/v1/audit/envelope/<hash>` —
+`keccak256` of the returned CBOR must equal the hash). Rows without receipts
+(older events, off-chain actions) keep the amber "preview decode" banner —
+the shape is real but the values are reconstructed, not fetched. If the
+audit worker is unreachable, a receipt-carrying row degrades to the preview
+banner instead of failing.
+
+Scope grants are **set-replace**: the envelope's `service_ids` list is the
+FULL replacement grant (an empty set is the revoke-all), so compare two
+consecutive grant envelopes to see what changed.

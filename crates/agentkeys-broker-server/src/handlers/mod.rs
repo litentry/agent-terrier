@@ -1,5 +1,6 @@
 pub mod accept;
 pub mod agent;
+pub mod audit_emit;
 pub mod auth;
 pub mod broker_status;
 pub mod cap;

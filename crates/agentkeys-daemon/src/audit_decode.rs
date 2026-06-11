@@ -222,22 +222,28 @@ fn op_body_for(kind: &str, event: &ApiAuditEvent, actor: &[u8; 32]) -> Cbor {
             ("service", Cbor::Text(service)),
             ("cap_hash", Cbor::Text(phash)),
         ]),
+        // Set-replace shape (#97 schema alignment): a grant carries the FULL
+        // replacement set of on-chain service ids (keccak256(service_name));
+        // a revoke is agent-wide — no per-service revoke exists.
         "scope.grant" => map(vec![
             (
                 "agent_omni",
                 Cbor::Text(format!("0x{}", hex::encode(actor))),
             ),
-            ("service", Cbor::Text(service)),
-            ("max_calls", Cbor::Integer(100u8.into())),
-            ("max_amount", Cbor::Text("0".to_string())),
-        ]),
-        "scope.revoke" => map(vec![
             (
-                "agent_omni",
-                Cbor::Text(format!("0x{}", hex::encode(actor))),
+                "service_ids",
+                Cbor::Array(vec![Cbor::Text(hash_hex(&service))]),
             ),
-            ("service", Cbor::Text(service)),
+            ("read_only", Cbor::Bool(true)),
+            ("max_per_call", Cbor::Text("0".to_string())),
+            ("max_per_period", Cbor::Text("0".to_string())),
+            ("max_total", Cbor::Text("0".to_string())),
+            ("period_seconds", Cbor::Integer(86400u32.into())),
         ]),
+        "scope.revoke" => map(vec![(
+            "agent_omni",
+            Cbor::Text(format!("0x{}", hex::encode(actor))),
+        )]),
         "cap.pair" | "device.paired" => map(vec![
             ("device_key_hash", Cbor::Text(phash)),
             ("role_bits", Cbor::Integer(1u8.into())),
@@ -345,6 +351,8 @@ mod tests {
             detail: "did a thing".into(),
             chip: "credentials".into(),
             sev: "ok".into(),
+            tx_hash: None,
+            audit_envelope_hashes: None,
         }
     }
 

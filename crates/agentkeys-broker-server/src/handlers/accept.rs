@@ -797,9 +797,19 @@ pub async fn accept_submit(
                         handle_ops_revert_message(reason, &tx_hash),
                     ));
                 }
+                // #97 phase F: the receipt confirms the executeBatch landed —
+                // decode what landed and emit the control-plane audit
+                // envelopes (DeviceAdd / ScopeGrant / ScopeRevoke /
+                // DeviceRevoke). Best-effort: the chain tx is already final.
+                let audit_envelope_hashes = crate::handlers::audit_emit::emit_for_confirmed_batch(
+                    operator_omni,
+                    &packed.call_data,
+                )
+                .await;
                 return Ok(Json(serde_json::json!({
                     "ok": true, "tx_hash": tx_hash, "block_number": block_number,
                     "user_op_hash": user_op_hash,
+                    "audit_envelope_hashes": audit_envelope_hashes,
                 })));
             }
             // Transient bundler/RPC hiccup mid-poll: tolerate until the deadline.
@@ -807,7 +817,13 @@ pub async fn accept_submit(
         }
         if std::time::Instant::now() >= deadline {
             // Broadcast but unconfirmed — surface the hashes so the UI can confirm
-            // on chain; NOT an error (the tx may still mine).
+            // on chain; NOT an error (the tx may still mine). No audit envelopes
+            // here: we don't know whether the ops landed, and the on-chain event
+            // log covers whatever eventually mines.
+            tracing::warn!(
+                user_op_hash = %user_op_hash,
+                "submit receipt timed out — control-plane audit envelopes NOT emitted for this op"
+            );
             return Ok(Json(serde_json::json!({
                 "ok": true, "tx_hash": "", "block_number": "",
                 "user_op_hash": user_op_hash,
