@@ -32,11 +32,11 @@ jobs:
           fetch-depth: 0   # full history so `git log` / `git blame` work in-session
 
       # Rust toolchain + cache so `@claude test` / `@claude check clippy`
-      # style requests don't need to pay cold-compile cost.
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # style requests don't need to pay cold-compile cost. Pinned by
+      # rust-toolchain.toml (channel + clippy/rustfmt) so @claude's clippy
+      # matches rust-checks exactly — never a floating @stable.
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup toolchain install
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2

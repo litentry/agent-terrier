@@ -61,10 +61,13 @@ jobs:
             /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           df -h / | tail -1
 
-      - name: Install rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
+      # Pinned by rust-toolchain.toml (single source of truth — no floating
+      # stable; see the rust-checks toolchain-pin gate). llvm-tools-preview is
+      # coverage-only, so it's added here rather than in the shared pin file.
+      - name: Install rust toolchain (pinned by rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
 
       - name: Cache cargo
         uses: actions/cache@v4
