@@ -113,7 +113,10 @@ issue) are out of scope — they apply to eth too.
   the `P256Account` wraps the verify in `try checkUserOpSignature() catch { SIG_FAIL }`, so an
   out-of-gas inside the capped call is **caught and mapped to `SIG_VALIDATION_FAILED`** (AA24, not
   the AA23 a bare OOG would give). Diagnosing this needs an on-chain replay: `validateUserOp`
-  returns SIG_OK under unlimited (eth_call) gas but SIG_FAIL under the 600k cap.
+  returns SIG_OK under unlimited (eth_call) gas but SIG_FAIL under the 600k cap. (Since #247 the
+  replay-and-decode is automatic: on a reverted `handleOps` the in-house bundler replays the
+  calldata via `eth_call`, decodes `FailedOp`, and the `/v1/accept/submit` error carries the
+  verbatim `AAxx` reason plus per-code operator guidance — no more manual `cast call` dance.)
 - **Workaround:** pin `verificationGasLimit` ≥ **1_500_000** (the value the working passkey
   REGISTER UserOp uses). Keep `maxFeePerGas` ≥ Heima base fee (~25 gwei) so the op can pay — but
   low enough that `Σ(gasLimits) × maxFee` stays under the paymaster's EntryPoint deposit.
@@ -131,7 +134,8 @@ issue) are out of scope — they apply to eth too.
   drain near the ED has its beneficiary payout fail **inside `handleOps`**, reverting the whole tx.
 - **Symptom (real 2026-06-10 incident, the fresh TEST EntryPoint):** every UserOp reverts with
   outer `status 0` at ~820k gas (validation completes, payout fails); `eth_call` decodes
-  **`AA91 failed send to beneficiary`**; the account nonce does not advance. Worse: once below the
+  **`AA91 failed send to beneficiary`** (surfaced automatically in the `/v1/accept/submit`
+  error since #247, with the ED guidance inline); the account nonce does not advance. Worse: once below the
   ED the EntryPoint's native account is REAPED — `cast balance` shows **0** while the internal
   `deposits` mapping still shows the escrowed amounts. Prod never hit this only because its
   EntryPoint balance is ~13 HEI across many deposits.
