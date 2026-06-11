@@ -194,6 +194,76 @@ flowchart TB
 
 **Notation throughout the rest of this doc:** the K1–K11 indices are referenced directly so any flow can be unambiguously mapped back to which key signed/verified/wrapped what.
 
+### 4.1 Key relationship map — what derives what, what vouches for what
+
+[![AgentKeys key map — generation, bindings, and the privacy/security rationale](assets/key-map.svg)](assets/key-map.svg)
+
+The annotated poster above ([`assets/key-map.svg`](assets/key-map.svg)) adds the privacy/security rationale (P1, S1–S6) to the derivation graph below; keep both in sync when a derivation changes.
+
+```mermaid
+flowchart TB
+  subgraph IDL["Identity layer — transient auth handles (§6.1)"]
+    RAW["raw identity<br/>email magic-link / OAuth sub / passkey<br/>(alt: K5 operator EVM wallet — SIWE direct, bypasses K3/K4)"]
+    IDO["identity_omni<br/>= SHA256('agentkeys' || id_type || id_value)"]
+  end
+
+  subgraph TEE["Signer TEE (§14) — K3_v[epoch] sealed inside; K4/KEK derived on demand, never persisted"]
+    W1["initial_master_wallet_K3_v1<br/>= the FIRST K4 derive (init stage 3),<br/>keyed by identity_omni — the ONLY<br/>identity_omni-keyed derivation"]
+    K4M["K4 current_master_wallet<br/>= HKDF(K3_v[epoch], O_master)"]
+    K4A["K4 wallet_agent_X<br/>= HKDF(K3_v[epoch], O_agent_X)"]
+    KEK["credential_kek<br/>= HKDF(K3_v[epoch], 'agentkeys.user.v1' || actor_omni)"]
+  end
+
+  subgraph L1["Durable anchors — Layer 1: public, frozen, key everything (§6)"]
+    OM["O_master (actor_omni)<br/>= SHA256('agentkeys' || 'evm' || initial_master_wallet_K3_v1)<br/>— the wallet's OWN identity omni (id_type 'evm')"]
+    OA["O_agent_X (agent_omni)<br/>= SHA256('agentkeys-hdkd-v1' || O_master || '//' || label)<br/>— no identity input; positional in the HDKD tree"]
+  end
+
+  subgraph DEV["Per-machine keys"]
+    K11["K11 WebAuthn passkey<br/>(master only; Touch ID-gated)"]
+    K10M["K10 master device key"]
+    K10A["K10 agent device key(s)<br/>(many concurrent per agent omni)"]
+  end
+
+  subgraph BEAR["Broker-signed bearers (K1 signs J1/K6; K2 signs K7)"]
+    J1["J1 session JWT (K6)<br/>claims: actor_omni, device_pubkey"]
+    K7["OIDC JWT (K7)<br/>claim agentkeys_actor_omni"]
+    K8["K8 STS creds<br/>PrincipalTag = actor_omni → bots/&lt;omni&gt;/ prefix"]
+  end
+
+  RAW -->|"identity ceremony (§9 stage 1)"| IDO
+  IDO -->|"stage-3 derive (then discarded)"| W1
+  W1 -->|"SHA256 + FREEZE at managed-wallet attestation"| OM
+  OM -->|"HDKD edge '//label' — public + recomputable"| OA
+  OM --> K4M
+  OM --> KEK
+  OA --> K4A
+  K11 -->|"registers master device; gates scope/device mutations"| OM
+  K10M -->|"SidecarRegistry binding"| OM
+  K10A -->|"registerAgentDevice (master-submitted)"| OA
+  OM --> J1
+  OA --> J1
+  J1 -->|"/v1/mint-oidc-jwt"| K7
+  K7 -->|"AssumeRoleWithWebIdentity"| K8
+```
+
+Reading the map: **identity flows into the anchors exactly once.** The email's `identity_omni` seeds one derivation (the initial wallet, init stage 3) and is then discarded; the frozen `O_master` is that wallet's *own* identity omni (same `SHA256(client_id || id_type || id_value)` shape, with the wallet as the identity — `identity/omni_account.rs`); every later derivation (agent omnis, K4 wallets, KEK) keys off anchors, never off the email. Agents have no identity input at all — their omni is positional. K9 (DKIM) is standalone per-domain mail signing, deliberately outside this graph.
+
+Worked example — `agentkeys init --email test@litentry.org`, then pair agent `hermes` (wallet illustrative since only the TEE can produce it; all hashes real):
+
+```text
+identity_omni = SHA256("agentkeys"||"email"||"test@litentry.org")
+              = 25264bfa70c1ca14236e31ca55e84dcba6aed6fb7d8663b748f21fafcc0ac59b   (transient)
+initial_master_wallet_K3_v1  (signer-internal HKDF keyed by identity_omni; illustrative)
+              = 0x7c41e8a3b5d2f0c694a1d8e2b37f5a09c6e4d21b
+O_master      = SHA256("agentkeys"||"evm"||"0x7c41e8a3b5d2f0c694a1d8e2b37f5a09c6e4d21b")
+              = a8fde0c55de542e2c7e151cefa670697569fefc4abf784b9a732f5ac3b5d81d9   (FROZEN)
+O_hermes      = SHA256("agentkeys-hdkd-v1" || O_master_raw32 || "//hermes")
+              = a152e6b37b01bc48b609efbb32e33055eb2cb555f60166784a1b81020a54f7a1
+wallet_hermes = HKDF(K3_v[epoch], O_hermes)                  (signer-internal, on demand)
+S3 prefixes:    bots/a8fde0c5…/ (master)        bots/a152e6b3…/ (hermes)
+```
+
 ---
 
 ## 5. Canonical names (one concept, one canonical spelling)
@@ -427,13 +497,13 @@ sequenceDiagram
   CLI->>Brk: POST /v1/auth/bind/<request_id> {webauthn_attestation, D_pub}
   Brk-->>CLI: J0 (claims: agentkeys.device_pubkey=D_pub, agentkeys.webauthn_cred=K11_id)
 
-  Note over CLI,Sig: Stage 3 — derive + link + managed-wallet attestation → J1
-  CLI->>Sig: POST /derive-address {O_master} (mTLS via broker; Bearer J0)
+  Note over CLI,Sig: Stage 3 — derive + link + managed-wallet attestation → J1 (signer calls keyed by identity_omni — O_master exists only after the freeze)
+  CLI->>Sig: POST /derive-address {identity_omni} (mTLS via broker; Bearer J0)
   Sig-->>CLI: {address: initial_master_wallet}
   CLI->>Brk: POST /v1/wallet/link {evm, initial_master_wallet} (Bearer J0)
   CLI->>Brk: POST /v1/auth/wallet/start {address}
   Brk-->>CLI: {siwe_message: M}
-  CLI->>Sig: POST /sign/siwe {O_master, hex(M)}
+  CLI->>Sig: POST /sign/siwe {identity_omni, hex(M)}
   Sig-->>CLI: {signature: sig}
   CLI->>Brk: POST /v1/auth/wallet/verify {request_id, sig}
   Brk-->>CLI: J1 (long-lived; claims: actor_omni FROZEN, device_pubkey, webauthn_cred, wallet_at_freeze)
