@@ -2,8 +2,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub mod cred_manifest;
 pub mod provision;
 
+pub use cred_manifest::{CredManifest, CredManifestError};
 pub use provision::{ProvisionErrorCode, ProvisionEvent, TripwireKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

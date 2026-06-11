@@ -12,9 +12,12 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
+use std::path::{Path, PathBuf};
+
 use agentkeys_backend_client::{
     normalize_omni_0x, BackendClient, CapMintOp, CapMintRequest, CredFetchInput, CredStoreInput,
 };
+use agentkeys_types::CredManifest;
 
 /// Fetch + decrypt the credential `service` the actor is authorized for, returning
 /// the plaintext secret. `operator_omni` == `actor_omni` for a master-self fetch;
@@ -117,4 +120,92 @@ pub async fn cred_store(
         .await
         .with_context(|| format!("cred worker store for service `{service}`"))?;
     Ok(result.s3_key)
+}
+
+// ─── #216 default-key selection — the OFF-CHAIN manifest (discovery only) ────
+// The on-chain AgentKeysScope stores only keccak(service) hashes, so the agent
+// can't enumerate its authorized service NAMES or learn its default LLM key from
+// chain. The master records both here, off-chain; every fetch still re-verifies
+// on-chain (isServiceInScope), so this never widens authorization.
+
+/// Resolve the cred-manifest path: an explicit `--manifest` /
+/// `$AGENTKEYS_CRED_MANIFEST` (clap merges both into `explicit`), else
+/// `~/.agentkeys/cred-manifest.json`.
+pub fn cred_manifest_path(explicit: Option<&str>) -> PathBuf {
+    if let Some(p) = explicit {
+        return PathBuf::from(p);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".agentkeys")
+            .join("cred-manifest.json");
+    }
+    PathBuf::from("cred-manifest.json")
+}
+
+/// Render the authorized-services listing (the chain can't enumerate names —
+/// this is the off-chain discovery layer). Marks the master-designated default.
+pub fn cred_list(path: &Path) -> Result<String> {
+    let man = CredManifest::load(path)
+        .with_context(|| format!("read cred manifest {}", path.display()))?;
+    if man.services.is_empty() {
+        return Ok(format!(
+            "no authorized credential services recorded ({} absent or empty).\n\
+             The master records them at grant time:\n  \
+             agentkeys cred manifest --services <a,b,c> --default <a>",
+            path.display()
+        ));
+    }
+    let default = man.default_name();
+    let mut out = format!("authorized credential services ({}):\n", path.display());
+    for (i, s) in man.services.iter().enumerate() {
+        let mark = if Some(s.as_str()) == default {
+            "  ← default"
+        } else {
+            ""
+        };
+        out.push_str(&format!("  {}. {}{}\n", i + 1, s, mark));
+    }
+    Ok(out.trim_end().to_string())
+}
+
+/// Write the off-chain cred manifest: authorized service NAMES + the
+/// master-designated default (public names only, never secrets). The master /
+/// operator runs this at grant time so the agent's no-arg fetch picks the default.
+pub fn cred_manifest_write(
+    path: &Path,
+    services_csv: &str,
+    default: Option<String>,
+) -> Result<String> {
+    let services: Vec<String> = services_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if services.is_empty() {
+        anyhow::bail!("--services must list at least one service name");
+    }
+    if let Some(d) = default.as_deref() {
+        if !services.iter().any(|s| s == d) {
+            anyhow::bail!(
+                "--default '{d}' is not in --services [{}]",
+                services.join(", ")
+            );
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+    }
+    let man = CredManifest::new(services, default);
+    man.save(path)
+        .with_context(|| format!("write cred manifest {}", path.display()))?;
+    Ok(format!(
+        "recorded cred manifest {} — {} service(s), default `{}`",
+        path.display(),
+        man.services.len(),
+        man.default_name().unwrap_or("(none)")
+    ))
 }

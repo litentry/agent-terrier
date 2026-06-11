@@ -269,30 +269,68 @@ async fn cred_fetch_inner(
     creds: Option<&crate::aws_creds::StsCreds>,
     req: &FetchRequest,
 ) -> Result<Vec<u8>, ApiError> {
-    let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
+    // A fetch may read TWO vaults, tried in order (see fetch_vault_owners):
+    // the actor's OWN (#228 agent-owned creds), then — for a DELEGATED cap
+    // (actor != operator) — the OPERATOR's vault (#216: the master vaulted the
+    // key master-self; the cap's already-verified on-chain cred:<service> scope
+    // grant IS the agent's authorization to fetch it). The S3 read still runs
+    // under the CALLER-relayed STS creds, so layer-3 IAM is untouched: reading
+    // the operator's prefix requires operator-tagged STS (the wire context's
+    // operator session) — the cap only narrows WHICH service that session
+    // releases. The envelope AAD is keyed by the vault OWNER (each vault's
+    // objects were encrypted with aad(operator, owner, service, epoch) at
+    // store time), so the owner drives both the key and the decrypt.
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
-    let resp = s3
-        .get_object()
-        .bucket(&state.config.vault_bucket)
-        .key(&key)
-        .send()
-        .await
-        .map_err(|e| err_502(e.to_string(), "s3_get"))?;
-    let body = resp
-        .body
-        .collect()
-        .await
-        .map_err(|e| err_502(e.to_string(), "s3_body"))?
-        .into_bytes();
+    let owners = fetch_vault_owners(&req.cap.payload.actor_omni, &req.cap.payload.operator_omni);
+    let mut last_err: Option<ApiError> = None;
+    for owner in &owners {
+        let key = s3_key(owner, &req.cap.payload.service);
+        let resp = match s3
+            .get_object()
+            .bucket(&state.config.vault_bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                // NoSuchKey (not stored in this vault) or AccessDenied (the
+                // relayed STS isn't tagged for this prefix) — try the next
+                // vault; surface the LAST attempt's error if all miss.
+                last_err = Some(err_502(e.to_string(), "s3_get"));
+                continue;
+            }
+        };
+        let body = resp
+            .body
+            .collect()
+            .await
+            .map_err(|e| err_502(e.to_string(), "s3_body"))?
+            .into_bytes();
 
-    let aad = envelope::aad(
-        &req.cap.payload.operator_omni,
-        &req.cap.payload.actor_omni,
-        &req.cap.payload.service,
-        req.cap.payload.k3_epoch,
-    );
-    envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
-        .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
+        let aad = envelope::aad(
+            &req.cap.payload.operator_omni,
+            owner,
+            &req.cap.payload.service,
+            req.cap.payload.k3_epoch,
+        );
+        return envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
+            .map_err(|e| err_500(e.to_string(), "envelope_decrypt"));
+    }
+    Err(last_err.unwrap_or_else(|| err_502("no vault candidates", "s3_get")))
+}
+
+/// The vaults a fetch may read, in order: the actor's OWN vault first (#228
+/// agent-owned creds — an agent's self-stored entry shadows a same-named
+/// delegated one, never the reverse), then the operator's vault when the cap
+/// is delegated (actor != operator, the #216 master-provisioned LLM key).
+/// Master-self caps (actor == operator) read exactly one vault — unchanged.
+fn fetch_vault_owners(actor_omni: &str, operator_omni: &str) -> Vec<String> {
+    if actor_omni.eq_ignore_ascii_case(operator_omni) {
+        vec![actor_omni.to_string()]
+    } else {
+        vec![actor_omni.to_string(), operator_omni.to_string()]
+    }
 }
 
 async fn cred_teardown(
@@ -442,6 +480,24 @@ fn s3_prefix(actor_omni: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_owners_master_self_reads_one_vault() {
+        // operator == actor (case-insensitive) → exactly the actor's own vault,
+        // byte-identical to the pre-#216 behavior.
+        assert_eq!(fetch_vault_owners("0xAB", "0xab"), vec!["0xAB".to_string()]);
+    }
+
+    #[test]
+    fn fetch_owners_delegated_falls_back_to_operator_vault() {
+        // actor != operator (#216 delegated fetch) → the agent's own vault
+        // first (#228 agent-owned shadows), then the operator's (the master-
+        // vaulted key the cap's scope grant authorizes).
+        assert_eq!(
+            fetch_vault_owners("0xagent", "0xmaster"),
+            vec!["0xagent".to_string(), "0xmaster".to_string()]
+        );
+    }
 
     #[test]
     fn s3_key_format_matches_arch_md_15_1() {
