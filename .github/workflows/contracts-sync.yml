@@ -1,0 +1,40 @@
+name: contract-address sync + doc-literal gate
+
+# Issue #251: the chain profile (crates/agentkeys-core/chain-profiles/*.json,
+# .contracts[] + contract_set_version) is the single machine source of truth
+# for deployed contract addresses. This cheap gate (checkout + jq + grep,
+# seconds) runs scripts/check-deployed-contracts-sync.sh, which verifies:
+#   1. the profile ⟷ scripts/operator-workstation.env mirror agrees, and
+#   2. no tracked markdown doc re-writes a literal address the profile owns
+#      (docs must ANCHOR — link + resolve command — never copy; historical/
+#      orphaned addresses pass naturally once out of the profile).
+# Deliberately a SEPARATE tiny workflow: harness-ci.yml does not trigger on
+# docs/**, and running the full rust-checks job for a doc edit would be waste.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "**/*.md"
+      - "crates/agentkeys-core/chain-profiles/**"
+      - "scripts/operator-workstation.env"
+      - "scripts/operator-workstation.test.env"
+      - "scripts/check-deployed-contracts-sync.sh"
+      - ".github/workflows/contracts-sync.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contracts-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: chain profile ⟷ env sync + no doc address literals
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-deployed-contracts-sync.sh
