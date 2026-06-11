@@ -336,6 +336,9 @@ AGENTKEYS_CHAIN=heima-paseo bash scripts/verify-heima-contracts.sh   # when Pase
 
 The verify script is read-only RPC (zero gas), exits 0 on all-pass / 1 on any failure. Run after every chain bring-up (`v2-stage1-demo.sh` step 9) to confirm the deploy was clean.
 
+## Rust toolchain pin (single source of truth)
+[`rust-toolchain.toml`](rust-toolchain.toml) pins the EXACT Rust version + components (clippy, rustfmt) for every surface — local dev, all CI jobs, and the broker-host build. **Never a floating `stable`**: CI runs `cargo clippy --workspace --all-targets -- -D warnings`, so a floating channel makes lints introduced in a newer stable fail CI while passing on older local toolchains (the PR #270 `needless_lifetimes` skew — local 1.94 green, CI latest-stable red). Workflows install via plain `rustup toolchain install` (reads the pin); **never reintroduce `dtolnay/rust-toolchain@stable`** — that action sets `RUSTUP_TOOLCHAIN`, which bypasses the file (and even a version-pinned `@1.x.y` is a second pin site that drifts). CI-gated by [`scripts/check-toolchain-pin.sh`](scripts/check-toolchain-pin.sh) (harness-ci `rust-checks`). Bump ritual (ONE change): edit `channel`, run `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings`, fix any new lints, commit pin + fixes together — full ritual in [`docs/dev-setup.md`](docs/dev-setup.md) "Toolchain pin + bump ritual".
+
 ## Code Conventions
 - Rust: `thiserror` for library errors, `anyhow` for binary errors
 - All async: `tokio` runtime, `#[tokio::test]` for async tests

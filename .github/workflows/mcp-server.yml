@@ -27,9 +27,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # Pinned by rust-toolchain.toml (channel + clippy) — single source of
+      # truth shared with local dev; never a floating @stable.
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
