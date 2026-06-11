@@ -29,6 +29,7 @@ import type {
   Result,
   RevokeIntent,
   SurfaceItem,
+  SubmitResult,
 } from './types';
 import type {
   Actor,
@@ -233,7 +234,7 @@ export class DaemonBackend implements AgentKeysClient {
   async revokeDevice(
     actorId: string,
     intent: RevokeIntent,
-    onchain?: { txHash?: string },
+    onchain?: { txHash?: string; auditEnvelopeHashes?: string[] },
   ): Promise<Result<void>> {
     const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/revoke`, {
       intent_text: intent.text,
@@ -242,6 +243,9 @@ export class DaemonBackend implements AgentKeysClient {
       // registry reads `revoked` and flips local state without the script.
       onchain: !!onchain,
       onchain_tx_hash: onchain?.txHash ?? null,
+      // #97: the DeviceRevoke envelope receipts from the submit — attached to
+      // the daemon's feed event so the decode view fetches the real envelope.
+      audit_envelope_hashes: onchain?.auditEnvelopeHashes ?? null,
     });
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
@@ -258,8 +262,9 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson('/v1/revoke/build', { device_key_hashes: input.deviceKeyHashes });
   }
 
-  async revokeSubmit(body: unknown): Promise<Result<unknown>> {
-    return this.postJson('/v1/revoke/submit', body);
+  async revokeSubmit(body: unknown): Promise<Result<SubmitResult>> {
+    const r = await this.postJson<ApiSubmitResult>('/v1/revoke/submit', body);
+    return r.ok ? { ok: true, data: apiToSubmitResult(r.data) } : r;
   }
 
   async revokeCap(actorId: string, capName: string, intent: RevokeIntent): Promise<Result<void>> {
@@ -596,8 +601,9 @@ export class DaemonBackend implements AgentKeysClient {
     });
   }
 
-  async acceptSubmit(body: unknown): Promise<Result<unknown>> {
-    return this.postJson('/v1/accept/submit', body);
+  async acceptSubmit(body: unknown): Promise<Result<SubmitResult>> {
+    const r = await this.postJson<ApiSubmitResult>('/v1/accept/submit', body);
+    return r.ok ? { ok: true, data: apiToSubmitResult(r.data) } : r;
   }
 
   // #248: build + submit the scope-only setScope UserOp for a bound agent. The
@@ -619,8 +625,9 @@ export class DaemonBackend implements AgentKeysClient {
     });
   }
 
-  async scopeSubmit(body: unknown): Promise<Result<unknown>> {
-    return this.postJson('/v1/scope/submit', body);
+  async scopeSubmit(body: unknown): Promise<Result<SubmitResult>> {
+    const r = await this.postJson<ApiSubmitResult>('/v1/scope/submit', body);
+    return r.ok ? { ok: true, data: apiToSubmitResult(r.data) } : r;
   }
 
   async listCredentials(): Promise<Result<CredService[]>> {
@@ -697,6 +704,8 @@ interface ApiAuditEvent {
   detail: string;
   chip: string;
   sev: string;
+  tx_hash?: string;
+  audit_envelope_hashes?: string[];
 }
 
 interface ApiWorker {
@@ -740,6 +749,30 @@ function apiToActor(a: ApiActor): Actor {
   };
 }
 
+/** #97: broker submit response shape (relayed verbatim by the daemon proxies). */
+interface ApiSubmitResult {
+  ok?: boolean;
+  tx_hash?: string;
+  block_number?: string;
+  user_op_hash?: string;
+  pending?: boolean;
+  audit_envelope_hashes?: string[];
+}
+
+function apiToSubmitResult(r: ApiSubmitResult): SubmitResult {
+  return {
+    ok: r.ok ?? true,
+    txHash: r.tx_hash || undefined,
+    blockNumber: r.block_number || undefined,
+    userOpHash: r.user_op_hash || undefined,
+    pending: r.pending,
+    auditEnvelopeHashes:
+      r.audit_envelope_hashes && r.audit_envelope_hashes.length > 0
+        ? r.audit_envelope_hashes
+        : undefined,
+  };
+}
+
 function apiToAuditEvent(e: ApiAuditEvent): AuditEvent {
   return {
     id: e.id,
@@ -750,6 +783,8 @@ function apiToAuditEvent(e: ApiAuditEvent): AuditEvent {
     detail: e.detail,
     chip: normalizeChip(e.chip),
     sev: normalizeStatus(e.sev),
+    txHash: e.tx_hash,
+    auditEnvelopeHashes: e.audit_envelope_hashes,
   };
 }
 

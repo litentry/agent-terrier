@@ -370,6 +370,19 @@ export interface DecodedEnvelope {
 }
 
 /** `GET /v1/audit/:id/decode` — both decode halves + the anchoring tier (#153). */
+/** #97: the typed broker submit response relayed by the daemon proxies —
+ *  `auditEnvelopeHashes` are the AuditEnvelope receipts the broker emitted for
+ *  the landed executeBatch (DeviceAdd/ScopeGrant/ScopeRevoke/DeviceRevoke). */
+export interface SubmitResult {
+  ok: boolean;
+  txHash?: string;
+  blockNumber?: string;
+  userOpHash?: string;
+  /** true ⇒ broadcast but unconfirmed (receipt poll timed out); no receipts. */
+  pending?: boolean;
+  auditEnvelopeHashes?: string[];
+}
+
 export interface DecodedAuditEvent {
   id: string;
   kind: string;
@@ -381,6 +394,11 @@ export interface DecodedAuditEvent {
   /** Human-readable provenance note for the synthesized/preview state. */
   provenance?: string;
   envelope: DecodedEnvelope | null;
+  /** #97: ALL real envelopes fetched by receipt hash (an accept carries two:
+   *  DeviceAdd + ScopeGrant). `envelope` stays the first for back-compat. */
+  envelopes?: DecodedEnvelope[];
+  /** #97: the confirmed on-chain tx hash from the submit receipt. */
+  tx_hash?: string;
   tx: DecodedTx | null;
 }
 
@@ -404,7 +422,11 @@ export interface AgentKeysClient {
 
   updateScope(actorId: string, ns: Namespace, value: ScopeBits): Promise<Result<void>>;
   updatePaymentCap(actorId: string, perTx: number, daily: number): Promise<Result<void>>;
-  revokeDevice(actorId: string, intent: RevokeIntent, onchain?: { txHash?: string }): Promise<Result<void>>;
+  revokeDevice(
+    actorId: string,
+    intent: RevokeIntent,
+    onchain?: { txHash?: string; auditEnvelopeHashes?: string[] },
+  ): Promise<Result<void>>;
   revokeCap(actorId: string, capName: string, intent: RevokeIntent): Promise<Result<void>>;
 
   enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>>;
@@ -500,7 +522,7 @@ export interface AgentKeysClient {
   }): Promise<
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   >;
-  acceptSubmit(body: unknown): Promise<Result<unknown>>;
+  acceptSubmit(body: unknown): Promise<Result<SubmitResult>>;
 
   // #248 — the Touch-ID-gated scope re-grant for an ALREADY-bound agent (the
   // permissions panel's commit). `scopeBuild` → broker assembles the
@@ -518,7 +540,7 @@ export interface AgentKeysClient {
   }): Promise<
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   >;
-  scopeSubmit(body: unknown): Promise<Result<unknown>>;
+  scopeSubmit(body: unknown): Promise<Result<SubmitResult>>;
 
   // The Touch-ID unpair: `revokeAgentDevice` requires msg.sender ==
   // operatorMasterWallet, so for an account-master operator the revoke is a
@@ -530,7 +552,7 @@ export interface AgentKeysClient {
   revokeBuild(input: { deviceKeyHashes: string[] }): Promise<
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   >;
-  revokeSubmit(body: unknown): Promise<Result<unknown>>;
+  revokeSubmit(body: unknown): Promise<Result<SubmitResult>>;
 
   // §credentials data class (#207). The SAME abstraction as memory: list the
   // master's stored credential services (categorized via the catalog) and vault

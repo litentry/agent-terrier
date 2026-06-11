@@ -26,6 +26,7 @@ import type {
   Result,
   RevokeIntent,
   SurfaceItem,
+  SubmitResult,
 } from './types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
 
@@ -128,7 +129,7 @@ export class EmptyBackend implements AgentKeysClient {
   async revokeDevice(
     _actorId: string,
     _intent: RevokeIntent,
-    _onchain?: { txHash?: string },
+    _onchain?: { txHash?: string; auditEnvelopeHashes?: string[] },
   ): Promise<Result<void>> {
     return disconnected();
   }
@@ -215,7 +216,7 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async acceptSubmit(_body: unknown): Promise<Result<unknown>> {
+  async acceptSubmit(_body: unknown): Promise<Result<SubmitResult>> {
     return disconnected();
   }
 
@@ -230,7 +231,7 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async scopeSubmit(_body: unknown): Promise<Result<unknown>> {
+  async scopeSubmit(_body: unknown): Promise<Result<SubmitResult>> {
     return disconnected();
   }
 
@@ -240,7 +241,7 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async revokeSubmit(_body: unknown): Promise<Result<unknown>> {
+  async revokeSubmit(_body: unknown): Promise<Result<SubmitResult>> {
     return disconnected();
   }
 

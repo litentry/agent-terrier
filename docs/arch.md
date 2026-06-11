@@ -1126,14 +1126,14 @@ and never reordered**. Grouped by 10s leaves room for related ops.
 | `MemoryPut` | 10 | `{key: string, payload_hash: [u8;32]}` | memory-service |
 | `MemoryGet` | 11 | `{key: string, cap_hash: [u8;32]}` | memory-service |
 | `MemoryTeardown` | 12 | `{actor_target: [u8;32]}` | memory-service |
-| `SignEip191` | 20 | `{message_digest: [u8;32], wallet: [u8;20]}` | signer (via daemon callback) |
-| `SignEip712` | 21 | `{chain_id: u64, verifying_contract: [u8;20], primary_type: string, type_hash: [u8;32], domain_separator: [u8;32], digest: [u8;32]}` | signer (via daemon callback) |
+| `SignEip191` | 20 | `{message_digest: [u8;32], wallet: [u8;20]}` | CLI sign orchestrator (`agentkeys signer sign`, #97) |
+| `SignEip712` | 21 | `{chain_id: u64, verifying_contract: [u8;20], primary_type: string, type_hash: [u8;32], domain_separator: [u8;32], digest: [u8;32]}` | CLI sign orchestrator (`agentkeys signer sign-typed-data`, #97) |
 | `PaymentEscrowRedeem` | 30 | `{escrow_addr: [u8;20], amount: U256, recipient: [u8;20], chain_id: u64}` | payment-service (P-2 mode) |
 | `PaymentDirect` | 31 | `{rail: enum, ref: string, amount_minor: u64, currency: string}` | payment-service (P-1/P-3) |
-| `ScopeGrant` | 40 | `{agent_omni: [u8;32], service: string, max_calls: u32, max_amount: U256}` | broker (via callback) |
-| `ScopeRevoke` | 41 | `{agent_omni: [u8;32], service: string}` | broker (via callback) |
-| `DeviceAdd` | 50 | `{device_key_hash: [u8;32], role_bits: u8, attestation_hash: [u8;32]}` | SidecarRegistry hook |
-| `DeviceRevoke` | 51 | `{device_key_hash: [u8;32]}` | SidecarRegistry hook |
+| `ScopeGrant` | 40 | `{agent_omni: [u8;32], service_ids: [[u8;32]], read_only: bool, max_per_call: U128, max_per_period: U128, max_total: U128, period_seconds: u32}` | broker submit relay (#97) |
+| `ScopeRevoke` | 41 | `{agent_omni: [u8;32]}` | broker submit relay (#97) |
+| `DeviceAdd` | 50 | `{device_key_hash: [u8;32], role_bits: u8, attestation_hash: [u8;32]}` | broker submit relay (#97) |
+| `DeviceRevoke` | 51 | `{device_key_hash: [u8;32]}` | broker submit relay (#97) |
 | `K10Rotate` | 52 | `{old_device_key_hash: [u8;32], new_device_key_hash: [u8;32]}` | SidecarRegistry hook |
 | `EmailSend` | 60 | `{to_hash: [u8;32], subject_hash: [u8;32], message_id: string}` | email-service |
 | `EmailReceive` | 61 | `{from_hash: [u8;32], message_id: string, payload_hash: [u8;32]}` | email-service |
@@ -1162,6 +1162,56 @@ entryCount)` inputs (each Merkle leaf IS an `envelope_hash`), committed
 on-chain by the operator master — exercised end-to-end by
 [`scripts/heima-worker-smoke.sh`](../scripts/heima-worker-smoke.sh) and
 asserted per-data-class in `harness/v2-stage3-demo.sh` steps 11-12.
+
+**Control-plane emit sites are LIVE (#97).** Two sites cover the sign /
+scope / device families:
+
+- **Broker submit relay** ([`handlers/audit_emit.rs`](../crates/agentkeys-broker-server/src/handlers/audit_emit.rs)):
+  after a confirmed `/v1/{accept,scope,revoke}/submit` receipt, the broker
+  decodes the `executeBatch` calldata that actually landed (via
+  `agentkeys_core::erc4337::decode_execute_batch` + the pinned-selector
+  `audit::calldata` decoder — on-chain truth, never client-claimed fields)
+  and emits one envelope per inner call: `registerAgentDevice` →
+  `DeviceAdd` (role_bits = `ROLE_CAP_MINT`, the registry's fixed agent
+  role; attestation hash zero); `setScope` with services → `ScopeGrant`
+  carrying the FULL replacement set (set-replace per #248 — auditors diff
+  consecutive grants); `setScope` empty → `ScopeRevoke` (agent-wide; no
+  per-service revoke exists in the set-replace model); `revokeAgentDevice`
+  → `DeviceRevoke` (actor = operator: the master performed the unpair; the
+  subject device is in the body). Omnis come from the calldata where
+  present — a confirmed receipt guarantees their authenticity because both
+  contracts enforce `msg.sender == operatorMasterWallet`. The submit
+  response carries the `audit_envelope_hashes` receipts. Posture is
+  best-effort + loud WARN by design (NOT the #229 `REQUIRE_AUDIT` flag):
+  the chain tx is already final when the emit happens, so failing the
+  response can't un-land it, and the indexed event log remains the
+  authoritative trail. Unknown inner selectors are skipped with a WARN
+  (forward-compat).
+- **CLI sign orchestrator** (`agentkeys signer sign` /
+  `sign-typed-data`): one envelope per completed sign, actor = operator =
+  the signing account's omni (the CLI session carries no separate operator
+  identity). The `SignEip712` envelope carries `intent_text` +
+  `intent_commitment` from the PR #95 ERC-7730 preview when
+  `--preview-7730` rendered one. Output gains `audit_envelope_hash`
+  (`unavailable` on a best-effort miss, with a stderr warning).
+
+The receipts surface end-to-end in the operator UI: the daemon's submit
+proxies attach `tx_hash` + `audit_envelope_hashes` to the audit-feed events
+they record (accept → `device.paired`, scope commit → `scope.grant`; the
+verified unpair threads them through `revoke_device`), and the daemon's
+`/v1/audit/:id/decode` **fetches the REAL envelope(s) by those hashes** from
+the audit worker (`--audit-worker-url` / `AGENTKEYS_AUDIT_WORKER_URL`,
+default the public worker) instead of synthesizing the #153 preview —
+falling back to the preview when no receipt exists or the worker is
+unreachable. Operator-facing behavior:
+[`docs/user-manual.md`](./user-manual.md) §"Audit receipts".
+
+The `ScopeGrant`/`ScopeRevoke` `op_body` schemas above were ALIGNED to the
+post-#164/#225 set-replace `setScope` reality in the same change that wired
+the emit sites — bytes 40/41 had never been emitted under the older
+per-service draft shape, so this is a pre-first-emit schema fix, not a
+break (invariant #7 forbids reusing/reordering *numbers*; it does not
+freeze a never-emitted body draft).
 
 #### Forward-compat / non-break design
 

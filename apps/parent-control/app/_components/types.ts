@@ -152,6 +152,11 @@ export interface AuditEvent {
   detail: string;
   chip: ChipKind;
   sev: StatusKind;
+  /** #97: confirmed on-chain tx for control-plane ops (accept/scope/revoke). */
+  txHash?: string;
+  /** #97: AuditEnvelope receipt hashes — the decode view fetches the REAL
+   *  envelopes by these instead of synthesizing a preview. */
+  auditEnvelopeHashes?: string[];
   _isNew?: boolean;
 }
 
