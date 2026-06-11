@@ -1,5 +1,5 @@
 use agentkeys_core::backend::{BackendError, CredentialBackend};
-use agentkeys_provisioner::{aws_creds::fetch_via_broker_default_ttl, run_provision, Provisioner};
+use agentkeys_provisioner::{run_provision, Provisioner};
 use agentkeys_types::{ServiceName, Session, WalletAddress};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -119,6 +119,11 @@ pub struct McpHandler {
     /// AWS region for STS calls. Read from `AWS_REGION` / `AWS_DEFAULT_REGION`
     /// at construction time; defaults to `us-east-1`.
     aws_region: String,
+    /// STS endpoint override (same effect as the SDK's `AWS_ENDPOINT_URL_STS`
+    /// env var). `None` ⇒ SDK default resolution. Tests inject a dead
+    /// endpoint here instead of `set_var` (process env is global — mutating
+    /// it leaks into parallel test threads).
+    sts_endpoint_url: Option<String>,
 }
 
 impl McpHandler {
@@ -139,6 +144,7 @@ impl McpHandler {
             broker_url: None,
             data_role_arn: read_env_data_role_arn(),
             aws_region: read_env_aws_region(),
+            sts_endpoint_url: None,
         }
     }
 
@@ -160,6 +166,7 @@ impl McpHandler {
             broker_url: None,
             data_role_arn: read_env_data_role_arn(),
             aws_region: read_env_aws_region(),
+            sts_endpoint_url: None,
         }
     }
 
@@ -181,6 +188,13 @@ impl McpHandler {
     /// Builder-style setter for AWS region (mostly for tests).
     pub fn with_aws_region(mut self, region: String) -> Self {
         self.aws_region = region;
+        self
+    }
+
+    /// Builder-style setter for the STS endpoint override (tests point this
+    /// at a dead endpoint for deterministic STS-half failures).
+    pub fn with_sts_endpoint_url(mut self, url: Option<String>) -> Self {
+        self.sts_endpoint_url = url;
         self
     }
 
@@ -382,11 +396,13 @@ impl McpHandler {
                 "AGENTKEYS_DATA_ROLE_ARN env var must be set when AGENTKEYS_BROKER_URL is configured (issue #71 Option A)".into(),
             )
         })?;
-        let creds = fetch_via_broker_default_ttl(
+        let creds = agentkeys_provisioner::fetch_via_broker_with_sts_endpoint(
             broker_url,
             &self.session.token,
             role_arn,
             &self.aws_region,
+            3600,
+            self.sts_endpoint_url.as_deref(),
         )
         .await
         .map_err(|e| BrokerEnvError(e.to_string()))?;
@@ -722,10 +738,9 @@ mod tests {
         let broker_url = format!("http://{}", addr);
 
         // Point STS at a dead endpoint so the call deterministically fails
-        // post-JWT-fetch instead of hitting real AWS. AWS_ENDPOINT_URL_STS
-        // is the SDK's documented override.
-        std::env::set_var("AWS_ENDPOINT_URL_STS", "http://127.0.0.1:1");
-
+        // post-JWT-fetch instead of hitting real AWS. Injected via the
+        // handler (NOT `set_var("AWS_ENDPOINT_URL_STS", ..)` — process env
+        // is global and leaks into parallel test threads).
         let handler = McpHandler::new(
             Arc::new(NoopBackend),
             test_session(),
@@ -735,7 +750,8 @@ mod tests {
         .with_data_role_arn(Some(
             "arn:aws:iam::000000000000:role/agentkeys-data-role".into(),
         ))
-        .with_aws_region("us-east-1".into());
+        .with_aws_region("us-east-1".into())
+        .with_sts_endpoint_url(Some("http://127.0.0.1:1".into()));
 
         let err = handler
             .broker_env_for_provision()
@@ -752,8 +768,6 @@ mod tests {
                 || msg.contains("io"),
             "expected STS-side failure, got: {msg}"
         );
-
-        std::env::remove_var("AWS_ENDPOINT_URL_STS");
     }
 
     #[tokio::test]

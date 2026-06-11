@@ -134,6 +134,30 @@ pub async fn fetch_via_broker(
     region: &str,
     session_duration_seconds: i32,
 ) -> ProvisionResult<AwsTempCreds> {
+    fetch_via_broker_with_sts_endpoint(
+        broker_url,
+        session_token,
+        role_arn,
+        region,
+        session_duration_seconds,
+        None,
+    )
+    .await
+}
+
+/// Like [`fetch_via_broker`] but with an explicit STS endpoint override
+/// (same effect as the SDK's `AWS_ENDPOINT_URL_STS` env var, minus the
+/// process-global env — tests inject a dead endpoint here instead of
+/// `set_var`, which leaks across parallel test threads). `None` ⇒ the
+/// SDK default resolution (real AWS, or whatever the ambient env says).
+pub async fn fetch_via_broker_with_sts_endpoint(
+    broker_url: &str,
+    session_token: &str,
+    role_arn: &str,
+    region: &str,
+    session_duration_seconds: i32,
+    sts_endpoint_url: Option<&str>,
+) -> ProvisionResult<AwsTempCreds> {
     let jwt_resp = fetch_oidc_jwt(broker_url, session_token).await?;
     assume_role_with_jwt(
         &jwt_resp.jwt,
@@ -141,6 +165,7 @@ pub async fn fetch_via_broker(
         role_arn,
         region,
         session_duration_seconds,
+        sts_endpoint_url,
     )
     .await
 }
@@ -164,15 +189,18 @@ async fn assume_role_with_jwt(
     role_arn: &str,
     region: &str,
     session_duration_seconds: i32,
+    sts_endpoint_url: Option<&str>,
 ) -> ProvisionResult<AwsTempCreds> {
     // Anonymous SDK config — the JWT authenticates AssumeRoleWithWebIdentity.
     // TODO: replace `AnonymousCredentials` with `.no_credentials()` once we
     // bump aws-config to 1.5+ (the helper isn't in 1.0–1.4).
-    let config = aws_config::defaults(BehaviorVersion::latest())
+    let mut loader = aws_config::defaults(BehaviorVersion::latest())
         .region(Region::new(region.to_string()))
-        .credentials_provider(AnonymousCredentials)
-        .load()
-        .await;
+        .credentials_provider(AnonymousCredentials);
+    if let Some(url) = sts_endpoint_url {
+        loader = loader.endpoint_url(url);
+    }
+    let config = loader.load().await;
     let client = aws_sdk_sts::Client::new(&config);
 
     let session_name = build_session_name(wallet);

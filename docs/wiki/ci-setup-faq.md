@@ -69,9 +69,9 @@ GitHub doesn't pass secrets to fork PRs by default — that's a platform securit
 
 You forgot to update the role ARN secret after rotating to OIDC. The default credential chain falls through to whatever AWS profile is on the runner image. Set `TEST_OIDC_AWS_ROLE_ARN` to the GitHub Actions OIDC role ARN (not the admin user ARN), and the OIDC web identity will assume the right role.
 
-## Q. Why is `--test-threads=1` on `cargo test`?
+## Q. Why does `cargo test` run with default parallel threads (no `--test-threads=1`)?
 
-Per the existing `@claude` review workflow convention: broker integration tests mutate process-global `$HOME` + `$AWS_*` env, and the keyring tests serialize on a per-process accounts map. Concurrent threads see each other's mutations and flake. Single-threaded test execution is the conservative default; per-test isolation cleanup is a future improvement.
+Historically the suite was serialized because tests mutated process-global env (`$HOME`, `AWS_*`, broker `BROKER_*`) and concurrent threads saw each other's mutations and flaked. The #258/#259/#264 sweep removed every `std::env::set_var`/`remove_var` from test code (values are injected via config structs/params — the `BrokerConfig` / `BundlerBootValues` pattern), so parallel execution is now safe **and deliberate**: a reintroduced env mutation shows up as a flake in the parallel run, and [`scripts/check-no-env-mutation-in-tests.sh`](../../scripts/check-no-env-mutation-in-tests.sh) fails the `rust-checks` job statically before it gets that far. Do not re-add `--test-threads=1`; fix the offending test to inject instead.
 
 ## Q. CI runs are slow — anything to tune?
 

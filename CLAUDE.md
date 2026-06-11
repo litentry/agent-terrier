@@ -338,6 +338,7 @@ The verify script is read-only RPC (zero gas), exits 0 on all-pass / 1 on any fa
 ## Code Conventions
 - Rust: `thiserror` for library errors, `anyhow` for binary errors
 - All async: `tokio` runtime, `#[tokio::test]` for async tests
+- **Never mutate process env in tests** — no `std::env::set_var`/`remove_var` anywhere under `crates/`; process env is global and `cargo test` runs tests on parallel threads, so one test's mutation leaks into concurrently running siblings (the #258/#259 flake class). Inject instead: read env once in a `from_env()`-style constructor and have tests build the config struct / pass the value explicitly (`BrokerConfig`, `BundlerBootValues` pattern). CI-gated by [`scripts/check-no-env-mutation-in-tests.sh`](scripts/check-no-env-mutation-in-tests.sh) (harness-ci `rust-checks`); exceptions need an allowlist entry there with the removal condition.
 - Crate names: agentkeys-types, agentkeys-core, agentkeys-cli, agentkeys-daemon, agentkeys-mock-server, agentkeys-mcp, agentkeys-provisioner
 - Git commits: `agentkeys: stage N -- <deliverable>`
 - Never self-grade: run `bash harness/stage-N-done.sh` to verify

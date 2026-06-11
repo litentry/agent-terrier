@@ -69,40 +69,70 @@ pub enum BundlerBoot {
     },
 }
 
-impl BundlerBoot {
-    /// Env: `AGENTKEYS_BUNDLER_SIGNER_KEY` (falls back to
-    /// `BROKER_SPONSOR_SIGNER_KEY` — today the same funded EOA submits),
-    /// `AGENTKEYS_CHAIN_RPC_HTTP`, `ENTRYPOINT_ADDRESS[_<CHAIN>]`,
-    /// `AGENTKEYS_CHAIN_ID[_<CHAIN>]` (default 212013),
-    /// `AGENTKEYS_HANDLEOPS_GAS_LIMIT` (default 4000000),
+/// Raw env values consumed by [`BundlerBoot::from_values`]. Read once from
+/// process env in [`BundlerBoot::from_env`]; tests construct this struct
+/// with explicit values instead — process env is global, so `set_var` in
+/// one test leaks into parallel siblings (the #258/#259 deflake class).
+#[derive(Debug, Default, Clone)]
+pub struct BundlerBootValues {
+    /// `AGENTKEYS_CHAIN_RPC_HTTP`.
+    pub rpc_url: Option<String>,
+    /// `AGENTKEYS_CHAIN_ID[_<CHAIN>]` (default 212013 when absent/unparseable).
+    pub chain_id: Option<String>,
+    /// `ENTRYPOINT_ADDRESS[_<CHAIN>]`.
+    pub entry_point: Option<String>,
+    /// `AGENTKEYS_BUNDLER_SIGNER_KEY` (falls back to
+    /// `BROKER_SPONSOR_SIGNER_KEY` — today the same funded EOA submits).
+    pub signer_key: Option<String>,
+    /// `AGENTKEYS_HANDLEOPS_GAS_LIMIT` (default 4000000).
+    pub handleops_gas_limit: Option<String>,
     /// `AGENTKEYS_BUNDLER_GAS_PRICE` (optional, wei).
+    pub gas_price: Option<String>,
+}
+
+impl BundlerBootValues {
+    pub fn from_process_env() -> Self {
+        Self {
+            rpc_url: std::env::var("AGENTKEYS_CHAIN_RPC_HTTP").ok(),
+            chain_id: env_profile("AGENTKEYS_CHAIN_ID").ok(),
+            entry_point: env_profile("ENTRYPOINT_ADDRESS").ok(),
+            signer_key: std::env::var("AGENTKEYS_BUNDLER_SIGNER_KEY")
+                .or_else(|_| std::env::var("BROKER_SPONSOR_SIGNER_KEY"))
+                .ok(),
+            handleops_gas_limit: std::env::var("AGENTKEYS_HANDLEOPS_GAS_LIMIT").ok(),
+            gas_price: std::env::var("AGENTKEYS_BUNDLER_GAS_PRICE").ok(),
+        }
+    }
+}
+
+impl BundlerBoot {
+    /// Read the env vars listed on [`BundlerBootValues`] once, then
+    /// validate via [`Self::from_values`].
+    pub fn from_env() -> Result<Self> {
+        Self::from_values(BundlerBootValues::from_process_env())
+    }
+
+    /// Pure half of [`Self::from_env`] — all validation and Degraded/Ready
+    /// branching on already-read values (injectable for tests).
     ///
     /// Absent/empty EntryPoint or signer key ⇒ `Ok(Degraded)`; malformed
     /// values ⇒ `Err` (fail fast); absent RPC URL ⇒ `Err` (static infra
     /// config, always pinned in the systemd unit).
-    pub fn from_env() -> Result<Self> {
-        let rpc_url =
-            std::env::var("AGENTKEYS_CHAIN_RPC_HTTP").context("env AGENTKEYS_CHAIN_RPC_HTTP")?;
-        let chain_id: u64 = env_profile("AGENTKEYS_CHAIN_ID")
-            .ok()
+    pub fn from_values(values: BundlerBootValues) -> Result<Self> {
+        let rpc_url = values.rpc_url.context("env AGENTKEYS_CHAIN_RPC_HTTP")?;
+        let chain_id: u64 = values
+            .chain_id
             .and_then(|s| s.parse().ok())
             .unwrap_or(212_013);
         let mut missing = Vec::new();
-        let entry_point = match env_profile("ENTRYPOINT_ADDRESS")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-        {
+        let entry_point = match values.entry_point.filter(|s| !s.trim().is_empty()) {
             Some(s) => Some(addr20(&s, "ENTRYPOINT_ADDRESS")?),
             None => {
                 missing.push("ENTRYPOINT_ADDRESS[_<CHAIN>]".to_string());
                 None
             }
         };
-        let signer = match std::env::var("AGENTKEYS_BUNDLER_SIGNER_KEY")
-            .or_else(|_| std::env::var("BROKER_SPONSOR_SIGNER_KEY"))
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-        {
+        let signer = match values.signer_key.filter(|s| !s.trim().is_empty()) {
             Some(key_hex) => Some(
                 SigningKey::from_slice(
                     &hex::decode(key_hex.trim().trim_start_matches("0x"))
@@ -122,13 +152,11 @@ impl BundlerBoot {
             &evm_address(&VerifyingKey::from(&signer)),
             "derived bundler address",
         )?;
-        let gas_limit = std::env::var("AGENTKEYS_HANDLEOPS_GAS_LIMIT")
-            .ok()
+        let gas_limit = values
+            .handleops_gas_limit
             .and_then(|s| s.parse().ok())
             .unwrap_or(4_000_000);
-        let gas_price = std::env::var("AGENTKEYS_BUNDLER_GAS_PRICE")
-            .ok()
-            .and_then(|s| s.parse().ok());
+        let gas_price = values.gas_price.and_then(|s| s.parse().ok());
         Ok(Self::Ready(Box::new(BundlerConfig {
             rpc_url,
             chain_id,
@@ -698,68 +726,91 @@ mod tests {
         assert!(msg.contains("AGENTKEYS_BUNDLER_SIGNER_KEY"), "{msg}");
     }
 
-    /// Single test fn (env mutation is process-global; parallel tests would race).
+    // Boot branching is covered through the pure `from_values` half —
+    // injected values, no `set_var`/`remove_var` (process env is global;
+    // mutation leaks across parallel test threads).
+
+    fn boot_values(
+        rpc: Option<&str>,
+        entry_point: Option<&str>,
+        signer_key: Option<&str>,
+    ) -> BundlerBootValues {
+        BundlerBootValues {
+            rpc_url: rpc.map(str::to_string),
+            entry_point: entry_point.map(str::to_string),
+            signer_key: signer_key.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn from_env_degrades_on_absent_config_but_rejects_malformed() {
-        let clear = || {
-            for k in [
-                "AGENTKEYS_CHAIN",
-                "AGENTKEYS_CHAIN_RPC_HTTP",
-                "ENTRYPOINT_ADDRESS",
-                "ENTRYPOINT_ADDRESS_HEIMA",
-                "AGENTKEYS_BUNDLER_SIGNER_KEY",
-                "BROKER_SPONSOR_SIGNER_KEY",
-            ] {
-                std::env::remove_var(k);
-            }
-        };
+    fn from_values_requires_rpc_url() {
+        // Absent RPC URL (static infra config) is a hard error.
+        assert!(BundlerBoot::from_values(boot_values(None, None, None)).is_err());
+    }
 
-        // Absent RPC URL (static infra config) is still a hard error.
-        clear();
-        assert!(BundlerBoot::from_env().is_err());
-
-        // Absent EntryPoint + key ⇒ Degraded with both named.
-        clear();
-        std::env::set_var("AGENTKEYS_CHAIN_RPC_HTTP", "http://127.0.0.1:1");
-        match BundlerBoot::from_env().unwrap() {
+    #[test]
+    fn from_values_degrades_on_absent_entrypoint_and_key() {
+        match BundlerBoot::from_values(boot_values(Some("http://127.0.0.1:1"), None, None)).unwrap()
+        {
             BundlerBoot::Degraded { chain_id, missing } => {
                 assert_eq!(chain_id, 212_013);
                 assert_eq!(missing.len(), 2);
             }
             BundlerBoot::Ready(_) => panic!("expected Degraded"),
         }
+    }
 
+    #[test]
+    fn from_values_degrades_on_empty_values() {
         // Empty-string values (unit wrote `ENTRYPOINT_ADDRESS_HEIMA=`) ⇒ Degraded too.
-        std::env::set_var("ENTRYPOINT_ADDRESS_HEIMA", "");
-        std::env::set_var("AGENTKEYS_BUNDLER_SIGNER_KEY", "");
-        match BundlerBoot::from_env().unwrap() {
+        match BundlerBoot::from_values(boot_values(Some("http://127.0.0.1:1"), Some(""), Some("")))
+            .unwrap()
+        {
             BundlerBoot::Degraded { missing, .. } => assert_eq!(missing.len(), 2),
             BundlerBoot::Ready(_) => panic!("expected Degraded on empty values"),
         }
+    }
 
-        // Key present, EntryPoint absent ⇒ Degraded naming only the EntryPoint.
-        std::env::set_var(
-            "AGENTKEYS_BUNDLER_SIGNER_KEY",
-            format!("0x{}", "46".repeat(32)),
-        );
-        match BundlerBoot::from_env().unwrap() {
+    #[test]
+    fn from_values_names_only_the_missing_entrypoint() {
+        let key = format!("0x{}", "46".repeat(32));
+        match BundlerBoot::from_values(boot_values(Some("http://127.0.0.1:1"), None, Some(&key)))
+            .unwrap()
+        {
             BundlerBoot::Degraded { missing, .. } => {
                 assert_eq!(missing.len(), 1);
                 assert!(missing[0].contains("ENTRYPOINT_ADDRESS"));
             }
             BundlerBoot::Ready(_) => panic!("expected Degraded"),
         }
+    }
 
+    #[test]
+    fn from_values_rejects_malformed_entrypoint() {
         // MALFORMED EntryPoint (present but bad) ⇒ hard error, not Degraded.
-        std::env::set_var("ENTRYPOINT_ADDRESS_HEIMA", "0xnothex");
-        assert!(BundlerBoot::from_env().is_err());
+        let key = format!("0x{}", "46".repeat(32));
+        assert!(BundlerBoot::from_values(boot_values(
+            Some("http://127.0.0.1:1"),
+            Some("0xnothex"),
+            Some(&key)
+        ))
+        .is_err());
+    }
 
-        // Both present and well-formed ⇒ Ready.
-        std::env::set_var("ENTRYPOINT_ADDRESS_HEIMA", format!("0x{}", "66".repeat(20)));
-        match BundlerBoot::from_env().unwrap() {
+    #[test]
+    fn from_values_ready_when_complete() {
+        let key = format!("0x{}", "46".repeat(32));
+        let entry_point_hex = format!("0x{}", "66".repeat(20));
+        match BundlerBoot::from_values(boot_values(
+            Some("http://127.0.0.1:1"),
+            Some(&entry_point_hex),
+            Some(&key),
+        ))
+        .unwrap()
+        {
             BundlerBoot::Ready(cfg) => assert_eq!(cfg.entry_point, [0x66; 20]),
             BundlerBoot::Degraded { missing, .. } => panic!("expected Ready, missing={missing:?}"),
         }
-        clear();
     }
 }

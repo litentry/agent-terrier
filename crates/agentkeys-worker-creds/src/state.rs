@@ -95,8 +95,15 @@ impl WorkerConfig {
     }
 }
 
+/// Pure key-name builder, split from the env read so the substitution
+/// logic is testable without touching process env (which is global —
+/// `set_var` in one test leaks into parallel siblings).
+fn profile_env_key(profile_uc: &str, base: &str) -> String {
+    format!("{base}_{profile_uc}")
+}
+
 fn profile_env(profile_uc: &str, base: &str) -> anyhow::Result<String> {
-    let key = format!("{base}_{profile_uc}");
+    let key = profile_env_key(profile_uc, base);
     std::env::var(&key).with_context(|| format!("{key} must be set"))
 }
 
@@ -129,11 +136,13 @@ mod tests {
 
     #[test]
     fn profile_env_uppercase_underscore_substitution() {
-        // smoke-test the var name substitution logic without touching
-        // real env (we use a fresh prefix so the test is hermetic).
-        let key = "SOME_BASE_HEIMA_PASEO";
-        std::env::set_var(key, "0xabc");
-        assert_eq!(profile_env("HEIMA_PASEO", "SOME_BASE").unwrap(), "0xabc");
-        std::env::remove_var(key);
+        assert_eq!(
+            profile_env_key("HEIMA_PASEO", "SOME_BASE"),
+            "SOME_BASE_HEIMA_PASEO"
+        );
+        assert_eq!(
+            profile_env_key("HEIMA", "SIDECAR_REGISTRY_ADDRESS"),
+            "SIDECAR_REGISTRY_ADDRESS_HEIMA"
+        );
     }
 }

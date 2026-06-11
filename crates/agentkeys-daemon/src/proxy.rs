@@ -338,15 +338,28 @@ fn unix_now() -> u64 {
 ///   2. `$XDG_RUNTIME_DIR/agentkeys-proxy.sock` (Linux convention)
 ///   3. `~/.agentkeys/agentkeys-proxy.sock` (macOS + fallback)
 pub fn resolve_socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var("AGENTKEYS_PROXY_SOCKET") {
+    resolve_socket_path_from(
+        std::env::var("AGENTKEYS_PROXY_SOCKET").ok(),
+        std::env::var("XDG_RUNTIME_DIR").ok(),
+        std::env::var("HOME").ok(),
+    )
+}
+
+/// Pure precedence half of [`resolve_socket_path`] — env is read once by
+/// the wrapper and injected here, so tests pass explicit values instead of
+/// `set_var` (process env is global; mutation leaks across parallel tests).
+fn resolve_socket_path_from(
+    explicit: Option<String>,
+    xdg_runtime_dir: Option<String>,
+    home: Option<String>,
+) -> PathBuf {
+    if let Some(p) = explicit {
         return PathBuf::from(p);
     }
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-        if !xdg.is_empty() {
-            return Path::new(&xdg).join("agentkeys-proxy.sock");
-        }
+    if let Some(xdg) = xdg_runtime_dir.filter(|d| !d.is_empty()) {
+        return Path::new(&xdg).join("agentkeys-proxy.sock");
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let home = home.unwrap_or_else(|| "/tmp".into());
     Path::new(&home)
         .join(".agentkeys")
         .join("agentkeys-proxy.sock")
@@ -359,9 +372,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_socket_respects_env_override() {
-        let _g = EnvGuard::set("AGENTKEYS_PROXY_SOCKET", "/tmp/test-proxy.sock");
-        assert_eq!(resolve_socket_path(), PathBuf::from("/tmp/test-proxy.sock"));
+    fn resolve_socket_explicit_override_wins() {
+        assert_eq!(
+            resolve_socket_path_from(
+                Some("/tmp/test-proxy.sock".into()),
+                Some("/run/user/1000".into()),
+                Some("/home/u".into()),
+            ),
+            PathBuf::from("/tmp/test-proxy.sock")
+        );
+    }
+
+    #[test]
+    fn resolve_socket_falls_back_to_xdg_then_home_then_tmp() {
+        assert_eq!(
+            resolve_socket_path_from(None, Some("/run/user/1000".into()), Some("/home/u".into())),
+            PathBuf::from("/run/user/1000/agentkeys-proxy.sock")
+        );
+        // Empty XDG_RUNTIME_DIR is treated as unset.
+        assert_eq!(
+            resolve_socket_path_from(None, Some(String::new()), Some("/home/u".into())),
+            PathBuf::from("/home/u/.agentkeys/agentkeys-proxy.sock")
+        );
+        assert_eq!(
+            resolve_socket_path_from(None, None, None),
+            PathBuf::from("/tmp/.agentkeys/agentkeys-proxy.sock")
+        );
     }
 
     #[test]
@@ -415,26 +451,5 @@ mod tests {
         };
         let resp = handle_cap(state, req, "cred-fetch", "fetch").await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    // Lightweight env-guard so tests don't pollute each other.
-    struct EnvGuard {
-        key: &'static str,
-        prior: Option<String>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, val: &str) -> Self {
-            let prior = std::env::var(key).ok();
-            std::env::set_var(key, val);
-            Self { key, prior }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prior {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
     }
 }
