@@ -406,8 +406,21 @@ enum CredAction {
     /// `cred:<service>` scope; prints the plaintext to stdout. The agent's
     /// identity/session come from the wire context (flags or env).
     Fetch {
-        /// The credential service id (e.g. `openrouter`).
-        service: String,
+        /// The credential service id (e.g. `openrouter`). OPTIONAL — when omitted,
+        /// it is resolved from the off-chain cred manifest (#216): `--select N`
+        /// (1-based) picks from the authorized list, else the master-designated
+        /// default (the no-UI path). An explicit service is used as-is (still
+        /// on-chain-verified at fetch).
+        service: Option<String>,
+        /// Pick the Nth authorized service (1-based) from the cred manifest
+        /// instead of the master-designated default. Ignored when a service is
+        /// given explicitly.
+        #[arg(long)]
+        select: Option<usize>,
+        /// Cred-manifest path (authorized service names + default). Default:
+        /// $AGENTKEYS_CRED_MANIFEST or ~/.agentkeys/cred-manifest.json.
+        #[arg(long, env = "AGENTKEYS_CRED_MANIFEST")]
+        manifest: Option<String>,
         #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
         operator_omni: String,
         #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
@@ -424,6 +437,30 @@ enum CredAction {
         vault_role_arn: String,
         #[arg(long, env = "REGION", default_value = "us-east-1")]
         region: String,
+    },
+    /// List the agent's authorized credential services from the off-chain
+    /// manifest (#216). The chain stores only keccak(service) hashes — it can
+    /// verify a known name but not enumerate names — so the manifest is the
+    /// discovery layer. Marks the master-designated default.
+    List {
+        #[arg(long, env = "AGENTKEYS_CRED_MANIFEST")]
+        manifest: Option<String>,
+    },
+    /// Record the off-chain cred manifest (#216): the authorized service names +
+    /// the master-designated default (public NAMES only — never secrets). The
+    /// master/operator runs this at grant time so the agent's no-arg `cred fetch`
+    /// picks the designated default LLM key.
+    Manifest {
+        /// Comma-separated authorized service names in order (e.g.
+        /// `openrouter,anthropic`).
+        #[arg(long)]
+        services: String,
+        /// The default service (the no-UI LLM key). Defaults to the first in
+        /// `--services`.
+        #[arg(long)]
+        default: Option<String>,
+        #[arg(long, env = "AGENTKEYS_CRED_MANIFEST")]
+        manifest: Option<String>,
     },
     /// Vault a credential (#216, the store half of `fetch`). Master-self by
     /// default (operator == actor); seeds the agent's authorized key (e.g. the
@@ -1468,6 +1505,8 @@ async fn main() {
         Commands::Cred { action } => match action {
             CredAction::Fetch {
                 service,
+                select,
+                manifest,
                 operator_omni,
                 actor_omni,
                 device_key_hash,
@@ -1477,18 +1516,33 @@ async fn main() {
                 vault_role_arn,
                 region,
             } => {
-                agentkeys_cli::cred_admin::cred_fetch(
-                    service,
-                    operator_omni,
-                    actor_omni,
-                    device_key_hash,
-                    session_bearer,
-                    broker_url,
-                    cred_url,
-                    vault_role_arn,
-                    region,
-                )
-                .await
+                // #216 default-key selection (off-chain). Resolve which service to
+                // fetch — explicit > --select N (1-based) > master-designated
+                // default — from the cred manifest, then fetch it (still on-chain
+                // verified). An explicit service needs no manifest.
+                let mpath = agentkeys_cli::cred_admin::cred_manifest_path(manifest.as_deref());
+                match agentkeys_types::CredManifest::load(&mpath)
+                    .map_err(|e| anyhow::anyhow!("load cred manifest {}: {e}", mpath.display()))
+                    .and_then(|m| {
+                        m.resolve(service.as_deref(), *select)
+                            .map_err(|e| anyhow::anyhow!("{e}"))
+                    }) {
+                    Ok(resolved) => {
+                        agentkeys_cli::cred_admin::cred_fetch(
+                            &resolved,
+                            operator_omni,
+                            actor_omni,
+                            device_key_hash,
+                            session_bearer,
+                            broker_url,
+                            cred_url,
+                            vault_role_arn,
+                            region,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
             }
             CredAction::Store {
                 service,
@@ -1529,6 +1583,18 @@ async fn main() {
                     .map(|s3_key| format!("stored `{service}` → {s3_key}")),
                     Err(e) => Err(e),
                 }
+            }
+            CredAction::List { manifest } => {
+                let mpath = agentkeys_cli::cred_admin::cred_manifest_path(manifest.as_deref());
+                agentkeys_cli::cred_admin::cred_list(&mpath)
+            }
+            CredAction::Manifest {
+                services,
+                default,
+                manifest,
+            } => {
+                let mpath = agentkeys_cli::cred_admin::cred_manifest_path(manifest.as_deref());
+                agentkeys_cli::cred_admin::cred_manifest_write(&mpath, services, default.clone())
             }
         },
     };
