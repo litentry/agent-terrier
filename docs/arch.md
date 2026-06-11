@@ -2483,6 +2483,7 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/s
 - **Operator runbook** — [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent). Historical: [`docs/archived/operator-runbook-stage7-2026-04.md`](archived/operator-runbook-stage7-2026-04.md).
 - **Milestone roadmap (M1-M7)** — [`plan/milestones-roadmap.md`](plan/milestones-roadmap.md)
 - **Cloud-side IAM + DNS + cert** — [`../cloud-setup.md`](cloud-bootstrap.md)
+- **Parallel CI test fleet (multi-broker, #265)** — [`spec/ci-parallel-test-fleet.md`](spec/ci-parallel-test-fleet.md) (shared-vs-per-slot topology, why the chain contract set is shared across slots, slot lifecycle, delivery phases)
 - **Per-actor reference (agent role)** — [`wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
 - **Upstream backend classes (per-upstream design)** — [`wiki/upstream-backend-classes-exercise-vs-distribution.md`](wiki/upstream-backend-classes-exercise-vs-distribution.md)
 
