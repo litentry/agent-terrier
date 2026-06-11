@@ -91,7 +91,10 @@ jobs:
           # --workspace or a trailing `-- <test-args>` — newer cargo-llvm-cov
           # rejects them ("--workspace ... not supported for subcommand 'report'").
           # Only the collecting run takes --workspace + test args.
-          cargo llvm-cov --no-report --workspace -- --test-threads=1
+          # Parallel threads: safe since the #258/#259/#264 sweep removed all
+          # process-env mutation from tests (gated by
+          # scripts/check-no-env-mutation-in-tests.sh in rust-checks).
+          cargo llvm-cov --no-report --workspace
           cargo llvm-cov report --lcov --output-path lcov.info
           cargo llvm-cov report --html
           cargo llvm-cov report --summary-only | tee coverage-summary.txt

@@ -102,11 +102,22 @@ trait RuntimeAdapter {
 
 // ─── Hermes adapter ─────────────────────────────────────────────────────
 
-struct HermesAdapter;
+#[derive(Default)]
+struct HermesAdapter {
+    /// Root used in place of `$HOME` when building `~/.hermes` paths.
+    /// `None` ⇒ the real `$HOME`. Tests inject a fixed root here instead
+    /// of `set_var("HOME", ..)` — process env is global, so mutating it
+    /// poisons every other test sharing the process.
+    home_root: Option<PathBuf>,
+}
 
 impl HermesAdapter {
     fn home(&self) -> Result<PathBuf> {
-        Ok(home_dir()?.join(".hermes"))
+        let root = match &self.home_root {
+            Some(root) => root.clone(),
+            None => home_dir()?,
+        };
+        Ok(root.join(".hermes"))
     }
     fn hooks_dir(&self) -> Result<PathBuf> {
         Ok(self.home()?.join("agent-hooks"))
@@ -481,7 +492,7 @@ fn merge_block(path: &std::path::Path, block: &str, check_only: bool) -> Result<
 
 fn adapter_for(runtime: &str) -> Result<Box<dyn RuntimeAdapter>> {
     match runtime.to_ascii_lowercase().as_str() {
-        "hermes" => Ok(Box::new(HermesAdapter)),
+        "hermes" => Ok(Box::new(HermesAdapter::default())),
         other => anyhow::bail!(
             "no wire adapter for runtime `{other}` (Phase 1.a ships `hermes`; \
              claude-code/codex/openclaw land in Phase 1.b)"
@@ -572,8 +583,9 @@ mod tests {
 
     #[test]
     fn managed_block_is_valid_shape() {
-        let a = HermesAdapter;
-        std::env::set_var("HOME", "/tmp/agentkeys-wire-test-home");
+        let a = HermesAdapter {
+            home_root: Some(PathBuf::from("/tmp/agentkeys-wire-test-home")),
+        };
         let block = a.managed_block(&req()).unwrap();
         assert!(block.starts_with(BLOCK_START));
         assert!(block.trim_end().ends_with(BLOCK_END));
@@ -586,7 +598,7 @@ mod tests {
 
     #[test]
     fn scripts_bake_identity_and_exec_hook() {
-        let a = HermesAdapter;
+        let a = HermesAdapter::default();
         let scripts = a.scripts("/usr/local/bin/agentkeys", &req());
         assert_eq!(scripts.len(), 3);
         let pretool = &scripts[0].1;
@@ -603,7 +615,7 @@ mod tests {
 
     #[test]
     fn scripts_omit_memory_engine_by_default() {
-        let a = HermesAdapter;
+        let a = HermesAdapter::default();
         // Default passthrough + no budget → no engine env, byte-identical script.
         let scripts = a.scripts("/usr/local/bin/agentkeys", &req());
         assert!(!scripts[2].1.contains("AGENTKEYS_MEMORY_ENGINE"));
@@ -612,7 +624,7 @@ mod tests {
 
     #[test]
     fn scripts_bake_memory_engine_when_set() {
-        let a = HermesAdapter;
+        let a = HermesAdapter::default();
         let mut r = req();
         r.memory_engine = "lexical".into();
         r.memory_max_lines = Some(3);
@@ -627,7 +639,7 @@ mod tests {
 
     #[test]
     fn scripts_bake_openviking_endpoint_only_for_openviking() {
-        let a = HermesAdapter;
+        let a = HermesAdapter::default();
         // endpoint set but engine is lexical → OPENVIKING_* must NOT be emitted
         let mut lexical = req();
         lexical.memory_engine = "lexical".into();
