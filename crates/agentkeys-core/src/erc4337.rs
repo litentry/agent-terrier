@@ -656,6 +656,62 @@ pub fn handle_ops_calldata(ops: &[PackedUserOp], beneficiary: &[u8; 20]) -> Vec<
     out
 }
 
+// ─── EntryPoint revert decoding (#247) ───────────────────────────────────────
+//
+// When `handleOps` reverts, the EntryPoint encodes WHY as a custom error —
+// `FailedOp(uint256 opIndex, string reason)` carrying the canonical `AAxx ...`
+// string (selector `0x220266b6`). Replaying the failed tx's calldata as an
+// `eth_call` returns those bytes, so the bundler/broker can surface the REAL
+// reason ("AA31 paymaster deposit too low") instead of guessing "wrong passkey"
+// (the 2026-06-10 incident). Decoders live here next to the encoders so the
+// 4337 ABI surface keeps one owner.
+
+/// Read the dynamic ABI value (`string`/`bytes`) whose offset word sits at
+/// 0-based `arg_idx` of `args` (the data AFTER the 4-byte selector). Revert
+/// blobs are untrusted input — any malformed offset/length yields `None`.
+fn abi_dynamic_at(args: &[u8], arg_idx: usize) -> Option<Vec<u8>> {
+    let word_usize = |w: &[u8]| -> Option<usize> {
+        if w[..WORD - 8].iter().any(|b| *b != 0) {
+            return None; // offsets/lengths beyond u64 are never legitimate
+        }
+        usize::try_from(u64::from_be_bytes(w[WORD - 8..].try_into().ok()?)).ok()
+    };
+    let off = word_usize(args.get(arg_idx * WORD..(arg_idx + 1) * WORD)?)?;
+    let data_start = off.checked_add(WORD)?;
+    let len = word_usize(args.get(off..data_start)?)?;
+    args.get(data_start..data_start.checked_add(len)?)
+        .map(<[u8]>::to_vec)
+}
+
+/// Decode a standard `Error(string)` revert blob (selector `0x08c379a0`).
+fn decode_error_string(data: &[u8]) -> Option<String> {
+    let args = data.strip_prefix(&selector("Error(string)")[..])?;
+    String::from_utf8(abi_dynamic_at(args, 0)?).ok()
+}
+
+/// Decode an EntryPoint v0.7 revert blob into its human-readable reason:
+///
+/// - `FailedOp(uint256,string)` → the verbatim `AAxx ...` reason
+/// - `FailedOpWithRevert(uint256,string,bytes)` → reason + the inner revert
+///   (decoded when it is `Error(string)`, raw hex otherwise)
+/// - `Error(string)` → the message
+///
+/// `None` for anything else — callers surface the raw hex instead of guessing.
+pub fn decode_entrypoint_revert(data: &[u8]) -> Option<String> {
+    if let Some(args) = data.strip_prefix(&selector("FailedOp(uint256,string)")[..]) {
+        return String::from_utf8(abi_dynamic_at(args, 1)?).ok();
+    }
+    if let Some(args) = data.strip_prefix(&selector("FailedOpWithRevert(uint256,string,bytes)")[..])
+    {
+        let reason = String::from_utf8(abi_dynamic_at(args, 1)?).ok()?;
+        let inner = abi_dynamic_at(args, 2)?;
+        let inner_text =
+            decode_error_string(&inner).unwrap_or_else(|| format!("0x{}", hex::encode(&inner)));
+        return Some(format!("{reason} (inner revert: {inner_text})"));
+    }
+    decode_error_string(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,6 +941,95 @@ mod tests {
         assert_ne!(h1, op.user_op_hash(&ep, 1));
         op.paymaster_and_data = vec![0u8; 80];
         assert_ne!(h1, op.user_op_hash(&ep, 212_013));
+    }
+
+    // ── decode_entrypoint_revert (#247) ──────────────────────────────────────
+    // Golden args produced by `cast abi-encode` (the authoritative ABI encoder):
+    //   cast abi-encode "f(uint256,string)" 0 "AA31 paymaster deposit too low"
+    //   cast abi-encode "f(string)" "P256 verify failed"
+    //   cast abi-encode "f(uint256,string,bytes)" 0 "AA23 reverted (or OOG)" <Error(string) blob>
+
+    fn hex_blob(selector_hex: &str, cast_args: &str) -> Vec<u8> {
+        hex::decode(format!(
+            "{selector_hex}{}",
+            cast_args.trim_start_matches("0x")
+        ))
+        .unwrap()
+    }
+
+    const FAILED_OP_AA31_ARGS: &str = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000001e41413331207061796d6173746572206465706f73697420746f6f206c6f770000";
+    const ERROR_STRING_ARGS: &str = "0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000125032353620766572696679206661696c65640000000000000000000000000000";
+    const FAILED_OP_WITH_REVERT_ARGS: &str = "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000164141323320726576657274656420286f72204f4f472900000000000000000000000000000000000000000000000000000000000000000000000000000000006408c379a0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000125032353620766572696679206661696c6564000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn entrypoint_revert_selectors_pin_cast_ground_truth() {
+        // cast sig "FailedOp(uint256,string)" / "FailedOpWithRevert(uint256,string,bytes)"
+        // / "Error(string)" — drift here would silently break the decode.
+        use crate::audit::calldata::selector_hex;
+        assert_eq!(selector_hex("FailedOp(uint256,string)"), "0x220266b6");
+        assert_eq!(
+            selector_hex("FailedOpWithRevert(uint256,string,bytes)"),
+            "0x65c8fd4d"
+        );
+        assert_eq!(selector_hex("Error(string)"), "0x08c379a0");
+    }
+
+    #[test]
+    fn decodes_failed_op_to_the_verbatim_aa_reason() {
+        let blob = hex_blob("220266b6", FAILED_OP_AA31_ARGS);
+        assert_eq!(
+            decode_entrypoint_revert(&blob).as_deref(),
+            Some("AA31 paymaster deposit too low")
+        );
+    }
+
+    #[test]
+    fn decodes_failed_op_with_revert_including_inner_error_string() {
+        let blob = hex_blob("65c8fd4d", FAILED_OP_WITH_REVERT_ARGS);
+        assert_eq!(
+            decode_entrypoint_revert(&blob).as_deref(),
+            Some("AA23 reverted (or OOG) (inner revert: P256 verify failed)")
+        );
+    }
+
+    #[test]
+    fn decodes_plain_error_string() {
+        let blob = hex_blob("08c379a0", ERROR_STRING_ARGS);
+        assert_eq!(
+            decode_entrypoint_revert(&blob).as_deref(),
+            Some("P256 verify failed")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_truncated_and_malformed_revert_blobs() {
+        // unknown selector
+        assert_eq!(decode_entrypoint_revert(&[0xde, 0xad, 0xbe, 0xef]), None);
+        // empty / shorter than a selector
+        assert_eq!(decode_entrypoint_revert(&[]), None);
+        assert_eq!(decode_entrypoint_revert(&[0x22]), None);
+        // right selector, truncated args (offset word only)
+        let truncated = hex_blob("220266b6", &FAILED_OP_AA31_ARGS[..2 + 64]);
+        assert_eq!(decode_entrypoint_revert(&truncated), None);
+        // offset pointing past the end of the blob
+        let mut bad_offset = hex_blob("220266b6", FAILED_OP_AA31_ARGS);
+        bad_offset[4 + 63] = 0xff;
+        assert_eq!(decode_entrypoint_revert(&bad_offset), None);
+        // offset word = u64::MAX — must yield None, never overflow-panic
+        let mut huge_offset = hex_blob("220266b6", FAILED_OP_AA31_ARGS);
+        for b in &mut huge_offset[4 + 32 + 24..4 + 64] {
+            *b = 0xff;
+        }
+        assert_eq!(decode_entrypoint_revert(&huge_offset), None);
+        // length word claiming more bytes than present
+        let mut bad_len = hex_blob("220266b6", FAILED_OP_AA31_ARGS);
+        bad_len[4 + 64 + 31] = 0xff;
+        assert_eq!(decode_entrypoint_revert(&bad_len), None);
+        // non-utf8 reason bytes
+        let mut bad_utf8 = hex_blob("220266b6", FAILED_OP_AA31_ARGS);
+        bad_utf8[4 + 96] = 0xff;
+        bad_utf8[4 + 97] = 0xfe;
+        assert_eq!(decode_entrypoint_revert(&bad_utf8), None);
     }
 
     #[test]

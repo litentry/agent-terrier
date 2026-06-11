@@ -576,6 +576,60 @@ pub struct SubmitAcceptRequest {
 const DEF_RECEIPT_TIMEOUT_SECS: u64 = 90;
 const RECEIPT_POLL_INTERVAL_SECS: u64 = 2;
 
+/// Operator-facing message for a reverted `handleOps`, built from the bundler's
+/// replayed `FailedOp` reason (#247). The in-house bundler attaches `reason` to
+/// a failed `eth_getUserOperationReceipt` (the verbatim EntryPoint `AAxx ...`
+/// string); the common codes map to concrete operator guidance so a funding
+/// failure is never steered toward a passkey reset (the real 2026-06-10 AA31
+/// incident). `None` (3rd-party bundler / replay no longer reverts) falls back
+/// to the old best-guess list — explicitly labeled as a guess.
+fn handle_ops_revert_message(reason: Option<&str>, tx_hash: &str) -> String {
+    let Some(reason) = reason else {
+        return format!(
+            "handleOps reverted on-chain (tx {tx_hash}) — revert reason not recoverable; \
+             most likely the WRONG passkey (P256Account SIG_VALIDATION_FAILED), an \
+             unregistered master, or a paymaster/scope issue"
+        );
+    };
+    let guidance = match reason.split_whitespace().next().unwrap_or("") {
+        "AA21" => Some(
+            "the SENDER account's EntryPoint deposit can't cover the op's prefund — a \
+             funding issue, not an auth issue. Top up: cast send $ENTRYPOINT \
+             'depositTo(address)' <master account> --value 0.2ether --legacy (the harness \
+             auto-top-up in harness/scripts/_erc4337_lib.sh derives the exact floor)",
+        ),
+        "AA31" => Some(
+            "the VerifyingPaymaster's EntryPoint deposit is below the one-op prefund — a \
+             funding issue, not an auth issue. Top up: bash scripts/heima-deploy-paymaster.sh \
+             (idempotent; deposits only when below threshold)",
+        ),
+        "AA24" => Some(
+            "the WebAuthn/P256 signature failed validation — wrong or unregistered master \
+             passkey for this account (or verification-gas starvation mapped to SIG_FAIL; \
+             check ACCEPT_VERIFICATION_GAS_LIMIT before re-onboarding)",
+        ),
+        "AA25" => Some(
+            "invalid account nonce — the op was built against a stale nonce (another op \
+             landed first); rebuild via /v1/accept/build and re-sign",
+        ),
+        "AA23" => Some(
+            "the account's validateUserOp reverted or ran out of gas — check the \
+             verification gas limit and the account contract, not the passkey",
+        ),
+        "AA91" => Some(
+            "the EntryPoint's payout to the bundler beneficiary failed — on Heima this \
+             usually means the EntryPoint's native balance fell near/below the \
+             Existential Deposit (docs/spec/heima-eth-gap.md gap 8); re-fund the \
+             EntryPoint deposits",
+        ),
+        _ => None,
+    };
+    match guidance {
+        Some(g) => format!("handleOps reverted on-chain (tx {tx_hash}): {reason} — {g}"),
+        None => format!("handleOps reverted on-chain (tx {tx_hash}): {reason}"),
+    }
+}
+
 /// Parse a `WireUserOp` (0x-hex packed fields) into the typed `PackedUserOp` —
 /// the inverse of `WireUserOp::from_packed`. Pure.
 fn wire_to_packed(op: &WireUserOp) -> Result<crate::sponsor::PackedUserOp, String> {
@@ -733,13 +787,14 @@ pub async fn accept_submit(
                     .unwrap_or("")
                     .to_string();
                 if !success {
+                    // #247: the in-house bundler replays the failed calldata via
+                    // eth_call and attaches the decoded FailedOp reason ("AA31
+                    // paymaster deposit too low") — map it to operator guidance
+                    // instead of guessing "wrong passkey".
+                    let reason = receipt.get("reason").and_then(|r| r.as_str());
                     return Err(aerr(
                         StatusCode::BAD_GATEWAY,
-                        format!(
-                            "handleOps reverted on-chain (tx {tx_hash}) — most likely the WRONG \
-                             passkey (P256Account SIG_VALIDATION_FAILED), an unregistered master, \
-                             or a paymaster/scope issue"
-                        ),
+                        handle_ops_revert_message(reason, &tx_hash),
                     ));
                 }
                 return Ok(Json(serde_json::json!({
@@ -786,6 +841,60 @@ mod tests {
     // keccak256("memory:personal") from `cast keccak` — the on-chain service id.
     const MEMORY_PERSONAL_ID: &str =
         "0x12f2770c904838cddb30299f5c22cd28df31b34fcdb44c342cd1f96c4a38ab27";
+
+    // ── handle_ops_revert_message (#247) ─────────────────────────────────────
+
+    #[test]
+    fn aa31_maps_to_paymaster_top_up_with_no_passkey_steering() {
+        let msg = handle_ops_revert_message(Some("AA31 paymaster deposit too low"), "0xfeed");
+        assert!(msg.contains("AA31 paymaster deposit too low"), "{msg}");
+        assert!(msg.contains("scripts/heima-deploy-paymaster.sh"), "{msg}");
+        assert!(msg.contains("0xfeed"), "{msg}");
+        assert!(!msg.to_lowercase().contains("passkey"), "{msg}");
+    }
+
+    #[test]
+    fn aa21_maps_to_account_deposit_top_up_with_no_passkey_steering() {
+        let msg = handle_ops_revert_message(Some("AA21 didn't pay prefund"), "0xfeed");
+        assert!(msg.contains("AA21 didn't pay prefund"), "{msg}");
+        assert!(msg.contains("depositTo(address)"), "{msg}");
+        assert!(!msg.to_lowercase().contains("passkey"), "{msg}");
+    }
+
+    #[test]
+    fn aa24_still_names_the_wrong_passkey() {
+        let msg = handle_ops_revert_message(Some("AA24 signature error"), "0xfeed");
+        assert!(msg.contains("AA24 signature error"), "{msg}");
+        assert!(msg.contains("passkey"), "{msg}");
+    }
+
+    #[test]
+    fn aa25_aa23_and_aa91_get_their_own_guidance() {
+        let msg = handle_ops_revert_message(Some("AA25 invalid account nonce"), "0xfeed");
+        assert!(msg.contains("stale nonce"), "{msg}");
+        let msg = handle_ops_revert_message(Some("AA23 reverted (or OOG)"), "0xfeed");
+        assert!(msg.contains("validateUserOp"), "{msg}");
+        let msg = handle_ops_revert_message(Some("AA91 failed send to beneficiary"), "0xfeed");
+        assert!(msg.contains("Existential Deposit"), "{msg}");
+        assert!(!msg.to_lowercase().contains("passkey"), "{msg}");
+    }
+
+    #[test]
+    fn unknown_reason_is_surfaced_verbatim_without_invented_guidance() {
+        let msg = handle_ops_revert_message(Some("AA95 out of gas"), "0xfeed");
+        assert_eq!(
+            msg,
+            "handleOps reverted on-chain (tx 0xfeed): AA95 out of gas"
+        );
+    }
+
+    #[test]
+    fn missing_reason_falls_back_to_the_labeled_guess() {
+        let msg = handle_ops_revert_message(None, "0xfeed");
+        assert!(msg.contains("revert reason not recoverable"), "{msg}");
+        assert!(msg.contains("WRONG passkey"), "{msg}");
+        assert!(msg.contains("0xfeed"), "{msg}");
+    }
 
     #[test]
     fn parses_register_fields_and_keccak_service_ids() {
