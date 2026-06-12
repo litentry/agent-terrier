@@ -31,7 +31,7 @@
     "deployer_env_var": "AGENTKEYS_BASE_DEPLOYER_KEY",
     "foundry_chain_arg": "base"
   },
-  "contract_set_version": "0.3",
+  "contract_set_version": "0.4",
   "contracts": [
     {
       "name": "AgentKeysScope",
