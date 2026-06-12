@@ -94,6 +94,27 @@ Halted (block 2,905,430 frozen since 2026-01-15). **No contracts deployed** — 
 
 ---
 
+## Base mainnet (chain_id = 8453) — the permissioned partner tier (#282 dual-stack)
+
+### v2 set — **contract_set_version 0.3** + `P256Router` (#170) — deployed 2026-06-12
+
+> **Source of truth = the chain profile [`crates/agentkeys-core/chain-profiles/base.json`](../../crates/agentkeys-core/chain-profiles/base.json)** (`.contracts[]` + `contract_set_version`), mirrored to [`scripts/operator-workstation.base.env`](../../scripts/operator-workstation.base.env) (`*_BASE` keys). Resolve addresses the same way as heima — `jq -r '.contracts[] | "\(.name): \(.address)"' crates/agentkeys-core/chain-profiles/base.json` — never paste literals (#251 gate).
+
+Design notes (what differs from the heima 0.3 set):
+
+- **`P256Router` — the #170 deliverable.** A precompile-first P-256 verifier (RIP-7212 `P256VERIFY` at `0x…0100`, live on Base since Fjord; flat 3,450 gas) with the pure-Solidity `P256Verifier` embedded as fallback, wired as `K11Verifier`'s `p256Addr` by `DeployAgentKeysV1.s.sol`. Every WebAuthn verify (registry mutations, `P256Account` UserOp validation) routes through it. The heima 0.3 set predates the router (its K11Verifier points at the bare `P256Verifier`); heima gains the router automatically at its next full-set redeploy, and because the router is fallback-capable, the SAME contract auto-flips to the cheap path when Heima's runtime-9261 precompile activates (litentry/heima#4030) — no redeploy.
+- **`EntryPoint` = the canonical eth-infinitism v0.7 deployment, ADOPTED not self-deployed** (D2 in [`base-migration.md`](../plan/chain/base-migration.md)): audited bytes + public-bundler interop; `heima-deploy-erc4337.sh` code-verifies it before pinning. Per-env isolation holds because prod-heima / prod-base are different chains.
+- **No ED buffer** — Base has no Substrate ExistentialDeposit; the AA91 reaping class can't occur (the erc4337 helper skips the buffer on non-substrate chains).
+- **Version note:** `0.3` here means "the same core-4 + verifier sources as heima 0.3, plus the router". The router is an auxiliary contract (like EntryPoint/factory/paymaster), not a core-set source change — `crates/agentkeys-chain/VERSION` stays `0.3` so heima's idempotent re-runs don't false-trip the version-mismatch stop. The first deliberate heima redeploy that picks up the router should bump both to `0.4`.
+
+Deployer: the Base prod deployer — `grep ^HEIMA_DEPLOYER_ADDR_BASE scripts/operator-workstation.base.env` (key `~/.agentkeys/deployer-base.key`, 0600). Gas is ETH. Heima stays live as the consumer free tier (D5 dual-stack) — nothing on this chain replaces it.
+
+**Live-proven #170 numbers (2026-06-12):** `P256Router.verify` with a valid P-256 signature = **31,776 gas** total (precompile path) vs **683,901 gas** through the pure-Solidity verifier on the same chain; invalid signatures correctly return false via the fallback.
+
+> First-run artifacts: one orphaned factory + one orphaned paymaster exist on Base from a mis-keyed first run (signed by the *heima* prod deployer before `resolve_master_key` became chain-aware) — functional but never referenced by any registry, env, or profile; ignore them on the explorer.
+
+---
+
 ## Deploy metadata (Heima mainnet v2)
 
 - Deployer wallet (EVM): the prod deployer — `grep ^HEIMA_DEPLOYER_ADDR_HEIMA scripts/operator-workstation.env`; see the deployer table above for prod vs test.
