@@ -345,9 +345,11 @@ impl BackendClient {
     /// `POST /v1/cred/fetch` — fetch + decrypt a stored credential's plaintext
     /// (#216 agent-side vaulted-key fetch). The `cap` (a cred-fetch cap with the
     /// `service` signed inside) is minted separately via [`Self::cap_mint`]; this
-    /// forwards per-actor STS creds under the VAULT role so the cred worker's S3
-    /// GET is scoped to `bots/<actor>/credentials/<service>.enc`. Returns the
-    /// base64 plaintext.
+    /// forwards STS creds under the VAULT role for the worker's S3 GET of
+    /// `bots/<operator>/credentials/<service>.enc` — the operator's vault is the
+    /// ONLY cred vault (single-vault, docs/plan/single-vault-credentials.md), so
+    /// a delegated fetch requires the operator-session-minted STS the wire
+    /// stages. Returns the base64 plaintext.
     pub async fn cred_fetch(&self, input: CredFetchInput) -> Result<CredFetchResult, BackendError> {
         let url = format!("{}/v1/cred/fetch", self.cred()?);
         let mut req = self
@@ -378,9 +380,11 @@ impl BackendClient {
         })
     }
 
-    /// `POST /v1/cred/store` — vault a credential (#216). The signed cap carries
-    /// the `service` + data-class; the per-actor STS creds (vault role) scope the
-    /// S3 PUT to `bots/<actor>/credentials/`. The plaintext is base64 in the body
+    /// `POST /v1/cred/store` — vault a credential (#216). MASTER-SELF ONLY
+    /// (single-vault, docs/plan/single-vault-credentials.md): a delegated store
+    /// cap is hard-rejected at both broker and worker
+    /// (`cred_store_not_master_self`), so the PUT always lands in
+    /// `bots/<operator>/credentials/`. The plaintext is base64 in the body
     /// (the worker encrypts with the K3 KEK).
     pub async fn cred_store(&self, input: CredStoreInput) -> Result<CredStoreResult, BackendError> {
         let url = format!("{}/v1/cred/store", self.cred()?);

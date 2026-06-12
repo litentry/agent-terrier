@@ -59,9 +59,11 @@ pub fn err_502(msg: impl Into<String>, reason: &'static str) -> ApiError {
 
 /// One vault-candidate S3 GetObject attempt, embedded in the fetch handlers'
 /// `s3_get` 502 `detail.attempts` (#284). Carries WHICH vault was tried
-/// (`agent-own` = the actor's own prefix, #228; `operator` = the #216
-/// delegated fallback), the vault owner's omni (already a signed cap field —
-/// not secret), and the S3 error class — never key contents.
+/// (`operator` = the operator's prefix, the cred worker's ONLY vault under
+/// the single-vault design — docs/plan/single-vault-credentials.md;
+/// `agent-own` = the actor's own prefix, as the memory/config workers report),
+/// the vault owner's omni (already a signed cap field — not secret), and the
+/// S3 error class — never key contents.
 #[derive(Debug, Serialize)]
 pub struct S3FetchAttempt {
     pub vault: &'static str,
