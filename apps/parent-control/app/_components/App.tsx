@@ -21,7 +21,7 @@ import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
-import type { ChainInfo, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
+import type { ChainInfo, ChainListEntry, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
 
 type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'pairing' | 'audit' | 'decode' | 'chain' | 'logo';
@@ -1069,7 +1069,7 @@ export function App() {
             <div className="modal-head"><span className="ttl">pairing ceremony · {pairingCeremony.agent}</span></div>
             <div className="modal-body">
               <div style={{ fontSize: 12, color: 'var(--ink-dim)', marginBottom: 14 }}>
-                Binding <span className="mono">O_master{pairingCeremony.derivation}</span> under your master identity. Each on-chain step is a real Heima transaction.
+                Binding <span className="mono">O_master{pairingCeremony.derivation}</span> under your master identity. Each on-chain step is a real transaction on the daemon&apos;s chain.
               </div>
               <CeremonyRunner steps={PAIRING_STEPS} onDone={finishPairingCeremony} stepMs={680} />
             </div>
@@ -1110,7 +1110,7 @@ function argValue(v: unknown): string {
   return String(v);
 }
 
-// ─── Step 9: decode the Heima transaction for an audit event ──────
+// ─── Step 9: decode the on-chain transaction for an audit event ──────
 // Real decode (#153): the daemon decodes the CBOR AuditEnvelope + the on-chain
 // calldata against the verified ABIs. While loading / when no daemon is wired,
 // a clearly-labelled reference decode (demoData) is shown instead. Rendered as a
@@ -1219,7 +1219,7 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
 
       {/* ── on-chain transaction (calldata decoded against the verified ABI) ── */}
       <div className="panel">
-        <div className="panel-head"><span>── decoded heima transaction</span></div>
+        <div className="panel-head"><span>── decoded on-chain transaction</span></div>
         <div className="panel-body">
           {decoded && !tx ? (
             <div className="muted" style={{ fontSize: 12 }}>
@@ -1258,15 +1258,33 @@ function ChainPage() {
   const client = useClient();
   const [info, setInfo] = useState<ChainInfo | null>(null);
   const [picked, setPicked] = useState<ChainRow | null>(null);
+  // #282 chain switcher — VIEW any built-in chain's registry. Display-only:
+  // the daemon's operational chain (ceremonies, audit, onboarding) never moves.
+  const [chains, setChains] = useState<ChainListEntry[]>([]);
+  const [daemonChain, setDaemonChain] = useState<string | null>(null);
+  const [view, setView] = useState<string>('');
 
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const r = await client.getChainInfo();
-      if (alive && r.ok) setInfo(r.data);
+      const r = await client.getChainList();
+      if (alive && r.ok) {
+        setChains(r.data.chains);
+        setDaemonChain(r.data.daemonChain);
+        setView((v) => v || r.data.daemonChain);
+      }
     })();
     return () => { alive = false; };
   }, [client]);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const r = await client.getChainInfo(view || undefined);
+      if (alive && r.ok) setInfo(r.data);
+    })();
+    return () => { alive = false; };
+  }, [client, view]);
 
   const name = info?.name ?? CHAIN_PROFILE.name;
   const chainId = info?.chainId ?? CHAIN_PROFILE.chainId;
@@ -1285,11 +1303,32 @@ function ChainPage() {
         <div>
           <div className="crumb">chain · {name} · chain_id {chainId}</div>
           <h1><span className="muted serif">/</span> chain</h1>
-          <div className="desc">{display}. Stage-1 contracts deployed via Foundry; tier-2 audit anchors a Merkle root here every 2 minutes.</div>
+          <div className="desc">{display}. Contracts deployed via Foundry; tier-2 audit anchors a Merkle root here every 2 minutes.</div>
         </div>
+        {chains.length > 0 && (
+          <div>
+            <select
+              value={view}
+              onChange={(e) => setView(e.target.value)}
+              aria-label="view chain"
+              style={{ padding: '7px 9px', fontSize: 12.5 }}
+            >
+              {chains.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name} · {c.chainId}{c.name === daemonChain ? ' · daemon' : ''}
+                </option>
+              ))}
+            </select>
+            {daemonChain && view && view !== daemonChain && (
+              <div className="muted" style={{ fontSize: 11, marginTop: 6, maxWidth: 280 }}>
+                viewing {view} — the daemon operates on {daemonChain} (ceremonies + audit stay there)
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <div className="stats">
-        <div className="stat"><div className="v">{name}</div><div className="k">AGENTKEYS_CHAIN</div></div>
+        <div className="stat"><div className="v">{name}</div><div className="k">{daemonChain && view && view !== daemonChain ? 'viewing chain' : 'AGENTKEYS_CHAIN'}</div></div>
         <div className="stat"><div className="v">{chainId}</div><div className="k">chain id</div></div>
         <div className="stat"><div className="v">{live ? 'live' : 'reference'}</div><div className="k">source</div></div>
         <div className="stat"><div className="v">{contracts.length}</div><div className="k">contracts deployed</div></div>

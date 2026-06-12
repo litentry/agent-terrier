@@ -117,8 +117,13 @@ export class DaemonBackend implements AgentKeysClient {
     }
   }
 
-  async getChainInfo(): Promise<Result<ChainInfo>> {
-    return this.getJson<ChainInfo>('/v1/chain/info');
+  async getChainInfo(chain?: string): Promise<Result<ChainInfo>> {
+    const q = chain ? `?chain=${encodeURIComponent(chain)}` : '';
+    return this.getJson<ChainInfo>(`/v1/chain/info${q}`);
+  }
+
+  async getChainList(): Promise<Result<import('./types').ChainList>> {
+    return this.getJson<import('./types').ChainList>('/v1/chain/list');
   }
 
   async decodeAuditEvent(id: string): Promise<Result<DecodedAuditEvent>> {
