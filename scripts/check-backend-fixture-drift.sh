@@ -27,7 +27,7 @@
 # Annotation (not blanket auto-scan) is deliberate: the harness is full of OTHER
 # JSON (chain extrinsics, audit events, deliberately-malformed negative-test
 # payloads) that share field names — those must NOT be forced to match. You opt
-# a body IN when it is meant to mirror the wire shape. The CLAUDE.md rule
+# a body IN when it is meant to mirror the wire shape. The AGENTS.md rule
 # ("never re-type a cap/worker body in bash without tying it to the fixture")
 # is what keeps new hand-rolls annotated.
 #

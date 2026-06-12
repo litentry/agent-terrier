@@ -98,7 +98,7 @@ Halted (block 2,905,430 frozen since 2026-01-15). **No contracts deployed** — 
 
 - Deployer wallet (EVM): the prod deployer — `grep ^HEIMA_DEPLOYER_ADDR_HEIMA scripts/operator-workstation.env`; see the deployer table above for prod vs test.
 - v2 deploy date: 2026-05-19 · #164 E1 deploy date: 2026-06-02
-- Compiler: Solc 0.8.20, `evm_version = "london"` (a `forge script` header-validation workaround, NOT Heima's EVM level — Heima executes **Cancun**; see CLAUDE.md "Heima EVM compatibility level"). The EntryPoint v0.7 is the canonical eth-infinitism bytecode, deployed via `forge create`.
+- Compiler: Solc 0.8.20, `evm_version = "london"` (a `forge script` header-validation workaround, NOT Heima's EVM level — Heima executes **Cancun**; see AGENTS.md "Heima EVM compatibility level"). The EntryPoint v0.7 is the canonical eth-infinitism bytecode, deployed via `forge create`.
 - Deploy script: [`crates/agentkeys-chain/script/DeployAgentKeysV1.s.sol`](../../crates/agentkeys-chain/script/DeployAgentKeysV1.s.sol)
 
 **Constructor wiring** (verified post-deploy):

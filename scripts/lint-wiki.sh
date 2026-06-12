@@ -17,7 +17,7 @@
 #
 # Exit 0 = clean, 1 = at least one violation. Read-only, deterministic, no LLM,
 # safe to re-run. Runnable locally (`bash scripts/lint-wiki.sh`) and in CI
-# (.github/workflows/wiki-lint.yml). See CLAUDE.md "Wiki-location policy".
+# (.github/workflows/wiki-lint.yml). See AGENTS.md "Wiki-location policy".
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -8,7 +8,7 @@ workaround → code site → what changes on eth** — so a future migration to 
 chain (or an EVM L2) can find and lift each workaround mechanically.
 
 **Scope:** only divergences that forced a workaround. The *capability* claims (what opcodes run)
-are proven by on-chain probes in [CLAUDE.md "Heima EVM compatibility level"](../../CLAUDE.md);
+are proven by on-chain probes in [AGENTS.md "Heima EVM compatibility level"](../../AGENTS.md);
 this doc is the migration-facing view and defers there for the proofs. Tooling quirks that are
 *not* Heima-specific (e.g. the `cast send --create` clap arg-ordering trap, a foundry-version
 issue) are out of scope — they apply to eth too.
@@ -175,7 +175,7 @@ Lift each workaround in lock-step with the chain swap:
 
 ## See also
 
-- [CLAUDE.md "Heima EVM compatibility level"](../../CLAUDE.md) — the on-chain capability proofs.
+- [AGENTS.md "Heima EVM compatibility level"](../../AGENTS.md) — the on-chain capability proofs.
 - [`deployed-contracts.md`](deployed-contracts.md) — the live contract set + the chain profile.
 - [`../plan/chain/erc4337-master-account.md`](../plan/chain/erc4337-master-account.md) — the
   ERC-4337 master design (chain-agnostic).

@@ -16,6 +16,6 @@ in [`../backend-protocol/`](../backend-protocol/).
 **Changing the contract:** edit `ApiMemoryEntry` / the route const in `ui_bridge.rs`,
 update this fixture to match (the unit test enforces it), and the two consumers are
 re-gated by `check-web-api-drift.sh`. This is rung 2 of the parity ladder (see
-[`../../CLAUDE.md`](../../CLAUDE.md) "Parity/wiring checks evolve down a ladder"); the
+[`../../AGENTS.md`](../../AGENTS.md) "Parity/wiring checks evolve down a ladder"); the
 rung-3 endgame is compiling the daemon plant types into the browser host via
 `agentkeys-web-core` so `daemon.ts` stops hand-building the body.

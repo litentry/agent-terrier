@@ -1,6 +1,6 @@
 use rusqlite::params;
 
-/// Shared typed identity → wallet resolver (Issue #13, CLAUDE.md Backend Design Principles).
+/// Shared typed identity → wallet resolver (Issue #13, AGENTS.md Backend Design Principles).
 /// Called from `approve_auth_request` Recover branch and `recover_session` handler.
 ///
 /// `identity_type` must be one of `"alias"`, `"email"`, `"ens"`, `"wallet"`.

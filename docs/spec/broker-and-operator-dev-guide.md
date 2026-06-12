@@ -199,7 +199,7 @@ Then `AGENTKEYS_CHAIN=anvil` in your operator env makes every `cast send` hit an
 
 ### 4.4 Editing `setup-broker-host.sh`
 
-`scripts/setup-broker-host.sh` is the canonical "single entry point" for the broker EC2 (per CLAUDE.md "Remote broker host (single entry point)" policy). When you change it, the unit-test is to dry-run it on a throwaway VM, but the practical inner loop is:
+`scripts/setup-broker-host.sh` is the canonical "single entry point" for the broker EC2 (per AGENTS.md "Remote broker host (single entry point)" policy). When you change it, the unit-test is to dry-run it on a throwaway VM, but the practical inner loop is:
 
 1. Edit the script.
 2. `bash -n scripts/setup-broker-host.sh` — syntax check.

@@ -1,7 +1,7 @@
 //! `agentkeys wire <runtime>` — provision a Task Host with AgentKeys
 //! IAM-guarantee hooks.
 //!
-//! Idempotent per CLAUDE.md "Idempotent remote-setup rule": every step
+//! Idempotent per AGENTS.md "Idempotent remote-setup rule": every step
 //! pre-checks state, writes only on drift, and logs one of
 //! `ok proceeding / skip <reason> / fail <reason>`. Re-runs are no-ops.
 //! `--check-only` reports drift without writing (the nightly drift check).
@@ -53,7 +53,7 @@ pub struct WireRequest {
     pub check_only: bool,
 }
 
-/// Per-step outcome, rendered to the operator with the CLAUDE.md convention.
+/// Per-step outcome, rendered to the operator with the AGENTS.md convention.
 enum Outcome {
     Ok(String),
     Skip(String),

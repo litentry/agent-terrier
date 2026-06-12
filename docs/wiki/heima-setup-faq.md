@@ -32,7 +32,7 @@ MAINNET_CONFIRM=1 AGENTKEYS_CHAIN=heima bash scripts/setup-heima.sh --only-step 
 
 ## Q. Paseo step 5 (fund deployer) hangs
 
-Paseo collators were halted at block 2,905,430 (frozen since 2026-01-15 per CLAUDE.md). When they're down, `heima-fund-account.sh` can't reach the chain. Three options:
+Paseo collators were halted at block 2,905,430 (frozen since 2026-01-15 per AGENTS.md). When they're down, `heima-fund-account.sh` can't reach the chain. Three options:
 
 - Wait for the parachain to recover.
 - Switch to `--chain anvil` for local dev work.
@@ -89,7 +89,7 @@ Then re-run the orchestrator from the failing step.
 
 ## Q. `forge script` errors with "header validation error: `prevrandao` not set"
 
-`forge script`'s simulator validates the chain's block header against the target EVM revision before broadcasting. Heima is a Substrate/Aura parachain via Frontier, so its header has no `prevrandao` field, and a `paris`+ simulator rejects it. Keep `evm_version = "london"` pinned in [`crates/agentkeys-chain/foundry.toml`](https://github.com/litentry/agentKeys/blob/main/crates/agentkeys-chain/foundry.toml) for the `forge script` deploy path; if you bumped it for unrelated reasons, revert. Note this is a *header-validation* workaround only — Heima's actual EVM execution level is **Cancun** (PUSH0 + transient storage run on-chain), not London. The full diagnosis is in CLAUDE.md "Heima EVM compatibility level".
+`forge script`'s simulator validates the chain's block header against the target EVM revision before broadcasting. Heima is a Substrate/Aura parachain via Frontier, so its header has no `prevrandao` field, and a `paris`+ simulator rejects it. Keep `evm_version = "london"` pinned in [`crates/agentkeys-chain/foundry.toml`](https://github.com/litentry/agentKeys/blob/main/crates/agentkeys-chain/foundry.toml) for the `forge script` deploy path; if you bumped it for unrelated reasons, revert. Note this is a *header-validation* workaround only — Heima's actual EVM execution level is **Cancun** (PUSH0 + transient storage run on-chain), not London. The full diagnosis is in AGENTS.md "Heima EVM compatibility level".
 
 ## Q. Anvil contract addresses are different every run — is that wrong?
 

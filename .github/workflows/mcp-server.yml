@@ -70,7 +70,7 @@ jobs:
         # GHCR repository names MUST be lowercase. ${{ github.repository }} keeps
         # the repo's actual casing (litentry/agentKeys → capital K), which docker
         # rejects with "repository name must be lowercase". Lowercase via tr
-        # (portable to bash 3.2; CLAUDE.md prefers tr over the bash-4 ${,,}).
+        # (portable to bash 3.2; AGENTS.md prefers tr over the bash-4 ${,,}).
         run: echo "base=ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')/agentkeys-mcp-server" >> "$GITHUB_OUTPUT"
       - name: build + push
         uses: docker/build-push-action@v6
