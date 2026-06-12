@@ -96,6 +96,8 @@ flowchart LR
 
 **Why five?** Compromise of any one boundary yields bounded damage. The blast-radius table in §3 enumerates this; the design's headline property is "any single trust root compromised yields bounded damage, never a system-wide takeover."
 
+> **Deployed stacks (one hostname set per stack):** the table above shows the Heima prod hostnames. The same five-boundary unit set is replicated per environment with a suffix on every hostname/IAM/bucket identifier — the CI/test fleet (`-test`, `-test-N`; #265) and the **Base prod partner-tier stack** (`-base`, e.g. `broker-base.litentry.org`, on its own EC2 with `AGENTKEYS_CHAIN=base`; #282 D5 dual-stack — Heima stays the consumer free tier). Stack inventory + naming matrix: [`cloud-bootstrap.md`](cloud-bootstrap.md) §0.2–§0.4.
+
 ---
 
 ## 2. Component inventory
@@ -1880,6 +1882,8 @@ Every chain-aware component (CLI, daemon, broker, workers) resolves the active p
 | **Production** | `heima` (Litentry/Heima mainnet, chain ID 212013) | No sudo; chain submissions in sovereign mode bind to operator's `current_master_wallet`; production-grade finality via parachain GRANDPA. The built-in default. |
 | **Development** | `heima-paseo` (Heima Paseo testnet) | `pallet_sudo` enabled with the well-known Substrate dev account **Alice** as the sudoer. Anyone can sign as Alice and call `sudo.sudo(call)` for testnet bring-up convenience (pre-fund deployer, force-bump K3 epoch, etc.). Found programmatically via `ChainProfile::development_default_name()`. |
 | **Local tests** | `anvil` | Local Foundry node; instant finality; zero gas. Used for CI + unit/integration tests. |
+
+**Dual-chain production (#282 D5):** production runs **one full broker stack per chain** — the Heima stack (the consumer free tier; the built-in default above) and the Base stack (the partner tier, on its own EC2 with `-base` resource names and `AGENTKEYS_CHAIN=base` baked into its units). Each stack is single-chain per process; there is no per-request chain routing. `DEFAULT_PROFILE` stays `heima` — flipping it is a deliberate post-cutover change, not implied by the second stack existing. Per-stack naming + bring-up: [`cloud-bootstrap.md` §0.4](cloud-bootstrap.md#04-add-a-prod-chain-stack-spawn-the-second-prod-broker--282).
 
 The development-vs-production split is encoded directly in the profile JSON via the optional `dev_environment` field. Production-shaped profiles (`heima`, `base`, `ethereum`, …) omit it; testnets / local-dev profiles set `dev_environment.is_development_default = true` (only `heima-paseo` carries this flag among built-ins). The `dev_environment.sudo` sub-object documents the Substrate sudoer for the chain, surfaced to operators via `agentkeys chain show <name> | jq .dev_environment`. See §22a.5a below for the full Alice/sudo background.
 
