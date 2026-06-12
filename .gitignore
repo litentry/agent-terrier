@@ -34,7 +34,7 @@ agentkeys-secrets.env
 # checked in; scripts/node_modules/ is not.
 scripts/node_modules/
 
-# Stage 6 runbook one-shot JSON artifacts. CLAUDE.md mandates the
+# Stage 6 runbook one-shot JSON artifacts. AGENTS.md mandates the
 # `jq -n --arg` → `$(...)` pattern piped directly into the AWS CLI call
 # (no file on disk). If any of these reappear, someone reverted to the
 # heredoc anti-pattern — delete and fix the runbook usage.

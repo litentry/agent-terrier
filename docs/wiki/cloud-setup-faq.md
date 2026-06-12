@@ -53,7 +53,7 @@ CloudTrail's `Decision` field tells you which statement evaluated.
 
 ## Q. Per-profile default region trap (real 2026-05-12 incident)
 
-`agentkeys-admin` defaults to `us-west-2`; `agentkeys-broker` / `agentkeys-daemon` default to `us-east-1`. Every regional CLI call must pass `--region "$REGION"` explicitly. The CLAUDE.md "Per-profile default region is NOT uniform" section covers this in detail.
+`agentkeys-admin` defaults to `us-west-2`; `agentkeys-broker` / `agentkeys-daemon` default to `us-east-1`. Every regional CLI call must pass `--region "$REGION"` explicitly. The AGENTS.md "Per-profile default region is NOT uniform" section covers this in detail.
 
 ## Q. Cert renewal failed silently — workflow turned red overnight
 
@@ -78,7 +78,7 @@ Yes — `setup-broker-host.sh --without-nginx --without-certbot` skips both. You
 
 ## Q. The systemd unit was hand-edited and now setup-broker-host.sh refuses
 
-Per CLAUDE.md "Remote broker host (single entry point)" — don't hand-edit. To recover:
+Per AGENTS.md "Remote broker host (single entry point)" — don't hand-edit. To recover:
 
 ```bash
 sudo systemctl stop agentkeys-broker

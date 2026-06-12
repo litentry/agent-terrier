@@ -58,7 +58,7 @@ impl CapOp {
 /// (or vice versa) and pollute the wrong bucket at the cap-authz layer.
 /// The IAM PrincipalTag enforces per-actor scoping at the AWS layer
 /// (defense in depth); this binding is the cryptographic per-class gate
-/// at the cap layer (issue #90 followup, codified in CLAUDE.md).
+/// at the cap layer (issue #90 followup, codified in AGENTS.md).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DataClass {

@@ -74,17 +74,17 @@ Dual-licensed under **MIT OR Apache-2.0**, at your choice.
 
 | Read | Why |
 |---|---|
-| [`CLAUDE.md`](CLAUDE.md) | Project-specific rules: docs layout, /create-pr workflow in worktrees, terminology-source-of-truth, branch push policy, idempotent-remote-setup invariants, runbook-fix-fold-back policy. **Read first, every session.** |
+| [`AGENTS.md`](AGENTS.md) | Project-specific rules: docs layout, /create-pr workflow in worktrees, terminology-source-of-truth, branch push policy, idempotent-remote-setup invariants, runbook-fix-fold-back policy. **Read first, every session.** |
 | [`docs/arch.md`](docs/arch.md) | Single source of truth for component inventory (K1–K11), trust boundaries, HDKD actor tree, per-actor binding ceremonies. When the per-doc detail outgrows arch.md, link outward — never duplicate. |
 | [`docs/archived/development-stages-v2-2026-04.md`](docs/archived/development-stages-v2-2026-04.md) | The 8-stage build plan (archived; superseded by the milestone roadmap below). Each stage has a `harness/stage-N-done.sh` gate; never self-grade — run the gate. |
 | [`docs/plan/execution-plan.md`](docs/plan/execution-plan.md) | Orchestration runbook (ralph, team, ultraqa workflows). |
 | [`docs/spec/broker-and-operator-dev-guide.md`](docs/spec/broker-and-operator-dev-guide.md) | Inner edit-build-test loop for broker + operator-side code. Use this before suggesting changes to the broker's run-time behavior. |
 
-### Hard rules (from CLAUDE.md)
+### Hard rules (from AGENTS.md)
 
 These are non-negotiable. Violating them produces broken PRs / corrupted state.
 
-- **Use `jj` (Jujutsu), never raw `git`.** Common mappings in CLAUDE.md. The one exception: inside a Claude Code `.claude/worktrees/<name>/` worktree, the initial commit must use `git` (jj can't colocate in a git-worktree); then `cd` to the main repo and push via `jj git push`. Never include `Co-Authored-By:` lines in those commits.
+- **Use `jj` (Jujutsu), never raw `git`.** Common mappings in AGENTS.md. The one exception: inside a Claude Code `.claude/worktrees/<name>/` worktree, the initial commit must use `git` (jj can't colocate in a git-worktree); then `cd` to the main repo and push via `jj git push`. Never include `Co-Authored-By:` lines in those commits.
 - **Branch `evm` pushes immediately.** On `evm`, push after every `jj describe` — the remote broker host pulls from `origin/evm` to redeploy. "I'll push at the end" silently breaks deploys.
 - **Diagnose before edit.** Reproduce the failure locally first; isolate the layer (shell / client / doc / broker code / network). If the cause is local to the operator's shell, respond with the one-line fix — don't edit the repo.
 - **Land the fix everywhere.** Once a local repro proves a fix is correct, land it the same turn — search the repo for every affected file, commit, push to `origin/evm`. Don't stop at "verified locally" or "fixed one file."

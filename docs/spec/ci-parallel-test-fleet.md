@@ -38,7 +38,7 @@ On this contract set, **the unit of isolation is the key, not the contract addre
 
 **Sharing also buys real things:**
 
-- **Fidelity to prod.** Prod is one contract set with many tenants. The four-layer isolation invariants (cross-actor negatives, CLAUDE.md issue #90 table) are *more* meaningful when another slot's state coexists in the same registry — a scope check that accidentally matched another operator's row would actually fire in CI. Per-slot sets would test a topology prod doesn't have and hide that bug class.
+- **Fidelity to prod.** Prod is one contract set with many tenants. The four-layer isolation invariants (cross-actor negatives, AGENTS.md issue #90 table) are *more* meaningful when another slot's state coexists in the same registry — a scope check that accidentally matched another operator's row would actually fire in CI. Per-slot sets would test a topology prod doesn't have and hide that bug class.
 - **One registry to govern.** Harness CI runs on Heima *mainnet* (real gas). N sets would mean N× deploy gas on every `crates/agentkeys-chain/VERSION` bump, N cutover ceremonies per contract change (the #225 account-auth cutover would have been prod + N instead of prod + 1), and N× the surface for the #225 split-registry incident class (a broker compiled against one registry while a client onboards into another).
 
 **The deliberate asymmetry:** the test fleet *does* have its own EntryPoint + factory, separate from prod's (#250). That isolation protects *prod* — a mis-pointed test bundler or a test-tier compromise must never be able to touch prod's EntryPoint deposits. Between two same-tier, equally disposable test slots, that blast-radius argument has no force.
@@ -79,4 +79,4 @@ On this contract set, **the unit of isolation is the key, not the contract addre
 - PR [#277](https://github.com/litentry/agentKeys/pull/277) (phase 2 + slot-2 bring-up)
 - [`cloud-bootstrap.md` §0.3](../cloud-bootstrap.md#03-test-broker-fleet--multiple-test-brokers-issue-265) — operator bring-up: naming matrix, add-a-slot checklist, live fleet inventory
 - [`ci-setup.md`](../ci-setup.md) — current (single-slot) CI activation; phase 4 updates it
-- CLAUDE.md — flag convention (`--ci [--slot N]`), EIP-by-tag rule, idempotent remote-setup rule, per-actor isolation invariants (#90)
+- AGENTS.md — flag convention (`--ci [--slot N]`), EIP-by-tag rule, idempotent remote-setup rule, per-actor isolation invariants (#90)

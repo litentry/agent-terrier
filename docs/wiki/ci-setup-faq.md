@@ -14,7 +14,7 @@ AWS hasn't found the test broker's OIDC provider. Three checks:
 
 ## Q. `harness-e2e` runs but stage-3 fails with `AccessDenied` on the cross-actor write
 
-That's the test working — stage-3 step 5 / 8 / 9 are NEGATIVE tests that EXPECT `AccessDenied`. If they pass-as-success, the workflow exits 0. If they pass with `AccessDenied`, the harness script asserts that (the per-actor + per-data-class invariants from CLAUDE.md). A genuine failure is the script exiting non-zero, not the AWS API returning `AccessDenied`.
+That's the test working — stage-3 step 5 / 8 / 9 are NEGATIVE tests that EXPECT `AccessDenied`. If they pass-as-success, the workflow exits 0. If they pass with `AccessDenied`, the harness script asserts that (the per-actor + per-data-class invariants from AGENTS.md). A genuine failure is the script exiting non-zero, not the AWS API returning `AccessDenied`.
 
 ## Q. Concurrent runs collide on S3 writes
 

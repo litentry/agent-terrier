@@ -209,7 +209,7 @@ A device's cap-token scopes which namespaces it can read AND write. The MagicLic
 - ✅ Cap-token format extensible — adding `namespaces_allowed` is additive (existing cap verifier ignores unknown fields gracefully per its design)
 - ✅ Memory worker never calls an LLM (memory-design §1 invariant 1) — namespace filter is deterministic string-set membership, no inference
 - ✅ K3 epoch rotation ([arch.md §16](./arch.md), memory-design §8.3) unchanged — namespaces are envelope metadata, not part of the keying material
-- ✅ Architecture-as-source-of-truth (CLAUDE.md policy) — once v0 namespaces ship, arch.md §17 gets an additive paragraph + memory-design §3 adds the namespace field to the wire format. No conflicting canonical names introduced.
+- ✅ Architecture-as-source-of-truth (AGENTS.md policy) — once v0 namespaces ship, arch.md §17 gets an additive paragraph + memory-design §3 adds the namespace field to the wire format. No conflicting canonical names introduced.
 
 ### 3.6 IAM tool vs IAM guarantee — and how AgentKeys delivers each
 
@@ -248,7 +248,7 @@ A corollary of §3.6: if hooks are the IAM-guarantee delivery mechanism, *who wr
 | LLM-provider config when the user provisioned the key via AgentKeys creds — `model.provider`, `model.base_url`, `model.api_key` come from the credential broker | Non-AgentKeys-managed config — model selection, region, custom prompts, runtime-specific knobs |
 | Idempotent re-runs — `agentkeys wire <runtime>` is safe to invoke repeatedly; diffs current vs intended, writes only on drift | The runtime's own state — sessions, history, checkpoints, plugins |
 
-The user-facing entry point is `agentkeys wire <runtime>` (one CLI command). The CLI dispatches to per-runtime adapters. Output follows the CLAUDE.md idempotent-remote-setup convention (`ok proceeding / skip <reason> / fail <reason>` per step).
+The user-facing entry point is `agentkeys wire <runtime>` (one CLI command). The CLI dispatches to per-runtime adapters. Output follows the AGENTS.md idempotent-remote-setup convention (`ok proceeding / skip <reason> / fail <reason>` per step).
 
 This pattern stays cleanly on §2.1 Authority Host side — AgentKeys is configuring an integration, not running the runtime. It also operationalizes §2.5 "deploy → grow → standardize": ship the hybrid for Hermes first (open-source, scriptable), expand to additional Task Hosts once a vendor pilot validates the approach.
 
@@ -266,7 +266,7 @@ Prove in <5 minutes to a vendor that AgentKeys is Agent IAM, not chatbot infrast
 
 ### 4.2 Phase 1 MCP server scope
 
-Already-shipped backend (per CLAUDE.md Stage 7+) provides the heavy lifting:
+Already-shipped backend (per AGENTS.md Stage 7+) provides the heavy lifting:
 
 | Capability | Status in backend |
 |---|---|
