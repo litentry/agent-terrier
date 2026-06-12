@@ -92,8 +92,10 @@ issue) are out of scope — they apply to eth too.
   pre-London-*looking* header (no `prevrandao`/`blobGasUsed`) reflects the **consensus/block
   layer**, not the opcode level. So the `evm_version=london` pin (#4) is a **simulator-header
   workaround, not an opcode ceiling** — contracts MAY use ≤Cancun features (PUSH0, transient
-  storage) at runtime today. The P-256 verification is **pure Solidity** (no RIP-7212 precompile,
-  no chain change).
+  storage) at runtime today. The RIP-7212 precompile at `0x100` is **LIVE on Heima since
+  runtime 9261** (litentry/heima#4030, spec-vector-verified 2026-06-12) and **CONSUMED since
+  the same-day 0.4 redeploy**: heima's K11 chain now routes through `P256Router` — verify =
+  **28,372 gas** live-proven (vs 706,696 pure-Solidity). #170 is resolved on both chains.
 - **On eth:** same opcode level; once the header matches (#4 lifts), no behavioural change.
 
 ### 6. `chain_id` is deployment-year-prefixed (migration note, not a gap)
@@ -123,7 +125,12 @@ issue) are out of scope — they apply to eth too.
   Code site: [`handlers/accept.rs`](../../crates/agentkeys-broker-server/src/handlers/accept.rs)
   `DEF_VERIFICATION_GAS_LIMIT` / `DEF_MAX_FEE`.
 - **On eth:** with a RIP-7212 precompile the verify is ~3.5k gas → `verificationGasLimit` can drop
-  back to ~100–200k and `maxFee` tracks the target chain's base fee.
+  back to ~100–200k and `maxFee` tracks the target chain's base fee. **Proven on Base
+  (2026-06-12, #287):** `P256Router.verify` = 31,776 gas total vs 683,901 pure-Solidity.
+- **Heima status (2026-06-12, post-0.4 redeploy):** the precompile is LIVE (runtime 9261)
+  AND consumed — the 0.4 set's K11 chain routes through `P256Router`; verify = **28,372 gas**
+  live-proven. The 1.5M `DEF_VERIFICATION_GAS_LIMIT` pin is now a **harmless cap** (unused
+  gas is refunded) on both chains; dropping it to ~200k is `base-migration.md` §3.2 item 8.
 
 ### 8. Existential Deposit bricks low-balance EntryPoints → `AA91 failed send to beneficiary`
 
@@ -167,6 +174,9 @@ Lift each workaround in lock-step with the chain swap:
   [`deployed-contracts.md`](deployed-contracts.md)).
 - [ ] **#7 verificationGasLimit** — if the target chain has a RIP-7212 P-256 precompile, drop
   `DEF_VERIFICATION_GAS_LIMIT` back to ~100–200k and let `DEF_MAX_FEE` track the chain's base fee.
+  *(Live-proven on both chains — Base 31,776 gas, Heima 28,372 gas since the 0.4 redeploy.
+  The 1.5M pin is now a harmless refunded cap; the broker const drop is tracked in
+  `base-migration.md` §3.2 item 8.)*
 - [ ] **Contracts** — none. EntryPoint v0.7 / `P256AccountFactory` / `P256Account` /
   `VerifyingPaymaster` / `SidecarRegistry` / `AgentKeysScope` are standard Solidity; redeploy
   as-is. A standard ERC-4337 **bundler + RIP-7212 P-256 precompile** (if the target chain has it)

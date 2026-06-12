@@ -6,9 +6,10 @@ import { P256Verifier } from "./P256Verifier.sol";
 /// @title P256Router — precompile-first P-256 verifier with pure-Solidity fallback
 /// @notice ABI-compatible with [P256Verifier.verify]. Tries the RIP-7212 / EIP-7951
 ///         `P256VERIFY` precompile at address 0x…0100 first (flat 3450 gas — live on
-///         Base since Fjord, Ethereum L1 since Fusaka, and ships on Heima in runtime
-///         9261 via litentry/heima#4030). Falls back to the embedded pure-Solidity
-///         verifier whenever the precompile gives no affirmative answer.
+///         Base since Fjord, Ethereum L1 since Fusaka, and on Heima since runtime
+///         9261, litentry/heima#4030, activated 2026-06-12). Falls back to the
+///         embedded pure-Solidity verifier whenever the precompile gives no
+///         affirmative answer.
 ///
 /// @dev    RIP-7212 returns EMPTY output both for "invalid signature" and (trivially,
 ///         as a call to an empty account) for "precompile not present" — the two are

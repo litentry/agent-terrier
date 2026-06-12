@@ -2,14 +2,19 @@
 pragma solidity ^0.8.20;
 
 /// @title P256Verifier — pure-Solidity NIST P-256 ECDSA signature verifier
-/// @notice Verifies WebAuthn / FIDO2 authenticator (K11) assertions on chain
-///         until Heima ships an EIP-7212 / RIP-7212 P-256 precompile.
+/// @notice Verifies WebAuthn / FIDO2 authenticator (K11) assertions on chain.
+///         Since #170/#282 this contract is the FALLBACK leg of [P256Router]
+///         (precompile-first); fresh deploys wire K11Verifier at the router,
+///         never at this contract directly.
 ///
 /// @dev    Heima executes at Cancun EVM level (verified on-chain 2026-06-02 per
 ///         #168 — PUSH0 + TSTORE/TLOAD run; the earlier "London" call introspected
 ///         block-header format, which signals the consensus layer, not opcode
-///         capability) — and has no native P-256 precompile at 0x100 (RIP-7212)
-///         or 0x0b. This contract performs the verify
+///         capability). The RIP-7212 P-256 precompile at 0x100 is now LIVE on
+///         Heima too (runtime 9261, litentry/heima#4030 — activation verified
+///         on mainnet 2026-06-12), but Heima's deployed 0.3 set predates the
+///         router, so its on-chain verifies still run THIS contract until the
+///         deliberate 0.4 redeploy. This contract performs the verify
 ///         in pure Solidity using Jacobian coordinates + Shamir's trick
 ///         double-scalar multiplication. ~707k gas per verify (measured on
 ///         Heima mainnet 2026-06-02);

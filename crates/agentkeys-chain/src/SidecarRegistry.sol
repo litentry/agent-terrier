@@ -8,9 +8,11 @@ import {K11Verifier} from "./K11Verifier.sol";
 ///         Workers re-verify caps against this state on every call (arch.md §10, §13.1).
 ///
 /// @dev    Stage-2 (#90) hardening:
-///         - K11 assertions are P-256 verified ON CHAIN via [K11Verifier] +
-///           [P256Verifier] (Heima executes Cancun; no EIP-7212/RIP-7212 P-256
-///           precompile, so on-chain P-256 is pure-Solidity). See #168.
+///         - K11 assertions are P-256 verified ON CHAIN via [K11Verifier] →
+///           [P256Router] (precompile-first since #170/#282; RIP-7212 is live
+///           on Base/Fjord AND Heima/runtime-9261) with [P256Verifier] as the
+///           pure-Solidity fallback. Heima's deployed 0.3 set predates the
+///           router and still verifies via [P256Verifier] directly. See #168.
 ///         - K11 assertion challenge is bound to (operation_kind || operator ||
 ///           params || chainid || operatorNonce[operator]) so a captured K11
 ///           sig cannot be replayed for a different operation.
