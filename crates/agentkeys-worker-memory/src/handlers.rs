@@ -15,7 +15,9 @@ use agentkeys_core::audit::{
 use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
-use agentkeys_worker_creds::errors::{err_400, err_403, err_404, err_500, err_502, ApiError};
+use agentkeys_worker_creds::errors::{
+    err_400, err_403, err_404, err_500, err_502, err_502_s3_get, ApiError, S3FetchAttempt,
+};
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
 
 pub fn build_router(state: SharedMemoryWorkerState) -> Router {
@@ -210,7 +212,19 @@ async fn memory_get_inner(
             {
                 err_404("memory object not found", "s3_no_such_key")
             } else {
-                err_502(e.to_string(), "s3_get")
+                // #284: the 502 names the S3 error code (AccessDenied /
+                // ExpiredToken / NoSuchBucket / ...) in body + detail, so a
+                // remote caller can diagnose without a host journalctl session.
+                let attempt =
+                    S3FetchAttempt::from_sdk_err("agent-own", &req.cap.payload.actor_omni, &e);
+                tracing::warn!(
+                    owner_omni = %req.cap.payload.actor_omni,
+                    s3_code = %attempt.s3_code,
+                    bucket = %state.config.memory_bucket,
+                    service = %req.cap.payload.service,
+                    "memory get: S3 GetObject failed"
+                );
+                err_502_s3_get(&state.config.memory_bucket, vec![attempt])
             }
         })?;
     let body = resp

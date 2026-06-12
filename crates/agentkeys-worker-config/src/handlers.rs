@@ -15,7 +15,10 @@ use agentkeys_core::audit::{
 use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
-use agentkeys_worker_creds::errors::{err_400, err_403, err_404, err_500, err_502, ApiError};
+use agentkeys_worker_creds::errors::{
+    err_400, err_403, err_404, err_500, err_502, err_502_s3_get, s3_error_summary, ApiError,
+    S3FetchAttempt,
+};
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
 
 pub fn build_router(state: SharedConfigWorkerState) -> Router {
@@ -149,7 +152,7 @@ async fn config_put_inner(
         .body(env_bytes.clone().into())
         .send()
         .await
-        .map_err(|e| err_502(format!("s3 PutObject: {}", s3_err_detail(&e)), "s3_put"))?;
+        .map_err(|e| err_502(format!("s3 PutObject: {}", s3_error_summary(&e)), "s3_put"))?;
     Ok((key, env_bytes))
 }
 
@@ -212,10 +215,18 @@ async fn config_get_inner(
                 err_404("config object not found", "s3_no_such_key")
             } else {
                 // Surface the REAL S3 error (AccessDenied / NoSuchBucket / region
-                // mismatch) instead of a generic "service error", so a broken
-                // Config data class is diagnosable — the #207 init/list 502 the
-                // operator sees now names the actual cause to fix.
-                err_502(format!("s3 GetObject: {}", s3_err_detail(&e)), "s3_get")
+                // mismatch) instead of a generic "service error" — body + detail
+                // name the code a remote caller can act on (#207, #284).
+                let attempt =
+                    S3FetchAttempt::from_sdk_err("agent-own", &req.cap.payload.actor_omni, &e);
+                tracing::warn!(
+                    owner_omni = %req.cap.payload.actor_omni,
+                    s3_code = %attempt.s3_code,
+                    bucket = %state.config.config_bucket,
+                    service = %req.cap.payload.service,
+                    "config get: S3 GetObject failed"
+                );
+                err_502_s3_get(&state.config.config_bucket, vec![attempt])
             }
         })?;
     let body = resp
@@ -358,23 +369,6 @@ fn err_403_or_502(e: verify::VerifyError) -> ApiError {
         | verify::VerifyError::NotInScope
         | verify::VerifyError::K3Mismatch { .. } => err_403(e.to_string(), "chain_check_failed"),
         _ => err_502(e.to_string(), "chain_rpc"),
-    }
-}
-
-/// Extract the REAL S3 error (code + message) from an aws SdkError so a broken
-/// Config data class surfaces the actual cause — `AccessDenied` (role missing
-/// S3 Get/Put/List on `bots/<actor>/config/*`, or a PrincipalTag mismatch),
-/// `NoSuchBucket` (`$CONFIG_BUCKET` not provisioned), a region mismatch, etc. —
-/// instead of a generic "service error" the operator can't act on.
-fn s3_err_detail<E, R>(e: &aws_sdk_s3::error::SdkError<E, R>) -> String
-where
-    E: aws_sdk_s3::error::ProvideErrorMetadata,
-{
-    use aws_sdk_s3::error::ProvideErrorMetadata;
-    match (e.code(), e.message()) {
-        (Some(code), Some(msg)) if !msg.is_empty() => format!("{code} — {msg}"),
-        (Some(code), _) => code.to_string(),
-        _ => e.to_string(),
     }
 }
 
