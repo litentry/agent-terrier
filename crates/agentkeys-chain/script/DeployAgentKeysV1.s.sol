@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Script, console} from "forge-std/Script.sol";
 import {P256Verifier} from "../src/P256Verifier.sol";
+import {P256Router} from "../src/P256Router.sol";
 import {K11Verifier} from "../src/K11Verifier.sol";
 import {SidecarRegistry} from "../src/SidecarRegistry.sol";
 import {AgentKeysScope} from "../src/AgentKeysScope.sol";
@@ -14,9 +15,10 @@ import {CredentialAudit} from "../src/CredentialAudit.sol";
 ///         `forge script script/DeployAgentKeysV1.s.sol --rpc-url <url>
 ///          --private-key <0x...> --broadcast`
 ///
-/// @dev    Deploy order: P256Verifier → K11Verifier → SidecarRegistry →
-///         AgentKeysScope → K3EpochCounter → CredentialAudit. Each downstream
-///         contract takes the prior addresses via constructor.
+/// @dev    Deploy order: P256Verifier → P256Router → K11Verifier →
+///         SidecarRegistry → AgentKeysScope → K3EpochCounter →
+///         CredentialAudit. Each downstream contract takes the prior
+///         addresses via constructor.
 ///
 ///         The bring-up script parses stdout for "Name: 0xAddress" lines; regex:
 ///           grep -oE '<Name>:\s+0x[a-fA-F0-9]{40}'
@@ -30,7 +32,13 @@ contract DeployAgentKeysV1 is Script {
         }
 
         P256Verifier p256 = new P256Verifier();
-        K11Verifier k11 = new K11Verifier(address(p256));
+        // #170: K11 verifies through the precompile-first router (RIP-7212 at
+        // 0x100 where live — Base since Fjord, Heima at runtime 9261 — with
+        // the pure-Solidity verifier as fallback). The same deployment is
+        // correct on both kinds of chain and auto-flips to the cheap path
+        // when a precompile activates.
+        P256Router p256router = new P256Router(address(p256));
+        K11Verifier k11 = new K11Verifier(address(p256router));
         SidecarRegistry registry = new SidecarRegistry(address(k11));
         // #164 E3: AgentKeysScope no longer verifies K11 itself (scope writes are
         // authorized by the operator's ERC-4337 master account). Constructor takes
@@ -45,6 +53,7 @@ contract DeployAgentKeysV1 is Script {
         console.log("Deployer:        ", tx.origin);
         console.log("SignerGovernance:", signerGov);
         console.log("P256Verifier:    ", address(p256));
+        console.log("P256Router:      ", address(p256router));
         console.log("K11Verifier:     ", address(k11));
         console.log("AgentKeysScope:  ", address(scope));
         console.log("SidecarRegistry: ", address(registry));

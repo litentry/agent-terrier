@@ -30,5 +30,66 @@
   "deploy": {
     "deployer_env_var": "AGENTKEYS_BASE_DEPLOYER_KEY",
     "foundry_chain_arg": "base"
-  }
+  },
+  "contract_set_version": "0.3",
+  "contracts": [
+    {
+      "name": "AgentKeysScope",
+      "address": "0x920C7FBD7853A7D9E155128cc2b940A15df21746",
+      "purpose": "per-actor scope grants — services, namespaces, spend/time windows",
+      "deployed_at": "base · 2026-06-12"
+    },
+    {
+      "name": "SidecarRegistry",
+      "address": "0xCc8CE59950fAAfACaF7033CfCBFaABfD8463bCe6",
+      "purpose": "D_pub ↔ (operator_omni, actor_omni, roles) device bindings + K11 cred storage",
+      "deployed_at": "base · 2026-06-12"
+    },
+    {
+      "name": "K3EpochCounter",
+      "address": "0xbC027f76f632274F02F86de12797fbC1503465e6",
+      "purpose": "current K3 epoch; bumps trigger signer-side KEK + K4 derivation rotation",
+      "deployed_at": "base · 2026-06-12"
+    },
+    {
+      "name": "CredentialAudit",
+      "address": "0x974f0c39b22FB2EE1bE28cEbdcE8C233CFa71A5D",
+      "purpose": "per-actor append-only audit log + tier-2 Merkle root anchor every 2 min",
+      "deployed_at": "base · 2026-06-12"
+    },
+    {
+      "name": "P256Verifier",
+      "address": "0xb1e267A57D07Ec711e8835484B92b503B62d9c17",
+      "purpose": "pure-Solidity P-256 (secp256r1) verifier — the P256Router fallback",
+      "deployed_at": "base · 2026-06-12"
+    },
+    {
+      "name": "P256Router",
+      "address": "0xD5b221DeFe8CFe3Eac9bcba4eA4aCA41C8e182D2",
+      "purpose": "precompile-first P-256 verifier (RIP-7212 at 0x100, Solidity fallback) — K11Verifier p256Addr, issue #170",
+      "deployed_at": "base · 2026-06-12"
+    },
+    {
+      "name": "K11Verifier",
+      "address": "0xB8065848847B85B6ac0C9e28182518C65Ebf8C35",
+      "purpose": "K11 WebAuthn assertion verifier used by scope + registry master mutations",
+      "deployed_at": "base · 2026-06-12"
+    },
+    {
+      "name": "VerifyingPaymaster",
+      "address": "0xC297fe74E38bB8a1270358AF1A94e4C3b5578098",
+      "purpose": "#164 E6 / #225 — broker-co-signed gas sponsorship for the K11-gated accept UserOp (one shared EntryPoint deposit; the J1 Sybil gate)",
+      "deployed_at": "Heima mainnet · #225"
+    },
+    {
+      "name": "EntryPoint",
+      "address": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+      "purpose": "ERC-4337 v0.7 EntryPoint — handleOps entry for passkey-account master UserOps"
+    },
+    {
+      "name": "P256AccountFactory",
+      "address": "0x70dd3E063Ed2e4F0A45ce0f69e51E690cF52C8f8",
+      "purpose": "CREATE2 factory for P256Account passkey-master smart-accounts; constructor(entryPoint, k11Verifier)"
+    }
+  ]
 }
