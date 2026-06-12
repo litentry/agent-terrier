@@ -2,8 +2,8 @@
 //!
 //! Endpoints:
 //!   GET  /healthz                — service ready check
-//!   POST /v1/cred/store          — verify cap (store op) → encrypt → S3 PUT
-//!   POST /v1/cred/fetch          — verify cap (fetch op) → S3 GET → decrypt → return
+//!   POST /v1/cred/store          — verify cap (store op, MASTER-SELF ONLY) → encrypt → S3 PUT
+//!   POST /v1/cred/fetch          — verify cap (fetch op) → S3 GET (operator vault) → decrypt → return
 //!   POST /v1/cred/teardown       — verify cap (teardown op) → S3 DELETE prefix
 //!
 //! Cap verification (each request, before any S3 touch — arch.md §15.1):
@@ -30,7 +30,7 @@ use crate::aws_creds::{s3_for_request, OptionalStsCreds};
 use crate::envelope;
 use crate::errors::{err_400, err_403, err_500, err_502, err_502_s3_get, ApiError, S3FetchAttempt};
 use crate::state::SharedWorkerState;
-use crate::verify::{self, CapOp, CapToken, DataClass};
+use crate::verify::{self, CapOp, CapPayload, CapToken, DataClass};
 
 pub fn build_router(state: SharedWorkerState) -> Router {
     Router::new()
@@ -168,6 +168,18 @@ async fn cred_store(
     Json(req): Json<StoreRequest>,
 ) -> Result<Json<StoreResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Store).await?;
+    // Single-vault layer-2 gate (docs/plan/single-vault-credentials.md):
+    // credentials are MASTER-VAULTED ONLY — reject a delegated store cap even
+    // if a (compromised) broker minted one. Defense-in-depth mirror of the
+    // broker's cred_store_not_master_self gate; closes the #228 shadowing
+    // hole at the worker too. Both omnis are broker-normalized 0x-lowercase.
+    if req.cap.payload.operator_omni != req.cap.payload.actor_omni {
+        return Err(err_403(
+            "cred store is master-self only (operator must equal actor) — \
+             agents cannot self-store credentials (single-vault)",
+            "cred_store_not_master_self",
+        ));
+    }
 
     let outcome = cred_store_inner(&state, creds.as_ref(), &req).await;
     // Durable audit (#229): after cap-verify, before the success response.
@@ -269,81 +281,70 @@ async fn cred_fetch_inner(
     creds: Option<&crate::aws_creds::StsCreds>,
     req: &FetchRequest,
 ) -> Result<Vec<u8>, ApiError> {
-    // A fetch may read TWO vaults, tried in order (see fetch_vault_owners):
-    // the actor's OWN (#228 agent-owned creds), then — for a DELEGATED cap
-    // (actor != operator) — the OPERATOR's vault (#216: the master vaulted the
-    // key master-self; the cap's already-verified on-chain cred:<service> scope
-    // grant IS the agent's authorization to fetch it). The S3 read still runs
-    // under the CALLER-relayed STS creds, so layer-3 IAM is untouched: reading
-    // the operator's prefix requires operator-tagged STS (the wire context's
-    // operator session) — the cap only narrows WHICH service that session
-    // releases. The envelope AAD is keyed by the vault OWNER (each vault's
-    // objects were encrypted with aad(operator, owner, service, epoch) at
-    // store time), so the owner drives both the key and the decrypt.
+    // Single-vault (docs/plan/single-vault-credentials.md): every credential
+    // lives in the OPERATOR's vault, so a fetch reads exactly ONE prefix —
+    // bots/<operator>/credentials/. A master-self cap (operator == actor) is
+    // the degenerate case; a DELEGATED cap (actor != operator, #216) reads
+    // the SAME vault — the cap's already-verified on-chain cred:<service>
+    // scope grant IS the agent's authorization, and the S3 read runs under
+    // the CALLER-relayed STS creds (reading the operator prefix requires
+    // operator-tagged STS — the wire context's operator session; layer-3 IAM
+    // untouched). The #228 agent-own vault and its shadowing fetch order were
+    // REMOVED: store is master-self-only at both broker and worker, so an
+    // actor-keyed candidate can no longer exist. The envelope AAD is keyed by
+    // the vault OWNER (= the operator), matching the
+    // aad(operator, actor == operator, service, epoch) written at
+    // master-self store time.
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
-    let owners = fetch_vault_owners(&req.cap.payload.actor_omni, &req.cap.payload.operator_omni);
-    let mut attempts: Vec<S3FetchAttempt> = Vec::new();
-    for (idx, owner) in owners.iter().enumerate() {
-        // owners[0] is always the actor's OWN vault (#228); owners[1], when
-        // present, the operator's (#216 delegated fallback).
-        let vault = if idx == 0 { "agent-own" } else { "operator" };
-        let key = s3_key(owner, &req.cap.payload.service);
-        let resp = match s3
-            .get_object()
-            .bucket(&state.config.vault_bucket)
-            .key(&key)
-            .send()
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                // NoSuchKey (not stored in this vault) or AccessDenied (the
-                // relayed STS isn't tagged for this prefix) — try the next
-                // vault; if all miss, the 502 carries EVERY attempt's S3
-                // error code (#284), not just the last one stringified.
-                let attempt = S3FetchAttempt::from_sdk_err(vault, owner, &e);
-                tracing::warn!(
-                    vault,
-                    owner_omni = %owner,
-                    s3_code = %attempt.s3_code,
-                    bucket = %state.config.vault_bucket,
-                    service = %req.cap.payload.service,
-                    "cred fetch: S3 GetObject failed for vault candidate"
-                );
-                attempts.push(attempt);
-                continue;
-            }
-        };
-        let body = resp
-            .body
-            .collect()
-            .await
-            .map_err(|e| err_502(e.to_string(), "s3_body"))?
-            .into_bytes();
+    let owner = fetch_vault_owner(&req.cap.payload);
+    let key = s3_key(owner, &req.cap.payload.service);
+    let resp = s3
+        .get_object()
+        .bucket(&state.config.vault_bucket)
+        .key(&key)
+        .send()
+        .await
+        .map_err(|e| {
+            // The 502 names the S3 error code (#284): NoSuchKey (service never
+            // vaulted by the master) vs AccessDenied (caller relayed
+            // non-operator-tagged STS) vs expired-STS — distinguishable from
+            // the wire without host access.
+            let attempt = S3FetchAttempt::from_sdk_err("operator", owner, &e);
+            tracing::warn!(
+                vault = attempt.vault,
+                owner_omni = %owner,
+                s3_code = %attempt.s3_code,
+                bucket = %state.config.vault_bucket,
+                service = %req.cap.payload.service,
+                "cred fetch: S3 GetObject failed"
+            );
+            err_502_s3_get(&state.config.vault_bucket, vec![attempt])
+        })?;
+    let body = resp
+        .body
+        .collect()
+        .await
+        .map_err(|e| err_502(e.to_string(), "s3_body"))?
+        .into_bytes();
 
-        let aad = envelope::aad(
-            &req.cap.payload.operator_omni,
-            owner,
-            &req.cap.payload.service,
-            req.cap.payload.k3_epoch,
-        );
-        return envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
-            .map_err(|e| err_500(e.to_string(), "envelope_decrypt"));
-    }
-    Err(err_502_s3_get(&state.config.vault_bucket, attempts))
+    let aad = envelope::aad(
+        &req.cap.payload.operator_omni,
+        owner,
+        &req.cap.payload.service,
+        req.cap.payload.k3_epoch,
+    );
+    envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
+        .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
 }
 
-/// The vaults a fetch may read, in order: the actor's OWN vault first (#228
-/// agent-owned creds — an agent's self-stored entry shadows a same-named
-/// delegated one, never the reverse), then the operator's vault when the cap
-/// is delegated (actor != operator, the #216 master-provisioned LLM key).
-/// Master-self caps (actor == operator) read exactly one vault — unchanged.
-fn fetch_vault_owners(actor_omni: &str, operator_omni: &str) -> Vec<String> {
-    if actor_omni.eq_ignore_ascii_case(operator_omni) {
-        vec![actor_omni.to_string()]
-    } else {
-        vec![actor_omni.to_string(), operator_omni.to_string()]
-    }
+/// Single-vault (docs/plan/single-vault-credentials.md): the ONLY vault a
+/// fetch reads — the OPERATOR's. Master-self caps are the degenerate case
+/// (operator == actor). Executable decision record: if this ever returns the
+/// ACTOR's omni again, the #228 shadowing hole reopens (an agent-stored key
+/// silently replacing the master-authorized one) — read the plan doc before
+/// changing it.
+fn fetch_vault_owner(payload: &CapPayload) -> &str {
+    &payload.operator_omni
 }
 
 async fn cred_teardown(
@@ -494,21 +495,37 @@ fn s3_prefix(actor_omni: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn fetch_owners_master_self_reads_one_vault() {
-        // operator == actor (case-insensitive) → exactly the actor's own vault,
-        // byte-identical to the pre-#216 behavior.
-        assert_eq!(fetch_vault_owners("0xAB", "0xab"), vec!["0xAB".to_string()]);
+    fn payload(operator: &str, actor: &str) -> CapPayload {
+        CapPayload {
+            operator_omni: operator.to_string(),
+            actor_omni: actor.to_string(),
+            service: "openrouter".to_string(),
+            op: CapOp::Fetch,
+            data_class: DataClass::Credentials,
+            device_key_hash: format!("0x{}", "c".repeat(64)),
+            k3_epoch: 1,
+            issued_at: 0,
+            expires_at: u64::MAX,
+            nonce: "n".to_string(),
+        }
     }
 
     #[test]
-    fn fetch_owners_delegated_falls_back_to_operator_vault() {
-        // actor != operator (#216 delegated fetch) → the agent's own vault
-        // first (#228 agent-owned shadows), then the operator's (the master-
-        // vaulted key the cap's scope grant authorizes).
+    fn fetch_reads_exactly_the_operator_vault() {
+        // Single-vault decision record (docs/plan/single-vault-credentials.md):
+        // master-self (operator == actor) — the degenerate case…
         assert_eq!(
-            fetch_vault_owners("0xagent", "0xmaster"),
-            vec!["0xagent".to_string(), "0xmaster".to_string()]
+            fetch_vault_owner(&payload("0xmaster", "0xmaster")),
+            "0xmaster"
+        );
+        // …and DELEGATED (#216): the agent fetches the MASTER-vaulted key from
+        // the operator's prefix. Never an actor-keyed candidate — returning
+        // the actor here would reopen the #228 shadowing hole.
+        let delegated = payload("0xmaster", "0xagent");
+        assert_eq!(fetch_vault_owner(&delegated), "0xmaster");
+        assert_eq!(
+            s3_key(fetch_vault_owner(&delegated), &delegated.service),
+            "bots/master/credentials/openrouter.enc"
         );
     }
 

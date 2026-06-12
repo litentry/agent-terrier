@@ -212,6 +212,12 @@ cred worker → S3); the secret is **decrypt-on-read and never shown** in the UI
 agent can fetch a credential only with a granted `cred:<service>` scope. **Vault a
 credential** with the form on that page (service id + secret). Listing is
 **master-only** — an agent's single-service cap can't enumerate your vault.
+**Storing is master-only too (single-vault):** your vault is the *only*
+credentials vault — agents cannot store credentials of their own (the broker
+rejects it with `cred_store_not_master_self`), so an agent can never quietly swap
+in a key you didn't authorize, and everything an agent can use is always visible
+on this page. If an agent acquires a new key (e.g. via a signup flow), vault it
+here yourself and grant the scope.
 
 **Default-key selection (#216).** The on-chain scope stores only a
 `keccak(service)` hash, so it can *verify* a service name but can't *enumerate*

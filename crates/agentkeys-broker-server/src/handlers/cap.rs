@@ -394,6 +394,13 @@ async fn mint_cap(
         return Err(CapError::OperatorMismatch);
     }
 
+    // Single-vault master-sovereign credentials (docs/plan/single-vault-credentials.md):
+    // cred-STORE mints are MASTER-SELF ONLY. Scope is service-granular, so a
+    // cred:<svc> FETCH grant would otherwise also authorize delegated STORE
+    // mints — the #228 shadowing hole. Hard route-level gate (config's soft
+    // "master-only because nobody grants it" posture is NOT enough here).
+    enforce_cred_store_master_self(op, data_class, &session_omni, &req.actor_omni)?;
+
     let chain = ChainContracts::from_state(&state)?;
 
     // 1. SidecarRegistry.getDevice(deviceKeyHash) — full decode.
@@ -488,6 +495,34 @@ async fn mint_cap(
         client_nonce: req.client_nonce,
         client_ts: req.client_ts,
     })
+}
+
+/// Single-vault gate (layer 1 — docs/plan/single-vault-credentials.md): a
+/// credentials STORE cap may only be minted master-self (`actor == session
+/// operator`). Every credential lives in the operator's vault; agents fetch
+/// delegated but never self-store (the #228 agent-own vault is removed, which
+/// closes the shadowing hole by construction). All other (op, data_class)
+/// combinations pass through untouched.
+fn enforce_cred_store_master_self(
+    op: CapOp,
+    data_class: DataClass,
+    session_omni_norm: &str,
+    actor_omni_raw: &str,
+) -> Result<(), CapError> {
+    if op != CapOp::Store || data_class != DataClass::Credentials {
+        return Ok(());
+    }
+    let actor = normalize_hex32(actor_omni_raw)
+        .map_err(|e| CapError::InvalidInput(format!("actor_omni invalid: {e}")))?;
+    if actor != session_omni_norm {
+        return Err(CapError::Forbidden(
+            "cred store is master-self only — agents cannot self-store credentials \
+             (single-vault: every credential lives in the operator's vault)"
+                .to_string(),
+            "cred_store_not_master_self",
+        ));
+    }
+    Ok(())
 }
 
 /// Worker-side max age for a cap-PoP signature. Shared with the worker's
@@ -865,6 +900,54 @@ mod tests {
         assert_eq!(CapOp::Fetch.as_u8(), 1);
         assert_eq!(CapOp::Teardown.as_u8(), 2);
         assert_eq!(CapOp::Classify.as_u8(), 3);
+    }
+
+    #[test]
+    fn cred_store_mint_is_master_self_only() {
+        // Single-vault (docs/plan/single-vault-credentials.md): a delegated
+        // cred-STORE mint is a hard 403 — the route-level gate that closes
+        // the #228 shadowing hole. Same actor delegated FETCH and delegated
+        // memory PUT stay mintable (scope-gated as before).
+        let master = "a".repeat(64);
+        let agent_0x = format!("0x{}", "b".repeat(64));
+        let master_0x = format!("0x{}", "a".repeat(64));
+
+        let err = enforce_cred_store_master_self(
+            CapOp::Store,
+            DataClass::Credentials,
+            &master,
+            &agent_0x,
+        )
+        .unwrap_err();
+        match err {
+            CapError::Forbidden(_, reason) => assert_eq!(reason, "cred_store_not_master_self"),
+            other => panic!("expected Forbidden(cred_store_not_master_self), got {other:?}"),
+        }
+
+        // master-self store (0x-prefixed raw form normalizes to the session omni)
+        assert!(enforce_cred_store_master_self(
+            CapOp::Store,
+            DataClass::Credentials,
+            &master,
+            &master_0x,
+        )
+        .is_ok());
+        // delegated fetch — untouched
+        assert!(enforce_cred_store_master_self(
+            CapOp::Fetch,
+            DataClass::Credentials,
+            &master,
+            &agent_0x,
+        )
+        .is_ok());
+        // delegated memory put — untouched (agents keep their own memory)
+        assert!(enforce_cred_store_master_self(
+            CapOp::Store,
+            DataClass::Memory,
+            &master,
+            &agent_0x
+        )
+        .is_ok());
     }
 
     #[test]
