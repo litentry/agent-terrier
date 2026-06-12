@@ -28,7 +28,7 @@ use agentkeys_core::audit::{
 use crate::audit::{cap_hash, keccak_hex, zero_hash};
 use crate::aws_creds::{s3_for_request, OptionalStsCreds};
 use crate::envelope;
-use crate::errors::{err_400, err_403, err_500, err_502, ApiError};
+use crate::errors::{err_400, err_403, err_500, err_502, err_502_s3_get, ApiError, S3FetchAttempt};
 use crate::state::SharedWorkerState;
 use crate::verify::{self, CapOp, CapToken, DataClass};
 
@@ -282,8 +282,11 @@ async fn cred_fetch_inner(
     // store time), so the owner drives both the key and the decrypt.
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let owners = fetch_vault_owners(&req.cap.payload.actor_omni, &req.cap.payload.operator_omni);
-    let mut last_err: Option<ApiError> = None;
-    for owner in &owners {
+    let mut attempts: Vec<S3FetchAttempt> = Vec::new();
+    for (idx, owner) in owners.iter().enumerate() {
+        // owners[0] is always the actor's OWN vault (#228); owners[1], when
+        // present, the operator's (#216 delegated fallback).
+        let vault = if idx == 0 { "agent-own" } else { "operator" };
         let key = s3_key(owner, &req.cap.payload.service);
         let resp = match s3
             .get_object()
@@ -296,8 +299,18 @@ async fn cred_fetch_inner(
             Err(e) => {
                 // NoSuchKey (not stored in this vault) or AccessDenied (the
                 // relayed STS isn't tagged for this prefix) — try the next
-                // vault; surface the LAST attempt's error if all miss.
-                last_err = Some(err_502(e.to_string(), "s3_get"));
+                // vault; if all miss, the 502 carries EVERY attempt's S3
+                // error code (#284), not just the last one stringified.
+                let attempt = S3FetchAttempt::from_sdk_err(vault, owner, &e);
+                tracing::warn!(
+                    vault,
+                    owner_omni = %owner,
+                    s3_code = %attempt.s3_code,
+                    bucket = %state.config.vault_bucket,
+                    service = %req.cap.payload.service,
+                    "cred fetch: S3 GetObject failed for vault candidate"
+                );
+                attempts.push(attempt);
                 continue;
             }
         };
@@ -317,7 +330,7 @@ async fn cred_fetch_inner(
         return envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
             .map_err(|e| err_500(e.to_string(), "envelope_decrypt"));
     }
-    Err(last_err.unwrap_or_else(|| err_502("no vault candidates", "s3_get")))
+    Err(err_502_s3_get(&state.config.vault_bucket, attempts))
 }
 
 /// The vaults a fetch may read, in order: the actor's OWN vault first (#228
