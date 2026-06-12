@@ -21,7 +21,7 @@ test = "test"
 # Verified 2026-06-01: DeployAgentKeysV1.s.sol with FOUNDRY_EVM_VERSION=cancun
 # reproduces the error; with london it deploys. (forge CREATE --broadcast does
 # NOT hit this; our deploy path is forge SCRIPT, so the pin stays.)
-# Full diagnosis: CLAUDE.md "Heima EVM compatibility level".
+# Full diagnosis: AGENTS.md "Heima EVM compatibility level".
 evm_version = "london"
 solc_version = "0.8.20"
 optimizer = true

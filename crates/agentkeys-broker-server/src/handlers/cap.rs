@@ -93,7 +93,7 @@ impl CapOp {
 /// the right variant for each endpoint (`/v1/cap/cred-*` → Credentials,
 /// `/v1/cap/memory-*` → Memory) and signs it into the payload; workers
 /// reject caps whose data_class doesn't match their bucket. Issue #90
-/// followup — codified in CLAUDE.md.
+/// followup — codified in AGENTS.md.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DataClass {

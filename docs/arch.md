@@ -268,7 +268,7 @@ S3 prefixes:    bots/a8fde0c5…/ (master)        bots/a152e6b3…/ (hermes)
 
 ## 5. Canonical names (one concept, one canonical spelling)
 
-Pinned to disambiguate the same value showing up under different labels across components. **Use the canonical column** in every new doc, runbook, CLI output, and commit message; the alias column lists every spelling that exists today so a reader chasing one of them can find their way back. Per `CLAUDE.md` → "Terminology-source-of-truth rule", if you introduce a name not in this table, either add the alias row here or rename the call site to match the canonical name in the same change.
+Pinned to disambiguate the same value showing up under different labels across components. **Use the canonical column** in every new doc, runbook, CLI output, and commit message; the alias column lists every spelling that exists today so a reader chasing one of them can find their way back. Per `AGENTS.md` → "Terminology-source-of-truth rule", if you introduce a name not in this table, either add the alias row here or rename the call site to match the canonical name in the same change.
 
 > **Deployed addresses** for every contract named here live in the chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../crates/agentkeys-core/chain-profiles/heima.json) (`.contracts[]` + `contract_set_version`) — the machine source of truth (#251), mirrored to `scripts/operator-workstation.env` for shell tooling. Test-set addresses live in `scripts/operator-workstation.test.env` (authoritative; synced one-way to the `TEST_*` GitHub secrets by `scripts/ci-set-github-secrets.sh`); wallet EOAs live in the env files. The human registry — design/version/ABI/cutover prose + the full **source-of-truth hierarchy** — is [`spec/deployed-contracts.md`](spec/deployed-contracts.md). Docs **anchor** to those sources, never copy: a literal contract address in any tracked `.md` is CI-rejected by the doc-literal gate in `scripts/check-deployed-contracts-sync.sh`. The operator-facing **wallet/contract/funding map** (key custody tiers, prod-vs-test sets side by side, the funding-flow diagram, "which wallet do I fund") is [`chain-setup.md` §Wallets](chain-setup.md#wallets-contracts--funding-map-prod--test).
 
@@ -1644,7 +1644,7 @@ Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 4
 | 3. AWS IAM PrincipalTag | per-actor STS creds scope S3 ARN via `${aws:PrincipalTag/agentkeys_actor_omni}` + `s3:prefix` condition on ListBucket | role inline + v3 bucket policy | steps 4-9 (cred + memory); step 19 (config) |
 | 4. Per-data-class buckets | vault-role can't reach memory bucket; memory-role can't reach vault bucket; config-role can't reach either (#201) | per-data-class IAM roles | step 10 (cred ↔ memory); step 19 (config) |
 
-**Test discipline:** any PR adding a new data class (e.g., payments-audit) MUST extend the cap-token enum, add two new broker endpoints, and extend the stage-3 demo with negative isolation tests for all four layers. CLAUDE.md codifies this rule.
+**Test discipline:** any PR adding a new data class (e.g., payments-audit) MUST extend the cap-token enum, add two new broker endpoints, and extend the stage-3 demo with negative isolation tests for all four layers. AGENTS.md codifies this rule.
 
 **Landed data class — `Config`** (the permission/policy config, §17.3; #201): the broker mints `/v1/cap/config-store` + `/v1/cap/config-fetch` → `{ op, data_class: Config, ... }`, the `agentkeys-worker-config` worker accepts only `DataClass::Config` (rejecting cred/memory caps with `cap_data_class_mismatch`, and symmetrically rejected by the cred/memory workers). **Master-only** (the governed agents hold no `Config` cap), so cap-mint + worker scope checks ride the §10.2.x master-self skip. Stage-3 negatives: step 20 (config cap → memory + cred workers) + step 21 (memory + cred cap → config worker), all master-self. **Landed compute-gate cap — `CapOp::Classify` + `/v1/cap/classify` (#207 items 2-3):** the 7th cap endpoint; unlike the storage endpoints the route does NOT fix the data class — `data_class` is an explicit signed request field (a classify cap spans data classes), and the `agentkeys-worker-classify` worker rejects a non-`Classify` op (the storage workers reject `op: Classify`) and a classify cap whose signed `data_class` differs from the surface being classified. Design: [`plan/web-flow/config-data-class-memory-list.md`](plan/web-flow/config-data-class-memory-list.md) + [`plan/classifier-service.md`](plan/classifier-service.md).
 
@@ -2198,7 +2198,7 @@ A single user-actor (master or child) can have its tool calls routed through any
 
 | Backend | Where the LLM runs | Where the daemon runs | Use case |
 |---|---|---|---|
-| **Hosted LLM** | Vendor cloud (xiaozhi, Doubao, OpenAI plugin host, Volcano Ark) | No daemon on vendor device; broker is the trust mediator | Voice agents, smart speakers, vendor-hosted assistants. Trust runs vendor JWT → broker → workers per CLAUDE.md per-actor isolation invariants. |
+| **Hosted LLM** | Vendor cloud (xiaozhi, Doubao, OpenAI plugin host, Volcano Ark) | No daemon on vendor device; broker is the trust mediator | Voice agents, smart speakers, vendor-hosted assistants. Trust runs vendor JWT → broker → workers per the §17.5 four-layer isolation invariants. |
 | **Local LLM** | Operator's machine (Claude Code, Codex CLI, Claude Desktop, Cursor, Cline, Roo, Windsurf, Gemini CLI) | Co-located with LLM | Power-user + developer flow. MCP server uses DaemonBackend; cap-mint is in-process (sub-millisecond). Full §12.2 host-local policy applies. |
 | **Task agent** | Sandboxed VM (aiosandbox / operator-managed pod / TEE-attested enclave) | In the sandbox alongside the LLM | Long-running autonomous workloads — research bot, multi-step DevOps, code interpreter. The agent runs *untrusted code* it receives from upstreams; the daemon is the security boundary. Per [§10.5](#105-where-d_priv-lives-on-an-agent-machine), D_priv lifecycle depends on sandbox-ephemerality. |
 | **Chat agent** | Operator-direct chat session, hosted by us | Operator's local daemon (talking to our chat-agent service) | The "talk to AgentKeys" surface for managing your own agents — what's been spent, what's been audited, what to revoke. Backed by an LLM we control (DeepSeek / Doubao / a tuned model) and proxied through the same cap-token machinery. |
@@ -2240,7 +2240,7 @@ When a user buys a vendor AI device (xiaozhi MagicLick, Doubao smart speaker, fu
      agentkeys.vendor       = magiclick | doubao | …
      iat / exp / aud         = standard JWT fields
    Our broker validates the JWT signature against K1 on every cap-mint.
-4. Per-actor IAM scoping (CLAUDE.md "four-layer isolation invariants")
+4. Per-actor IAM scoping (§17.5 "four-layer defense in depth")
    enforces that this vendor device can only read its own actor's S3 prefix.
 ```
 
@@ -2266,7 +2266,7 @@ Likewise the web UI is **not a trust plane** — per the #107 PR thread, the tru
 ### 22c.7 Prior art
 
 - **[`rohitg00/agentmemory`](https://github.com/rohitg00/agentmemory)** — the closest-in-spirit single-operator app: CLI + persistent daemon + web viewer + plugin-marketplace `connect <host>` model. The shape we mirror in §22c.1; differences are the multi-user / multi-device / trust-core requirements AgentKeys carries that agentmemory doesn't.
-- **[`iii-hq/iii`](https://github.com/iii-hq/iii)** — composable service runtime (Rust engine + Node/Python/Rust SDKs; sibling of Temporal / Inngest / Restate). We **borrow vocabulary only** — iii's Trigger taxonomy (`direct call` / `HTTP endpoint` / `cron schedule` / `queue subscription` / `state change` / `stream event`) is the internal dispatch model for [#133](https://github.com/litentry/agentKeys/issues/133)'s `agentkeys hook` subcommand. We do **NOT** adopt iii as a runtime — its live worker registry would break the per-data-class worker isolation in [§15](#15-workers-per-service) and the CLAUDE.md four-layer per-actor invariants. Engine is Elastic License 2.0; we avoid the legal entanglement by not importing it.
+- **[`iii-hq/iii`](https://github.com/iii-hq/iii)** — composable service runtime (Rust engine + Node/Python/Rust SDKs; sibling of Temporal / Inngest / Restate). We **borrow vocabulary only** — iii's Trigger taxonomy (`direct call` / `HTTP endpoint` / `cron schedule` / `queue subscription` / `state change` / `stream event`) is the internal dispatch model for [#133](https://github.com/litentry/agentKeys/issues/133)'s `agentkeys hook` subcommand. We do **NOT** adopt iii as a runtime — its live worker registry would break the per-data-class worker isolation in [§15](#15-workers-per-service) and the §17.5 four-layer per-actor invariants. Engine is Elastic License 2.0; we avoid the legal entanglement by not importing it.
 - **[`huangjunsen0406/xiaozhi-mcphub`](https://github.com/huangjunsen0406/xiaozhi-mcphub)** — multi-MCP aggregator for xiaozhi vendors (Node/TS + React + Postgres+pgvector). Solves "compose N MCP servers behind one xiaozhi endpoint" — a real problem when an operator runs many MCPs, which we're not yet at. If we need this in M4+, the right move is an `AggregateBackend` variant in [`agentkeys-mcp-server`](../crates/agentkeys-mcp-server/) per the §22c.2 backend-wiring pattern, not adopting an external JS/TS stack into the trust path.
 
 ---
@@ -2297,7 +2297,7 @@ Task Host runtimes (Claude Code, Codex, Hermes, OpenClaw) fire lifecycle hooks (
 
 Tier-1 coverage means one reference script bundle ports across four hosts with thin shims. Issue #133 is the canonical track: ship reference hook configs + `agentkeys hook check` CLI helper + cap-mint pre-warming for sub-50ms p99 latency.
 
-**Operator-facing delivery: `agentkeys wire <runtime>`** (per [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.7). The reference hook configs from #133 are not hand-installed by users. AgentKeys ships a single CLI command — `agentkeys wire hermes`, `agentkeys wire claude-code`, etc. — that idempotently writes the hook scripts (under `~/.<runtime>/agent-hooks/`), appends the `hooks:` block to the runtime's config, pre-approves first-use consent, fetches the LLM API key from the credential broker, and verifies via the runtime's own `hooks doctor` equivalent. Output follows the CLAUDE.md `ok proceeding / skip <reason> / fail <reason>` convention; re-runs are no-ops modulo drift. Per-runtime adapter trait lives in `crates/agentkeys-cli/src/wire/adapters/`. Full plan: [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](plan/phase-1-fresh-user-wire-onboarding.md).
+**Operator-facing delivery: `agentkeys wire <runtime>`** (per [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.7). The reference hook configs from #133 are not hand-installed by users. AgentKeys ships a single CLI command — `agentkeys wire hermes`, `agentkeys wire claude-code`, etc. — that idempotently writes the hook scripts (under `~/.<runtime>/agent-hooks/`), appends the `hooks:` block to the runtime's config, pre-approves first-use consent, fetches the LLM API key from the credential broker, and verifies via the runtime's own `hooks doctor` equivalent. Output follows the AGENTS.md `ok proceeding / skip <reason> / fail <reason>` convention; re-runs are no-ops modulo drift. Per-runtime adapter trait lives in `crates/agentkeys-cli/src/wire/adapters/`. Full plan: [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](plan/phase-1-fresh-user-wire-onboarding.md).
 
 ### 22d.3 Fallback — OpenAI-compatible proxy (Phase 3b, lower priority)
 
@@ -2468,7 +2468,7 @@ flowchart TB
 - Signer host is TEE-attested. Brokers and workers pin the signer's attestation hash; mTLS handshake fails if measurement drifts.
 - Daemons reach broker + workers over public TLS. Caller authentication at workers is by cap-token, not by IP.
 
-The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent; the single entry point per CLAUDE.md "Remote broker host" rule). Historical stage-7 operator commentary is archived at [`docs/archived/operator-runbook-stage7-2026-04.md`](archived/operator-runbook-stage7-2026-04.md) for reference only.
+The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent; the single entry point per AGENTS.md "Remote broker host" rule). Historical stage-7 operator commentary is archived at [`docs/archived/operator-runbook-stage7-2026-04.md`](archived/operator-runbook-stage7-2026-04.md) for reference only.
 
 ---
 

@@ -7,7 +7,7 @@ name: wiki lint
 #     title; a body H1 duplicates it and over-indents the sidebar TOC)
 #
 # The check lives in scripts/lint-wiki.sh (runnable locally too). The rule is
-# documented in CLAUDE.md "Wiki-location policy". Companion to publish-wiki.yml,
+# documented in AGENTS.md "Wiki-location policy". Companion to publish-wiki.yml,
 # which mirrors docs/wiki/ to the GitHub Wiki on push to main.
 
 on:

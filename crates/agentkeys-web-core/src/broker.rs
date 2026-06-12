@@ -75,7 +75,7 @@ impl BrokerClient {
     }
 
     // ── Cap-mint (operator-J1-gated). One typed call per (op, data_class);
-    //    the route is the source of truth for the data_class (per CLAUDE.md). ──
+    //    the route is the source of truth for the data_class (per AGENTS.md). ──
 
     pub async fn cap_memory_put(&self, bearer: &str, req: &CapRequest) -> R<CapToken> {
         self.post_json("/v1/cap/memory-put", Some(bearer), req)
