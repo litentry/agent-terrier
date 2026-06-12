@@ -323,6 +323,24 @@ export interface ChainInfo {
   tokenDecimals: number;
   finality: string;
   contracts: ChainContract[];
+  /** The chain the daemon OPERATES on (#282 switcher) — may differ from
+   *  `name` when the UI is viewing another chain via `?chain=`. Optional
+   *  for older daemons. */
+  daemonChain?: string;
+}
+
+/** One built-in chain profile from `GET /v1/chain/list` (#282 switcher). */
+export interface ChainListEntry {
+  name: string;
+  display: string;
+  chainId: number;
+  contracts: number;
+}
+
+/** All built-in chains + which one the daemon operates on (#282 switcher). */
+export interface ChainList {
+  chains: ChainListEntry[];
+  daemonChain: string;
 }
 
 /** One ABI-decoded argument of a transaction's calldata. */
@@ -405,8 +423,12 @@ export interface DecodedAuditEvent {
 export interface AgentKeysClient {
   status(): Promise<ConnectionStatus>;
 
-  /** Chain + deployed-contract registry for the chain page (#153). */
-  getChainInfo(): Promise<Result<ChainInfo>>;
+  /** Chain + deployed-contract registry for the chain page (#153). Pass a
+   *  built-in chain name to VIEW another chain's registry (#282 switcher —
+   *  display-only; the daemon's operational chain is unaffected). */
+  getChainInfo(chain?: string): Promise<Result<ChainInfo>>;
+  /** Built-in chain profiles + the daemon's operational chain (#282). */
+  getChainList(): Promise<Result<ChainList>>;
   /** Decode one audit event's CBOR envelope + on-chain calldata (#153). */
   decodeAuditEvent(id: string): Promise<Result<DecodedAuditEvent>>;
 

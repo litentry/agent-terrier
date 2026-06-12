@@ -305,7 +305,7 @@ export function AuditFeed({
         <PageHead
           crumb="tier-1 · sse · audit-service · decodable on click"
           title={<><span className="muted serif">/</span> audit feed</>}
-          desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its Heima transaction."
+          desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction."
         />
         <EmptyState
           status={status}
@@ -321,7 +321,7 @@ export function AuditFeed({
       <PageHead
         crumb="tier-1 · sse · audit-service · decodable on click"
         title={<><span className="muted serif">/</span> audit feed</>}
-        desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its Heima transaction."
+        desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction."
         actions={<button className="btn sm" onClick={onPause}>{paused ? '▶ resume' : '❚❚ pause'}</button>}
       />
       <Panel

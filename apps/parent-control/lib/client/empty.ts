@@ -82,7 +82,11 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async getChainInfo(): Promise<Result<import('./types').ChainInfo>> {
+  async getChainInfo(_chain?: string): Promise<Result<import('./types').ChainInfo>> {
+    return disconnected();
+  }
+
+  async getChainList(): Promise<Result<import('./types').ChainList>> {
     return disconnected();
   }
 

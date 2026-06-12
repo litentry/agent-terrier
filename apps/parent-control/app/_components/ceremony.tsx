@@ -164,7 +164,7 @@ const REGISTER_CONFIRM_TIMEOUT_MS = 120_000;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // #232: the "Register master P256Account" ceremony step — sign the register
-// userOpHash (2nd Touch ID) and land it on chain. The slow Heima handleOps
+// userOpHash (2nd Touch ID) and land it on chain. A slow handleOps
 // (10–30 s) can outrun the browser's `await` (the HTTP response gets lost while
 // the tx still lands), so the in-flight submit RACES an onboarding-state poll:
 // whichever first proves `chain == "master-registered"` advances the ceremony.
@@ -328,7 +328,7 @@ export function CeremonyRunner({
                   {s.onchain && <span className="clog-chain">on-chain</span>}
                 </div>
                 <div className="clog-sub">{s.sub}</div>
-                {txs[i] && <div className="clog-tx mono">tx {txs[i].slice(0, 22)}… · heima · confirmed</div>}
+                {txs[i] && <div className="clog-tx mono">tx {txs[i].slice(0, 22)}… · on-chain · confirmed</div>}
               </div>
             </div>
           );
