@@ -23,6 +23,12 @@ path = "src/bin/dump_protocol_fixtures.rs"
 agentkeys-provisioner = { path = "../agentkeys-provisioner" }
 # K10 cap-mint proof-of-possession (issue #76): DeviceKey + cap_pop_now signing.
 agentkeys-core = { workspace = true }
+# The transport-agnostic wire shapes (cap-mint + worker bodies). Moved out of
+# this crate's `protocol` module into a standalone, wasm-safe crate so the
+# browser host (agentkeys-web-core) can share them without pulling in this
+# crate's native transport (reqwest/tokio + the provisioner's aws-sdk-sts).
+# Re-exported below as `agentkeys_backend_client::protocol` for back-compat.
+agentkeys-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

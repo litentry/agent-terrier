@@ -12,6 +12,11 @@ path = "src/lib.rs"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# B2 (#203 rung 3): `Sensitivity` rides inside the daemon's ProposedScope wire
+# type, so its TS union ("safe" | "sensitive") is generated from this enum (the
+# frontend used to hand-declare it). Export test writes
+# apps/parent-control/lib/generated/ under `cargo test`.
+ts-rs = { version = "10", features = ["no-serde-warnings"] }
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 base64 = "0.22"
 sha2 = "0.10"

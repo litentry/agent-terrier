@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# scripts/check-web-api-drift.sh — the frontend↔daemon↔harness drift gate for
-# the master-memory plant contract (issue #203 / the #206 parity ladder, rung 2).
+# scripts/check-web-api-drift.sh — the harness drift gate for the master-memory
+# plant contract (issue #203 / the #206 parity ladder).
 #
 # Phase 6 (web-parity-demo.sh) used to false-green: it `curl`s the daemon's
-# `POST /v1/master/memory/plant` with a hand-built body, while the real frontend
-# (apps/parent-control/lib/client/daemon.ts) builds its OWN body at the same URL.
-# They agreed by manual coincidence — a daemon.ts route/shape change left phase 6
-# green on the old path.
+# plant endpoint with a hand-built body that agreed with the daemon only by
+# manual coincidence. This gate ties it to ONE serde schema (the
+# `ApiMemoryEntry` + `MASTER_MEMORY_PLANT_ROUTE` owned by
+# `agentkeys-protocol::web_api`), captured in
+# harness/fixtures/web-api/master_memory_plant.json. The Rust side is pinned by
+# a unit test (ui_bridge.rs `master_memory_plant_contract_matches_fixture`);
+# this script pins the ONE remaining non-Rust consumer:
+#   - the route literal must appear verbatim at web-parity-demo.sh's call site
+#   - its `# @web-fixture: master_memory_plant`-annotated entry object literal
+#     must have exactly the fixture's `entry_keys`.
 #
-# This gate ties both consumers to ONE serde schema (the daemon's `ApiMemoryEntry`
-# + the `MASTER_MEMORY_PLANT_ROUTE` const), captured in
-# harness/fixtures/web-api/master_memory_plant.json. The Rust side is pinned by a
-# unit test (ui_bridge.rs `master_memory_plant_contract_matches_fixture`); this
-# script pins the two NON-Rust consumers:
-#   - the route literal must appear verbatim in daemon.ts AND web-parity-demo.sh
-#   - the `# @web-fixture: master_memory_plant` / `// @web-fixture: …`-annotated
-#     entry object literal in each must have exactly the fixture's `entry_keys`.
+# The React frontend (apps/parent-control/lib/client/daemon.ts) is NO LONGER
+# gated here (#275 tier-3): it stopped hand-building the route/body entirely —
+# it consumes the wasm-exported builder from agentkeys-web-core, so its half of
+# this contract is compile-checked (ts-rs `ApiMemoryEntry` + the wasm builder),
+# which sits a rung BELOW this fixture diff on the parity ladder.
 #
-# A drifted route or entry shape (rename/add/drop) on either side is now CI-red
+# A drifted route or entry shape (rename/add/drop) in the harness demo is CI-red
 # instead of a stale green. Exit 0 = clean; 1 = drift; 2 = setup error.
 #
 #   bash scripts/check-web-api-drift.sh
@@ -26,7 +29,6 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE="$REPO_ROOT/harness/fixtures/web-api/master_memory_plant.json"
 HARNESS="$REPO_ROOT/harness/web-parity-demo.sh"
-FRONTEND="$REPO_ROOT/apps/parent-control/lib/client/daemon.ts"
 
 c() { [ -t 1 ] && printf '\033[%sm%s\033[0m' "$1" "$2" || printf '%s' "$2"; }
 ok()   { printf '  %s %s\n' "$(c '1;32' ok)"   "$1"; }
@@ -135,13 +137,12 @@ check_consumer() {
 }
 
 echo
-info "gating the two non-Rust consumers (the Rust source is pinned by the ui_bridge unit test)..."
+info "gating the remaining non-Rust consumer (the Rust source is pinned by the ui_bridge unit test; daemon.ts is compile-gated via the wasm builder, #275)..."
 check_consumer "harness web-parity-demo" "$HARNESS" 'curl|-X[[:space:]]+POST'
-check_consumer "frontend daemon.ts" "$FRONTEND" 'postJson|fetch|getJson'
 
 echo
 if [ "$fails" -gt 0 ]; then
-  bad "$fails plant-contract drift(s) — align the consumer, or if the contract changed update ApiMemoryEntry + harness/fixtures/web-api/master_memory_plant.json (the ui_bridge test enforces the Rust half)"
+  bad "$fails plant-contract drift(s) — align the consumer, or if the contract changed update agentkeys-protocol::web_api::ApiMemoryEntry + harness/fixtures/web-api/master_memory_plant.json (the ui_bridge test enforces the Rust half)"
   exit 1
 fi
-ok "no drift — daemon.ts + web-parity-demo.sh agree with the canonical plant contract"
+ok "no drift — web-parity-demo.sh agrees with the canonical plant contract"
