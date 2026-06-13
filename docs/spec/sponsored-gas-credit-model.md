@@ -15,6 +15,40 @@ treatment of taking fiat and converting to crypto.
 [`chain-setup.md` §Wallets](../chain-setup.md#wallets-contracts--funding-map-prod--test)
 (the funding map + tooling), [`deployed-contracts.md`](deployed-contracts.md).
 
+## Which address do I fund? (read this first)
+
+Two on-chain things hold/spend native gas, and they are funded by **two different
+mechanisms**. Mixing them up is the #1 confusion — and a plain transfer to the paymaster
+**loses the funds**.
+
+[![Which address do I fund? — the sponsor/bundler EOA (plain transfer) vs the paymaster deposit (deposit()), with the runtime flow and the plain-transfer-to-paymaster footgun](../assets/gas-funding-map.svg)](../assets/gas-funding-map.svg)
+
+| # | Fund THIS | Address | How — the ONLY correct way | What it does / drains | If it runs dry |
+|---|---|---|---|---|---|
+| **①** | **Sponsor / Bundler EOA** | `0x0298…944DA` (= `BROKER_SPONSOR_SIGNER_ADDRESS_HEIMA`) | **plain native transfer** ([`heima-fund-account.sh`](../../scripts/heima-fund-account.sh)) | fronts the outer `handleOps` tx gas; the EntryPoint refunds it as beneficiary, so it ~cycles but must keep a working float | broker can't broadcast → accepts fail at submit |
+| **②** | **Paymaster DEPOSIT** (inside the EntryPoint) | the deposit keyed by the **VerifyingPaymaster** — resolve the paymaster from [`heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) | **`deposit()` call** ([`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh)) | the actual sponsorship budget; DRAINS as ops are sponsored, never refilled by the cycle | EntryPoint reverts `AA31 paymaster deposit too low` → accepts fail |
+
+**Is `BROKER_SPONSOR_SIGNER` the bundler wallet? — Yes, today.** It is **one EOA wearing two
+hats**: (a) the **bundler submitter** that signs + broadcasts `EntryPoint.handleOps` (the
+bundler reads `AGENTKEYS_BUNDLER_SIGNER_KEY`, falling back to `BROKER_SPONSOR_SIGNER_KEY` —
+the *same* key, [`agentkeys-bundler/src/server.rs`](../../crates/agentkeys-bundler/src/server.rs)),
+and (b) the **paymaster co-signer** that authorizes each sponsorship (the VerifyingPaymaster
+verifies `recover(paymasterAndData.sig) == brokerSigner`) and is the `handleOps` *beneficiary*
+(receives the gas refund — [`handlers/accept.rs`](../../crates/agentkeys-broker-server/src/handlers/accept.rs)).
+Splitting them later is a one-line change (set a separate `AGENTKEYS_BUNDLER_SIGNER_KEY`); until
+then **fund the one EOA**.
+
+**Footgun (why the two are NOT interchangeable):** the paymaster contract pays sponsored gas
+**only** from its **deposit held inside the EntryPoint** (`EntryPoint.balanceOf(paymaster)`),
+credited via `paymaster.deposit()`. A plain transfer to the paymaster **address** lands in its
+*raw* balance, which the EntryPoint never touches — the money is stuck. The paymaster's raw
+balance is ~0 **by design**.
+
+**See the live numbers** (deposit + every wallet) any time:
+`bash scripts/check-wallet-balances.sh` — it prints `sponsor/bundler` (①), `paymaster raw`
+(the ~0 footgun balance), and `paymaster DEPOSIT` (②) as distinct rows. *(Snapshot
+2026-06-13: ① ≈ 9.8 HEI, ② deposit ≈ 2.08 HEI, paymaster raw = 0.)*
+
 ## The two layers
 
 ```mermaid
