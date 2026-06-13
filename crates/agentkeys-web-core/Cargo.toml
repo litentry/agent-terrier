@@ -10,6 +10,12 @@ description = "Host-agnostic master-plane core (broker client + ceremony logic) 
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# The shared, wasm-safe broker/worker wire shapes (the cap-mint body). Pure
+# serde, no transport — so the browser shares the cap-mint request type with the
+# native client (agentkeys-backend-client) instead of re-declaring it, which is
+# how the two used to drift on `ttl_seconds` (and the #76 K10 PoP fields).
+# #203 / parity-ladder rung 3.
+agentkeys-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

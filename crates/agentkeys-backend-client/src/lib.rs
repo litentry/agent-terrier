@@ -13,7 +13,7 @@
 
 pub mod client;
 pub mod fixtures;
-pub mod protocol;
+pub use agentkeys_protocol as protocol;
 
 pub use client::{BackendClient, BackendError};
 pub use protocol::{

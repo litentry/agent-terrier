@@ -41,6 +41,23 @@ import type {
   StatusKind,
   Worker,
 } from '@/app/_components/types';
+// Wire types GENERATED from the Rust structs via ts-rs (#203 B2 / #215 re-land):
+// the daemon's ui_bridge Api* structs, the catalog Sensitivity union, and the
+// broker UserOp build/submit response shapes (agentkeys-protocol). Do not
+// hand-edit @/lib/generated or re-declare these here — a Rust-side field rename
+// regenerates the .ts and the mappers below stop compiling (rung-3 drift gate;
+// CI also git-diffs the generated dir after `cargo test` regenerates it).
+import type { ApiActor } from '@/lib/generated/ApiActor';
+import type { ApiAnchorStatus } from '@/lib/generated/ApiAnchorStatus';
+import type { ApiAuditEvent } from '@/lib/generated/ApiAuditEvent';
+import type { ApiMemoryEntry } from '@/lib/generated/ApiMemoryEntry';
+import type { ApiWorker } from '@/lib/generated/ApiWorker';
+import type { BuildAcceptUserOpResponse } from '@/lib/generated/BuildAcceptUserOpResponse';
+import type { MasterMemoryPlantResponse } from '@/lib/generated/MasterMemoryPlantResponse';
+import type { MemoryCategory as ApiMemoryCategory } from '@/lib/generated/MemoryCategory';
+import type { ProposedScope as ApiProposedScope } from '@/lib/generated/ProposedScope';
+import type { SubmitAcceptUserOpResponse as ApiSubmitResult } from '@/lib/generated/SubmitAcceptUserOpResponse';
+import { loadWasmModule } from './wasm-module';
 
 /**
  * DaemonBackend — talks to a running agentkeys-daemon over HTTP.
@@ -87,6 +104,26 @@ export class DaemonBackend implements AgentKeysClient {
       return { ok: true, data: (await resp.json()) as T };
     } catch (e) {
       return { ok: false, status: unreachable(`GET ${path}: ${(e as Error).message}`) };
+    }
+  }
+
+  // Like postJson, but the body is ALREADY serialized JSON (the wasm plant
+  // builder returns serde_json's exact bytes — re-stringifying would launder
+  // them through JS). #275 tier-3.
+  private async postJsonBody<T>(path: string, jsonBody: string): Promise<Result<T>> {
+    try {
+      const resp = await fetch(`${this.baseUrl}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: jsonBody,
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        return { ok: false, status: unreachable(`POST ${path} → ${resp.status}: ${text}`) };
+      }
+      return { ok: true, data: (await resp.json()) as T };
+    } catch (e) {
+      return { ok: false, status: unreachable(`POST ${path}: ${(e as Error).message}`) };
     }
   }
 
@@ -203,11 +240,7 @@ export class DaemonBackend implements AgentKeysClient {
   }
 
   async getAnchorStatus(): Promise<Result<AnchorStatus>> {
-    const r = await this.getJson<{
-      last_anchor_at: number;
-      next_anchor_in: number;
-      recent: { ts: string; root: string; count: number; txn: string; conf: number }[];
-    }>('/v1/anchor/status');
+    const r = await this.getJson<ApiAnchorStatus>('/v1/anchor/status');
     if (!r.ok) return r;
     return {
       ok: true,
@@ -261,9 +294,7 @@ export class DaemonBackend implements AgentKeysClient {
   // the per-agent unpair; every paired agent = the pre-reset fleet teardown
   // (ONE Touch ID). The broker skips already-revoked hashes; all-skipped
   // returns 409 "nothing to revoke".
-  async revokeBuild(input: { deviceKeyHashes: string[] }): Promise<
-    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
-  > {
+  async revokeBuild(input: { deviceKeyHashes: string[] }): Promise<Result<BuildAcceptUserOpResponse>> {
     return this.postJson('/v1/revoke/build', { device_key_hashes: input.deviceKeyHashes });
   }
 
@@ -430,18 +461,26 @@ export class DaemonBackend implements AgentKeysClient {
   }
 
   async plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>> {
-    const r = await this.postJson<{ planted: number; skipped: number; total: number; taxonomy_status?: string }>(
-      '/v1/master/memory/plant',
-      {
-        // @web-fixture: master_memory_plant — entry shape gated by scripts/check-web-api-drift.sh
-        // (must match the daemon's ApiMemoryEntry + web-parity-demo.sh; issue #203 / the #206 parity ladder).
-        entries: entries.map((m) => ({
-          ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
-          version: m.version, updated: m.updated, preview: m.preview, body: m.body,
-          content_hash: m.contentHash ?? '',
-        })),
-      },
-    );
+    // #275 tier-3: the plant route + body come from the daemon's OWN wire types
+    // (agentkeys-protocol::web_api) compiled to wasm — one code path, so this
+    // client cannot hand-build a drifted body (the old @web-fixture diff gate
+    // for this file is retired; the ts-rs ApiMemoryEntry type checks the entry
+    // shape at compile time and the wasm builder validates + serializes it).
+    let route: string;
+    let body: string;
+    try {
+      const wasm = await loadWasmModule();
+      const wireEntries = entries.map((m): ApiMemoryEntry => ({
+        ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
+        version: m.version, updated: m.updated, preview: m.preview, body: m.body,
+        content_hash: m.contentHash ?? '',
+      }));
+      route = wasm.masterMemoryPlantRoute();
+      body = wasm.buildMasterMemoryPlantBody(wireEntries);
+    } catch (e) {
+      return { ok: false, status: unreachable(`wasm plant builder failed: ${String(e)}`) };
+    }
+    const r = await this.postJsonBody<MasterMemoryPlantResponse>(route, body);
     if (!r.ok) return r;
     return {
       ok: true,
@@ -449,7 +488,7 @@ export class DaemonBackend implements AgentKeysClient {
         planted: r.data.planted,
         skipped: r.data.skipped,
         total: r.data.total,
-        taxonomyStatus: r.data.taxonomy_status ?? 'ok',
+        taxonomyStatus: r.data.taxonomy_status,
       },
     };
   }
@@ -592,9 +631,7 @@ export class DaemonBackend implements AgentKeysClient {
     maxPerPeriod: string;
     maxTotal: string;
     periodSeconds: number;
-  }): Promise<
-    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
-  > {
+  }): Promise<Result<BuildAcceptUserOpResponse>> {
     return this.postJson('/v1/accept/build', {
       request_id: input.requestId,
       services: input.services,
@@ -619,9 +656,7 @@ export class DaemonBackend implements AgentKeysClient {
     services: string[];
     preserveServiceIds?: string[];
     readOnly: boolean;
-  }): Promise<
-    Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
-  > {
+  }): Promise<Result<BuildAcceptUserOpResponse>> {
     return this.postJson('/v1/scope/build', {
       actor_omni: input.actorOmni,
       services: input.services,
@@ -660,71 +695,10 @@ export class DaemonBackend implements AgentKeysClient {
   }
 }
 
-interface ApiProposedScope {
-  data_class: string;
-  entity: string;
-  service: string;
-  category: string;
-  sensitivity: 'safe' | 'sensitive';
-  gating: 'auto' | 'k11';
-  confidence: number;
-}
-
-// ─── API wire types (snake_case, mirror ui_bridge.rs ApiActor etc.) ────
-
-interface ApiActor {
-  id: string;
-  omni: string;
-  omni_hex: string;
-  label: string;
-  role: string;
-  parent: string | null;
-  derivation: string;
-  device: string;
-  device_pubkey: string;
-  last_active: string;
-  status: string;
-  vendor: string;
-  k11: boolean;
-  scope?: Record<string, { read: boolean; write: boolean }>;
-  // #248: on-chain scope service ids (keccak hex) that aren't a known memory:<ns>
-  // (e.g. cred:<service>); echoed back on commit so set-replace can't wipe them.
-  scope_unknown_service_ids?: string[];
-  // On-chain SidecarRegistry device key hash — the Touch-ID unpair's target.
-  device_key_hash?: string;
-  payment_cap?: { per_tx: number; daily: number; currency: string };
-  time_window?: { start: string; end: string; tz: string };
-  services?: string[];
-  // #225 E7: on-chain account (master → P256Account address; agent → device omni).
-  account_address?: string | null;
-  account_type?: string; // "p256account" | "device" | "none"
-}
-
-interface ApiAuditEvent {
-  id: string;
-  ts: string;
-  actor_id: string;
-  actor: string;
-  kind: string;
-  detail: string;
-  chip: string;
-  sev: string;
-  tx_hash?: string;
-  audit_envelope_hashes?: string[];
-}
-
-interface ApiWorker {
-  id: string;
-  title: string;
-  host: string;
-  desc: string;
-  calls_today: number;
-  calls_hour: number;
-  p50: number;
-  p95: number;
-  cap: string;
-  by_actor: { actor: string; count: number; share: number }[];
-}
+// ─── Wire types are imported from @/lib/generated (ts-rs, generated from the
+//     Rust structs — #203 B2). The mappers below convert the snake_case wire
+//     types to the camelCase UI domain types; a Rust-side field rename
+//     regenerates the .ts and breaks these mappers (the drift gate). ─────────
 
 function apiToActor(a: ApiActor): Actor {
   return {
@@ -754,19 +728,9 @@ function apiToActor(a: ApiActor): Actor {
   };
 }
 
-/** #97: broker submit response shape (relayed verbatim by the daemon proxies). */
-interface ApiSubmitResult {
-  ok?: boolean;
-  tx_hash?: string;
-  block_number?: string;
-  user_op_hash?: string;
-  pending?: boolean;
-  audit_envelope_hashes?: string[];
-}
-
 function apiToSubmitResult(r: ApiSubmitResult): SubmitResult {
   return {
-    ok: r.ok ?? true,
+    ok: r.ok,
     txHash: r.tx_hash || undefined,
     blockNumber: r.block_number || undefined,
     userOpHash: r.user_op_hash || undefined,
@@ -828,23 +792,6 @@ function normalizeChip(c: string): ChipKind {
     'revoke',
   ];
   return (allowed as string[]).includes(c) ? (c as ChipKind) : 'default';
-}
-
-interface ApiMemoryEntry {
-  ns: string;
-  key: string;
-  title: string;
-  bytes: number;
-  version: string;
-  updated: string;
-  preview: string;
-  body: string;
-  content_hash?: string;
-}
-
-interface ApiMemoryCategory {
-  ns: string;
-  label: string;
 }
 
 function apiToMemoryEntry(m: ApiMemoryEntry): MasterMemoryEntry {

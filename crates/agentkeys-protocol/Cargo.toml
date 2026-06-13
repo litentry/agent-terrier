@@ -1,0 +1,14 @@
+[package]
+name = "agentkeys-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Broker/worker wire protocol — the transport-agnostic, wasm-safe serde shapes shared by agentkeys-backend-client (native client + STS) and agentkeys-web-core (browser fetch client). Pure serde (no reqwest/tokio/aws), so it compiles to wasm32. The single owner of the cap-mint + worker request/response shapes (#203); the parity-ladder rung-3 split that lets the browser share the wire types without dragging native transport into the wasm build."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# B2 (#203 rung 3): the UserOp build/submit response shapes are consumed by the
+# React frontend too (daemon proxies relay them verbatim), so their TS types are
+# generated from these structs. ts-rs is wasm-safe (no native deps — the wasm32
+# CI gate proves the browser build still compiles).
+ts-rs = { version = "10", features = ["no-serde-warnings"] }

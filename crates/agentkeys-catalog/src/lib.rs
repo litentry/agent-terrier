@@ -23,8 +23,9 @@ use std::collections::BTreeMap;
 /// Sensitivity tier of a category. Drives the auto-distribute gate (#207 item 5):
 /// `Safe` → auto-confirm + daily review; `Sensitive` → explicit per-grant K11.
 /// Ordered `Safe < Sensitive` so the floor is a simple `max`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub enum Sensitivity {
     Safe,
     Sensitive,

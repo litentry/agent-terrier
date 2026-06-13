@@ -13,6 +13,7 @@ members = [
     "crates/agentkeys-mcp-server",
     "crates/agentkeys-provisioner",
     "crates/agentkeys-backend-client",
+    "crates/agentkeys-protocol",
     "crates/agentkeys-broker-server",
     "crates/agentkeys-worker-creds",
     "crates/agentkeys-worker-memory",
@@ -31,6 +32,7 @@ agentkeys-memory-engine = { path = "crates/agentkeys-memory-engine" }
 agentkeys-memory-openviking = { path = "crates/agentkeys-memory-openviking" }
 agentkeys-web-core = { path = "crates/agentkeys-web-core" }
 agentkeys-backend-client = { path = "crates/agentkeys-backend-client" }
+agentkeys-protocol = { path = "crates/agentkeys-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

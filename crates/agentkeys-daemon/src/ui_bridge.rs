@@ -220,22 +220,14 @@ pub struct RegisteredMaster {
     pub account: Option<String>,
 }
 
-/// A master-actor memory entry. `content_hash` is the dedup key —
-/// keccak-free sha256 over (ns || key || body) so a re-plant of the same
-/// content is detected and skipped (the "prevent duplicate plant" gate).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ApiMemoryEntry {
-    pub ns: String,
-    pub key: String,
-    pub title: String,
-    pub bytes: u64,
-    pub version: String,
-    pub updated: String,
-    pub preview: String,
-    pub body: String,
-    #[serde(default)]
-    pub content_hash: String,
-}
+// The plant wire contract (route + `ApiMemoryEntry` + request/response bodies)
+// is OWNED by the wasm-safe `agentkeys-protocol::web_api` (#275 tier-3): the
+// browser host compiles the same types via `agentkeys-web-core`, so the
+// frontend can no longer hand-build a drifted body. Re-exported here so the
+// daemon-internal paths (and the fixture-pinning test below) keep their names.
+pub use agentkeys_backend_client::protocol::web_api::{
+    ApiMemoryEntry, MasterMemoryPlantRequest, MasterMemoryPlantResponse, MASTER_MEMORY_PLANT_ROUTE,
+};
 
 /// Content hash over (ns ‖ key ‖ body) — the dedup key for plant idempotency
 /// AND the durable-merge identity (codex finding 1). A free function so the
@@ -252,12 +244,26 @@ fn content_hash_for(ns: &str, key: &str, body: &str) -> String {
     hex::encode(h.finalize())
 }
 
-impl ApiMemoryEntry {
+/// Daemon-side helpers on the SHARED wire type: inherent impls are only legal
+/// in the defining crate (`agentkeys-protocol`), and these touch daemon-local
+/// concerns (the sha256 dedup scheme + the private on-disk
+/// [`StoredMemoryEntry`] form), so they ride an extension trait here — call
+/// sites read exactly as before.
+trait ApiMemoryEntryExt: Sized {
+    fn compute_hash(&self) -> String;
+    /// The on-disk form stored inside the per-namespace JSON array (#201 Phase 4).
+    fn to_stored(&self) -> StoredMemoryEntry;
+    /// Rehydrate a UI entry from a stored array element decrypted out of
+    /// `memory:<ns>.enc`. `version`/`preview` are derived (not stored) and
+    /// `content_hash` is left empty (the read path doesn't dedup).
+    fn from_stored(ns: &str, s: StoredMemoryEntry) -> Self;
+}
+
+impl ApiMemoryEntryExt for ApiMemoryEntry {
     fn compute_hash(&self) -> String {
         content_hash_for(&self.ns, &self.key, &self.body)
     }
 
-    /// The on-disk form stored inside the per-namespace JSON array (#201 Phase 4).
     fn to_stored(&self) -> StoredMemoryEntry {
         StoredMemoryEntry {
             key: self.key.clone(),
@@ -268,9 +274,6 @@ impl ApiMemoryEntry {
         }
     }
 
-    /// Rehydrate a UI entry from a stored array element decrypted out of
-    /// `memory:<ns>.enc`. `version`/`preview` are derived (not stored) and
-    /// `content_hash` is left empty (the read path doesn't dedup).
     fn from_stored(ns: &str, s: StoredMemoryEntry) -> Self {
         let preview = s.body.chars().take(80).collect();
         ApiMemoryEntry {
@@ -311,7 +314,8 @@ pub struct MemoryTaxonomy {
     categories: Vec<MemoryCategory>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct MemoryCategory {
     pub ns: String,
     pub label: String,
@@ -417,27 +421,31 @@ pub type SharedUiBridgeState = Arc<UiBridgeState>;
 
 const AUDIT_BUFFER_CAP: usize = 200;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiScopeBits {
     pub read: bool,
     pub write: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiPaymentCap {
     pub per_tx: f64,
     pub daily: f64,
     pub currency: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiTimeWindow {
     pub start: String,
     pub end: String,
     pub tz: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiActor {
     pub id: String,
     pub omni: String,
@@ -457,23 +465,43 @@ pub struct ApiActor {
     /// the master-reset fleet teardown revoke by hash even when the per-label
     /// `~/.agentkeys/agents/<label>.json` record never existed on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub device_key_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub scope: Option<HashMap<String, ApiScopeBits>>,
     /// #248: on-chain scope service ids (0x-hex keccak) that aren't a known
     /// `memory:<ns>` — e.g. `cred:<service>` granted at accept. The panel's
     /// set-replace commit echoes these back so a memory toggle can't wipe them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub scope_unknown_service_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub payment_cap: Option<ApiPaymentCap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub time_window: Option<ApiTimeWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub services: Option<Vec<String>>,
+    /// #225 E7 actor page: the actor's on-chain account. master → its passkey
+    /// P256Account when bound (absent when unbound); agent → its K10 device
+    /// omni. Set by `enrich_actor_account` on the actors read path — struct
+    /// fields (not ad-hoc JSON inserts) so the generated TS contract carries
+    /// them (B2 rung 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account_address: Option<String>,
+    /// "p256account" (bound master) | "none" (unbound master → register CTA) |
+    /// "device" (agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account_type: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiCapToken {
     pub id: String,
     pub cap: String,
@@ -481,10 +509,12 @@ pub struct ApiCapToken {
     pub ttl: String,
     pub minted: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub danger: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiAuditEvent {
     pub id: String,
     pub ts: String,
@@ -497,47 +527,62 @@ pub struct ApiAuditEvent {
     /// #97: the confirmed on-chain tx for control-plane ops (accept / scope /
     /// revoke submits). `None` for synthesized / local events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub tx_hash: Option<String>,
     /// #97: the `AuditEnvelope v1` receipt hashes the broker emitted for this
     /// op — the decode view fetches the REAL envelopes by these instead of
     /// synthesizing a preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub audit_envelope_hashes: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiWorkerActorShare {
     pub actor: String,
+    #[ts(type = "number")]
     pub count: u64,
     pub share: f64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiWorker {
     pub id: String,
     pub title: String,
     pub host: String,
     pub desc: String,
+    #[ts(type = "number")]
     pub calls_today: u64,
+    #[ts(type = "number")]
     pub calls_hour: u64,
+    #[ts(type = "number")]
     pub p50: u64,
+    #[ts(type = "number")]
     pub p95: u64,
     pub cap: String,
     pub by_actor: Vec<ApiWorkerActorShare>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiAnchorBatch {
     pub ts: String,
     pub root: String,
+    #[ts(type = "number")]
     pub count: u64,
     pub txn: String,
+    #[ts(type = "number")]
     pub conf: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiAnchorStatus {
+    #[ts(type = "number")]
     pub last_anchor_at: u64,
+    #[ts(type = "number")]
     pub next_anchor_in: u64,
     pub recent: Vec<ApiAnchorBatch>,
 }
@@ -696,16 +741,14 @@ fn err(
     )
 }
 
-/// Canonical master-memory web-API routes — the SINGLE source of truth for the
-/// path the React frontend (`apps/parent-control/lib/client/daemon.ts`) and the
-/// harness web-parity demo (`harness/web-parity-demo.sh`) both hit. They used to
-/// hardcode `/v1/master/memory/plant` independently → a rename here left phase 6
-/// green on the old path (false-green, issue #203 / the #206 parity ladder). The
-/// route + the `ApiMemoryEntry` body shape are now pinned to
-/// `harness/fixtures/web-api/master_memory_plant.json` (see the test below) and
-/// the two consumers are gated against it by `scripts/check-web-api-drift.sh`.
+/// Master-memory LIST route (daemon-local). The PLANT route — the contract the
+/// frontend + harness both POST — is `MASTER_MEMORY_PLANT_ROUTE`, owned by
+/// `agentkeys-protocol::web_api` (re-exported above, #275 tier-3): the React
+/// frontend gets it from the `agentkeys-web-core` wasm export (one code path),
+/// the harness demo is fixture-gated by `scripts/check-web-api-drift.sh`, and
+/// the fixture (`harness/fixtures/web-api/master_memory_plant.json`) is pinned
+/// to the shared const + `ApiMemoryEntry` shape by the unit test below.
 pub const MASTER_MEMORY_ROUTE: &str = "/v1/master/memory";
-pub const MASTER_MEMORY_PLANT_ROUTE: &str = "/v1/master/memory/plant";
 
 /// Build the ui-bridge router with CORS open to the configured web-UI origin.
 pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router {
@@ -2713,6 +2756,8 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
                         payment_cap: None,
                         time_window: None,
                         services: None,
+                        account_address: None,
+                        account_type: None,
                     },
                 );
                 added += 1;
@@ -2747,6 +2792,8 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
                 payment_cap: None,
                 time_window: None,
                 services: None,
+                account_address: None,
+                account_type: None,
             },
         );
         added += 1;
@@ -2832,7 +2879,7 @@ async fn list_actors(State(state): State<SharedUiBridgeState>) -> impl IntoRespo
         a_master.cmp(&b_master).then_with(|| a.id.cmp(&b.id))
     });
     let master_account = master_account_address(&state).await;
-    let actors: Vec<serde_json::Value> = actors
+    let actors: Vec<ApiActor> = actors
         .iter()
         .map(|a| enrich_actor_account(a, master_account.as_deref()))
         .collect();
@@ -2849,10 +2896,10 @@ async fn get_actor(
     }
     .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
     let master_account = master_account_address(&state).await;
-    Ok(Json(enrich_actor_account(
-        &actor,
-        master_account.as_deref(),
-    )))
+    let enriched = enrich_actor_account(&actor, master_account.as_deref());
+    Ok(Json(
+        serde_json::to_value(&enriched).unwrap_or_else(|_| serde_json::json!({})),
+    ))
 }
 
 /// The master's on-chain P256Account (`operatorMasterWallet[omni]`). Prefers
@@ -2903,8 +2950,7 @@ async fn fetch_operator_master_wallet(rpc: &str, registry: &str, omni_0x: &str) 
 /// that holds master authority); agents → their K10 **device** identity. The
 /// `account_type` lets the UI distinguish a bound smart-account master (`p256account`)
 /// from an unbound one (`none` → "register on chain" CTA).
-fn enrich_actor_account(a: &ApiActor, master_account: Option<&str>) -> serde_json::Value {
-    let mut v = serde_json::to_value(a).unwrap_or_else(|_| serde_json::json!({}));
+fn enrich_actor_account(a: &ApiActor, master_account: Option<&str>) -> ApiActor {
     let (addr, ty): (Option<String>, &str) = if a.role == "master" {
         match master_account {
             Some(acc) => (Some(acc.to_string()), "p256account"),
@@ -2914,15 +2960,10 @@ fn enrich_actor_account(a: &ApiActor, master_account: Option<&str>) -> serde_jso
         // Agents are K10 devices (not ERC-4337 accounts) — surface the omni identity.
         (Some(a.omni_hex.clone()), "device")
     };
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert(
-            "account_address".into(),
-            addr.map(serde_json::Value::from)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        obj.insert("account_type".into(), serde_json::Value::from(ty));
-    }
-    v
+    let mut out = a.clone();
+    out.account_address = addr;
+    out.account_type = Some(ty.to_string());
+    out
 }
 
 async fn list_caps(
@@ -3982,6 +4023,8 @@ async fn ack_pairing(
                     payment_cap: None,
                     time_window: None,
                     services: None,
+                    account_address: None,
+                    account_type: None,
                 };
                 state
                     .actors
@@ -4627,6 +4670,8 @@ async fn register_pairing(
         payment_cap: None,
         time_window: None,
         services: None,
+        account_address: None,
+        account_type: None,
     };
     state
         .actors
@@ -5401,31 +5446,13 @@ async fn reconcile_taxonomy(
     Ok(merged)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct PlantRequest {
-    pub entries: Vec<ApiMemoryEntry>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PlantResponse {
-    pub planted: usize,
-    pub skipped: usize,
-    pub total: usize,
-    /// Durable category-index (taxonomy) outcome, surfaced so a configured-Config
-    /// store failure is NOT hidden behind an otherwise-successful memory plant
-    /// (codex finding 2): `"ok"` (written), `"unconfigured"` (Config not set up,
-    /// cache-only), `"failed: <reason>"` (memory IS durable but the category index
-    /// is stale → retry), or `"skipped: <reason>"` (config-context unavailable).
-    pub taxonomy_status: String,
-}
-
 /// Idempotent plant: each entry's content_hash is the dedup key. Re-planting
 /// the same content is a no-op (skipped++), so "prevent duplicate plant" is
 /// enforced server-side, not just in the UI. Returns planted/skipped counts +
 /// the resulting total. An audit row records the plant.
 async fn plant_master_memory(
     State(state): State<SharedUiBridgeState>,
-    Json(req): Json<PlantRequest>,
+    Json(req): Json<MasterMemoryPlantRequest>,
 ) -> axum::response::Response {
     match plant_master_memory_inner(&state, req).await {
         Ok(resp) => (axum::http::StatusCode::OK, Json(resp)).into_response(),
@@ -5435,14 +5462,14 @@ async fn plant_master_memory(
     }
 }
 
-/// Core plant logic. Returns the typed `PlantResponse` (real chain or in-memory
+/// Core plant logic. Returns the typed `MasterMemoryPlantResponse` (real chain or in-memory
 /// fallback) or an `(HTTP status, reason)` for partial-config / not-logged-in
 /// (409) and real-worker-failure (502). The handler maps it to a response; tests
 /// call this directly to assert the typed counts.
 async fn plant_master_memory_inner(
     state: &SharedUiBridgeState,
-    req: PlantRequest,
-) -> Result<PlantResponse, (axum::http::StatusCode, String)> {
+    req: MasterMemoryPlantRequest,
+) -> Result<MasterMemoryPlantResponse, (axum::http::StatusCode, String)> {
     let ctx = real_memory_ctx(state).await.map_err(|reason| {
         tracing::warn!("plant_master_memory: {reason}");
         (axum::http::StatusCode::CONFLICT, reason)
@@ -5588,7 +5615,7 @@ async fn plant_master_memory_inner(
         };
         push_audit(state, evt).await;
     }
-    Ok(PlantResponse {
+    Ok(MasterMemoryPlantResponse {
         planted,
         skipped,
         total,
@@ -5800,10 +5827,10 @@ fn normalize_data_class(s: &str) -> Result<&'static str, String> {
 /// The auto-distribute gating tier for a category's sensitivity (#207 §3 inv. 2):
 /// Safe → `auto` (auto-confirm + daily review); Sensitive → `k11` (explicit confirm).
 /// The tier comes from the CATALOG floor, so a vendor/telemetry prior can't downgrade it.
-fn gating_for(s: agentkeys_catalog::Sensitivity) -> &'static str {
+fn gating_for(s: agentkeys_catalog::Sensitivity) -> ScopeGating {
     match s {
-        agentkeys_catalog::Sensitivity::Safe => "auto",
-        agentkeys_catalog::Sensitivity::Sensitive => "k11",
+        agentkeys_catalog::Sensitivity::Safe => ScopeGating::Auto,
+        agentkeys_catalog::Sensitivity::Sensitive => ScopeGating::K11,
     }
 }
 
@@ -5980,15 +6007,27 @@ pub struct ProposeRequest {
 /// One proposed scope grant. `gating` is the sensitivity tier from the CATALOG:
 /// `auto` (Safe → auto-confirm + surface in the daily review) | `k11` (Sensitive →
 /// explicit per-grant K11 confirm). NEVER granted here — `propose` only proposes.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ProposedScope {
     pub data_class: String,
     pub entity: String,
     pub service: String,
     pub category: String,
     pub sensitivity: agentkeys_catalog::Sensitivity,
-    pub gating: &'static str,
+    pub gating: ScopeGating,
     pub confidence: f32,
+}
+
+/// The #207 §3 grant-gating tier for a proposed scope: `auto` (Safe →
+/// auto-confirm + daily review) | `k11` (Sensitive → explicit per-grant K11
+/// confirm). An enum (not a bare str) so the generated TS carries the union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub enum ScopeGating {
+    Auto,
+    K11,
 }
 
 /// `POST /v1/master/classify/propose` (#207 item 5 — connect-time auto-distribute).
@@ -6401,14 +6440,17 @@ mod tests {
         );
     }
 
-    /// Pin the master-memory plant CONTRACT (the daemon's web API) to the
-    /// committed fixture that `daemon.ts` + `web-parity-demo.sh` are gated
-    /// against (issue #203 / the #206 parity ladder, rung 2). The Rust struct +
-    /// route const are the source of truth; this test fails the moment they
-    /// drift from the fixture, so a field rename or route change can't silently
-    /// leave phase 6 green on the old path. If you change `ApiMemoryEntry` or the
-    /// route on purpose, update `harness/fixtures/web-api/master_memory_plant.json`
-    /// to match (and the two consumers will be re-gated by the bash check).
+    /// Pin the master-memory plant CONTRACT (the daemon's web API, owned by
+    /// `agentkeys-protocol::web_api` and re-exported above) to the committed
+    /// fixture that `web-parity-demo.sh` is gated against (issue #203 / the
+    /// #206 parity ladder). The shared struct + route const are the source of
+    /// truth; this test fails the moment they drift from the fixture, so a
+    /// field rename or route change can't silently leave phase 6 green on the
+    /// old path. The React frontend is NOT fixture-gated anymore (#275): it
+    /// consumes the wasm-exported builder, so its half is compile-checked. If
+    /// you change `ApiMemoryEntry` or the route on purpose, update
+    /// `harness/fixtures/web-api/master_memory_plant.json` to match (and the
+    /// harness consumer is re-gated by the bash check).
     #[test]
     fn master_memory_plant_contract_matches_fixture() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -7044,8 +7086,23 @@ mod tests {
     fn gating_tiers_safe_auto_sensitive_k11() {
         // #207 §3 invariant 2: Safe → auto (auto-confirm + daily review),
         // Sensitive → k11 (explicit per-grant confirm). The tier is the CATALOG's.
-        assert_eq!(gating_for(agentkeys_catalog::Sensitivity::Safe), "auto");
-        assert_eq!(gating_for(agentkeys_catalog::Sensitivity::Sensitive), "k11");
+        assert_eq!(
+            gating_for(agentkeys_catalog::Sensitivity::Safe),
+            ScopeGating::Auto
+        );
+        assert_eq!(
+            gating_for(agentkeys_catalog::Sensitivity::Sensitive),
+            ScopeGating::K11
+        );
+        // The wire spellings are pinned: a rename breaks the generated TS union.
+        assert_eq!(
+            serde_json::to_value(ScopeGating::Auto).unwrap(),
+            serde_json::json!("auto")
+        );
+        assert_eq!(
+            serde_json::to_value(ScopeGating::K11).unwrap(),
+            serde_json::json!("k11")
+        );
     }
 
     #[tokio::test]
@@ -7055,9 +7112,9 @@ mod tests {
         // explicit K11 confirm path writes scope. A safe one (notion) is auto.
         let state = make_state();
         let stripe = classify_entity(&state, "credentials", "stripe").await;
-        assert_eq!(gating_for(stripe.sensitivity), "k11");
+        assert_eq!(gating_for(stripe.sensitivity), ScopeGating::K11);
         let notion = classify_entity(&state, "credentials", "notion").await;
-        assert_eq!(gating_for(notion.sensitivity), "auto");
+        assert_eq!(gating_for(notion.sensitivity), ScopeGating::Auto);
     }
 
     #[test]
@@ -7074,14 +7131,14 @@ mod tests {
         let state = make_state();
         let travel = classify_entity(&state, "memory", "travel").await;
         assert_eq!(travel.category, "travel");
-        assert_eq!(gating_for(travel.sensitivity), "auto");
+        assert_eq!(gating_for(travel.sensitivity), ScopeGating::Auto);
         let health = classify_entity(&state, "memory", "health").await;
-        assert_eq!(gating_for(health.sensitivity), "k11");
+        assert_eq!(gating_for(health.sensitivity), ScopeGating::K11);
         let finance = classify_entity(&state, "memory", "finance").await;
-        assert_eq!(gating_for(finance.sensitivity), "k11");
+        assert_eq!(gating_for(finance.sensitivity), ScopeGating::K11);
         // unknown namespace → conservative Sensitive (explicit pick).
         let kids = classify_entity(&state, "memory", "kids").await;
-        assert_eq!(gating_for(kids.sensitivity), "k11");
+        assert_eq!(gating_for(kids.sensitivity), ScopeGating::K11);
     }
 
     #[tokio::test]
@@ -7435,6 +7492,8 @@ mod tests {
             payment_cap: None,
             time_window: None,
             services: None,
+            account_address: None,
+            account_type: None,
         };
         let cloned = actor.clone();
         let st = state.clone();
@@ -7466,6 +7525,8 @@ mod tests {
             payment_cap: None,
             time_window: None,
             services: None,
+            account_address: None,
+            account_type: None,
         };
         state
             .actors
@@ -7508,6 +7569,8 @@ mod tests {
                 payment_cap: None,
                 time_window: None,
                 services: None,
+                account_address: None,
+                account_type: None,
             },
         );
         actors.insert(
@@ -7532,6 +7595,8 @@ mod tests {
                 payment_cap: None,
                 time_window: None,
                 services: None,
+                account_address: None,
+                account_type: None,
             },
         );
         drop(actors);
@@ -8567,6 +8632,8 @@ mod tests {
                     payment_cap: None,
                     time_window: None,
                     services: None,
+                    account_address: None,
+                    account_type: None,
                 }],
                 caps: HashMap::new(),
                 workers: vec![ApiWorker {
@@ -8630,7 +8697,7 @@ mod tests {
         // First plant: both land.
         let r1 = plant_master_memory_inner(
             &state,
-            PlantRequest {
+            MasterMemoryPlantRequest {
                 entries: entries.clone(),
             },
         )
@@ -8642,7 +8709,7 @@ mod tests {
         assert_eq!(state.master_memory.read().await.len(), 2);
 
         // Re-plant the SAME content: 0 planted, 2 skipped (dedup by content_hash).
-        let r2 = plant_master_memory_inner(&state, PlantRequest { entries })
+        let r2 = plant_master_memory_inner(&state, MasterMemoryPlantRequest { entries })
             .await
             .unwrap();
         assert_eq!(r2.planted, 0);
@@ -8668,7 +8735,7 @@ mod tests {
         let state = make_state();
         let _ = plant_master_memory_inner(
             &state,
-            PlantRequest {
+            MasterMemoryPlantRequest {
                 entries: vec![mem_entry("personal", "profile", "v1 body")],
             },
         )
@@ -8677,7 +8744,7 @@ mod tests {
         // Same ns/key but DIFFERENT body → different content_hash → a new entry.
         let r = plant_master_memory_inner(
             &state,
-            PlantRequest {
+            MasterMemoryPlantRequest {
                 entries: vec![mem_entry("personal", "profile", "v2 body")],
             },
         )
@@ -8734,7 +8801,7 @@ mod tests {
         let state = make_state();
         plant_master_memory_inner(
             &state,
-            PlantRequest {
+            MasterMemoryPlantRequest {
                 entries: vec![
                     mem_entry("travel", "chengdu", "trip"),
                     mem_entry("personal", "profile", "name: Kevin"),
@@ -8759,7 +8826,7 @@ mod tests {
         let state = make_state();
         plant_master_memory_inner(
             &state,
-            PlantRequest {
+            MasterMemoryPlantRequest {
                 entries: vec![
                     mem_entry("travel", "chengdu", "trip body"),
                     mem_entry("travel", "customs", "customs body"),
@@ -8893,7 +8960,7 @@ mod tests {
         let state = make_state();
         let r = plant_master_memory_inner(
             &state,
-            PlantRequest {
+            MasterMemoryPlantRequest {
                 entries: vec![mem_entry("travel", "chengdu", "trip")],
             },
         )

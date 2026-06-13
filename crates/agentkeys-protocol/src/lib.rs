@@ -1,20 +1,33 @@
 //! The broker/worker wire protocol — the **single owner** of every request
 //! and response shape the cap-mint + worker chain serializes (issue #203).
 //!
-//! Before this crate the same JSON was hand-typed in three places (the MCP
-//! `HttpBackend`, the daemon `ui_bridge`, and bash `jq -n` bodies in the
-//! harness), which is the structural cause of the drift bugs #200 fixed
+//! Pure serde, **no transport** (no reqwest/tokio/aws), so it compiles to
+//! `wasm32`: the native client `agentkeys-backend-client` re-exports it as
+//! `::protocol`, and the browser host `agentkeys-web-core` (wasm) depends on
+//! it directly. That split is the parity-ladder rung-3 move for the wire
+//! shapes — the browser and the native client share ONE definition and cannot
+//! drift (they used to: `ttl_seconds` was a required `u64` in backend-client
+//! but `Option<u64>` in web-core's own copy, and web-core's copy was missing
+//! the #76 K10 cap-PoP fields entirely). web-core must NOT depend on
+//! `agentkeys-backend-client` instead: that crate pulls `aws-sdk-sts` +
+//! `tokio` + native `reqwest` via the provisioner and breaks the wasm build
+//! (the `wasm32` CI gate in `harness-ci.yml` enforces this).
+//!
+//! Before the one-owner discipline the same JSON was hand-typed in three
+//! places (the MCP backend, the daemon `ui_bridge`, and bash `jq -n` bodies in
+//! the harness), which is the structural cause of the drift bugs #200 fixed
 //! (`evm_address` vs `{address,chain_id}`, bare-vs-`0x` omni, per-namespace
 //! field shapes). Re-typing one of these in a second place is now either a
 //! compile error (Rust callers share these types) or a fixture mismatch (the
-//! harness gate diffs bash bodies against [`crate::fixtures`]).
+//! harness gate diffs bash bodies against `agentkeys-backend-client`'s
+//! `fixtures` module).
 //!
 //! Naming follows arch.md's canonical-names rule: the field names here MUST
 //! match what `agentkeys_broker_server::handlers::cap` and the
 //! `agentkeys_worker_*` handlers deserialize. We mirror by hand (not a shared
 //! struct dep) because the broker/worker are heavy binaries — but the mirror
 //! is now in ONE place, exercised end-to-end in the MCP server's
-//! `tests/three_acts.rs` and pinned by [`crate::fixtures`].
+//! `tests/three_acts.rs` and pinned by the backend-client fixtures.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -98,20 +111,35 @@ pub struct CapMintRequest {
 
 /// Broker cap-mint request body — the exact JSON
 /// `agentkeys_broker_server::handlers::cap` deserializes for all `/v1/cap/*`
-/// endpoints. Carries the K10 cap-mint **proof-of-possession** (issue #76):
+/// endpoints, AND the on-the-wire shape the browser host
+/// (`agentkeys-web-core`) serializes directly (it has no separate caller-side
+/// type — it aliases this as `CapRequest`).
+///
+/// Carries the K10 cap-mint **proof-of-possession** (issue #76):
 /// `client_sig` is an EIP-191 signature by the caller's K10 device key over
 /// `device_crypto::cap_pop_payload(operator, actor, service, op, data_class,
 /// client_nonce, client_ts)`. The broker validates it and the WORKER re-verifies
 /// it independently — so a compromised broker (which lacks the K10 private key)
-/// cannot mint a usable cap. Built by [`BackendClient::cap_mint`] from an
-/// injected `DeviceKey`, NOT hand-set by callers.
+/// cannot mint a usable cap. Built by `BackendClient::cap_mint` (in
+/// `agentkeys-backend-client`) from an injected `DeviceKey`, NOT hand-set by
+/// callers.
+///
+/// `ttl_seconds` is `Option` + `skip_serializing_if` to mirror the broker's
+/// `#[serde(default = "default_ttl_seconds")]`: `None` omits the field so the
+/// broker applies its default (300s, clamped 60..1800); native callers coming
+/// from [`CapMintRequest`] always send `Some(..)` (wire-identical to before).
+/// This is the SINGLE on-wire definition, so the browser and the native client
+/// can no longer drift on it — previously each crate had its own copy and they
+/// diverged on this very field (the bug class #203 closed for the chain, now
+/// extended to the browser).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrokerCapRequest {
     pub operator_omni: String,
     pub actor_omni: String,
     pub service: String,
     pub device_key_hash: String,
-    pub ttl_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
     // The K10 cap-PoP is OPTIONAL on the wire (issue #76 staged rollout): a caller
     // that holds the actor's K10 signs (the broker validates + the worker
     // re-verifies); a caller without one (e.g. a master before its K10 is
@@ -394,7 +422,8 @@ pub struct BuildAcceptUserOpRequest {
 /// `agentkeys_broker_server::sponsor::PackedUserOp`; the daemon fills `signature`
 /// with the master's K11 assertion over `user_op_hash`, then returns the whole op
 /// to `/v1/accept/submit`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct WireUserOp {
     pub sender: String,
     pub nonce: String,
@@ -409,11 +438,13 @@ pub struct WireUserOp {
 
 /// Broker → daemon response to `/v1/accept/build`. The master signs
 /// `user_op_hash` (the `EntryPoint.getUserOpHash` of `user_op`) with K11.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct BuildAcceptUserOpResponse {
     pub user_op: WireUserOp,
     pub user_op_hash: String,
     pub entry_point: String,
+    #[ts(type = "number")]
     pub chain_id: u64,
 }
 
@@ -441,12 +472,30 @@ pub struct SubmitAcceptUserOpRequest {
     pub assertion: AcceptAssertion,
 }
 
-/// Broker → daemon response to `/v1/accept/submit`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Broker → daemon response to `/v1/accept/submit` (and its `/v1/scope/submit`
+/// and `/v1/revoke/submit` siblings — the daemon proxies relay it verbatim to
+/// the web frontend, which consumes the generated TS type). Two variants share the
+/// shape: confirmed (`tx_hash`/`block_number` set, #97 `audit_envelope_hashes`
+/// carrying the control-plane AuditEnvelope receipts) and receipt-timeout
+/// (`pending: true`, empty `tx_hash`/`block_number`, no envelopes — the op may
+/// still mine; the UI confirms on chain by `user_op_hash`).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct SubmitAcceptUserOpResponse {
     pub ok: bool,
     pub tx_hash: String,
     pub block_number: String,
+    /// The ERC-4337 userOpHash the bundler accepted (#97).
+    pub user_op_hash: String,
+    /// #97: control-plane audit receipts decoded from the confirmed
+    /// executeBatch. Absent on the pending variant / pre-#97 brokers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub audit_envelope_hashes: Option<Vec<String>>,
+    /// #230: broadcast but receipt-poll timed out — NOT an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pending: Option<bool>,
 }
 
 // ── #248 — on-chain K11-gated scope re-grant for an ALREADY-bound agent ──────
@@ -497,6 +546,72 @@ pub struct BuildRevokeUserOpRequest {
     /// The agents' on-chain `SidecarRegistry` device key hashes (`0x` + 64 hex
     /// each).
     pub device_key_hashes: Vec<String>,
+}
+
+// ── the daemon's web-API plant contract (#275 tier-3) ───────────────────────
+
+/// The daemon's **web-API plant contract** — the frontend↔daemon surface, as
+/// opposed to the broker/worker chain above. It lives in this wasm-safe crate
+/// so the browser host (`agentkeys-web-core`) compiles the SAME types the
+/// daemon's `ui_bridge` serves: `daemon.ts` gets the route + body from a
+/// wasm-exported builder instead of hand-building them, which dissolves the
+/// old runtime parity check into the type system (#275, parity-ladder rung 3 —
+/// "one code path; violating parity is a compile error"). The contract is
+/// still pinned to `harness/fixtures/web-api/master_memory_plant.json` by a
+/// `ui_bridge` unit test, and the REMAINING non-Rust consumer
+/// (`harness/web-parity-demo.sh`) is gated against that fixture by
+/// `scripts/check-web-api-drift.sh`.
+pub mod web_api {
+    use serde::{Deserialize, Serialize};
+
+    /// Canonical master-memory plant route — the single source of truth for
+    /// the path the React frontend (via the `agentkeys-web-core` wasm export)
+    /// and the harness web-parity demo both POST to.
+    pub const MASTER_MEMORY_PLANT_ROUTE: &str = "/v1/master/memory/plant";
+
+    /// A master-actor memory entry. `content_hash` is the dedup key —
+    /// keccak-free sha256 over (ns || key || body) so a re-plant of the same
+    /// content is detected and skipped (the "prevent duplicate plant" gate).
+    #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+    #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+    pub struct ApiMemoryEntry {
+        pub ns: String,
+        pub key: String,
+        pub title: String,
+        #[ts(type = "number")]
+        pub bytes: u64,
+        pub version: String,
+        pub updated: String,
+        pub preview: String,
+        pub body: String,
+        #[serde(default)]
+        pub content_hash: String,
+    }
+
+    /// `POST` body for [`MASTER_MEMORY_PLANT_ROUTE`].
+    #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+    #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+    pub struct MasterMemoryPlantRequest {
+        pub entries: Vec<ApiMemoryEntry>,
+    }
+
+    /// Plant outcome. `taxonomy_status` surfaces the durable category-index
+    /// write so a configured-Config store failure is NOT hidden behind an
+    /// otherwise-successful memory plant: `"ok"` (written), `"unconfigured"`
+    /// (Config not set up, cache-only), `"failed: <reason>"` (memory IS
+    /// durable but the category index is stale → retry), or
+    /// `"skipped: <reason>"` (config-context unavailable).
+    #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+    #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+    pub struct MasterMemoryPlantResponse {
+        #[ts(type = "number")]
+        pub planted: usize,
+        #[ts(type = "number")]
+        pub skipped: usize,
+        #[ts(type = "number")]
+        pub total: usize,
+        pub taxonomy_status: String,
+    }
 }
 
 // ── shared protocol helpers (the omni-normalization bug site, centralized) ───
@@ -558,5 +673,34 @@ mod tests {
         assert_eq!(normalize_omni_0x("abcd"), "0xabcd");
         assert_eq!(normalize_omni_0x("0xabcd"), "0xabcd");
         assert_eq!(normalize_omni_0x("0Xabcd"), "0Xabcd");
+    }
+
+    #[test]
+    fn broker_cap_request_ttl_is_optional_on_the_wire() {
+        // Mirrors the broker's `#[serde(default)]`: `None` omits ttl_seconds (the
+        // broker then applies its default), `Some` emits a bare number. This is
+        // why the single on-wire type uses `Option` + skip rather than a required
+        // `u64` — the divergence web-core and backend-client used to carry.
+        let base = BrokerCapRequest {
+            operator_omni: "0xop".into(),
+            actor_omni: "0xactor".into(),
+            service: "memory:travel".into(),
+            device_key_hash: "0xdkh".into(),
+            ttl_seconds: None,
+            client_sig: None,
+            client_nonce: None,
+            client_ts: None,
+        };
+        let omitted = serde_json::to_value(&base).unwrap();
+        assert!(
+            omitted.get("ttl_seconds").is_none(),
+            "None must omit ttl_seconds so the broker applies its default"
+        );
+        let present = serde_json::to_value(BrokerCapRequest {
+            ttl_seconds: Some(900),
+            ..base
+        })
+        .unwrap();
+        assert_eq!(present["ttl_seconds"], 900);
     }
 }

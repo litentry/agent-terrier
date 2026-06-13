@@ -2370,14 +2370,20 @@ agentkeys/                                  # repo root
 │   │                                       #   LLM hosts over stdio / HTTP / xiaozhi
 │   │                                       #   mcp-endpoint WS relay (issue #107)
 │   ├── agentkeys-provisioner/              # Rust orchestrator that spawns TS scrapers
-│   ├── agentkeys-backend-client/           # ONE owner of the broker/worker client
-│   │                                       #   protocol (issue #203): cap-mint (6
-│   │                                       #   data-class endpoints: cred/memory/config
-│   │                                       #   store+fetch), STS relay, worker put/get +
-│   │                                       #   config put/get body types, memory:<ns>
-│   │                                       #   builder, 0x-omni normalize. MCP
-│   │                                       #   HttpBackend delegates to it; daemon
-│   │                                       #   ui_bridge cap-mint + worker bodies use it
+│   ├── agentkeys-protocol/                 # The wire TYPES half of the #203 one-owner
+│   │                                       #   split (#215 re-land): pure serde, wasm-safe
+│   │                                       #   — cap-mint + worker bodies, UserOp build/
+│   │                                       #   submit shapes, the web_api plant contract
+│   │                                       #   (#275). Shared by backend-client (native)
+│   │                                       #   AND web-core (browser); ts-rs generates
+│   │                                       #   the frontend's lib/generated/*.ts from it
+│   ├── agentkeys-backend-client/           # The native CLIENT half (issue #203):
+│   │                                       #   cap-mint (6 data-class endpoints:
+│   │                                       #   cred/memory/config store+fetch), STS
+│   │                                       #   relay, worker calls, memory:<ns>
+│   │                                       #   builder, 0x-omni normalize. Re-exports
+│   │                                       #   agentkeys-protocol as ::protocol; the MCP
+│   │                                       #   server + daemon ui_bridge call it
 │   └── agentkeys-chain/                    # Solidity contracts + Rust ABI bindings
 │       ├── contracts/
 │       │   ├── AgentKeysScope.sol
