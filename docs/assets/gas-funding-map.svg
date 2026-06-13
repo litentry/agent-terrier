@@ -1,0 +1,120 @@
+<svg viewBox="0 0 1160 760" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/></marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1d4ed8"/></marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#059669"/></marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7c3aed"/></marker>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/></marker>
+    <marker id="arrowGrey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#9ca3af"/></marker>
+  </defs>
+
+  <rect x="0" y="0" width="1160" height="760" fill="#ffffff"/>
+
+  <!-- ===== TITLE + LEGEND ===== -->
+  <text x="40" y="36" font-size="22" font-weight="bold" fill="#111827">Which address do I fund?</text>
+  <text x="40" y="58" font-size="11.5" fill="#6b7280">Rectangle = an on-chain ADDRESS (wallet or contract) with its functions/state inside &#183; Oval = external actor &#183; dashed = a derivation &#183; &#9312;&#9313; = the two things you fund.</text>
+
+  <!-- ===== EXTERNAL OVALS ===== -->
+  <ellipse cx="150" cy="104" rx="110" ry="30" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="150" y="100" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#6d28d9">BROKER_SPONSOR_SIGNER_KEY</text>
+  <text x="150" y="115" text-anchor="middle" font-size="9.5" fill="#6b7280">secp256k1 private key (off-chain)</text>
+
+  <ellipse cx="600" cy="98" rx="120" ry="30" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="600" y="94" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#047857">Operator</text>
+  <text x="600" y="110" text-anchor="middle" font-size="9.5" fill="#6b7280">funds the gas (you)</text>
+
+  <ellipse cx="250" cy="712" rx="120" ry="30" fill="#faf5ff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="250" y="708" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#7c3aed">User</text>
+  <text x="250" y="724" text-anchor="middle" font-size="9.5" fill="#6b7280">passkey &#183; Touch ID (gasless)</text>
+
+  <!-- ===== BLOCKCHAIN CONTAINER ===== -->
+  <rect x="40" y="150" width="1080" height="510" rx="22" fill="#fbfbfd" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="7 5"/>
+  <text x="600" y="172" text-anchor="middle" font-size="12" font-style="italic" fill="#6b7280">&#9939; Heima blockchain &#8212; every box is an on-chain ADDRESS; the lines inside are that address's functions / state</text>
+
+  <!-- ===== DERIVATION: KEY -> EOA address ===== -->
+  <line x1="150" y1="134" x2="150" y2="200" stroke="#7c3aed" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrowPurple)"/>
+  <text x="160" y="178" font-size="9.5" font-style="italic" fill="#6d28d9">derives the address</text>
+
+  <!-- ===== ADDRESS 1: SPONSOR / BUNDLER EOA ===== -->
+  <rect x="70" y="200" width="320" height="244" rx="10" fill="#ffffff" stroke="#059669" stroke-width="2.5"/>
+  <circle cx="368" cy="222" r="13" fill="#059669"/><text x="368" y="227" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">&#9312;</text>
+  <text x="88" y="226" font-size="13" font-weight="bold" fill="#047857">Sponsor / Bundler EOA</text>
+  <text x="88" y="242" font-size="9.5" fill="#6b7280">wallet (EOA) &#183; the broker's submitter</text>
+  <text x="88" y="265" font-size="12.5" font-family="Menlo, monospace" font-weight="bold" fill="#0f766e">0x0298&#8230;944DA</text>
+  <line x1="88" y1="275" x2="372" y2="275" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="88" y="292" font-size="9.5" font-style="italic" fill="#6b7280">functions / roles:</text>
+  <text x="92" y="309" font-size="10" fill="#374151">&#8226; sendRawTx(handleOps) &#8212; submit, FRONT gas</text>
+  <text x="92" y="326" font-size="10" fill="#374151">&#8226; sign(paymasterAndData) &#8212; broker co-sign</text>
+  <text x="92" y="343" font-size="10" fill="#374151">&#8226; receive gas refund (beneficiary)</text>
+  <line x1="88" y1="354" x2="372" y2="354" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="88" y="372" font-size="10" font-weight="bold" fill="#047857">&#9312; FUND by PLAIN NATIVE TRANSFER</text>
+  <text x="88" y="388" font-size="9.5" font-family="Menlo, monospace" fill="#6b7280">heima-fund-account.sh</text>
+  <text x="88" y="408" font-size="9.5" fill="#6b7280">balance now &#8776; 9.8 HEI &#183; cycles (refunded)</text>
+
+  <!-- ===== ADDRESS 2: ENTRYPOINT ===== -->
+  <rect x="430" y="200" width="350" height="300" rx="10" fill="#ffffff" stroke="#b45309" stroke-width="2.5"/>
+  <text x="448" y="226" font-size="13" font-weight="bold" fill="#b45309">EntryPoint</text>
+  <text x="448" y="242" font-size="9.5" fill="#6b7280">contract &#183; ERC-4337 hub (address in heima.json)</text>
+  <line x1="448" y1="252" x2="762" y2="252" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="448" y="269" font-size="9.5" font-style="italic" fill="#6b7280">functions:</text>
+  <text x="452" y="286" font-size="10" font-family="Menlo, monospace" fill="#374151">handleOps(ops, beneficiary)</text>
+  <text x="452" y="303" font-size="10" font-family="Menlo, monospace" fill="#374151">depositTo(paymaster) payable</text>
+  <text x="448" y="326" font-size="9.5" font-style="italic" fill="#6b7280">state &#8212; the deposit ledger:</text>
+  <circle cx="462" cy="346" r="10" fill="#1d4ed8"/><text x="462" y="350" text-anchor="middle" font-size="10" font-weight="bold" fill="#ffffff">&#9313;</text>
+  <text x="480" y="350" font-size="10.5" font-family="Menlo, monospace" font-weight="bold" fill="#1d4ed8">deposits[ paymaster ] = 2.08 HEI</text>
+  <text x="480" y="366" font-size="9.5" fill="#6b7280">&#8592; the gas-tank &#183; charged for every sponsored op</text>
+  <text x="452" y="389" font-size="10" font-family="Menlo, monospace" fill="#374151">balanceOf(account) &#8212; per-account deposits</text>
+  <line x1="448" y1="400" x2="762" y2="400" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="448" y="418" font-size="10" font-weight="bold" fill="#1d4ed8">&#9313; your deposit() top-up LANDS HERE</text>
+  <text x="448" y="434" font-size="9.5" fill="#6b7280">(credited through the paymaster's deposit(), at right)</text>
+
+  <!-- ===== ADDRESS 3: VERIFYINGPAYMASTER ===== -->
+  <rect x="820" y="200" width="270" height="300" rx="10" fill="#ffffff" stroke="#1d4ed8" stroke-width="2.5"/>
+  <text x="838" y="226" font-size="13" font-weight="bold" fill="#1d4ed8">VerifyingPaymaster</text>
+  <text x="838" y="242" font-size="9.5" fill="#6b7280">contract &#183; the sponsor (address in heima.json)</text>
+  <line x1="838" y1="252" x2="1072" y2="252" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="838" y="270" font-size="10" font-family="Menlo, monospace" fill="#0f766e">brokerSigner = 0x0298&#8230;944DA</text>
+  <text x="838" y="284" font-size="9" font-style="italic" fill="#6b7280">immutable &#8212; set at deploy</text>
+  <text x="838" y="306" font-size="9.5" font-style="italic" fill="#6b7280">functions:</text>
+  <text x="842" y="323" font-size="9.5" font-family="Menlo, monospace" fill="#374151">validatePaymasterUserOp()</text>
+  <text x="842" y="337" font-size="9" fill="#6b7280">&#8594; require recover(sig)==brokerSigner</text>
+  <text x="842" y="359" font-size="9.5" font-family="Menlo, monospace" font-weight="bold" fill="#047857">deposit() payable</text>
+  <text x="842" y="373" font-size="9" fill="#6b7280">&#8594; credits EntryPoint.deposits[self] &#9313;</text>
+  <line x1="838" y1="384" x2="1072" y2="384" stroke="#fecaca" stroke-width="1"/>
+  <text x="838" y="402" font-size="9.5" font-weight="bold" fill="#b91c1c">&#10007; raw balance is NEVER spent</text>
+  <text x="838" y="417" font-size="9.5" fill="#b91c1c">a plain transfer HERE is lost &#183; raw = 0</text>
+  <text x="838" y="437" font-size="9" font-style="italic" fill="#6b7280">(fund the deposit() above, not this address)</text>
+
+  <!-- ===== ADDRESS 4: MASTER P256ACCOUNT ===== -->
+  <rect x="430" y="556" width="350" height="92" rx="10" fill="#ffffff" stroke="#7c3aed" stroke-width="2.5"/>
+  <text x="448" y="582" font-size="13" font-weight="bold" fill="#7c3aed">Master P256Account</text>
+  <text x="448" y="598" font-size="9.5" fill="#6b7280">contract (ERC-4337) &#183; address &#8656; CREATE2(passkey)</text>
+  <line x1="448" y1="608" x2="762" y2="608" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="452" y="625" font-size="10" font-family="Menlo, monospace" fill="#374151">validateUserOp() &#8594; K11 passkey (Touch ID)</text>
+  <text x="452" y="640" font-size="10" font-family="Menlo, monospace" fill="#374151">execute(...) &#8594; the action &#183; pays NO gas</text>
+
+  <!-- ===== FUNDING ARROWS ===== -->
+  <line x1="512" y1="116" x2="250" y2="198" stroke="#059669" stroke-width="2.2" marker-end="url(#arrowGreen)"/>
+  <text x="300" y="150" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#047857">&#9312; fund the wallet</text>
+  <path d="M 722 90 L 955 90 L 955 198" fill="none" stroke="#1d4ed8" stroke-width="2.2" marker-end="url(#arrowBlue)"/>
+  <text x="838" y="82" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#1d4ed8">&#9313; deposit() &#8212; the ONLY top-up</text>
+
+  <!-- ===== DERIVATION: EOA address IS the paymaster's brokerSigner ===== -->
+  <path d="M 200 444 L 200 524 L 955 524 L 955 502" fill="none" stroke="#0f766e" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arrowTeal)"/>
+  <text x="430" y="518" text-anchor="middle" font-size="10" font-style="italic" font-weight="bold" fill="#0f766e">DERIVATION: EOA address = brokerSigner</text>
+
+  <!-- ===== RUNTIME ARROWS ===== -->
+  <line x1="390" y1="300" x2="428" y2="300" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="409" y="293" text-anchor="middle" font-size="8.5" fill="#374151">handleOps</text>
+  <line x1="428" y1="338" x2="390" y2="338" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrowGrey)"/>
+  <text x="409" y="354" text-anchor="middle" font-size="8.5" font-style="italic" fill="#6b7280">&#8617; refund</text>
+  <line x1="780" y1="300" x2="818" y2="300" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="799" y="293" text-anchor="middle" font-size="8.5" fill="#374151">validate</text>
+  <line x1="605" y1="500" x2="605" y2="554" stroke="#374151" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="615" y="528" font-size="9.5" fill="#7c3aed">execute() gasless</text>
+  <line x1="360" y1="694" x2="446" y2="624" stroke="#7c3aed" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  <text x="372" y="664" font-size="9.5" fill="#7c3aed">Touch ID</text>
+
+  <!-- ===== FOOTNOTE ===== -->
+  <text x="40" y="752" font-size="10" fill="#9ca3af">Live numbers any time: scripts/check-wallet-balances.sh &#183; snapshot 2026-06-13 &#8212; &#9312; EOA &#8776; 9.8 HEI, &#9313; deposit &#8776; 2.08 HEI, paymaster raw = 0.</text>
+</svg>
