@@ -29,6 +29,12 @@ ciborium = "0.2" # build AuditEnvelope op_body (ciborium::Value) for #153 decode
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# B2 (#203 parity ladder, rung 3 / #215 re-land): generate the Api* wire types as
+# TypeScript so the parent-control frontend imports them instead of hand-mirroring
+# (a drift then becomes a compile error, not a silent runtime break). The
+# `#[ts(export)]` tests write apps/parent-control/lib/generated/ under
+# `cargo test`; a CI git-diff gate fails on drift.
+ts-rs = { version = "10", features = ["no-serde-warnings"] }
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

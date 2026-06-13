@@ -184,23 +184,22 @@ impl BrokerClient {
     }
 }
 
-// ─── Cap-mint types (mirror crates/agentkeys-broker-server handlers/cap.rs) ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapRequest {
-    pub operator_omni: String,
-    pub actor_omni: String,
-    /// Signed capability service. For memory it is **namespace-qualified** —
-    /// `memory:<ns>` (e.g. `memory:travel`), arch.md §896 — because the broker
-    /// hashes it (`keccak(service)`) for `isServiceInScope` and the worker keys
-    /// storage off it (`bots/<actor>/memory/memory:<ns>.enc`). A bare `memory`
-    /// never matches a `memory:<ns>` grant → `service_not_in_scope`; the web
-    /// client builds it with `memoryService(ns)`, never a bare `memory`.
-    pub service: String,
-    pub device_key_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl_seconds: Option<u64>,
-}
+// ─── Cap-mint types ──────────────────────────────────────────────────────────
+//
+// The cap-mint request body is the SHARED on-wire type owned by
+// `agentkeys-protocol`, aliased here as `CapRequest` so this crate's call sites
+// and the `wasm.rs` bindings stay unchanged. Sharing it means the browser host
+// and the native client (agentkeys-backend-client) can no longer drift on this
+// body — previously each had its own copy and they diverged on `ttl_seconds`
+// (`Option<u64>` here vs a required `u64` there) AND this copy was missing the
+// #76 K10 cap-PoP fields (`client_sig`/`client_nonce`/`client_ts`; browser
+// callers send `None` — verified-when-present until the worker enforce flag
+// flips). `service` is still the namespace-qualified signed service
+// `memory:<ns>` (arch.md §896) — build it with `memoryService(ns)`, never a
+// bare `memory` (→ `service_not_in_scope`). The cap-token *response* shape
+// stays local: a typed convenience view over the same wire bytes the native
+// client keeps opaque (the deliberate B3 non-unification).
+pub use agentkeys_protocol::BrokerCapRequest as CapRequest;
 
 /// Broker-signed cap token. `payload` is the signed `CapPayload` (op, data_class,
 /// k3_epoch, expiry, …) — kept as opaque JSON here; the worker re-parses + the
@@ -339,6 +338,9 @@ mod tests {
             service: "memory".into(),
             device_key_hash: "0xdkh".into(),
             ttl_seconds: Some(900),
+            client_sig: None,
+            client_nonce: None,
+            client_ts: None,
         }
     }
 

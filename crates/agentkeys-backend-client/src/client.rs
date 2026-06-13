@@ -216,7 +216,12 @@ impl BackendClient {
                     actor_omni: req.actor_omni,
                     service: req.service,
                     device_key_hash,
-                    ttl_seconds: req.ttl_seconds,
+                    // Caller-side `CapMintRequest` always carries an explicit ttl,
+                    // so the wire body always sends it (`Some`) — byte-identical
+                    // to before the on-wire field became `Option`. Only a direct
+                    // on-wire caller (the browser) may send `None` to take the
+                    // broker default.
+                    ttl_seconds: Some(req.ttl_seconds),
                     client_sig: Some(pop.client_sig),
                     client_nonce: Some(pop.client_nonce),
                     client_ts: Some(pop.client_ts),
@@ -227,7 +232,7 @@ impl BackendClient {
                 actor_omni: req.actor_omni,
                 service: req.service,
                 device_key_hash: req.device_key_hash,
-                ttl_seconds: req.ttl_seconds,
+                ttl_seconds: Some(req.ttl_seconds),
                 client_sig: None,
                 client_nonce: None,
                 client_ts: None,
