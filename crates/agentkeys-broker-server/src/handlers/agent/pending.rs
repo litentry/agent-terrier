@@ -47,6 +47,9 @@ pub async fn pending_bindings(
                 "device_key_hash": device_key_hash,
                 "pairing_code": b.pairing_code,
                 "created_at": b.created_at,
+                // #224 — same expiry the agent's `--request-pairing` printed; the
+                // master card renders a live countdown so a stale card is visible.
+                "expires_at": b.expires_at,
             })
         })
         .collect();

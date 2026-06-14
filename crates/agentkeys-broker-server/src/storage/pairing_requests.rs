@@ -118,6 +118,11 @@ pub struct PendingBinding {
     pub pairing_code: String,
     /// Unix seconds when the agent requested pairing (`/request`). The UI formats it.
     pub created_at: i64,
+    /// Unix seconds the request expires (`created_at + PAIRING_REQUEST_TTL_SECONDS`)
+    /// — the SAME value the agent's `--request-pairing` prints. #224: the master
+    /// card renders a live countdown off it so a STALE card (already past expiry /
+    /// an old start) is visibly the one to refuse.
+    pub expires_at: i64,
 }
 
 /// The `SELECT` shape `poll()` reads:
@@ -255,6 +260,19 @@ impl PairingRequestStore {
     /// Open a new **unbound** pairing request (agent ran `/v1/agent/pairing/request`).
     /// `operator_omni` / `child_omni` / `label` / `requested_scope` are NULL until
     /// a master claims the `pairing_code`.
+    ///
+    /// #224 — SUPERSEDE: before inserting, DELETE every prior **open** (unclaimed)
+    /// request for the SAME `device_pubkey`. Re-running `--request-pairing` (esp.
+    /// `--force`, or after a lost local state file) therefore leaves **exactly one**
+    /// open request for the device instead of accumulating duplicate pending cards
+    /// (the real incident: two stale `hermes` cards for one device). The DELETE is
+    /// authenticated — the handler verifies `pop_sig` recovers to `device_pubkey`
+    /// BEFORE calling this, so only the device-key holder can supersede its own open
+    /// requests. CLAIMED rows are NOT touched (they are the master's bind queue; a
+    /// stale claimed row is removed via `decline`, never silently). The DELETE +
+    /// INSERT run under the one store `Mutex`, so a concurrent claim can't slip a
+    /// row between them. Returns the number of superseded rows (0 in the common
+    /// first-request case) for the handler to log.
     pub fn issue(
         &self,
         request_id: &str,
@@ -263,8 +281,15 @@ impl PairingRequestStore {
         pop_sig: &str,
         created_at: i64,
         expires_at: i64,
-    ) -> BrokerResult<()> {
+    ) -> BrokerResult<usize> {
         let conn = self.lock()?;
+        let superseded = conn
+            .execute(
+                "DELETE FROM pairing_requests
+                 WHERE LOWER(device_pubkey) = LOWER(?1) AND claimed_at IS NULL",
+                params![device_pubkey],
+            )
+            .map_err(|e| BrokerError::Internal(format!("supersede open pairing_requests: {e}")))?;
         conn.execute(
             "INSERT INTO pairing_requests
                 (request_id, pairing_code, device_pubkey, pop_sig, created_at, expires_at)
@@ -279,7 +304,7 @@ impl PairingRequestStore {
             ],
         )
         .map_err(|e| BrokerError::Internal(format!("insert pairing_request: {e}")))?;
-        Ok(())
+        Ok(superseded)
     }
 
     /// Atomically claim the request by `pairing_code` (master ran
@@ -454,7 +479,7 @@ impl PairingRequestStore {
         let mut stmt = conn
             .prepare(
                 "SELECT request_id, child_omni, operator_omni, label, requested_scope,
-                        device_pubkey, pop_sig, pairing_code, created_at
+                        device_pubkey, pop_sig, pairing_code, created_at, expires_at
                  FROM pairing_requests
                  WHERE operator_omni = ?1 AND claimed_at IS NOT NULL AND bound_at IS NULL
                  ORDER BY claimed_at ASC",
@@ -472,6 +497,7 @@ impl PairingRequestStore {
                     pop_sig: row.get(6)?,
                     pairing_code: row.get(7)?,
                     created_at: row.get(8)?,
+                    expires_at: row.get(9)?,
                 })
             })
             .map_err(|e| BrokerError::Internal(format!("query pending_bindings: {e}")))?;
@@ -868,8 +894,10 @@ mod tests {
         let s = store();
         s.issue("dup", "code-1", "0xdev", "0xpop", 100, 700)
             .unwrap();
+        // DISTINCT device so the #224 same-device supersede doesn't delete the
+        // first row first — the PRIMARY-KEY constraint is what we're exercising.
         assert!(s
-            .issue("dup", "code-2", "0xdev", "0xpop", 100, 700)
+            .issue("dup", "code-2", "0xother", "0xpop", 100, 700)
             .is_err());
     }
 
@@ -878,8 +906,120 @@ mod tests {
         let s = store();
         s.issue("req-1", "dupcode", "0xdev", "0xpop", 100, 700)
             .unwrap();
+        // DISTINCT device (see above) so we hit the UNIQUE(pairing_code) constraint
+        // rather than the same-device supersede path.
         assert!(s
-            .issue("req-2", "dupcode", "0xdev", "0xpop", 100, 700)
+            .issue("req-2", "dupcode", "0xother", "0xpop", 100, 700)
             .is_err());
+    }
+
+    /// #224 — re-`issue` for the SAME device supersedes (deletes) the prior OPEN
+    /// (unclaimed) request, so `--request-pairing`/`--force` re-runs leave exactly
+    /// one open request instead of accumulating duplicate pending cards.
+    #[test]
+    fn issue_supersedes_prior_open_request_for_same_device() {
+        let s = store();
+        assert_eq!(
+            s.issue("req-1", "code-1", "0xdev", "0xpop", 100, 700)
+                .unwrap(),
+            0,
+            "first request supersedes nothing"
+        );
+        // Second request for the SAME device supersedes the first.
+        assert_eq!(
+            s.issue("req-2", "code-2", "0xdev", "0xpop2", 150, 750)
+                .unwrap(),
+            1,
+            "second request for the same device supersedes the prior open one"
+        );
+        // The superseded request_id is gone; only the latest is pollable.
+        assert_eq!(
+            s.poll("req-1", "0xdev", 200).unwrap(),
+            PairingPoll::NotFound
+        );
+        assert_eq!(s.poll("req-2", "0xdev", 200).unwrap(), PairingPoll::Pending);
+        // The superseded code can no longer be claimed (no duplicate pending row).
+        assert_eq!(
+            s.claim("code-1", "op", "child", "agent-a", "memory", 200)
+                .unwrap(),
+            PairingClaim::NotFoundOrClaimed
+        );
+        // Run it N more times — still exactly one open request for the device.
+        s.issue("req-3", "code-3", "0xdev", "0xpop3", 160, 760)
+            .unwrap();
+        s.issue("req-4", "code-4", "0xdev", "0xpop4", 170, 770)
+            .unwrap();
+        s.claim("code-4", "op", "child", "agent-a", "memory", 200)
+            .unwrap();
+        assert_eq!(
+            s.pending_bindings("op").unwrap().len(),
+            1,
+            "N re-requests then one claim → exactly one pending binding"
+        );
+    }
+
+    /// #224 — supersede targets ONLY open (unclaimed) rows. A CLAIMED row is the
+    /// master's bind queue and survives a later request for the same device (a
+    /// stale claimed row is removed via `decline`, never silently by a re-request).
+    #[test]
+    fn issue_does_not_supersede_claimed_rows() {
+        let s = store();
+        s.issue("req-1", "code-1", "0xdev", "0xpop", 100, 700)
+            .unwrap();
+        s.claim("code-1", "op", "child", "agent-a", "memory", 200)
+            .unwrap();
+        // A fresh request for the same device supersedes NOTHING (the only prior
+        // row is claimed).
+        assert_eq!(
+            s.issue("req-2", "code-2", "0xdev", "0xpop2", 300, 900)
+                .unwrap(),
+            0,
+            "claimed rows are not superseded"
+        );
+        // The claimed row is still the master's pending binding.
+        let pend = s.pending_bindings("op").unwrap();
+        assert_eq!(pend.len(), 1);
+        assert_eq!(pend[0].request_id, "req-1");
+    }
+
+    /// #224 — supersede matches the device key case-insensitively (the same key may
+    /// be sent checksummed one run, lowercased the next).
+    #[test]
+    fn issue_supersede_is_case_insensitive_on_device() {
+        let s = store();
+        s.issue("req-1", "code-1", "0xAbCd", "0xpop", 100, 700)
+            .unwrap();
+        assert_eq!(
+            s.issue("req-2", "code-2", "0xabcd", "0xpop2", 150, 750)
+                .unwrap(),
+            1,
+            "mixed-case vs lowercase device is the same device → superseded"
+        );
+        assert_eq!(
+            s.poll("req-1", "0xabcd", 200).unwrap(),
+            PairingPoll::NotFound
+        );
+    }
+
+    /// #224 — `pending_bindings` surfaces `expires_at` (the SAME value the agent's
+    /// `--request-pairing` prints) so the master card can render a live countdown.
+    #[test]
+    fn pending_bindings_surface_created_and_expires_at() {
+        let s = store();
+        s.issue(
+            "req-1",
+            "code-1",
+            "0xdev",
+            "0xpop",
+            1_700_000_000,
+            1_700_000_600,
+        )
+        .unwrap();
+        s.claim("code-1", "op", "child", "agent-a", "memory", 1_700_000_100)
+            .unwrap();
+        let pend = s.pending_bindings("op").unwrap();
+        assert_eq!(pend.len(), 1);
+        assert_eq!(pend[0].created_at, 1_700_000_000);
+        assert_eq!(pend[0].expires_at, 1_700_000_600);
     }
 }
