@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Dot, PageHead } from './shared';
 import { PermissionView } from './permissions';
 import type { Actor, PairingRequest } from './types';
@@ -32,6 +32,35 @@ function scopeOptions(
   }
   namespaces.forEach((ns) => push(`memory:${ns}`, 'available namespace — not requested', false));
   return opts;
+}
+
+// #224 — live countdown to a pairing request's expiry (`expiresAt`, the SAME unix
+// second the agent's `--request-pairing` prints). Ticks once a second. A request
+// whose window has elapsed reads "⚠ expired" in the warn color — the visible tell
+// that a card is a STALE / duplicate request to refuse rather than approve (the
+// two-duplicate-cards incident this issue fixes). `expiresAt` of 0 means the broker
+// row predates the field → "expiry unknown" rather than a bogus countdown.
+function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!expiresAt) return <span className="muted">expiry unknown</span>;
+  const remaining = expiresAt - nowSec;
+  const expired = remaining <= 0;
+  const mag = Math.abs(remaining);
+  const human = mag >= 60 ? `${Math.floor(mag / 60)}m ${mag % 60}s` : `${mag}s`;
+  return (
+    <span
+      style={{
+        color: expired ? 'var(--warn, #b8860b)' : 'var(--ink-dim)',
+        fontWeight: expired ? 600 : 400,
+      }}
+    >
+      {expired ? `⚠ expired ${human} ago` : `expires in ${human}`}
+    </span>
+  );
 }
 
 // Workflows 3–8: incoming pairing requests + device view + permission view.
@@ -208,7 +237,12 @@ function PairRequestCard({
                   <div style={{ fontWeight: 600, fontSize: 14 }}>
                     Pairing request · <span className="serif" style={{ fontStyle: 'italic' }}>{req.agent}</span>
                   </div>
-                  <div className="muted" style={{ fontSize: 11.5 }}>{req.vendor} · requested {req.requestedAt ? new Date(req.requestedAt * 1000).toLocaleString() : '—'}</div>
+                  {/* #224 — start time + LIVE expiry countdown. A card reading
+                      "⚠ expired" (or an old start) is the stale/duplicate one to
+                      refuse; the freshness signal that the agent can cross-check. */}
+                  <div className="muted" style={{ fontSize: 11.5 }}>
+                    {req.vendor} · requested {req.requestedAt ? new Date(req.requestedAt * 1000).toLocaleString() : '—'} · <ExpiryCountdown expiresAt={req.expiresAt} />
+                  </div>
                 </div>
               </div>
               <span className="chip warn">action required</span>

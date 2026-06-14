@@ -1,0 +1,291 @@
+<svg viewBox="0 0 1680 900" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/>
+    </marker>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/>
+    </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ca3af"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1680" height="900" fill="#ffffff"/>
+
+  <!-- ===================== TITLE ===================== -->
+  <text x="32" y="34" font-size="22" font-weight="bold" fill="#111827">AgentKeys — component &amp; dependency map</text>
+  <text x="32" y="58" font-size="12" fill="#6b7280">How the CLI, daemon (master / agent), web client + wasm, MCP, backend-client, broker, workers, signer and chain fit together. Companion to the §2 inventory table.</text>
+  <text x="32" y="76" font-size="12" fill="#6b7280">Wire shapes have ONE owner — <tspan font-family="Menlo, monospace" fill="#b45309">agentkeys-protocol</tspan> — which both the native <tspan font-family="Menlo, monospace">backend-client</tspan> and the browser <tspan font-family="Menlo, monospace">web-core</tspan> (wasm) depend on, so a body can't drift across native vs browser.</text>
+
+  <!-- ===================== ZONE: OPERATOR WORKSTATION ===================== -->
+  <rect x="24" y="92" width="428" height="372" rx="12" fill="#eef2ff" stroke="#4f46e5" stroke-width="1.5"/>
+  <text x="40" y="113" font-size="12.5" font-weight="bold" fill="#4338ca">OPERATOR WORKSTATION — local · master plane</text>
+
+  <!-- client -->
+  <rect x="40" y="138" width="186" height="84" rx="8" fill="#ffffff" stroke="#4f46e5" stroke-width="1.3"/>
+  <text x="52" y="160" font-size="13" font-weight="bold" font-family="Menlo, monospace" fill="#111827">parent-control</text>
+  <rect x="168" y="146" width="50" height="16" rx="8" fill="#4f46e5"/>
+  <text x="193" y="158" font-size="9" font-weight="bold" fill="#ffffff" text-anchor="middle">CLIENT</text>
+  <text x="52" y="179" font-size="10.5" fill="#6b7280">apps/parent-control</text>
+  <text x="52" y="195" font-size="10.5" fill="#6b7280">React / Next.js — web UI</text>
+  <text x="52" y="211" font-size="10.5" fill="#6b7280">imports generated TS types</text>
+
+  <!-- wasm -->
+  <rect x="246" y="138" width="186" height="84" rx="8" fill="#ffffff" stroke="#4f46e5" stroke-width="1.3"/>
+  <text x="258" y="160" font-size="12.5" font-weight="bold" font-family="Menlo, monospace" fill="#111827">web-core</text>
+  <rect x="372" y="146" width="48" height="16" rx="8" fill="#7c3aed"/>
+  <text x="396" y="158" font-size="9" font-weight="bold" fill="#ffffff" text-anchor="middle">WASM</text>
+  <text x="258" y="179" font-size="10.5" fill="#6b7280">agentkeys-web-core</text>
+  <text x="258" y="195" font-size="10.5" fill="#6b7280">in-browser request builder</text>
+  <text x="258" y="211" font-size="10.5" fill="#6b7280">(wasm-pack → JS glue)</text>
+
+  <!-- cli -->
+  <rect x="40" y="246" width="186" height="84" rx="8" fill="#ffffff" stroke="#4f46e5" stroke-width="1.3"/>
+  <text x="52" y="268" font-size="13" font-weight="bold" font-family="Menlo, monospace" fill="#111827">agentkeys</text>
+  <rect x="178" y="254" width="38" height="16" rx="8" fill="#4f46e5"/>
+  <text x="197" y="266" font-size="9" font-weight="bold" fill="#ffffff" text-anchor="middle">CLI</text>
+  <text x="52" y="287" font-size="10.5" fill="#6b7280">init · agent admin · scope</text>
+  <text x="52" y="303" font-size="10.5" fill="#6b7280">grant/revoke · recovery</text>
+  <text x="52" y="319" font-size="10.5" fill="#6b7280">whoami · signer debug</text>
+
+  <!-- daemon master -->
+  <rect x="246" y="246" width="186" height="84" rx="8" fill="#ffffff" stroke="#4f46e5" stroke-width="1.3"/>
+  <text x="258" y="268" font-size="12" font-weight="bold" font-family="Menlo, monospace" fill="#111827">daemon</text>
+  <rect x="368" y="254" width="56" height="16" rx="8" fill="#4f46e5"/>
+  <text x="396" y="266" font-size="9" font-weight="bold" fill="#ffffff" text-anchor="middle">MASTER</text>
+  <text x="258" y="287" font-size="10.5" fill="#6b7280">K10 + K11 · WebAuthn</text>
+  <text x="258" y="303" font-size="10.5" fill="#6b7280">ui-bridge HTTP (localhost)</text>
+  <text x="258" y="319" font-size="10.5" fill="#6b7280">localhost sidecar proxy</text>
+
+  <!-- operator-zone relationship notes (free band y330..464) -->
+  <text x="238" y="356" font-size="10" font-style="italic" fill="#4338ca" text-anchor="middle">daemon → cli · Rust lib (agent_admin pending pass-through)</text>
+  <text x="238" y="374" font-size="10" font-style="italic" fill="#6b7280" text-anchor="middle">client → daemon · localhost HTTP (ui-bridge)</text>
+  <text x="238" y="392" font-size="10" font-style="italic" fill="#6b7280" text-anchor="middle">cap-mint + worker calls → via backend-client (both planes)</text>
+  <text x="238" y="410" font-size="10" font-style="italic" fill="#6b7280" text-anchor="middle">identity / session (J1) ← broker at init (CLI / core)</text>
+
+  <!-- ===================== ZONE: AGENT SANDBOX ===================== -->
+  <rect x="24" y="484" width="428" height="232" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.5"/>
+  <text x="40" y="505" font-size="12.5" font-weight="bold" fill="#0f766e">AGENT SANDBOX — remote runtime · VM / CI / cloud-LLM</text>
+
+  <!-- npm -->
+  <rect x="40" y="530" width="186" height="64" rx="8" fill="#ffffff" stroke="#0d9488" stroke-width="1.3"/>
+  <text x="52" y="552" font-size="11.5" font-weight="bold" font-family="Menlo, monospace" fill="#111827">@agentkeys/daemon</text>
+  <rect x="186" y="537" width="32" height="15" rx="7" fill="#0d9488"/>
+  <text x="202" y="548" font-size="8.5" font-weight="bold" fill="#ffffff" text-anchor="middle">npm</text>
+  <text x="52" y="572" font-size="10.5" fill="#6b7280">TS wrapper → agent binary</text>
+
+  <!-- daemon agent -->
+  <rect x="246" y="530" width="186" height="64" rx="8" fill="#ffffff" stroke="#0d9488" stroke-width="1.3"/>
+  <text x="258" y="552" font-size="12" font-weight="bold" font-family="Menlo, monospace" fill="#111827">daemon</text>
+  <rect x="374" y="537" width="50" height="15" rx="7" fill="#0d9488"/>
+  <text x="399" y="548" font-size="8.5" font-weight="bold" fill="#ffffff" text-anchor="middle">AGENT</text>
+  <text x="258" y="572" font-size="10.5" fill="#6b7280">holds K10 · sidecar proxy</text>
+
+  <!-- mcp -->
+  <rect x="40" y="612" width="186" height="86" rx="8" fill="#ffffff" stroke="#0d9488" stroke-width="1.3"/>
+  <text x="52" y="634" font-size="12.5" font-weight="bold" font-family="Menlo, monospace" fill="#111827">agentkeys-mcp</text>
+  <rect x="176" y="620" width="40" height="15" rx="7" fill="#0d9488"/>
+  <text x="196" y="631" font-size="8.5" font-weight="bold" fill="#ffffff" text-anchor="middle">MCP</text>
+  <text x="52" y="654" font-size="10.5" fill="#6b7280">agent tool surface</text>
+  <text x="52" y="670" font-size="10.5" fill="#6b7280">(memory / cap / audit /</text>
+  <text x="52" y="686" font-size="10.5" fill="#6b7280">whoami tools)</text>
+
+  <!-- provisioner -->
+  <rect x="246" y="612" width="186" height="86" rx="8" fill="#ffffff" stroke="#0d9488" stroke-width="1.3"/>
+  <text x="258" y="634" font-size="12" font-weight="bold" font-family="Menlo, monospace" fill="#111827">provisioner</text>
+  <text x="258" y="654" font-size="10.5" fill="#6b7280">agentkeys-provisioner</text>
+  <text x="258" y="670" font-size="10.5" fill="#6b7280">+ browser scraper</text>
+  <text x="258" y="686" font-size="10.5" fill="#6b7280">(Class-B API keys)</text>
+
+  <!-- ===================== ZONE: SHARED CRATES ===================== -->
+  <rect x="516" y="92" width="232" height="624" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.5"/>
+  <text x="532" y="113" font-size="12.5" font-weight="bold" fill="#92400e">SHARED CRATES — linked widely</text>
+
+  <!-- protocol (one owner — highlighted) -->
+  <rect x="532" y="138" width="200" height="94" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="2.4"/>
+  <text x="544" y="159" font-size="13" font-weight="bold" font-family="Menlo, monospace" fill="#111827">agentkeys-protocol</text>
+  <rect x="614" y="167" width="110" height="16" rx="8" fill="#b45309"/>
+  <text x="669" y="179" font-size="8.5" font-weight="bold" fill="#ffffff" text-anchor="middle">WIRE TYPES · 1 OWNER</text>
+  <text x="544" y="199" font-size="10.5" fill="#78350f">broker / worker / web-api</text>
+  <text x="544" y="215" font-size="10.5" fill="#78350f">pure serde · transport-free</text>
+  <text x="544" y="227" font-size="9.5" font-style="italic" fill="#92400e">compiles to wasm32</text>
+
+  <!-- backend-client -->
+  <rect x="532" y="252" width="200" height="96" rx="8" fill="#ffffff" stroke="#b45309" stroke-width="1.3"/>
+  <text x="544" y="273" font-size="12" font-weight="bold" font-family="Menlo, monospace" fill="#111827">backend-client</text>
+  <rect x="630" y="280" width="94" height="15" rx="7" fill="#b45309"/>
+  <text x="677" y="291" font-size="8.5" font-weight="bold" fill="#ffffff" text-anchor="middle">NATIVE CLIENT</text>
+  <text x="544" y="311" font-size="10.5" fill="#6b7280">agentkeys-backend-client</text>
+  <text x="544" y="327" font-size="10.5" fill="#6b7280">cap → STS → worker</text>
+  <text x="544" y="343" font-size="9.5" font-style="italic" fill="#92400e">re-exports protocol · aws-sdk-sts</text>
+
+  <!-- core -->
+  <rect x="532" y="368" width="200" height="58" rx="8" fill="#ffffff" stroke="#b45309" stroke-width="1.3"/>
+  <text x="544" y="389" font-size="12" font-weight="bold" font-family="Menlo, monospace" fill="#111827">agentkeys-core</text>
+  <text x="544" y="407" font-size="10" fill="#6b7280">device-crypto · sessions</text>
+  <text x="544" y="421" font-size="10" fill="#6b7280">chain-profiles (heima / base)</text>
+
+  <!-- types -->
+  <rect x="532" y="442" width="200" height="52" rx="8" fill="#ffffff" stroke="#b45309" stroke-width="1.3"/>
+  <text x="544" y="463" font-size="12" font-weight="bold" font-family="Menlo, monospace" fill="#111827">agentkeys-types</text>
+  <text x="544" y="481" font-size="10" fill="#6b7280">ts-rs → frontend bindings</text>
+
+  <!-- catalog -->
+  <rect x="532" y="510" width="200" height="48" rx="8" fill="#ffffff" stroke="#b45309" stroke-width="1.3"/>
+  <text x="544" y="531" font-size="12" font-weight="bold" font-family="Menlo, monospace" fill="#111827">agentkeys-catalog</text>
+  <text x="544" y="548" font-size="10" fill="#6b7280">service catalog + sensitivity</text>
+
+  <!-- memory -->
+  <rect x="532" y="574" width="200" height="54" rx="8" fill="#ffffff" stroke="#b45309" stroke-width="1.3"/>
+  <text x="544" y="595" font-size="11.5" font-weight="bold" font-family="Menlo, monospace" fill="#111827">memory-engine</text>
+  <text x="544" y="613" font-size="10" fill="#6b7280">agent state (-openviking)</text>
+
+  <text x="632" y="652" font-size="9.5" font-style="italic" fill="#92400e" text-anchor="middle">core · types · catalog —</text>
+  <text x="632" y="666" font-size="9.5" font-style="italic" fill="#92400e" text-anchor="middle">linked by all crates above</text>
+
+  <!-- ===================== ZONE: BROKER HOST ===================== -->
+  <rect x="812" y="92" width="400" height="624" rx="12" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="828" y="113" font-size="12.5" font-weight="bold" fill="#1e40af">BROKER HOST — remote cloud · origin/main deploy</text>
+
+  <!-- broker -->
+  <rect x="828" y="138" width="368" height="100" rx="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2.4"/>
+  <text x="840" y="161" font-size="13" font-weight="bold" font-family="Menlo, monospace" fill="#111827">agentkeys-broker-server</text>
+  <rect x="1060" y="146" width="126" height="16" rx="8" fill="#1d4ed8"/>
+  <text x="1123" y="158" font-size="8.5" font-weight="bold" fill="#ffffff" text-anchor="middle">CAP-MINT AUTHORITY</text>
+  <text x="840" y="183" font-size="10.5" fill="#1e3a8a">K1 cap co-sign · K2 OIDC JWT (→ AWS STS)</text>
+  <text x="840" y="200" font-size="10.5" fill="#1e3a8a">verifies scope / registry / epoch on chain</text>
+  <text x="840" y="217" font-size="10.5" fill="#1e3a8a">§10.2 pairing claim/pending · SSE drop push</text>
+  <text x="840" y="232" font-size="9.5" font-style="italic" fill="#1e40af">never holds K3 · no AWS principal at runtime</text>
+
+  <!-- bundler -->
+  <rect x="828" y="258" width="176" height="74" rx="8" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.3"/>
+  <text x="840" y="279" font-size="12" font-weight="bold" font-family="Menlo, monospace" fill="#111827">bundler</text>
+  <text x="840" y="298" font-size="10" fill="#6b7280">agentkeys-bundler</text>
+  <text x="840" y="314" font-size="10" fill="#6b7280">ERC-4337 UserOps → chain</text>
+
+  <!-- mcp-server -->
+  <rect x="1020" y="258" width="176" height="74" rx="8" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.3"/>
+  <text x="1032" y="279" font-size="11.5" font-weight="bold" font-family="Menlo, monospace" fill="#111827">mcp-server</text>
+  <rect x="1130" y="265" width="56" height="15" rx="7" fill="#1d4ed8"/>
+  <text x="1158" y="276" font-size="8.5" font-weight="bold" fill="#ffffff" text-anchor="middle">HOSTED</text>
+  <text x="1032" y="298" font-size="10" fill="#6b7280">agentkeys-mcp-server</text>
+  <text x="1032" y="314" font-size="10" fill="#6b7280">remote MCP · links backend-client</text>
+
+  <!-- workers -->
+  <rect x="828" y="352" width="368" height="118" rx="8" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.6"/>
+  <text x="840" y="373" font-size="12.5" font-weight="bold" font-family="Menlo, monospace" fill="#111827">workers ×6  (agentkeys-worker-*)</text>
+  <text x="840" y="393" font-size="11" fill="#374151">creds · memory · config · classify · audit · email</text>
+  <rect x="840" y="403" width="344" height="26" rx="6" fill="#fef2f2" stroke="#dc2626" stroke-width="1"/>
+  <text x="852" y="420" font-size="10.5" font-weight="bold" fill="#b91c1c">each INDEPENDENTLY re-verifies the cap on chain</text>
+  <text x="840" y="447" font-size="9.5" font-style="italic" fill="#6b7280">+ K10 proof-of-possession re-check (#76) · defense-in-depth</text>
+
+  <!-- tools (off path) -->
+  <rect x="828" y="488" width="368" height="46" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.1" stroke-dasharray="5 4"/>
+  <text x="840" y="508" font-size="11" font-weight="bold" font-family="Menlo, monospace" fill="#6b7280">mock-server · fleet</text>
+  <text x="840" y="524" font-size="9.5" fill="#9ca3af">test broker (mock-server) · devops TUI (fleet) — off the request path</text>
+
+  <!-- ===================== ZONE: EXTERNAL ===================== -->
+  <rect x="1276" y="92" width="380" height="624" rx="12" fill="#f9fafb" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="1292" y="113" font-size="12.5" font-weight="bold" fill="#374151">EXTERNAL TRUST DOMAINS</text>
+
+  <!-- signer -->
+  <rect x="1292" y="138" width="348" height="96" rx="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.3"/>
+  <text x="1304" y="160" font-size="13" font-weight="bold" fill="#111827">Signer (TEE)</text>
+  <text x="1304" y="180" font-size="10.5" fill="#6b7280">K3 vault (sealed) · KEK derive · STS mint</text>
+  <text x="1304" y="196" font-size="10.5" fill="#6b7280">K4 per-actor wallet (HKDF, on demand)</text>
+  <text x="1304" y="212" font-size="10.5" fill="#6b7280">K10 / K11 verify helpers</text>
+  <text x="1304" y="228" font-size="9.5" font-style="italic" fill="#6b7280">← workers: KEK derive (mTLS)</text>
+
+  <!-- chain -->
+  <rect x="1292" y="256" width="348" height="96" rx="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.3"/>
+  <text x="1304" y="278" font-size="13" font-weight="bold" fill="#111827">Chain — Heima / Base</text>
+  <text x="1304" y="298" font-size="10.5" fill="#6b7280">ScopeContract · SidecarRegistry</text>
+  <text x="1304" y="314" font-size="10.5" fill="#6b7280">K3EpochCounter · CredentialAudit</text>
+  <text x="1304" y="330" font-size="10.5" fill="#6b7280">ERC-4337 EntryPoint · P256Router</text>
+  <text x="1304" y="346" font-size="9.5" font-style="italic" fill="#6b7280">addresses: chain-profiles (SoT)</text>
+
+  <!-- aws -->
+  <rect x="1292" y="374" width="348" height="96" rx="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.3"/>
+  <text x="1304" y="396" font-size="13" font-weight="bold" fill="#111827">AWS</text>
+  <text x="1304" y="416" font-size="10.5" fill="#6b7280">S3 — vault / memory / config buckets</text>
+  <text x="1304" y="432" font-size="10.5" fill="#6b7280">STS (AssumeRoleWithWebIdentity)</text>
+  <text x="1304" y="448" font-size="10.5" fill="#6b7280">SES (email worker)</text>
+  <text x="1304" y="464" font-size="9.5" font-style="italic" fill="#6b7280">PrincipalTag = actor_omni (isolation)</text>
+
+  <!-- ===================== EDGES ===================== -->
+
+  <!-- WIRE: wasm → protocol (left→center channel) -->
+  <path d="M 432 174 L 530 180" fill="none" stroke="#b45309" stroke-width="2.4" marker-end="url(#arrowAmber)"/>
+  <text x="462" y="166" font-size="9.5" fill="#b45309" font-weight="bold">wire types</text>
+  <!-- WIRE: backend-client → protocol (vertical, inside center zone) -->
+  <path d="M 632 252 L 632 234" fill="none" stroke="#b45309" stroke-width="2.4" marker-end="url(#arrowAmber)"/>
+  <text x="640" y="247" font-size="9.5" fill="#b45309" font-weight="bold">re-exports</text>
+
+  <!-- LIB: client → wasm (adjacent) -->
+  <path d="M 226 176 L 244 176" fill="none" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrowGray)"/>
+  <!-- LIB: daemon-master → cli (adjacent) -->
+  <path d="M 246 300 L 228 300" fill="none" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrowGray)"/>
+  <!-- LIB: cli → backend-client (left→center channel) -->
+  <path d="M 226 286 L 530 300" fill="none" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrowGray)"/>
+  <text x="470" y="284" font-size="9.5" fill="#9ca3af" font-weight="bold">lib</text>
+  <!-- LIB: daemon-master → backend-client (left→center channel) -->
+  <path d="M 432 304 L 530 318" fill="none" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrowGray)"/>
+  <!-- LIB: daemon-agent → mcp -->
+  <path d="M 246 562 L 228 638" fill="none" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrowGray)"/>
+  <text x="206" y="606" font-size="9.5" fill="#9ca3af" font-weight="bold">lib</text>
+
+  <!-- NET: client → daemon-master (localhost, inside operator zone) -->
+  <path d="M 133 222 L 300 246" fill="none" stroke="#374151" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- NET: backend-client → broker (center→broker channel) -->
+  <path d="M 732 286 L 826 198" fill="none" stroke="#374151" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="752" y="244" font-size="9.5" fill="#374151" font-weight="bold">cap-mint (K1)</text>
+  <!-- NET: backend-client → workers (center→broker channel) -->
+  <path d="M 732 322 L 826 402" fill="none" stroke="#374151" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="754" y="356" font-size="9.5" fill="#374151" font-weight="bold">cap → STS</text>
+  <text x="754" y="370" font-size="9.5" fill="#374151" font-weight="bold">→ put / get</text>
+
+  <!-- NET: broker → bundler (inside broker zone) -->
+  <path d="M 914 238 L 914 256" fill="none" stroke="#374151" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="920" y="252" font-size="9" fill="#374151">UserOp</text>
+
+  <!-- NET: broker → signer (mTLS) — broker→external channel -->
+  <path d="M 1196 170 L 1290 172" fill="none" stroke="#dc2626" stroke-width="1.6" marker-end="url(#arrowRed)"/>
+  <text x="1214" y="162" font-size="9.5" fill="#dc2626" font-weight="bold">mTLS</text>
+  <!-- NET: broker → chain -->
+  <path d="M 1196 212 L 1290 284" fill="none" stroke="#374151" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="1206" y="250" font-size="9.5" fill="#374151" font-weight="bold">reads chain</text>
+
+  <!-- NET: workers → chain (re-verify) -->
+  <path d="M 1196 402 L 1290 320" fill="none" stroke="#374151" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="1206" y="372" font-size="9.5" fill="#374151" font-weight="bold">re-verify</text>
+  <!-- NET: workers → aws -->
+  <path d="M 1196 424 L 1290 414" fill="none" stroke="#374151" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="1206" y="440" font-size="9.5" fill="#374151" font-weight="bold">S3 / STS</text>
+
+  <!-- ===================== LEGEND ===================== -->
+  <rect x="24" y="740" width="1632" height="128" rx="10" fill="#ffffff" stroke="#e5e7eb" stroke-width="1.2"/>
+  <text x="40" y="764" font-size="13" font-weight="bold" fill="#111827">Legend</text>
+
+  <line x1="44" y1="788" x2="96" y2="788" stroke="#374151" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <text x="106" y="792" font-size="11" fill="#374151">network call (HTTPS / localhost) — the request path</text>
+
+  <line x1="44" y1="814" x2="96" y2="814" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowRed)"/>
+  <text x="106" y="818" font-size="11" fill="#374151">mTLS to the signer TEE (typed RPC, signer-protocol)</text>
+
+  <line x1="470" y1="788" x2="522" y2="788" stroke="#b45309" stroke-width="2.4" marker-end="url(#arrowAmber)"/>
+  <text x="532" y="792" font-size="11" fill="#374151">shared wire types — <tspan font-family="Menlo, monospace" fill="#b45309">agentkeys-protocol</tspan> is the one owner (no native vs wasm drift)</text>
+
+  <line x1="470" y1="814" x2="522" y2="814" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrowGray)"/>
+  <text x="532" y="818" font-size="11" fill="#374151">in-process dependency (Rust crate link / JS module import) — compiles in, no network</text>
+
+  <text x="1066" y="780" font-size="10.5" font-style="italic" fill="#6b7280">Both daemon planes (master + agent) reach the broker / workers</text>
+  <text x="1066" y="796" font-size="10.5" font-style="italic" fill="#6b7280">through agentkeys-backend-client; identity / session (J1) comes</text>
+  <text x="1066" y="812" font-size="10.5" font-style="italic" fill="#6b7280">from the broker at init (CLI / core).</text>
+  <text x="1066" y="832" font-size="10.5" font-style="italic" fill="#6b7280">Headline: every cap is re-verified on chain by the worker before</text>
+  <text x="1066" y="848" font-size="10.5" font-style="italic" fill="#6b7280">any S3 / KEK / STS op. Boundaries &amp; keys: arch §3–§4.</text>
+</svg>

@@ -3836,8 +3836,9 @@ async fn list_pairing_requests(
 /// (`apps/parent-control/app/_components/types.ts`). These rows are POST-claim
 /// (awaiting on-chain approval); `pairCode` carries the agent's REAL one-time
 /// pairing code (the master claimed by it) so the operator can confirm it matches
-/// the device, and `requestedAt` carries the broker `created_at` unix seconds (the
-/// UI formats it).
+/// the device, `requestedAt` carries the broker `created_at` unix seconds, and
+/// (#224) `expiresAt` carries the broker `expires_at` — the SAME value the agent
+/// printed — so the card renders a live countdown (a stale card reads as expired).
 fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
     let field = |k: &str| {
         b.get(k)
@@ -3855,6 +3856,13 @@ fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
     // created_at: broker unix seconds (the agent's /request). The UI formats it.
     let created_at = b
         .get("created_at")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    // #224 expires_at: broker unix seconds the request expires — the SAME value the
+    // agent's `--request-pairing` prints. The UI renders a live countdown so a stale
+    // card (already past expiry / an old start) is visibly the one to refuse.
+    let expires_at = b
+        .get("expires_at")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     // char-safe head…tail elision for long hex handles.
@@ -3904,6 +3912,7 @@ fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
         "derivation": format!("//{label}"),
         "requested": requested,
         "requestedAt": created_at,
+        "expiresAt": expires_at,
         "attestation": format!("PoP verified · {}", short(&pop_sig)),
     })
 }
@@ -6386,6 +6395,9 @@ mod tests {
             "device_pubkey": "0x04aabbccddeeff00112233445566778899aabbcc",
             "device_key_hash": "0x6d02e352b9bd71d3aa35677c35492bfdc39bacda89cc7d0506d31e2754abf2a5",
             "pop_sig": "0xsignaturedeadbeef0011223344556677",
+            "pairing_code": "bPe5Y8qNAdReal0neTimeCode",
+            "created_at": 1_700_000_000_i64,
+            "expires_at": 1_700_000_600_i64,
         });
         let pr = pending_binding_to_request(&row);
         assert_eq!(pr["id"], "req-abc123def456");
@@ -6397,6 +6409,11 @@ mod tests {
             pr["deviceKeyHash"],
             "0x6d02e352b9bd71d3aa35677c35492bfdc39bacda89cc7d0506d31e2754abf2a5"
         );
+        // #224 — pairCode is the agent's REAL one-time code (NOT the request_id),
+        // and start/expiry pass through verbatim for the card's countdown.
+        assert_eq!(pr["pairCode"], "bPe5Y8qNAdReal0neTimeCode");
+        assert_eq!(pr["requestedAt"], 1_700_000_000_i64);
+        assert_eq!(pr["expiresAt"], 1_700_000_600_i64);
         let requested = pr["requested"].as_array().expect("requested is an array");
         assert_eq!(requested.len(), 2, "two scope tokens");
         assert_eq!(requested[0]["cap"], "memory");

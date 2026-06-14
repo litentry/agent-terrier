@@ -102,6 +102,10 @@ flowchart LR
 
 ## 2. Component inventory
 
+[![AgentKeys component & dependency map — CLI, daemon (master/agent), web client + wasm, MCP, backend-client, broker, workers, signer, chain](assets/component-architecture.svg)](assets/component-architecture.svg)
+
+The map above ([`assets/component-architecture.svg`](assets/component-architecture.svg)) is the visual companion to the table below: it groups every crate/app by the trust zone it runs in (operator workstation · agent sandbox · shared crates · broker host · external domains) and draws the four edge classes — **network** (HTTPS/localhost), **mTLS** (signer), **shared wire types** (`agentkeys-protocol` is the one owner, so a body can't drift across native vs wasm — see the [issue #203 rule](../AGENTS.md)), and **in-process dependency** (Rust crate link / JS import). Note `agentkeys-daemon` links `agentkeys-cli` as a library (the `agent_admin` pending pass-through), and the React client builds protocol-correct requests through the `agentkeys-web-core` wasm module; both daemon planes reach the broker/workers via `agentkeys-backend-client`. Keep it in sync with this table when a crate or edge changes.
+
 | # | Component | Where it runs | Primary job |
 |---|---|---|---|
 | 1 | `agentkeys` CLI | Operator's workstation (master device) | Init, agent management, scope grant/revoke, recovery, whoami, signer debug |
@@ -591,9 +595,14 @@ ON AGENT MACHINE (any VM / container / CI runner / cloud sandbox / no-input devi
 4. Broker:
    - Verify pop_sig BEFORE storing (a bad sig creates no row — no DoS amplification
      on the unauthenticated endpoint; rate-limit + TTL + pool cap bound the rest)
-   - Store an UNBOUND pairing request (names NO master; operator/child_omni = ∅; TTL 600s)
+   - SUPERSEDE any prior OPEN (unclaimed) request for THIS device_pubkey, then
+     store an UNBOUND pairing request (names NO master; operator/child_omni = ∅;
+     TTL 600s). The supersede (#224) means re-running --request-pairing/--force
+     leaves exactly ONE open request per device — no duplicate pending cards
+     accumulate on the master; claimed rows are untouched (the master's bind queue).
    - Return { request_id (the agent's SECRET retrieval ticket),
-              pairing_code (high-entropy; the agent DISPLAYS this) }
+              pairing_code (high-entropy; the agent DISPLAYS this),
+              expires_at (created_at + TTL; the master card counts down to it, #224) }
 5. Daemon: DISPLAY pairing_code (QR / screen text) to the owner; begin polling (step 9).
 
 ON MASTER (already initialized; holds J1_master; master ≠ agent machine):

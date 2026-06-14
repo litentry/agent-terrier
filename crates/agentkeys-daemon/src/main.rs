@@ -309,7 +309,10 @@ struct Args {
     /// Replace an existing UNEXPIRED `--request-pairing` request for this device.
     /// Without it, re-running `--request-pairing` while a prior request is still
     /// claimable refuses (so it can't silently destroy the only retrieval handle,
-    /// since request_id is off stdout).
+    /// since request_id is off stdout). #224: when a new request DOES open, the
+    /// broker supersedes (deletes) this device's prior OPEN broker request, so
+    /// `--force` (or repeated runs) leave EXACTLY ONE open request — no duplicate
+    /// pending cards accumulate on the master.
     #[arg(long)]
     force: bool,
 
@@ -606,7 +609,9 @@ fn pairing_state_path(device_pubkey: &str) -> String {
 /// request and `force` is false — re-running would replace the only retrieval
 /// handle (request_id is off stdout), stranding a still-claimable pairing_code.
 /// Proceeds (Ok) when there is no prior state, it is expired/unparseable, or
-/// `--force` is set.
+/// `--force` is set. This guards only the LOCAL state file; once a new request
+/// DOES open, the broker supersedes this device's prior OPEN row server-side
+/// (#224), so the master never sees duplicate pending cards.
 fn pairing_request_guard(
     existing_state: Option<&str>,
     now_secs: i64,
