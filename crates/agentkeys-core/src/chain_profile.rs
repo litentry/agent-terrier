@@ -111,6 +111,13 @@ pub struct ChainProfile {
     /// `is_development_default`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev_environment: Option<DevEnvironment>,
+    /// Per-chain native-token funding amounts — the SoT for the deploy scripts so
+    /// ETH-priced chains (Base) aren't funded at HEI-sized amounts (a HEI-sized
+    /// 0.35 deposit on Base would escrow ~$1000s and exceed the deployer balance).
+    /// Read via `agentkeys chain show <chain> | jq -r .funding.<field>`; absent
+    /// fields fall back to the deploy script's built-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding: Option<Funding>,
 }
 
 /// One deployed contract on a chain: name + address + operator-facing purpose.
@@ -255,6 +262,38 @@ pub struct GasConfig {
     pub model: String,
     pub max_priority_fee_gwei: u64,
     pub max_fee_gwei: u64,
+}
+
+/// Per-chain native-token funding amounts, all in **wei encoded as decimal
+/// strings** (wei exceeds the JSON safe-integer range; strings avoid precision
+/// loss and the deploy scripts consume them verbatim via `jq -r`). Every field
+/// is optional — a missing/empty field means "use the deploy script's built-in
+/// default". ETH-priced chains (Base) set these far lower than HEI chains.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Funding {
+    /// Min deployer native balance required before a contract deploy proceeds
+    /// (`heima-bring-up.sh`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deploy_min_wei: String,
+    /// VerifyingPaymaster EntryPoint deposit top-up target (`heima-deploy-paymaster.sh`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub paymaster_deposit_wei: String,
+    /// Refill the paymaster deposit when it drops below this.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub paymaster_min_deposit_wei: String,
+    /// EntryPoint native ED buffer (`heima-deploy-erc4337.sh`); substrate-frontier
+    /// reaping guard, `"0"` on non-substrate chains (no ExistentialDeposit).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ed_buffer_wei: String,
+    /// Per-account EntryPoint deposit top-up for the #164 master register
+    /// (`_erc4337_lib.sh`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_deposit_wei: String,
+    /// `maxFeePerGas` for the register UserOp (`_erc4337_lib.sh`). The EntryPoint's
+    /// required prefund = this × Σ(gas limits), so an ETH chain MUST set a
+    /// chain-realistic (low) cap or the prefund alone is unaffordable.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub userop_max_fee_wei: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +577,41 @@ mod tests {
             p.rpc.substrate_wss.is_none(),
             "base must not carry substrate_wss"
         );
+    }
+
+    #[test]
+    fn base_funding_is_eth_sized_and_below_heima() {
+        // The deploy scripts read funding.* from the profile so ETH chains aren't
+        // funded at HEI-sized amounts. Pin the base values are present + far below
+        // heima's (a HEI-sized account deposit on Base would escrow ~$1000s and
+        // exceed the deployer balance — the 2026-06-14 register-affordability fix).
+        let base = ChainProfile::load_builtin("base").unwrap();
+        let heima = ChainProfile::load_builtin("heima").unwrap();
+        let bf = base.funding.as_ref().expect("base carries funding");
+        let hf = heima.funding.as_ref().expect("heima carries funding");
+        let wei = |s: &str| s.parse::<u128>().expect("funding wei parses");
+        assert_eq!(
+            bf.deploy_min_wei, "3000000000000000",
+            "base deploy floor = 0.003 ETH"
+        );
+        assert_eq!(
+            bf.userop_max_fee_wei, "1000000000",
+            "base register maxfee = 1 gwei"
+        );
+        assert!(
+            wei(&bf.account_deposit_wei) < wei(&hf.account_deposit_wei),
+            "base account deposit must be far below heima's HEI-sized one"
+        );
+        assert!(
+            wei(&bf.userop_max_fee_wei) < wei(&hf.userop_max_fee_wei),
+            "base register maxfee must be below heima's 40 gwei"
+        );
+        // Funding is OPTIONAL: a profile with no deployed set (anvil) may omit it
+        // and the deploy scripts fall back to their built-in defaults.
+        assert!(ChainProfile::load_builtin("anvil")
+            .unwrap()
+            .funding
+            .is_none());
     }
 
     #[test]

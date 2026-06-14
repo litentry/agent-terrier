@@ -42,7 +42,7 @@ SET_VERSION="$(jq -r '.contract_set_version // "?"' "$CHAIN_PROFILE")"
 # EntryPoint/factory (+ optional paymaster) since #250 — separate instances
 # from prod, recorded only in the test env file + the TEST_* GH secrets.
 test_env_val() { grep -E "^$1=" "$TEST_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 || true; }
-TEST_DEPLOYER="$(test_env_val HEIMA_DEPLOYER_ADDR_HEIMA)"
+TEST_DEPLOYER="$(test_env_val DEPLOYER_ADDR_HEIMA)"
 TEST_ENTRYPOINT="$(test_env_val ENTRYPOINT_ADDRESS_HEIMA)"
 TEST_PAYMASTER="$(test_env_val PAYMASTER_ADDRESS_HEIMA)"
 
@@ -70,7 +70,7 @@ printf '  %-26s %-44s %14s\n' "wallet / contract" "address" "HEI"
 printf '  %s\n' "$(printf '%.0s-' {1..86})"
 row() { printf '  %-26s %-44s %14s\n' "$1" "$2" "$(hei "$(native_wei "$2")")"; }
 
-row "prod deployer  [env]"      "$HEIMA_DEPLOYER_ADDR_HEIMA"
+row "prod deployer  [env]"      "$DEPLOYER_ADDR_HEIMA"
 [ -n "$TEST_DEPLOYER" ] && row "test/CI deployer  [env]"  "$TEST_DEPLOYER"
 row "sponsor/bundler  [env]"    "$BROKER_SPONSOR_SIGNER_ADDRESS_HEIMA"
 row "paymaster raw  [profile]"  "$PAYMASTER"
