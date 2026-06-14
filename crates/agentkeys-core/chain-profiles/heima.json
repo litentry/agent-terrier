@@ -32,7 +32,7 @@
   "gas": {
     "model": "eip1559",
     "max_priority_fee_gwei": 1,
-    "max_fee_gwei": 10
+    "max_fee_gwei": 1000
   },
   "deploy": {
     "deployer_env_var": "AGENTKEYS_HEIMA_DEPLOYER_KEY",
