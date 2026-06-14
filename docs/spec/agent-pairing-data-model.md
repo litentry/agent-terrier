@@ -58,6 +58,27 @@ Where they live: the agent persists `{request_id, pairing_code, device_pubkey, e
 0600 at `~/.agentkeys/pairing-request-<device_pubkey>.json` (the `state_file` in its output);
 the broker persists the row in the `pairing_requests` table ([`storage/pairing_requests.rs`](../../crates/agentkeys-broker-server/src/storage/pairing_requests.rs)).
 
+## Supersede — exactly one OPEN request per device (#224)
+
+Opening a request (`/v1/agent/pairing/request`) **first deletes every prior OPEN
+(unclaimed) request for the same `device_pubkey`**, then inserts the new one — atomically,
+under the store lock ([`PairingRequestStore::issue`](../../crates/agentkeys-broker-server/src/storage/pairing_requests.rs)).
+So re-running `agentkeys-daemon --request-pairing` (especially `--force`, or after a lost
+local `state_file`) leaves **exactly one** open request for the device instead of letting
+duplicate pending cards accumulate — the original incident was two stale `hermes` cards for
+one device, differing only by `request_id`.
+
+- **Authenticated, not a DoS vector.** The handler verifies `pop_sig` recovers to
+  `device_pubkey` *before* `issue`, so only the holder of the device key supersedes its own
+  open requests. The match is case-insensitive on the address (a key may be sent checksummed
+  one run, lowercased the next).
+- **CLAIMED rows are never superseded.** A claimed-but-unbound row is the master's bind
+  queue; a re-request does not silently delete it. A stale claimed row is removed by the
+  master via `decline` (or `purge_expired` once its retention lapses), never by an agent
+  re-request. (Combined with the supersede of *open* rows, the operator can no longer create
+  duplicate **claimed** rows by claiming two simultaneously-live codes — the older code is
+  gone before the new one opens.)
+
 ## Declared vs attested — the trust line
 
 The master UI groups a pairing request's fields into two columns for a reason:
@@ -104,6 +125,15 @@ needlessly — though neither is exploitable on its own once the request is clai
 | `id` | broker `request_id` | broker handle (master ack/register) |
 | `deviceKeyHash` / `dpubFull` | broker `device_key_hash` / `device_pubkey` | **attested** |
 | `requestedAt` | broker `created_at` (unix s) | timestamp (UI formats it) |
+| `expiresAt` | broker `expires_at` (unix s) | timestamp → **live countdown** (#224) |
 | `derivation` | `//<label>` | HDKD path |
 | `device` / `machine` / `runtime` | daemon placeholders | **declared** (unattested) |
 | `attestation` | `PoP verified · <pop_sig head>` | proof summary |
+
+**#224 — the card renders `expiresAt` as a LIVE countdown** (`ExpiryCountdown`, ticks
+1 Hz). `expires_at` is the SAME unix second the agent's `--request-pairing` printed
+(`created_at + PAIRING_REQUEST_TTL_SECONDS`, 600 s), so a card whose window has elapsed
+reads `⚠ expired` — the visible tell that it is a **stale / duplicate** request to
+refuse rather than approve. Together with the supersede rule below, this is the fix for
+the original incident (two stale `hermes` cards for one device, indistinguishable from
+the live one).

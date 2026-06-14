@@ -61,7 +61,11 @@ pub async fn pairing_request(
     let pairing_code = random_b64url(18);
     let now = unix_now()?;
     let expires_at = now + PAIRING_REQUEST_TTL_SECONDS;
-    state.pairing_request_store.issue(
+    // #224 — `issue` supersedes (deletes) any prior OPEN request for this device
+    // first, so re-running `--request-pairing`/`--force` leaves exactly one open
+    // request instead of accumulating duplicate pending cards. Authenticated: the
+    // pop_sig above proves device-key possession, so only the holder supersedes.
+    let superseded = state.pairing_request_store.issue(
         &request_id,
         &pairing_code,
         &body.device_pubkey,
@@ -72,7 +76,13 @@ pub async fn pairing_request(
 
     tracing::info!(
         device = %body.device_pubkey,
-        "opened §10.2 unbound pairing request — awaiting master claim"
+        superseded,
+        "opened §10.2 unbound pairing request — awaiting master claim{}",
+        if superseded > 0 {
+            " (superseded prior open request(s) for this device)"
+        } else {
+            ""
+        }
     );
 
     Ok((

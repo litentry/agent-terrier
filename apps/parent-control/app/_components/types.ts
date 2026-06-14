@@ -117,6 +117,13 @@ export interface PairingRequest {
   requested: RequestedPerm[];
   /** Unix seconds the agent requested pairing (`created_at`). Formatted in the UI. */
   requestedAt: number;
+  /**
+   * #224 — Unix seconds the pairing request expires (`expires_at`), the SAME value
+   * the agent's `--request-pairing` prints. The card renders a live countdown off
+   * it so a STALE card (already past expiry / an old start) is visibly the one to
+   * refuse. 0 when the broker row predates the field.
+   */
+  expiresAt: number;
   attestation: string;
 }
 
