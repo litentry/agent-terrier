@@ -100,5 +100,13 @@
       "deployed_at": "heima · 2026-06-12"
     }
   ],
-  "contract_set_version": "0.4"
+  "contract_set_version": "0.4",
+  "funding": {
+    "deploy_min_wei": "1000000000000000000",
+    "paymaster_deposit_wei": "2000000000000000000",
+    "paymaster_min_deposit_wei": "200000000000000000",
+    "ed_buffer_wei": "1000000000000000000",
+    "account_deposit_wei": "350000000000000000",
+    "userop_max_fee_wei": "40000000000"
+  }
 }
