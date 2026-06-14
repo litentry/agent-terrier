@@ -23,8 +23,8 @@ Two distinct EVM accounts deploy AgentKeys contracts. They are **different keys*
 
 | Role | Deployer EVM address (resolve — the env file is the SoT) | Key location |
 |---|---|---|
-| **Local / prod deploy** | `grep ^HEIMA_DEPLOYER_ADDR_HEIMA scripts/operator-workstation.env` | `$HEIMA_DEPLOYER_KEY_FILE` (default `~/.agentkeys/heima-deployer.key`, never committed) |
-| **Test / CI deploy** | `grep ^HEIMA_DEPLOYER_ADDR_HEIMA scripts/operator-workstation.test.env` | `~/.agentkeys/heima-deployer-test.key` (operator-provided; wired into the `TEST_HEIMA_DEPLOYER_KEY` GitHub secret via [`scripts/ci-set-github-secrets.sh`](../../scripts/ci-set-github-secrets.sh)) |
+| **Local / prod deploy** | `grep ^DEPLOYER_ADDR_HEIMA scripts/operator-workstation.env` | `$HEIMA_DEPLOYER_KEY_FILE` (default `~/.agentkeys/heima-deployer.key`, never committed) |
+| **Test / CI deploy** | `grep ^DEPLOYER_ADDR_HEIMA scripts/operator-workstation.test.env` | `~/.agentkeys/heima-deployer-test.key` (operator-provided; wired into the `TEST_HEIMA_DEPLOYER_KEY` GitHub secret via [`scripts/ci-set-github-secrets.sh`](../../scripts/ci-set-github-secrets.sh)) |
 
 - The prod deployer's Substrate twin (SS58 prefix 31) is how the EVM side gets funded — derive it from the EVM address via [`scripts/evm-to-substrate-address.mjs`](../../scripts/evm-to-substrate-address.mjs).
 - Heima Paseo testnet uses its own deployer (`HEIMA_PASEO_DEPLOYER_ADDR` in `operator-workstation.env`) — currently unused (chain halted, see below).
@@ -111,7 +111,7 @@ Design notes (what differs from the heima 0.3 set):
 - **No ED buffer** — Base has no Substrate ExistentialDeposit; the AA91 reaping class can't occur (the erc4337 helper skips the buffer on non-substrate chains).
 - **Version note:** this set was deployed under the `0.3` label (router as an aux addition) and relabeled **`0.4`** the same day when heima's 0.4 router-wired redeploy landed — the deployed bytes on base ARE the 0.4 definition, so both chains + `crates/agentkeys-chain/VERSION` now agree on `0.4` (no base redeploy was needed, label only).
 
-Deployer: the Base prod deployer — `grep ^HEIMA_DEPLOYER_ADDR_BASE scripts/operator-workstation.base.env` (key `~/.agentkeys/deployer-base.key`, 0600). Gas is ETH. Heima stays live as the consumer free tier (D5 dual-stack) — nothing on this chain replaces it.
+Deployer: the Base prod deployer — `grep ^DEPLOYER_ADDR_BASE scripts/operator-workstation.base.env` (key `~/.agentkeys/deployer-base.key`, 0600). Gas is ETH. Heima stays live as the consumer free tier (D5 dual-stack) — nothing on this chain replaces it.
 
 **Live-proven #170 numbers (2026-06-12):** `P256Router.verify` with a valid P-256 signature = **31,776 gas** total (precompile path) vs **683,901 gas** through the pure-Solidity verifier on the same chain; invalid signatures correctly return false via the fallback.
 
@@ -121,7 +121,7 @@ Deployer: the Base prod deployer — `grep ^HEIMA_DEPLOYER_ADDR_BASE scripts/ope
 
 ## Deploy metadata (Heima mainnet v2)
 
-- Deployer wallet (EVM): the prod deployer — `grep ^HEIMA_DEPLOYER_ADDR_HEIMA scripts/operator-workstation.env`; see the deployer table above for prod vs test.
+- Deployer wallet (EVM): the prod deployer — `grep ^DEPLOYER_ADDR_HEIMA scripts/operator-workstation.env`; see the deployer table above for prod vs test.
 - v2 deploy date: 2026-05-19 · #164 E1 deploy date: 2026-06-02
 - Compiler: Solc 0.8.20, `evm_version = "london"` (a `forge script` header-validation workaround, NOT Heima's EVM level — Heima executes **Cancun**; see AGENTS.md "Heima EVM compatibility level"). The EntryPoint v0.7 is the canonical eth-infinitism bytecode, deployed via `forge create`.
 - Deploy script: [`crates/agentkeys-chain/script/DeployAgentKeysV1.s.sol`](../../crates/agentkeys-chain/script/DeployAgentKeysV1.s.sol)

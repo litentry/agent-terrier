@@ -91,5 +91,13 @@
       "address": "0x70dd3E063Ed2e4F0A45ce0f69e51E690cF52C8f8",
       "purpose": "CREATE2 factory for P256Account passkey-master smart-accounts; constructor(entryPoint, k11Verifier)"
     }
-  ]
+  ],
+  "funding": {
+    "deploy_min_wei": "3000000000000000",
+    "paymaster_deposit_wei": "10000000000000000",
+    "paymaster_min_deposit_wei": "2000000000000000",
+    "ed_buffer_wei": "0",
+    "account_deposit_wei": "5000000000000000",
+    "userop_max_fee_wei": "1000000000"
+  }
 }

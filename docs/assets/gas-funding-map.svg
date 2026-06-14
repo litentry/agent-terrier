@@ -74,7 +74,7 @@
   <text x="838" y="242" font-size="9.5" fill="#6b7280">contract &#183; the sponsor (address in heima.json)</text>
   <line x1="838" y1="252" x2="1072" y2="252" stroke="#e5e7eb" stroke-width="1"/>
   <text x="838" y="270" font-size="10" font-family="Menlo, monospace" fill="#0f766e">brokerSigner = 0x0298&#8230;944DA</text>
-  <text x="838" y="284" font-size="9" font-style="italic" fill="#6b7280">immutable &#8212; set at deploy</text>
+  <text x="838" y="284" font-size="9" font-style="italic" fill="#6b7280">settable by owner &#183; setBrokerSigner()</text>
   <text x="838" y="306" font-size="9.5" font-style="italic" fill="#6b7280">functions:</text>
   <text x="842" y="323" font-size="9.5" font-family="Menlo, monospace" fill="#374151">validatePaymasterUserOp()</text>
   <text x="842" y="337" font-size="9" fill="#6b7280">&#8594; require recover(sig)==brokerSigner</text>
