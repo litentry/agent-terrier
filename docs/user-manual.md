@@ -231,6 +231,18 @@ services, and a bare `agentkeys cred fetch` (no service argument) pulls the
 re-verifies the `cred:<service>` scope on-chain, so the manifest is discovery only
 and never widens what the agent can reach.
 
+**Default-key selection (#216).** The on-chain scope stores only a
+`keccak(service)` hash, so it can *verify* a service name but can't *enumerate*
+names or mark a default. So an agent's authorized service NAMES + your designated
+default LLM key live in an **off-chain manifest** (`agentkeys cred manifest
+--services openrouter,anthropic --default openrouter` — public names only, never a
+secret). The agent then reads them: `agentkeys cred list` shows its authorized
+services, and a bare `agentkeys cred fetch` (no service argument) pulls the
+**master-designated default** — the no-UI path a screenless device relies on
+(`--select N` overrides to the Nth authorized service). Every fetch still
+re-verifies the `cred:<service>` scope on-chain, so the manifest is discovery only
+and never widens what the agent can reach.
+
 ## Audit receipts (parent-control)
 
 Every Touch-ID chain action — **accepting an agent**, **committing a scope

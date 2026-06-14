@@ -841,7 +841,7 @@ sequenceDiagram
     Worker->>Chain: re-verify scope + binding + epoch (defense in depth)
     Worker->>Sig: derive_cred_kek(operator_omni, k3_epoch) [mTLS]
     Sig-->>Worker: KEK (32 bytes)
-    Worker->>Worker: GetObject s3://vault_bucket/bots/<actor_omni>/credentials/<service>.enc (delegated cap: falls back to bots/<operator_omni>/… — the master-vaulted key, #216)
+    Worker->>Worker: GetObject s3://vault_bucket/bots/<operator_omni>/credentials/<service>.enc (single-vault — the operator/master vault is the only one; delegated cap reads it too, #216/#286)
     Worker->>Worker: AES-256-GCM decrypt under KEK
     Worker-->>Dmn: plaintext credential
     Dmn->>Dmn: Cache plaintext (TTL 5 min)
