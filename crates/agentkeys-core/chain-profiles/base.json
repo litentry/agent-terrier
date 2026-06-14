@@ -94,8 +94,8 @@
   ],
   "funding": {
     "deploy_min_wei": "3000000000000000",
-    "paymaster_deposit_wei": "10000000000000000",
-    "paymaster_min_deposit_wei": "2000000000000000",
+    "paymaster_deposit_wei": "1000000000000000",
+    "paymaster_min_deposit_wei": "1000000000000000",
     "ed_buffer_wei": "0",
     "account_deposit_wei": "5000000000000000",
     "userop_max_fee_wei": "1000000000"
