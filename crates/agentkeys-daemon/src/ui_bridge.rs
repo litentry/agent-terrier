@@ -1035,8 +1035,8 @@ async fn auth_email_status(
                     Ok(init) => OnboardingSession {
                         email,
                         omni: init.evm_omni,
-                        j1: init.session.token,
-                        wallet: init.session.wallet.0,
+                        j1: init.session.token.clone(),
+                        wallet: init.session.wallet.0.clone(),
                     },
                     Err(e) => {
                         tracing::warn!(

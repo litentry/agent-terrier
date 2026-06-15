@@ -29,7 +29,7 @@ fn resolve_bearer(session_bearer: &str) -> Result<String> {
     }
     let sess = agentkeys_core::session_store::load_session("master")
         .context("no --session-bearer given and no stored `master` session to fall back on")?;
-    Ok(sess.token)
+    Ok(sess.token.clone())
 }
 
 /// `agentkeys agent claim` — master claims an agent's pairing request by the

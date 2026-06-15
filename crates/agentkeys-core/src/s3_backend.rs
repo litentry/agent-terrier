@@ -70,7 +70,7 @@ use crate::signer_client::{SignerClient, SignerClientError};
 use agentkeys_types::{
     AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
     InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope,
-    ServiceName, Session, SignedAuthDecision, WalletAddress,
+    SecretBytes, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
 /// AEAD wire-format version byte. v1 (wallet-keyed AAD) is the original
@@ -386,7 +386,7 @@ impl S3CredentialBackend {
         wallet: &WalletAddress,
         service: &ServiceName,
         envelope: &[u8],
-    ) -> Result<Vec<u8>, BackendError> {
+    ) -> Result<SecretBytes, BackendError> {
         if envelope.len() < 1 + 12 + 16 {
             return Err(BackendError::Internal(format!(
                 "envelope too short: {} bytes",
@@ -404,7 +404,7 @@ impl S3CredentialBackend {
         let ciphertext = &envelope[13..];
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(kek));
         let aad = aad_for_version(version, wallet, service)?;
-        cipher
+        let plaintext = cipher
             .decrypt(
                 nonce,
                 Payload {
@@ -412,7 +412,8 @@ impl S3CredentialBackend {
                     aad: &aad,
                 },
             )
-            .map_err(|e| BackendError::Internal(format!("aes-gcm open: {e}")))
+            .map_err(|e| BackendError::Internal(format!("aes-gcm open: {e}")))?;
+        Ok(SecretBytes::new(plaintext))
     }
 }
 
@@ -560,7 +561,7 @@ impl CredentialBackend for S3CredentialBackend {
         session: &Session,
         agent_id: &WalletAddress,
         service: &ServiceName,
-    ) -> Result<Vec<u8>, BackendError> {
+    ) -> Result<SecretBytes, BackendError> {
         enforce_scope_for_service(session, service, false)?;
         // Dual-path read per issue-v2-stage-1-foundation.md migration step
         // 10: try v2 (actor_omni-keyed) path first, fall back to v1
@@ -1109,7 +1110,7 @@ mod tests {
         assert_eq!(envelope[0], ENVELOPE_VERSION_V1);
         assert!(envelope.len() > 1 + 12 + 16);
         let opened = S3CredentialBackend::open(&kek, &wallet, &svc, &envelope).unwrap();
-        assert_eq!(opened, plaintext);
+        assert_eq!(opened.as_slice(), plaintext);
     }
 
     #[test]
@@ -1123,7 +1124,7 @@ mod tests {
             S3CredentialBackend::seal(ENVELOPE_VERSION_V2, &kek, &wallet, &svc, plaintext).unwrap();
         assert_eq!(envelope[0], ENVELOPE_VERSION_V2);
         let opened = S3CredentialBackend::open(&kek, &wallet, &svc, &envelope).unwrap();
-        assert_eq!(opened, plaintext);
+        assert_eq!(opened.as_slice(), plaintext);
     }
 
     #[test]
@@ -1141,7 +1142,9 @@ mod tests {
         // Sanity: a v2-shaped envelope decrypted against itself works.
         let v2 = S3CredentialBackend::seal(ENVELOPE_VERSION_V2, &kek, &wallet, &svc, b"x").unwrap();
         assert_eq!(
-            S3CredentialBackend::open(&kek, &wallet, &svc, &v2).unwrap(),
+            S3CredentialBackend::open(&kek, &wallet, &svc, &v2)
+                .unwrap()
+                .as_slice(),
             b"x"
         );
     }
@@ -1246,7 +1249,7 @@ mod tests {
         assert_eq!(env[0], ENVELOPE_VERSION_V2);
         // Round-trip via the public open() — dispatches on version byte.
         let opened = S3CredentialBackend::open(&kek, &wallet, &svc, &env).unwrap();
-        assert_eq!(opened, b"x");
+        assert_eq!(opened.as_slice(), b"x");
     }
 
     #[test]

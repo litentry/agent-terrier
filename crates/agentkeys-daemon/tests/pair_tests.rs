@@ -515,7 +515,8 @@ async fn recover_full_loop() {
         .await
         .unwrap();
     assert_eq!(
-        cred_bytes, b"sk-or-v1-recover-test",
+        cred_bytes.as_slice(),
+        b"sk-or-v1-recover-test",
         "credential should survive recovery"
     );
 }
@@ -754,7 +755,8 @@ async fn recover_credentials_intact() {
         .await
         .unwrap();
     assert_eq!(
-        or_cred, b"sk-or-v1-original",
+        or_cred.as_slice(),
+        b"sk-or-v1-original",
         "openrouter credential should be intact after recovery"
     );
 
@@ -767,7 +769,8 @@ async fn recover_credentials_intact() {
         .await
         .unwrap();
     assert_eq!(
-        ant_cred, b"sk-ant-original",
+        ant_cred.as_slice(),
+        b"sk-ant-original",
         "anthropic credential should be intact after recovery"
     );
 }
@@ -944,7 +947,8 @@ async fn recover_via_2fa_credentials_intact() {
         .await
         .unwrap();
     assert_eq!(
-        or_cred, b"sk-or-v1-2fa-test",
+        or_cred.as_slice(),
+        b"sk-or-v1-2fa-test",
         "openrouter credential should survive 2FA recovery"
     );
 
@@ -957,7 +961,8 @@ async fn recover_via_2fa_credentials_intact() {
         .await
         .unwrap();
     assert_eq!(
-        ant_cred, b"sk-ant-2fa-test",
+        ant_cred.as_slice(),
+        b"sk-ant-2fa-test",
         "anthropic credential should survive 2FA recovery"
     );
 }

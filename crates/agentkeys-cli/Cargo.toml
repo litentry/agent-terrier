@@ -33,6 +33,7 @@ aws-credential-types = "1"
 sha2 = "0.10"
 hex = "0.4"
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 # `agentkeys agent device-session` — in-sandbox secp256k1 device keygen +
 # EIP-191 wallet_sig session minting (interim §10.2; full ceremony = issue #144).
 # Same versions as agentkeys-core / broker so the workspace lock is unchanged.
