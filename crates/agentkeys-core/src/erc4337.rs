@@ -47,6 +47,34 @@ pub fn master_cred_id_hash(operator_omni: &[u8; 32]) -> [u8; 32] {
     keccak256(preimage.as_bytes())
 }
 
+/// Prefix of the master-account CREATE2-salt preimage (see [`master_account_salt`]).
+/// **Terminology source-of-truth:** the bash literal in
+/// `harness/scripts/_erc4337_lib.sh` (`cast keccak
+/// "agentkeys-master-account:0x$OPERATOR_OMNI"`) MUST match this exactly.
+pub const MASTER_ACCOUNT_SALT_PREFIX: &str = "agentkeys-master-account:0x";
+
+/// The CREATE2 salt that pins a master's `P256Account` address:
+/// `keccak256("agentkeys-master-account:0x" + lowercase_hex(operator_omni))`.
+///
+/// Mirrors `_erc4337_lib.sh::erc4337_master_account_derive` so the broker (#278
+/// D6 sponsored register), the harness, and the daemon all derive the SAME
+/// counterfactual `factory.getAddress(...)` sender. A drift here = a CREATE2
+/// address mismatch (the op deploys a different account than the one bound).
+pub fn master_account_salt(operator_omni: &[u8; 32]) -> [u8; 32] {
+    let preimage = format!("{MASTER_ACCOUNT_SALT_PREFIX}{}", hex::encode(operator_omni));
+    keccak256(preimage.as_bytes())
+}
+
+/// The first master's `deviceKeyHash`: `keccak256(operator_omni)` over the RAW 32
+/// omni bytes — NOT a string preimage. `_erc4337_lib.sh` runs
+/// `cast keccak "0x$OPERATOR_OMNI"`, and `cast keccak` of a `0x`-hex string hashes
+/// the DECODED bytes (verified: omni `0x22…` → `0xc4bd59e1…`), so this hashes the
+/// 32-byte array directly (unlike [`master_cred_id_hash`] / [`master_account_salt`]
+/// whose `:0x`-prefixed preimages are non-hex strings hashed as ASCII).
+pub fn master_device_key_hash(operator_omni: &[u8; 32]) -> [u8; 32] {
+    keccak256(operator_omni)
+}
+
 /// Args for `SidecarRegistry.registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)`
 /// — the P.2 device binding. `actor_omni` is also the agent's omni for the P.3
 /// scope grant, so [`accept_batch_calldata`] threads it into both calls.
@@ -57,6 +85,24 @@ pub struct AgentRegister {
     pub actor_omni: [u8; 32],
     pub link_code_redemption: Vec<u8>,
     pub agent_pop_sig: Vec<u8>,
+}
+
+/// Args for `SidecarRegistry.registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint8)`
+/// — the master's first-device binding (#164 E7 / #278 D6). All 8 args are static
+/// words (no dynamic `bytes`), so the calldata is the selector + 8 inline words.
+/// For a master `operator_omni == actor_omni` (the operator IS the actor); the
+/// field stays explicit so the encoder never assumes it. `pub_x`/`pub_y` are the
+/// master P-256 passkey coordinates as raw 32-byte big-endian words.
+#[derive(Clone, Debug)]
+pub struct RegisterFirstMaster {
+    pub device_key_hash: [u8; 32],
+    pub operator_omni: [u8; 32],
+    pub actor_omni: [u8; 32],
+    pub cred_id_hash: [u8; 32],
+    pub rpid_hash: [u8; 32],
+    pub pub_x: [u8; 32],
+    pub pub_y: [u8; 32],
+    pub roles: u8,
 }
 
 /// Args for `AgentKeysScope.setScope(bytes32,bytes32,bytes32[],bool,uint128,uint128,uint128,uint32)`
@@ -373,6 +419,68 @@ pub fn revoke_batch_calldata(registry: &[u8; 20], device_key_hashes: &[[u8; 32]]
         .map(revoke_agent_device_calldata)
         .collect();
     execute_batch_calldata(&dests, &values, &calls)
+}
+
+/// `registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint8)`
+/// calldata — the master's first-device binding (#164 E7 / #278 D6). Eight static
+/// 32-byte words after the selector; no dynamic tail. Byte-exact with the
+/// `cast calldata ...` in `harness/scripts/_erc4337_lib.sh` (golden-tested).
+pub fn register_first_master_device_calldata(r: &RegisterFirstMaster) -> Vec<u8> {
+    let sel = selector(
+        "registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint8)",
+    );
+    let mut out = Vec::with_capacity(4 + 8 * WORD);
+    out.extend_from_slice(&sel);
+    out.extend_from_slice(&r.device_key_hash);
+    out.extend_from_slice(&r.operator_omni);
+    out.extend_from_slice(&r.actor_omni);
+    out.extend_from_slice(&r.cred_id_hash);
+    out.extend_from_slice(&r.rpid_hash);
+    out.extend_from_slice(&r.pub_x);
+    out.extend_from_slice(&r.pub_y);
+    out.extend_from_slice(&word_u128(r.roles as u128));
+    out
+}
+
+/// **The #278 D6 headline** — the master register as one `executeBatch` callData.
+///
+/// A single-call batch over `[registry]` carrying `registerFirstMasterDevice`.
+/// `executeBatch` (not the legacy singular `execute` the 3-tx harness path uses)
+/// so the ceremony can later batch initial rows (e.g. a first `setScope`)
+/// additively without a wire change — D6 keeps it register-only to preserve the
+/// 2-Touch-ID floor. Signed once (K11) as the sponsored master UserOp's
+/// `call_data`, paired with [`p256_account_factory_init_code`] for the deploy.
+pub fn register_batch_calldata(registry: &[u8; 20], r: &RegisterFirstMaster) -> Vec<u8> {
+    let register_cd = register_first_master_device_calldata(r);
+    execute_batch_calldata(&[*registry], &[0u128], &[register_cd])
+}
+
+/// ERC-4337 v0.7 `initCode` for a counterfactual `P256Account` deploy via
+/// `P256AccountFactory.createAccount(bytes32,uint256,uint256,bytes32,bytes32)`
+/// (#278 D6). Layout: `factory(20) ‖ createAccount-selector(4) ‖ credIdHash(32) ‖
+/// pubX(32) ‖ pubY(32) ‖ rpIdHash(32) ‖ salt(32)` = **184 bytes**. The deploy is
+/// idempotent (the factory returns the existing account if already deployed), so
+/// it is safe inside a UserOp's `initCode`. The predicted sender MUST be derived
+/// via `eth_call factory.getAddress(...)` (authoritative) — never recompute the
+/// CREATE2 address in Rust.
+pub fn p256_account_factory_init_code(
+    factory: &[u8; 20],
+    cred_id_hash: &[u8; 32],
+    pub_x: &[u8; 32],
+    pub_y: &[u8; 32],
+    rpid_hash: &[u8; 32],
+    salt: &[u8; 32],
+) -> Vec<u8> {
+    let sel = selector("createAccount(bytes32,uint256,uint256,bytes32,bytes32)");
+    let mut out = Vec::with_capacity(20 + 4 + 5 * WORD);
+    out.extend_from_slice(factory);
+    out.extend_from_slice(&sel);
+    out.extend_from_slice(cred_id_hash);
+    out.extend_from_slice(pub_x);
+    out.extend_from_slice(pub_y);
+    out.extend_from_slice(rpid_hash);
+    out.extend_from_slice(salt);
+    out
 }
 
 /// `abi.encode(bytes32 credIdHash, bytes authenticatorData, bytes clientDataJSON,
@@ -854,6 +962,19 @@ mod tests {
         }
     }
 
+    fn sample_register_first_master() -> RegisterFirstMaster {
+        RegisterFirstMaster {
+            device_key_hash: b32(0x11),
+            operator_omni: b32(0x22),
+            actor_omni: b32(0x33),
+            cred_id_hash: b32(0x44),
+            rpid_hash: b32(0x55),
+            pub_x: b32(0x66),
+            pub_y: b32(0x77),
+            roles: 2,
+        }
+    }
+
     fn addr(last: u8) -> [u8; 20] {
         let mut a = [0u8; 20];
         a[19] = last;
@@ -868,6 +989,9 @@ mod tests {
     const GOLDEN_REGISTER: &str = include_str!("testdata/erc4337_register.hex");
     const GOLDEN_SET_SCOPE: &str = include_str!("testdata/erc4337_set_scope.hex");
     const GOLDEN_EXECUTE_BATCH: &str = include_str!("testdata/erc4337_execute_batch.hex");
+    const GOLDEN_REGISTER_FIRST_MASTER: &str =
+        include_str!("testdata/erc4337_register_first_master.hex");
+    const GOLDEN_CREATE_ACCOUNT: &str = include_str!("testdata/erc4337_create_account.hex");
 
     #[test]
     fn register_agent_device_matches_cast() {
@@ -1261,5 +1385,84 @@ mod tests {
             master_cred_id_hash(&[0x22; 32]),
             master_cred_id_hash(&[0x33; 32])
         );
+    }
+
+    // ── #278 D6: master register calldata + initCode + derivation helpers ────
+
+    #[test]
+    fn register_first_master_device_matches_cast() {
+        // cast calldata "registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,
+        //   bytes32,uint256,uint256,uint8)" 0x11.. 0x22.. 0x33.. 0x44.. 0x55..
+        //   0x66.. 0x77.. 2  — the authoritative ABI encoder, 8 static words.
+        let got = hex::encode(register_first_master_device_calldata(
+            &sample_register_first_master(),
+        ));
+        assert_eq!(got, norm(GOLDEN_REGISTER_FIRST_MASTER));
+        // selector pinned via `cast sig`.
+        assert_eq!(&got[..8], "93b14d7c");
+        assert_eq!(got.len(), 2 * (4 + 8 * WORD)); // selector + 8 words, no tail
+    }
+
+    #[test]
+    fn p256_account_factory_init_code_matches_cast_and_is_184_bytes() {
+        // initCode = factory(20) ‖ createAccount calldata (cast golden). The
+        // createAccount golden is factory-independent, so it equals init[20..].
+        let factory = addr(0xfa);
+        let init = p256_account_factory_init_code(
+            &factory,
+            &b32(0x44),
+            &b32(0x66),
+            &b32(0x77),
+            &b32(0x55),
+            &b32(0x88),
+        );
+        assert_eq!(init.len(), 184);
+        assert_eq!(&init[..20], &factory);
+        assert_eq!(hex::encode(&init[20..]), norm(GOLDEN_CREATE_ACCOUNT));
+        // createAccount selector pinned via `cast sig`.
+        assert_eq!(hex::encode(&init[20..24]), "6b97f6c6");
+    }
+
+    #[test]
+    fn register_batch_is_a_single_call_batch_of_register_first_master() {
+        // The D6 register is executeBatch over [registry] with exactly the
+        // registerFirstMasterDevice callData — byte-identical to composing the
+        // encoders by hand (so a later additive row is the ONLY shape change).
+        let r = sample_register_first_master();
+        let inner = register_first_master_device_calldata(&r);
+        let batch = register_batch_calldata(&addr(0xa1), &r);
+        assert_eq!(
+            batch,
+            execute_batch_calldata(&[addr(0xa1)], &[0u128], std::slice::from_ref(&inner))
+        );
+        // executeBatch selector — the same entry accept/scope/revoke use.
+        assert_eq!(hex::encode(&batch[..4]), "47e1da2a");
+        assert!(find_subslice(&batch[4..], &inner).is_some());
+        // round-trips through the #97 audit decoder as one registerFirstMasterDevice call.
+        let calls = decode_execute_batch(&batch).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].dest, addr(0xa1));
+        assert_eq!(calls[0].calldata, inner);
+    }
+
+    #[test]
+    fn master_salt_and_device_key_hash_pin_the_harness_preimages() {
+        let omni = [0x22u8; 32];
+        // salt = keccak256(ASCII "agentkeys-master-account:0x" + lowercase hex(omni)).
+        let expected_salt = keccak256(
+            b"agentkeys-master-account:0x2222222222222222222222222222222222222222222222222222222222222222",
+        );
+        assert_eq!(master_account_salt(&omni), expected_salt);
+        assert_eq!(MASTER_ACCOUNT_SALT_PREFIX, "agentkeys-master-account:0x");
+        // device_key_hash = keccak256(RAW 32 omni bytes) — `cast keccak "0x..hex.."`
+        // hashes the DECODED bytes; pin the empirical cast value.
+        assert_eq!(master_device_key_hash(&omni), keccak256(&omni));
+        assert_eq!(
+            hex::encode(master_device_key_hash(&omni)),
+            "c4bd59e1394781d1c7bf20a2c0b30c2acc9fbdd52dc5e0d76917de4034ebdf59"
+        );
+        // the three derivations are distinct (different preimage shapes).
+        assert_ne!(master_account_salt(&omni), master_device_key_hash(&omni));
+        assert_ne!(master_cred_id_hash(&omni), master_account_salt(&omni));
     }
 }

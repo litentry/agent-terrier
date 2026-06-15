@@ -85,6 +85,14 @@ pub fn create_router(state: SharedState) -> Router {
         // (no EOA — incl. the deployer script — can sign it).
         .route("/v1/revoke/build", post(handlers::revoke::revoke_build))
         .route("/v1/revoke/submit", post(handlers::accept::accept_submit))
+        // #278 D6 — the ONE sponsored master-register UserOp (initCode +
+        // executeBatch([registerFirstMasterDevice])). submit reuses the accept
+        // relay verbatim, exactly as scope/revoke do.
+        .route(
+            "/v1/register/build",
+            post(handlers::register::register_build),
+        )
+        .route("/v1/register/submit", post(handlers::accept::accept_submit))
         // Stage 7 §3.5 — pluggable auth surface.
         .route(
             "/v1/auth/wallet/start",

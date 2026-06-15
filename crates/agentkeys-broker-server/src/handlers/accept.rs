@@ -135,7 +135,7 @@ fn u256_word(n: u128) -> [u8; 32] {
     w
 }
 
-fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20], String> {
+pub(crate) fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20], String> {
     let b =
         hex::decode(hex_s.trim().trim_start_matches("0x")).map_err(|e| format!("{name}: {e}"))?;
     b.try_into()
@@ -144,7 +144,7 @@ fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20], String> {
 
 /// Profile-aware env read: `BASE_<CHAIN>` (e.g. `SIDECAR_REGISTRY_ADDRESS_HEIMA`),
 /// falling back to the bare `BASE` — the same convention the operator env uses.
-fn env_profile(base: &str) -> Result<String, String> {
+pub(crate) fn env_profile(base: &str) -> Result<String, String> {
     let p = std::env::var("AGENTKEYS_CHAIN")
         .unwrap_or_else(|_| "heima".into())
         .to_uppercase()
@@ -222,10 +222,16 @@ fn enforce_profile_drift_guard(
 pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
     let rpc_url = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
         .map_err(|_| "env AGENTKEYS_CHAIN_RPC_HTTP not set".to_string())?;
-    let chain_id: u64 = env_profile("AGENTKEYS_CHAIN_ID")
+    // chain_id resolves env > chain-profile > heima fallback (finalized AFTER the
+    // profile resolves below). The `chain_id` is a `userOpHash` preimage, so a wrong
+    // value makes EVERY sponsored op (#278 register included) fail the EntryPoint's
+    // signature check as a misleading SIG_VALIDATION_FAILED ("wrong passkey") — the
+    // #225 trap. The bare-env fallback to Heima's 212013 silently mis-signed Base
+    // ops when `AGENTKEYS_CHAIN_ID[_<CHAIN>]` was unset; preferring the compiled
+    // chain profile (which carries the correct id) closes that.
+    let chain_id_env: Option<u64> = env_profile("AGENTKEYS_CHAIN_ID")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(212_013);
+        .and_then(|s| s.trim().parse().ok());
     let key_hex = std::env::var("BROKER_SPONSOR_SIGNER_KEY")
         .map_err(|_| "env BROKER_SPONSOR_SIGNER_KEY not set".to_string())?;
     let key_bytes = hex::decode(key_hex.trim().trim_start_matches("0x"))
@@ -264,7 +270,7 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
     // instead of building doomed UserOps that surface as "wrong passkey". Profile
     // resolution mirrors env_profile's chain pick ($AGENTKEYS_CHAIN, default
     // heima); $AGENTKEYS_CHAIN_PROFILE_FILE wins when set.
-    match agentkeys_core::chain_profile::ChainProfile::resolve(
+    let resolved_profile = match agentkeys_core::chain_profile::ChainProfile::resolve(
         None,
         std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
         std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
@@ -284,11 +290,48 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
                 ],
                 allow_override,
             )?;
+            Some(chain_profile)
         }
         // An unresolvable profile (operator-custom chain name with no built-in
         // JSON) has no registry to drift-check against — don't take accept down.
-        Err(e) => tracing::warn!("accept drift guard skipped — chain profile unresolved: {e}"),
-    }
+        Err(e) => {
+            tracing::warn!("accept drift guard skipped — chain profile unresolved: {e}");
+            None
+        }
+    };
+
+    // #278 D6: verificationGasLimit / preVerificationGas are env > profile > default
+    // (shared by accept / scope / revoke / register). The live RIP-7212 precompile
+    // (#170 / #288) makes the on-chain P-256 verify ~3.4k gas, so a precompile chain
+    // (Base) carries ~200k in its profile; chains still on the pure-Solidity verifier
+    // keep the 1.5M default. Lowering blind on a non-precompile chain reverts inside
+    // validateUserOp as a false SIG_VALIDATION_FAILED (#225 / gap #7).
+    // Finalize chain_id: explicit env wins, else the compiled profile's id, else a
+    // loud-warned heima fallback (only reachable on a custom chain with no env + no
+    // built-in profile — exactly the case the old silent 212013 default mis-signed).
+    let chain_id: u64 = chain_id_env
+        .or_else(|| resolved_profile.as_ref().map(|p| p.chain_id))
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "AGENTKEYS_CHAIN_ID unset and no chain profile resolved — defaulting to heima 212013; \
+                 set AGENTKEYS_CHAIN_ID[_<CHAIN>] or use a built-in chain or sponsored ops will mis-sign"
+            );
+            212_013
+        });
+    let (prof_vgl, prof_pvg) = resolved_profile
+        .as_ref()
+        .map(|p| (p.gas.verification_gas_limit, p.gas.pre_verification_gas))
+        .unwrap_or((None, None));
+    let verification_gas_limit = resolve_gas_limit(
+        "ACCEPT_VERIFICATION_GAS_LIMIT",
+        prof_vgl,
+        DEF_VERIFICATION_GAS_LIMIT,
+    );
+    let pre_verification_gas_amt = resolve_gas_limit(
+        "ACCEPT_PRE_VERIFICATION_GAS",
+        prof_pvg,
+        DEF_PRE_VERIFICATION_GAS,
+    );
 
     let cfg = AcceptConfig {
         rpc_url,
@@ -299,15 +342,27 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
         registry,
         scope,
         account_gas_limits: crate::sponsor::pack_u128_pair(
-            DEF_VERIFICATION_GAS_LIMIT,
+            verification_gas_limit,
             DEF_CALL_GAS_LIMIT,
         ),
-        pre_verification_gas: u256_word(DEF_PRE_VERIFICATION_GAS),
+        pre_verification_gas: u256_word(pre_verification_gas_amt),
         gas_fees: crate::sponsor::pack_u128_pair(DEF_MAX_PRIORITY_FEE, DEF_MAX_FEE),
         paymaster_verification_gas_limit: DEF_PAYMASTER_VERIFICATION_GAS,
         paymaster_post_op_gas_limit: DEF_PAYMASTER_POST_OP_GAS,
     };
     Ok((cfg, broker_sk))
+}
+
+/// Resolve a UserOp gas limit: env `<base>[_<CHAIN>]` (operator override) wins,
+/// then the compiled chain profile value, then the broker default (#278 D6). Env
+/// parse failures fall through to the profile/default rather than erroring — a
+/// typo'd override degrades safely instead of taking accept down.
+fn resolve_gas_limit(env_base: &str, profile_val: Option<u128>, default: u128) -> u128 {
+    env_profile(env_base)
+        .ok()
+        .and_then(|s| s.trim().parse::<u128>().ok())
+        .or(profile_val)
+        .unwrap_or(default)
 }
 
 /// **PURE** — assemble the `/v1/accept/build` response from the request + chain reads

@@ -108,9 +108,21 @@ export async function getAssertionOverHash(
   // Pin the master passkey so the browser auto-selects it (and the user can't
   // accidentally sign with the wrong key → on-chain rejection). Empty/absent ⇒
   // the browser shows its full picker (legacy behavior).
+  //
+  // `transports: ['internal']` is load-bearing: the master passkey is ALWAYS a
+  // local platform credential (Touch ID / Secure Enclave). Without the hint
+  // Chrome can't tell the named credential lives on THIS device, so it shows the
+  // cross-device "Passkeys & Security Keys" picker (QR + security key) instead of
+  // routing straight to Touch ID — the exact jarring 2nd prompt in onboarding.
+  // Pinning 'internal' forces the local authenticator and suppresses the
+  // hybrid/QR + USB fallbacks (we never want a cross-device master signature).
   const allowCredentials = (allowCredentialIdsB64Url ?? [])
     .filter(Boolean)
-    .map((id) => ({ type: 'public-key' as const, id: base64UrlDecode(id) }));
+    .map((id) => ({
+      type: 'public-key' as const,
+      id: base64UrlDecode(id),
+      transports: ['internal'] as AuthenticatorTransport[],
+    }));
   const cred = (await navigator.credentials.get({
     publicKey: {
       challenge,
@@ -143,7 +155,13 @@ export async function masterPasskeyPresent(credentialIdB64Url: string): Promise<
     const cred = await navigator.credentials.get({
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
-        allowCredentials: [{ type: 'public-key', id: base64UrlDecode(credentialIdB64Url) }],
+        allowCredentials: [
+          {
+            type: 'public-key',
+            id: base64UrlDecode(credentialIdB64Url),
+            transports: ['internal'] as AuthenticatorTransport[],
+          },
+        ],
         userVerification: 'discouraged',
         timeout: 60_000,
       },
