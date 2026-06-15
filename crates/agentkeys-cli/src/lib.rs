@@ -54,6 +54,7 @@ async fn broker_env_for_provision(
 use agentkeys_types::{AuthToken, Scope, ServiceName, Session, WalletAddress};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
+use zeroize::Zeroizing;
 
 fn format_backend_error(err: &BackendError) -> String {
     match err {
@@ -394,7 +395,7 @@ impl CommandContext {
                     .ok_or_else(|| anyhow!(
                         "--credential-backend=s3 requires --omni-account or AGENTKEYS_OMNI_ACCOUNT env (until issue #74 step 2 persists omni in the session JWT)"
                     ))?;
-                let session_token = self.load_session().ok().map(|s| s.token);
+                let session_token = self.load_session().ok().map(|s| s.token.clone());
                 let mut signer = HttpSignerClient::new(&signer_url);
                 if let Some(ref tok) = session_token {
                     signer = signer.with_session_jwt(tok.clone());
@@ -795,13 +796,13 @@ pub async fn cmd_read(ctx: &CommandContext, agent: Option<&str>, service: &str) 
         .await
         .map_err(wrap_backend_error)?;
 
-    let value = String::from_utf8_lossy(&bytes).to_string();
+    let value = Zeroizing::new(String::from_utf8_lossy(bytes.as_slice()).into_owned());
 
     if ctx.json_output {
-        let obj = json!({ "agent": agent_id.0, "service": service, "credential": value });
+        let obj = json!({ "agent": agent_id.0, "service": service, "credential": value.as_str() });
         Ok(serde_json::to_string_pretty(&obj).unwrap())
     } else {
-        Ok(value)
+        Ok(value.to_string())
     }
 }
 
@@ -863,8 +864,9 @@ pub async fn cmd_run(
     // The --env loop below reuses these values instead of issuing a second
     // read_credential for the same service, which would double-count audit
     // events and rate-limit decrements (codex P2 on PR #19).
-    let mut fetched: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut env_vars: Vec<(String, String)> = Vec::new();
+    let mut fetched: std::collections::HashMap<String, Zeroizing<String>> =
+        std::collections::HashMap::new();
+    let mut env_vars: Vec<(String, Zeroizing<String>)> = Vec::new();
     let mut credential_errors: Vec<String> = Vec::new();
     for service in &services_to_try {
         let service_name = ServiceName(service.clone());
@@ -873,7 +875,7 @@ pub async fn cmd_run(
             .await
         {
             Ok(bytes) => {
-                let value = String::from_utf8_lossy(&bytes).to_string();
+                let value = Zeroizing::new(String::from_utf8_lossy(bytes.as_slice()).into_owned());
                 let env_key = format!("{}_API_KEY", service.to_uppercase().replace('-', "_"));
                 fetched.insert(service.clone(), value.clone());
                 env_vars.push((env_key, value));
@@ -912,7 +914,7 @@ pub async fn cmd_run(
                 .read_credential(&session, &agent_id, &service_name)
                 .await
                 .map_err(wrap_backend_error)?;
-            let v = String::from_utf8_lossy(&bytes).to_string();
+            let v = Zeroizing::new(String::from_utf8_lossy(bytes.as_slice()).into_owned());
             fetched.insert(service.to_string(), v.clone());
             v
         };
@@ -934,7 +936,7 @@ pub async fn cmd_run(
     let mut child = std::process::Command::new(&cmd[0]);
     child.args(&cmd[1..]);
     for (k, v) in &env_vars {
-        child.env(k, v);
+        child.env(k, v.as_str());
     }
 
     let status = child.status().with_context(|| format!("exec {}", cmd[0]))?;
@@ -1457,7 +1459,7 @@ pub async fn cmd_signer_derive(
     let session = ctx
         .load_session()
         .context("load session (run `agentkeys init` first)")?;
-    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token);
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token.clone());
     let derived = client
         .derive_address(omni_account)
         .await
@@ -1591,7 +1593,7 @@ pub async fn cmd_signer_sign(
     let session = ctx
         .load_session()
         .context("load session (run `agentkeys init` first)")?;
-    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token);
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token.clone());
     let signed = client
         .sign_eip191(omni_account, message.as_bytes())
         .await
@@ -1666,7 +1668,7 @@ pub async fn cmd_signer_sign_typed_data(
         }
     }
 
-    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token);
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token.clone());
     let signed = client
         .sign_eip712(omni_account, &typed_data)
         .await

@@ -12,7 +12,7 @@ use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
     AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
     InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope,
-    ServiceName, Session, SignedAuthDecision, WalletAddress,
+    SecretBytes, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
 use crate::{
@@ -274,7 +274,7 @@ impl CredentialBackend for InProcessBackend {
         session: &Session,
         agent_id: &WalletAddress,
         service: &ServiceName,
-    ) -> Result<Vec<u8>, BackendError> {
+    ) -> Result<SecretBytes, BackendError> {
         let path = format!(
             "/credential/read?agent_id={}&service={}",
             agent_id.0, service.0
@@ -287,7 +287,7 @@ impl CredentialBackend for InProcessBackend {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(ct_b64)
             .map_err(|e| BackendError::Transport(format!("base64 decode: {e}")))?;
-        Ok(bytes)
+        Ok(SecretBytes::new(bytes))
     }
 
     async fn revoke_session(
