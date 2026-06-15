@@ -262,6 +262,20 @@ pub struct GasConfig {
     pub model: String,
     pub max_priority_fee_gwei: u64,
     pub max_fee_gwei: u64,
+    /// ERC-4337 UserOp `verificationGasLimit` for master ops (accept / scope /
+    /// revoke / #278 D6 register). The account's `validateUserOp` runs an
+    /// on-chain P-256 verify; on a chain with the live RIP-7212 precompile
+    /// (#170 / #288) that is ~3.4k gas, so precompile chains set ~200k here while
+    /// chains still on the pure-Solidity verifier keep the broker's 1.5M default.
+    /// `None` ⇒ the broker default. NEVER set it below the real verify cost:
+    /// under-gas reverts inside `validateUserOp` as a false `SIG_VALIDATION_FAILED`
+    /// (#225 / gap #7). Env `ACCEPT_VERIFICATION_GAS_LIMIT[_<CHAIN>]` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_gas_limit: Option<u128>,
+    /// ERC-4337 UserOp `preVerificationGas` for master ops. `None` ⇒ the broker
+    /// default (100k). Env `ACCEPT_PRE_VERIFICATION_GAS[_<CHAIN>]` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_verification_gas: Option<u128>,
 }
 
 /// Per-chain native-token funding amounts, all in **wei encoded as decimal
@@ -533,6 +547,20 @@ mod tests {
         // Case-insensitive lookup + miss path.
         assert!(p.contract("credentialaudit").is_some());
         assert!(p.contract("NotAContract").is_none());
+    }
+
+    #[test]
+    fn base_gas_carries_precompile_verification_limit_heima_defaults() {
+        // #278 D6: Base has the live RIP-7212 precompile (#287), so its profile
+        // pins the cheap ~200k verificationGasLimit; Heima stays on the broker's
+        // 1.5M default (None here) until the register verify is profiled live
+        // with the precompile — lowering it blind would revert as a false
+        // SIG_VALIDATION_FAILED (#225).
+        let base = ChainProfile::load_builtin("base").unwrap();
+        assert_eq!(base.gas.verification_gas_limit, Some(200_000));
+        let heima = ChainProfile::load_builtin("heima").unwrap();
+        assert_eq!(heima.gas.verification_gas_limit, None);
+        assert_eq!(heima.gas.pre_verification_gas, None);
     }
 
     #[test]

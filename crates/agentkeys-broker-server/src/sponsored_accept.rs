@@ -18,7 +18,9 @@
 //! `userOpHash`; the broker co-signs the paymaster `getHash`; submission is Stage B.
 
 use crate::sponsor::{assemble_paymaster_and_data, broker_cosign, pack_u128_pair, PackedUserOp};
-use agentkeys_core::erc4337::{accept_batch_calldata, AgentRegister, ScopeGrant};
+use agentkeys_core::erc4337::{
+    accept_batch_calldata, register_batch_calldata, AgentRegister, RegisterFirstMaster, ScopeGrant,
+};
 use anyhow::Result;
 use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -84,7 +86,25 @@ pub fn assemble_accept_userop(
     broker_sk: &SigningKey,
 ) -> Result<AssembledAcceptUserOp> {
     let call_data = accept_batch_calldata(&p.registry, &p.scope, p.register, p.grant);
-    assemble_userop_with_calldata(p, call_data, broker_sk)
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
+/// **The #278 D6 sibling** — assemble the ONE sponsored master-register UserOp:
+/// `initCode` (counterfactual `P256AccountFactory.createAccount` deploy) +
+/// `executeBatch([registerFirstMasterDevice])`. Unlike accept/scope/revoke the
+/// account does NOT exist yet, so `init_code` is non-empty (the 184-byte factory
+/// call from [`agentkeys_core::erc4337::p256_account_factory_init_code`]) and
+/// `p.master_account` MUST be the `factory.getAddress(...)` predicted sender.
+/// Like [`assemble_revoke_userop`] this uses only `p.registry` + the explicit
+/// `register` intent; `p.register`/`p.grant`/`p.scope` are unused.
+pub fn assemble_register_userop(
+    p: &AcceptUserOpParams,
+    init_code: Vec<u8>,
+    register: &RegisterFirstMaster,
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = register_batch_calldata(&p.registry, register);
+    assemble_userop_with_calldata(p, call_data, init_code, broker_sk)
 }
 
 /// **The #248 sibling** — assemble the scope-only re-grant UserOp
@@ -101,7 +121,7 @@ pub fn assemble_scope_userop(
         &p.register.actor_omni,
         p.grant,
     );
-    assemble_userop_with_calldata(p, call_data, broker_sk)
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
 }
 
 /// **The unpair sibling** — assemble the agent-revoke UserOp
@@ -120,7 +140,7 @@ pub fn assemble_revoke_userop(
     broker_sk: &SigningKey,
 ) -> Result<AssembledAcceptUserOp> {
     let call_data = agentkeys_core::erc4337::revoke_batch_calldata(&p.registry, device_key_hashes);
-    assemble_userop_with_calldata(p, call_data, broker_sk)
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
 }
 
 /// Shared envelope assembly: wrap `call_data` in the master-account UserOp,
@@ -130,15 +150,21 @@ pub fn assemble_revoke_userop(
 /// we set those bytes BEFORE hashing — a provisional `paymaster ‖ gasWord` — then
 /// rebuild `paymasterAndData` with the real broker signature appended. The two
 /// always agree on the gas word, which is what the on-chain `getHash` re-derives.
+///
+/// `init_code` is empty for accept/scope/revoke (the master account already
+/// exists) and the 184-byte factory call for the #278 D6 register (the account
+/// is deployed counterfactually in the same op). It is hashed into BOTH the
+/// `userOpHash` and the paymaster `getHash`, so the master + broker sign over it.
 fn assemble_userop_with_calldata(
     p: &AcceptUserOpParams,
     call_data: Vec<u8>,
+    init_code: Vec<u8>,
     broker_sk: &SigningKey,
 ) -> Result<AssembledAcceptUserOp> {
     let mut user_op = PackedUserOp {
         sender: p.master_account,
         nonce: p.nonce,
-        init_code: Vec::new(),
+        init_code,
         call_data,
         account_gas_limits: p.account_gas_limits,
         pre_verification_gas: p.pre_verification_gas,
@@ -478,6 +504,80 @@ mod tests {
             .unwrap()
             .user_op_hash;
         assert_ne!(h_a, h_b);
+    }
+
+    #[test]
+    fn register_userop_carries_initcode_and_the_register_batch() {
+        // #278 D6: the master register is the only op with a non-empty initCode —
+        // the counterfactual P256AccountFactory deploy — plus executeBatch([
+        // registerFirstMasterDevice]). Same paymaster co-sign + hash discipline.
+        use agentkeys_core::erc4337::{p256_account_factory_init_code, register_batch_calldata};
+        let sk = SigningKey::random(&mut rand_core::OsRng);
+        let broker_addr = evm_address(&VerifyingKey::from(&sk));
+        let broker_bytes: [u8; 20] = hex::decode(broker_addr.trim_start_matches("0x"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let reg = sample_register();
+        let grant = sample_grant();
+        // params' register/grant/scope are unused by the register composer.
+        let p = params(&reg, &grant, broker_bytes);
+
+        let register = RegisterFirstMaster {
+            device_key_hash: b32(0x11),
+            operator_omni: b32(0x22),
+            actor_omni: b32(0x22),
+            cred_id_hash: b32(0x44),
+            rpid_hash: b32(0x55),
+            pub_x: b32(0x66),
+            pub_y: b32(0x77),
+            roles: 2,
+        };
+        let factory = {
+            let mut a = [0u8; 20];
+            a[19] = 0xfa;
+            a
+        };
+        let init_code = p256_account_factory_init_code(
+            &factory,
+            &register.cred_id_hash,
+            &register.pub_x,
+            &register.pub_y,
+            &register.rpid_hash,
+            &b32(0x88),
+        );
+
+        let out = assemble_register_userop(&p, init_code.clone(), &register, &sk).unwrap();
+
+        // sender is the predicted account (the handler sets master_account = getAddress).
+        assert_eq!(out.user_op.sender, p.master_account);
+        // initCode is the 184-byte counterfactual deploy — the register-only carrier.
+        assert_eq!(out.user_op.init_code, init_code);
+        assert_eq!(out.user_op.init_code.len(), 184);
+        // callData is exactly the register batch.
+        assert_eq!(
+            out.user_op.call_data,
+            register_batch_calldata(&p.registry, &register)
+        );
+        // signature left for the master (K11) to fill.
+        assert!(out.user_op.signature.is_empty());
+        // sponsored: the broker co-sign over getHash recovers to the broker EOA.
+        let pad = &out.user_op.paymaster_and_data;
+        assert_eq!(pad.len(), 20 + 16 + 16 + 6 + 6 + 65);
+        let sig_hex = format!("0x{}", hex::encode(&pad[64..129]));
+        assert_eq!(
+            ecrecover_eip191(&out.paymaster_get_hash, &sig_hex).unwrap(),
+            broker_addr
+        );
+        // userOpHash deterministic, and ≠ the accept op (initCode + callData differ;
+        // accept never carries an initCode).
+        assert_eq!(
+            out.user_op_hash,
+            out.user_op.user_op_hash(&p.entry_point, p.chain_id)
+        );
+        let accept = assemble_accept_userop(&p, &sk).unwrap();
+        assert!(accept.user_op.init_code.is_empty());
+        assert_ne!(out.user_op_hash, accept.user_op_hash);
     }
 
     fn assembled() -> (AssembledAcceptUserOp, [u8; 20], u64, Vec<u8>) {

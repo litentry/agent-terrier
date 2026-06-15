@@ -19,8 +19,9 @@ use serde_json::{json, Value};
 
 use crate::protocol::{
     AcceptAssertion, AuditAppendV2, BrokerCapRequest, BuildAcceptUserOpRequest,
-    BuildRevokeUserOpRequest, BuildScopeUserOpRequest, ConfigGetBody, ConfigPutBody, MemoryGetBody,
-    MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp, ENVELOPE_VERSION,
+    BuildRegisterUserOpRequest, BuildRevokeUserOpRequest, BuildScopeUserOpRequest, ConfigGetBody,
+    ConfigPutBody, MemoryGetBody, MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp,
+    ENVELOPE_VERSION,
 };
 
 /// One canonical fixture: the on-disk file stem + the sample body.
@@ -122,6 +123,13 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         operator_omni: "0x<operator_omni>".into(),
         device_key_hashes: vec!["0x<device_key_hash>".into()],
     };
+    let build_register = BuildRegisterUserOpRequest {
+        operator_omni: "0x<operator_omni>".into(),
+        owner_pubkey_x: "0x<owner_pubkey_x>".into(),
+        owner_pubkey_y: "0x<owner_pubkey_y>".into(),
+        rpid_hash: "0x<rpid_hash>".into(),
+        roles: 0,
+    };
     vec![
         Fixture {
             name: "cap_mint_request",
@@ -166,6 +174,10 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         Fixture {
             name: "build_revoke_userop_request",
             body: serde_json::to_value(&build_revoke).expect("build_revoke serializes"),
+        },
+        Fixture {
+            name: "build_register_userop_request",
+            body: serde_json::to_value(&build_register).expect("build_register serializes"),
         },
     ]
 }
@@ -323,6 +335,20 @@ mod tests {
         assert_eq!(
             keys_of("build_revoke_userop_request"),
             vec!["device_key_hashes", "operator_omni"]
+        );
+    }
+
+    #[test]
+    fn build_register_userop_request_keys_frozen() {
+        assert_eq!(
+            keys_of("build_register_userop_request"),
+            vec![
+                "operator_omni",
+                "owner_pubkey_x",
+                "owner_pubkey_y",
+                "roles",
+                "rpid_hash",
+            ]
         );
     }
 }

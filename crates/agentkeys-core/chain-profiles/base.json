@@ -25,7 +25,8 @@
   "gas": {
     "model": "eip1559",
     "max_priority_fee_gwei": 1,
-    "max_fee_gwei": 50
+    "max_fee_gwei": 50,
+    "verification_gas_limit": 200000
   },
   "deploy": {
     "deployer_env_var": "AGENTKEYS_BASE_DEPLOYER_KEY",
