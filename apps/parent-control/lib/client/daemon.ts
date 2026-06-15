@@ -410,6 +410,7 @@ export class DaemonBackend implements AgentKeysClient {
           registeredAt: body.registered_at_unix,
           chainTxHash: body.chain_tx_hash ?? undefined,
           chain: body.chain ?? undefined,
+          chainError: body.chain_error ?? undefined,
           registerUserOpHash: body.register_userop_hash ?? undefined,
           registerAccount: body.register_account ?? undefined,
         },

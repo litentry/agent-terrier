@@ -40,7 +40,7 @@ interface PendingMasterRegister {
 
 type EnrollOutcome =
   | { mode: 'fallback' }
-  | { mode: 'real'; register?: PendingMasterRegister };
+  | { mode: 'real'; register?: PendingMasterRegister; registerError?: string };
 
 async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<EnrollOutcome> {
   if (!webauthnAvailable()) return { mode: 'fallback' };
@@ -147,6 +147,18 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
       // If fin.data.chain === 'master-registered' here, the daemon found the master
       // ALREADY bound (register build skipped) — we just minted a passkey we CANNOT
       // bind, so we deliberately do NOT overwrite ak_master_cred_id with it.
+      //
+      // #278 D6: chain === 'none' WITH a chainError means the register actually FAILED
+      // (broker /v1/register/build error / paymaster), as opposed to a clean dev skip
+      // (chain 'none', no error). Surface it at the register step instead of proceeding
+      // silently — otherwise the master is never bound and it only shows up later as a
+      // confusing `device_not_active`.
+      if (fin.data.chain === 'none' && fin.data.chainError) {
+        akLog('onboarding: master register FAILED — NOT bound on chain', {
+          chainError: fin.data.chainError,
+        });
+        return { mode: 'real', registerError: fin.data.chainError };
+      }
       return { mode: 'real' };
     }
     return { mode: 'fallback' };
@@ -287,7 +299,7 @@ export function CeremonyRunner({
       // Real async work for this step (e.g. the §9 Stage-2 WebAuthn Touch ID)
       // runs WHILE the row shows "running"; the bar advances when it resolves.
       if (step.action) {
-        try { await step.action(); } catch { /* fall through — narrated */ }
+        try { await step.action(); } catch (e) { akLog(`onboarding: step "${step.label}" failed`, { error: (e as Error)?.message }); }
       }
       if (cancelled) return;
       if (step.onchain) {
@@ -361,6 +373,9 @@ export function OnboardingScreen({
   // #232: the on-chain register handed from the K11-bind step to the "Register
   // master" step (a ref — the `stages` closures are rebuilt per render).
   const pendingRegister = useRef<PendingMasterRegister | null>(null);
+  // #278 D6: set when the register BUILD failed at the daemon/broker, so the register
+  // step can surface it (throw) instead of silently no-op'ing.
+  const registerError = useRef<string | null>(null);
   // #242: the one-Touch-ID re-login offer. Shown on the login screen when the
   // daemon still knows who the master is (logout-surviving coords) AND this
   // browser holds the matching passkey pointer.
@@ -579,6 +594,7 @@ export function OnboardingScreen({
       action: async () => {
         const outcome = await tryRealEnroll(client, email.trim());
         pendingRegister.current = outcome.mode === 'real' ? outcome.register ?? null : null;
+        registerError.current = outcome.mode === 'real' ? outcome.registerError ?? null : null;
         setEnrollMode(outcome.mode === 'real' ? 'real' : 'demo');
       },
     },
@@ -593,6 +609,14 @@ export function OnboardingScreen({
       // step tolerates slow handleOps (submit raced against the state poll).
       // No-op when there's nothing to register (demo fallback / already bound).
       action: async () => {
+        // #278 D6: the register BUILD failed at the daemon/broker — surface it HERE
+        // (the register step) instead of silently no-op'ing, so the operator sees the
+        // real cause and doesn't proceed against an unbound master.
+        if (registerError.current) {
+          const msg = registerError.current;
+          registerError.current = null;
+          throw new Error(`master register failed — ${msg}`);
+        }
         const reg = pendingRegister.current;
         if (!reg) return;
         pendingRegister.current = null;

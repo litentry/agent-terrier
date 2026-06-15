@@ -59,6 +59,10 @@ export interface K11EnrollResult {
   /** #225 E7: "register-pending" (browser must sign + submit), "master-registered"
    *  (idempotent skip — already on chain), or "none". */
   chain?: string;
+  /** #278 D6: set when chain === "none" because the register actually FAILED (broker
+   *  /v1/register/build error / paymaster misconfig), as opposed to a clean dev skip
+   *  (no chainError). The ceremony surfaces this instead of proceeding silently. */
+  chainError?: string;
   /** #225 E7: when chain === "register-pending", the userOpHash the browser passkey
    *  must sign (second Touch ID) and POST to register/submit. */
   registerUserOpHash?: string;

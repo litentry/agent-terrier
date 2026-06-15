@@ -548,6 +548,32 @@ pub struct BuildRevokeUserOpRequest {
     pub device_key_hashes: Vec<String>,
 }
 
+/// Daemon → broker `POST /v1/register/build` — the #278 D6 ONE-op master
+/// register. Collapses the legacy 3-tx ceremony (deployer `createAccount` +
+/// `depositTo` + self-funded register UserOp) into a single paymaster-sponsored
+/// UserOp = `initCode` (counterfactual `P256AccountFactory.createAccount`) +
+/// `executeBatch([registerFirstMasterDevice])`, gated by ONE master K11 Touch ID.
+///
+/// The request carries ONLY what the broker cannot derive: the master P-256
+/// passkey coordinates (`owner_pubkey_x`/`owner_pubkey_y`, `0x`+64hex), the
+/// WebAuthn `rpid_hash` (deployment/domain-specific, `0x`+64hex), and the device
+/// `roles` bitmap. The broker derives everything omni-keyed from the verified J1
+/// session omni — `cred_id_hash` ([`agentkeys_core::erc4337::master_cred_id_hash`]),
+/// CREATE2 `salt` ([`master_account_salt`]), `device_key_hash`
+/// ([`master_device_key_hash`]), `actor_omni == operator_omni` (a first master IS
+/// the operator) — so a client cannot drift them. The predicted `sender` comes
+/// from `factory.getAddress(...)` and rides back in
+/// [`BuildAcceptUserOpResponse::user_op`]`.sender`; submit reuses
+/// [`SubmitAcceptUserOpRequest`] at `/v1/register/submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildRegisterUserOpRequest {
+    pub operator_omni: String,
+    pub owner_pubkey_x: String,
+    pub owner_pubkey_y: String,
+    pub rpid_hash: String,
+    pub roles: u8,
+}
+
 // ── the daemon's web-API plant contract (#275 tier-3) ───────────────────────
 
 /// The daemon's **web-API plant contract** — the frontend↔daemon surface, as

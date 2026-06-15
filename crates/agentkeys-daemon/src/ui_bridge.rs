@@ -190,9 +190,13 @@ pub struct UiBridgeState {
 #[derive(Clone, Debug)]
 pub struct PendingMasterRegister {
     /// `erc4337-register-master.sh build` state file (ACCOUNT/NONCE/CALLDATA/…),
-    /// read back by the `submit` sub-command.
+    /// read back by the `submit` sub-command. Empty on the #278 D6 broker path.
     pub state_file: String,
-    /// The deployed P256Account (the operatorMasterWallet-to-be).
+    /// #278 D6: the broker `/v1/register/build` `WireUserOp` (with the non-empty
+    /// `initCode`). `Some` ⇒ submit forwards to the broker `/v1/register/submit`
+    /// (one sponsored op); `None` ⇒ the legacy deployer-funded shell-out path.
+    pub broker_user_op: Option<serde_json::Value>,
+    /// The deployed/predicted P256Account (the operatorMasterWallet-to-be).
     pub account: String,
     /// `master_cred_id_hash(omni)` — the account's signer key + a submit arg.
     pub cred_id_hash: String,
@@ -2014,9 +2018,13 @@ async fn finish_chain_register(
         chain: chain.to_string(),
         chain_error: err,
     };
-    let Some(script) = state.register_master_script.clone() else {
+    // On-chain register needs EITHER a broker (the #278 D6 sponsored path) OR the
+    // legacy register script. Neither configured ⇒ a CLEAN skip (dev / no-infra),
+    // no error. (The per-path requirement is enforced below: the broker path needs
+    // broker_url; the legacy fallback needs register_master_script.)
+    if state.broker_url.is_none() && state.register_master_script.is_none() {
         return none("none", None);
-    };
+    }
     let Some(session) = state.onboarding_session.read().await.clone() else {
         let msg = "K11 enrolled but no onboarding session — verify email first, \
                    then re-enroll to register the master device on chain"
@@ -2052,6 +2060,125 @@ async fn finish_chain_register(
         session.omni.clone()
     } else {
         format!("0x{}", session.omni)
+    };
+
+    // #278 D6 — when a broker is configured, collapse the register into ONE
+    // paymaster-sponsored UserOp via the broker's /v1/register/build (initCode +
+    // executeBatch([registerFirstMasterDevice])) instead of the deployer-funded
+    // 3-tx shell-out below. The browser signs the SAME userOpHash next; submit
+    // forwards to /v1/register/submit. The broker derives the omni-keyed values
+    // (cred-id / salt / device-key, actor==operator) and skip-gates 409 itself.
+    if let Some(broker) = state.broker_url.clone() {
+        let device_key_hash = master_device_key_hash_hex(&session.omni).unwrap_or_default();
+        let body = serde_json::json!({
+            "operator_omni": omni0x,
+            "owner_pubkey_x": pub_x,
+            "owner_pubkey_y": pub_y,
+            "rpid_hash": k11.rp_id_hash_hex,
+            "roles": 7, // CAP_MINT | RECOVERY | SCOPE_MGMT (§9 stage 4)
+        });
+        match broker_post_json(&broker, "/v1/register/build", &session.j1, &body).await {
+            Ok((st, v)) if st.is_success() => {
+                let user_op = v.get("user_op").cloned().unwrap_or(serde_json::Value::Null);
+                let userop_hash = v
+                    .get("user_op_hash")
+                    .and_then(|h| h.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                // sender IS the predicted CREATE2 master account (broker sets it).
+                let account = user_op
+                    .get("sender")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if userop_hash.is_empty() || account.is_empty() {
+                    return none(
+                        "none",
+                        Some(format!(
+                            "broker /v1/register/build: no user_op_hash/sender: {v}"
+                        )),
+                    );
+                }
+                *state.pending_register.write().await = Some(PendingMasterRegister {
+                    state_file: String::new(),
+                    broker_user_op: Some(user_op),
+                    account: account.clone(),
+                    cred_id_hash,
+                    device_key_hash,
+                    operator_omni: omni0x.clone(),
+                });
+                tracing::info!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    account = %account,
+                    "#278 D6: one-op sponsored master register built at the broker — awaiting the browser signature"
+                );
+                return ChainRegisterBuild {
+                    register_userop_hash: Some(userop_hash),
+                    register_account: Some(account),
+                    chain_tx_hash: None,
+                    chain: "register-pending".to_string(),
+                    chain_error: None,
+                };
+            }
+            // 409 = first-master-only: the operator already has a master on chain.
+            Ok((st, _)) if st == StatusCode::CONFLICT => {
+                *state.registered_master.write().await = Some(RegisteredMaster {
+                    device_key_hash,
+                    operator_omni: omni0x.clone(),
+                    tx_hash: None,
+                    account: None,
+                });
+                persist_master_session(state).await;
+                return ChainRegisterBuild {
+                    register_userop_hash: None,
+                    register_account: None,
+                    chain_tx_hash: None,
+                    chain: "master-registered".to_string(),
+                    chain_error: None,
+                };
+            }
+            // Any OTHER broker failure (5xx, route/paymaster misconfig, network): a
+            // broker IS configured, so it owns the register path — surface its failure
+            // LOUDLY + actionably. Do NOT silently fall back to the deployer-funded
+            // shell-out: that would hide a broken D6 sponsored register, re-introduce
+            // deployer txs without anyone noticing, and let onboarding "succeed" while
+            // masking the real error (stale-green). The operator fixes the broker
+            // (route / paymaster / deposit), then retries — the master is NOT bound, so
+            // downstream cap flows would fail `device_not_active` regardless.
+            Ok((st, v)) => {
+                tracing::error!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    "#278 D6: broker /v1/register/build FAILED {st}: {v}"
+                );
+                return none(
+                    "none",
+                    Some(format!(
+                        "master register failed at the broker (/v1/register/build → {st}): {v} \
+                         — fix the broker register route / paymaster, then retry (the master is \
+                         NOT bound on chain)"
+                    )),
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    "#278 D6: broker /v1/register/build unreachable: {e}"
+                );
+                return none(
+                    "none",
+                    Some(format!(
+                        "master register could not reach the broker: {e} — retry"
+                    )),
+                );
+            }
+        }
+    }
+
+    // Legacy deployer-funded shell-out path (reached only when no broker is
+    // configured — the D6 broker path above returns first). THIS path needs the
+    // register script; a broker-only daemon never gets here.
+    let Some(script) = state.register_master_script.clone() else {
+        return none("none", None);
     };
     let state_file = register_state_file(&session.omni);
 
@@ -2124,6 +2251,7 @@ async fn finish_chain_register(
     }
     *state.pending_register.write().await = Some(PendingMasterRegister {
         state_file,
+        broker_user_op: None,
         account: account.clone(),
         cred_id_hash,
         device_key_hash,
@@ -2166,6 +2294,21 @@ fn master_cred_id_hash_hex(operator_omni: &str) -> Result<String, String> {
     Ok(format!(
         "0x{}",
         hex::encode(agentkeys_core::erc4337::master_cred_id_hash(&omni))
+    ))
+}
+
+/// `master_device_key_hash(omni)` as `0x`-hex — `keccak256(raw omni bytes)`, the
+/// first master's `deviceKeyHash` (#278 D6 broker path; matches the broker-derived
+/// value + `_erc4337_lib.sh`'s `cast keccak "0x$OMNI"`).
+fn master_device_key_hash_hex(operator_omni: &str) -> Result<String, String> {
+    let bare = operator_omni.trim().trim_start_matches("0x");
+    let bytes = hex::decode(bare).map_err(|e| format!("omni hex: {e}"))?;
+    let omni: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "omni must be 32 bytes".to_string())?;
+    Ok(format!(
+        "0x{}",
+        hex::encode(agentkeys_core::erc4337::master_device_key_hash(&omni))
     ))
 }
 
@@ -2333,6 +2476,107 @@ async fn master_register_submit(
             "no-pending-register",
         )
     })?;
+
+    // #278 D6: a broker-built pending register submits the ONE sponsored op to the
+    // broker's /v1/register/submit (the shared accept relay) — the browser assertion
+    // rides through verbatim; the broker encodes it into the UserOp signature and
+    // lands EntryPoint.handleOps (deploying the account from the initCode + running
+    // registerFirstMasterDevice in one tx).
+    if let Some(user_op) = pending.broker_user_op.clone() {
+        let broker = state.broker_url.clone().ok_or_else(|| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no broker configured for the D6 register submit",
+                "no-broker",
+            )
+        })?;
+        let j1 = match state.onboarding_session.read().await.as_ref() {
+            Some(s) if !s.j1.is_empty() => s.j1.clone(),
+            _ => {
+                return Err(err(
+                    StatusCode::FORBIDDEN,
+                    "no master session",
+                    "no-session",
+                ))
+            }
+        };
+        let a = &req.assertion;
+        let body = serde_json::json!({
+            "user_op": user_op,
+            "assertion": {
+                "authenticator_data": &a.authenticator_data,
+                "client_data_json": &a.client_data_json,
+                "signature": &a.signature,
+                // the broker derives credIdHash from the verified J1 omni; raw id unused.
+                "credential_id": "",
+            },
+        });
+        let (resp, parsed) =
+            forward_to_broker_value(&broker, "/v1/register/submit", &j1, &body).await;
+        if !resp.status().is_success() {
+            let detail = parsed
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "broker /v1/register/submit failed".into());
+            return Err(err(
+                StatusCode::BAD_GATEWAY,
+                detail,
+                "register-submit-failed",
+            ));
+        }
+        let v = parsed.unwrap_or(serde_json::Value::Null);
+        let (tx_hash, _) = submit_receipts(&v);
+        // CONFIRMATION GATE: the reused accept relay returns `pending: true` (and no
+        // tx_hash) when its receipt poll times out — the op MAY still land later. Do
+        // NOT persist the bound master on an unconfirmed op, or /v1/onboarding/state
+        // would falsely report `master-registered` and downstream cap/UI flows would
+        // run against an UNbound operatorMasterWallet. (The legacy shell path
+        // post-verified isActive on chain before reporting success — keep that
+        // guarantee.) Keep the register pending; the browser keeps polling onboarding
+        // state, and a retry (or a session rehydrate, which re-derives from chain)
+        // confirms it.
+        let unconfirmed =
+            v.get("pending").and_then(|p| p.as_bool()).unwrap_or(false) || tx_hash.is_none();
+        if unconfirmed {
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                account = %pending.account,
+                "#278 D6: register broadcast but receipt UNCONFIRMED — keeping it pending, NOT marking bound"
+            );
+            return Ok(Json(serde_json::json!({
+                "ok": true,
+                "chain": "register-pending",
+                "pending": true,
+                "account": pending.account,
+                "device_key_hash": pending.device_key_hash,
+                "user_op_hash": v.get("user_op_hash").cloned().unwrap_or(serde_json::Value::Null),
+            })));
+        }
+        let registered = RegisteredMaster {
+            device_key_hash: pending.device_key_hash.clone(),
+            operator_omni: pending.operator_omni.clone(),
+            tx_hash: tx_hash.clone(),
+            account: Some(pending.account.clone()),
+        };
+        tracing::info!(
+            target: "agentkeys.daemon.ui_bridge",
+            account = %pending.account,
+            tx = tx_hash.as_deref().unwrap_or("(pending)"),
+            "#278 D6: one-op sponsored master register landed — operatorMasterWallet bound"
+        );
+        let out = serde_json::json!({
+            "ok": true,
+            "chain": "master-registered",
+            "tx_hash": tx_hash,
+            "account": pending.account,
+            "device_key_hash": pending.device_key_hash,
+            "user_op_hash": v.get("user_op_hash").cloned().unwrap_or(serde_json::Value::Null),
+        });
+        *state.registered_master.write().await = Some(registered);
+        *state.pending_register.write().await = None;
+        persist_master_session(&state).await;
+        return Ok(Json(out));
+    }
+
     let script = state.register_master_script.clone().ok_or_else(|| {
         err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4416,6 +4660,31 @@ async fn revoke_submit_proxy(
 /// [`forward_to_broker`] that ALSO hands back the parsed success JSON, so the
 /// submit proxies can read the #97 receipts (`tx_hash` +
 /// `audit_envelope_hashes`) before re-wrapping the response for the browser.
+/// POST `body` to `<broker><path>` with the master J1 bearer; return the broker's
+/// status + parsed JSON (#278 D6 internal register-build forward). Unlike
+/// [`forward_to_broker`] this is for INTERNAL callers (not an axum proxy), so it
+/// yields a typed `(StatusCode, Value)` instead of a relayed `Response`.
+async fn broker_post_json(
+    broker: &str,
+    path: &str,
+    j1: &str,
+    body: &serde_json::Value,
+) -> Result<(StatusCode, serde_json::Value), String> {
+    let url = format!("{}{}", broker.trim_end_matches('/'), path);
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(j1)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("broker {path}: {e}"))?;
+    let st = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let txt = resp.text().await.unwrap_or_default();
+    let v =
+        serde_json::from_str::<serde_json::Value>(&txt).unwrap_or(serde_json::Value::String(txt));
+    Ok((st, v))
+}
+
 async fn forward_to_broker_value(
     broker: &str,
     path: &str,
