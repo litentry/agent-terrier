@@ -1,7 +1,7 @@
 use agentkeys_types::{
     AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
     InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope,
-    ServiceName, Session, SignedAuthDecision, WalletAddress,
+    SecretBytes, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -52,7 +52,7 @@ pub trait CredentialBackend: Send + Sync {
         session: &Session,
         agent_id: &WalletAddress,
         service: &ServiceName,
-    ) -> Result<Vec<u8>, BackendError>;
+    ) -> Result<SecretBytes, BackendError>;
 
     async fn revoke_session(&self, session: &Session, target: &Session)
         -> Result<(), BackendError>;
@@ -191,7 +191,7 @@ mod tests {
             _session: &Session,
             _agent_id: &WalletAddress,
             _service: &ServiceName,
-        ) -> Result<Vec<u8>, BackendError> {
+        ) -> Result<SecretBytes, BackendError> {
             unimplemented!()
         }
 

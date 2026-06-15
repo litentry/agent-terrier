@@ -5,7 +5,7 @@ use crate::backend::{BackendError, CredentialBackend};
 use agentkeys_types::{
     AuthRequest, AuthRequestId, AuthRequestType, CanonicalBytes, EncryptedPairPayload,
     InboxAddress, OpenedAuthRequest, PairCode, PairPayload, PublicKey, RegistrationToken, Scope,
-    ServiceName, Session, SignedAuthDecision, WalletAddress,
+    SecretBytes, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
 pub struct MockHttpClient {
@@ -174,7 +174,7 @@ impl CredentialBackend for MockHttpClient {
         session: &Session,
         agent_id: &WalletAddress,
         service: &ServiceName,
-    ) -> Result<Vec<u8>, BackendError> {
+    ) -> Result<SecretBytes, BackendError> {
         let url = format!(
             "/credential/read?agent_id={}&service={}",
             agent_id.0, service.0
@@ -202,7 +202,7 @@ impl CredentialBackend for MockHttpClient {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(ct_b64)
             .map_err(|e| BackendError::Internal(format!("base64 decode: {e}")))?;
-        Ok(bytes)
+        Ok(SecretBytes::new(bytes))
     }
 
     async fn revoke_session(

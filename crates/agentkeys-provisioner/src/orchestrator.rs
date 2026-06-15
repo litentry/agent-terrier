@@ -364,10 +364,10 @@ mod orchestrate {
             _session: &Session,
             _agent_id: &WalletAddress,
             _service: &ServiceName,
-        ) -> Result<Vec<u8>, BackendError> {
+        ) -> Result<agentkeys_types::SecretBytes, BackendError> {
             let guard = self.read_result.lock().unwrap();
             match guard.as_ref() {
-                Some(bytes) => Ok(bytes.clone()),
+                Some(bytes) => Ok(agentkeys_types::SecretBytes::new(bytes.clone())),
                 None => Err(BackendError::NotFound("no credential".to_string())),
             }
         }

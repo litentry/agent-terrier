@@ -897,7 +897,7 @@ async fn start_scope_test_server() -> (String, String, String, SessionStore, tem
         .unwrap();
     let child_wallet = child_resp["wallet"].as_str().unwrap().to_string();
 
-    (base_url, _session.token, child_wallet, store, tmp)
+    (base_url, _session.token.clone(), child_wallet, store, tmp)
 }
 
 // Test 15: --add appends a service
@@ -1209,9 +1209,9 @@ impl CredentialBackend for ProvisionTestBackend {
         _: &Session,
         _: &agentkeys_types::WalletAddress,
         _: &agentkeys_types::ServiceName,
-    ) -> Result<Vec<u8>, agentkeys_core::backend::BackendError> {
+    ) -> Result<agentkeys_types::SecretBytes, agentkeys_core::backend::BackendError> {
         match &self.existing_credential {
-            Some(b) => Ok(b.clone()),
+            Some(b) => Ok(agentkeys_types::SecretBytes::new(b.clone())),
             None => Err(agentkeys_core::backend::BackendError::NotFound(
                 "none".into(),
             )),

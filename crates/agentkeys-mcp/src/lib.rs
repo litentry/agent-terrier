@@ -496,7 +496,7 @@ mod tests {
             _: &Session,
             _: &WalletAddress,
             _: &ServiceName,
-        ) -> Result<Vec<u8>, BackendError> {
+        ) -> Result<agentkeys_types::SecretBytes, BackendError> {
             Err(BackendError::NotFound("none".into()))
         }
         async fn revoke_session(&self, _: &Session, _: &Session) -> Result<(), BackendError> {
