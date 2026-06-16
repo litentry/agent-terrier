@@ -79,6 +79,20 @@ export function App() {
   const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
   const [justPaired, setJustPaired] = useState<string | null>(null);
   const [memoryView, setMemoryView] = useState<PreservedMemory | null>(null);
+  // The chain the daemon actually operates on (from /v1/chain/list), so the
+  // header badge reflects the live AGENTKEYS_CHAIN instead of the build-time
+  // CHAIN_PROFILE constant (which is always 'heima').
+  const [daemonChain, setDaemonChain] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (status.kind !== 'connected') { setDaemonChain(null); return; }
+    let cancelled = false;
+    (async () => {
+      const r = await client.getChainList();
+      if (!cancelled && r.ok) setDaemonChain(r.data.daemonChain);
+    })();
+    return () => { cancelled = true; };
+  }, [client, status.kind]);
 
   useEffect(() => {
     let cancelled = false;
@@ -935,7 +949,7 @@ export function App() {
           </div>
         </div>
         <div className="head-right">
-          <span style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{CHAIN_PROFILE.name} · {status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
+          <span style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{(daemonChain ?? CHAIN_PROFILE.name)} · {status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
           <button
             className={`bell ${pairingRequests.length ? 'has-req' : ''}`}
             onClick={() => go('pairing')}
@@ -1119,6 +1133,10 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
   const client = useClient();
   const [decoded, setDecoded] = useState<DecodedAuditEvent | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // The daemon's live chain display (e.g. "Base mainnet"), so the decode footer
+  // names the chain the event was actually committed on — not the build-time
+  // CHAIN_PROFILE constant. Falls back to that constant until the list loads.
+  const [chainDisplay, setChainDisplay] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -1130,6 +1148,17 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
     })();
     return () => { alive = false; };
   }, [client, event.id]);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const r = await client.getChainList();
+      if (!alive || !r.ok) return;
+      const entry = r.data.chains.find((c) => c.name === r.data.daemonChain);
+      setChainDisplay(entry?.display ?? r.data.daemonChain);
+    })();
+    return () => { alive = false; };
+  }, [client]);
 
   const mock = decodeCalldata(event);
   const onchain = ONCHAIN_KINDS.has(event.kind);
@@ -1238,7 +1267,7 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
           )}
           <div className="muted" style={{ fontSize: 11, marginTop: 12 }}>
             {decoded ? (
-              <>{decoded.provenance ?? 'calldata + CBOR decoded by the daemon against the verified ABIs'} · {CHAIN_PROFILE.display}</>
+              <>{decoded.provenance ?? 'calldata + CBOR decoded by the daemon against the verified ABIs'} · {chainDisplay ?? CHAIN_PROFILE.display}</>
             ) : err ? (
               <>offline — showing reference decode · <span className="mono">connect a daemon for real decode (#153)</span></>
             ) : (
