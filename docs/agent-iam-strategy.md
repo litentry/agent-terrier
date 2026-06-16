@@ -81,6 +81,51 @@ Sequence: ship working code → grow vendor adoption → THEN propose specs. Not
 
 Single-act memory injection reads as "smart toy." Three acts read as "Agent IAM." See §4 for the revised Phase 1 demo.
 
+### 2.7 The mobile-OS permission model is the product's spine (added 2026-05-31)
+
+The clearest mental model for AgentKeys — for the parent buying a toy, for the vendor integrating it, for the engineer building it — is the **mobile-OS app-permission system**. Everyone already understands it: you install an app, it asks for the permissions it needs at first launch, you grant or deny each one, the OS enforces those grants at the syscall boundary (the app physically cannot reach your camera if you said no), and you can revoke any permission later in Settings.
+
+AgentKeys is the same model, one layer up — for AI agents instead of mobile apps:
+
+| Mobile OS (iOS / Android) | AgentKeys | Mechanism in our stack |
+|---|---|---|
+| Install an app | Onboard a new agent | `agentkeys agent create` → `agentkeys wire <runtime>` (§3.7) |
+| First-launch permission prompt | Master's grant ceremony | K11 WebAuthn assertion on the master device (arch §10.7) |
+| Permission categories (Camera, Location, Contacts, Mic) | Capability categories | Memory namespaces (§3.5) × services × bounds |
+| Grant / deny per permission | Per-category grant | `AgentKeysScope.Scope` written on chain (arch §16.1) |
+| "Allow once" / "While using" / precise-vs-approximate | Bounded grants | read-only memory; payment ≤ ¥50; specific IoT devices |
+| OS enforces at the syscall boundary (app can't bypass) | **Hook enforces at the tool-call boundary** | PreToolUse hook → `permission.check` (§3.6, arch §22d) — the IAM *guarantee*, not the *tool* |
+| Runtime re-prompt for a sensitive action | `permission.check` → `ask_parent` verdict | deterministic policy engine escalates |
+| Revoke a permission in Settings | Parent revokes in the web UI | `cap.revoke` / `revoke_scope_with_webauthn` — the Act-3 demo |
+| Per-app sandbox | Per-actor isolation | four-layer per-actor invariants (CLAUDE.md) |
+| App Store review before distribution | Vendor onboarding / device pairing | arch §22c.4 |
+
+**Why this is the spine, not just an analogy:**
+
+1. **It tells the consumer what they're buying without saying "IAM."** Per §3.4's dual-narrative rule, a parent buying an AI toy doesn't want "Agent IAM." They want "the toy asks me before it can spend money or read the family calendar — the same way apps ask before using my camera." The mobile-OS model is the consumer pitch, already pre-installed in everyone's head.
+
+2. **It explains why hooks (not just MCP tools) are non-negotiable.** §3.6's IAM-tool-vs-IAM-guarantee distinction *is* the mobile-OS distinction between (a) an app *politely calling* a "may I use the camera?" function it could choose to skip, and (b) the *OS intercepting* the camera syscall so the app cannot proceed without the grant. The `PreToolUse` hook is the syscall-interception layer. Without it, AgentKeys is a courtesy API; with it, AgentKeys is the OS.
+
+3. **It makes the onboarding ceremony the product moment.** Mobile OS made "the permission prompt at first launch" the defining trust interaction of the smartphone era. AgentKeys' equivalent — the master being prompted, on their own device with biometric presence, to grant a freshly-onboarded agent its capabilities — is the moment the user feels in control. The grant ceremony (arch §10.7) is where Phase-1's demo "surprise" (§3.7) actually lands.
+
+**Permission categories — the consumer-facing vocabulary (v0):**
+
+| Consumer label | Maps to | Typical grant for a kids' AI toy |
+|---|---|---|
+| 出行记忆 Travel memory | `namespace=travel`, read | ✅ read |
+| 健康记忆 Health memory | `namespace=personal` (health subset), read | ❌ none |
+| 关系记忆 Relationship memory | `namespace=family`, read | ⚠️ read, parent-toggled |
+| 工作记忆 Work memory | `namespace=work` | ❌ none |
+| 支付能力 Payment | `service=payment`, `max_per_call` | ✅ ≤ ¥50/call, ≤ ¥200/day |
+| 家居控制 IoT control | `service=iot`, device allow-list | ⚠️ specific devices only |
+| 凭证访问 Credential access | `service=cred-store`, per-service | ❌ none |
+
+Each category is a `(service, namespace, operation, bound)` tuple. The existing primitives already carry every field — services in `Scope.services`, namespaces in the cap-token's `namespaces_allowed`, bounds in `Scope.max_per_call`. What v0 lacks — and what the mobile-OS model demands — is presenting them as **per-category toggles in one onboarding screen**, with each toggle bound to its own structured grant. That extension is recorded conservatively (additive, no v0 contract change) in arch §10.7.
+
+**You confirm; you don't configure — the AI recommends the scopes.** A parent shouldn't face a blank toggle grid. At onboarding the AI proposes a *recommended* scope set — derived from the agent's role (the classifier, #207), the master's saved policy (global config, #201), and a safe default preset — and the master just reviews, edits, and approves it with one biometric tap. It's the app-manifest, inverted: instead of the agent declaring the permissions it wants, AgentKeys *infers* the manifest and asks you to confirm. The AI recommends; **only the master's K11 assertion grants** — the recommendation authorizes nothing on its own.
+
+**The recommendation sharpens with use; it never loosens on its own.** An optional 2–3 question setup ("who is this for?") and, over time, the master's own grant/deny history make each next agent's recommendation smarter — held in the master's audited config, advisory-only. It ratchets toward caution: sensitive categories (health, payment, credentials) keep asking every time even after past grants, and high-impact learned defaults are periodically re-confirmed. No learned preference ever widens a live scope without a fresh K11 grant. (Mechanism in arch §10.7.)
+
 ---
 
 ## 3. Four corrections that reshape architecture commitments
