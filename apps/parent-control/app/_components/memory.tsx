@@ -5,7 +5,7 @@ import type { ConfigPreset, ConnectionStatus, MemoryCategory } from '@/lib/clien
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import { CeremonyRunner } from './ceremony';
 import { EmptyState, PageHead, Panel } from './shared';
-import type { CeremonyStep, PreservedMemory } from './types';
+import type { Actor, CeremonyStep, PreservedMemory } from './types';
 
 const PLANT_STEPS: CeremonyStep[] = [
   { label: 'Read prepared archive', sub: `${PREPARED_MEMORY.length} entries · travel / personal / family`, onchain: false },
@@ -37,6 +37,7 @@ type NsEntries = PreservedMemory[] | 'loading' | undefined;
 export function MemoryPage({
   categories,
   entriesByNs,
+  actors,
   status,
   presets,
   defaultPresetId,
@@ -51,6 +52,9 @@ export function MemoryPage({
 }: {
   categories: MemoryCategory[];
   entriesByNs: Record<string, NsEntries>;
+  /** All actors — used to show which delegates can READ each namespace
+   *  (master-hub #295 distribution: a delegate's `memory:<ns>` grant). */
+  actors: Actor[];
   status: ConnectionStatus;
   presets: ConfigPreset[];
   defaultPresetId: string;
@@ -127,6 +131,7 @@ export function MemoryPage({
               key={c.ns}
               category={c}
               entries={entriesByNs[c.ns]}
+              actors={actors}
               onLoad={onLoadCategory}
               onView={onView}
             />
@@ -231,11 +236,13 @@ function TaxonomySetup({
 function CategoryPanel({
   category,
   entries,
+  actors,
   onLoad,
   onView,
 }: {
   category: MemoryCategory;
   entries: NsEntries;
+  actors: Actor[];
   onLoad: (ns: string) => void;
   onView: (m: PreservedMemory) => void;
 }) {
@@ -243,6 +250,18 @@ function CategoryPanel({
   const loaded = Array.isArray(entries);
   const loading = entries === 'loading';
   const count = loaded ? entries.length : null;
+
+  // master-hub #295 distribution VISIBILITY: which delegates can READ this
+  // canonical namespace. A delegate's on-chain `memory:<ns>` grant surfaces in
+  // `actor.scope` as a per-namespace { read, write } map (same shape the
+  // dashboard/permissions panels read). Granting is the existing #248/#249
+  // scope panel; this is the read-only reverse index (no network, no decrypt).
+  const readers = actors.filter((a) => {
+    if (a.role !== 'agent') return false;
+    const scope = (a.scope ?? {}) as Record<string, { read?: boolean; write?: boolean }>;
+    const bits = scope[category.ns];
+    return !!bits && (bits.read === true || bits.write === true);
+  });
 
   const toggle = () => {
     const next = !open;
@@ -257,6 +276,17 @@ function CategoryPanel({
           {count !== null ? `${count} ${count === 1 ? 'entry' : 'entries'}` : loading ? 'decrypting…' : 'detail decrypts on open'}
         </span>
         <button className="btn sm" onClick={toggle}>{open ? 'hide' : 'open'}</button>
+      </div>
+
+      <div style={{ padding: '0 12px 8px', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span className="muted" title="Delegates whose memory:<ns> scope grants them read access to this canonical namespace (master-hub #295). Grant via the agent's permissions panel.">shared with</span>
+        {readers.length === 0 ? (
+          <span className="muted" style={{ fontStyle: 'italic' }}>no delegates</span>
+        ) : (
+          readers.map((a) => (
+            <span key={a.id} className="chip">{a.label || a.id}</span>
+          ))
+        )}
       </div>
 
       {open && loading && (

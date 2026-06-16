@@ -18,6 +18,9 @@ path = "src/lib.rs"
 # AES-GCM / S3-PUT flow; only the S3 path prefix + bucket differ.
 agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
 agentkeys-core = { workspace = true }
+# Shared wire types (#203 one-owner) — CanonicalStsResult for the server-side
+# canonical-read STS fetch (A', §7a). Pure serde, no heavy/native deps.
+agentkeys-protocol = { path = "../agentkeys-protocol" }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }

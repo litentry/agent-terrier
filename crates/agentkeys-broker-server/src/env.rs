@@ -46,6 +46,12 @@ pub enum Group {
 
 /// Required (or derive from `ACCOUNT_ID`). The role the broker assumes via STS for users.
 pub const BROKER_DATA_ROLE_ARN: &str = "BROKER_DATA_ROLE_ARN";
+/// Optional (#295 P1 §7a). The per-data-class MEMORY IAM role ARN the broker
+/// AssumeRoles (with a read-only, exact-object inline session policy) to issue
+/// delegated canonical-memory READ credentials. When unset, `/v1/cap/canonical-sts`
+/// returns a clear "not configured" error rather than failing boot. Same value
+/// the worker host uses as `MEMORY_ROLE_ARN`.
+pub const MEMORY_ROLE_ARN: &str = "MEMORY_ROLE_ARN";
 /// Optional. Path to the audit-log SQLite DB. Defaults to `~/.agentkeys/broker/audit.sqlite`.
 pub const BROKER_AUDIT_DB_PATH: &str = "BROKER_AUDIT_DB_PATH";
 /// Optional. AWS region used for STS calls. Defaults to `us-east-1`.

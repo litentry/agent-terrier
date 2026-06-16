@@ -31,6 +31,16 @@ use thiserror::Error;
 pub enum CapOp {
     Store,
     Fetch,
+    /// Delegated READ of the master's CANONICAL memory (master-hub #295 P1
+    /// distribution channel). Distinct from `Fetch` (the caller's OWN working
+    /// memory) even though the omnis are identical (operator = master, actor =
+    /// delegate) for both — only the resolved S3 PREFIX differs, so the
+    /// discriminator MUST be the signed op (a route alone is forgeable). The
+    /// memory worker resolves the read owner to `operator_omni` for this op;
+    /// `operator != actor` makes `check_chain_scope` consult the on-chain
+    /// `memory:<ns>` grant (the master-self skip is bypassed). See
+    /// docs/plan/master-hub-topology.md §6a/§12.
+    CanonicalFetch,
     Teardown,
     /// Compute-gate op for the classifier-service worker (#178 §15.6, #207
     /// items 2-3). Authorizes a COMPILE (NL → policy) or TAG (entity →
@@ -46,6 +56,7 @@ impl CapOp {
         match self {
             CapOp::Store => "store",
             CapOp::Fetch => "fetch",
+            CapOp::CanonicalFetch => "canonical_fetch",
             CapOp::Teardown => "teardown",
             CapOp::Classify => "classify",
         }
@@ -703,6 +714,11 @@ mod tests {
     fn cap_op_serializes_snake_case() {
         assert_eq!(serde_json::to_string(&CapOp::Store).unwrap(), "\"store\"");
         assert_eq!(serde_json::to_string(&CapOp::Fetch).unwrap(), "\"fetch\"");
+        assert_eq!(
+            serde_json::to_string(&CapOp::CanonicalFetch).unwrap(),
+            "\"canonical_fetch\""
+        );
+        assert_eq!(CapOp::CanonicalFetch.as_str(), "canonical_fetch");
         assert_eq!(
             serde_json::to_string(&CapOp::Teardown).unwrap(),
             "\"teardown\""

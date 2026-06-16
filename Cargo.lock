@@ -60,6 +60,7 @@ dependencies = [
  "agentkeys-broker-server",
  "agentkeys-core",
  "agentkeys-mock-server",
+ "agentkeys-provisioner",
  "agentkeys-types",
  "anyhow",
  "async-trait",
@@ -527,6 +528,7 @@ name = "agentkeys-worker-memory"
 version = "0.1.0"
 dependencies = [
  "agentkeys-core",
+ "agentkeys-protocol",
  "agentkeys-worker-creds",
  "anyhow",
  "aws-config",

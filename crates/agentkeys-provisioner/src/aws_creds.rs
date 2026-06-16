@@ -166,6 +166,7 @@ pub async fn fetch_via_broker_with_sts_endpoint(
         region,
         session_duration_seconds,
         sts_endpoint_url,
+        None,
     )
     .await
 }
@@ -180,16 +181,54 @@ pub async fn fetch_via_broker_default_ttl(
     fetch_via_broker(broker_url, session_token, role_arn, region, 3600).await
 }
 
+/// Like [`fetch_via_broker_default_ttl`] but attaches an inline AssumeRole
+/// **session policy** (#295 P1 §7a) — used by a delegated canonical-memory
+/// READ to scope the relayed operator STS down to read-only (`s3:GetObject`),
+/// so it cannot write or delete the master's canonical prefix even though the
+/// underlying memory role is prefix-wide R/W. `session_policy = None` is
+/// identical to `fetch_via_broker_default_ttl`.
+pub async fn fetch_via_broker_scoped_default_ttl(
+    broker_url: &str,
+    session_token: &str,
+    role_arn: &str,
+    region: &str,
+    session_policy: Option<&str>,
+) -> ProvisionResult<AwsTempCreds> {
+    let jwt_resp = fetch_oidc_jwt(broker_url, session_token).await?;
+    assume_role_with_jwt(
+        &jwt_resp.jwt,
+        &jwt_resp.wallet,
+        role_arn,
+        region,
+        3600,
+        None,
+        session_policy,
+    )
+    .await
+}
+
 /// Run `AssumeRoleWithWebIdentity` against the live AWS STS endpoint with the
 /// given JWT and return the temp creds. Anonymous SDK config — no AWS creds
 /// required on this side.
-async fn assume_role_with_jwt(
+/// Run `sts:AssumeRoleWithWebIdentity` with a caller-supplied OIDC JWT, optional
+/// STS endpoint override, and optional inline session policy. Public so the
+/// **broker** (#295 P1 §7a) can mint an operator-tagged OIDC internally and
+/// AssumeRole with a read-only, exact-object session policy WITHOUT ever handing
+/// the delegate the operator session bearer (the Codex-flagged critical fix).
+pub async fn assume_role_with_jwt(
     jwt: &str,
     wallet: &str,
     role_arn: &str,
     region: &str,
     session_duration_seconds: i32,
     sts_endpoint_url: Option<&str>,
+    // #295 P1 §7a: an optional inline AssumeRole **session policy** (max 2048
+    // chars). AWS makes the effective permission the INTERSECTION of the role's
+    // identity policy and this — so a read-only (`s3:GetObject`) session policy
+    // turns a prefix-wide read+write memory role into read-only, the scope-down
+    // a delegated canonical read needs so a relayed STS can't write/delete the
+    // master's canonical prefix. `None` ⇒ full role permissions (existing paths).
+    session_policy: Option<&str>,
 ) -> ProvisionResult<AwsTempCreds> {
     // Anonymous SDK config — the JWT authenticates AssumeRoleWithWebIdentity.
     // TODO: replace `AnonymousCredentials` with `.no_credentials()` once we
@@ -210,6 +249,7 @@ async fn assume_role_with_jwt(
         .role_session_name(&session_name)
         .web_identity_token(jwt)
         .duration_seconds(session_duration_seconds)
+        .set_policy(session_policy.map(|s| s.to_string()))
         .send()
         .await
         .map_err(|e| {
