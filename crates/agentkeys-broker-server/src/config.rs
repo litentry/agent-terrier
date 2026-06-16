@@ -5,6 +5,12 @@ use crate::env;
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
     pub data_role_arn: String,
+    /// #295 P1 §7a — the per-data-class MEMORY IAM role the broker AssumeRoles
+    /// (with a read-only, exact-object inline session policy) to issue delegated
+    /// canonical-memory READ credentials. Empty when `MEMORY_ROLE_ARN` is unset;
+    /// `/v1/cap/canonical-sts` then returns a clear "not configured" error
+    /// instead of failing boot (back-compat for brokers predating this).
+    pub memory_role_arn: String,
     pub audit_db_path: PathBuf,
     pub aws_region: String,
     pub session_duration_seconds: i32,
@@ -56,6 +62,10 @@ impl BrokerConfig {
                 env::ACCOUNT_ID,
             ))?;
 
+        // #295 P1 §7a — optional. Empty disables /v1/cap/canonical-sts with a
+        // clear error (not a boot failure), so brokers predating this keep booting.
+        let memory_role_arn = std::env::var(env::MEMORY_ROLE_ARN).unwrap_or_default();
+
         let audit_db_path = std::env::var(env::BROKER_AUDIT_DB_PATH)
             .ok()
             .map(PathBuf::from)
@@ -103,6 +113,7 @@ impl BrokerConfig {
 
         Ok(Self {
             data_role_arn,
+            memory_role_arn,
             audit_db_path,
             aws_region,
             session_duration_seconds,

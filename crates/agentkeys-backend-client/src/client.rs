@@ -347,6 +347,62 @@ impl BackendClient {
         })
     }
 
+    /// `POST /v1/memory/canonical-get` — delegated READ of the master's
+    /// CANONICAL memory (master-hub #295 P1 distribution). The `cap` is a
+    /// `CanonicalFetch`/`Memory` cap (minted via [`Self::cap_mint`] with
+    /// `CapMintOp::MemoryCanonicalGet`); the worker keys the read on the
+    /// OPERATOR prefix (`bots/<operator>/memory/`) for this op.
+    ///
+    /// §7a (A', the Codex-review fix): the read is performed SERVER-SIDE. This
+    /// client sends ONLY the delegate's own session bearer + the cap, and gets
+    /// back plaintext — NEVER any AWS creds. The WORKER relays the bearer to the
+    /// broker's `/v1/cap/canonical-sts` for an exact-object scoped STS that never
+    /// leaves the server, so the delegate cannot bypass the worker's audit/chain
+    /// re-verify (it holds no creds) nor hold the operator session.
+    /// `agent_session_bearer` is the DELEGATE's session.
+    pub async fn memory_canonical_get(
+        &self,
+        input: MemoryGetInput,
+    ) -> Result<MemoryGetResult, BackendError> {
+        // A': send ONLY the delegate's session bearer + the cap to the worker.
+        // The worker fetches the exact-object scoped STS server-side; no AWS
+        // creds ever reach this client.
+        let bearer = self
+            .agent_session_bearer
+            .as_deref()
+            .filter(|b| !b.is_empty())
+            .ok_or(BackendError::NotConfigured("agent_session_bearer"))?;
+        let url = format!("{}/v1/memory/canonical-get", self.memory()?);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&MemoryGetBody {
+                cap: input.cap,
+                namespace: input.namespace.clone(),
+            })
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+
+        let parsed: MemoryGetResp = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))?;
+
+        Ok(MemoryGetResult {
+            ok: parsed.ok,
+            plaintext_b64: parsed.plaintext_b64,
+            namespace: input.namespace,
+        })
+    }
+
     /// `POST /v1/cred/fetch` — fetch + decrypt a stored credential's plaintext
     /// (#216 agent-side vaulted-key fetch). The `cap` (a cred-fetch cap with the
     /// `service` signed inside) is minted separately via [`Self::cap_mint`]; this
