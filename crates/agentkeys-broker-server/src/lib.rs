@@ -56,6 +56,21 @@ pub fn create_router(state: SharedState) -> Router {
         // memory worker accepts and the cred worker rejects.
         .route("/v1/cap/memory-put", post(handlers::cap::cap_memory_put))
         .route("/v1/cap/memory-get", post(handlers::cap::cap_memory_get))
+        // #295 P1 — delegated canonical-memory READ (the master-hub
+        // distribution channel): mints a CanonicalFetch/Memory cap, gated by
+        // the on-chain memory:<ns> grant when operator != actor.
+        .route(
+            "/v1/cap/memory-canonical-get",
+            post(handlers::cap::cap_memory_canonical_get),
+        )
+        // #295 P1 §7a — broker-brokered scoped STS for a delegated canonical
+        // read: the delegate presents its CanonicalFetch cap + its OWN session
+        // and gets back read-only, exact-object creds; it never holds the
+        // operator session bearer (Codex critical fix).
+        .route(
+            "/v1/cap/canonical-sts",
+            post(handlers::canonical_sts::mint_canonical_sts),
+        )
         // Per-data-class CONFIG caps (#178 P1 / config-data-class-memory-list).
         // data_class=Config — the policy / memory-types taxonomy; master-only.
         .route(

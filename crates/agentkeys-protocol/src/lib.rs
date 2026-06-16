@@ -44,6 +44,12 @@ pub enum CapMintOp {
     CredFetch,
     MemoryPut,
     MemoryGet,
+    /// #295 P1 — delegated READ of the master's CANONICAL memory (master-hub
+    /// distribution). Mints `CapOp::CanonicalFetch`/`DataClass::Memory` at
+    /// `/v1/cap/memory-canonical-get`; `op_str` is `"canonical_fetch"` so the
+    /// K10 cap-PoP preimage matches the worker's `check_op`. Distinct from
+    /// `MemoryGet` (own working memory) — see docs/plan/master-hub-topology.md §6a.
+    MemoryCanonicalGet,
     /// #201 config data class — master-only taxonomy/config object. A third
     /// `DataClass::Config` with its own bucket + IAM role (arch.md §17.2); the
     /// cred + memory workers reject a Config cap via `verify::check_data_class`.
@@ -58,6 +64,7 @@ impl CapMintOp {
             "cred_fetch" => Some(Self::CredFetch),
             "memory_put" => Some(Self::MemoryPut),
             "memory_get" => Some(Self::MemoryGet),
+            "memory_canonical_get" => Some(Self::MemoryCanonicalGet),
             "config_store" => Some(Self::ConfigStore),
             "config_fetch" => Some(Self::ConfigFetch),
             _ => None,
@@ -70,6 +77,7 @@ impl CapMintOp {
             Self::CredFetch => "/v1/cap/cred-fetch",
             Self::MemoryPut => "/v1/cap/memory-put",
             Self::MemoryGet => "/v1/cap/memory-get",
+            Self::MemoryCanonicalGet => "/v1/cap/memory-canonical-get",
             Self::ConfigStore => "/v1/cap/config-store",
             Self::ConfigFetch => "/v1/cap/config-fetch",
         }
@@ -78,7 +86,7 @@ impl CapMintOp {
     pub fn data_class(self) -> &'static str {
         match self {
             Self::CredStore | Self::CredFetch => "credentials",
-            Self::MemoryPut | Self::MemoryGet => "memory",
+            Self::MemoryPut | Self::MemoryGet | Self::MemoryCanonicalGet => "memory",
             Self::ConfigStore | Self::ConfigFetch => "config",
         }
     }
@@ -92,6 +100,9 @@ impl CapMintOp {
         match self {
             Self::CredStore | Self::MemoryPut | Self::ConfigStore => "store",
             Self::CredFetch | Self::MemoryGet | Self::ConfigFetch => "fetch",
+            // #295 P1 — must match agentkeys_worker_creds::verify::CapOp::CanonicalFetch
+            // (and the broker's) so the K10 cap-PoP preimage agrees byte-for-byte.
+            Self::MemoryCanonicalGet => "canonical_fetch",
         }
     }
 }
@@ -336,6 +347,26 @@ pub struct MemoryGetResult {
     pub ok: bool,
     pub plaintext_b64: String,
     pub namespace: String,
+}
+
+/// #295 P1 §7a — request body for the broker `POST /v1/cap/canonical-sts`.
+/// The delegate presents its broker-minted `CanonicalFetch` cap (and its OWN
+/// session JWT as the Bearer) and receives read-only, exact-object STS creds.
+/// The operator session bearer never enters the delegate runtime (the Codex
+/// critical fix: the broker, not the client, holds operator authority).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanonicalStsBody {
+    pub cap: CapToken,
+}
+
+/// Response from `/v1/cap/canonical-sts`: scoped (read-only, single-object) STS
+/// creds the delegate relays as `X-Aws-*` to `/v1/memory/canonical-get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanonicalStsResult {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    pub expiration: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

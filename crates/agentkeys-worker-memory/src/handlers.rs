@@ -3,6 +3,7 @@
 
 use axum::{
     extract::State,
+    http::HeaderMap,
     routing::{get, post},
     Json, Router,
 };
@@ -18,13 +19,16 @@ use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::{
     err_400, err_403, err_404, err_500, err_502, err_502_s3_get, ApiError, S3FetchAttempt,
 };
-use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
+use agentkeys_worker_creds::verify::{self, CapOp, CapPayload, CapToken, DataClass};
 
 pub fn build_router(state: SharedMemoryWorkerState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/memory/put", post(memory_put))
         .route("/v1/memory/get", post(memory_get))
+        // #295 P1 — delegated READ of the master's CANONICAL memory (distinct
+        // signed cap op so it cannot be reached with an own-memory `get` cap).
+        .route("/v1/memory/canonical-get", post(memory_canonical_get))
         .route("/v1/memory/teardown", post(memory_teardown))
         .with_state(state)
 }
@@ -155,19 +159,134 @@ async fn memory_put_inner(
     Ok((key, env_bytes))
 }
 
+/// Read the caller's OWN working memory (`bots/<actor>/memory/`). Unchanged
+/// by #295 — the active `agentkeys.memory.get` path.
 async fn memory_get(
     State(state): State<SharedMemoryWorkerState>,
     OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<GetRequest>,
 ) -> Result<Json<GetResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Fetch).await?;
+    memory_read_after_verify(&state, creds.as_ref(), &req).await
+}
 
-    let outcome = memory_get_inner(&state, creds.as_ref(), &req).await;
+/// #295 P1 — delegated READ of the master's CANONICAL memory
+/// (`bots/<operator>/memory/`). Same release path as `memory_get`, but the
+/// SIGNED cap op is `CanonicalFetch`, so `memory_read_owner` resolves the S3
+/// prefix + envelope AAD to the OPERATOR (the master's canonical), not the
+/// caller's own memory. Because `operator != actor` for a delegate,
+/// `verify_cap`'s `check_chain_scope` consults the on-chain `memory:<ns>`
+/// grant (the master-self skip is bypassed) — that grant IS the delegate's
+/// authorization. The caller must relay OPERATOR-scoped STS (a session-policy
+/// pinned to this one key — plan §7a); a delegate's own actor-tagged STS gets
+/// AccessDenied on the operator prefix (layer-3 isolation intact).
+async fn memory_canonical_get(
+    State(state): State<SharedMemoryWorkerState>,
+    headers: HeaderMap,
+    Json(req): Json<GetRequest>,
+) -> Result<Json<GetResponse>, ApiError> {
+    verify_cap(&state, &req.cap, CapOp::CanonicalFetch).await?;
+    // A' (#295 §7a): the read runs SERVER-SIDE. The delegate sends its OWN
+    // session bearer + the cap and gets back ONLY plaintext — never S3 creds.
+    // The worker relays that bearer to the broker's /v1/cap/canonical-sts, which
+    // re-verifies the cap (session == cap.actor) + returns an STS scoped to
+    // GetObject on this ONE object. So a compromised worker's blast radius is one
+    // object per request (not the operator prefix), and the delegate cannot
+    // bypass this audit + chain re-verify by hitting S3 directly (it holds no creds).
+    let bearer = bearer_from_headers(&headers).ok_or_else(|| {
+        err_403(
+            "canonical-get requires the delegate session bearer (Authorization: Bearer …)"
+                .to_string(),
+            "missing_session_bearer",
+        )
+    })?;
+    let creds = fetch_canonical_sts(&state, &bearer, &req.cap).await?;
+    memory_read_after_verify(&state, Some(&creds), &req).await
+}
+
+/// Server-side canonical-read STS (A', §7a): relay the delegate's session bearer
+/// plus the (already chain-verified) cap to the broker's `/v1/cap/canonical-sts`.
+/// The broker re-verifies `session == cap.actor` and returns creds scoped to
+/// `GetObject` on the single `bots/<operator>/memory/<ns>.enc` object — minted
+/// HERE (server-side), never handed to the delegate.
+async fn fetch_canonical_sts(
+    state: &SharedMemoryWorkerState,
+    bearer: &str,
+    cap: &CapToken,
+) -> Result<StsCreds, ApiError> {
+    let broker_url = state.config.broker_url.trim_end_matches('/');
+    if broker_url.is_empty() {
+        return Err(err_500(
+            "canonical-get unavailable: BROKER_URL is not set on the memory worker".to_string(),
+            "broker_url_unset",
+        ));
+    }
+    let url = format!("{broker_url}/v1/cap/canonical-sts");
+    let resp = state
+        .http
+        .post(&url)
+        .bearer_auth(bearer)
+        .json(&serde_json::json!({ "cap": cap }))
+        .send()
+        .await
+        .map_err(|e| err_502(e.to_string(), "canonical_sts_post"))?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        // Surface the broker's authz verdict (e.g. 403 cap-actor-mismatch) as a
+        // 403, not a generic 502 — the caller gets the real reason.
+        return Err(err_403(
+            format!("broker canonical-sts {status}: {body}"),
+            "canonical_sts_denied",
+        ));
+    }
+    let creds: agentkeys_protocol::CanonicalStsResult = resp
+        .json()
+        .await
+        .map_err(|e| err_502(e.to_string(), "canonical_sts_json"))?;
+    Ok(StsCreds {
+        access_key_id: creds.access_key_id,
+        secret_access_key: creds.secret_access_key,
+        session_token: creds.session_token,
+    })
+}
+
+/// Pull a bearer token from `Authorization: Bearer …` (scheme case-insensitive).
+fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
+    let v = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let token = v
+        .strip_prefix("Bearer ")
+        .or_else(|| v.strip_prefix("bearer "))?
+        .trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+/// Shared post-verify release path for own (`memory_get`) and canonical
+/// (`memory_canonical_get`) reads. The read owner — and therefore the S3 key,
+/// the envelope AAD, and the audit key — is resolved from the SIGNED cap op
+/// via `memory_read_owner`, so the two paths can never key the same cap to
+/// different prefixes.
+async fn memory_read_after_verify(
+    state: &SharedMemoryWorkerState,
+    creds: Option<&StsCreds>,
+    req: &GetRequest,
+) -> Result<Json<GetResponse>, ApiError> {
+    let outcome = memory_get_inner(state, creds, req).await;
     // Durable audit (#229): the memory-release record, emitted BEFORE the
     // plaintext leaves the worker. cap_hash binds the row to the cap that
-    // authorized this read.
+    // authorized this read; the key reflects the prefix actually read.
     let audit_body = MemoryGetBody {
-        key: s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service),
+        key: s3_key(
+            memory_read_owner(&req.cap.payload),
+            &req.cap.payload.service,
+        ),
         cap_hash: cap_hash(&req.cap),
     };
     let audit_result = if outcome.is_ok() {
@@ -195,7 +314,11 @@ async fn memory_get_inner(
     creds: Option<&StsCreds>,
     req: &GetRequest,
 ) -> Result<Vec<u8>, ApiError> {
-    let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
+    // #295 P1: the read owner is resolved from the SIGNED cap op — `actor` for
+    // an own-memory `Fetch`, `operator` for `CanonicalFetch`. It drives BOTH
+    // the S3 key AND the envelope AAD below, so they can never diverge.
+    let owner = memory_read_owner(&req.cap.payload);
+    let key = s3_key(owner, &req.cap.payload.service);
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let resp = s3
         .get_object()
@@ -215,10 +338,9 @@ async fn memory_get_inner(
                 // #284: the 502 names the S3 error code (AccessDenied /
                 // ExpiredToken / NoSuchBucket / ...) in body + detail, so a
                 // remote caller can diagnose without a host journalctl session.
-                let attempt =
-                    S3FetchAttempt::from_sdk_err("agent-own", &req.cap.payload.actor_omni, &e);
+                let attempt = S3FetchAttempt::from_sdk_err("memory-owner", owner, &e);
                 tracing::warn!(
-                    owner_omni = %req.cap.payload.actor_omni,
+                    owner_omni = %owner,
                     s3_code = %attempt.s3_code,
                     bucket = %state.config.memory_bucket,
                     service = %req.cap.payload.service,
@@ -236,7 +358,7 @@ async fn memory_get_inner(
 
     let aad = envelope::aad(
         &req.cap.payload.operator_omni,
-        &req.cap.payload.actor_omni,
+        owner,
         &req.cap.payload.service,
         req.cap.payload.k3_epoch,
     );
@@ -367,6 +489,26 @@ fn err_403_or_502(e: verify::VerifyError) -> ApiError {
     }
 }
 
+/// The memory prefix a READ resolves to (master-hub #295 P1). Mirror of the
+/// cred worker's `fetch_vault_owner`, but memory has TWO read spaces:
+///   - `CapOp::Fetch`          → the caller's OWN working memory (`actor_omni`)
+///   - `CapOp::CanonicalFetch` → the master's CANONICAL memory (`operator_omni`)
+///
+/// Executable decision record (read docs/plan/master-hub-topology.md §6a/§12
+/// before changing): the returned owner drives BOTH the S3 key AND the
+/// envelope AAD (`envelope::aad` keys on its `actor` arg). If `CanonicalFetch`
+/// ever resolves to `actor_omni`, the distribution channel silently reads the
+/// delegate's own (empty) prefix instead of the master's; if `Fetch` ever
+/// resolves to `operator_omni`, the ACTIVE own-memory read breaks. Store +
+/// teardown stay `actor_omni`-keyed (master-self for canonical content), so a
+/// delegated cap can never write or wipe the master's prefix here.
+fn memory_read_owner(payload: &CapPayload) -> &str {
+    match payload.op {
+        CapOp::CanonicalFetch => &payload.operator_omni,
+        _ => &payload.actor_omni,
+    }
+}
+
 /// S3 key prefix per arch.md §15.2: `bots/<actor_omni_hex>/memory/<service>.enc`.
 /// Distinct from creds worker's `credentials/` prefix; same bucket-relative
 /// shape so a single audit pass covers both data classes.
@@ -404,6 +546,110 @@ mod tests {
     #[test]
     fn s3_prefix_uses_memory_path() {
         assert_eq!(s3_prefix("0xABCDEF"), "bots/abcdef/memory/");
+    }
+
+    #[test]
+    fn bearer_from_headers_parses_scheme_case_insensitively() {
+        // A' (#295 §7a): canonical-get relays the DELEGATE's session bearer to
+        // the broker. Parse `Bearer`/`bearer`; reject empty/missing/scheme-less
+        // so the handler 403s rather than relaying a blank bearer to the broker.
+        let mk = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(axum::http::header::AUTHORIZATION, v.parse().unwrap());
+            h
+        };
+        assert_eq!(
+            bearer_from_headers(&mk("Bearer tok123")).as_deref(),
+            Some("tok123")
+        );
+        assert_eq!(
+            bearer_from_headers(&mk("bearer tok123")).as_deref(),
+            Some("tok123")
+        );
+        assert!(bearer_from_headers(&mk("Bearer ")).is_none());
+        assert!(bearer_from_headers(&mk("tok-no-scheme")).is_none());
+        assert!(bearer_from_headers(&HeaderMap::new()).is_none());
+    }
+
+    fn sample_payload(
+        op: CapOp,
+        operator: &str,
+        actor: &str,
+        service: &str,
+        epoch: u64,
+    ) -> CapPayload {
+        CapPayload {
+            operator_omni: operator.to_string(),
+            actor_omni: actor.to_string(),
+            service: service.to_string(),
+            op,
+            data_class: DataClass::Memory,
+            device_key_hash: "0x00".to_string(),
+            k3_epoch: epoch,
+            issued_at: 0,
+            expires_at: u64::MAX,
+            nonce: "n".to_string(),
+        }
+    }
+
+    #[test]
+    fn memory_read_owner_routes_canonical_to_operator_and_own_to_actor() {
+        // #295 P1: the SAME omnis (operator=master, actor=delegate) appear on
+        // both an own-read and a canonical-read cap; only the signed op decides
+        // the prefix. This is why the discriminator must be the op, not the
+        // omnis (and why a route alone would be forgeable).
+        let master = "0xAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaa";
+        let delegate = "0xBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbb";
+        let canon = sample_payload(CapOp::CanonicalFetch, master, delegate, "memory:project", 7);
+        let own = sample_payload(CapOp::Fetch, master, delegate, "memory:project", 7);
+        assert_eq!(
+            memory_read_owner(&canon),
+            master,
+            "canonical read → master prefix"
+        );
+        assert_eq!(
+            memory_read_owner(&own),
+            delegate,
+            "own read → delegate prefix"
+        );
+    }
+
+    #[test]
+    fn canonical_read_aad_round_trips_a_master_self_store() {
+        // The load-bearing AAD invariant (#295 P1, plan §6/§11 contradiction 2):
+        // a master-self STORE binds the aad to the master (actor == operator).
+        // A DELEGATED canonical read (op=CanonicalFetch) must recompute the SAME
+        // aad — which works ONLY because memory_read_owner feeds `operator` as
+        // the aad actor arg (envelope::aad keys on its actor arg). A naive port
+        // keyed on the delegate's actor_omni would fetch the right object then
+        // FAIL decrypt (looks like KEK corruption).
+        let kek = "0".repeat(64); // 32-byte test KEK
+        let master = "0xAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaa";
+        let delegate = "0xBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbb";
+        let service = "memory:project";
+        let epoch = 7u64;
+        let plaintext: &[u8] = b"canonical project memory";
+
+        // master-self store aad (operator arg ignored; actor == master is bound).
+        let store_aad = envelope::aad(master, master, service, epoch);
+        let blob = envelope::encrypt(&kek, plaintext, &store_aad).expect("encrypt");
+
+        // delegated canonical read: owner resolves to master, aad recomputed.
+        let p = sample_payload(CapOp::CanonicalFetch, master, delegate, service, epoch);
+        let owner = memory_read_owner(&p);
+        let read_aad = envelope::aad(&p.operator_omni, owner, service, epoch);
+        let got = envelope::decrypt(&kek, &blob, &read_aad)
+            .expect("delegated canonical read must decrypt the master-self blob");
+        assert_eq!(got, plaintext);
+
+        // a would-be own-read aad (actor=delegate) must NOT decrypt the master blob.
+        let own = sample_payload(CapOp::Fetch, master, delegate, service, epoch);
+        let own_owner = memory_read_owner(&own);
+        let wrong_aad = envelope::aad(master, own_owner, service, epoch);
+        assert!(
+            envelope::decrypt(&kek, &blob, &wrong_aad).is_err(),
+            "own-read aad must not decrypt the master's canonical blob"
+        );
     }
 
     #[test]

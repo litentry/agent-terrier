@@ -1028,7 +1028,7 @@ export function App() {
           <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} />
         )}
         {page === 'memory' && (
-          <MemoryPage categories={categories} entriesByNs={entriesByNs} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
+          <MemoryPage categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
         )}
         {page === 'credentials' && (
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />

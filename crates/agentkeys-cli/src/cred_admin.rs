@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use agentkeys_backend_client::{
     normalize_omni_0x, BackendClient, CapMintOp, CapMintRequest, CredFetchInput, CredStoreInput,
+    MemoryGetInput,
 };
 use agentkeys_types::CredManifest;
 
@@ -67,6 +68,67 @@ pub async fn cred_fetch(
         .decode(&result.plaintext_b64)
         .context("decode cred plaintext_b64")?;
     String::from_utf8(bytes).context("cred plaintext is not valid UTF-8")
+}
+
+/// #295 P1 §7a — delegate-side canonical-memory READ. Pulls a `namespace` of the
+/// MASTER's CANONICAL memory (`bots/<operator>/memory/`) this actor is
+/// authorized for, returning the decrypted plaintext. Gated by the actor's
+/// on-chain `memory:<ns>` scope grant and run under the DELEGATE's OWN session:
+/// the shared client presents the CanonicalFetch cap + this session to the
+/// broker's `/v1/cap/canonical-sts`, which (after verifying the cap) returns
+/// read-only, exact-object STS creds. The delegate NEVER holds the operator
+/// session bearer (the Codex critical fix). The cap's `service` carries the
+/// namespace (the worker keys S3 on operator + service). Routes through the
+/// shared `agentkeys-backend-client`.
+#[allow(clippy::too_many_arguments)]
+pub async fn memory_canonical_get(
+    namespace: &str,
+    operator_omni: &str,
+    actor_omni: &str,
+    device_key_hash: &str,
+    session_bearer: &str,
+    broker_url: &str,
+    memory_url: &str,
+    region: &str,
+) -> Result<String> {
+    // The DELEGATE's own session bearer authenticates to the broker, which (after
+    // verifying the cap) issues scoped read-only creds — no MEMORY_ROLE_ARN is
+    // needed on this side (the broker holds it). cred_fetch keeps the role-relay.
+    let client = BackendClient::new(
+        Some(broker_url.to_string()),
+        Some(memory_url.to_string()),
+        None, // audit_url
+        None, // cred_url
+        Some(session_bearer.to_string()),
+        None, // memory_role_arn — unused on the broker-brokered canonical path
+        None, // vault_role_arn
+        region.to_string(),
+    );
+    let cap = client
+        .cap_mint(
+            CapMintOp::MemoryCanonicalGet,
+            CapMintRequest {
+                operator_omni: normalize_omni_0x(operator_omni),
+                actor_omni: normalize_omni_0x(actor_omni),
+                service: namespace.to_string(),
+                device_key_hash: device_key_hash.to_string(),
+                ttl_seconds: 300,
+            },
+            session_bearer,
+        )
+        .await
+        .with_context(|| format!("cap-mint memory-canonical-get for namespace `{namespace}`"))?;
+    let result = client
+        .memory_canonical_get(MemoryGetInput {
+            cap,
+            namespace: namespace.to_string(),
+        })
+        .await
+        .with_context(|| format!("memory worker canonical-get for namespace `{namespace}`"))?;
+    let bytes = STANDARD
+        .decode(&result.plaintext_b64)
+        .context("decode memory plaintext_b64")?;
+    String::from_utf8(bytes).context("memory plaintext is not valid UTF-8")
 }
 
 /// Vault the credential `service` = `secret` (the symmetric store half of

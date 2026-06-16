@@ -853,6 +853,36 @@ enum MemoryAction {
         #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
         operator: Option<String>,
     },
+    /// #295 P1 — delegate-side READ of the MASTER's CANONICAL memory namespace
+    /// (the master-hub distribution channel). Gated by the actor's on-chain
+    /// `memory:<ns>` scope grant; prints the decrypted plaintext. Unlike `put`
+    /// (which routes through the MCP server), this is the delegated-fetch path —
+    /// §7a (A'): the delegate sends ONLY its OWN session + the cap to the memory
+    /// worker and gets back plaintext, NEVER S3 creds. The WORKER fetches the
+    /// exact-object scoped STS server-side, so the delegate can't bypass the
+    /// worker's audit/chain re-verify nor hold the operator session. Needs the
+    /// broker + memory-worker URLs and the DELEGATE's own session (NOT the
+    /// master's). Identity/session come from flags or env.
+    CanonicalGet {
+        /// The memory namespace to read (e.g. `travel`). Carried as the cap
+        /// `service` and the worker S3 key suffix.
+        #[arg(long)]
+        namespace: String,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator_omni: String,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor_omni: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_HASH")]
+        device_key_hash: String,
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
+        session_bearer: String,
+        #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+        broker_url: String,
+        #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
+        memory_url: String,
+        #[arg(long, env = "REGION", default_value = "us-east-1")]
+        region: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1464,6 +1494,28 @@ async fn main() {
                     vendor_token.clone(),
                     actor.clone(),
                     operator.clone(),
+                )
+                .await
+            }
+            MemoryAction::CanonicalGet {
+                namespace,
+                operator_omni,
+                actor_omni,
+                device_key_hash,
+                session_bearer,
+                broker_url,
+                memory_url,
+                region,
+            } => {
+                agentkeys_cli::cred_admin::memory_canonical_get(
+                    namespace,
+                    operator_omni,
+                    actor_omni,
+                    device_key_hash,
+                    session_bearer,
+                    broker_url,
+                    memory_url,
+                    region,
                 )
                 .await
             }

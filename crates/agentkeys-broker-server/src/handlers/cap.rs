@@ -56,6 +56,16 @@ use crate::state::SharedState;
 pub enum CapOp {
     Store,
     Fetch,
+    /// Delegated READ of the master's CANONICAL memory (master-hub #295 P1
+    /// distribution). Mirror of `agentkeys_worker_creds::verify::CapOp`. A
+    /// distinct SIGNED op (not just a route) because an own-read and a
+    /// canonical-read carry identical omnis (operator = master, actor =
+    /// delegate) — only the resolved prefix differs. `operator != actor` makes
+    /// `mint_cap`'s scope check consult the on-chain `memory:<ns>` grant (the
+    /// master-self skip is bypassed). `as_u8` = 4 audits via the tier-1 worker
+    /// (reuses `AuditOpKind::MemoryGet`), NOT the on-chain `CredentialAudit.OP_*`
+    /// path, so no chain-enum change is needed.
+    CanonicalFetch,
     Teardown,
     /// Compute-gate op for the classifier-service worker (#178 §15.6, #207
     /// items 2-3): a COMPILE or TAG call, NOT an S3 touch. `/v1/cap/classify`
@@ -72,6 +82,7 @@ impl CapOp {
             CapOp::Fetch => 1,
             CapOp::Teardown => 2,
             CapOp::Classify => 3,
+            CapOp::CanonicalFetch => 4,
         }
     }
 
@@ -82,6 +93,7 @@ impl CapOp {
         match self {
             CapOp::Store => "store",
             CapOp::Fetch => "fetch",
+            CapOp::CanonicalFetch => "canonical_fetch",
             CapOp::Teardown => "teardown",
             CapOp::Classify => "classify",
         }
@@ -290,6 +302,28 @@ pub async fn cap_memory_get(
         .map(Json)
 }
 
+/// Delegated READ of the master's CANONICAL memory (master-hub #295 P1).
+/// Mints a `CanonicalFetch`/`Memory` cap. When the requester is a delegate
+/// (`operator != actor`), `mint_cap`'s scope check consults the on-chain
+/// `memory:<ns>` grant the master set for that delegate (the master-self skip
+/// is bypassed). The memory worker keys the read on the OPERATOR prefix for
+/// this op; the caller relays operator-authority STS (the cred-fetch pattern).
+pub async fn cap_memory_canonical_get(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    mint_cap(
+        state,
+        headers,
+        req,
+        CapOp::CanonicalFetch,
+        DataClass::Memory,
+    )
+    .await
+    .map(Json)
+}
+
 // Config cap-mint endpoints (#178 P1 / config-data-class-memory-list plan): the
 // policy / memory-types taxonomy data class. The minted cap carries
 // data_class=Config; the cred + memory workers reject it via
@@ -379,6 +413,16 @@ async fn mint_cap(
             "service must be 1..=64 chars".into(),
         ));
     }
+    // #295 §7a finding 3: a service is interpolated into an S3 key AND (for the
+    // canonical-read STS) an IAM Resource ARN. Reject characters that would
+    // become an IAM wildcard or an S3 path traversal — `memory:*` must never be
+    // a wildcard, `../` must never escape the prefix. (No legit service uses
+    // these: memory = `memory:<ns>`, creds = `openrouter`, IoT = `home:r:dev`.)
+    if req.service.contains(['*', '?', '/', '\\']) || req.service.contains("..") {
+        return Err(CapError::InvalidInput(
+            "service must not contain wildcard or path characters (* ? / \\ ..)".into(),
+        ));
+    }
     let ttl = req.ttl_seconds.clamp(60, 1800);
 
     // 0. Session JWT auth — caller must hold the operator session.
@@ -390,7 +434,19 @@ async fn mint_cap(
         .map_err(|e| CapError::InvalidInput(format!("session omni invalid: {e}")))?;
     let req_omni = normalize_hex32(&req.operator_omni)
         .map_err(|e| CapError::InvalidInput(format!("operator_omni invalid: {e}")))?;
-    if session_omni != req_omni {
+    let req_actor = normalize_hex32(&req.actor_omni)
+        .map_err(|e| CapError::InvalidInput(format!("actor_omni invalid: {e}")))?;
+    // Who must hold the session? `CanonicalFetch` (#295 P1 §7a) is the delegated
+    // canonical READ: the DELEGATE mints its OWN cap (`session == actor`), and the
+    // master's on-chain `memory:<ns>` grant (checked below, because operator != actor
+    // bypasses the master-self skip) is the authorization — a sandboxed delegate must
+    // never hold the operator session bearer. Every other op is operator-session-minted.
+    let required_session_omni = if matches!(op, CapOp::CanonicalFetch) {
+        &req_actor
+    } else {
+        &req_omni
+    };
+    if session_omni != *required_session_omni {
         return Err(CapError::OperatorMismatch);
     }
 
@@ -417,9 +473,12 @@ async fn mint_cap(
     if device.revoked {
         return Err(CapError::DeviceRevoked);
     }
-    let req_actor = normalize_hex32(&req.actor_omni)
-        .map_err(|e| CapError::InvalidInput(format!("actor_omni invalid: {e}")))?;
-    if device.operator_omni != session_omni {
+    // Device binding: the device must be bound to (operator = master, actor =
+    // delegate) as named in the request — independent of which side holds the
+    // session (operator for normal ops, the delegate for `CanonicalFetch`). For
+    // normal ops `session_omni == req_omni` (enforced above) so this is the same
+    // gate; for canonical it pins the master as operator + the delegate's device.
+    if device.operator_omni != req_omni {
         return Err(CapError::DeviceBindingMismatch("operator_omni"));
     }
     if device.actor_omni != req_actor {
@@ -849,6 +908,36 @@ fn keccak256_of_lc_service(name: &str) -> String {
     hasher.update(name.to_lowercase().as_bytes());
     let digest = hasher.finalize();
     format!("0x{}", hex::encode(digest))
+}
+
+/// Verify a `broker_sig` THIS broker produced over `payload` (#295 P1 §7a — the
+/// `/v1/cap/canonical-sts` endpoint re-verifies a CanonicalFetch cap before
+/// issuing scoped STS, so a forged/foreign cap can't obtain operator-prefix
+/// credentials). Recomputes `Sha256(json(payload))` and checks the ECDSA sig
+/// against the verifying key derived from the session signing PEM. Exact inverse
+/// of [`sign_cap_payload`] (same digest input, same encoding).
+pub(crate) fn verify_cap_payload_sig(
+    signing_pem: &str,
+    payload: &CapPayload,
+    sig_b64: &str,
+) -> bool {
+    use p256::ecdsa::signature::Verifier;
+    let Ok(canonical) = serde_json::to_vec(payload) else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&canonical);
+    let digest = hasher.finalize();
+    let Ok(sig_bytes) = URL_SAFE_NO_PAD.decode(sig_b64) else {
+        return false;
+    };
+    let Ok(sig) = Signature::from_slice(&sig_bytes) else {
+        return false;
+    };
+    let Ok(signing_key) = SigningKey::from_pkcs8_pem(signing_pem) else {
+        return false;
+    };
+    signing_key.verifying_key().verify(&digest, &sig).is_ok()
 }
 
 fn sign_cap_payload(signing_pem: &str, payload: &CapPayload) -> Result<String, CapError> {

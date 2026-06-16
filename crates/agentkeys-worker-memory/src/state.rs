@@ -18,6 +18,10 @@ pub struct MemoryWorkerConfig {
     pub epoch_contract: String,
     pub chain_profile: String,
     pub kek_hex_stage1: String,
+    /// Broker base URL for the server-side canonical-read STS fetch (#295 §7a,
+    /// "A'"). Empty disables `/v1/memory/canonical-get` with a clear error; set
+    /// by setup-broker-host.sh to the broker's reachable URL.
+    pub broker_url: String,
 }
 
 impl MemoryWorkerConfig {
@@ -72,6 +76,10 @@ impl MemoryWorkerConfig {
              simplification. Stage 2 (issue #91) replaces with mTLS-derived KEK from the \
              signer enclave (arch.md §15.1)."
         );
+        // Broker URL for the server-side canonical-read STS fetch (A', §7a).
+        // Optional: empty → /v1/memory/canonical-get returns a clear 500 rather
+        // than failing to boot (own-memory put/get/teardown don't need it).
+        let broker_url = std::env::var("BROKER_URL").unwrap_or_default();
         Ok(MemoryWorkerConfig {
             memory_bucket,
             region,
@@ -82,6 +90,7 @@ impl MemoryWorkerConfig {
             epoch_contract,
             chain_profile,
             kek_hex_stage1,
+            broker_url,
         })
     }
 }
