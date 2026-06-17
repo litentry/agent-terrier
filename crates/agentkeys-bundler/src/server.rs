@@ -30,6 +30,21 @@ fn env_profile(base: &str) -> Result<String> {
         .map_err(|_| anyhow!("env {base}[_{p}] not set"))
 }
 
+/// Chain id from the compiled-in chain profile for `AGENTKEYS_CHAIN` — the SAME
+/// source of truth the broker resolves against. A host that sets only
+/// `AGENTKEYS_CHAIN=base` therefore gets Base's `8453`, never the legacy Heima
+/// default that silently made the bundler sign + broadcast `handleOps` for the
+/// wrong chain (the Base register-never-broadcast bug). Returns the id as a
+/// string so it flows through the same `BundlerBootValues.chain_id` field as an
+/// explicit `AGENTKEYS_CHAIN_ID[_<CHAIN>]` override; `None` only for an unknown
+/// chain with no compiled profile, which `from_values` then rejects (fail loud).
+fn chain_id_from_chain_profile() -> Option<String> {
+    let chain = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+    agentkeys_core::chain_profile::ChainProfile::load_builtin(&chain)
+        .ok()
+        .map(|p| p.chain_id.to_string())
+}
+
 fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20]> {
     hex::decode(hex_s.trim().trim_start_matches("0x"))
         .map_err(|e| anyhow!("{name}: {e}"))?
@@ -77,7 +92,9 @@ pub enum BundlerBoot {
 pub struct BundlerBootValues {
     /// `AGENTKEYS_CHAIN_RPC_HTTP`.
     pub rpc_url: Option<String>,
-    /// `AGENTKEYS_CHAIN_ID[_<CHAIN>]` (default 212013 when absent/unparseable).
+    /// `AGENTKEYS_CHAIN_ID[_<CHAIN>]` override, else the compiled chain profile
+    /// for `AGENTKEYS_CHAIN` (resolved in `from_process_env`). No Heima default —
+    /// an unresolved id makes `from_values` fail loud rather than mis-sign.
     pub chain_id: Option<String>,
     /// `ENTRYPOINT_ADDRESS[_<CHAIN>]`.
     pub entry_point: Option<String>,
@@ -94,7 +111,11 @@ impl BundlerBootValues {
     pub fn from_process_env() -> Self {
         Self {
             rpc_url: std::env::var("AGENTKEYS_CHAIN_RPC_HTTP").ok(),
-            chain_id: env_profile("AGENTKEYS_CHAIN_ID").ok(),
+            // Explicit override first (profileless chains / local dev), else the
+            // compiled chain profile for AGENTKEYS_CHAIN (SoT). No Heima default.
+            chain_id: env_profile("AGENTKEYS_CHAIN_ID")
+                .ok()
+                .or_else(chain_id_from_chain_profile),
             entry_point: env_profile("ENTRYPOINT_ADDRESS").ok(),
             signer_key: std::env::var("AGENTKEYS_BUNDLER_SIGNER_KEY")
                 .or_else(|_| std::env::var("BROKER_SPONSOR_SIGNER_KEY"))
@@ -120,10 +141,23 @@ impl BundlerBoot {
     /// config, always pinned in the systemd unit).
     pub fn from_values(values: BundlerBootValues) -> Result<Self> {
         let rpc_url = values.rpc_url.context("env AGENTKEYS_CHAIN_RPC_HTTP")?;
+        // No silent default. The legacy `unwrap_or(212_013)` made a Base (or any
+        // non-Heima) host quietly sign + broadcast `handleOps` for Heima's chain
+        // id, which the target RPC rejects — the Base master-register UserOp never
+        // broadcast (submitter nonce stayed 0; a fast, silent 502). `from_process_env`
+        // fills this from an explicit AGENTKEYS_CHAIN_ID[_<CHAIN>] override or the
+        // compiled chain profile; an unresolved/garbled id is a hard misconfig.
         let chain_id: u64 = values
             .chain_id
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(212_013);
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .context(
+                "bundler chain id unresolved — set AGENTKEYS_CHAIN_ID[_<CHAIN>] or run with an \
+                 AGENTKEYS_CHAIN that has a compiled chain profile; refusing to assume Heima (212013)",
+            )?
+            .parse()
+            .context("AGENTKEYS_CHAIN_ID must be a u64 chain id")?;
         let mut missing = Vec::new();
         let entry_point = match values.entry_point.filter(|s| !s.trim().is_empty()) {
             Some(s) => Some(addr20(&s, "ENTRYPOINT_ADDRESS")?),
@@ -739,6 +773,10 @@ mod tests {
             rpc_url: rpc.map(str::to_string),
             entry_point: entry_point.map(str::to_string),
             signer_key: signer_key.map(str::to_string),
+            // chain id is resolved (override or compiled profile) BEFORE from_values;
+            // pin Heima's here so these tests exercise EntryPoint/key branching, not
+            // chain-id resolution.
+            chain_id: Some("212013".into()),
             ..Default::default()
         }
     }
@@ -812,5 +850,28 @@ mod tests {
             BundlerBoot::Ready(cfg) => assert_eq!(cfg.entry_point, [0x66; 20]),
             BundlerBoot::Degraded { missing, .. } => panic!("expected Ready, missing={missing:?}"),
         }
+    }
+
+    #[test]
+    fn from_values_rejects_unresolved_chain_id() {
+        // The old code silently defaulted a missing chain id to Heima's 212013, so a
+        // Base host signed handleOps for the wrong chain. Now unresolved ⇒ hard error.
+        let key = format!("0x{}", "46".repeat(32));
+        let ep = format!("0x{}", "66".repeat(20));
+        let mut v = boot_values(Some("http://127.0.0.1:1"), Some(&ep), Some(&key));
+        v.chain_id = None;
+        assert!(BundlerBoot::from_values(v).is_err());
+    }
+
+    #[test]
+    fn compiled_profiles_pin_base_and_heima_chain_ids() {
+        use agentkeys_core::chain_profile::ChainProfile;
+        // The SoT the bundler now resolves against: a Base host MUST sign for 8453,
+        // a Heima host for 212013 — never a hardcoded default.
+        assert_eq!(ChainProfile::load_builtin("base").unwrap().chain_id, 8453);
+        assert_eq!(
+            ChainProfile::load_builtin("heima").unwrap().chain_id,
+            212_013
+        );
     }
 }

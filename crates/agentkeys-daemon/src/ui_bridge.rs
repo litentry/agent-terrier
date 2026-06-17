@@ -861,7 +861,7 @@ pub fn build_state(
     // $AGENTKEYS_CHAIN, defaulting to heima mainnet. Drives /v1/chain/info +
     // /v1/audit/:id/decode (#153). Never hard-fails: an unknown chain name
     // falls back to the embedded heima profile.
-    let chain_profile = match agentkeys_core::chain_profile::ChainProfile::resolve(
+    let mut chain_profile = match agentkeys_core::chain_profile::ChainProfile::resolve(
         None,
         std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
         std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
@@ -881,6 +881,19 @@ pub fn build_state(
             agentkeys_core::chain_profile::ChainProfile::load_builtin("heima")?
         }
     };
+    // The daemon was the ONLY component sourcing its RPC from the compiled chain profile;
+    // the broker (accept.rs/cap.rs), every worker (state.rs) and the bundler all read
+    // AGENTKEYS_CHAIN_RPC_HTTP from their env. Read the same var here (dev.sh sources it
+    // from operator-workstation.<chain>.env, like setup-broker-host.sh does for the broker)
+    // so the daemon's chain reads AND /v1/chain/info (the top-right badge) match the rest
+    // of the system instead of diverging on the profile default.
+    if let Some(rpc) = chain_rpc_from_env(&chain_profile.name, |k| std::env::var(k).ok()) {
+        tracing::info!(
+            chain = %chain_profile.name, rpc = %rpc,
+            "ui-bridge: chain RPC from AGENTKEYS_CHAIN_RPC_HTTP[_<CHAIN>] env (matches broker/workers/bundler)"
+        );
+        chain_profile.rpc.http = rpc;
+    }
     Ok(Arc::new(UiBridgeState {
         webauthn,
         enroll: RwLock::new(EnrollState::default()),
@@ -2514,14 +2527,25 @@ async fn master_register_submit(
         let (resp, parsed) =
             forward_to_broker_value(&broker, "/v1/register/submit", &j1, &body).await;
         if !resp.status().is_success() {
-            let detail = parsed
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "broker /v1/register/submit failed".into());
-            return Err(err(
-                StatusCode::BAD_GATEWAY,
-                detail,
-                "register-submit-failed",
-            ));
+            // Surface the broker's REAL reason — it emits a precise error (e.g.
+            // "handleOps did not broadcast: bundler eth_sendUserOperation: <reason>"
+            // or a decoded handleOps revert). The old generic fallback hid every
+            // Base register failure behind one opaque line. Forward the broker's
+            // status too, so a 409 already-registered / 503 sponsored-only doesn't
+            // masquerade as a 502 gateway error.
+            let status = resp.status();
+            let detail = parsed.map(|v| v.to_string()).unwrap_or_else(|| {
+                "broker /v1/register/submit failed (broker returned an empty or non-JSON body)"
+                    .into()
+            });
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                account = %pending.account,
+                %status,
+                detail = %detail,
+                "#278 D6: master register submit FAILED at broker — UserOp not broadcast"
+            );
+            return Err(err(status, detail, "register-submit-failed"));
         }
         let v = parsed.unwrap_or(serde_json::Value::Null);
         let (tx_hash, _) = submit_receipts(&v);
@@ -3672,6 +3696,22 @@ fn profile_is_supported(p: &agentkeys_core::chain_profile::ChainProfile) -> bool
     !p.contracts.is_empty() && p.contract_set_version.is_some()
 }
 
+/// The chain RPC the daemon should dial, read from `AGENTKEYS_CHAIN_RPC_HTTP[_<CHAIN>]`
+/// — the SAME env var the broker (`accept.rs`/`cap.rs`), every worker (`state.rs`) and
+/// the bundler (`main.rs`) already read. The daemon was the ONE component that sourced
+/// its RPC from the compiled chain profile instead, so a deployed env never reached it;
+/// reading the same var here removes that divergence. `<CHAIN>` is the upper-cased
+/// profile name (`-`→`_`), with bare `AGENTKEYS_CHAIN_RPC_HTTP` as the fallback. Unset /
+/// blank ⇒ `None` (caller keeps the profile default). Pure (lookup injected) so it's
+/// testable without mutating process env (#258).
+fn chain_rpc_from_env(chain_name: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let suffix = chain_name.to_uppercase().replace('-', "_");
+    lookup(&format!("AGENTKEYS_CHAIN_RPC_HTTP_{suffix}"))
+        .or_else(|| lookup("AGENTKEYS_CHAIN_RPC_HTTP"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Resolve which profile `GET /v1/chain/info` serves: the daemon's
 /// operational profile by default, or any SUPPORTED built-in profile when
 /// the UI asks for a different view chain via `?chain=` (#282 web chain
@@ -3734,6 +3774,31 @@ mod chain_view_tests {
         let e = resolve_view_profile(&daemon, Some("doesnotexist")).unwrap_err();
         assert!(e.contains("doesnotexist"));
         assert!(e.contains("heima"));
+    }
+
+    #[test]
+    fn chain_rpc_from_env_matches_broker_precedence() {
+        use super::chain_rpc_from_env;
+        use std::collections::HashMap;
+        // chain-suffixed wins — the same var the broker/workers/bundler read.
+        let base: HashMap<&str, &str> = [(
+            "AGENTKEYS_CHAIN_RPC_HTTP_BASE",
+            "https://base-rpc.publicnode.com",
+        )]
+        .into();
+        assert_eq!(
+            chain_rpc_from_env("base", |k| base.get(k).map(|v| v.to_string())),
+            Some("https://base-rpc.publicnode.com".into())
+        );
+        // bare var is the fallback when no chain-suffixed override is set.
+        let bare: HashMap<&str, &str> = [("AGENTKEYS_CHAIN_RPC_HTTP", "https://x")].into();
+        assert_eq!(
+            chain_rpc_from_env("heima", |k| bare.get(k).map(|v| v.to_string())),
+            Some("https://x".into())
+        );
+        // unset ⇒ None (caller keeps the profile default); blank ⇒ None.
+        assert_eq!(chain_rpc_from_env("base", |_| None), None);
+        assert_eq!(chain_rpc_from_env("base", |_| Some("  ".into())), None);
     }
 
     #[test]
@@ -4703,10 +4768,12 @@ async fn forward_to_broker_value(
             let st =
                 StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let txt = resp.text().await.unwrap_or_default();
-            let parsed = st
-                .is_success()
-                .then(|| serde_json::from_str::<serde_json::Value>(&txt).ok())
-                .flatten();
+            // Parse the body on BOTH success and error. Success callers read the
+            // submit receipts from it; the #278 register-submit error path surfaces
+            // the broker's REAL reason from it (e.g. "handleOps did not broadcast:
+            // bundler eth_sendUserOperation: <reason>") instead of a generic
+            // fallback — propagate the error through every layer, never swallow it.
+            let parsed = serde_json::from_str::<serde_json::Value>(&txt).ok();
             let response = (
                 st,
                 [(axum::http::header::CONTENT_TYPE, "application/json")],

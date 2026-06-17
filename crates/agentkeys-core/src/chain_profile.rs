@@ -260,16 +260,25 @@ pub struct FinalityConfig {
 pub struct GasConfig {
     /// `"eip1559"` or `"legacy"`. Anvil + some local dev chains use legacy.
     pub model: String,
+    /// `maxPriorityFeePerGas` (gwei) for master UserOps. Wired into the op's
+    /// gas_fees by the broker (gwei→wei), falling back to the broker default when a
+    /// profile has no usable fee (legacy/anvil `max_fee_gwei == 0`).
     pub max_priority_fee_gwei: u64,
+    /// `maxFeePerGas` (gwei) for master UserOps — the chain's real fee ceiling, NOT
+    /// a blanket value. It sizes the EntryPoint prefund reserve (× total gas), so on
+    /// a cheap L2 (Base ~0.005 gwei base fee → ~2 here) a Heima-scale 40+ gwei would
+    /// reserve a prefund the paymaster deposit can't cover (false AA31).
     pub max_fee_gwei: u64,
     /// ERC-4337 UserOp `verificationGasLimit` for master ops (accept / scope /
-    /// revoke / #278 D6 register). The account's `validateUserOp` runs an
-    /// on-chain P-256 verify; on a chain with the live RIP-7212 precompile
-    /// (#170 / #288) that is ~3.4k gas, so precompile chains set ~200k here while
-    /// chains still on the pure-Solidity verifier keep the broker's 1.5M default.
-    /// `None` ⇒ the broker default. NEVER set it below the real verify cost:
-    /// under-gas reverts inside `validateUserOp` as a false `SIG_VALIDATION_FAILED`
-    /// (#225 / gap #7). Env `ACCEPT_VERIFICATION_GAS_LIMIT[_<CHAIN>]` overrides it.
+    /// revoke / #278 D6 register). `validateUserOp` runs an on-chain P-256 verify
+    /// (~3.4k gas on a RIP-7212 precompile chain, #170 / #288) — BUT the D6 register
+    /// also deploys the P256Account inside the UserOp (initCode), which the EntryPoint
+    /// runs within this limit (~1.3M on Base). So set it to cover the DEPLOY, not just
+    /// the verify (Base: 1.6M even with the precompile; the earlier 200k OOG'd the
+    /// deploy → AA13). `None` ⇒ the broker's 1.5M default (chains on the pure-Solidity
+    /// verifier). NEVER set it below the real cost: under-gas reverts inside
+    /// `validateUserOp` as a false `SIG_VALIDATION_FAILED` (#225 / gap #7).
+    /// Env `ACCEPT_VERIFICATION_GAS_LIMIT[_<CHAIN>]` overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_gas_limit: Option<u128>,
     /// ERC-4337 UserOp `preVerificationGas` for master ops. `None` ⇒ the broker
@@ -551,13 +560,13 @@ mod tests {
 
     #[test]
     fn base_gas_carries_precompile_verification_limit_heima_defaults() {
-        // #278 D6: Base has the live RIP-7212 precompile (#287), so its profile
-        // pins the cheap ~200k verificationGasLimit; Heima stays on the broker's
-        // 1.5M default (None here) until the register verify is profiled live
-        // with the precompile — lowering it blind would revert as a false
-        // SIG_VALIDATION_FAILED (#225).
+        // #278 D6: the register DEPLOYS the P256Account inside the UserOp (initCode),
+        // and the EntryPoint runs that ~1.3M deploy within verificationGasLimit — so
+        // even with Base's cheap RIP-7212 precompile verify (#287) the value must cover
+        // the DEPLOY (1.6M here; the earlier 200k OOG'd it → AA13). Heima stays on the
+        // broker's 1.5M default (None here).
         let base = ChainProfile::load_builtin("base").unwrap();
-        assert_eq!(base.gas.verification_gas_limit, Some(200_000));
+        assert_eq!(base.gas.verification_gas_limit, Some(1_600_000));
         let heima = ChainProfile::load_builtin("heima").unwrap();
         assert_eq!(heima.gas.verification_gas_limit, None);
         assert_eq!(heima.gas.pre_verification_gas, None);
