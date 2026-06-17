@@ -9,21 +9,19 @@ import type { AcceptAssertion } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
 import type { CeremonyStep } from './types';
 import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
+import {
+  ensureActiveChain,
+  getMasterCredId,
+  getMasterOmni,
+  setMasterCredId,
+  setMasterOmni,
+} from '@/lib/identityStore';
 
-// Real K11 enroll via the daemon ui-bridge (PR-B) — used by onboarding when a
-// daemon is configured. Returns 'real' on a completed browser ceremony,
-// 'fallback' when no daemon / no authenticator / the user dismissed it (the
-// onboarding then runs the narrated ceremony so the offline demo still flows).
-function readMasterCredId(): string {
-  try { return localStorage.getItem('ak_master_cred_id') || ''; } catch { return ''; }
-}
-
-// #242: the omni the local passkey pointer belongs to — written alongside
-// ak_master_cred_id at register time. Guards the pointer against a DIFFERENT
-// identity's session (cross-email reuse would sign with the wrong key).
-function readMasterOmni(): string {
-  try { return localStorage.getItem('ak_master_omni') || ''; } catch { return ''; }
-}
+// The master pointer (credentialId + the #242 omni it was bound for) is
+// chain-scoped — see lib/identityStore. The daemon switches between Heima and
+// Base, and a master enrolled on one chain must never be auto-selected while the
+// daemon runs the other: the omni-match guard below would reject it, silently
+// suppressing the "Sign back in with Touch ID" offer.
 
 const omniEq = (a: string, b: string) =>
   a.trim().replace(/^0x/, '').toLowerCase() === b.trim().replace(/^0x/, '').toLowerCase();
@@ -51,7 +49,7 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
   // re-bind, and the new passkey + an overwritten `ak_master_cred_id` pointer make
   // the accept sign with the WRONG key (the on-chain account stays on the original
   // passkey → SIG_VALIDATION_FAILED). Reuse the already-bound passkey instead.
-  const existingCred = readMasterCredId();
+  const existingCred = getMasterCredId();
   const st = await client.getOnboardingState();
   if (st.ok && st.data.chain === 'master-registered') {
     // #242: the pointer must belong to THIS session's identity. A stored omni
@@ -59,11 +57,11 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
     // for this omni — reusing it would sign with the wrong key. (No stored omni
     // = a pre-#242 pointer; the daemon's omni-keyed `chain` already vouches that
     // the binding is this session's, so accept + backfill.)
-    const pointerOmni = readMasterOmni();
+    const pointerOmni = getMasterOmni();
     const pointerMatches = !pointerOmni || !st.data.omni || omniEq(pointerOmni, st.data.omni);
     if (existingCred && pointerMatches) {
       if (!pointerOmni && st.data.omni) {
-        try { localStorage.setItem('ak_master_omni', st.data.omni); } catch {}
+        setMasterOmni(st.data.omni);
       }
       akLog('onboarding: master already bound — REUSING passkey (no new create)', {
         boundCredentialId: existingCred,
@@ -252,12 +250,12 @@ async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterR
   // trap: the accept would auto-select this key while the chain master is a
   // different one → SIG_VALIDATION_FAILED.
   if (registered) {
-    try { localStorage.setItem('ak_master_cred_id', reg.credentialId); } catch {}
+    setMasterCredId(reg.credentialId);
     // #242: key the pointer to the identity it was bound for (the live session
     // omni), so a later different-email session can never auto-select this key.
     const st = await client.getOnboardingState();
     if (st.ok && st.data.omni) {
-      try { localStorage.setItem('ak_master_omni', st.data.omni); } catch {}
+      setMasterOmni(st.data.omni);
     }
     akLog('onboarding: master REGISTERED + signer persisted ✅', {
       account: reg.account,
@@ -385,11 +383,18 @@ export function OnboardingScreen({
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Bind the identity store to the daemon's live chain BEFORE reading the
+      // pointer, so a Heima↔Base switch reads THIS chain's master — not the
+      // other chain's, whose omni would mismatch and silently hide the offer.
+      await ensureActiveChain(async () => {
+        const info = await client.getChainInfo();
+        return info.ok ? info.data.daemonChain ?? info.data.name : null;
+      });
       const st = await client.getOnboardingState();
       if (cancelled || !st.ok || !st.data.relogin) return;
-      const cred = readMasterCredId();
+      const cred = getMasterCredId();
       if (!cred) return; // no local passkey pointer — nothing to auto-select
-      const pointerOmni = readMasterOmni();
+      const pointerOmni = getMasterOmni();
       if (pointerOmni && !omniEq(pointerOmni, st.data.relogin.omni)) return; // another identity's key
       setRelogin(st.data.relogin);
     })();
@@ -414,7 +419,7 @@ export function OnboardingScreen({
         account: start.data.account,
         omni: start.data.omni,
       });
-      const assertion = await getAssertionOverHash(start.data.challenge, [readMasterCredId()]);
+      const assertion = await getAssertionOverHash(start.data.challenge, [getMasterCredId()]);
       const fin = await client.reloginFinish(start.data.challenge, assertion);
       if (fin.ok) {
         akLog('relogin: master session restored via passkey ✅', { omni: fin.data.omni });

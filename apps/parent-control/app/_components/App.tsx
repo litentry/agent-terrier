@@ -2,6 +2,14 @@
 
 import { useEffect, useState } from 'react';
 import {
+  clearMasterIdentity,
+  ensureActiveChain,
+  getMasterCredId,
+  getOnboardedFlag,
+  setActiveChain,
+  setOnboardedFlag,
+} from '@/lib/identityStore';
+import {
   CHAIN_PROFILE,
   ONCHAIN_KINDS,
   PAIRING_STEPS,
@@ -89,7 +97,12 @@ export function App() {
     let cancelled = false;
     (async () => {
       const r = await client.getChainList();
-      if (!cancelled && r.ok) setDaemonChain(r.data.daemonChain);
+      if (!cancelled && r.ok) {
+        setDaemonChain(r.data.daemonChain);
+        // Bind the chain-scoped identity store to the daemon's operational chain
+        // so master pointer reads/writes target THIS chain (Heima↔Base switch).
+        setActiveChain(r.data.daemonChain);
+      }
     })();
     return () => { cancelled = true; };
   }, [client, status.kind]);
@@ -97,6 +110,12 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Bind the identity store to the daemon's chain before the offline-flag
+      // read below, so the per-chain `ak_onboarded` resolves to THIS chain.
+      await ensureActiveChain(async () => {
+        const c = await client.getChainList();
+        return c.ok ? c.data.daemonChain : null;
+      });
       // Real "logged in" = the daemon holds a verified session (W1). Fall back to
       // the local flag only for the offline/demo path (no daemon to ask).
       const r = await client.getOnboardingState();
@@ -105,7 +124,7 @@ export function App() {
         on = true;
         if (!cancelled) setIdentity({ email: r.data.email, omni: r.data.omni });
       } else {
-        try { on = localStorage.getItem('ak_onboarded') === '1'; } catch {}
+        on = getOnboardedFlag();
       }
       if (!cancelled) setOnboarded(on);
     })();
@@ -219,8 +238,7 @@ export function App() {
         showToast(`Approve with Touch ID — one approval revokes ${fleetHashes.length} paired agent(s)…`);
         let assertion;
         try {
-          let masterCred: string | null = null;
-          try { masterCred = localStorage.getItem('ak_master_cred_id'); } catch {}
+          const masterCred = getMasterCredId() || null;
           assertion = await getAssertionOverHash(
             built.data.user_op_hash,
             masterCred ? [masterCred] : undefined,
@@ -270,14 +288,13 @@ export function App() {
       );
       return;
     }
-    let cleared: string | null = null;
-    try { cleared = localStorage.getItem('ak_master_cred_id'); } catch {}
+    const cleared = getMasterCredId() || null;
     akLog('reset: clearing master binding (local + on-chain; OS passkey untouched)', {
       clearedCredentialId: cleared,
     });
-    try { localStorage.removeItem('ak_master_cred_id'); } catch {}
-    try { localStorage.removeItem('ak_master_omni'); } catch {}
-    try { localStorage.removeItem('ak_onboarded'); } catch {}
+    // Per-chain wipe: only THIS chain's master pointer (the other chain's
+    // master, if any, stays bound).
+    clearMasterIdentity();
     const onchain = r.data.onchain;
     const fleet = r.data.fleet;
     akLog('reset: done', { onchain, fleet });
@@ -372,7 +389,7 @@ export function App() {
   // the next login starts clean. Returns to the §9 onboarding (email) screen.
   const logout = () => {
     void client.logout(); // W1: clear the daemon-held session (the real re-test reset)
-    try { localStorage.removeItem('ak_onboarded'); } catch {}
+    setOnboardedFlag(false);
     setOnboarded(false);
     setIdentity(null);
     setActors([]);
@@ -442,8 +459,7 @@ export function App() {
     showToast('Approve with Touch ID…');
     let assertion;
     try {
-      let masterCred: string | null = null;
-      try { masterCred = localStorage.getItem('ak_master_cred_id'); } catch {}
+      const masterCred = getMasterCredId() || null;
       akLog('scope: signing userOpHash (Touch ID)', {
         actor: actor.id,
         services,
@@ -627,8 +643,7 @@ export function App() {
     try {
       // Auto-select the master passkey (stored at K11 enrollment) so the browser
       // skips its picker and the right key signs. Absent ⇒ full picker (fallback).
-      let masterCred: string | null = null;
-      try { masterCred = localStorage.getItem('ak_master_cred_id'); } catch {}
+      const masterCred = getMasterCredId() || null;
       akLog('accept: signing userOpHash (Touch ID)', {
         masterAccount,
         requestedCredentialId: masterCred ?? '(none — full picker)',
@@ -833,8 +848,7 @@ export function App() {
         showToast('Approve with Touch ID…');
         let assertion;
         try {
-          let masterCred: string | null = null;
-          try { masterCred = localStorage.getItem('ak_master_cred_id'); } catch {}
+          const masterCred = getMasterCredId() || null;
           akLog('revoke: signing userOpHash (Touch ID)', {
             actor: actor.id,
             deviceKeyHash: actor.deviceKeyHash,
@@ -907,7 +921,7 @@ export function App() {
     return (
       <OnboardingScreen
         onComplete={(summary) => {
-          try { localStorage.setItem('ak_onboarded', '1'); } catch {}
+          setOnboardedFlag(true);
           setOnboarded(true);
           go('actors');
           // Jump straight into the app; a STICKY toast (no auto-dismiss) carries
