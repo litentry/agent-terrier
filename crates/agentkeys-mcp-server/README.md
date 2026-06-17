@@ -70,8 +70,8 @@ cargo run -p agentkeys-mcp-server -- \
 docker build -t agentkeys-mcp-server -f crates/agentkeys-mcp-server/Dockerfile .
 docker run --rm -p 8088:8088 \
   -e AGENTKEYS_BROKER_URL=https://broker.litentry.org \
-  -e AGENTKEYS_MEMORY_URL=https://memory.litentry.org \
-  -e AGENTKEYS_AUDIT_URL=https://audit.litentry.org \
+  -e AGENTKEYS_WORKER_MEMORY_URL=https://memory.litentry.org \
+  -e AGENTKEYS_WORKER_AUDIT_URL=https://audit.litentry.org \
   -e MCP_VENDOR_TOKENS="magiclick:demo-tok" \
   agentkeys-mcp-server
 ```
