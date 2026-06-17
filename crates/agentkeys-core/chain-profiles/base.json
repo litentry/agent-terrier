@@ -25,8 +25,8 @@
   "gas": {
     "model": "eip1559",
     "max_priority_fee_gwei": 1,
-    "max_fee_gwei": 50,
-    "verification_gas_limit": 200000
+    "max_fee_gwei": 1,
+    "verification_gas_limit": 1600000
   },
   "deploy": {
     "deployer_env_var": "AGENTKEYS_BASE_DEPLOYER_KEY",
@@ -95,8 +95,8 @@
   ],
   "funding": {
     "deploy_min_wei": "3000000000000000",
-    "paymaster_deposit_wei": "1000000000000000",
-    "paymaster_min_deposit_wei": "1000000000000000",
+    "paymaster_deposit_wei": "20000000000000000",
+    "paymaster_min_deposit_wei": "8000000000000000",
     "ed_buffer_wei": "0",
     "account_deposit_wei": "5000000000000000",
     "userop_max_fee_wei": "1000000000"
