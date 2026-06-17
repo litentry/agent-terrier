@@ -48,6 +48,15 @@ Use `jj` (Jujutsu) for all version control. Never use raw `git` commands.
 ## Diagnosis-before-edit policy
 Before changing any file in response to a reported failure, **reproduce the failure locally** and isolate the layer (shell quoting, client tooling, doc command, broker code, network). If the cause is local (shell, copy-paste, env var), respond with the one-line fix and let the user run it — do NOT edit code or docs. Only edit when the cause is in the repo. Keep the response concise: failing command, root cause, fix command — nothing else.
 
+## No-silent-override policy
+**Don't silently override. Whenever you reach for an override, stop and ask whether you've ignored the real reason.** An "override" — an env-var override, a fallback default, a shim, a post-resolve mutation, a "just set it here too" — that masks a root cause is a bug-in-waiting: it papers over a divergence (one component reading a different source, a value not propagating, a missing wiring) instead of fixing it where it lives.
+
+- **Never add a *silent* override** — one that quietly diverges from how the rest of the system resolves the same value. If component A reads a value from source X and you find yourself "overriding" it in component B, first find **why B doesn't read X**. Usually B is the OUTLIER and the fix is to wire B onto X, not to bolt an override onto B.
+- An override is correct ONLY when it IS the root fix: a genuine, documented operator knob with a clear, shared precedence — never a patch over a difference you didn't diagnose.
+- Real incident: the web chain badge showed a stale RPC because the daemon was the ONE component reading the compiled chain profile while the broker, every worker, and the bundler all read `AGENTKEYS_CHAIN_RPC_HTTP`. The reflex ("add an RPC override to the daemon") would have shipped a SECOND silent source of truth; the real fix was to bring the daemon onto the SAME env var the rest of the system already used.
+
+Pairs with the Diagnosis-before-edit policy: diagnose the root, fix it at the source; an override is a last resort, never a reflex.
+
 ## Land-the-fix policy
 Once a local repro proves a fix is correct, **land it the same turn**: edit every affected file (search repo-wide — never assume one file), commit, push to your working branch (PR'd to `origin/main`). Do not stop at "verified locally" or "fixed in one place" — the next operator running the docs will hit the same bug if the fix isn't on `origin/main`. Pair this with the diagnosis-before-edit policy: diagnose once, fix everywhere, push immediately.
 

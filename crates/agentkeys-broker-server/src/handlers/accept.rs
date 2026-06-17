@@ -302,10 +302,13 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
 
     // #278 D6: verificationGasLimit / preVerificationGas are env > profile > default
     // (shared by accept / scope / revoke / register). The live RIP-7212 precompile
-    // (#170 / #288) makes the on-chain P-256 verify ~3.4k gas, so a precompile chain
-    // (Base) carries ~200k in its profile; chains still on the pure-Solidity verifier
-    // keep the 1.5M default. Lowering blind on a non-precompile chain reverts inside
-    // validateUserOp as a false SIG_VALIDATION_FAILED (#225 / gap #7).
+    // (#170 / #288) makes the on-chain P-256 verify ~3.4k gas — BUT the D6 register
+    // also DEPLOYS the P256Account inside the UserOp (initCode), and the EntryPoint
+    // runs that deploy within verificationGasLimit (~1.3M on Base). So the value must
+    // cover the DEPLOY, not just the verify: Base carries ~1.6M in its profile even
+    // with the cheap precompile (the earlier 200k OOG'd the deploy → AA13). Chains on
+    // the pure-Solidity verifier keep the 1.5M default. Lowering it below the real
+    // cost reverts inside validateUserOp as a false SIG_VALIDATION_FAILED (#225 / gap #7).
     // Finalize chain_id: explicit env wins, else the compiled profile's id, else a
     // loud-warned heima fallback (only reachable on a custom chain with no env + no
     // built-in profile — exactly the case the old silent 212013 default mis-signed).
@@ -332,6 +335,22 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
         prof_pvg,
         DEF_PRE_VERIFICATION_GAS,
     );
+    // gas_fees come from the chain's real fee market (its compiled profile, gwei→wei),
+    // with the broker DEF as the fallback for a chain with no usable profile fee
+    // (legacy/anvil maxFee=0). The old hardcoded 40 gwei is Heima's base-fee scale; on
+    // Base (~0.005 gwei base) it reserved a ~0.16 ETH UserOp prefund the paymaster
+    // deposit can't cover — a false AA31 the moment the AA13 deploy-gas was fixed.
+    let (max_priority_fee, max_fee) = resolved_profile
+        .as_ref()
+        .map(|p| (p.gas.max_priority_fee_gwei, p.gas.max_fee_gwei))
+        .filter(|&(_, max_fee_gwei)| max_fee_gwei > 0)
+        .map(|(prio_gwei, max_fee_gwei)| {
+            (
+                prio_gwei as u128 * 1_000_000_000,
+                max_fee_gwei as u128 * 1_000_000_000,
+            )
+        })
+        .unwrap_or((DEF_MAX_PRIORITY_FEE, DEF_MAX_FEE));
 
     let cfg = AcceptConfig {
         rpc_url,
@@ -346,7 +365,7 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
             DEF_CALL_GAS_LIMIT,
         ),
         pre_verification_gas: u256_word(pre_verification_gas_amt),
-        gas_fees: crate::sponsor::pack_u128_pair(DEF_MAX_PRIORITY_FEE, DEF_MAX_FEE),
+        gas_fees: crate::sponsor::pack_u128_pair(max_priority_fee, max_fee),
         paymaster_verification_gas_limit: DEF_PAYMASTER_VERIFICATION_GAS,
         paymaster_post_op_gas_limit: DEF_PAYMASTER_POST_OP_GAS,
     };
@@ -796,6 +815,15 @@ pub async fn accept_submit(
     )
     .await
     .map_err(|e| {
+        // Log on the broker host: the submit error was previously returned to the
+        // caller WITHOUT tracing, so a bundler rejection (e.g. a wrong-chain-id outer
+        // tx the RPC refuses) left an empty broker journal and a fast, silent 502.
+        tracing::warn!(
+            target: "agentkeys.broker.accept",
+            bundler = %bundler_url,
+            error = %e,
+            "submit relay: bundler eth_sendUserOperation failed — UserOp NOT broadcast"
+        );
         aerr(
             StatusCode::BAD_GATEWAY,
             format!("handleOps did not broadcast: {e}"),
@@ -847,6 +875,12 @@ pub async fn accept_submit(
                     // paymaster deposit too low") — map it to operator guidance
                     // instead of guessing "wrong passkey".
                     let reason = receipt.get("reason").and_then(|r| r.as_str());
+                    tracing::warn!(
+                        target: "agentkeys.broker.accept",
+                        tx = %tx_hash,
+                        reason = reason.unwrap_or("(none)"),
+                        "submit relay: handleOps reverted on-chain"
+                    );
                     return Err(aerr(
                         StatusCode::BAD_GATEWAY,
                         handle_ops_revert_message(reason, &tx_hash),

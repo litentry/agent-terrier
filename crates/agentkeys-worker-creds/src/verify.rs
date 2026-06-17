@@ -416,13 +416,16 @@ async fn eth_call(
         "params": [{"to": to, "data": data}, "latest"],
         "id": 1,
     });
-    // The Heima public RPC intermittently 500s on eth_call (~12% per call,
-    // returning an HTML error page → non-JSON body). A single attempt makes
-    // every chain-verify a coin-flip and the worker returns a 502. Retry
-    // transient failures (transport error / HTTP 5xx / non-JSON body) with
-    // backoff; do NOT retry a valid JSON-RPC `error` (a real revert/bad-arg
-    // result, which is deterministic).
-    const ATTEMPTS: u32 = 4;
+    // Public RPCs fail eth_call transiently in two ways: Heima 500s ~12% of calls
+    // (HTML error page → non-JSON body), and Base's free endpoint THROTTLES the
+    // onboarding burst of reads with a JSON-RPC rate-limit error (-32016 "over rate
+    // limit"). A single attempt makes every chain-verify a coin-flip → a false 502
+    // (the cap looks unverifiable when the chain is fine). Retry transient failures
+    // — transport error / HTTP 5xx / non-JSON body / a rate-limit JSON-RPC error —
+    // with backoff; do NOT retry a DETERMINISTIC JSON-RPC error (a real revert /
+    // bad-arg result). A dedicated (non-throttled) RPC is the systemic fix; this
+    // keeps a burst on a public endpoint from failing onboarding.
+    const ATTEMPTS: u32 = 5;
     let mut last = String::new();
     for attempt in 0..ATTEMPTS {
         if attempt > 0 {
@@ -448,6 +451,12 @@ async fn eth_call(
             }
         };
         if let Some(err) = v.get("error") {
+            // A rate-limit error is TRANSIENT (public RPCs throttle bursts), unlike a
+            // revert — back off + retry it like a 5xx instead of failing the verify.
+            if is_rate_limit_error(err) {
+                last = format!("eth_call rate-limited: {err}");
+                continue;
+            }
             return Err(VerifyError::ChainRpc(format!("rpc error: {err}")));
         }
         return v
@@ -459,6 +468,28 @@ async fn eth_call(
     Err(VerifyError::ChainRpc(format!(
         "eth_call failed after {ATTEMPTS} attempts: {last}"
     )))
+}
+
+/// Is this JSON-RPC `error` a TRANSIENT rate-limit (retry) vs a deterministic
+/// revert / bad-arg (terminal)? Covers the common public-RPC codes — Base's
+/// `-32016` "over rate limit", the `-32005` / `-32029` "limit exceeded" family —
+/// and any message mentioning rate limiting / too many requests.
+fn is_rate_limit_error(err: &serde_json::Value) -> bool {
+    if matches!(
+        err.get("code").and_then(|c| c.as_i64()),
+        Some(-32016) | Some(-32005) | Some(-32029)
+    ) {
+        return true;
+    }
+    err.get("message")
+        .and_then(|m| m.as_str())
+        .map(|m| m.to_lowercase())
+        .map(|m| {
+            m.contains("rate limit")
+                || m.contains("too many requests")
+                || m.contains("limit exceeded")
+        })
+        .unwrap_or(false)
 }
 
 fn parse_device_entry(raw: &str) -> Result<OnChainDevice, VerifyError> {
@@ -967,6 +998,30 @@ mod tests {
         assert!(matches!(
             check_client_pop(&token, CAP_POP_MAX_AGE_SECS),
             Err(VerifyError::CapPopStale { .. })
+        ));
+    }
+
+    #[test]
+    fn is_rate_limit_error_retries_throttles_not_reverts() {
+        use serde_json::json;
+        // Transient throttles (Base -32016, the -32005/-32029 family, or a
+        // rate-limit message) ⇒ retry.
+        assert!(is_rate_limit_error(
+            &json!({"code": -32016, "message": "over rate limit"})
+        ));
+        assert!(is_rate_limit_error(
+            &json!({"code": -32005, "message": "limit exceeded"})
+        ));
+        assert!(is_rate_limit_error(&json!({"code": -32029})));
+        assert!(is_rate_limit_error(
+            &json!({"message": "Too Many Requests"})
+        ));
+        // A deterministic revert / bad-arg ⇒ terminal (must NOT retry).
+        assert!(!is_rate_limit_error(
+            &json!({"code": 3, "message": "execution reverted"})
+        ));
+        assert!(!is_rate_limit_error(
+            &json!({"code": -32000, "message": "invalid opcode"})
         ));
     }
 }

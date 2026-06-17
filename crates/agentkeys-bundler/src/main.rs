@@ -6,7 +6,7 @@
 //!   ENTRYPOINT_ADDRESS[_HEIMA]   = 0x…  (absent ⇒ degraded)
 //!   AGENTKEYS_BUNDLER_SIGNER_KEY = 0x… (or BROKER_SPONSOR_SIGNER_KEY; absent ⇒ degraded)
 //! Optional:
-//!   AGENTKEYS_CHAIN_ID[_HEIMA]      (default 212013)
+//!   AGENTKEYS_CHAIN_ID[_<CHAIN>]    (override; else the compiled chain profile for AGENTKEYS_CHAIN — no Heima default)
 //!   AGENTKEYS_HANDLEOPS_GAS_LIMIT   (default 4000000 — Heima can't estimate handleOps)
 //!   AGENTKEYS_BUNDLER_GAS_PRICE     (wei; default eth_gasPrice +25%)
 //!   AGENTKEYS_BUNDLER_BIND          (default 127.0.0.1:9098 — loopback-only, PRIVATE)
