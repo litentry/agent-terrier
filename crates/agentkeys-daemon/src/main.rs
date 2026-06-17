@@ -220,7 +220,9 @@ struct Args {
 
     /// W3 real-memory: the memory worker base URL (e.g. https://memory.litentry.org).
     /// Unset ⇒ master-memory plant/list use the in-memory fallback (dev/no-infra).
-    #[arg(long, env = "AGENTKEYS_MEMORY_URL")]
+    /// Canonical env `AGENTKEYS_WORKER_MEMORY_URL` (matches `--config-url`'s
+    /// `AGENTKEYS_WORKER_CONFIG_URL` + `scripts/operator-workstation.env`).
+    #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
     memory_url: Option<String>,
 
     /// W3 real-memory: per-actor memory IAM role ARN for the STS relay (sourced from
