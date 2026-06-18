@@ -20,10 +20,10 @@ A memory provider (OpenViking, mem0, …) joins as the **engine** — it sits *b
 - **It can reorder but never widen.** The provider can change *which* authorized memories come first, but it can never surface a memory the gate didn't allow — even a misbehaving provider can't leak more than you granted.
 - **It's never load-bearing.** If the provider is down or errors, AgentKeys falls back to a simple recency order. Your agent keeps working.
 
-Two kinds of provider, handled differently:
+Two kinds of provider, and they are **not** equally private:
 
-- **Self-hosted** (OpenViking, self-hosted mem0): runs on your own machine. AgentKeys mirrors a copy of the authorized memory into it for ranking — the plaintext stays on a machine you control.
-- **Cloud** (hosted mem0, Honcho, …): runs in the provider's cloud. AgentKeys does **not** ship your memory into their cloud as a copy; instead the gate decides *whether* a call to that cloud is allowed at all, and records it. Prefer self-hosted if you want your memory to never leave your own machines.
+- **Self-hosted** (OpenViking, self-hosted mem0) — **the sovereign default.** Runs on your own machine; AgentKeys mirrors a copy of the authorized memory into it for ranking, and the plaintext stays on a machine you control.
+- **Cloud** (hosted mem0, Honcho, …) — **an explicitly authorized egress, not "memory never leaves."** AgentKeys won't *replicate* your whole store there, but to rank or extract, a cloud engine **does see the query and the authorized snippets you send it**. So using one is a consent decision: you choose which namespaces may go out, and every call is audited. Reach for cloud only when you've accepted that egress; otherwise stay self-hosted.
 
 ## How an agent gets its memory
 
@@ -40,8 +40,9 @@ The same holds for agent-native files like **skills** and `AGENTS.md`/`CLAUDE.md
 ## What this means for you
 
 - **Swap providers freely.** Your encrypted memory, your namespaces, and your access rules don't move when you change the engine — only the ranking does.
-- **You stay in control of where plaintext lives.** Self-hosted engines keep it on your machines; cloud engines are gated and audited at the boundary.
+- **You stay in control of where plaintext lives.** Self-hosted engines keep it on your machines; a cloud engine is an explicit, audited egress you opt into per namespace — not a privacy guarantee.
+- **Agents can't promote their own writes.** *Who* authored a memory and whether it's *shared* are stamped by AgentKeys from the authenticated identity and your curation — an agent can't label its own note as "from you" or push it into shared memory. A delegate's write lands in a staging inbox; it becomes shared only when you approve it.
 - **Constrained devices still work.** A small voice device that can't run a ranking model can still hold your memory by downloading a precomputed index instead of building one (see [#316](https://github.com/litentry/agentKeys/issues/316)).
-- **One memory, every agent.** Each agent reads the same authorized truth through the same gate, so a learning curated once is available everywhere you've granted it.
+- **One shared memory, plus each agent's own.** There's *one shared canonical memory* you curate and distribute to the agents you authorize — a learning curated once is available everywhere you've granted it. Each delegate **also keeps its own private working memory**, which is never collapsed into the shared one; sharing is additive (you grant a read), not a merge of everyone's notes.
 
 For the underlying construction, sync, and cost model, see [`../plan/memory-construction.md`](../plan/memory-construction.md). For the storage and isolation guarantees, see [`./knowledge-storage.md`](./knowledge-storage.md) and [`./tag-based-access.md`](./tag-based-access.md).
