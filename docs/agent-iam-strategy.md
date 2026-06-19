@@ -1,13 +1,18 @@
 # AgentKeys strategic direction — Agent IAM for the AI device era
 
-**Status**: Strategic anchor (revised 2026-05-24). Captures the strategic framing that emerged from a multi-round discussion: original Agent IAM proposal → independent analysis → ChatGPT critique with four architecture corrections → this synthesis.
+**Status**: Strategic anchor (revised 2026-05-24; certified-stack and business-model update 2026-06-19). Captures the strategic framing that emerged from a multi-round discussion: original Agent IAM proposal → independent analysis → ChatGPT critique with four architecture corrections → the Volcano/ESP32 device platform review → this synthesis.
 
 **Purpose**: be the source of truth for "what AgentKeys is, what it isn't, and what we ship next." Future planning, positioning, and scope decisions reference this doc.
 
 **Companion docs**:
+- [`arch.md`](./arch.md) — source of truth for shipped trust boundaries, key inventory, daemon role, backend wiring, and IAM-guarantee seams
+- [`plan/ai-device-platform.md`](./plan/ai-device-platform.md) — gate-first AI-device platform, de-phased around one platform with Volcano as default engine/substrate
+- [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md) — first certified-stack device plan and the AgentKeys-vs-Volcano component split
+- [`volcano/service.md`](./volcano/service.md) — Volcano service inventory and open integration questions
+- [`research/on-device-memory-daemon-esp32.md`](./research/on-device-memory-daemon-esp32.md) — why the ESP32 stays a terminal and memory stays server-side/warm-cached for v0
 - [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) — original wedge brainstorm (positioning is updated by this doc)
-- [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md), [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md), [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) — tactical adapter architectures (unchanged by this doc)
-- [issue #103 plan](./plan/issue-103-aiosandbox-hermes-esp32-demo.md) — Phase 1 execution (scope is updated by this doc)
+- [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md), [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) — tactical adapter architectures (unchanged by this doc)
+- [issue #103 plan](./archived/issue-103-aiosandbox-hermes-esp32-demo.md) — historical MCP/Hermes demo context (**archived**); superseded for Phase 1 by the certified Volcano device pilot. The xiaozhi/MagicLick device-chatbot research it relied on ([`xiaozhi-esp32-magiclink.md`](./archived/xiaozhi-esp32-magiclink.md), [`xiaozhi-hermes-architecture.md`](./archived/xiaozhi-hermes-architecture.md), [`xiaozhi-hermes-risks.md`](./archived/xiaozhi-hermes-risks.md)) is archived alongside it.
 
 ---
 
@@ -15,17 +20,19 @@
 
 > AgentKeys is the **Agent IAM and memory control plane** for a future where users have many AI devices, many agents, and many LLMs, but still need one trusted way to manage what those systems can know, access, and do.
 
-We stay infrastructure. We do not become a task-execution agent. We integrate with Hermes, OpenClaw, Claude Code, Doubao agents, vendor-specific runtimes — we provide them with identity, memory, permissions, capabilities, and audit. They do the work; we control the authority to do the work.
+We stay infrastructure. We do not become a task-planning/execution agent. We integrate with Hermes, OpenClaw, Claude Code, Codex, Doubao, Volcano Ark, vendor-specific runtimes, and certified device stacks — we provide them with identity, memory, permissions, capabilities, and audit. They do the work; we control the authority to do the work.
+
+The business model follows the same boundary: **bundle a certified underlying stack + AgentKeys premium**, without becoming a low-margin compute reseller. ASR/TTS/LLM/sandbox are COGS with quotas, overage pass-through/cost-plus, or BYO-cloud enterprise options. Margin and moat come from the control plane: identity, consent, memory ownership, deterministic policy, audit, revocation, portability, and the policy-intent classifier that turns natural-language requests into structured gates.
 
 Three-layer positioning, told to three audiences:
 
 | Layer | Audience | Pitch |
 |---|---|---|
 | **AI Device Account** | Consumer / vendor BD | "Your AI memory follows you safely across devices. Parents control what devices can know and do." |
-| **Agent IAM** | Investor / CTO / CISO / partner | "Identity, permissions, capabilities, audit for AI agents — the IAM layer for the AI device era." |
+| **Agent IAM** | Investor / CTO / CISO / partner | "Identity, permissions, capabilities, audit, and spend/memory control for AI agents — the IAM layer for the AI device era." |
 | **Trust Substrate** | Compliance / regulator / Web3 partner | "Tamper-evident permission history + cryptographic device/agent identity attestation + on-chain anchoring." |
 
-Cap-token machinery, signer, memory/cred/audit workers, per-actor isolation, and HDKD identity are already shipped via Stage 7+. What's net-new is the MCP server wrapper, the parent-control web UI, vendor onboarding, and the three-act demo storyboard.
+Cap-token machinery, signer, memory/cred/audit workers, per-actor isolation, HDKD identity, and the app/daemon trust core are already shipped or specified in `arch.md`. What's net-new strategically is the certified-stack adapter shape (Volcano first, others later), the in-path gate endpoint for device UX, billing/quota around bundled COGS, and the small policy-intent model tracked in [issue #322](https://github.com/litentry/agentKeys/issues/322).
 
 ---
 
@@ -37,9 +44,13 @@ These ideas survived independent analysis and ChatGPT critique. They are committ
 
 Hermes, OpenClaw, Claude Code, Codex, Doubao agents, vendor-specific runtimes = **Task Execution Hosts**. They reason, plan, retry, execute, and complete tasks.
 
+Volcano, Ark/Doubao, AIO Sandbox, RTC, OpenViking, Alibaba, Baidu, Bedrock, and future local bridges = **Engine / execution substrate providers**. They provide voice transport, ASR/TTS, LLM calls, sandbox hosting, tool surfaces, or ranking. They are swappable behind adapters.
+
 AgentKeys = **Authority Host**. We manage identity, device registry, agent registry, memory namespaces, credential broker, capability token issuance, policy engine, delegation chains, approval workflows, audit logs, revocation, budget controls.
 
-The distinction has the same shape as "OS vs application" or "AWS IAM vs the EC2 instance running your workload." Both are valuable, both are needed, they don't compete because they sit at different layers. **Authority must be neutral by construction** — no specialized runtime can credibly play this role without giving up their own walled garden. That neutrality is our structural moat.
+The distinction has the same shape as "OS vs application" or "AWS IAM vs the EC2 instance running your workload." Both are valuable, both are needed, they don't compete because they sit at different layers. **Authority must be neutral by construction** — no specialized runtime can credibly play this role without giving up its own walled garden. That neutrality is our structural moat.
+
+Certified-stack packaging does not collapse the boundary. When AgentKeys ships an Agent Task Host image, a CustomLLM endpoint, or hooks, those components exist only to put the gate in the execution path. They must not own task planning, retry policy, generic tool orchestration, or user-data custody beyond the authority primitives above. This matches `arch.md` §22c.5: the daemon stays a trust core; it does not become the agent runtime.
 
 ### 2.2 Agent IAM as the technical category
 
@@ -59,17 +70,21 @@ This is a $20B+ comparable market with deep mental models (Okta, Auth0, AWS IAM,
 
 ### 2.3 MCP is an integration surface, not the product identity
 
-MCP is the protocol vendor LLMs use to call our tools. Important. But also: SDKs, OAuth-style flows, device APIs, runtime adapters, policy APIs are all eventually-needed surfaces. **We sequence**: MCP first (open standard, broad reach), Python + TypeScript SDKs second, OAuth-style flows third, the rest later.
+MCP is one protocol vendor LLMs use to call our tools. Important. But MCP is **reach**, not the consistency boundary. If an LLM may choose whether to call an MCP tool, the user does not have an IAM guarantee; they have a courtesy API.
 
-The product identity is "Agent IAM" — not "an MCP server."
+The consistency boundary is a non-LLM gate in the execution path: hooks for hook-capable Task Hosts, a certified-stack in-path endpoint for device stacks, and worker-side re-verification before data access. This is exactly the `arch.md` §22d distinction between IAM tool and IAM guarantee.
 
-**Addendum (2026-05-28)**: the MCP server delivers IAM *tools*. Turning a tool into an IAM *guarantee* (a check the LLM cannot skip) requires a non-LLM enforcement layer — either lifecycle **hooks** in the Task Host runtime (primary, [#133](https://github.com/litentry/agentKeys/issues/133)) or an OpenAI-compatible **proxy** for hosts without hooks (fallback, Phase 3b). See §3.6 for the IAM-tool-vs-IAM-guarantee distinction and the hooks-first / proxy-fallback decision.
+We still use MCP where it is the best adapter: hosted MCP for broad reach, SDKs for embedded/vendor flows, OAuth-style flows for account linking, and certified-stack adapters for productized device stacks. The product identity is "Agent IAM" — not "an MCP server."
 
-### 2.4 Zero orchestration in v1 — hard line
+**Addendum (2026-05-28; refined 2026-06-19)**: the MCP server delivers IAM *tools*. Turning a tool into an IAM *guarantee* (a check the LLM cannot skip) requires a non-LLM enforcement layer — lifecycle **hooks** in the Task Host runtime (primary for local/runtime hosts, [#133](https://github.com/litentry/agentKeys/issues/133)) or a certified-stack **in-path endpoint** such as Volcano RTC CustomLLM for the device stack. The generic OpenAI-compatible proxy fallback was dropped 2026-06-19 (agent-first; see §3.6).
+
+### 2.4 Zero task orchestration in v1 — hard line
 
 The proposal said *"AgentKeys can optionally provide lightweight orchestration."* That's a slippery slope. Once we ship even lightweight orchestration, vendors will ask for more. Each ask is reasonable; the sum is mission creep that turns us into "another agent runtime" — exactly the position the Task Host vs Authority Host distinction exists to prevent.
 
-**Policy**: zero orchestration in v1, documented explicitly. If a vendor needs orchestration, they pick a runtime (Hermes, OpenClaw, their own). We provide the authority layer around it.
+**Policy**: zero task orchestration in v1, documented explicitly. If a vendor needs planning, retries, workflow graphs, tool scheduling, or autonomous execution, they pick a runtime (Hermes, OpenClaw, Volcano/AIO Sandbox, their own). We provide the authority layer around it.
+
+Allowed in v1: narrow adapter code that makes the authority layer enforceable — hooks, `agentkeys wire`, a CustomLLM gate endpoint, broker-driven sandbox binding, cap prewarming, audit capture, and memory injection. These are not orchestration features; they are the consistency boundary.
 
 ### 2.5 Deploy → grow → standardize sequencing
 
@@ -94,7 +109,7 @@ AgentKeys is the same model, one layer up — for AI agents instead of mobile ap
 | Permission categories (Camera, Location, Contacts, Mic) | Capability categories | Memory namespaces (§3.5) × services × bounds |
 | Grant / deny per permission | Per-category grant | `AgentKeysScope.Scope` written on chain (arch §16.1) |
 | "Allow once" / "While using" / precise-vs-approximate | Bounded grants | read-only memory; payment ≤ ¥50; specific IoT devices |
-| OS enforces at the syscall boundary (app can't bypass) | **Hook enforces at the tool-call boundary** | PreToolUse hook → `permission.check` (§3.6, arch §22d) — the IAM *guarantee*, not the *tool* |
+| OS enforces at the syscall boundary (app can't bypass) | **Non-LLM gate enforces at the action boundary** | PreToolUse hook or certified-stack in-path endpoint → `permission.check` (§3.6, arch §22d) — the IAM *guarantee*, not the *tool* |
 | Runtime re-prompt for a sensitive action | `permission.check` → `ask_parent` verdict | deterministic policy engine escalates |
 | Revoke a permission in Settings | Parent revokes in the web UI | `cap.revoke` / `revoke_scope_with_webauthn` — the Act-3 demo |
 | Per-app sandbox | Per-actor isolation | four-layer per-actor invariants (CLAUDE.md) |
@@ -104,7 +119,7 @@ AgentKeys is the same model, one layer up — for AI agents instead of mobile ap
 
 1. **It tells the consumer what they're buying without saying "IAM."** Per §3.4's dual-narrative rule, a parent buying an AI toy doesn't want "Agent IAM." They want "the toy asks me before it can spend money or read the family calendar — the same way apps ask before using my camera." The mobile-OS model is the consumer pitch, already pre-installed in everyone's head.
 
-2. **It explains why hooks (not just MCP tools) are non-negotiable.** §3.6's IAM-tool-vs-IAM-guarantee distinction *is* the mobile-OS distinction between (a) an app *politely calling* a "may I use the camera?" function it could choose to skip, and (b) the *OS intercepting* the camera syscall so the app cannot proceed without the grant. The `PreToolUse` hook is the syscall-interception layer. Without it, AgentKeys is a courtesy API; with it, AgentKeys is the OS.
+2. **It explains why a non-LLM gate (not just MCP tools) is non-negotiable.** §3.6's IAM-tool-vs-IAM-guarantee distinction *is* the mobile-OS distinction between (a) an app *politely calling* a "may I use the camera?" function it could choose to skip, and (b) the *OS intercepting* the camera syscall so the app cannot proceed without the grant. `PreToolUse` hooks are the syscall-interception layer for hook-capable runtimes; a CustomLLM/in-path endpoint is the equivalent for certified device stacks. Without that gate, AgentKeys is a courtesy API; with it, AgentKeys is the OS.
 
 3. **It makes the onboarding ceremony the product moment.** Mobile OS made "the permission prompt at first launch" the defining trust interaction of the smartphone era. AgentKeys' equivalent — the master being prompted, on their own device with biometric presence, to grant a freshly-onboarded agent its capabilities — is the moment the user feels in control. The grant ceremony (arch §10.7) is where Phase-1's demo "surprise" (§3.7) actually lands.
 
@@ -125,6 +140,23 @@ Each category is a `(service, namespace, operation, bound)` tuple. The existing 
 **You confirm; you don't configure — the AI recommends the scopes.** A parent shouldn't face a blank toggle grid. At onboarding the AI proposes a *recommended* scope set — derived from the agent's role (the classifier, #207), the master's saved policy (global config, #201), and a safe default preset — and the master just reviews, edits, and approves it with one biometric tap. It's the app-manifest, inverted: instead of the agent declaring the permissions it wants, AgentKeys *infers* the manifest and asks you to confirm. The AI recommends; **only the master's K11 assertion grants** — the recommendation authorizes nothing on its own.
 
 **The recommendation sharpens with use; it never loosens on its own.** An optional 2–3 question setup ("who is this for?") and, over time, the master's own grant/deny history make each next agent's recommendation smarter — held in the master's audited config, advisory-only. It ratchets toward caution: sensitive categories (health, payment, credentials) keep asking every time even after past grants, and high-impact learned defaults are periodically re-confirmed. No learned preference ever widens a live scope without a fresh K11 grant. (Mechanism in arch §10.7.)
+
+### 2.8 Certified stacks, not a free-form component matrix
+
+The right product posture is **certified stacks**: a small number of tested combinations where AgentKeys knows the latency, billing, auth, data-residency, and enforcement behavior end-to-end. Volcano/Ark is the first default stack because it can provide voice, LLM, sandbox host, agent tools, and memory ranking while AgentKeys keeps the sovereign gate. Alibaba, Baidu, local bridge, or global-cloud stacks can follow behind the same adapter contract.
+
+We should not promise every user can independently swap ASR, TTS, LLM, sandbox, memory ranker, and hosting provider in arbitrary combinations. That sounds neutral but destroys performance responsibility and support quality. The platform is provider-neutral at the authority layer; the product experience ships as certified bundles.
+
+### 2.9 Commercial model: stack bundle + AgentKeys premium
+
+For consumer/device products, charge for the bundle users understand: device + voice/model/sandbox quota + AgentKeys control plane. Underlying services are COGS:
+
+- **Free tier**: shared sandbox, capped model/voice budget, hibernate-to-zero, enough to prove value.
+- **Paid consumer tier**: dedicated or warmer sandbox, higher voice/model quota, cross-device memory/control, premium audit/history.
+- **Vendor tier**: per-active-device platform fee + usage pass-through/cost-plus, with revenue share where the vendor owns distribution.
+- **Enterprise/BYO cloud**: customer brings Volcano/Alibaba/Baidu/AWS/local stack; AgentKeys sells the control plane, policy model, audit, and portability.
+
+The strategic mistake is to compete on raw ASR/TTS/LLM/sandbox margin. The strategic moat is the authority layer that remains valuable when providers are swapped.
 
 ---
 
@@ -206,14 +238,14 @@ The existing AgentKeys memory design ([`docs/plan/agentkeys-memory-design.md`](.
 
 For Agent IAM, we add an ORTHOGONAL semantic dimension: **namespaces**. These are how memory is SCOPED for permission and discovery. Namespaces compose with structural types — a memory item belongs to one namespace AND one structural type.
 
-**Composition example** (Kevin owns a MagicLick + FoloToy):
+**Composition example** (Kevin owns an ESP32 panel + FoloToy):
 ```
 Memory item: { type: "semantic", namespace: "travel", line: "Kevin asked about Chengdu customs clearance" }
 Memory item: { type: "profile",  namespace: "personal", line: "Lives in Shanghai, allergic to peanuts" }
 Memory item: { type: "episodic", namespace: "family", line: "Anniversary dinner reservation 2026-06-15" }
 ```
 
-The MagicLick's cap-token grants `namespaces_allowed: ["travel"]`. It can read the first item, NOT the second or third. The toy's reply to *"where am I going this weekend?"* references Chengdu (travel) but never reveals the peanut allergy (personal) or the anniversary (family).
+The device's cap-token grants `namespaces_allowed: ["travel"]`. It can read the first item, NOT the second or third. The reply to *"where am I going this weekend?"* references Chengdu (travel) but never reveals the peanut allergy (personal) or the anniversary (family).
 
 **Why this composes cleanly with the existing memory design**:
 
@@ -231,7 +263,7 @@ The MagicLick's cap-token grants `namespaces_allowed: ["travel"]`. It can read t
 | `work` | Work projects, contacts, deadlines, work travel | Work-context apps + devices | Work-context apps + devices |
 | `travel` | Trip planning, location context, near-term itinerary | Travel-context apps + devices | Travel-context apps + toys/wearables |
 
-A device's cap-token scopes which namespaces it can read AND write. The MagicLick demo Act 1 (Permissioned Memory) shows the toy with `cap = {namespaces_allowed: ["travel"]}` — reads ONLY `travel`, sees nothing in `personal` / `family` / `work` even though they exist for the same actor.
+A device's cap-token scopes which namespaces it can read AND write. The Phase-1 Permissioned Memory act shows the device with `cap = {namespaces_allowed: ["travel"]}` — reads ONLY `travel`, sees nothing in `personal` / `family` / `work` even though they exist for the same actor.
 
 **What we explicitly defer** (not in v0):
 
@@ -267,16 +299,18 @@ Added 2026-05-28 to crystallize the distinction that drives the Phase 3 architec
 | **IAM tool** | Function in the LLM's tool registry | The LLM (prompt + context + sampling) | LLM skips / is jailbroken → unauthorized action proceeds |
 | **IAM guarantee** | Non-LLM gate in the execution path | The runtime (deterministically) | Gate fails closed; action cannot proceed without allow verdict |
 
-The seven Phase-1 MCP tools in §4.2 are *tools* by themselves. They become *guarantees* only when a non-LLM enforcement layer wraps them.
+The tools in §4.2 are *tools* by themselves. They become *guarantees* only when a non-LLM enforcement layer wraps them.
 
-**Decision (2026-05-28)**: AgentKeys delivers guarantees via two tracks, with explicit priority:
+**Decision (2026-05-28; refined 2026-06-19)**: AgentKeys delivers guarantees through **two agent-first non-LLM seams** (`arch.md` §22d), packaged by deployment shape:
 
-1. **Primary — Hooks** ([issue #133](https://github.com/litentry/agentKeys/issues/133)). Task Host runtimes (Claude Code, Codex, Hermes, OpenClaw) fire lifecycle hooks (`PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`) that synchronously invoke AgentKeys MCP tool calls. Verified 2026-05-28: Hermes's hook JSON shape is explicitly Claude-Code-compatible; Codex shape is similar but needs a thin shim; OpenClaw shares Hermes lineage. One reference script bundle ports across Tier-1 with low per-host adapter cost.
-2. **Fallback — OpenAI-compatible proxy** (lower priority). For hosts without a hook surface (xiaozhi-server, vendor mobile chatbots, plain `openai.ChatCompletion` scripts), the LLM client's `base_url` points at an AgentKeys-hosted proxy that intercepts prompts + `tool_calls` + responses and enforces policy before forwarding upstream. Lower priority because: (a) §2.4 mission-creep risk — proxy lives in the path of every byte; (b) competitively crowded space (Vercel AI Gateway, Helicone, Portkey, OpenRouter, Cloudflare AI Gateway); (c) hooks cover the strategically-important Tier-1 hosts.
+1. **Primary for hook-capable Task Hosts — hooks** ([issue #133](https://github.com/litentry/agentKeys/issues/133)). Claude Code, Codex, Hermes, OpenClaw and similar runtimes fire lifecycle hooks (`PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`) that synchronously invoke AgentKeys checks. Verified 2026-05-28: Hermes's hook JSON shape is explicitly Claude-Code-compatible; Codex shape is similar but needs a thin shim; OpenClaw shares Hermes lineage. One reference script bundle ports across Tier-1 with low per-host adapter cost.
+2. **Primary for certified device stacks — in-path endpoint**. Volcano RTC CustomLLM is the concrete first case: Volcano carries realtime voice, ASR/TTS, and the LLM substrate; our endpoint sits where the LLM turn is resolved and runs cap-check + memory-inject + audit before calling Doubao/Ark. The endpoint is in the agent's execution path by construction, so the gate cannot be skipped; it is a certified-stack seam we can validate end-to-end (latency, auth, billing) — **not** a generic gateway.
 
-This decision sharpens §3.1's bounded-revocation commitment: *high-risk = always-online permission check + fresh cap-token mint per call* is only deliverable when there's a non-LLM gate. Hooks are the primary gate; proxy is the fallback gate for hooks-less hosts.
+**Explicitly NOT a track — the generic OpenAI-compatible proxy.** An earlier revision kept a fallback that put an AgentKeys-hosted `base_url` in front of hooks-less hosts (vendor mobile chatbots, plain `openai.ChatCompletion` scripts). **Dropped 2026-06-19 — agent is the development direction.** A host earns an IAM guarantee by being an agent runtime (hooks) or a certified device stack (in-path endpoint); a bare chatbot/script with no agent loop is not a target, and we do not ship a generic LLM gateway. Rationale: (a) §2.4 mission-creep — a proxy in the path of every byte invites retry/fallback/caching asks that drift toward Task-Host territory; (b) crowded, undifferentiated space (Vercel AI Gateway, Helicone, Portkey, OpenRouter, Cloudflare AI Gateway); (c) hooks + certified stacks already cover the strategically-important paths, and reach for non-agent hosts is better served by SDK/MCP/direct adapter than by becoming a gateway business.
 
-Phasing per §5: hooks land in Phase 3 (issue #133); proxy lands as Phase 3b (after #133 ships + at least one vendor pilot is on hooks).
+This decision sharpens §3.1's bounded-revocation commitment: *high-risk = always-online permission check + fresh cap-token mint per call* is only deliverable when there's a non-LLM gate — and both seams are non-LLM gates. Hooks are primary for runtimes that expose lifecycle hooks; the certified-stack in-path endpoint is primary for the Volcano device pilot.
+
+Phasing per §5: the certified-stack in-path gate lands first for the device pilot; hooks remain the primary runtime-neutral path.
 
 ### 3.7 Authority-provisioned config — `agentkeys wire <runtime>` (added 2026-05-28)
 
@@ -297,21 +331,35 @@ The user-facing entry point is `agentkeys wire <runtime>` (one CLI command). The
 
 This pattern stays cleanly on §2.1 Authority Host side — AgentKeys is configuring an integration, not running the runtime. It also operationalizes §2.5 "deploy → grow → standardize": ship the hybrid for Hermes first (open-source, scriptable), expand to additional Task Hosts once a vendor pilot validates the approach.
 
+For certified device stacks, the analogous action is **broker-driven stack binding**, not `agentkeys wire`: LAN/QR pair the device, bind it to an actor, attach or spawn the right sandbox tier, install/activate the Agent Task Host image, and issue a scoped cap-token. This is adapter delivery. The authority model remains the same: master K11 grants, K10 proves the delegated caller, workers re-verify before data access.
+
+### 3.8 Policy-intent classifier — model helps translate, gate decides
+
+Natural-language requests need to be converted into a structured action intent before a deterministic gate can evaluate them. The right shape is a small policy-intent classifier, not an embedding-only solution:
+
+- **Small model**: maps utterances/tool proposals into structured intent such as `{action, data_class, namespace, actor, resource, spend_amount, risk, confidence}`.
+- **Embeddings**: support retrieval of relevant policy examples, user preferences, and similar past decisions. They do not replace intent classification.
+- **Deterministic gate**: consumes the structured intent plus chain/config state and returns allow/deny/ask. The model never authorizes.
+- **Deployment**: run the classifier stack-local — Volcano stack in China, Alibaba/Baidu stacks where used, local bridge when offline, US stack for global users — so latency and data residency do not force every request through our US servers.
+- **Training factory**: use the US 8×H100 capacity for synthetic data generation, distillation, eval, red-team, and fine-tuning. Do not put China realtime inference on the US GPU path.
+
+This work is tracked in [issue #322](https://github.com/litentry/agentKeys/issues/322). It is a moat because the classifier encodes the user-permission taxonomy across stacks, but it must remain advisory to the deterministic gate to preserve sovereignty and auditability.
+
 ---
 
-## 4. Revised Phase 1 (ship in ~2 weeks)
+## 4. Revised Phase 1 — certified Volcano device pilot
 
 ### 4.1 Phase 1 goal
 
-Prove in <5 minutes to a vendor that AgentKeys is Agent IAM, not chatbot infrastructure. Three behavioral properties visible end-to-end:
+Prove in <5 minutes to a vendor that AgentKeys is the gate/control plane for AI devices, not chatbot infrastructure and not a Volcano wrapper. The first certified stack is ESP32-S3-Touch-LCD-4B + Volcano RTC/Ark/Cloud Sandbox + AgentKeys gate. Three behavioral properties must be visible end-to-end:
 
 1. A device can read **permissioned** memory (not just memory)
 2. Unauthorized actions are **deterministically denied** by policy, no LLM in the decision
 3. A parent can **revoke** capabilities and the device complies immediately on the next online check
 
-### 4.2 Phase 1 MCP server scope
+### 4.2 Authority substrate + tool surface
 
-Already-shipped backend (per AGENTS.md Stage 7+) provides the heavy lifting:
+Already-shipped or architecture-owned backend (per `arch.md`) provides the heavy lifting:
 
 | Capability | Status in backend |
 |---|---|
@@ -323,9 +371,9 @@ Already-shipped backend (per AGENTS.md Stage 7+) provides the heavy lifting:
 | OIDC issuer (federation) | ✅ exists |
 | Per-actor + per-data-class isolation invariants | ✅ exists (issue #90) |
 
-What we wrap with MCP for Phase 1 (~1 week of new code, thin layer over backend RPCs):
+What we expose as tools/APIs for the gate layer:
 
-| MCP tool | Status in v1 |
+| Tool/API | Status in v1 |
 |---|---|
 | `agentkeys.identity.whoami(actor)` | **Active** |
 | `agentkeys.memory.get(actor, namespace)` | **Active** |
@@ -338,26 +386,27 @@ What we wrap with MCP for Phase 1 (~1 week of new code, thin layer over backend 
 | `agentkeys.delegation.revoke(...)` | Documented schema only |
 | `agentkeys.approval.request(...)` | Documented schema only |
 
+MCP remains one wrapper around this surface. The certified-stack path calls the same authority surface from an in-path endpoint rather than relying on the LLM to voluntarily call MCP.
+
 ### 4.3 Phase 1 three-act demo storyboard
 
-The demo runs on MagicLick 2.5 (xiaozhi-esp32 v1.9.4, unchanged) + stock xinnan-tech/xiaozhi-esp32-server with our MCP server registered in `mcp_server_settings.json` (per [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md) MCP-direct pivot).
+The demo runs on ESP32-S3-Touch-LCD-4B + Volcano RTC CustomLLM + Doubao/Ark + AgentKeys in-path endpoint. Volcano carries realtime voice, ASR/TTS, LLM hosting, and sandbox substrate. AgentKeys owns pairing, cap-token scope, memory store, policy enforcement, audit, and the management view.
 
 **Act 1 — Permissioned Memory** (not "smart memory")
 
 - User says: *"Where am I going this weekend?"*
-- Doubao/Qwen LLM in xiaozhi-server decides it needs memory context
-- LLM calls `agentkeys.memory.get(actor=O_kevin_001, namespace="travel")`
-- AgentKeys MCP server verifies cap-token, scopes the read to the `travel` namespace only (NOT `profile`, NOT `family`, NOT `work`)
-- Returns Chengdu trip context
-- LLM synthesizes response via TTS
+- Volcano RTC sends ASR text to the AgentKeys CustomLLM endpoint
+- AgentKeys verifies the device/agent cap, loads only the `travel` namespace for `actor=O_kevin_001`, and optionally lets OpenViking rank **only the gate-authorized lines**
+- AgentKeys calls Doubao/Ark with the authorized memory slice
+- Volcano synthesizes the reply via TTS
 - **Headline**: the device reads ONLY the memory namespace it's allowed to read — not "it knows you"; "it knows what it's allowed to know about you"
 
 **Act 2 — Deterministic Denial** (no LLM in the policy decision)
 
 - User says: *"Order me hotpot for ¥600"*
-- LLM decides this requires payment authority; calls `agentkeys.permission.check(actor=O_kevin_001, scope="payment.spend", amount_rmb=600)`
+- Policy-intent classifier maps the request to structured intent: `payment.spend`, `amount_rmb=600`, `actor=O_kevin_001`
 - AgentKeys deterministic policy engine returns `denied: daily_spend_cap_exceeded (cap=500, requested=600, period=daily)`
-- LLM (because we trained the prompt this way) refuses politely and explains
+- The endpoint refuses before any payment tool or provider call can execute
 - Audit row appears in parent-control web UI **instantly**; chain explorer anchor visible in next 2-min batch
 - **Headline**: policy decides, not the LLM. Cap-bounded blast radius. Cryptographically auditable later.
 
@@ -374,64 +423,74 @@ The demo runs on MagicLick 2.5 (xiaozhi-esp32 v1.9.4, unchanged) + stock xinnan-
 
 | Deliverable | What it is | Why it matters |
 |---|---|---|
-| AgentKeys MCP server | 7 active tools wrapping existing backend RPCs | The integration surface vendors plug into |
-| **`agentkeys wire <runtime>` CLI** (per §3.7) | Hybrid auto-provisioning — writes IAM-gate config + LLM-provider config into a Task Host's config files; idempotent; tracked in [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](./plan/phase-1-fresh-user-wire-onboarding.md) | The user-facing entry point that turns "AgentKeys is wired into the runtime" into one command. The fresh-user "surprise" moment depends on this. |
-| Hermes adapter (Phase 1.a) | First runtime adapter for `wire`; lives in `crates/agentkeys-cli/src/wire/adapters/hermes.rs` | Validates the hybrid auto-provisioning shape against a real Task Host inside aiosandbox |
-| `agentkeys hook check / audit / memory-inject` CLI helpers | The thin wrappers the dropped hook scripts call — translate host stdin/stdout JSON to AgentKeys MCP tool calls | Makes the hook scripts trivial (single `exec` line); bug fixes ship in the AgentKeys binary, not in the user's filesystem |
-| Parent-control web UI (mobile-responsive) | One page: actor list, scope toggles, revoke buttons, audit feed | The face of "Agent IAM" — without this, Act 3 isn't a demo |
+| Certified Volcano stack adapter | ESP32-S3-Touch-LCD-4B + Volcano RTC CustomLLM + Ark/Doubao + Cloud Sandbox + AgentKeys gate | Proves the first full product stack without making Volcano the authority |
+| CustomLLM agent endpoint | In-path turn handler: cap-check + memory-inject + policy-intent classify + audit → Doubao/Ark | Makes the gate deterministic and non-skippable for voice UX |
+| Broker-driven device binding | LAN/QR pair → bind actor → attach/spawn sandbox tier → issue scoped cap-token | Turns onboarding into the authority ceremony, not a manual MCP setup |
+| AgentKeys tool/API surface | 7 active authority tools over existing backend RPCs, callable via MCP or direct adapter | Keeps reach and consistency decoupled |
+| Agent Task Host image + daemon sidecar | Narrow runtime package deployed inside the certified sandbox; daemon holds K10 only for the agent | Places enforcement near the agent without turning AgentKeys into a general runtime |
+| Parent-control web UI / management view | Actor list, memory view, scope toggles, revoke buttons, audit feed | The consumer face of "control what your AI devices can remember/access/do" |
 | Two-tier audit | Real-time off-chain feed + 2-min batched on-chain anchor | §3.2 corrected architecture |
 | Bounded revocation model | Immediate online; documented TTL/cache for offline | §3.1 corrected architecture |
-| Three mock memory namespaces | `profile`, `travel`, `family` (only `travel` readable by demo actor) | Shows scoped access in Act 1 |
-| Demo runbook + 15-min vendor pitch script | Operator can re-run; vendor sees value in 5 min via the 7-step fresh-user journey (install → curl-bootstrap → master approve → install Task Host → `agentkeys wire` → open runtime → memory-aware first turn) | Distribution-ready; the 7 steps are the runbook scaffold |
+| Policy-intent classifier v0 | Small model or distilled classifier that emits structured intent for the deterministic gate | Shows how natural-language device requests become auditable policy decisions |
+| Quota/billing guardrails | Free shared sandbox quota, paid dedicated/warm tier, overage pass-through/cost-plus | Prevents the Volcano integration from becoming low-margin unlimited compute resale |
+| Demo runbook + 15-min vendor pitch script | Operator can re-run: pair device → approve scope → voice turn → denial → revoke → audit | Distribution-ready; the vendor sees the gate, not a chatbot |
 
 ### 4.5 What Phase 1 does NOT include
 
 Explicitly out of scope. Each is the right move later, premature now.
 
-- **Orchestration of any kind** (§2.4 hard line)
+- **Task orchestration of any kind** (§2.4 hard line)
 - **Active delegation** (§3.3 — schema only)
 - **Approval workflows** (deferred to Phase 2 — needs more design)
+- **Spend execution** before single-use caps + mint-time budgeting ship ([`plan/ai-device-platform.md`](./plan/ai-device-platform.md) §4)
 - **Native mobile app** (§5.3 — web UI sufficient for v0, native after pilot)
 - **Real-time on-chain audit** (§3.2 corrected — batched only)
-- **Volcano Ark MCP server registration** (Phase 2)
-- **Tuya Cloud connector** (Phase 2)
-- **Hermes / OpenClaw as MCP tools** (Phase 3)
+- **Generic Volcano Ark marketplace listing** beyond the certified stack
+- **Tuya Cloud connector / Alibaba / Baidu / local bridge** (after the first stack proves the adapter seam)
+- **Hermes / OpenClaw as productized certified stacks** (runtime-neutral path after the device pilot)
 - **OAuth-for-Agents** or any standards body engagement (Phase 4-5)
-- **Vendor-specific MCP tools or vendor onboarding portal** (Phase 2)
+- **Vendor self-serve onboarding portal** (after one manually-supported pilot)
 
 ---
 
 ## 5. Revised 12-month roadmap
 
-Sequenced to test the Agent IAM thesis with minimum viable surface, then deepen the moat with each phase.
+Sequenced to test the gate-first AI-device thesis with one certified stack, then deepen the moat without locking the authority layer to any provider.
 
 ### Phase 0 — Done (Stage 7+)
 
 Broker, signer, memory/cred/audit workers, OIDC issuer, per-actor + per-data-class isolation (issue #90), on-chain anchoring backend (currently Heima per arch.md, swappable per the chain-agnostic design), HDKD identity tree. All cap-token machinery shipped.
 
-### Phase 1 — Agent IAM v0 demo (0-2 weeks)
+### Phase 1 — Certified Volcano device v0 (0-2 weeks)
 
-Per §4. Goal: vendor understands AgentKeys ≠ chatbot in <5 minutes. MagicLick 2.5 + xiaozhi-server stock + AgentKeys MCP + parent web UI + three-act demo. Two-tier audit. Bounded revocation. Zero orchestration. Delegation as schema preview.
+Per §4 and [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md). Goal: vendor understands AgentKeys ≠ chatbot and ≠ Volcano wrapper in <5 minutes. ESP32-S3-Touch-LCD-4B + Volcano RTC CustomLLM + Ark/Doubao + AgentKeys gate endpoint + parent-control management view + three-act demo. Two-tier audit. Bounded revocation. Zero task orchestration. Delegation as schema preview.
 
-### Phase 2 — First vendor wedge + multi-rail reach (1-2 months)
+### Phase 2 — Commercial pilot + bundle economics (1-2 months)
 
-Not "build many protocol surfaces." Land a real vendor pilot.
+Not "build many protocol surfaces." Land a real vendor pilot with the economics visible.
 
-- Vendor configuration tools (vendor onboarding portal: tenant tokens, per-vendor billing, attributed devices)
-- Device identity provisioning (vendor brings devices into AgentKeys, gets actor omnis back)
-- Memory namespace template (for the "AI companion" product class: profile, work, family, child, travel, temp)
-- Permission policy template (default-deny for sensitive scopes, sensible defaults for memory reads)
-- Audit dashboard for parents (better UI than v0 web page; family-friendly)
-- **Volcano Ark MCP marketplace registration** (open international signup per `tuya-vs-xiaozhi.md` Phase 3a)
-- **Tuya Cloud Development connector** (Phase 2 from `tuya-vs-xiaozhi.md` original roadmap)
+- Vendor configuration tools: tenant tokens, attributed devices, per-vendor quotas, per-stack cost telemetry.
+- Device identity provisioning: vendor brings devices into AgentKeys, gets actor omnis back, and binds them through the master K11 ceremony.
+- Stack bundle pricing: free shared sandbox quota, paid dedicated/warm sandbox, overage pass-through/cost-plus, BYO-cloud enterprise escape hatch.
+- Memory namespace template for AI companions: profile, work, family, child, travel, temp.
+- Permission policy template: default-deny for sensitive scopes, sensible defaults for memory reads, spend disabled until prerequisites ship.
+- Parent dashboard: family-friendly control, audit, memory view, and revoke.
+- Volcano open questions closed: sandbox lifecycle API, OpenViking rank-only mode, CustomLLM auth/streaming/timeout contract.
 
 Goal: 1 paid vendor pilot signed at the $2-3/active-device/mo Basic tier from the office-hours pricing doc.
 
-### Phase 3 — Runtime neutrality via hook reference configs (3-4 months) — primary IAM-guarantee track
+### Phase 3 — Policy-intent model + runtime guarantees (2-4 months)
 
-Prove "the same authority layer works across different agent runtimes" by shipping the **hook reference configs** that turn AgentKeys MCP tools into IAM guarantees inside each Task Host. Per §3.6, this is the primary enforcement seam: hooks live in the Task Host runtime, fire deterministically around tool calls, and don't depend on LLM discretion.
+Deepen the moat that the first certified stack exposes: the same authority layer should work across runtimes, and natural-language requests should reliably become structured policy intents.
 
-Tracked under [issue #133](https://github.com/litentry/agentKeys/issues/133). Tier-1 hosts (verified 2026-05-28 — see [`docs/wiki/agent-iam-guarantee-glossary.md`](./wiki/agent-iam-guarantee-glossary.md) §3 for the full availability table):
+Policy-intent classifier track ([issue #322](https://github.com/litentry/agentKeys/issues/322)):
+
+- Generate and curate request → structured-intent datasets for memory, device control, spend, credential access, audit, and delegation.
+- Distill a small model that emits typed intent + risk + confidence; evaluate against adversarial prompt-injection and provenance attacks.
+- Deploy stack-local: Volcano China, future Alibaba/Baidu stacks, local bridge, and global cloud stacks. US 8×H100 is the training/eval factory, not the China realtime path.
+- Keep authority deterministic: classifier output is input to the gate; it never authorizes.
+
+Runtime-guarantee track ([issue #133](https://github.com/litentry/agentKeys/issues/133)):
 
 - **Hermes** — `~/.hermes/config.yaml` `hooks:` block; explicitly Claude-Code-compatible JSON shape. The reference implementation.
 - **Claude Code** — `~/.claude/settings.json`; richest hook surface (~24 events). Same shell scripts as Hermes (compatible JSON).
@@ -439,7 +498,7 @@ Tracked under [issue #133](https://github.com/litentry/agentKeys/issues/133). Ti
 - **OpenClaw** — likely Hermes-compatible (Hermes ships `hermes claw` as the migration tool); verify with live install.
 - **Hermes-MCP / OpenClaw-MCP / Doubao via Volcano Ark** — also exposed as MCP tools so other Task Hosts can call them; not the same as IAM enforcement.
 
-Phase 3 deliverables ([#133](https://github.com/litentry/agentKeys/issues/133)):
+Guarantee deliverables:
 
 - Reference hook configs for all Tier-1 hosts (one script bundle ports across with thin shims thanks to Hermes-Claude-Code shape parity)
 - `agentkeys hook check` CLI helper (wraps host stdin/stdout JSON convention so operators just write `command: 'agentkeys hook check --scope payment.spend'`)
@@ -448,21 +507,13 @@ Phase 3 deliverables ([#133](https://github.com/litentry/agentKeys/issues/133)):
 - Reverse-direction stub — JSON shape AgentKeys fires when our server initiates a denial/revocation (impl deferred to M4)
 - Python SDK + TypeScript SDK (for non-MCP integration paths)
 
-Goal: 3+ runtimes integrated, demonstrably interoperable through the same AgentKeys backend with the same IAM-guarantee semantics.
+Goal: one certified stack + 3+ runtimes integrated, demonstrably interoperable through the same AgentKeys backend with the same IAM-guarantee semantics and classifier schema.
 
-### Phase 3b — OpenAI-compatible proxy fallback (post-Phase-3, lower priority)
+### Phase 3b — ~~Generic OpenAI-compatible proxy fallback~~ — DROPPED (2026-06-19)
 
-For Tier-2 hosts without a hook surface — xiaozhi-server (verified 2026-05-28: only plugin/MCP tool registration), vendor mobile chatbots, plain `openai.ChatCompletion` scripts — ship an OpenAI-compatible proxy that the host's LLM client points at via `OPENAI_BASE_URL`. The proxy intercepts prompts + `tool_calls` + completions, enforces policy, logs audit, then forwards upstream.
+**Removed from the roadmap.** The generic OpenAI-compatible proxy (an AgentKeys-hosted `OPENAI_BASE_URL` in front of hooks-less hosts — xiaozhi-server, vendor mobile chatbots, plain `openai.ChatCompletion` scripts) is no longer a planned track. Agent is the development direction: a host earns an IAM guarantee by being an agent runtime (hooks, Phase 3) or a certified device stack (in-path endpoint, Phase 1) — not by routing a bare chatbot through a gateway. Non-agent hosts are reached via SDK / MCP / direct adapter, never a generic LLM gateway. See §3.6 ("Explicitly NOT a track") for the full rationale (mission-creep, crowded space, weak differentiation).
 
-**Sequenced lower than Phase 3** because:
-
-1. §2.4 mission-creep risk — proxy lives in the path of every byte; vendors will ask for retry/fallback/caching that edges toward Task Host territory.
-2. Competitive crowding — Vercel AI Gateway, Helicone, LangSmith, Portkey, OpenRouter, Cloudflare AI Gateway. We want this only when our authority position is established and we own the IAM-shaped differentiation.
-3. Tier-1 hosts already cover the strategically-important runtimes; Phase 3 is broader-reach for less per-host cost.
-
-**Gate to start Phase 3b**: #133 reference configs ship + at least one vendor pilot is live on the hooks path.
-
-### Phase 4 — Capability + revocation depth (6 months)
+### Phase 4 — Multi-stack neutrality + capability depth (6-9 months)
 
 Take the half-spec'd v1 schemas and ship the deep versions.
 
@@ -472,6 +523,7 @@ Take the half-spec'd v1 schemas and ship the deep versions.
 - **Audit replay** (regulator-grade reconstruction of any agent's authority history)
 - **Memory namespace ACL maturity** (cross-vendor consent ceremony in production, not demo)
 - **Family / work / kids memory separation** (the consumer narrative made operational)
+- **Second certified stack** (Alibaba/Baidu/local bridge/global cloud) behind the same adapter contract, proving Volcano is default, not lock-in
 
 Goal: first enterprise customer (could be a regulated B2B brand-owner — toy maker selling to schools, health-data-adjacent device maker, etc.).
 
@@ -482,7 +534,7 @@ Only if Phases 1-4 land with deployed reference implementations and 10+ vendor p
 - Propose MCP extensions for IAM-grade auth headers (session keys, cap-token forwarding, audit-chain headers)
 - OAuth-for-Agents specification engagement (likely IETF or W3C working group)
 - Reference implementations for non-MCP runtimes (raw HTTP / gRPC clients for vendors that don't use MCP)
-- Brand-owner partnerships: Tuya, Xiaomi (per `tuya-vs-xiaozhi.md` Phase 3c "deferred"), Alibaba Smart Home
+- Brand-owner partnerships: Tuya, Xiaomi (per `tuya-vs-xiaozhi.md` Phase 3c "deferred"), Alibaba Smart Home, Baidu/Xiaodu-style device ecosystems
 
 Goal: become the reference implementation that every new agent runtime + IoT cloud integrates with by default.
 
@@ -532,25 +584,62 @@ Privacy is a benefit, not a category. "Privacy product" is crowded (Brave, DuckD
 
 **Mitigation**: never lead with "privacy." Lead with "control" (consumer narrative) or "authority" (B2B narrative). Privacy follows naturally and is a strong supporting benefit.
 
+### Risk 8 — Margin compression from bundled compute
+
+If the product is perceived as "Volcano plus markup," ASR/TTS/LLM/sandbox costs eat the business and customers pressure us into commodity resale pricing.
+
+**Mitigation**: price and message the bundle around the AgentKeys control plane, not raw tokens/minutes. Include explicit quotas, overage pass-through/cost-plus, and BYO-cloud enterprise options. Track COGS per stack from the first pilot.
+
+### Risk 9 — Provider lock-in through the first certified stack
+
+Volcano is the right first stack, but if identity, memory store, policy, or audit leak into Volcano-specific services, the "swappable engine" promise becomes marketing copy.
+
+**Mitigation**: keep the red-line rows from [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md) §3 owned by AgentKeys: identity, caps, canonical memory store, deterministic enforcement, audit, pairing, and control plane. Volcano can rank authorized lines and run the engine/substrate; it cannot become the authority.
+
+### Risk 10 — Component-matrix sprawl
+
+Provider-neutral architecture can tempt us into supporting arbitrary ASR × TTS × LLM × sandbox × ranking combinations before any one stack is excellent. That creates latency bugs, support burden, and weak product taste.
+
+**Mitigation**: certify stacks, not components. Start with Volcano; add one second stack only after the first paid pilot proves the adapter contract. Keep arbitrary component swapping as an internal architecture property, not a user-facing promise.
+
+### Risk 11 — Classifier becomes a hidden authority
+
+The policy-intent classifier is necessary for UX, but if teams treat its output as authorization, the system becomes probabilistic at the trust boundary.
+
+**Mitigation**: classifier output is typed evidence only. The deterministic gate decides from structured intent + chain/config state. Low confidence or high-risk classifications become `ask`, not `allow`. Every decision logs classifier version, input hash, structured intent, and deterministic policy result.
+
+### Risk 12 — Cross-region latency and data residency
+
+If China device requests depend on a classifier or policy service hosted only on our US infrastructure, latency and data-sovereignty constraints will break the product.
+
+**Mitigation**: deploy the small classifier stack-local. Use the US 8×H100 servers for training, distillation, eval, and red-team. Realtime inference runs in the customer's stack/region: Volcano China, Alibaba/Baidu China, local bridge, or global cloud.
+
 ---
 
 ## 7. What this strategic anchor changes about existing docs
 
 | Doc | Update needed |
 |---|---|
+| [`arch.md`](./arch.md) | Source-of-truth reference checked against this revision: daemon remains trust core (§22c.5), MCP remains a tool/reach surface (§22c.1-§22c.2), and IAM guarantees require a non-LLM gate — hooks or the certified-stack in-path endpoint — plus worker verify (§22d, §17.5; the generic proxy fallback was dropped 2026-06-19). This change updates cross-references only; the component inventory changes when the certified-stack adapter ships. |
+| [`plan/ai-device-platform.md`](./plan/ai-device-platform.md) | Already reflects the de-phased, gate-first platform: one platform, Volcano as default engine/substrate, AgentKeys as sovereign gate. This strategy doc now adopts that framing. |
+| [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md) | Becomes the canonical Phase-1 device plan. Keep its red-line component split synchronized with §2.8/§4 here. |
+| [`volcano/service.md`](./volcano/service.md) | Keep open questions tied to the Phase-2 pilot gate: sandbox lifecycle API, OpenViking rank-only mode, CustomLLM contract. |
+| [`research/on-device-memory-daemon-esp32.md`](./research/on-device-memory-daemon-esp32.md) | Strategy adopts its conclusion: ESP32 stays a terminal in v0; server-side warm cache/preload is the latency path; no K10/cap-mint daemon on device. |
+| [issue #322](https://github.com/litentry/agentKeys/issues/322) | Becomes the canonical classifier track for request-intent → structured gate input. |
 | [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) | Update positioning note at top to point at this strategy doc + add Agent IAM framing + three-narrative reality. Substance below the banner stays. |
 | [`ai-hardware-companion-wedge.md`](./research/ai-hardware-companion-wedge.md) | Update positioning sections — sharper "Agent IAM" framing; keep market sizing + competitive analysis as-is. |
-| [issue #103 plan](./plan/issue-103-aiosandbox-hermes-esp32-demo.md) | Pivot demo storyboard to the three-act IAM demo per §4.3. Add parent-control web UI deliverable. Note the four corrections (bounded revocation, two-tier audit, delegation-as-preview, zero orchestration). Implementation detail unchanged (cap-token machinery already exists). |
-| [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md) | No change — MCP-direct pivot still correct. |
-| [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md) | Minor: clarify Phase 2 timing per §5 above; tool inventory unchanged. |
-| [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) | No change — complement-not-compete framing still correct. |
-| [`xiaozhi-hermes-risks.md`](./research/xiaozhi-hermes-risks.md) | No change — risk analysis still applies; many risks evaporate under MCP-direct. |
+| [issue #103 plan](./archived/issue-103-aiosandbox-hermes-esp32-demo.md) | **Archived** — superseded for Phase 1 by the certified Volcano device pilot; kept as historical MCP/Hermes demo context. |
+| [`xiaozhi-hermes-architecture.md`](./archived/xiaozhi-hermes-architecture.md) | **Archived** — server-side bridge/warm-cache topology, kept as historical reference; the device-chatbot path is not the Phase-1 product (now the certified Volcano stack). |
+| [`xiaozhi-esp32-magiclink.md`](./archived/xiaozhi-esp32-magiclink.md) | **Archived** — MagicLick 2.5 / xiaozhi-esp32 hardware research; the Phase-1 device is now ESP32-S3-Touch-LCD-4B per [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md). |
+| [`xiaozhi-hermes-risks.md`](./archived/xiaozhi-hermes-risks.md) | **Archived** — risk analysis kept as historical reference; many risks evaporate under the certified-stack in-path model. |
+| [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md) | Fold into the certified-stack adapter view: Ark is one provider behind the gate, not the product identity. |
+| [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) | Keep complement-not-compete framing; Tuya connector moves after the first certified stack proves the adapter seam. |
 
 ---
 
 ## 8. The one-sentence summary
 
-> AgentKeys is the **user-owned authority layer for the AI device era** — Agent IAM to technical buyers, "your AI memory follows you safely" to consumers, tamper-evident trust substrate to regulators. We stay infrastructure; we never become an agent runtime; we work with Hermes / OpenClaw / Claude Code / Doubao / xiaozhi / any agent that needs identity, memory, permissions, capabilities, and audit. They do the work; we control the authority to do the work.
+> AgentKeys is the **user-owned authority layer for the AI device era** — Agent IAM to technical buyers, "control what your AI devices can remember, access, and do" to consumers, tamper-evident trust substrate to regulators. We ship certified stacks where needed for product quality, starting with Volcano, but the red line stays ours: identity, memory ownership, policy, audit, revocation, and portability. Engines do the work; AgentKeys controls the authority to do the work.
 
 ---
 
@@ -559,13 +648,18 @@ Privacy is a benefit, not a category. "Privacy product" is crowded (Brave, DuckD
 - **Original proposal**: pasted in chat 2026-05-24 — "AgentKeys Strategic Direction: Agent IAM for the AI Device Era." Captured §1-14 of the strategic framing.
 - **Independent analysis (this AI)**: pushed back on consumer/B2B positioning tension, sequencing of multiple integration surfaces, standards timing, demo storyboard.
 - **ChatGPT critique**: four architectural corrections (bounded revocation, two-tier audit, delegation-as-preview, dual-narrative) + the three-layer positioning framework (AI Device Account / Agent IAM / Trust Substrate).
-- **This doc**: synthesis of all three. Source of truth for Agent IAM positioning + Phase 1 scope + roadmap. Future planning references this anchor.
+- **Volcano/ESP32 platform review (2026-06-18/19)**: de-phased the old Plan A/B framing, selected Volcano as the first certified engine/substrate, kept AgentKeys as the sovereign gate, and identified the policy-intent classifier as a control-plane moat.
+- **This doc**: synthesis of all inputs. Source of truth for Agent IAM positioning + certified-stack business model + Phase 1 scope + roadmap. Future planning references this anchor.
 
 Companion architectural research:
 - [`ai-hardware-companion-wedge.md`](./research/ai-hardware-companion-wedge.md) — market + competitive landscape
 - [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) — wedge brainstorm + Approach D selection
-- [`xiaozhi-esp32-magiclink.md`](./research/xiaozhi-esp32-magiclink.md) — hardware identification + Option 1 decision
-- [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md) — MCP-direct architecture
-- [`xiaozhi-hermes-risks.md`](./research/xiaozhi-hermes-risks.md) — risk verification
+- [`xiaozhi-esp32-magiclink.md`](./archived/xiaozhi-esp32-magiclink.md) — hardware identification + Option 1 decision (archived)
+- [`xiaozhi-hermes-architecture.md`](./archived/xiaozhi-hermes-architecture.md) — MCP-direct architecture (archived)
+- [`xiaozhi-hermes-risks.md`](./archived/xiaozhi-hermes-risks.md) — risk verification (archived)
 - [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md) — Volcano Ark MCP-server adapter
 - [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) — Tuya vs xiaozhi role comparison + Phase 3 feasibility
+- [`plan/ai-device-platform.md`](./plan/ai-device-platform.md) — gate-first device platform, Volcano-composed
+- [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md) — certified Volcano device stack
+- [`volcano/service.md`](./volcano/service.md) — Volcano service inventory
+- [issue #322](https://github.com/litentry/agentKeys/issues/322) — policy-intent classifier training plan
