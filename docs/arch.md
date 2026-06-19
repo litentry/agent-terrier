@@ -742,7 +742,7 @@ The strategy doc ([agent-iam-strategy.md §2.7](agent-iam-strategy.md)) frames t
 | First-launch permission prompt | Master grant ceremony — K11 WebAuthn on master, with operator-readable intent | §10.1 K11 ceremony + intent-rendering |
 | Grant / deny per permission | `set_scope_with_webauthn(operator, agent, Scope, k10_sig, k11_assertion)` | §16.1 `AgentKeysScope` |
 | Bounded grant (≤ ¥50, read-only) | `Scope.{read_only, max_per_call, max_per_period, max_total, payment_k11_threshold}` + cap-token `namespaces_allowed` | §16.1 + §19 cap shape |
-| OS enforces at the syscall boundary | **`PreToolUse` hook → `permission.check`** — the IAM *guarantee* | §22d hooks-first |
+| OS enforces at the syscall boundary | **non-LLM gate → `permission.check`** — `PreToolUse` hook for hook-capable runtimes, certified-stack in-path endpoint for device stacks | §22d IAM guarantee |
 | Runtime re-prompt | `permission.check → ask_parent` | deterministic policy engine (§22d tool layer) |
 | Revoke in Settings | `revoke_scope_with_webauthn` / `cap.revoke` | §16.1 + Act-3 demo |
 | Per-app sandbox | per-actor isolation | §14, §17 |
@@ -758,13 +758,13 @@ The conservative path is **additive**: a future `Scope.grants` field — `Permis
 - **`agentkeys-worker-classify`** (#207) — classifies the new agent's role → candidate capability categories.
 - **master/global `config`** (#201, master-self-only + audited) — the policy ceiling (caps, sensitive-namespace denylist) plus, accrued over time, the master's grant/deny history. An optional 2–3 question profile seeds it; it is never a precondition for first use.
 
-The recommender emits a proposed `Scope.grants` (the deferred field above) — so it is the *consumer* that motivates that extension. **Invariants:** it runs daemon-side in the master's trust domain (never broker-decides-for-you); it is LLM/heuristic-assisted and so lives on the *advisory* side of §3.6 — the deterministic cap-mint + `PreToolUse` gate is untouched; and a recommendation grants nothing, **only the master's K11 assertion does**. The learning loop is **asymmetric** — sensitive categories (health, payment, credentials) re-prompt every time regardless of history, and high-impact learned defaults resurface for periodic re-confirmation — so accrued preferences can never silently widen a live scope.
+The recommender emits a proposed `Scope.grants` (the deferred field above) — so it is the *consumer* that motivates that extension. **Invariants:** it runs daemon-side in the master's trust domain (never broker-decides-for-you); it is LLM/heuristic-assisted and so lives on the *advisory* side of §3.6 — the deterministic cap-mint + non-LLM gate is untouched; and a recommendation grants nothing, **only the master's K11 assertion does**. The learning loop is **asymmetric** — sensitive categories (health, payment, credentials) re-prompt every time regardless of history, and high-impact learned defaults resurface for periodic re-confirmation — so accrued preferences can never silently widen a live scope.
 
 **arch.md compatibility check (no contradictions, verified 2026-05-31):**
 - ✅ §10.2 link-code bootstrap unchanged — the ceremony composes the existing two chain calls; it alters neither.
 - ✅ §16.1 `AgentKeysScope` contract unchanged — the per-category `grants` field is explicitly deferred + additive; the shipped struct is untouched.
-- ✅ §22d hooks-first enforcement unchanged — this section names the `PreToolUse` hook as the syscall-analog enforcement point; it introduces no competing enforcement path.
-- ✅ §3.6 IAM-guarantee posture unchanged — the recommender is advisory (LLM/heuristic); cap-mint + the `PreToolUse` gate stay deterministic, and only the master's K11 assertion grants.
+- ✅ §22d IAM-guarantee enforcement unchanged — this section names the non-LLM gate as the syscall-analog enforcement point; hooks and certified-stack in-path endpoints are packaging choices, not competing authority primitives.
+- ✅ §3.6 IAM-guarantee posture unchanged — the recommender is advisory (LLM/heuristic); cap-mint + the non-LLM gate stay deterministic, and only the master's K11 assertion grants.
 - ✅ §6.3 identity ≠ actor ≠ capability separation unchanged — grants attach to the (operator, agent) scope edge, exactly as `AgentKeysScope` already keys them.
 - ✅ Canonical names (§5) — "permission-grant ceremony" and "permission category" are UX terms layered on existing canonical names (`agent_omni`, `cap-token`, `Scope`); no new identity/key spelling introduced.
 
@@ -772,7 +772,7 @@ The recommender emits a proposed `Scope.grants` (the deferred field above) — s
 - [strategy §2.7](agent-iam-strategy.md) — consumer-facing framing + the permission-category vocabulary
 - [§10.2](#102-agent-bootstrap-link-code-only--single-path) — the bootstrap the ceremony composes with the scope grant
 - [§16.1](#161-contracts) — the `AgentKeysScope.Scope` struct the grant writes
-- [§22d](#22d-iam-guarantee-delivery--hooks-first-proxy-fallback) — the hook enforcement that turns the grant into an IAM guarantee
+- [§22d](#22d-iam-guarantee-delivery--hooks-and-the-certified-stack-in-path-endpoint) — the non-LLM enforcement that turns the grant into an IAM guarantee
 - [#110](https://github.com/litentry/agentKeys/issues/110) — parent-control UI where per-category toggles surface
 
 ---
@@ -2320,7 +2320,7 @@ Likewise the web UI is **not a trust plane** — per the #107 PR thread, the tru
 - [§11](#11-recovery--m-of-n-device-quorum-no-anchor-wallet-no-seed-phrase) — recovery quorum when master devices are lost
 - [§12](#12-sidecar-daemon) — daemon as the trust core under all three surfaces
 - [§22](#22-pluggable-surfaces) — MCP backend variant is one of the pluggable axes
-- [docs/agent-iam-strategy.md §4.4](agent-iam-strategy.md) — Phase 1 vendor onboarding portal deliverable
+- [docs/agent-iam-strategy.md §4.4](agent-iam-strategy.md) — certified-stack Phase 1 deliverables (device binding, in-path endpoint, tool/API surface, management view)
 - [#110](https://github.com/litentry/agentKeys/issues/110) — phased web UI roadmap (M1 parent dashboard → M2 onboarding → M3 multi-master → M4 backend wiring)
 - [#133](https://github.com/litentry/agentKeys/issues/133) — Phase 3 hooks that fire when tools are invoked through any of these surfaces
 - [#134](https://github.com/litentry/agentKeys/issues/134) — M6 distribution: GH Releases + Homebrew + `curl | sh` installer
@@ -2333,20 +2333,20 @@ Likewise the web UI is **not a trust plane** — per the #107 PR thread, the tru
 
 ---
 
-## 22d. IAM-guarantee delivery — hooks-first, proxy-fallback
+## 22d. IAM-guarantee delivery — hooks and the certified-stack in-path endpoint
 
-Recorded 2026-05-28. AgentKeys exposes IAM **tools** through the MCP server (§22c.1, §22c.2). Turning a tool into an IAM **guarantee** — a check the LLM cannot bypass — is a separate concern delivered through two enforcement seams, with explicit priority.
+Recorded 2026-05-28; revised 2026-06-19 (the generic OpenAI-compatible proxy fallback was dropped — agent-first direction; see §22d.3). AgentKeys exposes IAM **tools** through the MCP server (§22c.1, §22c.2). Turning a tool into an IAM **guarantee** — a check the LLM cannot bypass — is a separate concern delivered through **two agent-first non-LLM seams**: **hooks** for hook-capable Task Hosts (§22d.2) and the **certified-stack in-path endpoint** for device stacks (§22d.3). Each is primary for its deployment shape.
 
 ### 22d.1 IAM tool vs IAM guarantee — the architecture-level distinction
 
 | | Definition | Whether the check runs is decided by... | Failure mode |
 |---|---|---|---|
 | **IAM tool** | Function in the LLM's tool registry, surfaced via MCP per §22c | The LLM (prompt + context + sampling) | LLM skips / is jailbroken → unauthorized action proceeds |
-| **IAM guarantee** | Non-LLM gate in the execution path, runtime-invoked deterministically | The runtime — hook system, proxy, or OS capability | Gate fails closed; action cannot proceed without an allow verdict |
+| **IAM guarantee** | Non-LLM gate in the execution path, runtime-invoked deterministically | The runtime — hook system, certified-stack in-path endpoint, or OS capability | Gate fails closed; action cannot proceed without an allow verdict |
 
-The seven Phase-1 MCP tools enumerated in [docs/agent-iam-strategy.md §4.2](agent-iam-strategy.md) (`identity.whoami`, `memory.get`, `memory.put`, `permission.check`, `cap.mint`, `cap.revoke`, `audit.append`) are **tools** by themselves. They become **guarantees** only when wrapped by one of the two enforcement seams below. This is the architecture-level framing for the §3.1 bounded-revocation commitment in the strategy doc: *high-risk = always-online permission check + fresh cap-token mint per call* is deliverable only when there's a non-LLM gate, which is what §22d.2 (hooks) and §22d.3 (proxy) provide.
+The authority tools enumerated in [docs/agent-iam-strategy.md §4.2](agent-iam-strategy.md) (`identity.whoami`, `memory.get`, `memory.put`, `permission.check`, `cap.mint`, `cap.revoke`, `audit.append`) are **tools** by themselves. They become **guarantees** only when wrapped by one of the two enforcement seams below. This is the architecture-level framing for the §3.1 bounded-revocation commitment in the strategy doc: *high-risk = always-online permission check + fresh cap-token mint per call* is deliverable only when there's a non-LLM gate, which is what §22d.2 (hooks) and §22d.3 (the certified-stack in-path endpoint) provide.
 
-### 22d.2 Primary — hook reference configs ([#133](https://github.com/litentry/agentKeys/issues/133))
+### 22d.2 Primary for hook-capable Task Hosts — hook reference configs ([#133](https://github.com/litentry/agentKeys/issues/133))
 
 Task Host runtimes (Claude Code, Codex, Hermes, OpenClaw) fire lifecycle hooks (`PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`) that synchronously invoke AgentKeys MCP tool calls. The runtime guarantees the hook fires; the LLM cannot bypass.
 
@@ -2361,32 +2361,28 @@ Tier-1 coverage means one reference script bundle ports across four hosts with t
 
 **Operator-facing delivery: `agentkeys wire <runtime>`** (per [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.7). The reference hook configs from #133 are not hand-installed by users. AgentKeys ships a single CLI command — `agentkeys wire hermes`, `agentkeys wire claude-code`, etc. — that idempotently writes the hook scripts (under `~/.<runtime>/agent-hooks/`), appends the `hooks:` block to the runtime's config, pre-approves first-use consent, fetches the LLM API key from the credential broker, and verifies via the runtime's own `hooks doctor` equivalent. Output follows the AGENTS.md `ok proceeding / skip <reason> / fail <reason>` convention; re-runs are no-ops modulo drift. Per-runtime adapter trait lives in `crates/agentkeys-cli/src/wire/adapters/`. Full plan: [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](plan/phase-1-fresh-user-wire-onboarding.md).
 
-### 22d.3 Fallback — OpenAI-compatible proxy (Phase 3b, lower priority)
+### 22d.3 Primary for certified device stacks — the in-path endpoint
 
-Tier-2 hosts have no lifecycle hook surface — xiaozhi-server (verified 2026-05-28: only plugin/MCP tool registration, no hooks), vendor mobile chatbots, plain `openai.ChatCompletion` scripts. For these, AgentKeys offers an OpenAI-compatible proxy that the host's LLM client points at via `OPENAI_BASE_URL`. The proxy inspects every prompt + `tool_calls` + completion, enforces policy, logs audit, then forwards upstream.
+Certified device stacks have no agent-runtime hook surface, but they do expose one point where the LLM turn is resolved. In the Volcano device stack, RTC CustomLLM calls AgentKeys as the turn endpoint: AgentKeys runs cap-check + memory-inject + audit, then calls Ark/Doubao. The endpoint sits in the agent's execution path by construction, so the gate cannot be skipped — the same non-LLM-guarantee property hooks give a Task Host. Because the seam is scoped to a *certified* stack, we validate latency, auth, and billing end-to-end without becoming a generic gateway. This is the **Phase-1 primary seam** (strategy §3.6/§4); it is not a fallback.
 
-Lower priority than hooks because:
+**Dropped (2026-06-19) — the generic OpenAI-compatible proxy.** An earlier revision kept a fallback seam for hooks-less *unmanaged* hosts (xiaozhi-server — verified 2026-05-28: only plugin/MCP tool registration, no hooks — vendor mobile chatbots, plain `openai.ChatCompletion` scripts): an AgentKeys-hosted `OPENAI_BASE_URL` the client points at, intercepting every prompt + `tool_calls` + completion. **No longer a planned track.** AgentKeys is agent-first — a host earns an IAM guarantee by being an agent runtime (hooks) or a certified device stack (in-path endpoint), not by routing a bare chatbot through a gateway. Rationale: (1) strategy §2.4 mission-creep — a proxy in the path of every byte invites retry/fallback/caching asks that drift toward Task-Host territory; (2) competitive crowding — Vercel AI Gateway, Helicone, Portkey, OpenRouter, Cloudflare AI Gateway; (3) weak differentiation — hooks + certified stacks cover the strategically-important paths, and non-agent hosts are better reached via SDK/MCP/direct adapter.
 
-1. **Strategy §2.4 mission-creep risk** — proxy lives in the path of every byte; vendors will ask for retry/fallback/caching that edges toward Task Host territory.
-2. **Competitive crowding** — Vercel AI Gateway, Helicone, LangSmith, Portkey, OpenRouter, Cloudflare AI Gateway all occupy this space. We want this only when our authority position is established and we own the IAM-shaped differentiation.
-3. **Tier-1 hosts already cover the strategically-important runtimes** — one investment, four runtimes; broader reach for less per-host cost.
-
-Sequenced as **Phase 3b**, after #133 ships and at least one vendor pilot is on hooks.
+> **Disambiguation.** This dropped seam is the *IAM-guarantee* proxy only. It is unrelated to (a) the daemon's **localhost credential proxy** (§12 — the sidecar that injects minted credentials at a Unix socket; shipped, unaffected) and (b) the **"broker-not-proxy" principle** (we mint credentials, never proxy per-operation reads/writes). Those two keep the word "proxy" and are untouched.
 
 ### 22d.4 Why this matters at the architecture level
 
-Per [strategy §2.4](agent-iam-strategy.md) zero-orchestration hard line, AgentKeys must not become a Task Host. Both enforcement seams respect that boundary, but differently:
+Per [strategy §2.4](agent-iam-strategy.md) zero task-orchestration hard line, AgentKeys must not become a Task Host — or a generic LLM gateway. Both seams respect that boundary, but differently:
 
 - **Hooks** sit *inside* the Task Host (Claude Code, Codex, Hermes, OpenClaw). The Task Host owns lifecycle; AgentKeys provides the policy-check tool body. No request-path orchestration on AgentKeys' side.
-- **Proxy** sits between the LLM client and the LLM provider. AgentKeys touches every byte of the LLM conversation. The §2.4 risk is real — discipline is "don't add retry, don't add fallback, don't add caching; stay a policy + audit + memory-injection layer."
+- **The certified-stack in-path endpoint** sits at the one point where the stack resolves the LLM turn (Volcano RTC CustomLLM → AgentKeys → Ark/Doubao). AgentKeys touches that turn — cap-check + memory-inject + audit — not the whole task loop. Discipline is "no retry, no fallback, no caching, no orchestration"; scoping the seam to one *certified* vendor (not an open `OPENAI_BASE_URL` gateway) is what keeps the §2.4 risk bounded.
 
-The hooks-first ordering is therefore both about coverage (Tier-1 covers the high-value runtimes) AND about preserving the Authority Host posture (hooks have lower §2.4 risk than proxy).
+Both seams are agent-first and bounded — neither makes AgentKeys a Task Host or a generic LLM gateway. The generic OpenAI-compatible proxy that would have served *non-agent* hosts was dropped 2026-06-19 (§22d.3) precisely because it lacked that bound.
 
 ### 22d.5 Cross-references
 
 - [docs/agent-iam-strategy.md §3.6](agent-iam-strategy.md) — strategic-anchor record of the same decision
-- [docs/wiki/agent-iam-guarantee-glossary.md](wiki/agent-iam-guarantee-glossary.md) — standalone glossary with the full hooks-vs-proxy trade-off table + verified hook-availability table across six runtimes
-- [docs/wiki/agent-iam-guarantee-glossary.md](wiki/agent-iam-guarantee-glossary.md) — standalone glossary with the hooks-vs-proxy trade-off table + verified hook-availability table across six runtimes. (The previous operator-facing summary at `docs/demo-aiosandbox-runbook.md` §6 was archived 2026-05-28; a new operator runbook lands with the `agentkeys wire` follow-up.)
+- [docs/wiki/agent-iam-guarantee-glossary.md](wiki/agent-iam-guarantee-glossary.md) — standalone glossary with the full two-seam (hooks / certified in-path endpoint) trade-off + the dropped-proxy decision record + verified hook-availability table across six runtimes
+- [docs/wiki/agent-iam-guarantee-glossary.md](wiki/agent-iam-guarantee-glossary.md) — standalone glossary with the two-seam (hooks / certified in-path endpoint) trade-off + the dropped-proxy decision record + verified hook-availability table across six runtimes. (The previous operator-facing summary at `docs/demo-aiosandbox-runbook.md` §6 was archived 2026-05-28; a new operator runbook lands with the `agentkeys wire` follow-up.)
 - [§22c.2](#22c2-backend-wiring--four-agent-runtimes) — four backend variants of the MCP server (Tools layer; the layer §22d wraps with guarantees)
 - [#133](https://github.com/litentry/agentKeys/issues/133) — Phase 3 LLM-host hook integration (the hook-track deliverable)
 - [#107](https://github.com/litentry/agentKeys/issues/107) — Phase 1 MCP server (the tool-layer deliverable; the substrate hooks call into)
