@@ -128,13 +128,13 @@ Implementation:
 
 | Site | Operation | Conformant? |
 |---|---|---|
-| [`scripts/heima-scope-set.sh`](../../scripts/heima-scope-set.sh) | scope grant | ✅ |
-| [`scripts/heima-scope-revoke.sh`](../../scripts/heima-scope-revoke.sh) | scope revoke | ✅ |
-| [`scripts/heima-device-revoke.sh`](../../scripts/heima-device-revoke.sh) | revoke device | ✅ |
-| [`harness/scripts/heima-device-add.sh`](../../harness/scripts/heima-device-add.sh) | register companion as 2nd master | ✅ |
-| [`harness/scripts/heima-register-spare-master.sh`](../../harness/scripts/heima-register-spare-master.sh) | register synthetic 3rd master | ✅ |
-| [`harness/scripts/heima-set-recovery-threshold.sh`](../../harness/scripts/heima-set-recovery-threshold.sh) | set recovery threshold | ✅ |
-| [`harness/scripts/heima-recovery.sh`](../../harness/scripts/heima-recovery.sh) PRIMARY + COMPANION | M-of-N device revoke | ✅ (both prompts uniform; companion via POST body) |
+| `scripts/heima-scope-set.sh` (operator-internal) | scope grant | ✅ |
+| `scripts/heima-scope-revoke.sh` (operator-internal) | scope revoke | ✅ |
+| `scripts/heima-device-revoke.sh` (operator-internal) | revoke device | ✅ |
+| `harness/scripts/heima-device-add.sh` (operator-internal) | register companion as 2nd master | ✅ |
+| `harness/scripts/heima-register-spare-master.sh` (operator-internal) | register synthetic 3rd master | ✅ |
+| `harness/scripts/heima-set-recovery-threshold.sh` (operator-internal) | set recovery threshold | ✅ |
+| `harness/scripts/heima-recovery.sh` (operator-internal) PRIMARY + COMPANION | M-of-N device revoke | ✅ (both prompts uniform; companion via POST body) |
 | Future master-mutation script | (new) | MUST follow this convention before merging |
 
 ## What does NOT count as conformant

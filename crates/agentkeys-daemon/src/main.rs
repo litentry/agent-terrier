@@ -218,7 +218,7 @@ struct Args {
     #[arg(long, default_value_t = 84532)]
     init_chain_id: u64,
 
-    /// W3 real-memory: the memory worker base URL (e.g. https://memory.litentry.org).
+    /// W3 real-memory: the memory worker base URL (e.g. https://memory.example.invalid).
     /// Unset ⇒ master-memory plant/list use the in-memory fallback (dev/no-infra).
     /// Canonical env `AGENTKEYS_WORKER_MEMORY_URL` (matches `--config-url`'s
     /// `AGENTKEYS_WORKER_CONFIG_URL` + `scripts/operator-workstation.env`).
@@ -230,7 +230,7 @@ struct Args {
     #[arg(long, env = "MEMORY_ROLE_ARN")]
     memory_role_arn: Option<String>,
 
-    /// #201 config data class: the config worker base URL (e.g. https://config.litentry.org).
+    /// #201 config data class: the config worker base URL (e.g. https://config.example.invalid).
     /// Unset ⇒ the master-memory list derives categories from the in-memory cache instead of
     /// the durable, master-only Config-class taxonomy (config/memory-taxonomy.enc); dev/no-infra.
     #[arg(long, env = "AGENTKEYS_WORKER_CONFIG_URL")]
@@ -242,7 +242,7 @@ struct Args {
     #[arg(long, env = "CONFIG_ROLE_ARN")]
     config_role_arn: Option<String>,
 
-    /// #207 classifier-service: the classify worker base URL (e.g. https://classify.litentry.org).
+    /// #207 classifier-service: the classify worker base URL (e.g. https://classify.example.invalid).
     /// Set ⇒ classification (cred auto-categorize #207 item 7, connect-time auto-distribute
     /// item 5) runs the cap-gated, audited worker TAG path. Unset ⇒ the daemon classifies
     /// against the bundled `agentkeys-catalog` tier-0 locally (deterministic, dev/no-infra).
@@ -250,13 +250,11 @@ struct Args {
     classify_url: Option<String>,
 
     /// #97 — the audit worker the web decode view fetches REAL `AuditEnvelope`s
-    /// from (by the submit receipt hashes). Defaults to the public worker; set
-    /// empty to disable (decode falls back to the synthesized preview).
-    #[arg(
-        long,
-        env = "AGENTKEYS_AUDIT_WORKER_URL",
-        default_value = "https://audit.litentry.org"
-    )]
+    /// from (by the submit receipt hashes). Empty (the default) ⇒ the decode
+    /// stays a synthesized preview; set `AGENTKEYS_AUDIT_WORKER_URL` to the audit
+    /// worker base URL to fetch real envelopes. No hardcoded host default — the
+    /// operator configures it explicitly (#317).
+    #[arg(long, env = "AGENTKEYS_AUDIT_WORKER_URL", default_value = "")]
     audit_worker_url: String,
 
     /// W3 real-memory: AWS region for the STS relay.
@@ -676,7 +674,7 @@ fn acquire_pairing_lock(path: &str) -> anyhow::Result<std::fs::File> {
 /// given. These commands ALWAYS need a broker, so prod is the sane default (override
 /// with the flag/env for a test broker). Deliberately NOT applied to `--ui-bridge`,
 /// where an unset `broker_url` means "fall back to pre-sourced AWS creds" (§191).
-const DEFAULT_PAIRING_BROKER_URL: &str = "https://broker.litentry.org";
+const DEFAULT_PAIRING_BROKER_URL: &str = "https://broker.example.invalid";
 
 async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     use agentkeys_core::device_crypto::DeviceKey;

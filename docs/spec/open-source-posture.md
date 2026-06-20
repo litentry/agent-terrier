@@ -8,7 +8,7 @@
 - [`../arch.md`](../arch.md) — Rust/TypeScript component split and Cargo workspace layout (read this first for the 13-component inventory)
 - [`./1-step-analysis.md`](./1-step-analysis.md) — auth-layer sub-analysis (threat model lives in §3.3c)
 - [`./plans/design-spec.md`](../archived/design-spec.md) — original product vision (historical)
-- [`./plans/ceo-plan.md`](../plan/ceo-plan.md) — v0 implementation plan (canonical)
+- `./plans/ceo-plan.md` (operator-internal) — v0 implementation plan (canonical)
 - [`./heima-open-questions.md`](./heima-open-questions.md) — Kai meeting agenda (Q9 is the top priority dependency)
 
 **Prior interview reference:**
@@ -350,17 +350,17 @@ What the writeup can honestly claim, given everything above:
 - [ ] Draft the Tier 1/2/3 service classification in `provisioner-scripts` README
 - [ ] Prepare for Kai meeting: **Q9 (revocation latency) is the top priority** — revocation is the ONLY defense on stock sandbox (Round 13 finding). Also push Q1, Q2, Q11.
 - [ ] Budget for v0.1 security audit (even if deferred, get estimates now)
-- [ ] Hardened fork of `agent-infra/sandbox` — see [`agent-infra-sandbox-runtime-probe.md`](../research/aiosandbox/agent-infra-sandbox-runtime-probe.md) §8 for the full TODO list
+- [ ] Hardened fork of `agent-infra/sandbox` — see `agent-infra-sandbox-runtime-probe.md` (operator-internal) §8 for the full TODO list
 
 ## 15. Cross-references
 
 - **Component inventory and language choices:** [`../arch.md`](../arch.md) §2, §3
 - **Kernel hardening threat model:** [`./1-step-analysis.md`](./1-step-analysis.md) §3.3c
-- **Multi-repo structure:** [`./plans/ceo-plan.md`](../plan/ceo-plan.md) §"Repository structure"
+- **Multi-repo structure:** `./plans/ceo-plan.md` (operator-internal) §"Repository structure"
 - **TEE worker Kai questions:** [`./heima-open-questions.md`](./heima-open-questions.md) Q9 (top priority), Q11, Q1, Q2
 - **Heima parachain licensing:** see `/lifeKnowledge/heima.md`
 - **User flows showing trust boundaries in action:** [`./1-step-analysis.md`](./1-step-analysis.md) §4
-- **Hardened sandbox TODO list:** [`../research/aiosandbox/agent-infra-sandbox-runtime-probe.md`](../research/aiosandbox/agent-infra-sandbox-runtime-probe.md) §8
+- **Hardened sandbox TODO list:** `../research/aiosandbox/agent-infra-sandbox-runtime-probe.md` (operator-internal) §8
 
 ---
 

@@ -13,7 +13,7 @@ export function selectBackend(): AgentKeysClient {
   if (kind === 'core') {
     // Phone-first host: the WASM core talks to the broker directly (no daemon). X1.
     return new CoreBackend(
-      process.env.NEXT_PUBLIC_AGENTKEYS_BROKER_URL ?? 'https://broker.litentry.org',
+      process.env.NEXT_PUBLIC_AGENTKEYS_BROKER_URL ?? 'https://broker.example.invalid',
     );
   }
   if (kind === 'daemon') {

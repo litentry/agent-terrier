@@ -30,9 +30,9 @@ The headline: **an agent can only do what the master granted it**, and that gran
 
 Everything an agent does flows through a **cap-token** the broker mints for it, re-verified by the target worker before any effect. The agent's reach is exactly its granted scope:
 
-- **Memory** — read/write its per-actor memory store, filtered by the namespaces its cap allows (`namespaces_allowed`, e.g. `["travel"]`). See the gated-memory model in [`../arch.md` §15.2](../arch.md#152-memory-service) and the [memory build-vs-gate decision](../../docs/research/memory-build-vs-gate-decision.md).
+- **Memory** — read/write its per-actor memory store, filtered by the namespaces its cap allows (`namespaces_allowed`, e.g. `["travel"]`). See the gated-memory model in [`../arch.md` §15.2](../arch.md#152-memory-service) and the memory build-vs-gate decision (operator-internal).
 - **Credentials** — fetch/store API keys for services in its on-chain scope only (§15.1).
-- **Other workers** (email, payment, audit, future home-IoT) — same shape: a deterministic gate (op + resource scope + limits + attribute constraints) over the worker's effect. The general model is the [universal gate pattern](../../docs/research/universal-gate-pattern.md).
+- **Other workers** (email, payment, audit, future home-IoT) — same shape: a deterministic gate (op + resource scope + limits + attribute constraints) over the worker's effect. The general model is the universal gate pattern (operator-internal).
 
 The agent never holds the KEK, never reaches S3 directly without scoped STS creds, and never sees other actors' data — isolation is enforced four ways (broker cap-mint, worker chain-verify, AWS IAM PrincipalTag, per-data-class buckets; [`../arch.md` §17.5](../arch.md#175-per-data-class-cap-token-binding-issue-90)).
 
@@ -53,4 +53,4 @@ The agent's `actor_omni` is the durable anchor for *everything* keyed to that ag
 - [`../arch.md` §10](../arch.md) — per-actor binding ceremonies (master init, agent bootstrap, device/K10 rotation)
 - [`../arch.md` §12](../arch.md) — sidecar daemon (K10/K11 custody, cap-mint)
 - Other operator playbooks in this wiki (sibling pages under `docs/wiki/`)
-- [memory build-vs-gate decision](../../docs/research/memory-build-vs-gate-decision.md) + [universal gate pattern](../../docs/research/universal-gate-pattern.md) — how an agent's capabilities are gated
+- memory build-vs-gate decision (operator-internal) + universal gate pattern (operator-internal) — how an agent's capabilities are gated

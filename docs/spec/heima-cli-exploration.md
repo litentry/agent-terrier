@@ -1,6 +1,6 @@
 # AgentKeys / Heima CLI — Exploration of a Blockchain-Backed 1Password CLI Replacement
 
-> **ARCHIVED** — This was the initial exploration document (2026-04-07). All questions below have been resolved. See [`plans/ceo-plan.md`](../plan/ceo-plan.md) for the v0 plan, and [`credential-backend-interface.md`](credential-backend-interface.md) for the trait spec.
+> **ARCHIVED** — This was the initial exploration document (2026-04-07). All questions below have been resolved. See `plans/ceo-plan.md` (operator-internal) for the v0 plan, and [`credential-backend-interface.md`](credential-backend-interface.md) for the trait spec.
 
 **Status:** archived exploration draft, 2026-04-07
 **Inputs:** [`lifeKnowledge/heima.md`](heima.md) (Heima capability analysis), 1Password CLI feature inventory (research summary), reference site https://agentvault-site.vercel.app/

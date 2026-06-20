@@ -11,7 +11,7 @@ Design handoff source: Claude Design — iii.dev-inspired aesthetic (IBM Plex Mo
 - **audit feed** — live SSE stream filterable by worker, click any row for full event detail
 - **anchor status** — countdown to next tier-2 batch + recent Merkle roots with explorer links
 - **workers** — five worker cards (memory, credentials, audit, email, payment) with per-actor usage share; click a card to see trust profile
-- **onboarding** — first-run wizard mirroring [`harness/v2-stage1-demo.sh`](../../harness/v2-stage1-demo.sh) steps (real WebAuthn lands in PR-B)
+- **onboarding** — first-run wizard mirroring `harness/v2-stage1-demo.sh` (operator-internal) steps (real WebAuthn lands in PR-B)
 - **onboarding/mobile** — stub for adding a second master device via QR pairing (real cross-device WebAuthn lands in M5)
 - **logo** — six Bedlington Terrier variants (profile, front-cute, cloud, monogram, seal, icon) for brand exploration
 
@@ -55,7 +55,7 @@ npm run typecheck    # tsc --noEmit
 
 ### `dev:stack` — single-terminal dev stack
 
-The entry script lives at the repo root: [`dev.sh`](../../dev.sh). It starts the daemon on `127.0.0.1:3114` and the Next.js dev server on `localhost:3113`, multiplexing both stdouts into one terminal with per-process color prefixes:
+The entry script is `dev.sh`, the repo's local dev launcher (operator-internal; not in the OSS mirror). It starts the daemon on `127.0.0.1:3114` and the Next.js dev server on `localhost:3113`, multiplexing both stdouts into one terminal with per-process color prefixes:
 
 ```
 [dev]    bold yellow   — the dev script's own status lines
@@ -73,7 +73,7 @@ cd apps/parent-control && npm run dev:stack   # from this app dir
 
 The script auto-rebuilds the daemon if any `.rs` source under `crates/agentkeys-daemon/` is newer than the existing binary, waits for `GET /healthz` before bringing up the UI, and pre-sets `NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon` + `NEXT_PUBLIC_AGENTKEYS_DAEMON_URL=http://127.0.0.1:3114` so the UI talks to the daemon by default. Ctrl-C cleans up both processes; stale processes on either port are killed before binding.
 
-Overrides via env: `UI_PORT`, `DAEMON_PORT`, `DAEMON_ORIGIN`, `DAEMON_RP_ID`, `DAEMON_RP_NAME` — see the comment block at the top of [`dev.sh`](../../dev.sh).
+Overrides via env: `UI_PORT`, `DAEMON_PORT`, `DAEMON_ORIGIN`, `DAEMON_RP_ID`, `DAEMON_RP_NAME` — see the comment block at the top of `dev.sh`, the repo's local dev launcher (operator-internal; not in the OSS mirror).
 
 ## Deploy (M1)
 

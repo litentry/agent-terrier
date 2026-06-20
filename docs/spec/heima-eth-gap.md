@@ -32,8 +32,8 @@ issue) are out of scope — they apply to eth too.
 - **Code:** [`agentkeys-bundler`](../../crates/agentkeys-bundler/src/server.rs)
   (`AGENTKEYS_HANDLEOPS_GAS_LIMIT`, default `4_000_000` — the broker's `accept_submit` now relays
   to the bundler per #230, which owns the pinned-gas legacy tx);
-  [`erc4337-register-master.sh`](../../harness/scripts/erc4337-register-master.sh)
-  (`--gas-limit 3000000`); [`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh)
+  `erc4337-register-master.sh` (operator-internal)
+  (`--gas-limit 3000000`); the paymaster-deploy helper `heima-deploy-paymaster.sh` (operator-internal)
   (`--gas-limit 2000000`).
 - **On eth:** `eth_estimateGas` works — drop the pin (or keep a generous cap; harmless).
 
@@ -50,9 +50,9 @@ issue) are out of scope — they apply to eth too.
 - **Code:** [`agentkeys-bundler`](../../crates/agentkeys-bundler/src/server.rs) (#230 — ALL chain
   reads are raw `serde_json::Value`, no alloy/ethers; it signs + RLP-encodes the legacy `handleOps`
   tx itself and reads `eth_getTransactionReceipt.status` directly, which is also WHY a stock
-  bundler/cast is not in the submit path anymore); [`erc4337-register-master.sh`](../../harness/scripts/erc4337-register-master.sh)
-  (`|| true` + `isActive`); [`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh)
-  (`|| true` + `cast code`); [`heima-bring-up.sh`](../../scripts/heima-bring-up.sh) (`cast code`
+  bundler/cast is not in the submit path anymore); `erc4337-register-master.sh` (operator-internal)
+  (`|| true` + `isActive`); the paymaster-deploy helper `heima-deploy-paymaster.sh` (operator-internal)
+  (`|| true` + `cast code`); the chain bring-up entry point `heima-bring-up.sh` (operator-internal) (`cast code`
   per deployed address).
 - **On eth:** receipts parse — trust the parsed receipt + exit code; the on-chain re-checks become
   belt-and-braces rather than load-bearing. `cast send --json` becomes usable again.
@@ -65,7 +65,7 @@ issue) are out of scope — they apply to eth too.
 - **Workaround:** deploy via **`cast send --create <init‖ctor-args>`** at the **deterministic
   CREATE address** (`cast compute-address <deployer> --nonce <n>`), `|| true` + `cast code` verify
   (so the mixHash quirk #2 doesn't matter either).
-- **Code:** [`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh). (The 4-core
+- **Code:** the paymaster-deploy helper `heima-deploy-paymaster.sh` (operator-internal). (The 4-core
   deploy uses `forge script`, which is gated separately by #4.)
 - **On eth:** `forge create` works; `cast send --create` is portable and keeps the
   no-estimation posture, so it's fine to leave it.
@@ -147,7 +147,7 @@ issue) are out of scope — they apply to eth too.
   `deposits` mapping still shows the escrowed amounts. Prod never hit this only because its
   EntryPoint balance is ~13 HEI across many deposits.
 - **Workaround:** keep a standing **native ED buffer** in every EntryPoint —
-  [`scripts/heima-deploy-erc4337.sh`](../../scripts/heima-deploy-erc4337.sh) ensures balance ≥
+  the ERC-4337 deploy helper `heima-deploy-erc4337.sh` (operator-internal) ensures balance ≥
   `ERC4337_EP_BUFFER_WEI` (default 1 HEI) on every run, sent via the EntryPoint's `receive()` (which
   credits the **deployer's own withdrawable deposit** — nothing is burned). Note the recreation
   quirk: topping up a reaped account can land ~the ED short of the sent value, so the top-up is
@@ -187,5 +187,5 @@ Lift each workaround in lock-step with the chain swap:
 
 - [AGENTS.md "Heima EVM compatibility level"](../../AGENTS.md) — the on-chain capability proofs.
 - [`deployed-contracts.md`](deployed-contracts.md) — the live contract set + the chain profile.
-- [`../plan/chain/erc4337-master-account.md`](../plan/chain/erc4337-master-account.md) — the
+- `../plan/chain/erc4337-master-account.md` (operator-internal) — the
   ERC-4337 master design (chain-agnostic).

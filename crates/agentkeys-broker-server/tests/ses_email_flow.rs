@@ -13,7 +13,7 @@
 //!
 //! ```bash
 //! awsp agentkeys-admin
-//! RUN_SES_INTEGRATION_TESTS=1 ACCOUNT_ID=429071895007 \
+//! RUN_SES_INTEGRATION_TESTS=1 ACCOUNT_ID=000000000000 \
 //!   cargo test -p agentkeys-broker-server --features auth-email-link \
 //!     --test ses_email_flow -- --ignored
 //! ```
@@ -38,7 +38,7 @@ use aws_sdk_s3::Client as S3Client;
 
 const ENV_GATE: &str = "RUN_SES_INTEGRATION_TESTS";
 const DEFAULT_REGION: &str = "us-east-1";
-const DEFAULT_MAIL_DOMAIN: &str = "bots.litentry.org";
+const DEFAULT_MAIL_DOMAIN: &str = "bots.example.invalid";
 const DEFAULT_FROM_LOCAL: &str = "noreply-test"; // → noreply-test@<MAIL_DOMAIN>
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const POLL_MAX_ATTEMPTS: usize = 12; // 60s total

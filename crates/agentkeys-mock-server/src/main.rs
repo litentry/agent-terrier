@@ -14,7 +14,7 @@ struct Args {
     /// When set, the server runs in signer-only mode: it serves ONLY
     /// `/dev/derive-address`, `/dev/sign-message`, and `/healthz`.
     /// All other endpoints (session, credential, audit, etc.) are absent.
-    /// Intended for the dedicated `signer.litentry.org` listener (:8092).
+    /// Intended for the dedicated `signer.example.invalid` listener (:8092).
     #[arg(long)]
     signer_only: bool,
 

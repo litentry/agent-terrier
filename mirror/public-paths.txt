@@ -1,0 +1,105 @@
+# mirror/public-paths.txt — the PUBLIC allowlist for the OSS mirror (#317).
+#
+# ─── MIRROR-REPO ANCHOR — the single source of truth for WHICH GitHub repo the OSS
+#     mirror IS. Renaming the public mirror is a ONE-line change here; the publish
+#     workflow reads it (env MIRROR_REMOTE still overrides for forks/testing). ─────
+# mirror-repo: litentry/agent-terrier
+#
+# This is the single source of truth for what ships to the open-source mirror.
+# Everything NOT matched here is PRIVATE (stripped by the filter). Consumed by:
+#   - scripts/check-public-boundary.sh  (the boundary gate: no public file may
+#     reference a private path or carry a real operational value)
+#   - the filter-repo mirror-publish workflow (Phase 3d) — generates the
+#     --paths-from-file allowlist from this file.
+#
+# Syntax (one rule per line; '#' comments; blank lines ignored):
+#   foo/bar/      a directory prefix — keeps everything under it
+#   foo/bar.ext   an exact file
+#   glob:PATTERN  a shell glob (matched against the full repo-relative path)
+#
+# Keep this list and check-public-boundary.sh's PRIVATE patterns in sync: a path
+# is PUBLIC iff it matches a rule here AND does not match a PRIVATE override below.
+
+# ─── Auditable trust surface + contribution surface (all crates) ──────────────
+crates/
+
+# ─── Provisioner (service signup/scraper contribution surface) ────────────────
+provisioner-scripts/
+
+# ─── Firmware (hardware integrators) ──────────────────────────────────────────
+firmware/
+
+# ─── Web app (reference parent-control UI; no secrets; it's the ts-rs codegen
+#     target, so the public crates depend on it shipping) ─────────────────────
+apps/parent-control/
+
+# ─── Public docs (arch SoT + spec/research/wiki + the no-secrets operator refs) ─
+docs/arch.md
+docs/agent-iam-strategy.md
+docs/contracts.md
+docs/dev-setup.md
+docs/user-manual.md
+docs/spec/
+docs/wiki/
+# docs/research/ is PRIVATE (competitive/China-market/hardware research) — omitted
+# from the allowlist. The hardware/volcano cluster lives in docs/hardware/ (also
+# omitted → private). Both stay out of the mirror.
+
+# ─── Harness: fixtures + authoring contract are public; the demo ORCHESTRATORS
+#     (which drive real deploys against private infra) are PRIVATE — see the
+#     PRIVATE override in check-public-boundary.sh. harness/AGENTS.md (the
+#     authoring contract for those private orchestrators) is also PRIVATE. ──────
+harness/fixtures/
+
+# ─── CI quality-gate scripts the public mirror's CI + contributors run ────────
+glob:scripts/check-*.sh
+glob:scripts/verify-*.sh
+glob:scripts/lint-*.sh
+
+# ─── Public CI workflows (build / test / wasm / contracts-sync / wiki / mcp /
+#     LLM review). harness-ci.yml + pm-auto-archive are PRIVATE (deploy
+#     orchestration + secrets + pm) — PRIVATE override in the gate. ─────────────
+.github/workflows/contracts-sync.yml
+.github/workflows/coverage.yml
+.github/workflows/wiki-lint.yml
+.github/workflows/publish-wiki.yml
+.github/workflows/mcp-server.yml
+.github/workflows/claude.yml
+.github/workflows/mirror-boundary.yml
+
+# ─── Root: workspace + public agent context + the deploy-shape env template ───
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+rustfmt.toml
+README.md
+LICENSE
+AGENTS.md
+CLAUDE.md
+.gitignore
+.gitmodules
+scripts/operator-workstation.env.example
+
+# ─── The manifest itself: the public boundary gate (scripts/check-public-boundary.sh)
+#     reads it, so it must ship. NOT the mirror/ dir prefix — a future
+#     mirror/publish-mirror.sh stays private. ────────────────────────────────────
+mirror/public-paths.txt
+
+# ─── PRIVATE OVERRIDES (deny:) ────────────────────────────────────────────────
+# Kept OUT of the mirror even though an allow rule above (a blanket docs/research/
+# etc.) would otherwise include them. For competitive / region-specific /
+# commercial-strategy docs that live in an otherwise-public dir. deny: wins over
+# every allow rule. Accepts a file, a dir prefix (trailing /), or glob:PATTERN.
+# deny: = a private file/dir inside an otherwise-ALLOWED dir (crates/, docs/spec/).
+# (docs/research/, docs/hardware/, docs/volcano/, docs/plan/, docs/market/, and a
+# future top-level www/ are already PRIVATE by allowlist-omission — no deny needed.)
+deny:docs/spec/business-pitch.md
+# The volcano TUI crate (pre-emptive — when crates/agentkeys-volcano-probe is
+# created). It's a workspace member, so publish-mirror.sh ALSO strips its line
+# from the root Cargo.toml `members` (else the mirror build breaks on a missing
+# member). Same applies to any future private crate.
+deny:crates/agentkeys-volcano-probe/
+# The operator-laptop fleet console TUI (#279) — devops tooling, not part of the
+# public protocol/SDK. Leaf binary (no reverse deps); publish-mirror.sh strips its
+# root-Cargo.toml `members` line so the mirror workspace stays buildable.
+deny:crates/agentkeys-fleet/

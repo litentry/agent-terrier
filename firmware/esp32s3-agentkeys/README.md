@@ -48,7 +48,7 @@ Config keys:
 |---|---|---|
 | `wifi_ssid` | (must set) | secrets.h |
 | `wifi_password` | (must set) | secrets.h |
-| `sandbox_url` | `https://demo.aiosandbox.litentry.org/v1/chat` | config.h |
+| `sandbox_url` | `https://demo.aiosandbox.example.invalid/v1/chat` | config.h |
 | `actor_token` | `demo_token_O_demo_001_changeme` | config.h |
 
 ## Troubleshooting
@@ -95,6 +95,6 @@ firmware/esp32s3-agentkeys/
 
 ## Related
 
-- **Plan**: [`docs/plan/issue-103-aiosandbox-hermes-esp32-demo.md`](../../docs/plan/issue-103-aiosandbox-hermes-esp32-demo.md)
+- **Plan**: the issue-103 aiosandbox/Hermes ESP32 demo plan (operator-internal; not in the OSS mirror)
 - **Sandbox-side runbook**: TBD (issue #103 step 12)
 - **AgentKeys arch**: [`docs/arch.md`](../../docs/arch.md)

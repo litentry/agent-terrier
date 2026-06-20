@@ -85,7 +85,7 @@ Dual-licensed under **MIT OR Apache-2.0**, at your choice.
 | [`AGENTS.md`](AGENTS.md) | Project-specific rules: docs layout, /create-pr workflow in worktrees, terminology-source-of-truth, branch push policy, idempotent-remote-setup invariants, runbook-fix-fold-back policy. **Read first, every session.** |
 | [`docs/arch.md`](docs/arch.md) | Single source of truth for component inventory (K1–K11), trust boundaries, HDKD actor tree, per-actor binding ceremonies. When the per-doc detail outgrows arch.md, link outward — never duplicate. |
 | [`docs/archived/development-stages-v2-2026-04.md`](docs/archived/development-stages-v2-2026-04.md) | The 8-stage build plan (archived; superseded by the milestone roadmap below). Each stage has a `harness/stage-N-done.sh` gate; never self-grade — run the gate. |
-| [`docs/plan/execution-plan.md`](docs/plan/execution-plan.md) | Orchestration runbook (ralph, team, ultraqa workflows). |
+| `docs/plan/execution-plan.md` (operator-internal; not in the OSS mirror) | Orchestration runbook (ralph, team, ultraqa workflows). |
 | [`docs/spec/broker-and-operator-dev-guide.md`](docs/spec/broker-and-operator-dev-guide.md) | Inner edit-build-test loop for broker + operator-side code. Use this before suggesting changes to the broker's run-time behavior. |
 
 ### Hard rules (from AGENTS.md)

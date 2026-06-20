@@ -14,7 +14,7 @@
 #endif
 
 // --- Demo endpoint defaults (override via NVS or secrets.h) ---
-#define DEFAULT_SANDBOX_URL  "https://demo.aiosandbox.litentry.org/v1/chat"
+#define DEFAULT_SANDBOX_URL  "https://demo.aiosandbox.example.invalid/v1/chat"
 #define DEFAULT_ACTOR_TOKEN  "demo_token_O_demo_001_changeme"
 
 // --- GPIO assignments (ESP32-S3-DevKitC-1) ---
