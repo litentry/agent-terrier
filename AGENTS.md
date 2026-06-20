@@ -8,11 +8,12 @@ See `docs/plan/execution-plan.md` for the orchestration runbook (ralph, team, ul
 Do not read folder `docs/archived`
 
 ## Docs layout (lean)
-`docs/arch.md` is the single source of truth — brief, indexes every detail via outward links. Five sub-folders, each one audience:
+`docs/arch.md` is the single source of truth — brief, indexes every detail via outward links. Six sub-folders, each one audience:
 - `docs/spec/` — developers + coordinating colleagues (cloud, CI, blockchain, signer-protocol, threats).
 - `docs/plan/` — agent-authored plans BEFORE code lands; promote to `spec/` when shipped, else archive.
 - `docs/research/` — third-party context (Heima, EIP-191/712, aiosandbox, agent memory).
 - `docs/wiki/` — end users + hardware integrators; mirrored to GitHub Wiki by [`publish-wiki.yml`](.github/workflows/publish-wiki.yml).
+- `docs/market/` — investor / BD / marketing collateral (pitch deck, website content, positioning); audience = investors / partners / marketing. Not indexed from arch.md (not architectural).
 - `docs/archived/` — superseded files; never linked from arch.md, never read in normal dev. Move stale files here, don't delete. Run the `agentkeys-docs` skill to audit + compact.
 
 **User-facing instructions** — every behavior/caveat a user would notice (e.g. `agentkeys wire` taking over the runtime's `hooks:` block) goes in [`docs/user-manual.md`](docs/user-manual.md), the single home for user-aware instructions.
