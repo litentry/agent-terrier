@@ -119,13 +119,13 @@ pub struct UiBridgeState {
     pub signer_url: Option<String>,
     /// Chain id for the managed-wallet attestation (mirrors `--init-chain-id`).
     pub chain_id: u64,
-    /// W3 real-memory chain — the memory worker base URL (e.g. `https://memory.litentry.org`).
+    /// W3 real-memory chain — the memory worker base URL (e.g. `https://memory.example.invalid`).
     /// `None` ⇒ master-memory plant/list fall back to the in-memory store (dev/no-infra).
     pub memory_url: Option<String>,
     /// Per-actor memory IAM role ARN for the STS relay (`MEMORY_ROLE_ARN`). Required
     /// alongside `memory_url` for the real chain; a partial config fails loud (issue #90 discipline).
     pub memory_role_arn: Option<String>,
-    /// #201 config data class — the config worker base URL (e.g. `https://config.litentry.org`).
+    /// #201 config data class — the config worker base URL (e.g. `https://config.example.invalid`).
     /// `None` ⇒ the memory-types taxonomy is read/written from the in-memory fallback (dev/no-infra),
     /// and the master-memory list derives categories from the cache instead of the durable,
     /// master-only Config-class taxonomy object (`config/memory-taxonomy.enc`).
@@ -8992,7 +8992,7 @@ mod tests {
                 workers: vec![ApiWorker {
                     id: "memory".into(),
                     title: "memory-service".into(),
-                    host: "memory.litentry.org".into(),
+                    host: "memory.example.invalid".into(),
                     desc: "".into(),
                     calls_today: 100,
                     calls_hour: 10,

@@ -7,7 +7,7 @@ await page.goto('https://api-dashboard.search.brave.com/register', { waitUntil: 
 await page.waitForTimeout(1500);
 
 // Fill form minimally
-const email = `bot-pow-${Date.now()}@bots.litentry.org`;
+const email = `bot-pow-${Date.now()}@bots.example.invalid`;
 const pw = 'PowTest-' + Date.now();
 await page.fill('#email', email);
 await page.fill('#password', pw);

@@ -15,7 +15,7 @@ use state::SharedState;
 
 /// Signer-only router: serves `/dev/*` + `/healthz` exclusively.
 /// Used when `--signer-only` is set, so that the dedicated signer listener
-/// (`signer.litentry.org` → :8092) never accidentally serves session/credential
+/// (`signer.example.invalid` → :8092) never accidentally serves session/credential
 /// endpoints. JWT bearer auth is enforced when `state.broker_session_pubkey`
 /// is set.
 pub fn create_signer_router(state: SharedState) -> Router {

@@ -52,7 +52,7 @@ pub struct WebCore {
 
 #[wasm_bindgen]
 impl WebCore {
-    /// `new WebCore("https://broker.litentry.org")`.
+    /// `new WebCore("https://broker.example.invalid")`.
     #[wasm_bindgen(constructor)]
     pub fn new(broker_base_url: String) -> WebCore {
         WebCore {

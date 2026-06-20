@@ -35,7 +35,7 @@ pub struct AuditClient {
 
 impl AuditClient {
     /// Construct with a worker base URL (no trailing slash). Defaults to
-    /// `$AGENTKEYS_AUDIT_WORKER_URL` then `https://audit.litentry.org`
+    /// `$AGENTKEYS_AUDIT_WORKER_URL` then `https://audit.example.invalid`
     /// — operators override per deployment.
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
@@ -46,7 +46,7 @@ impl AuditClient {
 
     pub fn from_env() -> Self {
         let url = std::env::var("AGENTKEYS_AUDIT_WORKER_URL")
-            .unwrap_or_else(|_| "https://audit.litentry.org".to_string());
+            .unwrap_or_else(|_| "https://audit.example.invalid".to_string());
         Self::new(url)
     }
 

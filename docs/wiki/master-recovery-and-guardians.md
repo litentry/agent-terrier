@@ -8,7 +8,7 @@ not merely *audited* on-chain. The chain is the executor, not the bookkeeper.
 > does and does NOT restore (control vs. secrets), the dev escape hatch, and why a
 > related hot-path control — spend caps — is deliberately enforced OFF-chain. Deep
 > spec: [`arch.md` §11](../arch.md) and the ERC-4337 master plan
-> [`docs/plan/chain/erc4337-master-account.md`](../plan/chain/erc4337-master-account.md).
+> `docs/plan/chain/erc4337-master-account.md` (operator-internal).
 
 ## What recovery is (and is not)
 
@@ -35,9 +35,9 @@ This is the distinction that matters: scope grants, agent binding, master regist
 2. **Set the threshold** — `recoveryThreshold` is per-operator (default 1; the onboarding flow prompts you to bump to 2 when you add a third device). Threshold M with N guardians = an **M-of-N** quorum.
 
 Operator ceremonies (K11-gated):
-[`heima-set-recovery-threshold.sh`](../../harness/scripts/heima-set-recovery-threshold.sh) sets the quorum;
-[`heima-recovery.sh`](../../harness/scripts/heima-recovery.sh) drives the M-of-N master-device revoke + rotate;
-[`heima-register-spare-master.sh`](../../harness/scripts/heima-register-spare-master.sh) registers a third device to exercise the quorum end-to-end.
+`heima-set-recovery-threshold.sh` (operator-internal) sets the quorum;
+`heima-recovery.sh` (operator-internal) drives the M-of-N master-device revoke + rotate;
+`heima-register-spare-master.sh` (operator-internal) registers a third device to exercise the quorum end-to-end.
 
 ## The recovery timeline (you lose your laptop)
 
@@ -58,7 +58,7 @@ This is the one boundary to internalize:
 
 ## The dev escape hatch (NOT recovery): reset master
 
-[`heima-reset-master.sh`](../../scripts/heima-reset-master.sh) (`SidecarRegistry.resetMaster`, behind the daemon's *reset master* button) is a **deployer-gated dev escape** — not Touch ID, not a guardian quorum. It exists because first-master registration makes `operatorMasterWallet` immutable, so a lost passkey with **no guardians configured** is otherwise unrecoverable. It also tears down the whole fleet (declines pending pairings, revokes every agent device, clears local state). In production this would be gated on guardian recovery (`P256Account.recover`) instead of a deployer key. See the *reset master* note in [`../user-manual.md`](../user-manual.md).
+The reset-master helper (operator-internal) (`SidecarRegistry.resetMaster`, behind the daemon's *reset master* button) is a **deployer-gated dev escape** — not Touch ID, not a guardian quorum. It exists because first-master registration makes `operatorMasterWallet` immutable, so a lost passkey with **no guardians configured** is otherwise unrecoverable. It also tears down the whole fleet (declines pending pairings, revokes every agent device, clears local state). In production this would be gated on guardian recovery (`P256Account.recover`) instead of a deployer key. See the *reset master* note in [`../user-manual.md`](../user-manual.md).
 
 ## Why spend caps are enforced OFF-chain (the design contrast)
 
@@ -79,4 +79,4 @@ A future enhancement could add an on-chain spend ledger (a `recordSpend` + rolli
 - [`./key-security.md`](./key-security.md) — the two-tier secret-storage model and why the KEK is TEE-held.
 - [`./blockchain-tee-architecture.md`](./blockchain-tee-architecture.md) — how the chain and the TEE divide responsibility.
 - [`./policy-scope-namespace.md`](./policy-scope-namespace.md) — scope, services, and spend limits.
-- Plan: [`docs/plan/chain/erc4337-master-account.md`](../plan/chain/erc4337-master-account.md) (the P256Account + guardian-recovery design, #164 E5).
+- Plan: `docs/plan/chain/erc4337-master-account.md` (operator-internal) (the P256Account + guardian-recovery design, #164 E5).

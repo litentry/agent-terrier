@@ -56,7 +56,7 @@ const CDP_URL = process.env.CDP_URL ?? "http://localhost:9222";
 // working: in that mode the email backend polls the legacy `inbound/`
 // (admin profile creds required).
 const USER_WALLET = (process.env.AGENTKEYS_USER_WALLET ?? "").toLowerCase();
-const MAIL_DOMAIN = process.env.AGENTKEYS_MAIL_DOMAIN ?? "bots.litentry.org";
+const MAIL_DOMAIN = process.env.AGENTKEYS_MAIL_DOMAIN ?? "bots.example.invalid";
 const SIGNUP_EMAIL =
   USER_WALLET !== ""
     ? `or-${USER_WALLET}-${Math.floor(Date.now() / 1000)}@${MAIL_DOMAIN}`

@@ -36,8 +36,8 @@ Two things the script intentionally does **not** do:
 
 | Script | Audience | What it does |
 |---|---|---|
-| [`scripts/setup-dev-env.sh`](../scripts/setup-dev-env.sh) | Anyone — fresh dev machine | Installs every prerequisite above, builds workspace, runs smoke tests. (The one you just ran.) |
-| [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) | Operator — fresh broker host | Provisions a Linux host into a running broker: builds binaries, creates the `agentkeys` system user, drops systemd units, optional nginx + Let's Encrypt. Idempotent. See [`stage7-wip.md` "Remote deployment"](./stage7-wip.md) for the manual long-form walk-through. |
+| `scripts/setup-dev-env.sh` (operator-internal) | Anyone — fresh dev machine | Installs every prerequisite above, builds workspace, runs smoke tests. (The one you just ran.) |
+| the broker-host bring-up entry point (operator-internal) | Operator — fresh broker host | Provisions a Linux host into a running broker: builds binaries, creates the `agentkeys` system user, drops systemd units, optional nginx + Let's Encrypt. Idempotent. See [`stage7-wip.md` "Remote deployment"](./stage7-wip.md) for the manual long-form walk-through. |
 
 ### Manual matrix (if you'd rather pick tools yourself)
 
@@ -155,7 +155,7 @@ You operate the AgentKeys infrastructure for a team. You hold the long-lived `ag
 
 ### 5.1 One-time: AWS setup
 
-Run through [`cloud-bootstrap.md`](./cloud-bootstrap.md) §1–§3 once per AWS account. Afterwards you'll have:
+Run through the internal cloud-bootstrap operator runbook (`operator-docs/`, not in the OSS mirror) §1–§3 once per AWS account. Afterwards you'll have:
 
 - SES domain identity verified on `bots.litentry.org` (or your substitute via `AGENTKEYS_EMAIL_DOMAIN`)
 - `agentkeys-daemon` IAM user with `sts:AssumeRole` only
@@ -163,7 +163,7 @@ Run through [`cloud-bootstrap.md`](./cloud-bootstrap.md) §1–§3 once per AWS 
 - S3 bucket `agentkeys-mail-<ACCOUNT_ID>` with receipt rule writing inbound to `inbound/`
 - Route 53 records: three DKIM CNAMEs, MX, SPF, DMARC
 
-Manage the daemon user's long-lived AWS keys via a **named profile** in `~/.aws/credentials` (mode 0600). The broker uses the AWS SDK's default credential chain — `AWS_PROFILE` (set by `awsp` or your shell), the shared credentials file, or an EC2 instance profile via IMDS. **No long-lived AWS keys live in env vars.** See [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) for the bring-up + credential wiring; historical credential commentary archived at [`archived/operator-runbook-stage7-2026-04.md`](./archived/operator-runbook-stage7-2026-04.md).
+Manage the daemon user's long-lived AWS keys via a **named profile** in `~/.aws/credentials` (mode 0600). The broker uses the AWS SDK's default credential chain — `AWS_PROFILE` (set by `awsp` or your shell), the shared credentials file, or an EC2 instance profile via IMDS. **No long-lived AWS keys live in env vars.** See the broker-host bring-up entry point (operator-internal) for the bring-up + credential wiring; historical credential commentary archived at [`archived/operator-runbook-stage7-2026-04.md`](./archived/operator-runbook-stage7-2026-04.md).
 
 ### 5.2 Run the broker server
 
@@ -191,8 +191,8 @@ The broker:
 3. Returns 1-hour temp creds to the caller.
 4. Logs every mint to `BROKER_AUDIT_DB_PATH` (SQLite, one row per mint).
 
-For runbook detail (start / supervise / rotate / monitor / migrate to hosted), see [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) (idempotent; the canonical entry point).
-For the automated remote-host bootstrap, see [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh).
+For runbook detail (start / supervise / rotate / monitor / migrate to hosted), see the broker-host bring-up entry point (operator-internal; idempotent; the canonical entry point).
+For the automated remote-host bootstrap, see the broker-host bring-up entry point (operator-internal).
 
 ### 5.3 Hand off bearer tokens to your developers
 
@@ -260,20 +260,20 @@ The stage-done script is the authoritative evaluator — never self-grade. If it
 | Mock server won't bind port 8090 | Stale process | `lsof -i :8090`, kill, restart |
 | Broker won't bind port 8091 | Stale process | `lsof -i :8091`, kill, restart |
 | `agentkeys init` double-prompts on macOS | Known keyring-rs update path | Filed under Stage 9 "idempotent init" item |
-| `bot-<ts>@bots.litentry.org` email never arrives | DNS / MX / SES receipt-rule misconfigured, or bucket missing write perm | `aws s3 ls s3://$BUCKET/inbound/ --recursive` — if empty >60s after signup, re-verify [`cloud-bootstrap.md` §1–§2](./cloud-bootstrap.md#1-domain--dns) |
+| `bot-<ts>@bots.litentry.org` email never arrives | DNS / MX / SES receipt-rule misconfigured, or bucket missing write perm | `aws s3 ls s3://$BUCKET/inbound/ --recursive` — if empty >60s after signup, re-verify the domain/DNS steps (§1–§2) in the internal cloud-bootstrap operator runbook (`operator-docs/`, not in the OSS mirror) |
 | `MalformedPolicyDocument: ... failed legacy parsing` during operator setup | Heredoc-generated JSON lost a `$VAR:r` / `$VAR:h` to a zsh modifier | Use the `jq -n --arg … '{…}'` pattern — never heredoc JSON into AWS calls |
 
 ## 9. When a provider changes their flow
 
 Providers add, remove, and reorder signup steps. When a deterministic scraper breaks, diagnose with the `/agentkeys-workflow-collection` skill — it drives a real Chrome session via `chrome-devtools-mcp` to produce a diff-ready transcript. That transcript is what feeds back into the scraper's pattern library.
 
-The longer-term plan (Stage 5b → folded into M2 vendor wedge) is to detect drift automatically from telemetry and hand MCP-capable callers a fallback that their own LLM can drive — details in [`plan/milestones-roadmap.md`](./plan/milestones-roadmap.md) § M2.
+The longer-term plan (Stage 5b → folded into M2 vendor wedge) is to detect drift automatically from telemetry and hand MCP-capable callers a fallback that their own LLM can drive — details in `plan/milestones-roadmap.md` (operator-internal) § M2.
 
 ## 10. Further reading
 
-- [`plan/milestones-roadmap.md`](./plan/milestones-roadmap.md) — M1-M7 roadmap (replaces the archived v1/v2 stage plan)
-- [`cloud-bootstrap.md`](./cloud-bootstrap.md) — one-time AWS infra (DNS, SES, S3, IAM, OIDC federation)
-- [`../scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) — idempotent broker bring-up + supervise + rotate
+- `plan/milestones-roadmap.md` (operator-internal) — M1-M7 roadmap (replaces the archived v1/v2 stage plan)
+- the internal cloud-bootstrap operator runbook (`operator-docs/`, not in the OSS mirror) — one-time AWS infra (DNS, SES, S3, IAM, OIDC federation)
+- the broker-host bring-up entry point (operator-internal) — idempotent broker bring-up + supervise + rotate
 - [`spec/credential-backend-interface.md`](./spec/credential-backend-interface.md) — 15-method trait contract
 - [`spec/ses-email-architecture.md`](./spec/ses-email-architecture.md) — Stage 6 email pipeline deep-dive
 - [`spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) — what the broker is defending against

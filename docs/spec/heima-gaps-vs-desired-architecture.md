@@ -21,7 +21,7 @@ Related docs:
 - [`architecture.md`](architecture.md) — canonical broker / signer / daemon / key-flow doc (post-issue-#74).
 - [`signer-protocol.md`](signer-protocol.md) — `/dev/*` wire contract.
 - [`plans/issue-74-dev-key-service-plan.md`](../archived/issue-74-dev-key-service-plan.md) — dev_key_service signer landed in PR #75.
-- [`plans/issue-74-step-1c-device-key-auth.md`](../plan/issue-74-step-1c-device-key-auth.md) — device-key auth on `/dev/*`, planned.
+- `plans/issue-74-step-1c-device-key-auth.md` (operator-internal) — device-key auth on `/dev/*`, planned.
 - [`docs/wiki/blockchain-tee-architecture.md`](../wiki/blockchain-tee-architecture.md) — canonical desired architecture (four rules).
 - [`docs/wiki/key-security.md`](../wiki/key-security.md) — TEE key security model.
 - [`development-stages-v2-2026-04.md`](../archived/development-stages-v2-2026-04.md) — stage roadmap (archived); this gap list is the critical path for Stage 6 and Stage 7.
@@ -42,7 +42,7 @@ The table below is the at-a-glance answer to "where do we stand?" Per-gap detail
 | 8 | `pallet-oidc-pubkeys` (URL-hijack defense) | **GAP — unchanged** | Stage 7b; depends on §3 having TEE-attested rather than on-disk keypair. |
 | 9 | `pallet-enclave-successors` (MRSIGNER governance) | **GAP — unchanged** | Required only when MRSIGNER rotation lands; not a v0.1 blocker. |
 | 10 | **(NEW)** Signer-edge contract for the per-user wallet key | **PARTIAL — wire shape pinned, dev-stage backend** | `signer-protocol.md` v0.1 ships the wire contract; `dev_key_service` is the dev-stage HKDF backend; issue #74 step 2 (TEE worker) closes the trust gap. |
-| 11 | **(NEW)** Per-request crypto auth on the signer edge | **PLANNED** | Heima's `ClientAuth::EvmSiweSigned` / `BackendSigned` tier model is the prior art. Issue #74 step 1c (device-key auth) is a strict superset — see [`plans/issue-74-step-1c-device-key-auth.md`](../plan/issue-74-step-1c-device-key-auth.md). |
+| 11 | **(NEW)** Per-request crypto auth on the signer edge | **PLANNED** | Heima's `ClientAuth::EvmSiweSigned` / `BackendSigned` tier model is the prior art. Issue #74 step 1c (device-key auth) is a strict superset — see `plans/issue-74-step-1c-device-key-auth.md` (operator-internal). |
 | 12 | (tracking metadata) | n/a | Resolution log lives in §12 below. |
 
 ---
@@ -423,7 +423,7 @@ as a normal config value.
 
 ## 11. Gap (NEW): per-request crypto auth on the signer edge
 
-**Status:** PLANNED — design in [`plans/issue-74-step-1c-device-key-auth.md`](../plan/issue-74-step-1c-device-key-auth.md); CEO review pending.
+**Status:** PLANNED — design in `plans/issue-74-step-1c-device-key-auth.md` (operator-internal); CEO review pending.
 
 ### Current
 
@@ -438,7 +438,7 @@ omni at the signer.
 
 Heima already faced this design question. Its `ClientAuth` enum (in
 `tee-worker/omni-executor/primitives/src/auth.rs:212-227` per
-[`docs/research/option-a-port-dexs-backend.md`](../research/option-a-port-dexs-backend.md))
+`docs/research/option-a-port-dexs-backend.md` (operator-internal))
 classifies operations into three tiers:
 
 - `JwtBearer` — static long-lived TEE-RSA JWT (low-stakes reads).

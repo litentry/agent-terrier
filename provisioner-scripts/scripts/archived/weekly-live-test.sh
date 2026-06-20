@@ -16,7 +16,7 @@
 #
 # Every test run:
 #   1. resets Chrome to a fresh throwaway profile
-#   2. mints a fresh bot-$(date +%s)@bots.litentry.org signup email
+#   2. mints a fresh bot-$(date +%s)@bots.example.invalid signup email
 #   3. runs the scraper, captures JSON events to /tmp/
 #   4. records pass/fail based on {"type":"success"} presence
 #
@@ -56,7 +56,7 @@ run_scraper() {
   bash "$RESET_CHROME" 2>&1 | tail -2
 
   # Fresh signup email per run (SES-S3 backend is configured by stage6-demo-env.sh).
-  export AGENTKEYS_SIGNUP_EMAIL="bot-$(date +%s)@${DOMAIN:-bots.litentry.org}"
+  export AGENTKEYS_SIGNUP_EMAIL="bot-$(date +%s)@${DOMAIN:-bots.example.invalid}"
   # stage6-demo-env.sh exports AGENTKEYS_SIGNUP_PASSWORD; keep it.
   if [ -z "${AGENTKEYS_SIGNUP_PASSWORD:-}" ]; then
     echo "error: AGENTKEYS_SIGNUP_PASSWORD not set (stage6-demo-env.sh not sourced)" >&2

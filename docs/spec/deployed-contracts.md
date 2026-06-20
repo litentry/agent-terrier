@@ -6,14 +6,14 @@ The **human registry** for AgentKeys' on-chain contracts: design/version notes, 
 
 | Record | Single source of truth | Notes |
 |---|---|---|
-| **Prod contract addresses** + deployed set version | chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) — `.contracts[]` + `contract_set_version` | versioned + compiled in (`include_str!`) — broker/daemon/UI serve it; rewritten by `heima-bring-up.sh` step 6b on every deploy. Mirrored to [`scripts/operator-workstation.env`](../../scripts/operator-workstation.env) (shell consumption, step 6); `bash scripts/check-deployed-contracts-sync.sh` verifies the mirror. |
-| **Test contract addresses** (parallel set) | [`scripts/operator-workstation.test.env`](../../scripts/operator-workstation.test.env) (`*_ADDRESS_HEIMA`) — **authoritative** | the `TEST_*` GitHub secrets are a CI-consumable **copy**, synced one-way env→secrets by [`scripts/ci-set-github-secrets.sh`](../../scripts/ci-set-github-secrets.sh) (re-run it after any test redeploy). Never in the chain profile — it records the prod set only. |
-| **Wallet (EOA) addresses** | the env files (`*_DEPLOYER_ADDR_HEIMA`, `BROKER_SPONSOR_SIGNER_ADDRESS_HEIMA`) | key custody tiers + funding map: [`chain-setup.md` §Wallets](../chain-setup.md#wallets-contracts--funding-map-prod--test) |
+| **Prod contract addresses** + deployed set version | chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) — `.contracts[]` + `contract_set_version` | versioned + compiled in (`include_str!`) — broker/daemon/UI serve it; rewritten by the chain bring-up entry point (operator-internal) on every deploy. Mirrored to `scripts/operator-workstation.env` (the operator-internal shell mirror); `bash scripts/check-deployed-contracts-sync.sh` verifies the mirror. |
+| **Test contract addresses** (parallel set) | `scripts/operator-workstation.test.env` (`*_ADDRESS_HEIMA`, operator-internal) — **authoritative** | the `TEST_*` GitHub secrets are a CI-consumable **copy**, synced one-way env→secrets by the CI-secrets sync helper (operator-internal; re-run it after any test redeploy). Never in the chain profile — it records the prod set only. |
+| **Wallet (EOA) addresses** | the env files (`*_DEPLOYER_ADDR_HEIMA`, `BROKER_SPONSOR_SIGNER_ADDRESS_HEIMA`) | key custody tiers + funding map: the chain-setup operator runbook §Wallets (operator-internal) |
 | **Human prose** | this doc | ABI/cutover/version notes ONLY — no addresses |
 
 **No doc may re-write a literal address that one of those sources owns** — link to the source and give a resolve command instead. CI-enforced: the doc-literal gate in [`scripts/check-deployed-contracts-sync.sh`](../../scripts/check-deployed-contracts-sync.sh) (workflow [`contracts-sync.yml`](../../.github/workflows/contracts-sync.yml)) fails any tracked `.md` containing an address currently in a chain profile. Historical/orphaned addresses pass naturally — once a redeploy moves an address out of the profile, its literal is no longer banned.
 
-Indexed from [`arch.md`](../arch.md) §5. (`docs/contracts.md` is a redirect to this file.) The operator-facing **wallet/funding map** — key custody tiers, prod-vs-test sets side by side, the funding-flow diagram, "which wallet do I fund" — is [`chain-setup.md` §Wallets](../chain-setup.md#wallets-contracts--funding-map-prod--test); update it in the same commit as any redeploy/rotation recorded here.
+Indexed from [`arch.md`](../arch.md) §5. (`docs/contracts.md` is a redirect to this file.) The operator-facing **wallet/funding map** — key custody tiers, prod-vs-test sets side by side, the funding-flow diagram, "which wallet do I fund" — is the chain-setup operator runbook §Wallets (operator-internal); update it in the same commit as any redeploy/rotation recorded here.
 
 ---
 
@@ -24,9 +24,9 @@ Two distinct EVM accounts deploy AgentKeys contracts. They are **different keys*
 | Role | Deployer EVM address (resolve — the env file is the SoT) | Key location |
 |---|---|---|
 | **Local / prod deploy** | `grep ^DEPLOYER_ADDR_HEIMA scripts/operator-workstation.env` | `$HEIMA_DEPLOYER_KEY_FILE` (default `~/.agentkeys/heima-deployer.key`, never committed) |
-| **Test / CI deploy** | `grep ^DEPLOYER_ADDR_HEIMA scripts/operator-workstation.test.env` | `~/.agentkeys/heima-deployer-test.key` (operator-provided; wired into the `TEST_HEIMA_DEPLOYER_KEY` GitHub secret via [`scripts/ci-set-github-secrets.sh`](../../scripts/ci-set-github-secrets.sh)) |
+| **Test / CI deploy** | `grep ^DEPLOYER_ADDR_HEIMA scripts/operator-workstation.test.env` | `~/.agentkeys/heima-deployer-test.key` (operator-provided; wired into the `TEST_HEIMA_DEPLOYER_KEY` GitHub secret via the CI-secrets sync helper (operator-internal)) |
 
-- The prod deployer's Substrate twin (SS58 prefix 31) is how the EVM side gets funded — derive it from the EVM address via [`scripts/evm-to-substrate-address.mjs`](../../scripts/evm-to-substrate-address.mjs).
+- The prod deployer's Substrate twin (SS58 prefix 31) is how the EVM side gets funded — derive it from the EVM address via the EVM-to-Substrate address helper (operator-internal).
 - Heima Paseo testnet uses its own deployer (`HEIMA_PASEO_DEPLOYER_ADDR` in `operator-workstation.env`) — currently unused (chain halted, see below).
 
 ---
@@ -58,20 +58,20 @@ The set: the 4 stage-1 cores `AgentKeysScope` / `SidecarRegistry` / `K3EpochCoun
 
 ### ERC-4337 master infra (#164/#225, prod deployer — LIVE master-auth since the 2026-06-08 cutover)
 
-The P-256 smart-account master plumbing ([plan](../plan/chain/erc4337-master-account.md)), all in the chain profile's `.contracts[]`:
+The P-256 smart-account master plumbing (plan (operator-internal)), all in the chain profile's `.contracts[]`:
 
 - `EntryPoint` (ERC-4337 v0.7, deployed 2026-06-02) — canonical eth-infinitism v0.7 bytecode; landed a UserOp end-to-end in the spike.
 - `P256AccountFactory` — CREATE2 factory; `constructor(entryPoint, k11Verifier)`, wired to the live `K11Verifier`; mainnet CREATE2 determinism smoke-verified.
-- `VerifyingPaymaster` (#225) — broker-co-signed gas sponsorship for the K11-gated accept UserOp; one shared EntryPoint deposit (the J1 Sybil gate). Deployed + funded via [`scripts/heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh), which rewrites the chain profile + env mirror. **Fund the deposit via `deposit()`, never a plain transfer** — see [`chain-setup.md`](../chain-setup.md).
+- `VerifyingPaymaster` (#225) — broker-co-signed gas sponsorship for the K11-gated accept UserOp; one shared EntryPoint deposit (the J1 Sybil gate). Deployed + funded via the paymaster deploy helper (operator-internal), which rewrites the chain profile + env mirror. **Fund the deposit via `deposit()`, never a plain transfer** — see the chain-setup operator runbook (operator-internal).
 
 Master mutations are UserOps from the operator's `P256Account`, relayed by the broker to the in-house [`agentkeys-bundler`](../../crates/agentkeys-bundler/) (#230) — the pre-cutover "inert until masters are registered as accounts" status and the pre-#225 "paymaster intentionally not deployed" note are both superseded.
 
 ### Test / CI deploy (Heima mainnet — test deployer)
 
-The test stack deploys the **same four contracts** with the test deployer key (`0x051e…475e`), landing them at **different addresses** (distinct `(deployer, nonce)` derivation), **plus its own ERC-4337 set since #250 — a separate EntryPoint v0.7 + P256AccountFactory** (deployed by [`scripts/heima-deploy-erc4337.sh`](../../scripts/heima-deploy-erc4337.sh), invoked from `setup-heima.sh --ci` step 6; the test EC2 also runs its own `agentkeys-bundler`). Full per-env isolation: a test-stack compromise or mis-pointed bundler can never touch prod's EntryPoint deposits/nonces. It shares the prod AWS account but uses distinct IAM roles, S3 buckets, OIDC issuer, and `-test` DNS — a leaked test cred cannot reach prod data. The test addresses are recorded ONLY in [`scripts/operator-workstation.test.env`](../../scripts/operator-workstation.test.env) (**authoritative**) and mirrored into the `TEST_*` GitHub secrets (the CI-consumable **copy** — synced one-way env→secrets by [`scripts/ci-set-github-secrets.sh`](../../scripts/ci-set-github-secrets.sh); re-run it after any test redeploy or the workflow runs on stale addresses) — **never in the chain profile** (it records the prod set; `heima-bring-up.sh` enforces this).
+The test stack deploys the **same four contracts** with the test deployer key (`0x051e…475e`), landing them at **different addresses** (distinct `(deployer, nonce)` derivation), **plus its own ERC-4337 set since #250 — a separate EntryPoint v0.7 + P256AccountFactory** (deployed by the ERC-4337 deploy helper (operator-internal), invoked from the chain bring-up entry point's `--ci` step 6; the test EC2 also runs its own `agentkeys-bundler`). Full per-env isolation: a test-stack compromise or mis-pointed bundler can never touch prod's EntryPoint deposits/nonces. It shares the prod AWS account but uses distinct IAM roles, S3 buckets, OIDC issuer, and `-test` DNS — a leaked test cred cannot reach prod data. The test addresses are recorded ONLY in `scripts/operator-workstation.test.env` (operator-internal; **authoritative**) and mirrored into the `TEST_*` GitHub secrets (the CI-consumable **copy** — synced one-way env→secrets by the CI-secrets sync helper (operator-internal); re-run it after any test redeploy or the workflow runs on stale addresses) — **never in the chain profile** (it records the prod set; the chain bring-up enforces this).
 
 - **Tier-1 CI** (the no-LLM gate from #66/#98) runs against an **ephemeral anvil** chain — fresh contracts per run, no persistent mainnet addresses.
-- **Tier-2 / persistent test deploy** addresses are pinned in [`scripts/operator-workstation.test.env`](../../scripts/operator-workstation.test.env) (`*_ADDRESS_HEIMA`) — real since the #250 test-set deploy (core set + the test stack's own EntryPoint/factory). Re-pin after a test redeploy, then re-run `ci-set-github-secrets.sh`:
+- **Tier-2 / persistent test deploy** addresses are pinned in `scripts/operator-workstation.test.env` (`*_ADDRESS_HEIMA`, operator-internal) — real since the #250 test-set deploy (core set + the test stack's own EntryPoint/factory). Re-pin after a test redeploy, then re-run the CI-secrets sync helper:
 
   ```bash
   # --ci selects operator-workstation.test.env AND auto-defaults the deployer
@@ -102,12 +102,12 @@ Halted (block 2,905,430 frozen since 2026-01-15). **No contracts deployed** — 
 
 ### v2 set — **contract_set_version 0.4** (`P256Router` #170) — deployed 2026-06-12
 
-> **Source of truth = the chain profile [`crates/agentkeys-core/chain-profiles/base.json`](../../crates/agentkeys-core/chain-profiles/base.json)** (`.contracts[]` + `contract_set_version`), mirrored to [`scripts/operator-workstation.base.env`](../../scripts/operator-workstation.base.env) (`*_BASE` keys). Resolve addresses the same way as heima — `jq -r '.contracts[] | "\(.name): \(.address)"' crates/agentkeys-core/chain-profiles/base.json` — never paste literals (#251 gate).
+> **Source of truth = the chain profile [`crates/agentkeys-core/chain-profiles/base.json`](../../crates/agentkeys-core/chain-profiles/base.json)** (`.contracts[]` + `contract_set_version`), mirrored to `scripts/operator-workstation.base.env` (`*_BASE` keys, operator-internal). Resolve addresses the same way as heima — `jq -r '.contracts[] | "\(.name): \(.address)"' crates/agentkeys-core/chain-profiles/base.json` — never paste literals (#251 gate).
 
 Design notes (what differs from the heima 0.3 set):
 
 - **`P256Router` — the #170 deliverable.** A precompile-first P-256 verifier (RIP-7212 `P256VERIFY` at `0x…0100`, live on Base since Fjord; flat 3,450 gas) with the pure-Solidity `P256Verifier` embedded as fallback, wired as `K11Verifier`'s `p256Addr` by `DeployAgentKeysV1.s.sol`. Every WebAuthn verify (registry mutations, `P256Account` UserOp validation) routes through it. The heima 0.3 set predates the router (its K11Verifier points at the bare `P256Verifier`). **Heima's runtime-9261 precompile ACTIVATED 2026-06-12** (litentry/heima#4030; spec-vector-verified on mainnet) — so heima now needs only the 0.4 full-set redeploy to wire the router and inherit the cheap path; the router itself needs no chain-specific variant.
-- **`EntryPoint` = the canonical eth-infinitism v0.7 deployment, ADOPTED not self-deployed** (D2 in [`base-migration.md`](../plan/chain/base-migration.md)): audited bytes + public-bundler interop; `heima-deploy-erc4337.sh` code-verifies it before pinning. Per-env isolation holds because prod-heima / prod-base are different chains.
+- **`EntryPoint` = the canonical eth-infinitism v0.7 deployment, ADOPTED not self-deployed** (D2 in `base-migration.md` (operator-internal)): audited bytes + public-bundler interop; `heima-deploy-erc4337.sh` code-verifies it before pinning. Per-env isolation holds because prod-heima / prod-base are different chains.
 - **No ED buffer** — Base has no Substrate ExistentialDeposit; the AA91 reaping class can't occur (the erc4337 helper skips the buffer on non-substrate chains).
 - **Version note:** this set was deployed under the `0.3` label (router as an aux addition) and relabeled **`0.4`** the same day when heima's 0.4 router-wired redeploy landed — the deployed bytes on base ARE the 0.4 definition, so both chains + `crates/agentkeys-chain/VERSION` now agree on `0.4` (no base redeploy was needed, label only).
 
@@ -159,7 +159,7 @@ The verify script checks, per contract: (1) **bytecode presence** (`eth_getCode`
 
 1. **Skip** when all four cores have on-chain code AND `crates/agentkeys-chain/VERSION` == the chain profile's `contract_set_version` (the recorded deployed version).
 2. **Redeploy** when the stored address is the `0x0` sentinel / absent or has no on-chain bytecode (chain reset). A bumped `VERSION` ≠ the recorded version is a hard stop that prints the mismatch and asks for an explicit opt-in (it orphans state + costs mainnet gas — see below) rather than auto-redeploying.
-3. **Force** a fresh deploy at new addresses (contract patch): bump `crates/agentkeys-chain/VERSION`, then re-run with `FORCE_DEPLOY=1` (blind) — or, for the #164 account-auth cutover, use [`../../scripts/heima-cutover-account-auth.sh`](../../scripts/heima-cutover-account-auth.sh) (probes the live `setScope` selector + skips when already live).
+3. **Force** a fresh deploy at new addresses (contract patch): bump `crates/agentkeys-chain/VERSION`, then re-run with `FORCE_DEPLOY=1` (blind) — or, for the #164 account-auth cutover, use the account-auth cutover helper (operator-internal; probes the live `setScope` selector + skips when already live).
 
 On a fresh deploy the bring-up script **auto-writes the chain profile** (`contracts[]` + `contract_set_version`, step 6b — the source of truth) **and `operator-workstation.env`** (step 6). It does NOT touch this markdown — so update **only the human prose here** (the version line + any ABI/cutover/historical note) when the design or version changes; the addresses live in the profile, not a table here. Confirm the two mirrors agree: `bash scripts/check-deployed-contracts-sync.sh`. No bytecode comparison anywhere — Solidity metadata + immutables make it unreliable, so the human-asserted `VERSION` is the comparison key.
 

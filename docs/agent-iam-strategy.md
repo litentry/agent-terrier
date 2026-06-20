@@ -6,12 +6,12 @@
 
 **Companion docs**:
 - [`arch.md`](./arch.md) — source of truth for shipped trust boundaries, key inventory, daemon role, backend wiring, and IAM-guarantee seams
-- [`plan/ai-device-platform.md`](./plan/ai-device-platform.md) — gate-first AI-device platform, de-phased around one platform with Volcano as default engine/substrate
-- [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md) — first certified-stack device plan and the AgentKeys-vs-Volcano component split
-- [`volcano/service.md`](./volcano/service.md) — Volcano service inventory and open integration questions
-- [`research/on-device-memory-daemon-esp32.md`](./research/on-device-memory-daemon-esp32.md) — why the ESP32 stays a terminal and memory stays server-side/warm-cached for v0
-- [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) — original wedge brainstorm (positioning is updated by this doc)
-- [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md), [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) — tactical adapter architectures (unchanged by this doc)
+- `plan/ai-device-platform.md` (operator-internal) — gate-first AI-device platform, de-phased around one platform with Volcano as default engine/substrate
+- `plan/esp32-touch-agent-console.md` (operator-internal) — first certified-stack device plan and the AgentKeys-vs-Volcano component split
+- `volcano/service.md` (operator-internal) — Volcano service inventory and open integration questions
+- `research/on-device-memory-daemon-esp32.md` (operator-internal) — why the ESP32 stays a terminal and memory stays server-side/warm-cached for v0
+- `ai-hardware-companion-office-hours.md` (operator-internal) — original wedge brainstorm (positioning is updated by this doc)
+- `volcano-ark-mcp-integration.md` (operator-internal), `tuya-vs-xiaozhi.md` (operator-internal) — tactical adapter architectures (unchanged by this doc)
 - [issue #103 plan](./archived/issue-103-aiosandbox-hermes-esp32-demo.md) — historical MCP/Hermes demo context (**archived**); superseded for Phase 1 by the certified Volcano device pilot. The xiaozhi/MagicLick device-chatbot research it relied on ([`xiaozhi-esp32-magiclink.md`](./archived/xiaozhi-esp32-magiclink.md), [`xiaozhi-hermes-architecture.md`](./archived/xiaozhi-hermes-architecture.md), [`xiaozhi-hermes-risks.md`](./archived/xiaozhi-hermes-risks.md)) is archived alongside it.
 
 ---
@@ -234,7 +234,7 @@ Three audiences, three pitches, one product. Don't conflate.
 
 ### 3.5 Memory namespace model (early-phase, composes with the 4-type taxonomy)
 
-The existing AgentKeys memory design ([`docs/plan/agentkeys-memory-design.md`](./plan/agentkeys-memory-design.md), committed on `main` as `53ccc9f`) defines four STRUCTURAL types — `profile` (single CAS-mutable file), `procedural` (append + occasional rewrite), `semantic` (one S3 object per ULID), `episodic` (date-prefixed per ULID). These are how memory is STORED on the per-actor S3 prefix.
+The existing AgentKeys memory design (`docs/plan/agentkeys-memory-design.md` (operator-internal), committed on `main` as `53ccc9f`) defines four STRUCTURAL types — `profile` (single CAS-mutable file), `procedural` (append + occasional rewrite), `semantic` (one S3 object per ULID), `episodic` (date-prefixed per ULID). These are how memory is STORED on the per-actor S3 prefix.
 
 For Agent IAM, we add an ORTHOGONAL semantic dimension: **namespaces**. These are how memory is SCOPED for permission and discovery. Namespaces compose with structural types — a memory item belongs to one namespace AND one structural type.
 
@@ -249,7 +249,7 @@ The device's cap-token grants `namespaces_allowed: ["travel"]`. It can read the 
 
 **Why this composes cleanly with the existing memory design**:
 
-- The 4-type S3 key derivation in [memory-design §3.2a](./plan/agentkeys-memory-design.md) is unchanged. No new path components in v0. (S3 layout: `bots/<actor>/memory/{profile.json.enc, procedural.jsonl.enc, semantic/<ulid>.enc, episodic/<date>/<ulid>.enc}` — exactly as designed.)
+- The 4-type S3 key derivation in memory-design §3.2a (operator-internal) is unchanged. No new path components in v0. (S3 layout: `bots/<actor>/memory/{profile.json.enc, procedural.jsonl.enc, semantic/<ulid>.enc, episodic/<date>/<ulid>.enc}` — exactly as designed.)
 - Namespaces live in the wire-format metadata + line envelope, NOT in the S3 key derivation. The memory worker filters at retrieval time.
 - Cap-tokens add a `namespaces_allowed: ["personal", "travel"]` claim. The worker enforces the filter deterministically (no LLM, no fuzzy matching — string-set membership check).
 - Future evolution: if scale / perf demands a path-prefixed namespace layout for cheap S3 LIST per namespace, migration is well-defined (rewrite per-actor under `bots/<actor>/memory/<namespace>/{...}` paths); cap-tokens already speak the namespace language at that point.
@@ -319,7 +319,7 @@ A corollary of §3.6: if hooks are the IAM-guarantee delivery mechanism, *who wr
 - **Manual** — user runs both `agentkeys …` and the runtime's own setup wizard, then hand-edits `~/.<runtime>/config.<ext>` to register AgentKeys hooks. Two-wizard friction. Demo "surprise" effect diluted because the user already configured the runtime.
 - **Automatic** — AgentKeys CLI writes the hook scripts + the `hooks:` block + the runtime's LLM-provider config in one idempotent command. One wizard. Strong demo surprise. Higher maintenance burden (track each runtime's config schema; nightly drift check needed).
 
-**Decision (2026-05-28): hybrid.** Detailed in [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](./plan/phase-1-fresh-user-wire-onboarding.md):
+**Decision (2026-05-28): hybrid.** Detailed in `docs/plan/phase-1-fresh-user-wire-onboarding.md` (operator-internal):
 
 | AgentKeys owns | Runtime owns |
 |---|---|
@@ -442,7 +442,7 @@ Explicitly out of scope. Each is the right move later, premature now.
 - **Task orchestration of any kind** (§2.4 hard line)
 - **Active delegation** (§3.3 — schema only)
 - **Approval workflows** (deferred to Phase 2 — needs more design)
-- **Spend execution** before single-use caps + mint-time budgeting ship ([`plan/ai-device-platform.md`](./plan/ai-device-platform.md) §4)
+- **Spend execution** before single-use caps + mint-time budgeting ship (`plan/ai-device-platform.md` (operator-internal) §4)
 - **Native mobile app** (§5.3 — web UI sufficient for v0, native after pilot)
 - **Real-time on-chain audit** (§3.2 corrected — batched only)
 - **Generic Volcano Ark marketplace listing** beyond the certified stack
@@ -463,7 +463,7 @@ Broker, signer, memory/cred/audit workers, OIDC issuer, per-actor + per-data-cla
 
 ### Phase 1 — Certified Volcano device v0 (0-2 weeks)
 
-Per §4 and [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md). Goal: vendor understands AgentKeys ≠ chatbot and ≠ Volcano wrapper in <5 minutes. ESP32-S3-Touch-LCD-4B + Volcano RTC CustomLLM + Ark/Doubao + AgentKeys gate endpoint + parent-control management view + three-act demo. Two-tier audit. Bounded revocation. Zero task orchestration. Delegation as schema preview.
+Per §4 and `plan/esp32-touch-agent-console.md` (operator-internal). Goal: vendor understands AgentKeys ≠ chatbot and ≠ Volcano wrapper in <5 minutes. ESP32-S3-Touch-LCD-4B + Volcano RTC CustomLLM + Ark/Doubao + AgentKeys gate endpoint + parent-control management view + three-act demo. Two-tier audit. Bounded revocation. Zero task orchestration. Delegation as schema preview.
 
 ### Phase 2 — Commercial pilot + bundle economics (1-2 months)
 
@@ -594,7 +594,7 @@ If the product is perceived as "Volcano plus markup," ASR/TTS/LLM/sandbox costs 
 
 Volcano is the right first stack, but if identity, memory store, policy, or audit leak into Volcano-specific services, the "swappable engine" promise becomes marketing copy.
 
-**Mitigation**: keep the red-line rows from [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md) §3 owned by AgentKeys: identity, caps, canonical memory store, deterministic enforcement, audit, pairing, and control plane. Volcano can rank authorized lines and run the engine/substrate; it cannot become the authority.
+**Mitigation**: keep the red-line rows from `plan/esp32-touch-agent-console.md` (operator-internal) §3 owned by AgentKeys: identity, caps, canonical memory store, deterministic enforcement, audit, pairing, and control plane. Volcano can rank authorized lines and run the engine/substrate; it cannot become the authority.
 
 ### Risk 10 — Component-matrix sprawl
 
@@ -621,19 +621,19 @@ If China device requests depend on a classifier or policy service hosted only on
 | Doc | Update needed |
 |---|---|
 | [`arch.md`](./arch.md) | Source-of-truth reference checked against this revision: daemon remains trust core (§22c.5), MCP remains a tool/reach surface (§22c.1-§22c.2), and IAM guarantees require a non-LLM gate — hooks or the certified-stack in-path endpoint — plus worker verify (§22d, §17.5; the generic proxy fallback was dropped 2026-06-19). This change updates cross-references only; the component inventory changes when the certified-stack adapter ships. |
-| [`plan/ai-device-platform.md`](./plan/ai-device-platform.md) | Already reflects the de-phased, gate-first platform: one platform, Volcano as default engine/substrate, AgentKeys as sovereign gate. This strategy doc now adopts that framing. |
-| [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md) | Becomes the canonical Phase-1 device plan. Keep its red-line component split synchronized with §2.8/§4 here. |
-| [`volcano/service.md`](./volcano/service.md) | Keep open questions tied to the Phase-2 pilot gate: sandbox lifecycle API, OpenViking rank-only mode, CustomLLM contract. |
-| [`research/on-device-memory-daemon-esp32.md`](./research/on-device-memory-daemon-esp32.md) | Strategy adopts its conclusion: ESP32 stays a terminal in v0; server-side warm cache/preload is the latency path; no K10/cap-mint daemon on device. |
+| `plan/ai-device-platform.md` (operator-internal) | Already reflects the de-phased, gate-first platform: one platform, Volcano as default engine/substrate, AgentKeys as sovereign gate. This strategy doc now adopts that framing. |
+| `plan/esp32-touch-agent-console.md` (operator-internal) | Becomes the canonical Phase-1 device plan. Keep its red-line component split synchronized with §2.8/§4 here. |
+| `volcano/service.md` (operator-internal) | Keep open questions tied to the Phase-2 pilot gate: sandbox lifecycle API, OpenViking rank-only mode, CustomLLM contract. |
+| `research/on-device-memory-daemon-esp32.md` (operator-internal) | Strategy adopts its conclusion: ESP32 stays a terminal in v0; server-side warm cache/preload is the latency path; no K10/cap-mint daemon on device. |
 | [issue #322](https://github.com/litentry/agentKeys/issues/322) | Becomes the canonical classifier track for request-intent → structured gate input. |
-| [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) | Update positioning note at top to point at this strategy doc + add Agent IAM framing + three-narrative reality. Substance below the banner stays. |
-| [`ai-hardware-companion-wedge.md`](./research/ai-hardware-companion-wedge.md) | Update positioning sections — sharper "Agent IAM" framing; keep market sizing + competitive analysis as-is. |
+| `ai-hardware-companion-office-hours.md` (operator-internal) | Update positioning note at top to point at this strategy doc + add Agent IAM framing + three-narrative reality. Substance below the banner stays. |
+| `ai-hardware-companion-wedge.md` (operator-internal) | Update positioning sections — sharper "Agent IAM" framing; keep market sizing + competitive analysis as-is. |
 | [issue #103 plan](./archived/issue-103-aiosandbox-hermes-esp32-demo.md) | **Archived** — superseded for Phase 1 by the certified Volcano device pilot; kept as historical MCP/Hermes demo context. |
 | [`xiaozhi-hermes-architecture.md`](./archived/xiaozhi-hermes-architecture.md) | **Archived** — server-side bridge/warm-cache topology, kept as historical reference; the device-chatbot path is not the Phase-1 product (now the certified Volcano stack). |
-| [`xiaozhi-esp32-magiclink.md`](./archived/xiaozhi-esp32-magiclink.md) | **Archived** — MagicLick 2.5 / xiaozhi-esp32 hardware research; the Phase-1 device is now ESP32-S3-Touch-LCD-4B per [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md). |
+| [`xiaozhi-esp32-magiclink.md`](./archived/xiaozhi-esp32-magiclink.md) | **Archived** — MagicLick 2.5 / xiaozhi-esp32 hardware research; the Phase-1 device is now ESP32-S3-Touch-LCD-4B per `plan/esp32-touch-agent-console.md` (operator-internal). |
 | [`xiaozhi-hermes-risks.md`](./archived/xiaozhi-hermes-risks.md) | **Archived** — risk analysis kept as historical reference; many risks evaporate under the certified-stack in-path model. |
-| [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md) | Fold into the certified-stack adapter view: Ark is one provider behind the gate, not the product identity. |
-| [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) | Keep complement-not-compete framing; Tuya connector moves after the first certified stack proves the adapter seam. |
+| `volcano-ark-mcp-integration.md` (operator-internal) | Fold into the certified-stack adapter view: Ark is one provider behind the gate, not the product identity. |
+| `tuya-vs-xiaozhi.md` (operator-internal) | Keep complement-not-compete framing; Tuya connector moves after the first certified stack proves the adapter seam. |
 
 ---
 
@@ -652,14 +652,14 @@ If China device requests depend on a classifier or policy service hosted only on
 - **This doc**: synthesis of all inputs. Source of truth for Agent IAM positioning + certified-stack business model + Phase 1 scope + roadmap. Future planning references this anchor.
 
 Companion architectural research:
-- [`ai-hardware-companion-wedge.md`](./research/ai-hardware-companion-wedge.md) — market + competitive landscape
-- [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) — wedge brainstorm + Approach D selection
+- `ai-hardware-companion-wedge.md` (operator-internal) — market + competitive landscape
+- `ai-hardware-companion-office-hours.md` (operator-internal) — wedge brainstorm + Approach D selection
 - [`xiaozhi-esp32-magiclink.md`](./archived/xiaozhi-esp32-magiclink.md) — hardware identification + Option 1 decision (archived)
 - [`xiaozhi-hermes-architecture.md`](./archived/xiaozhi-hermes-architecture.md) — MCP-direct architecture (archived)
 - [`xiaozhi-hermes-risks.md`](./archived/xiaozhi-hermes-risks.md) — risk verification (archived)
-- [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md) — Volcano Ark MCP-server adapter
-- [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) — Tuya vs xiaozhi role comparison + Phase 3 feasibility
-- [`plan/ai-device-platform.md`](./plan/ai-device-platform.md) — gate-first device platform, Volcano-composed
-- [`plan/esp32-touch-agent-console.md`](./plan/esp32-touch-agent-console.md) — certified Volcano device stack
-- [`volcano/service.md`](./volcano/service.md) — Volcano service inventory
+- `volcano-ark-mcp-integration.md` (operator-internal) — Volcano Ark MCP-server adapter
+- `tuya-vs-xiaozhi.md` (operator-internal) — Tuya vs xiaozhi role comparison + Phase 3 feasibility
+- `plan/ai-device-platform.md` (operator-internal) — gate-first device platform, Volcano-composed
+- `plan/esp32-touch-agent-console.md` (operator-internal) — certified Volcano device stack
+- `volcano/service.md` (operator-internal) — Volcano service inventory
 - [issue #322](https://github.com/litentry/agentKeys/issues/322) — policy-intent classifier training plan

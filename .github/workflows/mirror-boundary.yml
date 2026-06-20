@@ -1,0 +1,22 @@
+name: mirror-boundary
+
+# #317 OSS-mirror boundary gate: fails a PR if any public-bound file (per
+# mirror/public-paths.txt) leaks a real operational value or links a private
+# path that the OSS mirror strips. Cheap (read-only grep); runs on
+# every PR + push to main so the public/private boundary never silently drifts.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Public/private boundary gate
+        run: bash scripts/check-public-boundary.sh
