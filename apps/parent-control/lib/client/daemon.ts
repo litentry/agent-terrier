@@ -437,7 +437,15 @@ export class DaemonBackend implements AgentKeysClient {
       const body = await resp.json();
       return {
         ok: true,
-        data: { ok: body.ok ?? true, txHash: body.tx_hash ?? undefined, account: body.account ?? undefined },
+        data: {
+          ok: body.ok ?? true,
+          txHash: body.tx_hash ?? undefined,
+          account: body.account ?? undefined,
+          chain: body.chain ?? undefined,
+          // #278 D6: an HTTP-200 with chain "register-pending" / pending:true is
+          // a broadcast-but-unconfirmed op — the master is NOT bound yet.
+          pending: body.pending === true || body.chain === 'register-pending',
+        },
       };
     } catch (e) {
       return { ok: false, status: unreachable(`register/submit fetch failed: ${(e as Error).message}`) };

@@ -70,10 +70,21 @@ pub struct UiBridgeState {
     pub webauthn: Webauthn,
     pub enroll: RwLock<EnrollState>,
     pub actors: RwLock<HashMap<String, ApiActor>>,
-    /// #233: latches once the actor tree has been reconciled against the chain
-    /// (post-restart reconstruction). Cleared by master_reset so the next read
-    /// re-checks a (now empty) chain instead of trusting the torn-down map.
-    pub fleet_synced: std::sync::atomic::AtomicBool,
+    /// #233 actor-tree lazy-sync invalidation as a GENERATION counter, not a
+    /// bool. The bool had a TOCTOU race: an in-flight EMPTY reconcile (master
+    /// not yet registered) could latch `synced` AFTER a master-register
+    /// invalidation and permanently mask the new master row — the empty
+    /// actor-page bug. `fleet_gen` is bumped by every fleet-mutating handler
+    /// (register / reset / pairing / accept / scope / revoke) via
+    /// [`invalidate_fleet_sync`]; `fleet_synced_gen` is the generation the
+    /// in-memory `actors` map was last reconciled to. A reconcile only advances
+    /// `fleet_synced_gen` to the generation it OBSERVED before reading the
+    /// chain, so a stale reconcile can never hide a newer invalidation.
+    pub fleet_gen: std::sync::atomic::AtomicU64,
+    pub fleet_synced_gen: std::sync::atomic::AtomicU64,
+    /// Serializes fleet reconciles so concurrent `/v1/actors` reads don't each
+    /// hit the chain or race on the actor map (#233 hardening).
+    pub fleet_sync_lock: tokio::sync::Mutex<()>,
     pub caps: RwLock<HashMap<String, Vec<ApiCapToken>>>,
     pub audit: RwLock<VecDeque<ApiAuditEvent>>,
     pub audit_tx: broadcast::Sender<ApiAuditEvent>,
@@ -897,7 +908,9 @@ pub fn build_state(
     Ok(Arc::new(UiBridgeState {
         webauthn,
         enroll: RwLock::new(EnrollState::default()),
-        fleet_synced: std::sync::atomic::AtomicBool::new(false),
+        fleet_gen: std::sync::atomic::AtomicU64::new(1),
+        fleet_synced_gen: std::sync::atomic::AtomicU64::new(0),
+        fleet_sync_lock: tokio::sync::Mutex::new(()),
         actors: RwLock::new(HashMap::new()),
         caps: RwLock::new(HashMap::new()),
         audit: RwLock::new(VecDeque::with_capacity(AUDIT_BUFFER_CAP)),
@@ -1325,12 +1338,16 @@ async fn relogin_finish(
     // The on-chain binding never left — repopulate the local record so cap-mint
     // + onboarding-state see the registered master without a re-probe. The
     // account address is read from chain by list_actors when absent.
-    *state.registered_master.write().await = Some(RegisteredMaster {
-        device_key_hash: coords.device_key_hash.clone(),
-        operator_omni: coords.operator_omni.clone(),
-        tx_hash: None,
-        account: None,
-    });
+    mark_master_registered(
+        &state,
+        RegisteredMaster {
+            device_key_hash: coords.device_key_hash.clone(),
+            operator_omni: coords.operator_omni.clone(),
+            tx_hash: None,
+            account: None,
+        },
+    )
+    .await;
     persist_master_session(&state).await;
     tracing::info!(
         target: "agentkeys.daemon.ui_bridge",
@@ -1696,11 +1713,9 @@ async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_js
         n
     };
     state.caps.write().await.clear();
-    // #233: un-latch the chain sync — the next actor read re-checks the (now
-    // torn-down) chain instead of trusting this process's cleared map.
-    state
-        .fleet_synced
-        .store(false, std::sync::atomic::Ordering::Relaxed);
+    // #233: invalidate the chain sync — the next actor read re-reconciles the
+    // (now torn-down) chain instead of trusting this process's cleared map.
+    invalidate_fleet_sync(&state);
     {
         let mut enroll = state.enroll.write().await;
         enroll.pending.clear();
@@ -1849,15 +1864,19 @@ pub async fn rehydrate_master_session(state: &UiBridgeState) {
         });
         // The device is on chain (SidecarRegistry) under this omni — record it so
         // cap-mint resolves it directly and onboarding-state reports it registered.
-        *state.registered_master.write().await = Some(RegisteredMaster {
-            device_key_hash: record.device_key_hash.clone(),
-            operator_omni: record.operator_omni.clone(),
-            tx_hash: None,
-            // The account address isn't persisted in the #220 session record;
-            // the #233 chain reconciliation backfills it from
-            // operatorMasterWallet on the first actor read after restart.
-            account: None,
-        });
+        mark_master_registered(
+            state,
+            RegisteredMaster {
+                device_key_hash: record.device_key_hash.clone(),
+                operator_omni: record.operator_omni.clone(),
+                tx_hash: None,
+                // The account address isn't persisted in the #220 session record;
+                // the #233 chain reconciliation backfills it from
+                // operatorMasterWallet on the first actor read after restart.
+                account: None,
+            },
+        )
+        .await;
         tracing::info!(
             target: "agentkeys.daemon.ui_bridge",
             wallet = %record.wallet,
@@ -2135,12 +2154,16 @@ async fn finish_chain_register(
             }
             // 409 = first-master-only: the operator already has a master on chain.
             Ok((st, _)) if st == StatusCode::CONFLICT => {
-                *state.registered_master.write().await = Some(RegisteredMaster {
-                    device_key_hash,
-                    operator_omni: omni0x.clone(),
-                    tx_hash: None,
-                    account: None,
-                });
+                mark_master_registered(
+                    state,
+                    RegisteredMaster {
+                        device_key_hash,
+                        operator_omni: omni0x.clone(),
+                        tx_hash: None,
+                        account: None,
+                    },
+                )
+                .await;
                 persist_master_session(state).await;
                 return ChainRegisterBuild {
                     register_userop_hash: None,
@@ -2234,12 +2257,16 @@ async fn finish_chain_register(
 
     // Idempotent skip: the operator already has a master on chain (no re-register).
     if json.get("skipped").is_some() {
-        *state.registered_master.write().await = Some(RegisteredMaster {
-            device_key_hash,
-            operator_omni,
-            tx_hash: None,
-            account: (!account.is_empty()).then_some(account.clone()),
-        });
+        mark_master_registered(
+            state,
+            RegisteredMaster {
+                device_key_hash,
+                operator_omni,
+                tx_hash: None,
+                account: (!account.is_empty()).then_some(account.clone()),
+            },
+        )
+        .await;
         persist_master_session(state).await;
         return ChainRegisterBuild {
             register_userop_hash: None,
@@ -2595,7 +2622,7 @@ async fn master_register_submit(
             "device_key_hash": pending.device_key_hash,
             "user_op_hash": v.get("user_op_hash").cloned().unwrap_or(serde_json::Value::Null),
         });
-        *state.registered_master.write().await = Some(registered);
+        mark_master_registered(&state, registered).await;
         *state.pending_register.write().await = None;
         persist_master_session(&state).await;
         return Ok(Json(out));
@@ -2660,7 +2687,7 @@ async fn master_register_submit(
         "account": pending.account,
         "device_key_hash": pending.device_key_hash,
     });
-    *state.registered_master.write().await = Some(registered);
+    mark_master_registered(&state, registered).await;
     *state.pending_register.write().await = None;
     persist_master_session(&state).await;
     Ok(Json(resp))
@@ -3101,26 +3128,66 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
     Ok(added)
 }
 
-/// Lazy #233 sync gate for the read paths: reconstruct once per process when
-/// the map has no agent rows but the daemon knows who the master is. Errors are
-/// logged + retried on the next call (RPC may be down); success (even an empty
-/// chain) latches so the actor page doesn't re-poll the RPC on every load.
+/// Invalidate the lazy #233 actor-tree sync: bump the fleet generation so the
+/// next `/v1/actors` read reconciles from chain. Call after ANY fleet mutation
+/// (master register, device add/revoke, scope change, reset). Race-safe: a
+/// reconcile already in flight when this fires only marks itself synced up to
+/// the OLDER generation it observed, so this newer invalidation still forces a
+/// re-sync (the empty-actor-page TOCTOU fix).
+fn invalidate_fleet_sync(state: &UiBridgeState) {
+    state
+        .fleet_gen
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// Record that the master is now bound on chain AND invalidate the actor-tree
+/// sync (#233). EVERY path that learns the master is registered routes through
+/// here — register-submit (both transports), the already-bound idempotent
+/// skips, restart rehydrate, and re-login — so a latch poisoned by an earlier
+/// EMPTY reconcile can never leave `/v1/actors` permanently empty after the
+/// master registers (Codex adversarial-review finding: centralize the
+/// "master is now known registered" transition).
+async fn mark_master_registered(state: &UiBridgeState, registered: RegisteredMaster) {
+    *state.registered_master.write().await = Some(registered);
+    invalidate_fleet_sync(state);
+}
+
+/// Lazy #233 sync gate for the read paths: reconstruct the actor tree from chain
+/// whenever the in-memory map is older than the latest fleet invalidation.
+/// Serialized by `fleet_sync_lock` so concurrent `/v1/actors` reads don't each
+/// hit the chain. Errors are logged + retried on the next call (RPC may be
+/// down). Crucially, a reconcile only advances `fleet_synced_gen` to the
+/// generation it OBSERVED before the chain read — so an invalidation that races
+/// the read still forces a re-sync (the TOCTOU fix: a stale EMPTY reconcile can
+/// no longer latch "synced" over a master-register that landed mid-read).
 async fn maybe_sync_fleet_from_chain(state: &SharedUiBridgeState) {
     use std::sync::atomic::Ordering;
-    if state.fleet_synced.load(Ordering::Relaxed) {
+    // Fast path: the in-memory map already reflects the latest invalidation.
+    if state.fleet_synced_gen.load(Ordering::Acquire) >= state.fleet_gen.load(Ordering::Acquire) {
         return;
     }
     if held_operator_omni(state).await.is_none() {
+        return; // nobody onboarded — nothing to reconstruct (do NOT advance the synced gen)
+    }
+    let _lock = state.fleet_sync_lock.lock().await;
+    // Re-check under the lock — another task may have synced while we waited —
+    // and capture the generation we're reconciling against AFTER acquiring it,
+    // so we never claim to be synced past an invalidation we didn't observe.
+    let target = state.fleet_gen.load(Ordering::Acquire);
+    if state.fleet_synced_gen.load(Ordering::Acquire) >= target {
         return;
     }
     match reconcile_actors_from_chain(state).await {
         Ok(added) => {
-            state.fleet_synced.store(true, Ordering::Relaxed);
+            // Advance ONLY to the observed generation. If an invalidation bumped
+            // fleet_gen during the chain reads, fleet_synced_gen stays below it
+            // and the next read re-reconciles — a stale empty read can't mask it.
+            state.fleet_synced_gen.fetch_max(target, Ordering::Release);
             if added > 0 {
                 tracing::info!(
                     target: "agentkeys.daemon.ui_bridge",
                     added,
-                    "#233: actor tree reconstructed from chain after restart"
+                    "#233: actor tree reconstructed from chain"
                 );
             }
         }
@@ -4356,9 +4423,7 @@ async fn ack_pairing(
                 );
             }
         }
-        state
-            .fleet_synced
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        invalidate_fleet_sync(&state);
     }
     resp
 }
@@ -4518,9 +4583,7 @@ async fn accept_submit_proxy(
     if resp.status().is_success() {
         // The accept just registered an agent on chain — un-latch the #233 sync
         // so the actor tree reflects it even if the follow-up ack is skipped.
-        state
-            .fleet_synced
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        invalidate_fleet_sync(&state);
         // #97: the broker's submit relay decoded the landed executeBatch and
         // emitted the DeviceAdd + ScopeGrant envelopes — record the confirmed
         // chain commit in the audit feed with the REAL receipts (the decode
@@ -4625,9 +4688,7 @@ async fn scope_submit_proxy(
     };
     let (resp, parsed) = forward_to_broker_value(&broker, "/v1/scope/submit", &j1, &body).await;
     if resp.status().is_success() {
-        state
-            .fleet_synced
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        invalidate_fleet_sync(&state);
         // #97: record the confirmed set-replace commit with the broker's real
         // receipts. The envelope (fetched by hash in the decode view) carries
         // the FULL replacement grant — incl. whether it was a revoke-all.
@@ -4715,9 +4776,7 @@ async fn revoke_submit_proxy(
     };
     let resp = forward_to_broker(&broker, "/v1/revoke/submit", &j1, &body).await;
     if resp.status().is_success() {
-        state
-            .fleet_synced
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        invalidate_fleet_sync(&state);
     }
     resp
 }
@@ -8605,6 +8664,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn master_register_invalidates_a_poisoned_fleet_sync() {
+        // The empty-actor-page bug (Codex adversarial-review finding #1): the
+        // lazy sync was latched "synced" while the master was UNREGISTERED (an
+        // empty reconcile during the reset→re-onboard window), then the master
+        // registers. Routing every register through `mark_master_registered`
+        // bumps the fleet generation, so the next `/v1/actors` read MUST
+        // re-reconcile and surface the master — even though the latch had
+        // claimed it was already synced. (Before the fix, the stale latch made
+        // `list_actors` skip reconcile and return `[]` forever.)
+        use std::sync::atomic::Ordering;
+        let addr = spawn_chain_stub().await;
+        let mut state = make_state_real(None);
+        set_chain_rpc(&mut state, &format!("http://{addr}"));
+
+        // Poison the latch exactly as an empty reconcile would: claim the
+        // (empty) in-memory map is current as of the latest generation.
+        state
+            .fleet_synced_gen
+            .store(state.fleet_gen.load(Ordering::Relaxed), Ordering::Relaxed);
+
+        // The master registers — the production transition every register path
+        // now funnels through.
+        mark_master_registered(
+            &state,
+            RegisteredMaster {
+                device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
+                operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
+                tx_hash: None,
+                account: None,
+            },
+        )
+        .await;
+
+        let resp = list_actors(State(state.clone())).await.into_response();
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let actors_arr = json["actors"].as_array().unwrap();
+        assert!(
+            actors_arr.iter().any(|a| a["role"] == "master"),
+            "master row must surface after register despite the poisoned latch: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_reconcile_cannot_mask_a_newer_invalidation() {
+        // Models the [high] TOCTOU at the atomic level: reconcile A observes
+        // generation G; an invalidation (e.g. a master register) bumps to G+1
+        // mid-read; then A completes and advances `fleet_synced_gen` only to the
+        // OBSERVED G via fetch_max. The next read must still see synced(G) <
+        // gen(G+1) and re-sync — a stale EMPTY read can never latch over the
+        // newer register.
+        use std::sync::atomic::Ordering;
+        let state = make_state();
+        let observed = state.fleet_gen.load(Ordering::Relaxed); // reconcile A starts here
+        invalidate_fleet_sync(&state); // a register lands mid-read
+        state
+            .fleet_synced_gen
+            .fetch_max(observed, Ordering::Release); // A latches its OLD gen
+        assert!(
+            state.fleet_gen.load(Ordering::Relaxed)
+                > state.fleet_synced_gen.load(Ordering::Relaxed),
+            "a reconcile that observed an older generation leaves a re-sync pending"
+        );
+    }
+
+    #[tokio::test]
     async fn master_reset_revokes_chain_reconstructed_agents_by_hash() {
         // Restart-then-reset: the in-memory map is EMPTY but the chain still
         // holds an active agent. Reset must reconstruct first (#233) and revoke
@@ -8885,9 +9010,12 @@ mod tests {
             j1: "eyJ.fake.jwt".into(),
             wallet: "0xW".into(),
         });
-        state
-            .fleet_synced
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Simulate "already synced": mark the in-memory map current as of the
+        // latest fleet generation, so we can prove ack INVALIDATES it.
+        state.fleet_synced_gen.store(
+            state.fleet_gen.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         let resp = ack_pairing(
             State(state.clone()),
@@ -8907,10 +9035,11 @@ mod tests {
         );
         drop(actors);
         assert!(
-            !state
-                .fleet_synced
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "chain sync un-latched so the next read re-reconciles"
+            state.fleet_gen.load(std::sync::atomic::Ordering::Relaxed)
+                > state
+                    .fleet_synced_gen
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            "chain sync invalidated so the next read re-reconciles"
         );
     }
 
