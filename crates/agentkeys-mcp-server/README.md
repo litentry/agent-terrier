@@ -34,9 +34,9 @@ etc.) can call.
 ```bash
 cargo run -p agentkeys-mcp-server -- \
   --listen 0.0.0.0:8088 \
-  --broker-url https://broker.litentry.org \
-  --memory-url https://memory.litentry.org \
-  --audit-url  https://audit.litentry.org \
+  --broker-url https://broker.example.invalid \
+  --memory-url https://memory.example.invalid \
+  --audit-url  https://audit.example.invalid \
   --vendor-tokens "magiclick:demo-tok,volcano-ark:tok-va"
 ```
 
@@ -58,9 +58,9 @@ binding).
 cargo run -p agentkeys-mcp-server -- \
   --transport mcp-endpoint \
   --backend http \
-  --broker-url https://broker.litentry.org \
-  --memory-url https://memory.litentry.org \
-  --audit-url  https://audit.litentry.org \
+  --broker-url https://broker.example.invalid \
+  --memory-url https://memory.example.invalid \
+  --audit-url  https://audit.example.invalid \
   --mcp-endpoint 'ws://<relay-host>:8004/mcp_endpoint/mcp/?token=<your-tool-token>'
 ```
 
@@ -69,9 +69,9 @@ cargo run -p agentkeys-mcp-server -- \
 ```bash
 docker build -t agentkeys-mcp-server -f crates/agentkeys-mcp-server/Dockerfile .
 docker run --rm -p 8088:8088 \
-  -e AGENTKEYS_BROKER_URL=https://broker.litentry.org \
-  -e AGENTKEYS_WORKER_MEMORY_URL=https://memory.litentry.org \
-  -e AGENTKEYS_WORKER_AUDIT_URL=https://audit.litentry.org \
+  -e AGENTKEYS_BROKER_URL=https://broker.example.invalid \
+  -e AGENTKEYS_WORKER_MEMORY_URL=https://memory.example.invalid \
+  -e AGENTKEYS_WORKER_AUDIT_URL=https://audit.example.invalid \
   -e MCP_VENDOR_TOKENS="magiclick:demo-tok" \
   agentkeys-mcp-server
 ```

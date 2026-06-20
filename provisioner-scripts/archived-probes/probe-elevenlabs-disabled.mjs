@@ -36,7 +36,7 @@ const emails = await page.locator('input[type="email"]').all();
 console.log('email inputs:', emails.length);
 if (emails.length) {
   await emails[0].click();
-  await emails[0].pressSequentially('bot-probe-test@bots.litentry.org', { delay: 60 });
+  await emails[0].pressSequentially('bot-probe-test@bots.example.invalid', { delay: 60 });
 }
 await page.waitForTimeout(500);
 await inspect('1 - after email');

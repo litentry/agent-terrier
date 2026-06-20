@@ -84,7 +84,7 @@ cargo build -p agentkeys-broker-server --features auth-email-link
 cargo build --release -p agentkeys-broker-server --features auth-email-link
 ```
 
-Cargo footgun (per [`scripts/setup-broker-host.sh:547`](../../scripts/setup-broker-host.sh)): never combine `-p agentkeys-broker-server -p agentkeys-mock-server --features auth-email-link` — cargo silently drops the feature flag. Always build the two binaries in separate `cargo build` invocations.
+Cargo footgun (per the broker-host setup script, operator-internal — `scripts/setup-broker-host.sh:547`): never combine `-p agentkeys-broker-server -p agentkeys-mock-server --features auth-email-link` — cargo silently drops the feature flag. Always build the two binaries in separate `cargo build` invocations.
 
 ### 3.3 Run the three foreground processes
 
@@ -166,7 +166,7 @@ AGENTKEYS_CHAIN=anvil
 
 ### 4.2 Run the canonical inner-loop demo
 
-[`harness/v2-stage1-demo.sh`](../../harness/v2-stage1-demo.sh) is the end-to-end exerciser most operator edits land against. It's a 13-step script: install CLI → email-link init → identity bootstrap → S3 envelope smoke test → chain bring-up → device register → agent create → scope grant → K11 enroll → cap-mint roundtrip.
+`harness/v2-stage1-demo.sh` (operator-internal) is the end-to-end exerciser most operator edits land against. It's a 13-step script: install CLI → email-link init → identity bootstrap → S3 envelope smoke test → chain bring-up → device register → agent create → scope grant → K11 enroll → cap-mint roundtrip.
 
 ```bash
 set -a; source scripts/operator-workstation.dev.env; set +a
@@ -195,7 +195,7 @@ When you don't want to talk to Heima at all, run [foundry](https://book.getfound
 anvil --chain-id 31337 --port 8545
 ```
 
-Then `AGENTKEYS_CHAIN=anvil` in your operator env makes every `cast send` hit anvil instead of Heima. The deployer wallet is whichever anvil-prefunded key you point at via `HEIMA_DEPLOYER_KEY` / `HEIMA_DEPLOYER_KEY_FILE`. Anvil's mempool is single-tenant — none of the [PR #102 nonce-contention issues](../ci-setup.md) bite locally.
+Then `AGENTKEYS_CHAIN=anvil` in your operator env makes every `cast send` hit anvil instead of Heima. The deployer wallet is whichever anvil-prefunded key you point at via `HEIMA_DEPLOYER_KEY` / `HEIMA_DEPLOYER_KEY_FILE`. Anvil's mempool is single-tenant — none of the PR #102 nonce-contention issues (covered in the internal CI-setup operator runbook, `operator-docs/`, not in the OSS mirror) bite locally.
 
 ### 4.4 Editing `setup-broker-host.sh`
 
@@ -230,7 +230,7 @@ Cargo.toml
 Cargo.lock
 ```
 
-Untouched + auto-deploy is opt-in (gated on `OIDC_AWS_ROLE_ARN_DEPLOY` + `TEST_BROKER_INSTANCE_ID` repo secrets — see [`docs/ci-setup.md`](../ci-setup.md) §7).
+Untouched + auto-deploy is opt-in (gated on `OIDC_AWS_ROLE_ARN_DEPLOY` + `TEST_BROKER_INSTANCE_ID` repo secrets — see the internal CI-setup operator runbook §7, `operator-docs/`, not in the OSS mirror).
 
 To dry-run the deploy without a broker code change, dispatch manually with the override:
 
@@ -249,9 +249,9 @@ Three files, three audiences. The "is the broker reading the right thing" debug 
 
 | File | Where it lives | Who reads it | Local-dev override |
 |---|---|---|---|
-| [`scripts/broker.env`](../../scripts/broker.env) | **Broker host** (EC2 or your laptop's broker process) | `agentkeys-broker-server` (every entry has a matching constant in `crates/agentkeys-broker-server/src/env.rs`) | `scripts/broker.dev.env` (gitignored, copied from `broker.env`, swap hosts to `127.0.0.1`) |
-| [`scripts/operator-workstation.env`](../../scripts/operator-workstation.env) | **Operator laptop** | Every `harness/` + `scripts/heima-*.sh` script | `scripts/operator-workstation.dev.env` (gitignored, swap hosts to `127.0.0.1:809x`) |
-| [`scripts/broker.test.env`](../../scripts/broker.test.env) | **Test broker host** (CI auto-deploy target) | `agentkeys-broker-server` running on the test EC2 | Same shape as `broker.env`; CI workflow materializes per-run values into this on the runner |
+| `scripts/broker.env` (operator-internal) | **Broker host** (EC2 or your laptop's broker process) | `agentkeys-broker-server` (every entry has a matching constant in `crates/agentkeys-broker-server/src/env.rs`) | `scripts/broker.dev.env` (gitignored, copied from `broker.env`, swap hosts to `127.0.0.1`) |
+| `scripts/operator-workstation.env` (operator-internal) | **Operator laptop** | Every `harness/` + `scripts/heima-*.sh` script | `scripts/operator-workstation.dev.env` (gitignored, swap hosts to `127.0.0.1:809x`) |
+| `scripts/broker.test.env` (operator-internal) | **Test broker host** (CI auto-deploy target) | `agentkeys-broker-server` running on the test EC2 | Same shape as `broker.env`; CI workflow materializes per-run values into this on the runner |
 
 Mixing them on the wrong host is the most common config bug. The broker host should NEVER source `operator-workstation.env` — that file has AWS admin tooling vars (BUCKET, OIDC_PROVIDER_ARN) that don't exist as broker-server env vars and would silently shadow what the broker actually reads.
 
@@ -321,7 +321,7 @@ Re-run with `--from-step N` to keep prior progress, OR `--only-step N` to test o
 | `heima-paseo` | Heima testnet | Real-chain semantics without real-money cost; default for `v2-stage1-demo.sh` | Testnet HEI (free from faucet) |
 | `heima` | Heima mainnet | The canonical chain; matches what CI's harness-e2e runs against | Real HEI — small per-run cost |
 
-Switch with `--chain` on any harness script. Contract addresses for `heima` and `heima-paseo` live in [`scripts/operator-workstation.env`](../../scripts/operator-workstation.env); add `anvil` ones by running `bash scripts/setup-heima.sh --chain anvil --from-step 4 --to-step 8` after starting your local anvil.
+Switch with `--chain` on any harness script. Contract addresses for `heima` live in the chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) (`.contracts[]`) and in [`deployed-contracts.md`](./deployed-contracts.md); add `anvil` ones by running the chain bring-up entry point (operator-internal — `scripts/setup-heima.sh --chain anvil --from-step 4 --to-step 8`) after starting your local anvil.
 
 ---
 
@@ -330,7 +330,7 @@ Switch with `--chain` on any harness script. Contract addresses for `heima` and 
 - [`docs/arch.md`](../arch.md) — single source of truth for component inventory + trust boundaries.
 - [`docs/dev-setup.md`](../dev-setup.md) — first-time machine bootstrap (rust, jj, node, AWS CLI, browser).
 - [`docs/operator-runbook-stage7.md`](../operator-runbook-stage7.md) — deploy-to-real-EC2 walkthrough (manual; not for local dev).
-- [`docs/ci-setup.md`](../ci-setup.md) — no-LLM CI + auto-deploy of test broker (issue #101 / PR #102).
+- The internal CI-setup operator runbook (`operator-docs/`, not in the OSS mirror) — no-LLM CI + auto-deploy of test broker (issue #101 / PR #102).
 - [`docs/spec/signer-protocol.md`](./signer-protocol.md) — wire contract for the signer (TEE swap-in target).
 - [`docs/spec/credential-backend-interface.md`](./credential-backend-interface.md) — the `CredentialBackend` trait; what the broker's storage plug-ins must implement.
 - [`docs/archived/development-stages-v2-2026-04.md`](../archived/development-stages-v2-2026-04.md) — the staged build plan + harness gates.

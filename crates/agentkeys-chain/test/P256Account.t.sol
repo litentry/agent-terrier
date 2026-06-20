@@ -56,6 +56,9 @@ contract P256AccountTest is Test {
     bytes32 constant CRED2 = keccak256("cred-2");
     uint256 constant PUBX = uint256(keccak256("pubx"));
     uint256 constant PUBY = uint256(keccak256("puby"));
+    // #317: frozen WebAuthn-RPID test vector — NOT a deployment domain. The
+    // keccak256 hash is baked into this test's expected signatures, so this
+    // literal is content-filter-allowlisted and must never be scrubbed.
     bytes32 constant RPID = keccak256("litentry.org");
 
     function setUp() public {

@@ -41,7 +41,7 @@ pub struct Cli {
     #[arg(long, env = "MCP_LISTEN", default_value = "0.0.0.0:8088")]
     pub listen: SocketAddr,
 
-    /// Broker base URL (e.g. `https://broker.litentry.org`).
+    /// Broker base URL (e.g. `https://broker.example.invalid`).
     #[arg(long, env = "AGENTKEYS_BROKER_URL")]
     pub broker_url: Option<String>,
 

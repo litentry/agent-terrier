@@ -1,6 +1,6 @@
 Your agent's memory in AgentKeys is built from three parts that stay cleanly separated: **the truth** (your canonical memory, which AgentKeys stores and you own), **the engine** (a memory provider like OpenViking or mem0 that *ranks and retrieves* — but never owns your data), and **the gate** (AgentKeys' rule for who is allowed to read what). An agent never talks to your raw memory or to a provider directly — it reads only the slice the gate authorizes, ranked by the engine, delivered into its context. This page explains how those pieces fit together, why you can swap providers freely, and why your namespaces always stay yours.
 
-**Scope:** end users and integrators. For the developer construction model see [`../plan/memory-construction.md`](../plan/memory-construction.md); for where bytes are stored see [`./knowledge-storage.md`](./knowledge-storage.md); for how access is scoped see [`./policy-scope-namespace.md`](./policy-scope-namespace.md).
+**Scope:** end users and integrators. For the developer construction model see `../plan/memory-construction.md` (operator-internal); for where bytes are stored see [`./knowledge-storage.md`](./knowledge-storage.md); for how access is scoped see [`./policy-scope-namespace.md`](./policy-scope-namespace.md).
 
 ## The three parts
 
@@ -45,4 +45,4 @@ The same holds for agent-native files like **skills** and `AGENTS.md`/`CLAUDE.md
 - **Constrained devices still work.** A small voice device that can't run a ranking model can still hold your memory by downloading a precomputed index instead of building one (see [#316](https://github.com/litentry/agentKeys/issues/316)).
 - **One shared memory, plus each agent's own.** There's *one shared canonical memory* you curate and distribute to the agents you authorize — a learning curated once is available everywhere you've granted it. Each delegate **also keeps its own private working memory**, which is never collapsed into the shared one; sharing is additive (you grant a read), not a merge of everyone's notes.
 
-For the underlying construction, sync, and cost model, see [`../plan/memory-construction.md`](../plan/memory-construction.md). For the storage and isolation guarantees, see [`./knowledge-storage.md`](./knowledge-storage.md) and [`./tag-based-access.md`](./tag-based-access.md).
+For the underlying construction, sync, and cost model, see `../plan/memory-construction.md` (operator-internal). For the storage and isolation guarantees, see [`./knowledge-storage.md`](./knowledge-storage.md) and [`./tag-based-access.md`](./tag-based-access.md).

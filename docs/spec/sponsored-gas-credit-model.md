@@ -25,8 +25,8 @@ mechanisms**. Mixing them up is the #1 confusion — and a plain transfer to the
 
 | # | Fund THIS | Address | How — the ONLY correct way | What it does / drains | If it runs dry |
 |---|---|---|---|---|---|
-| **①** | **Sponsor / Bundler EOA** | `0x0298…944DA` (= `BROKER_SPONSOR_SIGNER_ADDRESS_HEIMA`) | **plain native transfer** ([`heima-fund-account.sh`](../../scripts/heima-fund-account.sh)) | fronts the outer `handleOps` tx gas; the EntryPoint refunds it as beneficiary, so it ~cycles but must keep a working float | broker can't broadcast → accepts fail at submit |
-| **②** | **Paymaster DEPOSIT** (inside the EntryPoint) | the deposit keyed by the **VerifyingPaymaster** — resolve the paymaster from [`heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) | **`deposit()` call** ([`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh)) | the actual sponsorship budget; DRAINS as ops are sponsored, never refilled by the cycle | EntryPoint reverts `AA31 paymaster deposit too low` → accepts fail |
+| **①** | **Sponsor / Bundler EOA** | `0x0298…944DA` (= `BROKER_SPONSOR_SIGNER_ADDRESS_HEIMA`) | **plain native transfer** (the fund-account helper, operator-internal) | fronts the outer `handleOps` tx gas; the EntryPoint refunds it as beneficiary, so it ~cycles but must keep a working float | broker can't broadcast → accepts fail at submit |
+| **②** | **Paymaster DEPOSIT** (inside the EntryPoint) | the deposit keyed by the **VerifyingPaymaster** — resolve the paymaster from [`heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) | **`deposit()` call** (the deploy-paymaster helper, operator-internal) | the actual sponsorship budget; DRAINS as ops are sponsored, never refilled by the cycle | EntryPoint reverts `AA31 paymaster deposit too low` → accepts fail |
 
 **Is `BROKER_SPONSOR_SIGNER` the bundler wallet? — Yes, today.** It is **one EOA wearing two
 hats**: (a) the **bundler submitter** that signs + broadcasts `EntryPoint.handleOps` (the
@@ -120,7 +120,7 @@ is purely the operator's accounting of *who is allowed* to consume sponsorship.
 | Seam | Layer-1 component | What layer 2 does | Build state |
 |---|---|---|---|
 | **Authorization** | broker co-sign (Sybil gate) | gate the co-sign on a credit balance: no credit → broker declines → paymaster won't sponsor → op fails (or falls back to user-paid). The broker is the only place that can refuse before gas is spent. | co-sign LIVE (gates device/scope today, **not credits**); the credit hook is **not built** |
-| **Funding** | paymaster EntryPoint deposit | the exchange server's *only* on-chain write — `deposit()` top-ups from converted fiat | `deposit()` LIVE ([`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh)); automated reimbursement is **not built** |
+| **Funding** | paymaster EntryPoint deposit | the exchange server's *only* on-chain write — `deposit()` top-ups from converted fiat | `deposit()` LIVE (via the deploy-paymaster helper, operator-internal); automated reimbursement is **not built** |
 | **Reconciliation** | deposit drawdown ↔ credit ledger | operator reconciles Σ sponsored ops (deposit drawdown, observable via the monitor) against credits spent | manual; no automated reconciliation built |
 
 ## Implemented vs not — read this before quoting the model
@@ -146,9 +146,11 @@ policy set in the exchange server — not on-chain, not fixed here.
 
 ## Operational tie-ins
 
-- **Fund the pool** (the only correct way): [`heima-deploy-paymaster.sh`](../../scripts/heima-deploy-paymaster.sh)
-  calls `deposit()`. A plain transfer to the paymaster address does **nothing** — see the
-  footgun in [`chain-setup.md` §Wallets](../chain-setup.md#wallets-contracts--funding-map-prod--test).
+- **Fund the pool** (the only correct way): the deploy-paymaster helper (operator-internal)
+  calls `deposit()`. A plain transfer to the paymaster address does **nothing**. Contract
+  addresses live in the chain profile [`heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json)
+  and the public [`deployed-contracts.md`](./deployed-contracts.md); the wallet custody /
+  funding map is operator-internal (the chain-setup runbook §Wallets).
 - **Monitor the pool + wallets:** [`check-wallet-balances.sh`](../../scripts/check-wallet-balances.sh)
   prints the deposit + every wallet (the signal the reimbursement loop would watch to
   decide when to top up).

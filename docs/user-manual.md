@@ -3,7 +3,7 @@
 The single home for **user-facing behaviors and instructions** — the things an
 operator or end user needs to know about how AgentKeys touches their machine.
 (Developers: see [`arch.md`](arch.md). Running the wire demo end to end: see
-[`operator-runbook-wire.md`](operator-runbook-wire.md).)
+the internal wire operator runbook (`operator-docs/`, not in the OSS mirror).)
 
 > Convention: every user-aware instruction or caveat lives here. If a change
 > alters something a user would notice, document it in this file.
