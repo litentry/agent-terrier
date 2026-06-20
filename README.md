@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/agentkeys-logo-dark-512.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/brand/agentkeys-logo-light-512.png">
+    <img src="docs/assets/brand/agentkeys-logo-light-512.png" width="140" alt="AgentKeys logo">
+  </picture>
+</p>
+
 # AgentKeys
 
 Credential broker for AI agents. A master (human) delegates scoped, revocable access to third-party service credentials (OpenRouter, OpenAI, etc.) to agent sandboxes — without ever handing the agent the raw keys.
