@@ -205,7 +205,14 @@ async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterR
     try {
       const sub = await client.registerMasterSubmit(assertion);
       return sub.ok
-        ? { via: 'submit' as const, ok: true as const, txHash: sub.data.txHash }
+        ? {
+            via: 'submit' as const,
+            ok: true as const,
+            txHash: sub.data.txHash,
+            // #278 D6: "register-pending" is broadcast-but-unconfirmed — NOT a
+            // bound master. Carry it through so the handler keeps polling chain.
+            pending: sub.data.pending === true || sub.data.chain === 'register-pending',
+          }
         : { via: 'submit' as const, ok: false as const, detail: sub.status.detail ?? 'submit failed' };
     } catch (e) {
       return { via: 'submit' as const, ok: false as const, detail: (e as Error)?.message ?? 'submit threw' };
@@ -222,15 +229,34 @@ async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterR
   const timeout = sleep(REGISTER_CONFIRM_TIMEOUT_MS).then(() => ({ via: 'timeout' as const }));
 
   const first = await Promise.race([submit, statePoll, timeout]);
-  settled = true;
 
   let registered = false;
   let txHash: string | undefined;
   let failDetail = '';
   if (first.via === 'submit') {
     if (first.ok) {
-      registered = true;
-      txHash = first.txHash;
+      // Nest the ok-check so TS narrows `first` to the ok:false variant in the
+      // `else` (a compound `first.ok && first.pending` defeats that narrowing
+      // and widens first.detail to string | undefined — the CI tsc failure).
+      if (!first.pending) {
+        // Confirmed bound on chain (the daemon persisted registered_master).
+        registered = true;
+        txHash = first.txHash;
+      } else {
+        // #278 D6: the register was broadcast but its receipt is UNCONFIRMED —
+        // the daemon deliberately did NOT mark the master bound (a stored-but-
+        // unbound pointer is the wrong-passkey / empty-actor trap). The HTTP 200
+        // is NOT success here: keep racing the still-running chain poll against
+        // the confirm timeout; ground truth is chain == "master-registered".
+        akLog('onboarding: register broadcast but PENDING — polling chain for confirmation', {
+          account: reg.account,
+        });
+        const next = await Promise.race([statePoll, timeout]);
+        registered = next.via === 'state-poll';
+        if (!registered) {
+          failDetail = `register broadcast but unconfirmed within ${REGISTER_CONFIRM_TIMEOUT_MS / 1000} s`;
+        }
+      }
     } else {
       // The HTTP submit failed — but handleOps may still have landed (the
       // response can be dropped after the tx went out). The chain state decides.
@@ -244,6 +270,7 @@ async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterR
     // 'timeout' — or the defensive 'poll-stopped' arm that can't win the race.
     failDetail = `no register confirmation within ${REGISTER_CONFIRM_TIMEOUT_MS / 1000} s`;
   }
+  settled = true;
 
   // Persist the auto-select pointer ONLY when the register actually BOUND the
   // account (B2). A stored-but-unbound pointer is exactly the wrong-passkey

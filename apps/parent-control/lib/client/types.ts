@@ -82,6 +82,14 @@ export interface RegisterMasterResult {
   ok: boolean;
   txHash?: string;
   account?: string;
+  /** #278 D6: the daemon's onboarding chain state for this submit —
+   *  "master-registered" (bound + confirmed) or "register-pending" (broadcast
+   *  but the receipt is unconfirmed; the master is NOT yet bound). */
+  chain?: string;
+  /** True when the register op was broadcast but its receipt hasn't confirmed:
+   *  the master is NOT bound yet, so the ceremony must keep polling onboarding
+   *  state and must NOT persist the passkey pointer or complete onboarding. */
+  pending?: boolean;
 }
 
 export interface RevokeIntent {
