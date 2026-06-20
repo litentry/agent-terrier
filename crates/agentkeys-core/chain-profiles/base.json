@@ -80,7 +80,7 @@
       "name": "VerifyingPaymaster",
       "address": "0xC297fe74E38bB8a1270358AF1A94e4C3b5578098",
       "purpose": "#164 E6 / #225 — broker-co-signed gas sponsorship for the K11-gated accept UserOp (one shared EntryPoint deposit; the J1 Sybil gate)",
-      "deployed_at": "Heima mainnet · #225"
+      "deployed_at": "Base mainnet · #225"
     },
     {
       "name": "EntryPoint",
