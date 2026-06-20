@@ -1,5 +1,13 @@
 name: mcp-server
 
+# `test + clippy` below is a REQUIRED status check on main, so it MUST NOT be
+# `on.pull_request.paths`-filtered: a PR outside those paths would never create
+# the check run, and branch protection blocks it forever waiting for a status
+# that never reports (the #334 deadlock). So `pull_request` runs on EVERY PR;
+# the `changes` job detects whether mcp-server-relevant paths changed and the
+# `test` job skips the expensive cargo work (still reporting success) when they
+# didn't. `push` keeps its path filter — the image only needs rebuilding when
+# mcp-server actually changes, and pushes are not a required-check gate.
 on:
   push:
     branches: [main]
@@ -10,28 +18,53 @@ on:
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"
   pull_request:
-    paths:
-      - "crates/agentkeys-mcp-server/**"
-      - "crates/agentkeys-backend-client/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/mcp-server.yml"
 
 permissions:
   contents: read
   packages: write
+  pull-requests: read # dorny/paths-filter@v3 on pull_request events queries the PR's changed files via the API
 
 jobs:
-  test:
-    name: test + clippy
+  # Detect whether anything affecting the mcp-server build changed. The required
+  # `test + clippy` job always runs (so the check always reports) but consults
+  # this to skip the expensive cargo steps on unrelated PRs (#334 deadlock fix).
+  changes:
+    name: detect mcp-server-relevant changes
     runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'crates/agentkeys-mcp-server/**'
+              - 'crates/agentkeys-backend-client/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/mcp-server.yml'
+
+  test:
+    name: test + clippy
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      # No mcp-server-relevant changes: report success WITHOUT the cargo build,
+      # so this REQUIRED check never deadlocks a code-only PR (the #334 fix).
+      - name: Skip (no mcp-server-relevant changes)
+        if: needs.changes.outputs.relevant != 'true'
+        run: echo "No mcp-server / backend-client / Cargo / workflow changes — nothing to build; reporting success."
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.relevant == 'true'
       # Pinned by rust-toolchain.toml (channel + clippy) — single source of
       # truth shared with local dev; never a floating @stable.
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        if: needs.changes.outputs.relevant == 'true'
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.relevant == 'true'
         with:
           workspaces: ". -> target"
       # The tests/ suite includes transport_conformance.rs (#207) — it boots the
@@ -46,10 +79,12 @@ jobs:
       # broker; if it's unreachable the tool-call degrades to a well-formed
       # connection error, so this stays green + flake-free either way.
       - name: cargo test (incl. real-backend transport-conformance)
+        if: needs.changes.outputs.relevant == 'true'
         env:
           CONFORMANCE_BROKER_URL: https://broker.litentry.org
         run: cargo test -p agentkeys-mcp-server --all-features
       - name: cargo clippy
+        if: needs.changes.outputs.relevant == 'true'
         run: cargo clippy -p agentkeys-mcp-server --all-targets -- -D warnings
 
   image:

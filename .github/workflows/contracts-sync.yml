@@ -10,18 +10,17 @@ name: contract-address sync + doc-literal gate
 #      orphaned addresses pass naturally once out of the profile).
 # Deliberately a SEPARATE tiny workflow: harness-ci.yml does not trigger on
 # docs/**, and running the full rust-checks job for a doc edit would be waste.
-
+#
+# This job is a REQUIRED status check on main, so it MUST NOT be
+# `on.pull_request.paths`-filtered: a PR that doesn't touch those paths would
+# never create the check run, and branch protection would block it forever
+# waiting for a status that never reports (the #334 deadlock). The gate is cheap
+# (checkout + jq + grep, seconds), so it simply runs on EVERY PR — the script
+# is a fast no-op when nothing it guards changed.
 on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - "**/*.md"
-      - "crates/agentkeys-core/chain-profiles/**"
-      - "scripts/operator-workstation.env"
-      - "scripts/operator-workstation.test.env"
-      - "scripts/check-deployed-contracts-sync.sh"
-      - ".github/workflows/contracts-sync.yml"
 
 permissions:
   contents: read
