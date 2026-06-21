@@ -41,6 +41,16 @@ docs/dev-setup.md
 docs/user-manual.md
 docs/spec/
 docs/wiki/
+# Brand media kit (logos / favicons / icons / brand README) + the arch diagrams
+# embedded in PUBLIC docs (arch.md ← component-architecture + key-map; spec ←
+# gas-funding-map). All clean of op-values, and the diagrams are visual companions
+# to already-public docs — stripping them just leaves broken images in the mirror.
+# ci-fleet-slot-capacity.svg is referenced ONLY by private operator-docs/, so it is
+# deliberately NOT listed here (private by default).
+docs/assets/brand/
+docs/assets/component-architecture.svg
+docs/assets/key-map.svg
+docs/assets/gas-funding-map.svg
 # docs/research/ is PRIVATE (competitive/China-market/hardware research) — omitted
 # from the allowlist. The hardware/volcano cluster lives in docs/hardware/ (also
 # omitted → private). Both stay out of the mirror.
