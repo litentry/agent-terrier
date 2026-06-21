@@ -8,6 +8,11 @@
 .gstack/
 AWSCLIV2.pkg
 
+# agentkeys-volcano-probe runtime outputs (TTS audio + the pairing-QR PNG written to CWD)
+volcano-tts.mp3
+volcano-tui.mp3
+pairing-qr.png
+
 # Claude Code per-workspace runtime state (lock files, scheduled-task index,
 # personal settings.local.json). Never check these in.
 .claude/
