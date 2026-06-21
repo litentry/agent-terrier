@@ -16,6 +16,9 @@ on:
 
 jobs:
   publish:
+    # Fork-safe: only publish the wiki from the canonical source repo. The OSS
+    # mirror (litentry/agent-terrier) has no wiki repo, so skip (green) there.
+    if: github.repository == 'litentry/agentKeys'
     runs-on: ubuntu-latest
     concurrency:
       group: wiki-publish
