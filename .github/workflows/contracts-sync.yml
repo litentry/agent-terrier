@@ -32,6 +32,10 @@ concurrency:
 jobs:
   check:
     name: chain profile ⟷ env sync + no doc address literals
+    # Fork-safe: only run on the canonical source repo. The OSS mirror
+    # (litentry/agent-terrier) strips scripts/operator-workstation.env, so this
+    # gate has nothing to verify there — skip (green) instead of hard-failing.
+    if: github.repository == 'litentry/agentKeys'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
