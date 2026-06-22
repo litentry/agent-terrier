@@ -66,6 +66,9 @@ tower-service = "0.3"
 # See src/ui_bridge.rs.
 webauthn-rs = "0.5"
 url = "2"
+# Render the §10.2 pairing deep-link as a scannable QR in the daemon log/terminal
+# (the owner scans it / reads the code to claim from the master). Pure-Rust, cross-compiles.
+qrcode = { version = "0.14", default-features = false }
 # SSE audit-feed broadcast (PR-C) — futures-util drives the axum
 # Sse stream; tokio-stream wraps the broadcast::Receiver as a Stream.
 futures-util = { version = "0.3", default-features = false }
