@@ -304,10 +304,18 @@ pub struct Funding {
     /// Refill the paymaster deposit when it drops below this.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub paymaster_min_deposit_wei: String,
-    /// EntryPoint native ED buffer (`heima-deploy-erc4337.sh`); substrate-frontier
-    /// reaping guard, `"0"` on non-substrate chains (no ExistentialDeposit).
+    /// Deployer native reserve held back in the ERC-4337 register pre-flight
+    /// (`_erc4337_lib.sh`): ≈ the chain ExistentialDeposit so spending the account
+    /// deposit can't reap the DEPLOYER. `"0"` on non-substrate chains (no ED).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ed_buffer_wei: String,
+    /// The EntryPoint contract's standing native buffer (`heima-deploy-erc4337.sh`):
+    /// a generous balance (≫ the ED) so account-recreation can't reap the EntryPoint
+    /// (the AA91 class). SEPARATE from `ed_buffer_wei` (the bare deployer ED) — the
+    /// two were conflated, which over-charged the deployer pre-flight. Consumers
+    /// fall back to `ed_buffer_wei` when this is unset (un-migrated profiles).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub entrypoint_native_buffer_wei: String,
     /// Per-account EntryPoint deposit top-up for the #164 master register
     /// (`_erc4337_lib.sh`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -649,6 +657,26 @@ mod tests {
             .unwrap()
             .funding
             .is_none());
+    }
+
+    #[test]
+    fn heima_entrypoint_buffer_exceeds_the_deployer_ed_reserve() {
+        // The deployer ED reserve (`ed_buffer_wei`, ≈ the ExistentialDeposit, held
+        // back in the register pre-flight) and the EntryPoint contract's standing
+        // buffer (`entrypoint_native_buffer_wei`, the AA91 guard) are DISTINCT: the
+        // latter must be ≫ the former. Conflating them over-charged the deployer
+        // pre-flight (need = deposit + 1.0 HEI instead of deposit + ~0.1 HEI).
+        let heima = ChainProfile::load_builtin("heima").unwrap();
+        let hf = heima.funding.as_ref().expect("heima carries funding");
+        let wei = |s: &str| s.parse::<u128>().expect("funding wei parses");
+        assert!(
+            !hf.ed_buffer_wei.is_empty() && !hf.entrypoint_native_buffer_wei.is_empty(),
+            "heima must set both the ED reserve and the EntryPoint buffer"
+        );
+        assert!(
+            wei(&hf.entrypoint_native_buffer_wei) > wei(&hf.ed_buffer_wei),
+            "the EntryPoint native buffer must exceed the bare deployer ED reserve"
+        );
     }
 
     #[test]
