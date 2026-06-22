@@ -6,6 +6,7 @@ pub mod broker_status;
 pub mod canonical_sts;
 pub mod cap;
 pub mod grant;
+pub mod inbox_sts;
 pub mod metrics;
 pub mod oidc;
 pub mod register;

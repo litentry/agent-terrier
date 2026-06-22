@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
+import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { ConfigPreset, ConnectionStatus, MemoryCategory } from '@/lib/client/types';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import { CeremonyRunner } from './ceremony';
@@ -43,12 +44,18 @@ export function MemoryPage({
   defaultPresetId,
   initializing,
   planting,
+  inbox,
+  inboxBusy,
   onInitDefault,
   onInitDone,
   onPlant,
   onPlantDone,
   onLoadCategory,
   onView,
+  onAcceptInbox,
+  onRejectInbox,
+  onRefreshInbox,
+  onViewInboxBody,
 }: {
   categories: MemoryCategory[];
   entriesByNs: Record<string, NsEntries>;
@@ -60,12 +67,20 @@ export function MemoryPage({
   defaultPresetId: string;
   initializing: boolean;
   planting: boolean;
+  /** #339 P2 — absorption-inbox curate queue (delegate proposals). */
+  inbox: ApiInboxItem[];
+  inboxBusy: boolean;
   onInitDefault: (presetId: string) => void;
   onInitDone: () => void;
   onPlant: () => void;
   onPlantDone: () => void;
   onLoadCategory: (ns: string) => void;
   onView: (m: PreservedMemory) => void;
+  onAcceptInbox: (s3Key: string) => void;
+  onRejectInbox: (s3Key: string) => void;
+  onRefreshInbox: () => void;
+  /** #339 P2 — lazily fetch one proposal's full body for review. */
+  onViewInboxBody: (s3Key: string) => Promise<string>;
 }) {
   const hasMemory = categories.length > 0;
   const connected = status.kind === 'connected';
@@ -78,6 +93,19 @@ export function MemoryPage({
         title={<><span className="muted serif">/</span> memory</>}
         desc="Your portable memory namespace — the spine agents read from and write to. Categories resolve from your master-only memory-types config (no decryption); an entry's detail is decrypted only when you open its category. Agents see only the namespaces their scope grants (memory:<ns>), and the configured engine ranks what's injected per query — never widening past the gate."
       />
+
+      {/* #339 P2 — absorption-inbox curate queue: delegate proposals (the
+          master-hub "push" channel) awaiting accept-into-canonical or reject. */}
+      {connected && inbox.length > 0 && (
+        <InboxPanel
+          inbox={inbox}
+          busy={inboxBusy}
+          onAccept={onAcceptInbox}
+          onReject={onRejectInbox}
+          onRefresh={onRefreshInbox}
+          onViewBody={onViewInboxBody}
+        />
+      )}
 
       {!hasMemory && !busy && (
         connected ? (
@@ -139,6 +167,122 @@ export function MemoryPage({
         </>
       )}
     </>
+  );
+}
+
+// #339 P2 — the absorption-inbox curate queue. Each row is a delegate's PROPOSAL
+// (master-hub "push"): a learning a delegate pushed into the master's staging
+// inbox, awaiting the master's review. `source` + `ns` are worker-stamped (the
+// delegate cannot forge its own attribution, §8). Accept curates it INTO
+// canonical memory (the PR-merge); reject discards it. Nothing here is canonical
+// until accepted — this is staging, never a blind write.
+function InboxPanel({
+  inbox,
+  busy,
+  onAccept,
+  onReject,
+  onRefresh,
+  onViewBody,
+}: {
+  inbox: ApiInboxItem[];
+  busy: boolean;
+  onAccept: (s3Key: string) => void;
+  onReject: (s3Key: string) => void;
+  onRefresh: () => void;
+  onViewBody: (s3Key: string) => Promise<string>;
+}) {
+  // Lazy body view: presence in `bodies` = expanded. 'loading' while fetching,
+  // the string when decrypted, {error} on failure. The list carries only metadata
+  // (#339 P2), so the full proposal body is fetched on demand via inbox-get.
+  const [bodies, setBodies] = useState<Record<string, string | 'loading' | { error: string }>>({});
+  const toggleBody = (s3Key: string) => {
+    if (bodies[s3Key] !== undefined) {
+      setBodies((p) => {
+        const n = { ...p };
+        delete n[s3Key];
+        return n;
+      });
+      return;
+    }
+    setBodies((p) => ({ ...p, [s3Key]: 'loading' }));
+    onViewBody(s3Key)
+      .then((body) => setBodies((p) => ({ ...p, [s3Key]: body })))
+      .catch((e: Error) => setBodies((p) => ({ ...p, [s3Key]: { error: e.message } })));
+  };
+  const shortOmni = (o: string) => {
+    const h = o.replace(/^0x/, '');
+    return h.length > 12 ? `${h.slice(0, 6)}…${h.slice(-4)}` : h;
+  };
+  const age = (ts: number) => {
+    if (!ts) return '—';
+    const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    return `${Math.floor(secs / 86400)}d ago`;
+  };
+
+  return (
+    <Panel title={`── inbox · ${inbox.length} pending`} flush>
+      <div className="banner" style={{ margin: '8px 12px' }}>
+        <span className="lbl">↦ absorption</span>
+        <span>
+          Learnings your delegates <strong>pushed</strong> for review (master-hub absorption). Each is staged in your
+          inbox — <strong>not yet canonical</strong>. <strong>Accept</strong> curates it into the named namespace
+          (a content-hash-deduped merge); <strong>reject</strong> discards it. Provenance is stamped by the worker,
+          so a delegate can't fake who proposed what.
+          <button className="btn ghost sm" style={{ marginLeft: 10 }} onClick={onRefresh} disabled={busy}>↻ refresh</button>
+        </span>
+      </div>
+      <table className="tab">
+        <thead>
+          <tr>
+            <th>proposal</th>
+            <th>from delegate</th>
+            <th>age</th>
+            <th className="right">bytes</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {inbox.map((it) => {
+            const b = bodies[it.s3_key];
+            const expanded = b !== undefined;
+            return (
+              <Fragment key={it.s3_key}>
+                <tr>
+                  <td>
+                    <span className="mono" style={{ fontWeight: 500 }}>{it.key}</span>
+                    <div className="secondary">memory:{it.ns}</div>
+                  </td>
+                  <td className="mono muted" title={it.source_delegate_omni}>{shortOmni(it.source_delegate_omni)}</td>
+                  <td className="muted">{age(it.ts)}</td>
+                  <td className="right mono">{it.bytes}</td>
+                  <td className="right" style={{ whiteSpace: 'nowrap' }}>
+                    <button className="btn sm" onClick={() => toggleBody(it.s3_key)}>{expanded ? 'hide' : 'view'}</button>
+                    <button className="btn primary sm" style={{ marginLeft: 6 }} disabled={busy} onClick={() => onAccept(it.s3_key)}>accept</button>
+                    <button className="btn ghost sm" style={{ marginLeft: 6 }} disabled={busy} onClick={() => onReject(it.s3_key)}>reject</button>
+                  </td>
+                </tr>
+                {expanded && (
+                  <tr>
+                    <td colSpan={5} style={{ background: 'var(--bg-elev, #faf8f2)' }}>
+                      {b === 'loading' ? (
+                        <span className="muted" style={{ fontSize: 11.5 }}>decrypting proposal…</span>
+                      ) : typeof b === 'object' ? (
+                        <span className="muted" style={{ fontSize: 11.5, color: 'var(--err, #b3261e)' }}>couldn&apos;t load body — {b.error}</span>
+                      ) : (
+                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, lineHeight: 1.5 }}>{b}</pre>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </Panel>
   );
 }
 

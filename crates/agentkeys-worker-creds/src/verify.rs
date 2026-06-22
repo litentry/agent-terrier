@@ -41,6 +41,16 @@ pub enum CapOp {
     /// `memory:<ns>` grant (the master-self skip is bypassed). See
     /// docs/plan/master-hub-topology.md §6a/§12.
     CanonicalFetch,
+    /// Delegated APPEND to the master's absorption INBOX (master-hub #339 P2
+    /// absorption channel / "push"). Distinct from `Store` (own working memory
+    /// write) and `CanonicalFetch` (canonical read): authorizes a WRITE to
+    /// `bots/<operator>/inbox/<delegate>/…` gated by a distinct on-chain
+    /// `inbox:<ns>` grant (never the `memory:<ns>` read grant). `operator !=
+    /// actor` makes `check_chain_scope` consult that grant (master-self skip
+    /// bypassed). The memory worker performs the write SERVER-SIDE under a
+    /// broker-minted, prefix-scoped operator STS (A', §8); the delegate holds no
+    /// AWS creds. See docs/plan/master-hub-topology.md §6b/§8.
+    Append,
     Teardown,
     /// Compute-gate op for the classifier-service worker (#178 §15.6, #207
     /// items 2-3). Authorizes a COMPILE (NL → policy) or TAG (entity →
@@ -57,6 +67,7 @@ impl CapOp {
             CapOp::Store => "store",
             CapOp::Fetch => "fetch",
             CapOp::CanonicalFetch => "canonical_fetch",
+            CapOp::Append => "append",
             CapOp::Teardown => "teardown",
             CapOp::Classify => "classify",
         }
@@ -750,6 +761,8 @@ mod tests {
             "\"canonical_fetch\""
         );
         assert_eq!(CapOp::CanonicalFetch.as_str(), "canonical_fetch");
+        assert_eq!(serde_json::to_string(&CapOp::Append).unwrap(), "\"append\"");
+        assert_eq!(CapOp::Append.as_str(), "append");
         assert_eq!(
             serde_json::to_string(&CapOp::Teardown).unwrap(),
             "\"teardown\""

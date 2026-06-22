@@ -66,6 +66,16 @@ pub enum CapOp {
     /// (reuses `AuditOpKind::MemoryGet`), NOT the on-chain `CredentialAudit.OP_*`
     /// path, so no chain-enum change is needed.
     CanonicalFetch,
+    /// Delegated APPEND to the master's absorption INBOX (master-hub #339 P2
+    /// "push"). Mirror of `agentkeys_worker_creds::verify::CapOp::Append`. A
+    /// distinct SIGNED op so an own-memory `Store` cap can never be redeemed as
+    /// an inbox append. Like `CanonicalFetch` the DELEGATE mints it
+    /// (`session == actor`); `operator != actor` makes `mint_cap`'s scope check
+    /// consult the on-chain `inbox:<ns>` grant (distinct from the `memory:<ns>`
+    /// read grant). `as_u8` = 5 audits via the tier-1 worker
+    /// (`AuditOpKind::MemoryInboxAppend`), NOT the on-chain `CredentialAudit.OP_*`
+    /// path, so no chain-enum change is needed.
+    Append,
     Teardown,
     /// Compute-gate op for the classifier-service worker (#178 §15.6, #207
     /// items 2-3): a COMPILE or TAG call, NOT an S3 touch. `/v1/cap/classify`
@@ -83,6 +93,7 @@ impl CapOp {
             CapOp::Teardown => 2,
             CapOp::Classify => 3,
             CapOp::CanonicalFetch => 4,
+            CapOp::Append => 5,
         }
     }
 
@@ -94,6 +105,7 @@ impl CapOp {
             CapOp::Store => "store",
             CapOp::Fetch => "fetch",
             CapOp::CanonicalFetch => "canonical_fetch",
+            CapOp::Append => "append",
             CapOp::Teardown => "teardown",
             CapOp::Classify => "classify",
         }
@@ -324,6 +336,24 @@ pub async fn cap_memory_canonical_get(
     .map(Json)
 }
 
+/// Delegated APPEND to the master's absorption INBOX (master-hub #339 P2 push).
+/// Mints an `Append`/`Memory` cap. The DELEGATE mints it (`session == actor`);
+/// because `operator != actor`, `mint_cap`'s scope check consults the on-chain
+/// `inbox:<ns>` grant (a DISTINCT service-id from the `memory:<ns>` read grant —
+/// granting read never grants push). The delegate then redeems the cap at the
+/// memory worker's `/v1/memory/inbox-append`, which performs the write
+/// server-side under a broker-minted, prefix-scoped operator STS (`/v1/cap/inbox-sts`);
+/// the delegate holds no AWS creds.
+pub async fn cap_memory_append(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    mint_cap(state, headers, req, CapOp::Append, DataClass::Memory)
+        .await
+        .map(Json)
+}
+
 // Config cap-mint endpoints (#178 P1 / config-data-class-memory-list plan): the
 // policy / memory-types taxonomy data class. The minted cap carries
 // data_class=Config; the cred + memory workers reject it via
@@ -436,12 +466,14 @@ async fn mint_cap(
         .map_err(|e| CapError::InvalidInput(format!("operator_omni invalid: {e}")))?;
     let req_actor = normalize_hex32(&req.actor_omni)
         .map_err(|e| CapError::InvalidInput(format!("actor_omni invalid: {e}")))?;
-    // Who must hold the session? `CanonicalFetch` (#295 P1 §7a) is the delegated
-    // canonical READ: the DELEGATE mints its OWN cap (`session == actor`), and the
-    // master's on-chain `memory:<ns>` grant (checked below, because operator != actor
-    // bypasses the master-self skip) is the authorization — a sandboxed delegate must
-    // never hold the operator session bearer. Every other op is operator-session-minted.
-    let required_session_omni = if matches!(op, CapOp::CanonicalFetch) {
+    // Who must hold the session? The two DELEGATED cross-actor ops — `CanonicalFetch`
+    // (#295 P1 §7a, the canonical READ) and `Append` (#339 P2, the inbox PUSH) — are
+    // minted by the DELEGATE with its OWN session (`session == actor`); the master's
+    // on-chain grant (`memory:<ns>` / `inbox:<ns>` respectively, checked below because
+    // operator != actor bypasses the master-self skip) is the authorization. A
+    // sandboxed delegate must never hold the operator session bearer. Every other op
+    // is operator-session-minted.
+    let required_session_omni = if matches!(op, CapOp::CanonicalFetch | CapOp::Append) {
         &req_actor
     } else {
         &req_omni

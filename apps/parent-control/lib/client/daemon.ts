@@ -50,6 +50,7 @@ import type {
 import type { ApiActor } from '@/lib/generated/ApiActor';
 import type { ApiAnchorStatus } from '@/lib/generated/ApiAnchorStatus';
 import type { ApiAuditEvent } from '@/lib/generated/ApiAuditEvent';
+import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { ApiMemoryEntry } from '@/lib/generated/ApiMemoryEntry';
 import type { ApiWorker } from '@/lib/generated/ApiWorker';
 import type { BuildAcceptUserOpResponse } from '@/lib/generated/BuildAcceptUserOpResponse';
@@ -500,6 +501,38 @@ export class DaemonBackend implements AgentKeysClient {
         taxonomyStatus: r.data.taxonomy_status,
       },
     };
+  }
+
+  // ── #339 P2 — absorption-inbox curate queue ──────────────────────────────
+  // The wire item type (ApiInboxItem) is ts-rs-generated from the daemon's Rust
+  // struct, so a Rust-side field rename is a frontend compile error (#215).
+
+  async listInbox(): Promise<Result<ApiInboxItem[]>> {
+    const r = await this.getJson<{ items: ApiInboxItem[] }>('/v1/master/inbox');
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.items };
+  }
+
+  async acceptInbox(s3Key: string): Promise<Result<{ planted: number; ns: string; key: string }>> {
+    return this.postJson<{ planted: number; ns: string; key: string }>(
+      '/v1/master/inbox/accept',
+      { s3_key: s3Key },
+    );
+  }
+
+  async rejectInbox(s3Key: string): Promise<Result<{ deleted: boolean }>> {
+    return this.postJson<{ deleted: boolean }>('/v1/master/inbox/reject', { s3_key: s3Key });
+  }
+
+  // Read one proposal's full decrypted body so the master can review it before
+  // accept/reject (the daemon relays the worker's inbox-get; master-self).
+  async getInboxItem(
+    s3Key: string,
+  ): Promise<Result<{ body: string; ns: string; key: string; source_delegate_omni: string; ts: number }>> {
+    return this.postJson<{ body: string; ns: string; key: string; source_delegate_omni: string; ts: number }>(
+      '/v1/master/inbox/entry',
+      { s3_key: s3Key },
+    );
   }
 
   async listConfigPresets(): Promise<Result<ConfigPresetList>> {

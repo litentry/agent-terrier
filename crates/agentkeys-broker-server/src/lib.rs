@@ -71,6 +71,21 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/cap/canonical-sts",
             post(handlers::canonical_sts::mint_canonical_sts),
         )
+        // #339 P2 — delegated absorption-inbox APPEND (the master-hub "push"
+        // channel): mints an Append/Memory cap, gated by the on-chain inbox:<ns>
+        // grant (a DISTINCT service-id from the memory:<ns> read grant).
+        .route(
+            "/v1/cap/memory-append",
+            post(handlers::cap::cap_memory_append),
+        )
+        // #339 P2 §8 — broker-brokered scoped STS for a delegated inbox append
+        // (the write-side twin of canonical-sts): the worker presents the
+        // delegate's Append cap + the delegate's OWN session and gets back
+        // PUT-only creds scoped to the single delegate's inbox sub-prefix.
+        .route(
+            "/v1/cap/inbox-sts",
+            post(handlers::inbox_sts::mint_inbox_sts),
+        )
         // Per-data-class CONFIG caps (#178 P1 / config-data-class-memory-list).
         // data_class=Config — the policy / memory-types taxonomy; master-only.
         .route(

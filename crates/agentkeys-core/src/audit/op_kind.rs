@@ -7,7 +7,7 @@
 //! Byte ranges with reserved slots:
 //!
 //! - 0-9   creds family (CredStore=0, CredFetch=1, CredTeardown=2; 3-9 reserved)
-//! - 10-19 memory family (MemoryPut=10, MemoryGet=11, MemoryTeardown=12; 13-19 reserved)
+//! - 10-19 memory family (MemoryPut=10, MemoryGet=11, MemoryTeardown=12, MemoryInboxAppend=13; 14-19 reserved)
 //! - 20-29 signs family (SignEip191=20, SignEip712=21; 22-29 reserved)
 //! - 30-39 payments family (PaymentEscrowRedeem=30, PaymentDirect=31; 32-39 reserved)
 //! - 40-49 scope family (ScopeGrant=40, ScopeRevoke=41; 42-49 reserved)
@@ -32,6 +32,8 @@ pub enum AuditOpKind {
     MemoryPut = 10,
     MemoryGet = 11,
     MemoryTeardown = 12,
+    /// #339 P2 — a delegate appended a proposal to the master's absorption inbox.
+    MemoryInboxAppend = 13,
     SignEip191 = 20,
     SignEip712 = 21,
     PaymentEscrowRedeem = 30,
@@ -60,6 +62,7 @@ impl AuditOpKind {
             10 => Self::MemoryPut,
             11 => Self::MemoryGet,
             12 => Self::MemoryTeardown,
+            13 => Self::MemoryInboxAppend,
             20 => Self::SignEip191,
             21 => Self::SignEip712,
             30 => Self::PaymentEscrowRedeem,
@@ -90,6 +93,7 @@ impl AuditOpKind {
             Self::MemoryPut => "memory.put",
             Self::MemoryGet => "memory.get",
             Self::MemoryTeardown => "memory.teardown",
+            Self::MemoryInboxAppend => "memory.inbox_append",
             Self::SignEip191 => "sign.eip191",
             Self::SignEip712 => "sign.eip712",
             Self::PaymentEscrowRedeem => "payment.escrow_redeem",
@@ -125,6 +129,7 @@ mod tests {
             AuditOpKind::MemoryPut,
             AuditOpKind::MemoryGet,
             AuditOpKind::MemoryTeardown,
+            AuditOpKind::MemoryInboxAppend,
             AuditOpKind::SignEip191,
             AuditOpKind::SignEip712,
             AuditOpKind::PaymentEscrowRedeem,
@@ -156,7 +161,7 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [
-            3u8, 9, 13, 19, 22, 32, 42, 53, 62, 71, 83, 89, 90, 200, 250, 255,
+            3u8, 9, 14, 19, 22, 32, 42, 53, 62, 71, 83, 89, 90, 200, 250, 255,
         ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),
@@ -178,6 +183,7 @@ mod tests {
             AuditOpKind::MemoryPut as u8,
             AuditOpKind::MemoryGet as u8,
             AuditOpKind::MemoryTeardown as u8,
+            AuditOpKind::MemoryInboxAppend as u8,
             AuditOpKind::SignEip191 as u8,
             AuditOpKind::SignEip712 as u8,
             AuditOpKind::PaymentEscrowRedeem as u8,
