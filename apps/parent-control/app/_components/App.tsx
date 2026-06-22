@@ -21,6 +21,7 @@ import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
 import { CeremonyRunner, OnboardingScreen } from './ceremony';
 import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
 import { LogoPage } from './logos';
+import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import { MemoryPage } from './memory';
 import { CredentialsPage } from './credentials';
 import { PairingPage } from './pairing';
@@ -31,6 +32,13 @@ import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import type { ChainInfo, ChainListEntry, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
+
+// #242: does a daemon error detail mean the master J1 lapsed (vs a genuine
+// missing-config / transport error)? The daemon says "master session expired —
+// re-authenticate (one passkey prompt)…"; match that so we offer Touch ID re-auth
+// rather than a dead-end toast. NOT triggered by partial-config errors.
+const looksSessionExpired = (detail?: string): boolean =>
+  !!detail && /session expired|re-?authenticate/i.test(detail);
 
 type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'pairing' | 'audit' | 'decode' | 'chain' | 'logo';
 
@@ -69,6 +77,19 @@ export function App() {
   const [categories, setCategories] = useState<MemoryCategory[]>([]);
   const [entriesByNs, setEntriesByNs] = useState<Record<string, PreservedMemory[] | 'loading'>>({});
   const [planting, setPlanting] = useState(false);
+  // #339 P2 — the absorption-inbox curate queue (delegate proposals awaiting the
+  // master's accept-into-canonical or reject); `inboxBusy` blocks re-entry while
+  // a curate action is in flight.
+  const [inbox, setInbox] = useState<ApiInboxItem[]>([]);
+  const [inboxBusy, setInboxBusy] = useState(false);
+  // #242 — the master J1 can lapse while the user stays "logged in" (coords are
+  // persisted). When a chain read 502s with "master session expired", surface a
+  // Touch ID re-auth banner instead of a dead-end toast; ONE passkey prompt
+  // restores the session (NO re-onboarding). `reloadKey` re-runs the data loads
+  // after a successful re-auth.
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [reauthBusy, setReauthBusy] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   // #207 item 1A — config-init entry point A (default-preset bootstrap): the
   // bundled presets, the shipped default id, and the in-flight authoring state.
   const [presets, setPresets] = useState<ConfigPreset[]>([]);
@@ -141,14 +162,20 @@ export function App() {
     if (!onboarded) return;
     let cancelled = false;
     (async () => {
-      const [cats, pre, creds] = await Promise.all([
+      const [cats, pre, creds, inb] = await Promise.all([
         client.listMemoryCategories(),
         client.listConfigPresets(),
         client.listCredentials(),
+        client.listInbox(),
       ]);
       if (cancelled) return;
       if (cats.ok) {
         setCategories(cats.data);
+        setSessionExpired(false); // a successful chain read proves the J1 is live
+      } else if (looksSessionExpired(cats.status.detail)) {
+        // #242: the J1 lapsed (coords still persisted) — surface the Touch ID
+        // re-auth banner, NOT a dead-end toast. ONE passkey prompt restores it.
+        setSessionExpired(true);
       } else if (cats.status.reason !== 'no-backend-configured') {
         // #201 codex finding 2: a configured-but-broken Config 502s here instead
         // of reporting an empty store — surface it rather than show a bare list.
@@ -159,9 +186,96 @@ export function App() {
         setDefaultPresetId(pre.data.defaultId);
       }
       if (creds.ok) setCredentials(creds.data);
+      if (inb.ok) setInbox(inb.data);
     })();
     return () => { cancelled = true; };
-  }, [onboarded, client]);
+  }, [onboarded, client, reloadKey]);
+
+  // #339 P2 — re-fetch the curate queue (after an accept/reject, or on demand).
+  const refreshInbox = async () => {
+    const r = await client.listInbox();
+    if (r.ok) setInbox(r.data);
+  };
+
+  // #242 — restore an expired master session with ONE Touch ID (no re-onboarding).
+  // Mirrors the login screen's relogin ceremony: reloginStart mints a chain-bound
+  // broker challenge, the BOUND passkey signs it, reloginFinish verifies on chain +
+  // restores the daemon session; then re-run the data loads that 502'd while expired.
+  const reauthenticate = async () => {
+    if (reauthBusy) return;
+    setReauthBusy(true);
+    const start = await client.reloginStart();
+    if (!start.ok) {
+      setReauthBusy(false);
+      showToast(`Re-authentication couldn't start — ${start.status.detail ?? 'daemon unreachable'}.`);
+      return;
+    }
+    try {
+      const assertion = await getAssertionOverHash(start.data.challenge, [getMasterCredId()]);
+      const fin = await client.reloginFinish(start.data.challenge, assertion);
+      if (fin.ok) {
+        setSessionExpired(false);
+        setReloadKey((k) => k + 1); // re-run the loads that failed while expired
+        showToast('Session restored — no re-onboarding needed.');
+      } else {
+        showToast(
+          `Re-authentication failed — ${fin.status.detail ?? 'rejected'}. If your master passkey was deleted, reset the master and re-onboard.`,
+        );
+      }
+    } catch (e) {
+      showToast(`Touch ID cancelled or failed — ${(e as Error)?.message ?? ''}.`);
+    }
+    setReauthBusy(false);
+  };
+
+  // #339 P2 — fetch one proposal's full body for the curate review (lazy: the
+  // list carries only metadata). Returns the body, or throws so the panel can
+  // surface the error.
+  const viewInboxBody = async (s3Key: string): Promise<string> => {
+    const r = await client.getInboxItem(s3Key);
+    if (r.ok) return r.data.body;
+    const detail = r.status.detail ?? '';
+    const m = detail.match(/\{"error":"([^"]+)"\}/);
+    throw new Error(m ? m[1] : detail || 'could not load the proposal body');
+  };
+
+  // #339 P2 — accept one proposal INTO canonical memory (merge + GC), then
+  // refresh both the queue and the category list (a new namespace may appear).
+  const acceptInboxItem = async (s3Key: string) => {
+    if (inboxBusy) return;
+    setInboxBusy(true);
+    const r = await client.acceptInbox(s3Key);
+    setInboxBusy(false);
+    if (r.ok) {
+      showToast(`Curated ${r.data.ns}/${r.data.key} into canonical (${r.data.planted} new).`);
+      await refreshInbox();
+      const listed = await client.listMemoryCategories();
+      if (listed.ok) {
+        setCategories(listed.data);
+        setEntriesByNs({}); // drop the lazy cache so the updated namespace re-decrypts
+      }
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      showToast(`Accept failed — ${m ? m[1] : detail || 'connect a daemon + memory worker first'}.`);
+    }
+  };
+
+  // #339 P2 — reject (discard) one proposal; it never enters canonical.
+  const rejectInboxItem = async (s3Key: string) => {
+    if (inboxBusy) return;
+    setInboxBusy(true);
+    const r = await client.rejectInbox(s3Key);
+    setInboxBusy(false);
+    if (r.ok) {
+      showToast('Proposal discarded.');
+      await refreshInbox();
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      showToast(`Reject failed — ${m ? m[1] : detail || 'reload the page'}.`);
+    }
+  };
 
   // §2 lazy detail: decrypt a namespace's entries only when its category opens.
   // Idempotent — a second open while loaded/loading is a no-op.
@@ -1051,12 +1165,35 @@ export function App() {
       </aside>
 
       <main className="app-main" data-section={sectionAttr}>
+        {/* #242 — the master J1 lapsed but the coords are still held: ONE Touch ID
+            restores it (no re-onboarding). Only SESSION-GATED, encrypted reads
+            (memory / credentials / inbox — cap-mint → STS → worker → decrypt) are
+            paused; the actor tree + audit are PUBLIC on-chain reads (eth_call) and
+            still load without the J1 — so the banner must NOT claim "chain reads". */}
+        {sessionExpired && (
+          <div className="banner" role="alert" style={{ marginBottom: 14, borderColor: 'var(--danger, #b3261e)' }}>
+            <span className="lbl">⚠ session expired</span>
+            <span>
+              Your master session lapsed — reading your encrypted memory + credentials is paused (the actor tree
+              still loads, since it&apos;s read from chain). You&apos;re still bound, so this is
+              <strong> one Touch ID</strong>, not a re-onboarding.
+              <button
+                className="btn primary sm"
+                style={{ marginLeft: 10 }}
+                disabled={reauthBusy}
+                onClick={reauthenticate}
+              >
+                {reauthBusy ? 'authenticating…' : '⊕ re-authenticate (Touch ID)'}
+              </button>
+            </span>
+          </div>
+        )}
         {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {page === 'detail' && currentActor && (
           <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} />
         )}
         {page === 'memory' && (
-          <MemoryPage categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
+          <MemoryPage categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} inbox={inbox} inboxBusy={inboxBusy} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} onAcceptInbox={acceptInboxItem} onRejectInbox={rejectInboxItem} onRefreshInbox={refreshInbox} onViewInboxBody={viewInboxBody} />
         )}
         {page === 'credentials' && (
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />

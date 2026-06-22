@@ -1,4 +1,5 @@
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
+import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 
 export type ConnectionStatus =
   | { kind: 'disconnected'; reason: 'no-backend-configured' | 'unreachable' | 'unauthorized'; detail?: string }
@@ -499,6 +500,14 @@ export interface AgentKeysClient {
   listMemoryCategories(): Promise<Result<MemoryCategory[]>>;
   getMemoryEntries(ns: string, key?: string): Promise<Result<MasterMemoryEntry[]>>;
   plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>>;
+  // #339 P2 — absorption-inbox curate: list the queue, accept one INTO canonical
+  // (merge + GC), or reject (GC only). `ApiInboxItem` is the ts-rs-generated wire type.
+  listInbox(): Promise<Result<ApiInboxItem[]>>;
+  acceptInbox(s3Key: string): Promise<Result<{ planted: number; ns: string; key: string }>>;
+  rejectInbox(s3Key: string): Promise<Result<{ deleted: boolean }>>;
+  getInboxItem(
+    s3Key: string,
+  ): Promise<Result<{ body: string; ns: string; key: string; source_delegate_omni: string; ts: number }>>;
 
   // §1A onboarding — config-init entry point A (default-preset bootstrap, #207
   // item 1A). `listConfigPresets` returns the bundled default taxonomies + the

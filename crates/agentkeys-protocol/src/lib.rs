@@ -50,6 +50,14 @@ pub enum CapMintOp {
     /// K10 cap-PoP preimage matches the worker's `check_op`. Distinct from
     /// `MemoryGet` (own working memory) — see docs/plan/master-hub-topology.md §6a.
     MemoryCanonicalGet,
+    /// #339 P2 — delegated APPEND to the master's absorption INBOX (master-hub
+    /// absorption / "push"). Mints `CapOp::Append`/`DataClass::Memory` at
+    /// `/v1/cap/memory-append`; `op_str` is `"append"`. The delegate proposes a
+    /// learning into `bots/<operator>/inbox/<delegate>/…` (staging, NOT
+    /// canonical); the master curates it into canonical later. Gated by a
+    /// **distinct** on-chain `inbox:<ns>` grant — NEVER the `memory:<ns>` read
+    /// grant (`readOnly` is a dead flag) — see docs/plan/master-hub-topology.md §6b/§8.
+    MemoryAppend,
     /// #201 config data class — master-only taxonomy/config object. A third
     /// `DataClass::Config` with its own bucket + IAM role (arch.md §17.2); the
     /// cred + memory workers reject a Config cap via `verify::check_data_class`.
@@ -65,6 +73,7 @@ impl CapMintOp {
             "memory_put" => Some(Self::MemoryPut),
             "memory_get" => Some(Self::MemoryGet),
             "memory_canonical_get" => Some(Self::MemoryCanonicalGet),
+            "memory_append" => Some(Self::MemoryAppend),
             "config_store" => Some(Self::ConfigStore),
             "config_fetch" => Some(Self::ConfigFetch),
             _ => None,
@@ -78,6 +87,7 @@ impl CapMintOp {
             Self::MemoryPut => "/v1/cap/memory-put",
             Self::MemoryGet => "/v1/cap/memory-get",
             Self::MemoryCanonicalGet => "/v1/cap/memory-canonical-get",
+            Self::MemoryAppend => "/v1/cap/memory-append",
             Self::ConfigStore => "/v1/cap/config-store",
             Self::ConfigFetch => "/v1/cap/config-fetch",
         }
@@ -86,7 +96,9 @@ impl CapMintOp {
     pub fn data_class(self) -> &'static str {
         match self {
             Self::CredStore | Self::CredFetch => "credentials",
-            Self::MemoryPut | Self::MemoryGet | Self::MemoryCanonicalGet => "memory",
+            Self::MemoryPut | Self::MemoryGet | Self::MemoryCanonicalGet | Self::MemoryAppend => {
+                "memory"
+            }
             Self::ConfigStore | Self::ConfigFetch => "config",
         }
     }
@@ -103,6 +115,9 @@ impl CapMintOp {
             // #295 P1 — must match agentkeys_worker_creds::verify::CapOp::CanonicalFetch
             // (and the broker's) so the K10 cap-PoP preimage agrees byte-for-byte.
             Self::MemoryCanonicalGet => "canonical_fetch",
+            // #339 P2 — must match agentkeys_worker_creds::verify::CapOp::Append
+            // (and the broker's) so the K10 cap-PoP preimage agrees byte-for-byte.
+            Self::MemoryAppend => "append",
         }
     }
 }
@@ -367,6 +382,132 @@ pub struct CanonicalStsResult {
     pub secret_access_key: String,
     pub session_token: String,
     pub expiration: i64,
+}
+
+// ── #339 P2 — absorption inbox (master-hub "push" / curated merge) ────────────
+//
+// The mirror of P1's canonical READ, but for WRITE: a delegate proposes a
+// learning into the master's staging inbox; the master curates it into canonical
+// later. The on-chain authorization is a **distinct** `inbox:<ns>` grant (never
+// the `memory:<ns>` read grant — `readOnly` is a dead flag, master-hub-topology.md
+// §5/§6b). Like P1's A' model, the cross-actor WRITE runs SERVER-SIDE in the
+// worker under a broker-minted, prefix-scoped operator STS — the delegate holds
+// NO AWS creds. Provenance (`source_delegate_omni`) is stamped by the WORKER from
+// the cap-signed `actor_omni`, NEVER from a delegate-supplied field (§8).
+
+/// Delegate → worker `POST /v1/memory/inbox-append`. The Append cap carries
+/// `service = inbox:<ns>` (the SIGNED namespace); `key` is the delegate's
+/// proposed memory key within that namespace and `plaintext_b64` the proposed
+/// body. The worker stamps provenance + content-hash and writes the envelope to
+/// `bots/<operator>/inbox/<delegate>/<ns>/<content_hash>.enc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryInboxAppendBody {
+    pub cap: CapToken,
+    pub key: String,
+    pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryInboxAppendResp {
+    pub ok: bool,
+    pub s3_key: String,
+    /// sha256 over (ns || key || body) — the dedup key + the curate watermark.
+    pub content_hash: String,
+    /// Durable-audit receipt (#229) — see [`MemoryPutResp::audit_envelope_hash`].
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+/// #339 P2 §8 (A') — request body for the broker `POST /v1/cap/inbox-sts`. The
+/// write-side twin of [`CanonicalStsBody`]: the WORKER (not the delegate) relays
+/// the delegate's session bearer + the broker-minted `Append` cap and receives
+/// PUT-only STS scoped to the single delegate's inbox sub-prefix. The delegate
+/// never holds AWS creds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxStsBody {
+    pub cap: CapToken,
+}
+
+/// Response from `/v1/cap/inbox-sts`: write-scoped STS the worker uses to PUT the
+/// one inbox object. Same shape as [`CanonicalStsResult`] but semantically a
+/// PutObject grant on `bots/<operator>/inbox/<delegate>/<ns>/*` (single delegate,
+/// single namespace) — never read, never another delegate's sub-prefix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxStsResult {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    pub expiration: i64,
+}
+
+/// The decrypted inbox proposal — what the worker stores (inside the envelope)
+/// and the master reads back to curate. `source_delegate_omni`, `ns`, `ts`, and
+/// `content_hash` are **worker-stamped** (the delegate controls only `key` +
+/// body bytes); the master must trust attribution, not the delegate (§8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxItem {
+    pub source_delegate_omni: String,
+    pub ns: String,
+    pub key: String,
+    pub body_b64: String,
+    pub content_hash: String,
+    pub ts: u64,
+}
+
+/// Per-item metadata for the master's inbox listing (the curate queue). Mirrors
+/// [`InboxItem`] minus the body; `s3_key` is the handle the master passes to
+/// `inbox-get` / `inbox-delete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxItemMeta {
+    pub s3_key: String,
+    pub source_delegate_omni: String,
+    pub ns: String,
+    pub key: String,
+    pub content_hash: String,
+    pub bytes: u64,
+    pub ts: u64,
+}
+
+/// Master → worker `POST /v1/memory/inbox-list`. Master-self cap (operator ==
+/// actor); the worker lists `bots/<operator>/inbox/**` and returns the curate
+/// queue. The handler rejects a non-master-self cap so no delegate can read
+/// another delegate's proposals (hub-and-spoke, never mesh — §7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxListBody {
+    pub cap: CapToken,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InboxListResp {
+    pub ok: bool,
+    pub items: Vec<InboxItemMeta>,
+}
+
+/// Master → worker `POST /v1/memory/inbox-get` — read one proposal to review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxGetBody {
+    pub cap: CapToken,
+    pub s3_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InboxGetResp {
+    pub ok: bool,
+    pub item: InboxItem,
+}
+
+/// Master → worker `POST /v1/memory/inbox-delete` — GC after curation
+/// (delete-on-accept / discard-on-reject). Master-self.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxDeleteBody {
+    pub cap: CapToken,
+    pub s3_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InboxDeleteResp {
+    pub ok: bool,
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -682,6 +823,17 @@ pub fn service_memory(namespace: &str) -> String {
     format!("memory:{namespace}")
 }
 
+/// Build the signed cap **service** string for an absorption-inbox APPEND —
+/// `inbox:<ns>` (#339 P2). This is a **distinct** on-chain service-id from
+/// [`service_memory`]'s `memory:<ns>` read grant: `keccak("inbox:travel") !=
+/// keccak("memory:travel")`, so granting a delegate read of `memory:travel`
+/// does NOT let it push to `inbox:travel` (and vice-versa). The asymmetry that
+/// `readOnly` should carry on-chain but doesn't is carried by this separate
+/// service name instead — see docs/plan/master-hub-topology.md §5/§6b.
+pub fn service_inbox(namespace: &str) -> String {
+    format!("inbox:{namespace}")
+}
+
 /// Normalize an omni to the broker's expected `0x`-prefixed lower-hex shape.
 ///
 /// The broker cap-mint input-validates that `operator_omni`/`actor_omni` start
@@ -709,6 +861,12 @@ mod tests {
             ("cred_fetch", "/v1/cap/cred-fetch", "credentials"),
             ("memory_put", "/v1/cap/memory-put", "memory"),
             ("memory_get", "/v1/cap/memory-get", "memory"),
+            (
+                "memory_canonical_get",
+                "/v1/cap/memory-canonical-get",
+                "memory",
+            ),
+            ("memory_append", "/v1/cap/memory-append", "memory"),
             ("config_store", "/v1/cap/config-store", "config"),
             ("config_fetch", "/v1/cap/config-fetch", "config"),
         ] {
@@ -720,9 +878,26 @@ mod tests {
     }
 
     #[test]
+    fn memory_append_op_str_matches_worker_append() {
+        // #339 P2: the K10 cap-PoP preimage uses op_str; it MUST agree byte-for-byte
+        // with agentkeys_worker_creds::verify::CapOp::Append.as_str() ("append").
+        assert_eq!(CapMintOp::MemoryAppend.op_str(), "append");
+        assert_eq!(CapMintOp::MemoryCanonicalGet.op_str(), "canonical_fetch");
+    }
+
+    #[test]
     fn service_memory_is_namespace_prefixed() {
         assert_eq!(service_memory("travel"), "memory:travel");
         assert_eq!(service_memory("webparity"), "memory:webparity");
+    }
+
+    #[test]
+    fn service_inbox_is_distinct_from_memory_read_grant() {
+        // #339 P2 §5/§6b: the append grant is a DISTINCT on-chain service-id from
+        // the read grant, so a `memory:<ns>` read can never authorize an
+        // `inbox:<ns>` push (keccak(inbox:ns) != keccak(memory:ns)).
+        assert_eq!(service_inbox("travel"), "inbox:travel");
+        assert_ne!(service_inbox("travel"), service_memory("travel"));
     }
 
     #[test]

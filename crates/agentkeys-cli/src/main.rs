@@ -883,6 +883,40 @@ enum MemoryAction {
         #[arg(long, env = "REGION", default_value = "us-east-1")]
         region: String,
     },
+    /// #339 P2 — PUSH a learning into the master's absorption inbox (the
+    /// master-hub "push" channel): a proposal the master later CURATES into
+    /// canonical memory (a pull-request, never a blind write). Gated by the
+    /// DELEGATE's on-chain `inbox:<ns>` grant (DISTINCT from the `memory:<ns>`
+    /// read grant) and run under the delegate's OWN session (A', §8): the worker
+    /// writes server-side under a broker-minted scoped STS, so the delegate holds
+    /// no S3 creds and provenance is worker-stamped. Identity/session from flags or env.
+    InboxPush {
+        /// The bare memory namespace the proposal targets (e.g. `travel`). Built
+        /// into the cap `service` as `inbox:<ns>`; the master curates it into
+        /// canonical `memory:<ns>`.
+        #[arg(long)]
+        namespace: String,
+        /// The proposed memory key within the namespace (e.g. `night-light-rule`).
+        #[arg(long)]
+        key: String,
+        /// The proposed memory body — the learning text the master will review.
+        #[arg(long)]
+        body: String,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator_omni: String,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor_omni: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_HASH")]
+        device_key_hash: String,
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
+        session_bearer: String,
+        #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+        broker_url: String,
+        #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
+        memory_url: String,
+        #[arg(long, env = "REGION", default_value = "us-east-1")]
+        region: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1509,6 +1543,32 @@ async fn main() {
             } => {
                 agentkeys_cli::cred_admin::memory_canonical_get(
                     namespace,
+                    operator_omni,
+                    actor_omni,
+                    device_key_hash,
+                    session_bearer,
+                    broker_url,
+                    memory_url,
+                    region,
+                )
+                .await
+            }
+            MemoryAction::InboxPush {
+                namespace,
+                key,
+                body,
+                operator_omni,
+                actor_omni,
+                device_key_hash,
+                session_bearer,
+                broker_url,
+                memory_url,
+                region,
+            } => {
+                agentkeys_cli::cred_admin::memory_inbox_push(
+                    namespace,
+                    key,
+                    body,
                     operator_omni,
                     actor_omni,
                     device_key_hash,

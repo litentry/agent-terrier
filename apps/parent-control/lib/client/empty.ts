@@ -29,6 +29,7 @@ import type {
   SubmitResult,
 } from './types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
+import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 
 const DISCONNECTED: DisconnectedStatus = {
   kind: 'disconnected',
@@ -163,6 +164,24 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async plantMemory(_entries: MasterMemoryEntry[]): Promise<Result<PlantResult>> {
+    return disconnected();
+  }
+
+  async listInbox(): Promise<Result<ApiInboxItem[]>> {
+    return disconnected();
+  }
+
+  async acceptInbox(_s3Key: string): Promise<Result<{ planted: number; ns: string; key: string }>> {
+    return disconnected();
+  }
+
+  async rejectInbox(_s3Key: string): Promise<Result<{ deleted: boolean }>> {
+    return disconnected();
+  }
+
+  async getInboxItem(
+    _s3Key: string,
+  ): Promise<Result<{ body: string; ns: string; key: string; source_delegate_omni: string; ts: number }>> {
     return disconnected();
   }
 

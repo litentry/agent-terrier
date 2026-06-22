@@ -13,8 +13,10 @@ use reqwest::Client;
 use crate::protocol::{
     AuditAppendInput, AuditAppendResult, AuditAppendV2, AuditAppendV2Resp, BrokerCapRequest,
     CapMintOp, CapMintRequest, CapToken, CredFetchBody, CredFetchInput, CredFetchResp,
-    CredFetchResult, CredStoreBody, CredStoreInput, CredStoreResp, CredStoreResult, MemoryGetBody,
-    MemoryGetInput, MemoryGetResp, MemoryGetResult, MemoryPutBody, MemoryPutInput, MemoryPutResp,
+    CredFetchResult, CredStoreBody, CredStoreInput, CredStoreResp, CredStoreResult,
+    InboxDeleteBody, InboxDeleteResp, InboxGetBody, InboxGetResp, InboxItem, InboxItemMeta,
+    InboxListBody, InboxListResp, MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult,
+    MemoryInboxAppendBody, MemoryInboxAppendResp, MemoryPutBody, MemoryPutInput, MemoryPutResp,
     MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
 };
 
@@ -401,6 +403,142 @@ impl BackendClient {
             plaintext_b64: parsed.plaintext_b64,
             namespace: input.namespace,
         })
+    }
+
+    /// `POST /v1/memory/inbox-append` — a delegate PUSHes a proposal to the
+    /// master's absorption inbox (master-hub #339 P2). `cap` is an `Append`/`Memory`
+    /// cap (minted via [`Self::cap_mint`] with `CapMintOp::MemoryAppend`, service
+    /// `inbox:<ns>`); `key` is the proposed memory key and `plaintext_b64` the body.
+    ///
+    /// §8 (A', mirrors canonical-get): the write runs SERVER-SIDE. This client
+    /// sends ONLY the delegate's own session bearer + the cap and gets back a
+    /// receipt — NEVER any AWS creds. The WORKER relays the bearer to the broker's
+    /// `/v1/cap/inbox-sts` for a PUT-only, sub-prefix-scoped STS that never leaves
+    /// the server. `agent_session_bearer` is the DELEGATE's session.
+    pub async fn memory_inbox_append(
+        &self,
+        cap: CapToken,
+        key: String,
+        plaintext_b64: String,
+    ) -> Result<MemoryInboxAppendResp, BackendError> {
+        let bearer = self
+            .agent_session_bearer
+            .as_deref()
+            .filter(|b| !b.is_empty())
+            .ok_or(BackendError::NotConfigured("agent_session_bearer"))?;
+        let url = format!("{}/v1/memory/inbox-append", self.memory()?);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&MemoryInboxAppendBody {
+                cap,
+                key,
+                plaintext_b64,
+            })
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        resp.json::<MemoryInboxAppendResp>()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))
+    }
+
+    /// `POST /v1/memory/inbox-list` — the MASTER lists its own inbox (the curate
+    /// queue). Master-self cap (operator == actor); STS relayed under the memory
+    /// role like own-memory reads. Returns the per-item provenance metadata.
+    pub async fn memory_inbox_list(
+        &self,
+        cap: CapToken,
+    ) -> Result<Vec<InboxItemMeta>, BackendError> {
+        let url = format!("{}/v1/memory/inbox-list", self.memory()?);
+        let mut req = self.client.post(&url).json(&InboxListBody { cap });
+        if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        let parsed: InboxListResp = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))?;
+        Ok(parsed.items)
+    }
+
+    /// `POST /v1/memory/inbox-get` — the MASTER reads one inbox proposal to review.
+    pub async fn memory_inbox_get(
+        &self,
+        cap: CapToken,
+        s3_key: String,
+    ) -> Result<InboxItem, BackendError> {
+        let url = format!("{}/v1/memory/inbox-get", self.memory()?);
+        let mut req = self.client.post(&url).json(&InboxGetBody { cap, s3_key });
+        if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        let parsed: InboxGetResp = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))?;
+        Ok(parsed.item)
+    }
+
+    /// `POST /v1/memory/inbox-delete` — the MASTER GCs one inbox proposal after
+    /// curating it (delete-on-accept / discard-on-reject). Master-self.
+    pub async fn memory_inbox_delete(
+        &self,
+        cap: CapToken,
+        s3_key: String,
+    ) -> Result<bool, BackendError> {
+        let url = format!("{}/v1/memory/inbox-delete", self.memory()?);
+        let mut req = self
+            .client
+            .post(&url)
+            .json(&InboxDeleteBody { cap, s3_key });
+        if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        let parsed: InboxDeleteResp = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))?;
+        Ok(parsed.deleted)
     }
 
     /// `POST /v1/cred/fetch` — fetch + decrypt a stored credential's plaintext
