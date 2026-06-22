@@ -580,6 +580,23 @@ pub struct ApiWorker {
     pub by_actor: Vec<ApiWorkerActorShare>,
 }
 
+/// #339 P2 — one absorption-inbox proposal in the master's curate queue. The
+/// frontend-facing view of `agentkeys_protocol::InboxItemMeta`; `source_delegate_omni`
+/// + `ns` are worker-stamped (the delegate cannot forge its own attribution).
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiInboxItem {
+    pub s3_key: String,
+    pub source_delegate_omni: String,
+    pub ns: String,
+    pub key: String,
+    pub content_hash: String,
+    #[ts(type = "number")]
+    pub bytes: u64,
+    #[ts(type = "number")]
+    pub ts: u64,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiAnchorBatch {
@@ -809,6 +826,12 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route(MASTER_MEMORY_ROUTE, get(list_master_memory))
         .route("/v1/master/memory/entry", get(get_master_memory_entry))
         .route(MASTER_MEMORY_PLANT_ROUTE, post(plant_master_memory))
+        // #339 P2 — absorption-inbox curate queue: the master lists delegate
+        // proposals, then accepts (curate into canonical + GC) or rejects (GC).
+        .route("/v1/master/inbox", get(list_master_inbox))
+        .route("/v1/master/inbox/entry", post(get_master_inbox_entry))
+        .route("/v1/master/inbox/accept", post(accept_master_inbox))
+        .route("/v1/master/inbox/reject", post(reject_master_inbox))
         .route("/v1/master/config/presets", get(list_config_presets))
         .route("/v1/master/config/init", post(init_config_default))
         .route("/v1/master/classify/tag", post(classify_tag))
@@ -5854,6 +5877,433 @@ async fn reconcile_taxonomy(
 /// the same content is a no-op (skipped++), so "prevent duplicate plant" is
 /// enforced server-side, not just in the UI. Returns planted/skipped counts +
 /// the resulting total. An audit row records the plant.
+// ── #339 P2 — absorption-inbox curate (the master-hub "push" landing) ─────────
+
+#[derive(Debug, serde::Deserialize)]
+struct InboxCurateRequest {
+    s3_key: String,
+}
+
+/// Mint a master-self inbox cap (Fetch op, `service = "inbox"`,
+/// `operator == actor == O_master` so the broker skips the on-chain scope check)
+/// and POST it to a worker inbox endpoint, reusing the master's memory-role STS
+/// creds. `extra` is merged into the request body alongside `cap`.
+async fn inbox_worker_post(
+    http: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &agentkeys_provisioner::AwsTempCreds,
+    path: &str,
+    extra: serde_json::Value,
+) -> Result<serde_json::Value, (axum::http::StatusCode, String)> {
+    let cap = mint_master_cap(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "memory-get",
+        "inbox",
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    let mut body = serde_json::json!({ "cap": cap });
+    if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra_obj {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    let resp = http
+        .post(format!("{}{}", ctx.memory_url, path))
+        .header("x-aws-access-key-id", &creds.access_key_id)
+        .header("x-aws-secret-access-key", &creds.secret_access_key)
+        .header("x-aws-session-token", &creds.session_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("inbox worker {path} transport: {e}"),
+            )
+        })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("inbox worker {path} {status}: {text}"),
+        ));
+    }
+    resp.json().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("inbox worker {path} parse: {e}"),
+        )
+    })
+}
+
+/// `GET /v1/master/inbox` — the curate queue: list every delegate proposal in
+/// the master's absorption inbox (master-self).
+async fn list_master_inbox(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
+    let ctx = match real_memory_ctx(&state).await {
+        Ok(Some(ctx)) => ctx,
+        // No real chain configured → empty queue (in-memory fallback has no inbox).
+        Ok(None) => {
+            let empty: Vec<ApiInboxItem> = Vec::new();
+            return (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({ "items": empty })),
+            )
+                .into_response();
+        }
+        Err(reason) => {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response()
+        }
+    };
+    let http = reqwest::Client::new();
+    let creds = match agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    match inbox_worker_post(
+        &http,
+        &ctx,
+        &creds,
+        "/v1/memory/inbox-list",
+        serde_json::json!({}),
+    )
+    .await
+    {
+        Ok(v) => {
+            let items: Vec<ApiInboxItem> = v
+                .get("items")
+                .and_then(|i| serde_json::from_value(i.clone()).ok())
+                .unwrap_or_default();
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({ "items": items })),
+            )
+                .into_response()
+        }
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+/// `POST /v1/master/inbox/entry` — read ONE proposal's full body so the master can
+/// review what was pushed before accept/reject (master-self). The worker already
+/// holds the body via `/v1/memory/inbox-get`; this decodes it to plaintext.
+async fn get_master_inbox_entry(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<InboxCurateRequest>,
+) -> axum::response::Response {
+    let ctx = match real_memory_ctx(&state).await {
+        Ok(Some(ctx)) => ctx,
+        Ok(None) => {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "inbox requires a configured chain + master session" })),
+            )
+                .into_response()
+        }
+        Err(reason) => {
+            return (axum::http::StatusCode::CONFLICT, Json(serde_json::json!({ "error": reason })))
+                .into_response()
+        }
+    };
+    let http = reqwest::Client::new();
+    let creds = match agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    match inbox_worker_post(
+        &http,
+        &ctx,
+        &creds,
+        "/v1/memory/inbox-get",
+        serde_json::json!({ "s3_key": req.s3_key }),
+    )
+    .await
+    {
+        Ok(v) => {
+            let item = v.get("item").cloned().unwrap_or(serde_json::Value::Null);
+            let body_b64 = item
+                .get("body_b64")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default();
+            let body = {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+                match STANDARD.decode(body_b64) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Err(e) => return (
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        Json(
+                            serde_json::json!({ "error": format!("inbox item body decode: {e}") }),
+                        ),
+                    )
+                        .into_response(),
+                }
+            };
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "body": body,
+                    "ns": item.get("ns"),
+                    "key": item.get("key"),
+                    "source_delegate_omni": item.get("source_delegate_omni"),
+                    "content_hash": item.get("content_hash"),
+                    "ts": item.get("ts"),
+                })),
+            )
+                .into_response()
+        }
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+/// `POST /v1/master/inbox/accept` — curate one proposal INTO canonical memory
+/// (the master's PR-merge), then GC the inbox object. Reuses the existing master
+/// memory plant (read-modify-write merge + taxonomy reconcile).
+async fn accept_master_inbox(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<InboxCurateRequest>,
+) -> axum::response::Response {
+    let ctx = match real_memory_ctx(&state).await {
+        Ok(Some(ctx)) => ctx,
+        Ok(None) => {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "inbox curate requires a configured chain + master session" })),
+            )
+                .into_response()
+        }
+        Err(reason) => {
+            return (axum::http::StatusCode::CONFLICT, Json(serde_json::json!({ "error": reason })))
+                .into_response()
+        }
+    };
+    let http = reqwest::Client::new();
+    let creds = match agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
+            )
+                .into_response()
+        }
+    };
+
+    // 1. Read the proposal (worker-stamped provenance + the proposed body).
+    let item = match inbox_worker_post(
+        &http,
+        &ctx,
+        &creds,
+        "/v1/memory/inbox-get",
+        serde_json::json!({ "s3_key": req.s3_key }),
+    )
+    .await
+    {
+        Ok(v) => v.get("item").cloned().unwrap_or(serde_json::Value::Null),
+        Err((status, reason)) => {
+            return (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    };
+    let ns = item
+        .get("ns")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let key = item
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let body_b64 = item
+        .get("body_b64")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let body = {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        match STANDARD.decode(body_b64) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "error": format!("inbox item body decode: {e}") })),
+                )
+                    .into_response()
+            }
+        }
+    };
+    if ns.is_empty() || key.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": "inbox item missing ns/key" })),
+        )
+            .into_response();
+    }
+
+    // 2. Curate INTO canonical via the existing plant (merge + taxonomy).
+    let preview: String = body.chars().take(120).collect();
+    let entry = ApiMemoryEntry {
+        ns: ns.clone(),
+        key: key.clone(),
+        title: key.clone(),
+        bytes: body.len() as u64,
+        version: "1".to_string(),
+        updated: String::new(),
+        preview,
+        body,
+        content_hash: String::new(),
+    };
+    let plant = match plant_master_memory_inner(
+        &state,
+        MasterMemoryPlantRequest {
+            entries: vec![entry],
+        },
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err((status, reason)) => {
+            return (
+                status,
+                Json(serde_json::json!({ "error": format!("curate plant failed: {reason}") })),
+            )
+                .into_response()
+        }
+    };
+
+    // 3. GC the inbox object (delete-on-accept).
+    if let Err((status, reason)) = inbox_worker_post(
+        &http,
+        &ctx,
+        &creds,
+        "/v1/memory/inbox-delete",
+        serde_json::json!({ "s3_key": req.s3_key }),
+    )
+    .await
+    {
+        // The merge committed; surface the GC failure but don't claim a clean accept.
+        return (
+            status,
+            Json(serde_json::json!({
+                "ok": false,
+                "planted": plant.planted,
+                "ns": ns,
+                "key": key,
+                "error": format!("curated into canonical but inbox GC failed: {reason}"),
+            })),
+        )
+            .into_response();
+    }
+
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "planted": plant.planted, "ns": ns, "key": key })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/master/inbox/reject` — discard one proposal (GC the inbox object,
+/// never enters canonical).
+async fn reject_master_inbox(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<InboxCurateRequest>,
+) -> axum::response::Response {
+    let ctx = match real_memory_ctx(&state).await {
+        Ok(Some(ctx)) => ctx,
+        Ok(None) => {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "inbox curate requires a configured chain + master session" })),
+            )
+                .into_response()
+        }
+        Err(reason) => {
+            return (axum::http::StatusCode::CONFLICT, Json(serde_json::json!({ "error": reason })))
+                .into_response()
+        }
+    };
+    let http = reqwest::Client::new();
+    let creds = match agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    match inbox_worker_post(
+        &http,
+        &ctx,
+        &creds,
+        "/v1/memory/inbox-delete",
+        serde_json::json!({ "s3_key": req.s3_key }),
+    )
+    .await
+    {
+        Ok(_) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "deleted": true })),
+        )
+            .into_response(),
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
 async fn plant_master_memory(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<MasterMemoryPlantRequest>,

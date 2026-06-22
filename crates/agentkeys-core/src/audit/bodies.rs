@@ -61,6 +61,16 @@ pub struct MemoryTeardownBody {
     pub actor_target: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryInboxAppendBody {
+    /// S3 object key written (`bots/<operator>/inbox/<delegate>/<ns>/<hash>.enc`)
+    /// — the path itself is the worker-stamped provenance (#339 P2 §8: source
+    /// delegate + namespace come from the cap, never a delegate-supplied field).
+    pub key: String,
+    /// `keccak256(envelope_ciphertext)` — the stored bytes, never plaintext.
+    pub payload_hash: String,
+}
+
 // ── 20..29 — signs family ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -131,6 +131,73 @@ pub async fn memory_canonical_get(
     String::from_utf8(bytes).context("memory plaintext is not valid UTF-8")
 }
 
+/// #339 P2 — delegate-side absorption-inbox PUSH (the master-hub "push" channel).
+/// Proposes a learning (`key` + `body`) into the MASTER's staging inbox
+/// (`bots/<operator>/inbox/<delegate>/…`) for the master to curate into canonical
+/// later — a pull-request, never a blind write into `memory:<ns>`. Gated by the
+/// actor's on-chain `inbox:<ns>` scope grant (DISTINCT from the `memory:<ns>` read
+/// grant — granting read never grants push) and run under the DELEGATE's OWN
+/// session (A', §8): the shared client presents the `Append` cap + this session;
+/// the WORKER writes server-side under a broker-minted, sub-prefix-scoped STS, so
+/// the delegate NEVER holds S3 creds, and provenance is worker-stamped from the
+/// cap (the delegate can't forge its own attribution). Returns the inbox receipt.
+#[allow(clippy::too_many_arguments)]
+pub async fn memory_inbox_push(
+    namespace: &str,
+    key: &str,
+    body: &str,
+    operator_omni: &str,
+    actor_omni: &str,
+    device_key_hash: &str,
+    session_bearer: &str,
+    broker_url: &str,
+    memory_url: &str,
+    region: &str,
+) -> Result<String> {
+    // The DELEGATE's own session authenticates to the broker; no MEMORY_ROLE_ARN
+    // on this side — the broker's `/v1/cap/inbox-sts` holds it and issues the
+    // worker a write-scoped STS (the delegate never sees creds), same A' shape as
+    // the canonical read.
+    let client = BackendClient::new(
+        Some(broker_url.to_string()),
+        Some(memory_url.to_string()),
+        None, // audit_url
+        None, // cred_url
+        Some(session_bearer.to_string()),
+        None, // memory_role_arn — broker-brokered inbox-sts holds it
+        None, // vault_role_arn
+        region.to_string(),
+    );
+    // DISTINCT `inbox:<ns>` grant (never the `memory:<ns>` read grant) — built from
+    // the bare namespace by the single shared helper so the spelling can't drift.
+    let service = agentkeys_backend_client::protocol::service_inbox(namespace);
+    let cap = client
+        .cap_mint(
+            CapMintOp::MemoryAppend,
+            CapMintRequest {
+                operator_omni: normalize_omni_0x(operator_omni),
+                actor_omni: normalize_omni_0x(actor_omni),
+                service,
+                device_key_hash: device_key_hash.to_string(),
+                ttl_seconds: 300,
+            },
+            session_bearer,
+        )
+        .await
+        .with_context(|| format!("cap-mint memory-append for inbox namespace `{namespace}`"))?;
+    let plaintext_b64 = STANDARD.encode(body.as_bytes());
+    let resp = client
+        .memory_inbox_append(cap, key.to_string(), plaintext_b64)
+        .await
+        .with_context(|| {
+            format!("memory worker inbox-append for namespace `{namespace}` key `{key}`")
+        })?;
+    Ok(format!(
+        "pushed proposal to the master's inbox → {} (content_hash {})",
+        resp.s3_key, resp.content_hash
+    ))
+}
+
 /// Vault the credential `service` = `secret` (the symmetric store half of
 /// [`cred_fetch`]). `operator_omni` == `actor_omni` for a master-self store (the
 /// master vaulting into its OWN vault — the common case, e.g. seeding the agent's
