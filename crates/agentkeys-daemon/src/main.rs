@@ -802,6 +802,18 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
         "agentkeys-daemon opened §10.2 pairing request — show your owner the code to claim: {pairing_code}; they cross-check device_key_hash={device_key_hash} on the master before approving (#224)"
     );
 
+    // The canonical deep-link the owner scans (QR) or reads the code from to claim.
+    let deep_link = build_pair_deep_link(pairing_code, &base);
+
+    // Human-facing QR on STDERR (the log stream — never the stdout artifact): the owner
+    // scans it from the master's parent-control, or reads the pairing_code below.
+    let qr = render_pair_qr(&deep_link);
+    if !qr.is_empty() {
+        eprintln!(
+            "\nScan to pair (master parent-control → /pairing), or type the code below:\n{qr}"
+        );
+    }
+
     // Machine artifact on STDOUT (logs are on stderr). The owner reads
     // pairing_code to claim; request_id is NOT here (it is half the replayable
     // poll tuple) — it lives only in the 0600 state_file for --retrieve-pairing.
@@ -809,6 +821,7 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
         "{}",
         request_artifact(
             pairing_code,
+            &deep_link,
             &device_pubkey,
             &device_key_hash,
             expires_at,
@@ -1744,8 +1757,37 @@ fn binding_artifact(
 /// (request_id, device_pubkey, pop_sig), and the daemon already writes it to the
 /// 0600 `state_file` that `--retrieve-pairing` reads by default. `pairing_code`
 /// (the master's claim code) is NOT a poll credential and stays.
+/// The canonical §10.2 pairing deep-link the device shows (QR / link). The master's
+/// parent-control claims `code` against `broker`. Defined ONCE here so the daemon-log QR,
+/// the probe-TUI QR, and any future scan handler share one scheme. Values are
+/// percent-encoded (the broker URL carries `://` and `/`).
+fn build_pair_deep_link(pairing_code: &str, broker_url: &str) -> String {
+    let enc = |s: &str| -> String { url::form_urlencoded::byte_serialize(s.as_bytes()).collect() };
+    format!(
+        "agentkeys-pair://claim?code={}&broker={}",
+        enc(pairing_code),
+        enc(broker_url)
+    )
+}
+
+/// Render `deep_link` as a Unicode-half-block QR for the daemon log/terminal. Inverted so it
+/// scans on a dark-background terminal. Empty string if the payload can't be encoded.
+fn render_pair_qr(deep_link: &str) -> String {
+    use qrcode::render::unicode::Dense1x2;
+    match qrcode::QrCode::new(deep_link.as_bytes()) {
+        Ok(code) => code
+            .render::<Dense1x2>()
+            .dark_color(Dense1x2::Light)
+            .light_color(Dense1x2::Dark)
+            .quiet_zone(true)
+            .build(),
+        Err(_) => String::new(),
+    }
+}
+
 fn request_artifact(
     pairing_code: &str,
+    deep_link: &str,
     agent_address: &str,
     device_key_hash: &str,
     expires_at: i64,
@@ -1754,6 +1796,7 @@ fn request_artifact(
 ) -> serde_json::Value {
     serde_json::json!({
         "pairing_code": pairing_code,
+        "deep_link": deep_link,
         "agent_address": agent_address,
         "device_key_hash": device_key_hash,
         "expires_at": expires_at,
@@ -1774,11 +1817,12 @@ fn session_bearer_path(dir: &str, child_omni: &str) -> String {
 #[cfg(test)]
 mod pairing_poll_tests {
     use super::{
-        acquire_pairing_lock, backoff_with_jitter, binding_artifact, classify_poll,
-        format_broker_error, is_derivation_path, is_omni_hex, is_retryable_status,
+        acquire_pairing_lock, backoff_with_jitter, binding_artifact, build_pair_deep_link,
+        classify_poll, format_broker_error, is_derivation_path, is_omni_hex, is_retryable_status,
         pairing_request_guard, pairing_state_path, parse_retry_after, poll_retry_wait,
-        read_poll_body, request_artifact, retry_after_for, session_bearer_path, truncate_body,
-        validate_claimed_binding, PollClass, MAX_POLL_BODY, PAIRING_POLL_INTERVAL_SECONDS,
+        read_poll_body, render_pair_qr, request_artifact, retry_after_for, session_bearer_path,
+        truncate_body, validate_claimed_binding, PollClass, MAX_POLL_BODY,
+        PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::{Duration, SystemTime};
@@ -2069,14 +2113,52 @@ mod pairing_poll_tests {
         // --request-pairing stdout must NOT carry request_id (half the replayable
         // poll tuple); it lives only in the 0600 state_file. pairing_code (claim
         // code, not a poll credential) and the state_file path stay.
-        let art = request_artifact("paircode", "0xdevice", "dkh", 123, "/state.json", "/k.json");
+        let deep_link = build_pair_deep_link("paircode", "https://broker.example/");
+        let art = request_artifact(
+            "paircode",
+            &deep_link,
+            "0xdevice",
+            "dkh",
+            123,
+            "/state.json",
+            "/k.json",
+        );
         assert!(
             art.get("request_id").is_none(),
             "request artifact must not expose request_id: {art}"
         );
-        for k in ["pairing_code", "state_file", "agent_address"] {
+        for k in ["pairing_code", "deep_link", "state_file", "agent_address"] {
             assert!(art.get(k).is_some(), "request artifact missing field {k}");
         }
+        // The deep-link carries ONLY the claim code + broker — never the replayable request_id.
+        assert!(
+            !deep_link.contains("request_id"),
+            "deep_link leaked request_id: {deep_link}"
+        );
+    }
+
+    #[test]
+    fn pair_deep_link_round_trips_code_and_broker() {
+        let dl = build_pair_deep_link("ABC-123", "https://broker.example.com:8443/");
+        assert!(
+            dl.starts_with("agentkeys-pair://claim?"),
+            "bad scheme: {dl}"
+        );
+        let q = dl.split_once('?').unwrap().1;
+        let (mut code, mut broker) = (None, None);
+        for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
+            match k.as_ref() {
+                "code" => code = Some(v.into_owned()),
+                "broker" => broker = Some(v.into_owned()),
+                _ => {}
+            }
+        }
+        assert_eq!(code.as_deref(), Some("ABC-123"));
+        assert_eq!(broker.as_deref(), Some("https://broker.example.com:8443/"));
+        assert!(
+            !render_pair_qr(&dl).is_empty(),
+            "QR render should be non-empty"
+        );
     }
 
     #[test]
