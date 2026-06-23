@@ -61,3 +61,17 @@ provisioner-scripts/recordings/*/
 !provisioner-scripts/recordings/brave-search-signup-reference/
 !provisioner-scripts/recordings/elevenlabs-signup-reference/
 !provisioner-scripts/recordings/.gitkeep
+
+# Front-end / client apps (see AGENTS.md "Client"). These dirs are front-end
+# only; their external deps, lockfiles, and TanStack-generated route trees are
+# regenerable from package.json + source — never committed. (Each app's own
+# .gitignore already covers node_modules / dist / .tanstack / .output;
+# design-system/ is a plain lib with no .gitignore, so list its deps here.)
+design-system/node_modules/
+design-system/package-lock.json
+/apps/website/package-lock.json
+/apps/mobile-mock/package-lock.json
+/apps/design-system/package-lock.json
+/apps/website/src/routeTree.gen.ts
+/apps/mobile-mock/src/routeTree.gen.ts
+/apps/design-system/src/routeTree.gen.ts

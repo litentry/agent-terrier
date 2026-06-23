@@ -1,22 +1,27 @@
 /* AgentKeys parent-control UI — iii.dev-inspired aesthetic */
 
 :root {
-  --bg: #f6f3ec;
-  --bg-elev: #eeeae0;
-  --bg-deep: #e6e1d3;
-  --ink: #1a1815;
-  --ink-dim: #5a5448;
-  --ink-faint: #8a8273;
-  --rule: #2a261f;
-  --rule-soft: #c4bda9;
-  --rule-hair: #d8d1bd;
-  --accent: oklch(0.55 0.13 50);     /* warm amber */
-  --accent-soft: oklch(0.92 0.04 50);
-  --ok: oklch(0.5 0.08 165);
-  --ok-soft: oklch(0.92 0.03 165);
-  --danger: oklch(0.5 0.16 25);
-  --danger-soft: oklch(0.94 0.05 25);
-  --info: oklch(0.5 0.07 240);
+  /* Unified onto the Agent Terrier design system (Meadow default). The
+     parent-control variable names are kept and re-pointed at --ds-* tokens
+     (from @agentkeys/design-system, imported in layout.tsx), so every existing
+     rule re-skins without per-component edits. Switch the whole app's palette
+     by setting [data-theme="meadow|terracotta|forest"] on <html>. */
+  --bg: var(--ds-background);
+  --bg-elev: var(--ds-bar);
+  --bg-deep: var(--ds-tile);
+  --ink: var(--ds-text);
+  --ink-dim: var(--ds-text-muted);
+  --ink-faint: var(--ds-text-faint);
+  --rule: var(--ds-ink);
+  --rule-soft: var(--ds-border-strong);
+  --rule-hair: var(--ds-border);
+  --accent: var(--ds-ask);                 /* warm amber → ds "ask" */
+  --accent-soft: var(--ds-ask-tint);
+  --ok: var(--ds-allow);
+  --ok-soft: color-mix(in srgb, var(--ds-allow) 12%, #fff);
+  --danger: var(--ds-blocked);
+  --danger-soft: color-mix(in srgb, var(--ds-blocked) 9%, #fff);
+  --info: #2d5ba8;
 }
 
 * { box-sizing: border-box; }
@@ -26,7 +31,7 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  font-family: var(--ds-font-body);
   font-size: 13px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
@@ -45,8 +50,7 @@ a {
 a:hover { text-decoration-color: var(--ink); }
 
 .serif {
-  font-family: 'IBM Plex Serif', 'Iowan Old Style', Georgia, serif;
-  font-feature-settings: "ss01";
+  font-family: var(--ds-font-display);
 }
 
 /* ─── Section accents (master/actors stay neutral) ───────────── */
@@ -878,4 +882,35 @@ a:hover { text-decoration-color: var(--ink); }
 .chain-badge__muted { color: var(--ink-faint); }
 @media (max-width: 560px) {
   .chain-badge { font-size: 10px; max-width: 70vw; top: 6px; right: 6px; }
+}
+
+/* ─── Design-system unification (Phase 4) ────────────────────────────────────
+   Re-skins parent-control onto the Agent Terrier consumer system: softens the
+   hard frames to the consumer radius scale, fills primary/active with the Meadow
+   brand color, and drops the italic display style for Bricolage. Appended last
+   so it wins the cascade without editing every rule above. */
+.panel, .stats, .worker-card, .device-card, .perm-rows, .modal, .tx-decode,
+.pair-req, .onboard-card, .empty-memory, .banner, .wa-intent {
+  border-radius: var(--ds-r-panel);
+}
+.panel-head, .modal-head {
+  border-top-left-radius: var(--ds-r-panel);
+  border-top-right-radius: var(--ds-r-panel);
+}
+.btn, .chip, .tswitch, .view-toggle, .perm-seg, .bell, .hamb, .perm-switch {
+  border-radius: var(--ds-r-pill);
+}
+.btn.primary, .nav-item.active {
+  background: var(--ds-primary);
+  color: var(--ds-on-primary);
+  border-color: var(--ds-primary);
+}
+.btn.primary:hover { background: color-mix(in srgb, var(--ds-primary) 88%, #000); }
+.nav-item.active .marker, .nav-item.active .count { color: var(--ds-on-primary); }
+input, textarea, select { border-radius: var(--ds-r-field); }
+/* Bricolage is a grotesque, not a serif — drop the italic the old IBM Plex Serif
+   headings used so the display type reads as the consumer system intends. */
+.serif, .page-head h1, .stat .v, .brand .mark, .worker-card .w-head .name,
+.worker-card .w-stat .v, .wa-dialog .ttl-big, .fp-ring .glyph {
+  font-style: normal;
 }

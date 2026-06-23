@@ -5,6 +5,13 @@ Rust monorepo with Cargo workspace. See `docs/arch.md` for component inventory.
 See `docs/spec/credential-backend-interface.md` for the CredentialBackend trait contract (15 methods).
 Do not read folder `docs/archived`
 
+## Client (front-end only — skip for backend context)
+The browser UI lives in four front-end dirs, **separate from the Rust backend and not needed as context for broker/daemon/chain/cli work** — don't read them unless the task is front-end:
+- [`design-system/`](design-system/) — shared `@agentkeys/design-system`: design tokens (3 themes, bilingual EN/中文, two font sets) + React components, consumed by every app (`tokens.json` is the color source-of-truth → `scripts/generate-tokens.mjs`).
+- TanStack Start apps [`apps/website`](apps/website) (`:3116`), [`apps/mobile-mock`](apps/mobile-mock) (`:3117`), [`apps/design-system`](apps/design-system) (`:3118` — component gallery + theme curator). Run via the fleet `d` menu or `npm --prefix <dir> run dev`.
+
+node_modules / build output / generated route trees / lockfiles are gitignored — regenerable from `package.json` + source.
+
 ## Docs layout (lean)
 `docs/arch.md` is the single source of truth — brief, indexes every detail via outward links. Sub-folders, each one audience:
 - `docs/spec/` — developers + coordinating colleagues (cloud, CI, blockchain, signer-protocol, threats).
