@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Block a commit whose staged Rust is unformatted (mirrors the CI fmt gate).
+# Skips instantly when no .rs is staged, so docs-only commits stay fast.
+# Bypass in a pinch with: git commit --no-verify
+set -euo pipefail
+if git diff --cached --name-only --diff-filter=ACM | grep -q '\.rs$'; then
+  exec "$(cd "$(dirname "$0")" && pwd)/rustfmt-check.sh"
+fi
