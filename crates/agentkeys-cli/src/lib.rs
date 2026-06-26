@@ -5,6 +5,7 @@ pub mod agent_admin;
 pub mod cred_admin;
 pub mod device_session;
 pub mod hook;
+pub mod inbox_curate;
 pub mod k11;
 pub mod k11_intent;
 pub mod k11_webauthn;

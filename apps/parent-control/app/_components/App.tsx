@@ -247,6 +247,11 @@ export function App() {
     const r = await client.acceptInbox(s3Key);
     setInboxBusy(false);
     if (r.ok) {
+      // Optimistic removal: drop the curated row immediately so the queue
+      // reflects the change without waiting on (or silently losing) the
+      // post-action refetch. The backend already deleted the inbox object;
+      // refreshInbox() below reconciles against the durable list.
+      setInbox((prev) => prev.filter((i) => i.s3_key !== s3Key));
       showToast(`Curated ${r.data.ns}/${r.data.key} into canonical (${r.data.planted} new).`);
       await refreshInbox();
       const listed = await client.listMemoryCategories();
@@ -268,6 +273,9 @@ export function App() {
     const r = await client.rejectInbox(s3Key);
     setInboxBusy(false);
     if (r.ok) {
+      // Optimistic removal (see acceptInboxItem) — the discarded proposal
+      // leaves the queue at once; refreshInbox() reconciles.
+      setInbox((prev) => prev.filter((i) => i.s3_key !== s3Key));
       showToast('Proposal discarded.');
       await refreshInbox();
     } else {
