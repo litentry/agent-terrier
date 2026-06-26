@@ -66,6 +66,11 @@ glob:scripts/check-*.sh
 glob:scripts/verify-*.sh
 glob:scripts/lint-*.sh
 
+# ─── Shared git hooks (pre-commit/pre-push rustfmt gate, installed via
+#     core.hooksPath; secret-free, mirrors the CI fmt step) — public so
+#     contributors get the same local gate + the dev-setup.md links resolve. ───
+.githooks/
+
 # ─── Public CI workflows (build / test / wasm / contracts-sync / wiki / mcp /
 #     LLM review). harness-ci.yml + pm-auto-archive are PRIVATE (deploy
 #     orchestration + secrets + pm) — PRIVATE override in the gate. ─────────────
