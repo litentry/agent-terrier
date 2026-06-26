@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Last-resort fmt gate for a raw `git push`. NOTE: `jj git push` bypasses this
+# (jj runs no git hooks) — the pre-commit hook is the real gate in this repo's
+# worktree PR flow. Bypass with: git push --no-verify
+set -euo pipefail
+exec "$(cd "$(dirname "$0")" && pwd)/rustfmt-check.sh"

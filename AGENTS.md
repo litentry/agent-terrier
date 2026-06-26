@@ -182,6 +182,7 @@ The verify script is read-only RPC (zero gas), exits 0 on all-pass / 1 on any fa
 - Crate names: agentkeys-types, agentkeys-core, agentkeys-cli, agentkeys-daemon, agentkeys-mock-server, agentkeys-mcp, agentkeys-provisioner
 - Git commits: `agentkeys: stage N -- <deliverable>`
 - Never self-grade: run `bash harness/stage-N-done.sh` to verify
+- **Always `cargo fmt --all` before committing** — CI's `cargo fmt --all -- --check` is a verifier, not a fixer, so unformatted code is a guaranteed red (the common trap: a standalone `//` comment placed right after a line with a trailing `// comment`, which rustfmt right-aligns). The committed [`.githooks/`](.githooks) pre-commit hook (installed by `setup-dev-env.sh` via `core.hooksPath`) enforces this for BOTH workspaces (root + `viz/server`). It fires on the `git commit` step — note `jj git push` bypasses git hooks, so the pre-commit hook, not pre-push, is the real gate. See [`docs/dev-setup.md`](docs/dev-setup.md) "Git hooks".
 
 ## Mock Server Design Principles
 The mock server mirrors Heima blockchain extrinsics. Follow these rules:

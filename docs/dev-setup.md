@@ -72,6 +72,14 @@ Optional but recommended:
 3. Fix any lints the new version introduces; commit the pin bump + lint fixes together.
 4. Nothing else to touch: CI, `setup-dev-env.sh`, and `setup-broker-host.sh` all read the same file. The broker host downloads the new toolchain on its next `setup-broker-host.sh --ref main` deploy (one-time ~1–2 min; old toolchains are reclaimed by `--reclaim-toolchain`).
 
+### Git hooks (auto-installed fmt gate)
+
+`setup-dev-env.sh` points git at the committed [`.githooks/`](../.githooks) dir (`git config core.hooksPath .githooks`). The **pre-commit** hook runs `cargo fmt --all -- --check` across BOTH cargo workspaces (the root + the standalone `viz/server`) — exactly the CI fmt step — so format drift is caught at commit time instead of as a red CI run. It only fires when a `.rs` file is staged (docs-only commits stay instant); fmt `--check` doesn't compile, so it's ~1s. A **pre-push** hook runs the same check for raw `git push`.
+
+**The fix when it fires:** `cargo fmt --all` (run it in `viz/server` too if you touched that workspace), re-stage, recommit. Format-on-save in your editor (rust-analyzer: `"editor.formatOnSave": true`) avoids it entirely.
+
+**One caveat:** `jj git push` does **not** run git hooks, so the pre-*push* hook never fires under jj — the **pre-commit** hook (which fires on the `git commit` step of the [worktree PR flow](../AGENTS.md)) is the effective guard. Working purely in jj in the main repo (no `git commit`)? Rely on editor format-on-save, or run `cargo fmt --all` before `jj describe`. Existing clones: re-run `setup-dev-env.sh` or `git config core.hooksPath .githooks` once. Bypass a single commit with `git commit --no-verify`.
+
 ## 2. Build everything (everyone)
 
 If you ran `scripts/setup-dev-env.sh` in §1, the workspace is already built and tested — skip ahead to §3. Otherwise:
