@@ -917,6 +917,40 @@ enum MemoryAction {
         #[arg(long, env = "REGION", default_value = "us-east-1")]
         region: String,
     },
+    /// #339 P2 — LIST the master's absorption-inbox curate queue: every delegate
+    /// proposal awaiting review. The MASTER-side twin of `inbox-push`; it drives
+    /// the LOCAL DAEMON (which holds the master session + owns the curate merge),
+    /// so the daemon must be running with an active master session (authenticate
+    /// in the web app). Provenance shown is worker-stamped — unforgeable.
+    InboxList {
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
+    /// #339 P2 — VIEW one inbox proposal's full body before curating (from `inbox-list`).
+    InboxView {
+        /// The proposal's `s3_key` (copy it from `inbox-list`).
+        #[arg(long)]
+        s3_key: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
+    /// #339 P2 — ACCEPT (curate) one proposal INTO canonical memory (per-namespace
+    /// MERGE), then GC the inbox object. The master's pull-request "merge".
+    InboxAccept {
+        /// The proposal's `s3_key` (copy it from `inbox-list`).
+        #[arg(long)]
+        s3_key: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
+    /// #339 P2 — REJECT (discard) one proposal; canonical memory is left untouched.
+    InboxReject {
+        /// The proposal's `s3_key` (copy it from `inbox-list`).
+        #[arg(long)]
+        s3_key: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1578,6 +1612,18 @@ async fn main() {
                     region,
                 )
                 .await
+            }
+            MemoryAction::InboxList { daemon_url } => {
+                agentkeys_cli::inbox_curate::inbox_list(daemon_url).await
+            }
+            MemoryAction::InboxView { s3_key, daemon_url } => {
+                agentkeys_cli::inbox_curate::inbox_view(daemon_url, s3_key).await
+            }
+            MemoryAction::InboxAccept { s3_key, daemon_url } => {
+                agentkeys_cli::inbox_curate::inbox_accept(daemon_url, s3_key).await
+            }
+            MemoryAction::InboxReject { s3_key, daemon_url } => {
+                agentkeys_cli::inbox_curate::inbox_reject(daemon_url, s3_key).await
             }
         },
         Commands::Agent { action } => match action {
