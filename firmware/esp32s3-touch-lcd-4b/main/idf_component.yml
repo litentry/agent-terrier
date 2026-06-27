@@ -1,0 +1,8 @@
+dependencies:
+  idf:
+    version: ">=5.3"
+  # The official Espressif-registry BSP owns ALL board pins (ST7701 RGB + GT911 touch +
+  # ES8311/ES7210 audio + TCA9554 IO-expander) and transitively pulls LVGL, esp_lvgl_port,
+  # and esp_codec_dev — the firmware never hand-codes a GPIO.
+  # https://components.espressif.com/components/waveshare/esp32_s3_touch_lcd_4b
+  waveshare/esp32_s3_touch_lcd_4b: "^2.0.0"
