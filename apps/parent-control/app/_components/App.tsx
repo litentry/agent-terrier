@@ -560,10 +560,15 @@ export function App() {
       return false;
     }
     if (services.length === 0) {
-      const proceed = window.confirm(
-        `Commit ZERO grants for ${actor.label}? This revokes every memory namespace on chain — the agent will be denied everywhere.\n\nRevoke all?`,
-      );
-      if (!proceed) return false;
+      // The commit below still echoes the actor's PRESERVED (non memory/inbox)
+      // grants — credentials, email, … — so "zero selected" revokes ONLY memory +
+      // inbox, never those. Say exactly that (Codex review: the old text claimed
+      // full denial while the request preserved cred grants).
+      const preserved = actor.scopeUnknownServiceIds ?? [];
+      const msg = preserved.length > 0
+        ? `Revoke ALL memory + inbox grants for ${actor.label}?\n\nIts ${preserved.length} other on-chain grant(s) (credentials, email, …) stay UNCHANGED — revoke those from their own controls, or revoke the device to clear everything.\n\nContinue?`
+        : `Commit ZERO grants for ${actor.label}? This revokes every memory + inbox grant on chain — the agent will be denied everywhere.\n\nRevoke all?`;
+      if (!window.confirm(msg)) return false;
     }
     showToast(`Building setScope for ${actor.label}…`);
     // setScope is set-replace — echo the mirror's unmatched on-chain service ids

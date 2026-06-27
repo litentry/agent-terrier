@@ -1,5 +1,9 @@
 export type Namespace = 'personal' | 'family' | 'work' | 'travel';
 
+// Two INDEPENDENT per-namespace grants (#339): `read` = `memory:<ns>` (read the
+// master's shared canonical memory); `write` = `inbox:<ns>` (write/suggest into the
+// master's inbox, which the master curates). The delegate NEVER writes the master's
+// shared memory directly, and its own local memory is its own — neither is `write`.
 export type ScopeBits = { read: boolean; write: boolean };
 
 export type ActorRole = 'master' | 'agent';

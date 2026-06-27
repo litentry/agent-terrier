@@ -149,10 +149,15 @@ export function ActorDetail({
   // The staged grant as on-chain services: every namespace with read or write.
   // The chain grant carries ONE read-only bit for the whole set, so any staged
   // r+w commits the set as read+write (the bar says which before Touch ID).
-  const stagedGranted = stagedScope
-    ? NAMESPACES.filter((ns) => stagedScope[ns]?.read || stagedScope[ns]?.write)
+  // #339 — two INDEPENDENT grants per namespace: read → memory:<ns> (read the
+  // master's shared memory), write → inbox:<ns> (write/suggest into the master's
+  // inbox). No direct shared-memory write exists, so there is no r+w ladder.
+  const stagedRead = stagedScope
+    ? NAMESPACES.filter((ns) => stagedScope[ns]?.read)
     : [];
-  const stagedReadOnly = stagedScope ? !stagedGranted.some((ns) => stagedScope[ns]?.write) : true;
+  const stagedWrite = stagedScope
+    ? NAMESPACES.filter((ns) => stagedScope[ns]?.write)
+    : [];
   const stagedDirty =
     stagedScope !== null &&
     NAMESPACES.some((ns) => {
@@ -166,8 +171,14 @@ export function ActorDetail({
     setCommitting(true);
     const ok = await onCommitScope(
       actor,
-      stagedGranted.map((ns) => `memory:${ns}`),
-      stagedReadOnly,
+      [
+        ...stagedRead.map((ns) => `memory:${ns}`),
+        ...stagedWrite.map((ns) => `inbox:${ns}`),
+      ],
+      // The on-chain readOnly bit is a dead flag (isServiceInScope ignores it);
+      // shared memory is read-only to a delegate and contribution is via the inbox
+      // grant, so pass a fixed value rather than surface a toggle for it.
+      true,
     );
     setCommitting(false);
     if (ok) setStagedScope(null); // the refetched chain mirror now shows the grant
@@ -236,10 +247,17 @@ export function ActorDetail({
             >
               <span className="lbl">staged</span>
               <span style={{ fontSize: 11.5, flex: '1 1 auto' }}>
-                {stagedGranted.length === 0
-                  ? 'Revokes EVERY memory namespace on chain.'
-                  : `Grants ${stagedGranted.map((ns) => `memory:${ns}`).join(' · ')} · ${stagedReadOnly ? 'read-only' : 'read + write'}.`}
-                {' '}One on-chain setScope; the grant carries a single read-only bit for the whole set.
+                {stagedRead.length === 0 && stagedWrite.length === 0
+                  ? 'Revokes every memory + inbox grant (credential / email grants are unchanged).'
+                  : [
+                      stagedRead.length > 0
+                        ? `Reads ${stagedRead.map((ns) => `memory:${ns}`).join(' · ')}.`
+                        : '',
+                      stagedWrite.length > 0
+                        ? `Suggests ${stagedWrite.map((ns) => `inbox:${ns}`).join(' · ')}.`
+                        : '',
+                    ].filter(Boolean).join(' ')}
+                {' '}One on-chain setScope (master K11).
               </span>
               <span style={{ display: 'flex', gap: 8 }}>
                 <button className="btn" disabled={committing} onClick={() => setStagedScope(null)}>discard</button>

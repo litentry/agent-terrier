@@ -436,10 +436,18 @@ pub type SharedUiBridgeState = Arc<UiBridgeState>;
 
 const AUDIT_BUFFER_CAP: usize = 200;
 
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiScopeBits {
+    /// `memory:<ns>` granted — the delegate may READ the master's shared canonical
+    /// memory for this namespace (#295 distribution). The delegate's OWN local
+    /// memory is its own and is not represented here.
     pub read: bool,
+    /// `inbox:<ns>` granted — the delegate may WRITE/suggest into the master's
+    /// absorption inbox for this namespace (#339), which the master curates. A
+    /// DISTINCT on-chain grant (`keccak("inbox:<ns>") != keccak("memory:<ns>")`), so
+    /// granting read never grants write — and the delegate NEVER writes the master's
+    /// shared memory directly (the only contribution path is the curated inbox).
     pub write: bool,
 }
 
@@ -2913,11 +2921,24 @@ async fn fetch_actor_scope_from_chain(
     }
     let data = format!("0x{}{op}{act}", chain_selector("getScope(bytes32,bytes32)"));
     let raw = daemon_eth_call(rpc, scope_contract, &data).await?;
-    let (services, read_only, exists) = parse_scope_return(&raw)?;
+    let (services, _read_only, exists) = parse_scope_return(&raw)?;
     if !exists || services.is_empty() {
         return Ok((None, Vec::new()));
     }
-    let known: Vec<([u8; 32], &str)> = SCOPE_NAMESPACES
+    Ok(classify_scope_hashes(&services))
+}
+
+/// Map raw on-chain scope `serviceHash`es into the per-namespace `ApiScopeBits` the
+/// permission panel renders, plus the **unmatched** hashes (`unknown`) the panel must
+/// echo back on a set-replace commit so they aren't wiped. PURE (no chain) so the
+/// shared-read vs inbox-write distinction is unit-testable: a `keccak("memory:<ns>")`
+/// sets `read` (read the master's shared memory), a `keccak("inbox:<ns>")` sets `write`
+/// (suggest into the master's inbox — the ONLY contribution path, never a direct
+/// shared-memory write), and anything else (e.g. `cred:<service>`) is preserved verbatim.
+fn classify_scope_hashes(
+    services: &[[u8; 32]],
+) -> (Option<HashMap<String, ApiScopeBits>>, Vec<String>) {
+    let known_mem: Vec<([u8; 32], &str)> = SCOPE_NAMESPACES
         .iter()
         .map(|ns| {
             (
@@ -2926,23 +2947,30 @@ async fn fetch_actor_scope_from_chain(
             )
         })
         .collect();
-    let mut map = HashMap::new();
+    // #339 — the DISTINCT inbox-write grant per namespace (`inbox:<ns>`). A separate
+    // keccak from `memory:<ns>`, so the panel can NAME it (the `write` bit) instead of
+    // dumping it into the blind-preserve `unknown` set where the UI can't toggle it.
+    let known_inbox: Vec<([u8; 32], &str)> = SCOPE_NAMESPACES
+        .iter()
+        .map(|ns| {
+            (
+                agentkeys_core::device_crypto::keccak256(format!("inbox:{ns}").as_bytes()),
+                *ns,
+            )
+        })
+        .collect();
+    let mut map: HashMap<String, ApiScopeBits> = HashMap::new();
     let mut unknown = Vec::new();
-    for h in &services {
-        match known.iter().find(|(kh, _)| kh == h) {
-            Some((_, ns)) => {
-                map.insert(
-                    (*ns).to_string(),
-                    ApiScopeBits {
-                        read: true,
-                        write: !read_only,
-                    },
-                );
-            }
-            None => unknown.push(format!("0x{}", hex::encode(h))),
+    for h in services {
+        if let Some((_, ns)) = known_mem.iter().find(|(kh, _)| kh == h) {
+            map.entry((*ns).to_string()).or_default().read = true;
+        } else if let Some((_, ns)) = known_inbox.iter().find(|(kh, _)| kh == h) {
+            map.entry((*ns).to_string()).or_default().write = true;
+        } else {
+            unknown.push(format!("0x{}", hex::encode(h)));
         }
     }
-    Ok(((!map.is_empty()).then_some(map), unknown))
+    ((!map.is_empty()).then_some(map), unknown)
 }
 
 /// The operator omni this daemon serves: the registered master, else the
@@ -4057,7 +4085,96 @@ async fn decode_audit_event(
         decoded["tx_hash"] = serde_json::json!(tx);
     }
 
+    // Decode the scope `serviceHash`es into readable names (`memory:<ns>` /
+    // `inbox:<ns>` / the actors' cred services) so the audit view shows the GRANT
+    // SET, not raw keccak hashes (the "can't read which grants are in the set"
+    // gap). Annotates each envelope's `op_body` with a `service_names` array the
+    // frontend renders alongside `service_ids`; unknown hashes pass through labeled.
+    let actor_services: Vec<String> = {
+        let actors = state.actors.read().await;
+        actors
+            .values()
+            .filter_map(|a| a.services.clone())
+            .flatten()
+            .collect()
+    };
+    annotate_service_names(&mut decoded, &scope_name_map(&actor_services));
+
     Ok(Json(decoded))
+}
+
+/// Build a `serviceHash` (`0x`-hex keccak) → human-readable service-name map: the
+/// `memory:<ns>` + DISTINCT `inbox:<ns>` grants for every namespace (#339), each
+/// actor's cred services (`<svc>` and `cred:<svc>`), and a few well-known worker
+/// services. The reverse of the on-chain keccak the broker/`heima-scope-set` write.
+fn scope_name_map(actor_services: &[String]) -> HashMap<String, String> {
+    let mut candidates: Vec<String> = Vec::new();
+    for ns in SCOPE_NAMESPACES {
+        candidates.push(format!("memory:{ns}"));
+        candidates.push(format!("inbox:{ns}"));
+    }
+    for svc in actor_services {
+        candidates.push(svc.clone());
+        candidates.push(format!("cred:{svc}"));
+    }
+    for k in ["email", "mail:send", "mail:inbox", "audit:append"] {
+        candidates.push(k.to_string());
+    }
+    let mut map = HashMap::new();
+    for name in candidates {
+        let h = format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(name.as_bytes()))
+        );
+        map.entry(h).or_insert(name);
+    }
+    map
+}
+
+/// Annotate every decoded envelope's `op_body.service_ids` (raw keccak hashes) with
+/// a parallel `service_names` array so the audit decode view is readable. Unknown
+/// hashes pass through labeled (`unknown · 0x…`) so nothing is silently dropped.
+fn annotate_service_names(decoded: &mut serde_json::Value, name_map: &HashMap<String, String>) {
+    fn names_for(ids: &serde_json::Value, map: &HashMap<String, String>) -> serde_json::Value {
+        let names: Vec<serde_json::Value> = ids
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|v| {
+                        let raw = v.as_str().unwrap_or_default();
+                        let name = map
+                            .get(&raw.to_lowercase())
+                            .cloned()
+                            .unwrap_or_else(|| format!("unknown · {raw}"));
+                        serde_json::Value::String(name)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        serde_json::Value::Array(names)
+    }
+    fn annotate_one(env: &mut serde_json::Value, map: &HashMap<String, String>) {
+        let Some(ids) = env
+            .get("op_body")
+            .and_then(|b| b.get("service_ids"))
+            .cloned()
+        else {
+            return;
+        };
+        if !ids.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+            return;
+        }
+        let names = names_for(&ids, map);
+        if let Some(body) = env.get_mut("op_body").and_then(|b| b.as_object_mut()) {
+            body.insert("service_names".to_string(), names);
+        }
+    }
+    annotate_one(&mut decoded["envelope"], name_map);
+    if let Some(envs) = decoded.get_mut("envelopes").and_then(|e| e.as_array_mut()) {
+        for env in envs.iter_mut() {
+            annotate_one(env, name_map);
+        }
+    }
 }
 
 /// #97: overlay REAL fetched envelopes onto a synthesized decode preview. The
@@ -7225,6 +7342,72 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 mod tests {
     use super::*;
 
+    /// #339 — the security distinction the inbox grant rests on: a `memory:<ns>`
+    /// grant confers READ (the master's shared canonical memory) but NEVER write,
+    /// and an `inbox:<ns>` grant confers WRITE (suggest into the master's inbox) but
+    /// NEVER read. Granting read never grants write (`keccak("inbox:<ns>") !=
+    /// keccak("memory:<ns>")`) — the delegate never writes the master's shared memory
+    /// directly. An unknown service (e.g. `cred:<svc>`) is preserved verbatim for the
+    /// panel's set-replace commit.
+    #[test]
+    fn classify_scope_hashes_separates_shared_read_from_inbox_write() {
+        use agentkeys_core::device_crypto::keccak256;
+        let mem = keccak256(b"memory:travel");
+        let inbox = keccak256(b"inbox:travel");
+        let cred = keccak256(b"cred:openrouter");
+
+        // memory grant → READ (shared canonical), never inbox-write.
+        let (map, unknown) = classify_scope_hashes(&[mem]);
+        let m = map.expect("memory grant present");
+        assert!(
+            m["travel"].read && !m["travel"].write,
+            "a memory grant is shared-READ only — never inbox-write"
+        );
+        assert!(unknown.is_empty());
+
+        // inbox grant → WRITE (suggest to inbox), never shared read.
+        let (map, _) = classify_scope_hashes(&[inbox]);
+        let m = map.expect("inbox grant present");
+        assert!(
+            m["travel"].write && !m["travel"].read,
+            "an inbox grant is WRITE/suggest only — never shared read"
+        );
+
+        // both grants on one ns → read + write, merged.
+        let (map, _) = classify_scope_hashes(&[mem, inbox]);
+        let m = map.unwrap();
+        assert!(m["travel"].read && m["travel"].write);
+
+        // unknown service (cred) is preserved verbatim, never in the named map.
+        let (map, unknown) = classify_scope_hashes(&[cred]);
+        assert!(map.is_none());
+        assert_eq!(unknown, vec![format!("0x{}", hex::encode(cred))]);
+    }
+
+    /// The audit decode view must show the GRANT SET, not raw keccak hashes:
+    /// `memory:<ns>` / `inbox:<ns>` / cred services decode by name; an unknown hash
+    /// passes through labeled (never silently dropped).
+    #[test]
+    fn annotate_service_names_decodes_the_grant_set() {
+        use agentkeys_core::device_crypto::keccak256;
+        let h = |s: &str| format!("0x{}", hex::encode(keccak256(s.as_bytes())));
+        let map = scope_name_map(&["openrouter".to_string()]);
+        let mut decoded = serde_json::json!({
+            "envelope": { "op_body": { "service_ids": [
+                h("memory:family"), h("inbox:travel"), h("cred:openrouter"), "0xdeadbeef"
+            ] } }
+        });
+        annotate_service_names(&mut decoded, &map);
+        let names = &decoded["envelope"]["op_body"]["service_names"];
+        assert_eq!(names[0], "memory:family");
+        assert_eq!(names[1], "inbox:travel");
+        assert_eq!(names[2], "cred:openrouter");
+        assert!(names[3]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown · 0xdeadbeef"));
+    }
+
     /// #214: a broker PendingBinding row (post-claim, §10.2) maps to the web UI's
     /// PairingRequest shape — label→agent, requested_scope→RequestedPerm[],
     /// device_pubkey→dpub. The device key is surfaced for display only, never as
@@ -9088,10 +9271,12 @@ mod tests {
             actors_arr[1]["device_key_hash"],
             format!("0x{}", T233_AGENT_HASH.repeat(32))
         );
-        // The on-chain grant (memory:family, read+write) is mirrored into the
-        // permission panel's data source — the DENY-everywhere incident.
+        // The on-chain grant (memory:family) is mirrored into the permission panel's
+        // data source as READ (the DENY-everywhere incident). A memory grant is
+        // shared-READ only; inbox-WRITE is the DISTINCT inbox:<ns> grant (#339),
+        // absent here — so write stays false.
         assert_eq!(actors_arr[1]["scope"]["family"]["read"], true);
-        assert_eq!(actors_arr[1]["scope"]["family"]["write"], true);
+        assert_eq!(actors_arr[1]["scope"]["family"]["write"], false);
         assert!(
             actors_arr[1]["scope"].get("personal").is_none(),
             "ungranted namespaces stay absent"

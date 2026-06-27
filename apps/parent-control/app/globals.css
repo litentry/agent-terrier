@@ -840,6 +840,20 @@ a:hover { text-decoration-color: var(--ink); }
 }
 .perm-readonly.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .perm-readonly.off { color: var(--ink-faint); }
+/* #339 — two INDEPENDENT per-namespace grant toggles: read = memory:<ns> (read the
+   master's shared memory), write = inbox:<ns> (suggest into the master's inbox). Each
+   is a self-contained rounded pill that clips its own focus ring, so nothing overflows
+   a parent border the way the old segmented control's square corners + focus square did. */
+.perm-rw { display: inline-flex; gap: 6px; align-items: center; }
+.perm-tog {
+  font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer;
+  font-family: inherit; border: 1px solid var(--rule-soft); background: var(--bg);
+  color: var(--ink-dim); padding: 5px 12px; border-radius: var(--ds-r-pill);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.perm-tog.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.perm-tog:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.perm-rw-ro .perm-tog { cursor: default; }
 .perm-agent-pick { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
 .perm-agent-pick button {
   border: 1px solid var(--rule-soft); background: var(--bg); padding: 8px 14px; font-family: inherit;
@@ -848,7 +862,7 @@ a:hover { text-decoration-color: var(--ink); }
 .perm-agent-pick button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 @media (max-width: 640px) {
   .perm-row { grid-template-columns: 30px 1fr; gap: 12px; }
-  .perm-row > .perm-seg, .perm-row > .perm-switch, .perm-row > .perm-readonly { grid-column: 2; justify-self: start; margin-top: 6px; }
+  .perm-row > .perm-seg, .perm-row > .perm-switch, .perm-row > .perm-readonly, .perm-row > .perm-rw { grid-column: 2; justify-self: start; margin-top: 6px; }
   .perm-icon { width: 30px; height: 30px; font-size: 14px; }
 }
 
