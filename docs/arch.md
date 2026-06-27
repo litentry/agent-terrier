@@ -15,6 +15,7 @@ This doc supersedes the pre-v2 architecture revision (which described a single-b
 - [`signer-protocol.md`](spec/signer-protocol.md) — typed RPC over mTLS to the signer
 - [`threat-model-key-custody.md`](spec/threat-model-key-custody.md) — retroactive-confidentiality + key custody position
 - [`credential-backend-interface.md`](spec/credential-backend-interface.md) — `CredentialBackend` trait surface (now backed by the sidecar)
+- [`agent-background-job-harness.md`](spec/agent-background-job-harness.md) — portable, agent-agnostic contract for running/streaming/controlling on-device background work (task = process group; deterministic `/v1/jobs` list + group-kill; #340)
 - `plan/v2-issues/issue-v2-stage-1-foundation.md` (operator-internal) — stage 1 deliverable inventory (shipped)
 - `plan/v2-issues/issue-v2-stage-2-hardening.md` (operator-internal) — stage 2 deliverable inventory (shipped)
 - `plan/v2-issues/issue-payment-service-deferred.md` (operator-internal) — payment-service design (shipped per modes P-1/P-2/P-3)
