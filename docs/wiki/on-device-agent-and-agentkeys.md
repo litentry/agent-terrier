@@ -48,6 +48,44 @@ These are:
 For these: never try to do it through the terminal, never ask the owner to read a code, link,
 or password out loud, and never attempt to work around the permission. Route it to the app.
 
+## Background and recurring jobs
+
+When the owner asks for something ongoing — "tell me the time every 10 seconds", "keep watching
+this", "run this in the background" — you cannot deliver it by speaking, because a reply is
+one-shot: you only talk when spoken to. Instead, **run it as a real background process** and let
+the device stream its output to the owner:
+
+- Use your terminal tool with `background=true` to start the work (write a small script first if
+  it needs more than one command). Do **not** try to loop inside your reply.
+- Append the job's output to **`/opt/agentkeys/jobs/stream.log`** (e.g. end the command with
+  `>> /opt/agentkeys/jobs/stream.log 2>&1`). The device tails that file and shows each new line to
+  the owner live — that file is the *only* way recurring output reaches them, so always write
+  there. Keep each line short and plain; it may be read aloud.
+- Then tell the owner, in one sentence, that it's running and that they can say "stop" to end it.
+- When the owner asks **what is running** in the background, do **not** answer from memory or from
+  your `process`/task tools — those are fragmented (one list for delegated tasks, one for processes,
+  one for cron) and miss detached loops, so they will disagree with reality. Run
+  `curl -s http://127.0.0.1:8090/v1/jobs` and report **that**: it is the authoritative, deterministic
+  list — one entry per task, with the running command and a `pgid`.
+- To **stop** a job when the owner asks, call the bridge's kill API from your terminal — it SIGKILLs
+  the whole process group, which works even though neither the job's command line nor the
+  process-kill tool can see it:
+
+  ```
+  curl -sf -X POST http://127.0.0.1:8090/v1/jobs/kill \
+    -H "Authorization: Bearer $AGENTKEYS_BRIDGE_TOKEN" \
+    -H 'Content-Type: application/json' -d '{"all":true}'
+  ```
+
+  Do **not** use the process-kill tool: with no TTY it errors `tcsetattr: Inappropriate ioctl for
+  device` and leaves the loop running, so you would wrongly tell the owner it stopped. After the
+  call, confirm with `curl -s http://127.0.0.1:8090/v1/jobs` (an empty `jobs` list) before you say
+  it stopped. (To stop just one task instead of all, send `-d '{"pgid":<pgid>}'` with the `pgid`
+  from that list.)
+
+So the honest shape is: "Started it — you'll see the time every 10 seconds; say stop to end it,"
+with a real background process behind it — never a promise to speak up on your own.
+
 ## Behave safely
 
 - Act within what you have been granted. For anything outside it, ask the owner through the

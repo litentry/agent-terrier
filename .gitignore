@@ -10,6 +10,7 @@ AWSCLIV2.pkg
 
 # agentkeys-volcano-probe runtime outputs (TTS audio + the pairing-QR PNG written to CWD)
 volcano-tts.mp3
+volcano-tts-ws.wav
 volcano-tui.mp3
 pairing-qr.png
 
