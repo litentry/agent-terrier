@@ -397,14 +397,14 @@ function CategoryPanel({
 
   // master-hub #295 distribution VISIBILITY: which delegates can READ this
   // canonical namespace. A delegate's on-chain `memory:<ns>` grant surfaces in
-  // `actor.scope` as a per-namespace { read, write } map (same shape the
-  // dashboard/permissions panels read). Granting is the existing #248/#249
-  // scope panel; this is the read-only reverse index (no network, no decrypt).
+  // `actor.scope[ns].read` (the `write` bit is the DISTINCT inbox-suggest grant,
+  // #339 — NOT shared-memory read, so it does not make a reader). Granting is the
+  // #248/#249 scope panel; this is the read-only reverse index (no network/decrypt).
   const readers = actors.filter((a) => {
     if (a.role !== 'agent') return false;
     const scope = (a.scope ?? {}) as Record<string, { read?: boolean; write?: boolean }>;
     const bits = scope[category.ns];
-    return !!bits && (bits.read === true || bits.write === true);
+    return !!bits && bits.read === true;
   });
 
   const toggle = () => {

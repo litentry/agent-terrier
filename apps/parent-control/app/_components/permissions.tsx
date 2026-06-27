@@ -121,7 +121,10 @@ export function PermissionList({
         {NAMESPACES.map((ns) => {
           const s = scope[ns] || { read: false, write: false };
           const granted = s.read || s.write;
-          const lvl = s.write ? 'read + write' : s.read ? 'read only' : 'no access';
+          const lvl = s.read && s.write ? 'reads shared · suggests'
+            : s.read ? 'reads shared'
+            : s.write ? 'suggests to inbox'
+            : 'no access';
           return (
             <PermRow
               key={ns}
@@ -131,9 +134,33 @@ export function PermissionList({
               state={`scope · ${lvl}`}
               granted={granted}
               control={
-                editable
-                  ? <PermSeg value={s} onChange={(v) => onScopeChange && onScopeChange(ns, v)} />
-                  : <span className={`perm-readonly ${granted ? 'on' : 'off'}`}>{s.write ? 'r+w' : s.read ? 'read' : 'deny'}</span>
+                editable ? (
+                  // Two INDEPENDENT grants per namespace (#339), not a deny/read/r+w
+                  // ladder: read = memory:<ns> (read the master's shared memory) ·
+                  // write = inbox:<ns> (write/suggest into the master's inbox, which
+                  // the master curates — NEVER a direct shared-memory write).
+                  <div className="perm-rw">
+                    <button
+                      type="button"
+                      className={`perm-tog ${s.read ? 'on' : ''}`}
+                      aria-pressed={s.read}
+                      title="READ — let this delegate read your shared memory for this namespace (memory:<ns>)."
+                      onClick={() => onScopeChange && onScopeChange(ns, { read: !s.read, write: s.write })}
+                    >read</button>
+                    <button
+                      type="button"
+                      className={`perm-tog ${s.write ? 'on' : ''}`}
+                      aria-pressed={s.write}
+                      title="WRITE — let this delegate write/suggest into your inbox for this namespace (inbox:<ns>); you curate each one. The delegate never writes your shared memory directly."
+                      onClick={() => onScopeChange && onScopeChange(ns, { read: s.read, write: !s.write })}
+                    >write</button>
+                  </div>
+                ) : (
+                  <span className="perm-rw perm-rw-ro">
+                    <span className={`perm-tog ${s.read ? 'on' : ''}`}>read</span>
+                    <span className={`perm-tog ${s.write ? 'on' : ''}`}>write</span>
+                  </span>
+                )
               }
             />
           );
