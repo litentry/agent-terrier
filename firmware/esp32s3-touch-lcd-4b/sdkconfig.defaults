@@ -1,0 +1,36 @@
+# ESP-IDF defaults for the Waveshare ESP32-S3-Touch-LCD-4B.
+# The BSP (waveshare/esp32_s3_touch_lcd_4b) drives ST7701 RGB + GT911 + ES8311; these
+# defaults give it the memory + LVGL features it needs. Tune SPIRAM speed up to 120M if
+# the RGB panel tears (needs CONFIG_ESPTOOLPY_FLASHFREQ_120M + Flash in DIO).
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 16 MB external flash
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# 8 MB octal PSRAM — the RGB framebuffer + LVGL draw buffers live here
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Custom partition layout (single factory app, no OTA, + a spiffs assets partition)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Bundle the common CA roots so HTTPS to the broker + agent works without per-cert pinning
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# LVGL: enable the QR-code widget (the real pairing deep-link QR) + the fonts the UI uses
+CONFIG_LV_USE_QRCODE=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+
+# Headroom for the UI build on the main task
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

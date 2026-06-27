@@ -1,0 +1,11 @@
+# ESP-IDF build output + component-manager scratch (regenerated from idf_component.yml)
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+
+# Per-device secrets (WiFi creds, agent bearer) — copied from secrets.h.example
+main/secrets.h
+
+*.pyc

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>AgentKeys device — UI mirror</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: #1a1d24; color: #8a91a3; font-family: system-ui, -apple-system, sans-serif;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    }
+    h1 { font-size: 13px; font-weight: 500; letter-spacing: .02em; margin: 0; }
+    .frame { padding: 18px; background: #000; border-radius: 30px; box-shadow: 0 10px 50px rgba(0,0,0,.55); }
+    /* The panel is 480x480; the canvas id MUST be "canvas" (Emscripten SDL default). */
+    canvas { width: 480px; height: 480px; display: block; border-radius: 8px; background: #10131A; touch-action: none; }
+    .hint { font-size: 11px; opacity: .7; }
+  </style>
+</head>
+<body>
+  <h1>ESP32-S3-Touch-LCD-4B · on-device UI mirror (LVGL 9.5 → WASM)</h1>
+  <div class="frame">
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  </div>
+  <div class="hint">Same <code>ui/*.c</code> as the firmware · click/drag = touch · mock agent data</div>
+  <script type="text/javascript">
+    var Module = { canvas: document.getElementById('canvas') };
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>
