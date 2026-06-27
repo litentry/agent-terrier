@@ -239,6 +239,23 @@ mod tests {
         assert!(grant.services.is_empty());
     }
 
+    /// Codex review (high): committing ZERO memory/inbox grants from the panel is
+    /// NOT "denied everywhere" — the actor's preserved ids (cred/email, read back
+    /// from the mirror) still ride into the set-replace, so those grants survive.
+    /// This pins the on-chain truth the UI confirm text now states accurately
+    /// (the old text claimed full revocation while preserving creds).
+    #[test]
+    fn zero_named_services_still_preserves_cred_grants() {
+        let mut req = sample();
+        req.services = Vec::new(); // every memory/inbox toggle off — the panel's "revoke all"
+        let cred_id = format!("0x{}", "44".repeat(32));
+        req.preserve_service_ids = vec![cred_id];
+        let (_, grant) = parse_scope_grant(&req).unwrap();
+        // The cred grant survives → the agent is NOT denied everywhere.
+        assert_eq!(grant.services.len(), 1);
+        assert_eq!(grant.services[0], [0x44u8; 32]);
+    }
+
     #[test]
     fn preserve_service_ids_union_into_the_grant_without_duplicates() {
         // The mirror's unmatched hashes (e.g. cred:openrouter) survive a memory
