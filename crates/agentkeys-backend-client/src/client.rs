@@ -13,12 +13,33 @@ use reqwest::Client;
 use crate::protocol::{
     AuditAppendInput, AuditAppendResult, AuditAppendV2, AuditAppendV2Resp, BrokerCapRequest,
     CapMintOp, CapMintRequest, CapToken, CredFetchBody, CredFetchInput, CredFetchResp,
-    CredFetchResult, CredStoreBody, CredStoreInput, CredStoreResp, CredStoreResult,
+    CredFetchResult, CredStoreBody, CredStoreInput, CredStoreResp, CredStoreResult, DelegationPath,
     InboxDeleteBody, InboxDeleteResp, InboxGetBody, InboxGetResp, InboxItem, InboxItemMeta,
     InboxListBody, InboxListResp, MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult,
     MemoryInboxAppendBody, MemoryInboxAppendResp, MemoryPutBody, MemoryPutInput, MemoryPutResp,
     MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
 };
+
+/// A device→sandbox delegation the SANDBOX holds (issue #369 origination side).
+/// When set on a [`BackendClient`], `cap_mint` signs the cap-PoP with the
+/// sandbox's OWN ephemeral [`device_key`](BackendClient::device_key) but stamps
+/// the cap with the on-chain-bound DEVICE's `device_key_hash` + the device-signed
+/// `delegation_path`, so the worker accepts the cap via the delegated branch
+/// (`verify_delegation`) without the K10 ever leaving the device. Obtained from
+/// the broker's `/v1/agent/delegation/poll` after the device co-signs.
+#[derive(Debug, Clone)]
+pub struct Delegation {
+    /// The on-chain-bound DEVICE's `device_key_hash` (NOT the ephemeral key's) —
+    /// what the worker re-verifies the delegation signature recovers to.
+    pub device_key_hash: String,
+    /// The device-signed scope (space-delimited `data_class` / `service` tokens).
+    pub scope: String,
+    /// Unix-seconds expiry the device signed.
+    pub expires_at: u64,
+    /// The device's EIP-191 signature over
+    /// `delegation_payload(device_key_hash, ephemeral_addr, scope, expires_at)`.
+    pub delegation_sig: String,
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum BackendError {
@@ -58,6 +79,11 @@ pub struct BackendClient {
     /// because a cap without a valid K10 PoP is rejected by the broker + worker
     /// (that rejection is what makes a compromised broker unable to mint caps).
     pub device_key: Option<std::sync::Arc<agentkeys_core::device_crypto::DeviceKey>>,
+    /// A device→sandbox delegation (issue #369). When set, `device_key` is the
+    /// sandbox's EPHEMERAL key (signs the cap-PoP) and this carries the device's
+    /// bound `device_key_hash` + co-signature that the worker re-verifies. `None`
+    /// = the direct #76 path (the client holds the actor's own registered K10).
+    pub delegation: Option<Delegation>,
 }
 
 impl BackendClient {
@@ -83,6 +109,7 @@ impl BackendClient {
             vault_role_arn,
             region,
             device_key: None,
+            delegation: None,
         }
     }
 
@@ -95,6 +122,21 @@ impl BackendClient {
         device_key: std::sync::Arc<agentkeys_core::device_crypto::DeviceKey>,
     ) -> Self {
         self.device_key = Some(device_key);
+        self
+    }
+
+    /// Run cap-mint in the #369 DELEGATED mode: sign the cap-PoP with the
+    /// sandbox's `ephemeral_key` and attach the device-signed `delegation`. The
+    /// cap is stamped with the device's bound `device_key_hash` (from `delegation`)
+    /// so the worker accepts it via the delegated branch — the K10 never leaves the
+    /// device. Supersedes [`with_device_key`] for the sandbox runtime.
+    pub fn with_delegation(
+        mut self,
+        ephemeral_key: std::sync::Arc<agentkeys_core::device_crypto::DeviceKey>,
+        delegation: Delegation,
+    ) -> Self {
+        self.device_key = Some(ephemeral_key);
+        self.delegation = Some(delegation);
         self
     }
 
@@ -210,9 +252,27 @@ impl BackendClient {
                         op.data_class(),
                     )
                     .map_err(|e| BackendError::Transport(format!("cap-PoP sign: {e}")))?;
-                let device_key_hash = device_key
-                    .device_key_hash()
-                    .map_err(|e| BackendError::Transport(format!("device_key_hash: {e}")))?;
+                // In DELEGATED mode (#369) the cap-PoP is signed by the sandbox's
+                // ephemeral key, but the cap's `device_key_hash` is the on-chain-
+                // bound DEVICE's (the delegation proves the device authorized this
+                // ephemeral key); the worker takes the delegated verify branch. In
+                // direct mode (#76) it's the signer's OWN hash, no delegation_path.
+                let (device_key_hash, delegation_path) = match self.delegation.as_ref() {
+                    Some(d) => (
+                        d.device_key_hash.clone(),
+                        Some(DelegationPath {
+                            scope: d.scope.clone(),
+                            expires_at: d.expires_at,
+                            delegation_sig: d.delegation_sig.clone(),
+                        }),
+                    ),
+                    None => (
+                        device_key.device_key_hash().map_err(|e| {
+                            BackendError::Transport(format!("device_key_hash: {e}"))
+                        })?,
+                        None,
+                    ),
+                };
                 BrokerCapRequest {
                     operator_omni: req.operator_omni,
                     actor_omni: req.actor_omni,
@@ -227,6 +287,7 @@ impl BackendClient {
                     client_sig: Some(pop.client_sig),
                     client_nonce: Some(pop.client_nonce),
                     client_ts: Some(pop.client_ts),
+                    delegation_path,
                 }
             }
             None => BrokerCapRequest {
@@ -238,6 +299,7 @@ impl BackendClient {
                 client_sig: None,
                 client_nonce: None,
                 client_ts: None,
+                delegation_path: None,
             },
         };
 

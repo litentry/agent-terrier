@@ -46,6 +46,8 @@ use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use agentkeys_protocol::DelegationPath;
+
 use crate::jwt::verify::verify_session_jwt;
 use crate::state::SharedState;
 
@@ -180,6 +182,12 @@ pub struct CapToken {
     pub client_nonce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_ts: Option<u64>,
+    /// Device→sandbox delegation (issue #369) — echoed VERBATIM from the request
+    /// when the cap-PoP was signed by a sandbox's ephemeral key. The broker does
+    /// NOT verify it (it stays untrusted — the whole #76/#369 posture); the worker
+    /// re-verifies it independently. Omitted on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_path: Option<DelegationPath>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,6 +209,10 @@ pub struct CapRequest {
     pub client_nonce: Option<String>,
     #[serde(default)]
     pub client_ts: Option<u64>,
+    /// Device→sandbox delegation (issue #369) — present when `client_sig` is a
+    /// delegated sandbox-key signature; echoed into the cap-token for the worker.
+    #[serde(default)]
+    pub delegation_path: Option<DelegationPath>,
 }
 
 fn default_ttl_seconds() -> u64 {
@@ -403,6 +415,11 @@ pub struct CapClassifyRequest {
     pub client_nonce: Option<String>,
     #[serde(default)]
     pub client_ts: Option<u64>,
+    /// Device→sandbox delegation (issue #369) — present when `client_sig` is a
+    /// delegated sandbox-key signature. Passed through to the minted cap-token for
+    /// the worker to re-verify; the broker never inspects it.
+    #[serde(default)]
+    pub delegation_path: Option<DelegationPath>,
 }
 
 pub async fn cap_classify(
@@ -420,6 +437,7 @@ pub async fn cap_classify(
         client_sig: req.client_sig,
         client_nonce: req.client_nonce,
         client_ts: req.client_ts,
+        delegation_path: req.delegation_path,
     };
     mint_cap(state, headers, cap_req, CapOp::Classify, data_class)
         .await
@@ -585,6 +603,9 @@ async fn mint_cap(
         client_sig: req.client_sig,
         client_nonce: req.client_nonce,
         client_ts: req.client_ts,
+        // Echo the delegation VERBATIM (#369) — the worker re-verifies it; the
+        // broker is untrusted and never inspects it.
+        delegation_path: req.delegation_path,
     })
 }
 
@@ -664,12 +685,47 @@ fn verify_cap_pop(req: &CapRequest, op: CapOp, data_class: DataClass) -> Result<
         .map_err(|e| CapError::CapPopInvalid(format!("client_sig recover: {e}")))?;
     let recovered_hash = agentkeys_core::device_crypto::device_key_hash(&recovered)
         .map_err(|e| CapError::CapPopInvalid(format!("recovered address hash: {e}")))?;
-    if strip_0x_lc(&recovered_hash) != strip_0x_lc(&req.device_key_hash) {
-        return Err(CapError::CapPopInvalid(
-            "client_sig does not match device_key_hash (K10 proof-of-possession failed)".into(),
-        ));
+
+    // Direct K10 path (#76): the cap-PoP was signed by the on-chain-bound device key.
+    if strip_0x_lc(&recovered_hash) == strip_0x_lc(&req.device_key_hash) {
+        return Ok(());
     }
-    Ok(())
+    // Delegated path (#369): the cap-PoP was signed by a sandbox's EPHEMERAL key,
+    // not the device K10. Accept iff a device-issued, unexpired, in-scope delegation
+    // authorizes EXACTLY this signer. The WORKER re-verifies this same delegation
+    // independently (it is the authoritative gate); the broker checks it here only
+    // to fail fast and stay untrusted. Uses the SAME shared scope matcher + crypto.
+    if let Some(deleg) = &req.delegation_path {
+        if deleg.expires_at <= now {
+            return Err(CapError::CapPopInvalid(format!(
+                "delegation expired at {} (now {now})",
+                deleg.expires_at
+            )));
+        }
+        if !agentkeys_core::device_crypto::cap_in_scope(
+            &deleg.scope,
+            data_class.as_str(),
+            op.as_str(),
+            &req.service,
+        ) {
+            return Err(CapError::CapPopInvalid(format!(
+                "cap (service {}) outside delegation scope {:?}",
+                req.service, deleg.scope
+            )));
+        }
+        agentkeys_core::device_crypto::verify_delegation(
+            &req.device_key_hash,
+            &recovered,
+            &deleg.scope,
+            deleg.expires_at,
+            &deleg.delegation_sig,
+        )
+        .map_err(|e| CapError::CapPopInvalid(format!("delegation verify: {e}")))?;
+        return Ok(());
+    }
+    Err(CapError::CapPopInvalid(
+        "client_sig does not match device_key_hash (K10 proof-of-possession failed)".into(),
+    ))
 }
 
 // ─── on-chain reads (raw eth_call over reqwest) ────────────────────────
@@ -1105,6 +1161,7 @@ mod tests {
             client_sig: Some(client_sig),
             client_nonce: Some(client_nonce),
             client_ts: Some(client_ts),
+            delegation_path: None,
         }
     }
 
@@ -1169,6 +1226,83 @@ mod tests {
     }
 
     #[test]
+    fn verify_cap_pop_accepts_delegated_in_scope_rejects_out_of_scope() {
+        // #369 broker delegated branch: the cap-PoP is signed by the SANDBOX's
+        // ephemeral key (not the device K10), and a device-signed delegation
+        // authorizes it. The broker accepts iff the delegation is in-scope + the
+        // device co-signed it; a regression here (broker stops checking the
+        // delegation scope or binding) turns this RED.
+        use agentkeys_core::device_crypto::DeviceKey;
+        let dir = std::env::temp_dir();
+        let device =
+            DeviceKey::load_or_generate(dir.join("ak-cap-deleg-dev.key").to_str().unwrap(), true)
+                .unwrap();
+        let sandbox =
+            DeviceKey::load_or_generate(dir.join("ak-cap-deleg-sbx.key").to_str().unwrap(), true)
+                .unwrap();
+        let dkh = device.device_key_hash().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let nonce = "00112233aabbccdd".to_string();
+        let (operator, actor, service) = (
+            format!("0x{}", "a".repeat(64)),
+            format!("0x{}", "b".repeat(64)),
+            "memory:travel",
+        );
+        // The SANDBOX signs the cap-PoP; the cap carries the DEVICE's bound hash.
+        let sig = sandbox
+            .cap_pop_sig(&operator, &actor, service, "store", "memory", &nonce, now)
+            .unwrap();
+        let expires = now + 3600;
+        let mk = |scope: &str, signer: &DeviceKey| {
+            let mut r = cap_req_with(&dkh, sig.clone(), nonce.clone(), now);
+            r.delegation_path = Some(DelegationPath {
+                scope: scope.to_string(),
+                expires_at: expires,
+                delegation_sig: signer
+                    .delegation_sig(sandbox.address(), scope, expires)
+                    .unwrap(),
+            });
+            r
+        };
+        // In-scope, device-signed → accepted.
+        assert!(verify_cap_pop(
+            &mk("memory:travel memory:personal", &device),
+            CapOp::Store,
+            DataClass::Memory
+        )
+        .is_ok());
+        // Out-of-scope (excludes memory:travel) → rejected.
+        assert!(matches!(
+            verify_cap_pop(
+                &mk("memory:personal", &device),
+                CapOp::Store,
+                DataClass::Memory
+            ),
+            Err(CapError::CapPopInvalid(_))
+        ));
+        // Wrong-device: the SANDBOX self-signs the delegation → rejected (the
+        // delegation must recover to the bound device).
+        assert!(matches!(
+            verify_cap_pop(
+                &mk("memory:travel", &sandbox),
+                CapOp::Store,
+                DataClass::Memory
+            ),
+            Err(CapError::CapPopInvalid(_))
+        ));
+        // No delegation + a non-device signer → the direct #76 path rejects.
+        let mut bare = cap_req_with(&dkh, sig.clone(), nonce.clone(), now);
+        bare.delegation_path = None;
+        assert!(matches!(
+            verify_cap_pop(&bare, CapOp::Store, DataClass::Memory),
+            Err(CapError::CapPopInvalid(_))
+        ));
+    }
+
+    #[test]
     fn verify_cap_pop_is_noop_when_no_pop_supplied() {
         // Staged rollout (issue #76): a cap-mint with NO PoP is accepted at the
         // broker — the worker is the gate that rejects a missing PoP under
@@ -1182,6 +1316,7 @@ mod tests {
             client_sig: None,
             client_nonce: None,
             client_ts: None,
+            delegation_path: None,
         };
         assert!(verify_cap_pop(&req, CapOp::Store, DataClass::Memory).is_ok());
     }

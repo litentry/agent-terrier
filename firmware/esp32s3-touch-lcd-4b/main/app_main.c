@@ -14,6 +14,7 @@
 #include "agent_client.h"
 #include "app_config.h"
 #include "app_state.h"
+#include "device_identity.h"
 #include "ui.h"
 #include "wifi.h"
 
@@ -60,6 +61,38 @@ void app_main(void)
     ui_init();
 
     wifi_start(WIFI_SSID, WIFI_PASSWORD);
+
+    // K10 device identity (issue #367): load from NVS, or generate-on-first-boot
+    // via the SHARED agentkeys-device-core crate (the same secp256k1/keccak the
+    // broker ecrecovers). After wifi_start() so the RNG has RF entropy. Phase B
+    // (#367) feeds the §10.2 pairing request/poll from device_identity_pop_sig().
+    if (device_identity_init() == ESP_OK) {
+        char dkh[DEVICE_ID_HASH_LEN] = "";
+        device_identity_key_hash(dkh, sizeof(dkh));
+        ESP_LOGI(TAG, "device identity: addr=%s device_key_hash=%s", device_identity_address(), dkh);
+        // Restore a persisted pairing so a reboot / reflash stays "✓ Paired" without a
+        // re-claim (the binding lives in the nvs partition, not the app partition).
+        char master[80];
+        if (device_identity_paired(master, sizeof(master))) {
+            app_state_set_pairing(PAIR_BOUND, "", "", dkh);
+            ESP_LOGI(TAG, "restored paired state from NVS (master %s)", master);
+        }
+
+        // #369 bring-up self-check: produce a device->sandbox delegation co-signature
+        // over a fixed dev sandbox key, proving the path links + the crypto worker has
+        // stack for RFC6979 delegation signing on real hardware. The REAL sandbox key +
+        // scope + TTL arrive over the broker relay once piece-2 (spawn-on-binding) lands;
+        // until then this is the on-device proof the K10 can co-sign without ever leaving.
+        char dsig[DEVICE_ID_SIG_LEN] = "";
+        esp_err_t de = device_identity_delegation_sig(
+            "0x1563915e194d8cfba1943570603f7606a3115508", "memory:get memory:put", 1767300000ULL,
+            dsig, sizeof(dsig));
+        ESP_LOGI(TAG, "delegation self-check (#369): %s sig=%.18s...",
+                 de == ESP_OK ? "OK" : "FAIL", dsig);
+    } else {
+        ESP_LOGE(TAG, "device_identity_init failed");
+    }
+
     xTaskCreate(agent_health_task, "agent_health", 4096, NULL, 3, NULL);
 
     // P3 adds ES8311 audio here: bsp_audio_init() + bsp_audio_codec_microphone_init() /

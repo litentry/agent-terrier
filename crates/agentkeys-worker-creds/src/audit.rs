@@ -192,6 +192,7 @@ mod tests {
             client_sig: None,
             client_nonce: None,
             client_ts: None,
+            delegation_path: None,
         }
     }
 

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/agentkeys-types",
+    "crates/agentkeys-device-core",
     "crates/agentkeys-core",
     "crates/agentkeys-memory-engine",
     "crates/agentkeys-memory-openviking",
@@ -27,6 +28,7 @@ members = [
 
 [workspace.dependencies]
 agentkeys-types = { path = "crates/agentkeys-types" }
+agentkeys-device-core = { path = "crates/agentkeys-device-core" }
 agentkeys-core = { path = "crates/agentkeys-core" }
 agentkeys-memory-engine = { path = "crates/agentkeys-memory-engine" }
 agentkeys-memory-openviking = { path = "crates/agentkeys-memory-openviking" }

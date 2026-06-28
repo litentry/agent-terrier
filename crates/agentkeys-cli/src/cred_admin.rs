@@ -90,11 +90,12 @@ pub async fn memory_canonical_get(
     broker_url: &str,
     memory_url: &str,
     region: &str,
+    delegation_file: Option<&str>,
 ) -> Result<String> {
     // The DELEGATE's own session bearer authenticates to the broker, which (after
     // verifying the cap) issues scoped read-only creds — no MEMORY_ROLE_ARN is
     // needed on this side (the broker holds it). cred_fetch keeps the role-relay.
-    let client = BackendClient::new(
+    let mut client = BackendClient::new(
         Some(broker_url.to_string()),
         Some(memory_url.to_string()),
         None, // audit_url
@@ -104,6 +105,20 @@ pub async fn memory_canonical_get(
         None, // vault_role_arn
         region.to_string(),
     );
+    // #369 DELEGATED mode: when the sandbox holds a device-signed delegation (it
+    // does NOT hold a registered K10), it signs the cap-PoP with its EPHEMERAL key
+    // and attaches the delegation_path; cap_mint stamps the cap with the DEVICE's
+    // bound device_key_hash (from the delegation), and the worker accepts it via
+    // verify_delegation. Without a delegation file this is the legacy direct path.
+    let effective_dkh = match delegation_file {
+        Some(f) => {
+            let (ephemeral, delegation) = crate::delegation_admin::StoredDelegation::load(f)?;
+            let dkh = delegation.device_key_hash.clone();
+            client = client.with_delegation(ephemeral, delegation);
+            dkh
+        }
+        None => device_key_hash.to_string(),
+    };
     let cap = client
         .cap_mint(
             CapMintOp::MemoryCanonicalGet,
@@ -111,7 +126,7 @@ pub async fn memory_canonical_get(
                 operator_omni: normalize_omni_0x(operator_omni),
                 actor_omni: normalize_omni_0x(actor_omni),
                 service: namespace.to_string(),
-                device_key_hash: device_key_hash.to_string(),
+                device_key_hash: effective_dkh,
                 ttl_seconds: 300,
             },
             session_bearer,

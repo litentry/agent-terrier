@@ -38,6 +38,7 @@ fn sample_cap(service: &str, data_class: DataClass, op: CapOp) -> CapToken {
         client_sig: None,
         client_nonce: None,
         client_ts: None,
+        delegation_path: None,
     }
 }
 
