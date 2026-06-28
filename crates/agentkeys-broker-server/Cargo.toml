@@ -17,6 +17,9 @@ agentkeys-types = { workspace = true }
 # pop_sig verify) + HDKD child_omni derivation. One source of truth across
 # daemon/CLI/broker.
 agentkeys-core = { workspace = true }
+# #369 — the shared DelegationPath wire type echoed into the minted cap-token
+# (one owner; the worker deserializes the SAME type).
+agentkeys-protocol = { workspace = true }
 # #295 P1 §7a: the broker mints an operator-tagged OIDC internally + AssumeRoles
 # with a read-only exact-object session policy for delegated canonical-memory
 # reads, reusing assume_role_with_jwt — so the delegate never holds the operator

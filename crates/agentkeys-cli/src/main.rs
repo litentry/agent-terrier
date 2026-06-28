@@ -398,6 +398,131 @@ enum Commands {
         #[command(subcommand)]
         action: CredAction,
     },
+    /// Device→sandbox delegation (#369): the device holds K10 and co-signs a
+    /// scoped, short-lived delegation to a sandbox's ephemeral key, so a cloud
+    /// sandbox reaches the user's workers WITHOUT ever holding K10.
+    Delegation {
+        #[command(subcommand)]
+        action: DelegationAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DelegationAction {
+    /// DEVICE: re-derive this device's agent `J1` from the durable on-chain
+    /// binding (pop_sig-gated `/v1/agent/resolve`) and print the JSON the sandbox
+    /// consumes — `{session_jwt, operator_omni, actor_omni, device_key_hash}`.
+    #[command(about = "Device: resolve this device's agent J1 from its on-chain binding")]
+    Resolve {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/agent-device.key",
+            help = "Device K10 file (0600) — NEVER leaves the device"
+        )]
+        key_file: String,
+    },
+    /// DEVICE: discover pending delegation requests for this device and co-sign
+    /// each with K10, bounding the sandbox to `--scope`. The per-spawn bound can be
+    /// TIGHTER than the on-chain grant (e.g. omit `memory:travel` on a re-spawn).
+    #[command(about = "Device: co-sign pending sandbox delegation requests with K10")]
+    Cosign {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/agent-device.key",
+            help = "Device K10 file (0600)"
+        )]
+        key_file: String,
+        #[arg(
+            long,
+            default_value = "memory",
+            help = "Delegation scope to sign (space-delimited data_class / service tokens, e.g. 'memory:travel memory:personal')"
+        )]
+        scope: String,
+        #[arg(
+            long,
+            default_value_t = 3600,
+            help = "Delegation TTL (seconds) the device signs"
+        )]
+        ttl_seconds: u64,
+        #[arg(
+            long,
+            help = "Drain the current pending queue once and exit (else poll forever)"
+        )]
+        once: bool,
+        #[arg(
+            long,
+            default_value_t = 3,
+            help = "Poll interval (seconds) when looping"
+        )]
+        poll_interval_secs: u64,
+    },
+    /// SANDBOX: generate an ephemeral key, request a delegation, and poll until the
+    /// device co-signs — writing a delegation file the cap-mint clients attach as
+    /// the `delegation_path`. `--session-bearer` is the sandbox's J1 (from `resolve`).
+    #[command(
+        about = "Sandbox: bootstrap a device-signed delegation (ephemeral key + request/poll)"
+    )]
+    Bootstrap {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_SESSION_BEARER",
+            help = "The sandbox's agent J1 bearer"
+        )]
+        session_bearer: String,
+        #[arg(
+            long,
+            default_value = "memory",
+            help = "Requested delegation scope (the device may narrow it)"
+        )]
+        scope: String,
+        #[arg(
+            long,
+            default_value_t = 3600,
+            help = "Requested delegation TTL (seconds)"
+        )]
+        ttl_seconds: u64,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/sandbox-ephemeral.key",
+            help = "Sandbox ephemeral key file (0600) — the cap-PoP signer"
+        )]
+        ephemeral_key_file: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_DELEGATION_FILE",
+            default_value = "~/.agentkeys/delegation.json",
+            help = "Output delegation file the cap-mint reads"
+        )]
+        out_file: String,
+        #[arg(
+            long,
+            default_value_t = 40,
+            help = "Max poll attempts before giving up"
+        )]
+        poll_attempts: u32,
+        #[arg(long, default_value_t = 3, help = "Poll interval (seconds)")]
+        poll_interval_secs: u64,
+        #[arg(long, help = "Force a fresh ephemeral key")]
+        regen: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -882,6 +1007,12 @@ enum MemoryAction {
         memory_url: String,
         #[arg(long, env = "REGION", default_value = "us-east-1")]
         region: String,
+        /// #369 DELEGATED mode: a `delegation bootstrap` output file. When set, the
+        /// cap-PoP is signed by the sandbox's ephemeral key carried in it + the
+        /// device-signed `delegation_path` is attached (the sandbox holds no K10).
+        /// Unset → the legacy direct path (`device_key_hash` is the caller's own).
+        #[arg(long, env = "AGENTKEYS_DELEGATION_FILE")]
+        delegation_file: Option<String>,
     },
     /// #339 P2 — PUSH a learning into the master's absorption inbox (the
     /// master-hub "push" channel): a proposal the master later CURATES into
@@ -1574,6 +1705,7 @@ async fn main() {
                 broker_url,
                 memory_url,
                 region,
+                delegation_file,
             } => {
                 agentkeys_cli::cred_admin::memory_canonical_get(
                     namespace,
@@ -1584,6 +1716,7 @@ async fn main() {
                     broker_url,
                     memory_url,
                     region,
+                    delegation_file.as_deref(),
                 )
                 .await
             }
@@ -1753,6 +1886,54 @@ async fn main() {
             } => {
                 let mpath = agentkeys_cli::cred_admin::cred_manifest_path(manifest.as_deref());
                 agentkeys_cli::cred_admin::cred_manifest_write(&mpath, services, default.clone())
+            }
+        },
+        Commands::Delegation { action } => match action {
+            DelegationAction::Resolve {
+                broker_url,
+                key_file,
+            } => agentkeys_cli::delegation_admin::device_resolve(broker_url, key_file).await,
+            DelegationAction::Cosign {
+                broker_url,
+                key_file,
+                scope,
+                ttl_seconds,
+                once,
+                poll_interval_secs,
+            } => {
+                agentkeys_cli::delegation_admin::device_cosign(
+                    broker_url,
+                    key_file,
+                    scope,
+                    *ttl_seconds,
+                    *once,
+                    *poll_interval_secs,
+                )
+                .await
+            }
+            DelegationAction::Bootstrap {
+                broker_url,
+                session_bearer,
+                scope,
+                ttl_seconds,
+                ephemeral_key_file,
+                out_file,
+                poll_attempts,
+                poll_interval_secs,
+                regen,
+            } => {
+                agentkeys_cli::delegation_admin::delegation_bootstrap(
+                    broker_url,
+                    session_bearer,
+                    scope,
+                    *ttl_seconds,
+                    ephemeral_key_file,
+                    out_file,
+                    *poll_attempts,
+                    *poll_interval_secs,
+                    *regen,
+                )
+                .await
             }
         },
     };

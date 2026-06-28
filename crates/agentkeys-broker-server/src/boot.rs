@@ -30,7 +30,8 @@ use crate::oidc::OidcKeypair;
 use crate::plugins::audit::{AuditAnchor, AuditPolicy};
 use crate::plugins::PluginRegistry;
 use crate::storage::{
-    AuthNonceStore, GrantStore, IdentityLinkStore, PairingRequestStore, WalletStore,
+    AgentDelegationStore, AuthNonceStore, GrantStore, IdentityLinkStore, PairingRequestStore,
+    WalletStore,
 };
 
 /// Outcome of the synchronous Tier-1 boot phase.
@@ -46,6 +47,8 @@ pub struct BootArtifacts {
     /// §10.2 agent-initiated pairing-request + pending-binding store (issue #144,
     /// method A).
     pub pairing_request_store: Arc<PairingRequestStore>,
+    /// §369 device→sandbox delegation rendezvous store.
+    pub agent_delegation_store: Arc<AgentDelegationStore>,
     /// Concrete EmailLink plugin handle (Phase A.1, US-018). Populated
     /// when `email_link` is in `BROKER_AUTH_METHODS` AND the
     /// `auth-email-link` feature is compiled in. The registry's auth
@@ -197,6 +200,16 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
             )
         })?,
     );
+    let agent_delegation_store = Arc::new(
+        AgentDelegationStore::open(&agent_delegations_path(config)).map_err(|e| {
+            boot_fail(
+                env::BROKER_AUDIT_DB_PATH,
+                &config.audit_db_path.display().to_string(),
+                format!("AgentDelegationStore: {}", e),
+                "agent-delegations-db",
+            )
+        })?,
+    );
 
     // 5. Validate + parse plugin selection. Every name in each list must
     //    resolve at compile time (i.e. the corresponding feature must be
@@ -236,6 +249,7 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
         grant_store,
         identity_link_store,
         pairing_request_store,
+        agent_delegation_store,
         #[cfg(feature = "auth-email-link")]
         email_link: built.email_link,
         #[cfg(feature = "auth-oauth2")]
@@ -316,6 +330,14 @@ fn pairing_requests_path(config: &BrokerConfig) -> std::path::PathBuf {
         .parent()
         .map(|p| p.join("pairing_requests.sqlite"))
         .unwrap_or_else(|| std::path::PathBuf::from("pairing_requests.sqlite"))
+}
+
+fn agent_delegations_path(config: &BrokerConfig) -> std::path::PathBuf {
+    config
+        .audit_db_path
+        .parent()
+        .map(|p| p.join("agent_delegations.sqlite"))
+        .unwrap_or_else(|| std::path::PathBuf::from("agent_delegations.sqlite"))
 }
 
 #[cfg(feature = "audit-sqlite")]

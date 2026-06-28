@@ -26,9 +26,11 @@
 
 pub mod claim;
 pub mod decline;
+pub mod delegation;
 pub mod pending;
 pub mod poll;
 pub mod request;
+pub mod resolve;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

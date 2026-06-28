@@ -1,0 +1,27 @@
+[package]
+name = "agentkeys-device-core"
+version = "0.1.0"
+edition = "2021"
+description = "no_std secp256k1 / EIP-191 / keccak core for the §10.2 device ceremony — the SINGLE source of K10 crypto, shared byte-for-byte by the daemon (native) and the ESP32 firmware (xtensa staticlib). Anti-drift per issue #367."
+
+# no_std + alloc: builds for the host (re-exported by agentkeys-core), for
+# wasm32 (the CI no_std gate), and for xtensa-esp32s3-none-elf (the firmware
+# staticlib, via the `ffi` feature + the esp-rs toolchain). NO rng/getrandom
+# dependency — signing is deterministic (RFC6979); keygen takes INJECTED entropy
+# (OsRng on the host, esp_fill_random on the device), so the curve math here is
+# identical on every target.
+[dependencies]
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
+sha3 = { version = "0.10", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[features]
+# The C ABI surface (`#[no_mangle] extern "C"`) the ESP-IDF firmware links. Off
+# by default so the host rlib + the wasm32 no_std gate stay pure-Rust; the
+# firmware build turns it on and adds `staticlib` to the crate-type.
+ffi = []
+# `ffi` + the no_std runtime (panic handler + C-backed global allocator) needed
+# to link as a STANDALONE staticlib on the device. The firmware's
+# `cargo rustc --crate-type staticlib` build enables this; the workspace rlib
+# never does, so std's panic/alloc handlers are untouched (no conflict).
+freestanding = ["ffi"]

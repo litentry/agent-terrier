@@ -54,6 +54,22 @@ installs the toolchain into `~/.espressif`), then `. ./export.sh`. Until you sou
 the current shell, `$IDF_PATH` is empty — so `. $IDF_PATH/export.sh` resolves to `/export.sh` and
 fails with `no such file or directory`.
 
+**Rust device-core (issue #367):** the firmware links the shared
+[`agentkeys-device-core`](../../crates/agentkeys-device-core) crate as an Xtensa staticlib (so the
+device runs the *same* K10 crypto the broker verifies), which needs Espressif's Rust fork.
+`setup-esp32.sh` installs it automatically; by hand it's a one-time:
+
+```bash
+cargo install espup && espup install && rustup component add rust-src --toolchain esp
+```
+
+> **Don't `source ~/export-esp.sh` for the IDF build.** That env prepends espup's
+> `xtensa-esp-elf-gcc` and shadows ESP-IDF's own GCC, so `idf.py` fails with
+> `Tool doesn't match supported version`. The build selects the Rust toolchain with
+> `cargo +esp` (no GCC needed for a pure-Rust archive), so ESP-IDF's GCC stays first
+> on PATH. `rust-src` backs `-Zbuild-std` (the esp toolchain ships no precompiled
+> xtensa std).
+
 ## 2. Configure the device
 
 ```bash
@@ -143,19 +159,62 @@ touch-navigable.
    A **401** with no/!wrong bearer is expected (PR #347 hardening); `/healthz` is open and returns
    `{"ok":true,...}`.
 
-## 7. Test pairing (P2 — partial)
+## Test the K10 device identity / device-core (issue #367)
 
-Open **Pair**, tap **Request**. The device calls `{AGENT_BASE_URL}/v1/pairing/request`, and on
-success unhides the QR (hidden until a deep-link exists) rendering the real
-`agentkeys-pair://claim?...` deep-link + the short `Code …` and `device-key …` labels, then polls
-until the master claims it in the parent-control app (→ *"✓ Paired"*). See
-[on-device agent + AgentKeys](./on-device-agent-and-agentkeys.md) for the owner-side flow.
+The device generates its secp256k1 **K10** via the shared `agentkeys-device-core` crate — the same
+Rust the broker `ecrecover`s. Three ways to test it, fastest first:
 
-> **Not wired yet:** the agent-side `/v1/pairing/{request,poll}` endpoints do not exist — the bridge
-> must front the daemon's `--request-pairing` / `--retrieve-pairing` (a `hermes-sandbox` + daemon
-> follow-up). Until then **Request** ends in *"⚠ Pairing failed - tap Request to retry"* on purpose,
-> and the QR stays hidden (the firmware never fabricates a fake QR). When the endpoint lands, this
-> section becomes a full QR-scan test with no firmware change.
+**A · No board (the quickest check).** Build the crate as a host staticlib, link a C harness, and
+verify the FFI + pinned golden vectors — no board, no Xtensa toolchain:
+
+```bash
+bash crates/agentkeys-device-core/test-ffi.sh      # → "DEVICE-CORE FFI: PASS" + addr/hash/sig
+```
+
+In the **fleet app** this is the `test device-core FFI` entry in the `d` (deploy/tools) menu, under
+*ESP32 device*. It exercises the exact FFI the firmware's
+[`device_identity.c`](../../firmware/esp32s3-touch-lcd-4b/main/net/device_identity.c) calls.
+
+**B · On the real device (the authentic test).** Flash + monitor (`setup-esp32.sh` or the fleet
+`flash + monitor ESP32 device` job). At boot, `device_identity_init()` runs and logs:
+
+```
+I (…) device_id: K10 generated + stored: 0x…           # first boot
+I (…) app: device identity: addr=0x… device_key_hash=0x…
+I (…) device_id: K10 loaded from NVS: 0x…              # every reboot after
+```
+
+Seeing a stable `addr`/`device_key_hash` across reboots proves the device generated a real K10 from
+hardware entropy, stored it in NVS, and re-derives it with the shared crate. (Erasing flash —
+section 9 — makes it mint a fresh one.)
+
+**C · Mirror UI.** The browser mirror (the fleet `run UI mirror watcher` job) renders the screens
+with **mock** data — it's a pixel/UX mirror, not a crypto harness, so the pairing screen shows a
+placeholder hash there. Use **A** (correctness) or **B** (real hardware) to test the device-core
+itself.
+
+## 7. Test pairing (device-direct §10.2)
+
+The device does the **§10.2 ceremony directly against the broker** with its own K10 — no agent
+bridge, no server change (issue #367 Phase B). **Prerequisite:** `BROKER_URL` in `secrets.h` must
+point to a real AgentKeys broker (the one your master uses), and the master must be onboarded in
+parent-control.
+
+1. Open **Pair**, tap **Request**. The device pop_sig-signs with its K10 and `POST`s
+   `{BROKER_URL}/v1/agent/pairing/request`. On the serial monitor you'll see
+   `pairing request opened; QR shown; polling for the master's claim`.
+2. The screen unhides the **QR** (the real `agentkeys-pair://claim?code=…&broker=…` deep-link) plus
+   the short `Code …` and the FULL `device-key …` hash — compare that hash against what parent-control
+   shows for this device (#224).
+3. In **parent-control**, claim the code (scan the QR or enter it) and approve with Touch-ID. The
+   broker mints `J1_agent`; the device's next poll returns `status:"claimed"` and the screen flips to
+   *"✓ Paired"* (monitor: `claimed by master omni …` → `device bound`).
+
+See [on-device agent + AgentKeys](./on-device-agent-and-agentkeys.md) for the owner-side flow.
+
+> The firmware never fabricates a QR: a failed request shows *"⚠ Pairing failed - tap Request to
+> retry"* and the monitor logs the broker HTTP status (e.g. a wrong/empty `BROKER_URL` → a transport
+> error; an expired request mid-poll → `401`).
 
 ## 8. Troubleshooting
 
@@ -163,6 +222,7 @@ until the master claims it in the parent-control app (→ *"✓ Paired"*). See
 |---|---|---|
 | `. $IDF_PATH/export.sh` → `no such file or directory: /export.sh` | ESP-IDF cloned but `install.sh` not run / not sourced, so `$IDF_PATH` is empty | `cd ~/esp/esp-idf && ./install.sh esp32s3 && . ./export.sh` (install once; source per shell) |
 | Board not detected by `flash` | charge-only cable, or wrong port | use a **data** USB-C cable; pick the right `-p` port; force download mode (BOOT+RESET) |
+| `Could not open <port> ... [Errno 35] Resource temporarily unavailable` | a leftover `idf.py monitor` from a prior run still holds the port's exclusive lock | `setup-esp32.sh` now auto-frees the port before flashing (kills the stale holder, logs its PID). If flashing by hand instead: exit the old monitor with **Ctrl-]**, or `kill $(lsof -t <PORT>)` |
 | `idf.py build` fails fetching components | no access to `components.espressif.com` | allow internet; then `idf.py reconfigure` |
 | `component.zip is not a zip file` (during `set-target`/`build`) | a managed-component download arrived truncated/corrupt (flaky link) | `rm -rf managed_components dependencies.lock build && idf.py set-target esp32s3` — forces a clean re-download |
 | Wrong target / `set-target` skipped | built for the default chip | `idf.py set-target esp32s3 && idf.py fullclean build` |

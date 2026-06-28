@@ -231,6 +231,9 @@ async fn handle_cap(
                 client_sig: Some(pop.client_sig),
                 client_nonce: Some(pop.client_nonce),
                 client_ts: Some(pop.client_ts),
+                // The daemon signs with its own device K10, not a delegated
+                // sandbox key — no delegation_path (#369).
+                delegation_path: None,
             }
         }
         None => agentkeys_backend_client::BrokerCapRequest {
@@ -242,6 +245,7 @@ async fn handle_cap(
             client_sig: None,
             client_nonce: None,
             client_ts: None,
+            delegation_path: None,
         },
     };
 

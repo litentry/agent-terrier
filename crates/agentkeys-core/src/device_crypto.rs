@@ -1,9 +1,13 @@
-//! Shared device-key crypto for the §10.2 agent bootstrap (issue #144).
+//! Std layer over the device-key crypto for the §10.2 agent bootstrap (#144).
 //!
-//! De-duplicates the secp256k1 / EIP-191 / keccak helpers previously inlined in
-//! `agentkeys-cli::device_session` and the broker's `plugins::auth::wallet_sig`,
-//! so the daemon (keygen + link-code redeem), the CLI (interim device-session),
-//! and the broker (redeem `pop_sig` verify) agree byte-for-byte.
+//! The pure secp256k1 / EIP-191 / keccak primitives now live in the `no_std`
+//! [`agentkeys_device_core`] crate so the daemon / CLI / broker (native) and the
+//! ESP32 firmware (xtensa staticlib) run the SAME bytes (issue #367 anti-drift).
+//! This module RE-EXPORTS them — wrapping the fallible ones back into
+//! `anyhow::Result` — and adds the host-only pieces device-core deliberately
+//! omits: `OsRng` keygen + `0600` file custody ([`DeviceKey`], `write_key_0600`,
+//! `enforce_owner_only`, `load_device_key_from_env`). Callers keep importing
+//! `agentkeys_core::device_crypto::*` unchanged.
 //!
 //! The proof-of-possession preimage is the **deployed** one —
 //! `keccak256("agentkeys-agent-pop:" || device_key_hash_hex)` — matching
@@ -14,158 +18,69 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
-use sha3::{Digest, Keccak256};
+use k256::ecdsa::SigningKey;
 
-/// Keccak-256 over `bytes`.
-pub fn keccak256(bytes: &[u8]) -> [u8; 32] {
-    let mut h = Keccak256::new();
-    h.update(bytes);
-    h.finalize().into()
+// The pure secp256k1 / EIP-191 / keccak primitives live in the no_std
+// `agentkeys-device-core` crate so the daemon and the ESP32 firmware share ONE
+// implementation (issue #367 anti-drift). Re-export the infallible ones verbatim;
+// the four fallible ones are thin-wrapped below back into `anyhow::Result`, so
+// every `device_crypto::*` caller — and `DeviceKey` — stays byte-identical.
+pub use agentkeys_device_core::{
+    agent_pop_payload, cap_in_scope, cap_pop_payload, delegation_payload, evm_address, keccak256,
+    DeviceCryptoError,
+};
+
+/// Verify a single-hop device→sandbox delegation (issue #369): recover the device
+/// signer from `delegation_sig` over [`delegation_payload`] and assert
+/// `keccak(signer) == device_key_hash`. Returns the recovered device address.
+/// Thin `anyhow` wrapper over [`agentkeys_device_core::verify_delegation`] — the
+/// WORKER calls this to re-check, independently of the broker, that a sandbox's
+/// cap is backed by a device-issued delegation. The caller still enforces
+/// `now < expires_at` and that the cap request falls within `scope`.
+pub fn verify_delegation(
+    device_key_hash_hex: &str,
+    sandbox_key: &str,
+    scope: &str,
+    expires_at: u64,
+    delegation_sig: &str,
+) -> Result<String> {
+    Ok(agentkeys_device_core::verify_delegation(
+        device_key_hash_hex,
+        sandbox_key,
+        scope,
+        expires_at,
+        delegation_sig,
+    )?)
 }
 
-/// EVM address (`0x` + 40 lowercase hex) = last 20 bytes of
-/// keccak256(uncompressed pubkey x‖y).
-pub fn evm_address(vk: &VerifyingKey) -> String {
-    let point = vk.to_encoded_point(false);
-    let xy = &point.as_bytes()[1..]; // drop the 0x04 SEC1 tag → 64 bytes
-    let hash = keccak256(xy);
-    format!("0x{}", hex::encode(&hash[12..]))
-}
-
-/// `device_key_hash = keccak256(address_bytes)` as `0x` + 64 hex. `addr` may be
-/// `0x`-prefixed and any case; the 20 raw address bytes are hashed (not ASCII).
+/// `device_key_hash = keccak256(address_bytes)` as `0x` + 64 hex.
+/// Thin `anyhow` wrapper over [`agentkeys_device_core::device_key_hash`].
 pub fn device_key_hash(addr: &str) -> Result<String> {
-    let addr_lc = addr.trim().to_lowercase();
-    let hex_part = addr_lc.strip_prefix("0x").unwrap_or(&addr_lc);
-    let addr_bytes = hex::decode(hex_part).context("address is not hex")?;
-    if addr_bytes.len() != 20 {
-        return Err(anyhow!(
-            "address must be 20 bytes, got {}",
-            addr_bytes.len()
-        ));
-    }
-    Ok(format!("0x{}", hex::encode(keccak256(&addr_bytes))))
+    Ok(agentkeys_device_core::device_key_hash(addr)?)
 }
 
-/// The MASTER device key hash, derived deterministically from the operator
-/// omni: `device_key_hash = keccak256(operator_omni_bytes)` as `0x` + 64 hex.
-///
-/// This mirrors the web/#164 register convention `cast keccak "0x$OPERATOR_OMNI"`
-/// (`harness/scripts/heima-register-first-master.sh` + `_lib.sh::resolve_active_master_dkh`)
-/// — `cast keccak` over a `0x`-prefixed value hashes the 32 RAW omni bytes, not
-/// the ASCII hex. Because the hash is derivable from the omni alone, the master
-/// session needs no cached `device_key_hash` to resolve cap-mint after a daemon
-/// restart (issue #220): the on-chain `SidecarRegistry` binding is the source of
-/// truth and `keccak(operator_omni)` reproduces its key with no re-onboarding.
-///
-/// `omni` may be `0x`/`0X`-prefixed or bare; it MUST decode to exactly 32 bytes.
+/// The MASTER device key hash, derived deterministically from the operator omni
+/// (issue #220 — `keccak256(operator_omni_bytes)`, the `cast keccak "0x$OMNI"`
+/// convention). Thin `anyhow` wrapper over
+/// [`agentkeys_device_core::device_key_hash_from_omni`].
 pub fn device_key_hash_from_omni(omni: &str) -> Result<String> {
-    let trimmed = omni.trim();
-    let hex_part = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
-    let omni_bytes = hex::decode(hex_part).context("omni is not hex")?;
-    if omni_bytes.len() != 32 {
-        return Err(anyhow!("omni must be 32 bytes, got {}", omni_bytes.len()));
-    }
-    Ok(format!("0x{}", hex::encode(keccak256(&omni_bytes))))
+    Ok(agentkeys_device_core::device_key_hash_from_omni(omni)?)
 }
 
-/// The agent proof-of-possession preimage:
-/// `keccak256("agentkeys-agent-pop:" || device_key_hash_hex)`, where
-/// `device_key_hash_hex` is the `0x`-prefixed string from [`device_key_hash`].
-pub fn agent_pop_payload(device_key_hash_hex: &str) -> [u8; 32] {
-    keccak256(format!("agentkeys-agent-pop:{device_key_hash_hex}").as_bytes())
-}
-
-/// Strip an optional `0x`/`0X` prefix and lowercase — the canonical omni form
-/// the broker + worker agree on. Local to the PoP preimage so both sides
-/// canonicalize identically regardless of the caller's `0x`/case.
-fn norm_omni(s: &str) -> String {
-    let t = s.trim().to_lowercase();
-    t.strip_prefix("0x").unwrap_or(&t).to_string()
-}
-
-/// The **per-request cap-mint** proof-of-possession preimage (issue #76 — the
-/// real broker-SPOF fix). The client signs this with its K10 device key on
-/// every cap-mint; the broker embeds the signature in the cap and the WORKER
-/// re-verifies it independently of the broker against the on-chain device→omni
-/// binding (`keccak(ecrecover(sig)) == device_key_hash`). Because the K10
-/// private key never reaches the broker, a compromised broker cannot mint a
-/// usable cap — it cannot produce this signature.
-///
-/// Preimage (domain-separated, request-bound):
-/// `keccak256("agentkeys-cap-pop:v1:" || operator || actor || keccak(service)
-///  || op || data_class || client_nonce || client_ts)`.
-///
-/// `service` is hashed (it may contain `:`, e.g. `memory:travel`) so the `:`
-/// field separator is unambiguous — every other field is fixed-charset
-/// (hex / snake_case enum / digits). `operator`/`actor` are canonicalized
-/// (strip `0x`, lowercase) so the client and worker agree byte-for-byte.
-/// `op` / `data_class` are the snake_case strings from `CapOp` / `DataClass`
-/// (`store`/`fetch`/… , `credentials`/`memory`/`config`).
-pub fn cap_pop_payload(
-    operator_omni: &str,
-    actor_omni: &str,
-    service: &str,
-    op: &str,
-    data_class: &str,
-    client_nonce: &str,
-    client_ts: u64,
-) -> [u8; 32] {
-    let operator = norm_omni(operator_omni);
-    let actor = norm_omni(actor_omni);
-    let service_hash = hex::encode(keccak256(service.trim().to_lowercase().as_bytes()));
-    let preimage = format!(
-        "agentkeys-cap-pop:v1:{operator}:{actor}:{service_hash}:{op}:{data_class}:{client_nonce}:{client_ts}"
-    );
-    keccak256(preimage.as_bytes())
-}
-
-/// EIP-191 `personal_sign` over `message`, producing 65-byte `r‖s‖v` hex
-/// (`v ∈ {27,28}`, low-s via k256). Matches the broker's ecrecover envelope.
+/// EIP-191 `personal_sign` over `message` (65-byte `r‖s‖v` hex, `v ∈ {27,28}`).
+/// Thin `anyhow` wrapper over [`agentkeys_device_core::eip191_sign`].
 pub fn eip191_sign(sk: &SigningKey, message: &[u8]) -> Result<String> {
-    let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
-    let mut h = Keccak256::new();
-    h.update(prefix.as_bytes());
-    h.update(message);
-    let digest = h.finalize();
-    let (sig, recid): (Signature, RecoveryId) = sk
-        .sign_prehash_recoverable(&digest)
-        .context("sign_prehash_recoverable")?;
-    let mut out = sig.to_bytes().to_vec(); // 64 bytes r‖s
-    out.push(27 + recid.to_byte());
-    Ok(format!("0x{}", hex::encode(out)))
+    Ok(agentkeys_device_core::eip191_sign(sk, message)?)
 }
 
-/// EIP-191 ecrecover: recover the `0x`-lowercase signer address from a 65-byte
-/// `r‖s‖v` hex signature over `message`. `v ∈ {0,1,27,28}`.
+/// EIP-191 ecrecover of the `0x`-lowercase signer address from a 65-byte
+/// `r‖s‖v` hex signature. Thin `anyhow` wrapper over
+/// [`agentkeys_device_core::ecrecover_eip191`].
 pub fn ecrecover_eip191(message: &[u8], signature_hex: &str) -> Result<String> {
-    let sig_hex = signature_hex.trim().trim_start_matches("0x");
-    let sig_bytes = hex::decode(sig_hex).context("signature is not hex")?;
-    if sig_bytes.len() != 65 {
-        return Err(anyhow!(
-            "signature must be 65 bytes, got {}",
-            sig_bytes.len()
-        ));
-    }
-    let recovery_id_byte = match sig_bytes[64] {
-        v @ (0 | 1) => v,
-        v @ (27 | 28) => v - 27,
-        other => return Err(anyhow!("unsupported v byte: {other}")),
-    };
-    let recovery_id = RecoveryId::try_from(recovery_id_byte).context("bad recovery id")?;
-    let signature = Signature::from_slice(&sig_bytes[..64]).context("bad sig bytes")?;
-    let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
-    let mut h = Keccak256::new();
-    h.update(prefix.as_bytes());
-    h.update(message);
-    let digest = h.finalize();
-    let vk = VerifyingKey::recover_from_prehash(&digest, &signature, recovery_id)
-        .map_err(|e| anyhow!("recover failed: {e}"))?;
-    Ok(evm_address(&vk))
+    Ok(agentkeys_device_core::ecrecover_eip191(
+        message,
+        signature_hex,
+    )?)
 }
 
 /// Load the K10 device key from `AGENTKEYS_DEVICE_KEY_FILE` (default
@@ -326,6 +241,22 @@ impl DeviceKey {
     pub fn pop_sig(&self) -> Result<String> {
         let dkh = self.device_key_hash()?;
         self.sign_eip191(&agent_pop_payload(&dkh))
+    }
+
+    /// Device→sandbox delegation co-signature (issue #369): authorize `sandbox_key`
+    /// (the sandbox's OWN ephemeral key) to mint caps on this device's behalf,
+    /// bounded by `scope` + `expires_at`. The software twin of the ESP32
+    /// `ak_device_delegation_sig` — same [`delegation_payload`] bytes, so a daemon-
+    /// hosted device key and a hardware K10 are interchangeable to the worker. Used
+    /// when the master daemon delegates to a local sandbox (no ESP32 in the loop).
+    pub fn delegation_sig(
+        &self,
+        sandbox_key: &str,
+        scope: &str,
+        expires_at: u64,
+    ) -> Result<String> {
+        let dkh = self.device_key_hash()?;
+        self.sign_eip191(&delegation_payload(&dkh, sandbox_key, scope, expires_at))
     }
 
     /// Per-request cap-mint proof-of-possession signature (issue #76). Signs
@@ -496,6 +427,44 @@ mod tests {
             device_key_hash(recovered.as_str()).unwrap(),
             dk.device_key_hash().unwrap()
         );
+    }
+
+    #[test]
+    fn delegation_sig_round_trips_and_rejects_wrong_device() {
+        // The full #369 producer→verifier loop on the native side: a device key
+        // co-signs a delegation to a sandbox key, and verify_delegation (what the
+        // worker runs) recovers THIS device — but not a different one.
+        let dir = tempfile::tempdir().unwrap();
+        let device =
+            DeviceKey::load_or_generate(dir.path().join("dev.key").to_str().unwrap(), true)
+                .unwrap();
+        let other =
+            DeviceKey::load_or_generate(dir.path().join("other.key").to_str().unwrap(), true)
+                .unwrap();
+        let sandbox = "0x1563915e194d8cfba1943570603f7606a3115508";
+        let scope = "memory:get memory:put";
+        let expires = 1_767_300_000u64;
+
+        let sig = device.delegation_sig(sandbox, scope, expires).unwrap();
+        let recovered = verify_delegation(
+            &device.device_key_hash().unwrap(),
+            sandbox,
+            scope,
+            expires,
+            &sig,
+        )
+        .unwrap();
+        assert_eq!(recovered, device.address());
+
+        // The same sig verified against ANOTHER device's hash must fail.
+        assert!(verify_delegation(
+            &other.device_key_hash().unwrap(),
+            sandbox,
+            scope,
+            expires,
+            &sig
+        )
+        .is_err());
     }
 
     #[test]

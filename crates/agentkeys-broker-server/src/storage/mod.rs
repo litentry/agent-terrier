@@ -5,6 +5,9 @@
 //! lands in US-006, email_tokens in Phase A.1, oauth_pending in Phase
 //! A.2, grants + identity_links in Phase B.
 
+// Issue #369 — device→sandbox delegation rendezvous (the origination side of the
+// delegated-worker-access design). Unconditional (core, not feature-gated).
+pub mod agent_delegations;
 pub mod auth_nonces;
 // `email_rate_limits` is bucket-id-generic — reused by both EmailLink
 // (Phase A.1) and OAuth2 (Phase A.2). Compiled in when either feature
@@ -25,6 +28,10 @@ pub mod pairing_requests;
 pub mod rate_limit_mints;
 pub mod wallets;
 
+pub use agent_delegations::{
+    AgentDelegationStore, DelegationPoll, DelegationSign, PendingDelegationRequest, SignTarget,
+    DELEGATION_REQUEST_TTL_SECONDS,
+};
 pub use auth_nonces::{AuthNonceStore, ConsumeOutcome};
 #[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
 pub use email_rate_limits::{EmailRateLimitStore, RateLimitOutcome};

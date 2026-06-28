@@ -47,6 +47,9 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         client_sig: None,
         client_nonce: None,
         client_ts: None,
+        // None + skip_serializing_if → the serialized fixture (and its frozen key
+        // set) is unchanged by the #369 delegation_path field.
+        delegation_path: None,
     };
     let memory_put = MemoryPutBody {
         cap: json!("<cap-token>"),
