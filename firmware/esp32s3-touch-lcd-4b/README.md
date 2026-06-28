@@ -84,10 +84,16 @@ The status bar (WiFi · agent · paired · 🔊 · battery) is backed by live `a
   `POST /v1/chat` with `Authorization: Bearer`, SSE parse of `token`/`tool_start`/`tool`/`done`/
   `error` streamed into the conversation; `GET /healthz` liveness. The TALK button drives a real
   text turn (P3 swaps the placeholder transcript for ES8311 mic → ASR).
-- **P2 connection + pairing** ⏳ — `net/pairing.c` implements the request + poll flow against
-  `{agent}/v1/pairing/{request,poll}` and surfaces failures honestly (no fake QR). **Blocked on the
-  agent-side endpoint**: the bridge must front the daemon's `--request-pairing` / `--retrieve-pairing`
-  (a `hermes-sandbox` + daemon follow-up). On-device WiFi provisioning (SoftAP/BLE) is also P2.
+- **device identity (K10)** ✅ — `net/device_identity.c` generates (first boot, from `esp_fill_random`)
+  or loads the secp256k1 K10 via the shared `agentkeys-device-core` FFI (issue #367), persists it in
+  NVS, and logs the address + `device_key_hash` at boot. Phase B wires `device_identity_pop_sig()`
+  into §10.2 pairing. See "Shared Rust device-core" below.
+- **P2 pairing (device-direct §10.2)** ✅ — `net/pairing.c` does the §10.2 ceremony **directly against
+  the broker** with the device's own K10 (`device_identity`): pop_sig-authenticated `POST
+  /v1/agent/pairing/request` → shows the `agentkeys-pair://claim` QR → polls `/v1/agent/pairing/poll`
+  until the master's claim mints `J1_agent` → bound. No agent-bridge endpoint, no server change (the
+  broker §10.2 routes are already deployed) — this retires the old bridge dependency. (On-device WiFi
+  provisioning / SoftAP is the remaining P2 item.)
 - **P3 voice** ⏳ — ES8311 mic capture → ASR → `/v1/chat` → streamed TTS → speaker + barge-in.
 - **P4 streaming + polish** ⏳ — WebSocket-Opus streaming (Xiaozhi-style), real voice catalog,
   battery SoC, per-round metrics.
@@ -99,18 +105,23 @@ firmware/esp32s3-touch-lcd-4b/
 ├── CMakeLists.txt            # ESP-IDF project root
 ├── sdkconfig.defaults        # octal PSRAM, 16 MB flash, LVGL qrcode, mbedTLS CA bundle
 ├── partitions.csv            # single-app 16 MB layout
+├── components/
+│   └── agentkeys_device/     # builds agentkeys-device-core as an xtensa no_std staticlib
+│       ├── CMakeLists.txt    #   + links it (issue #367 anti-drift)
+│       └── include/agentkeys_device.h  # GENERATED FFI header (cbindgen, never hand-edited)
 └── main/
     ├── idf_component.yml      # depends on waveshare/esp32_s3_touch_lcd_4b ^2.0.0
-    ├── app_main.c             # boot: NVS → board → ui_init → wifi + health poll
+    ├── app_main.c             # boot: NVS → board → ui_init → wifi + device identity + health poll
     ├── app_config.h           # config layering (NVS > secrets.h > defaults)
     ├── app_state.{h,c}        # thread-safe shared state (conn, pairing, settings, conversation)
     ├── ui/
     │   ├── ui.{h,c}           # screen manager, status bar, theme, nav, refresh timer
     │   └── screen_*.c         # home / pairing / settings / connection / voices
     └── net/
-        ├── agent_client.{h,c} # /v1/chat bearer + SSE (PR #347) + /healthz
-        ├── pairing.{h,c}      # §10.2 request + poll → bound
-        └── wifi.{h,c}         # WiFi STA + auto-reconnect
+        ├── agent_client.{h,c}    # /v1/chat bearer + SSE (PR #347) + /healthz
+        ├── pairing.{h,c}         # §10.2 request + poll → bound
+        ├── device_identity.{h,c} # K10 keygen/load via the shared crate's FFI → NVS (#367)
+        └── wifi.{h,c}            # WiFi STA + auto-reconnect
 ```
 
 ## Threading
@@ -119,6 +130,50 @@ LVGL is single-threaded. Network tasks (WiFi, agent client, pairing) only ever m
 (mutex-guarded) and bump a revision counter; the LVGL refresh timer redraws the active screen when
 the revision changes. Screen switches from any task take the BSP's recursive LVGL lock. No task
 touches an `lv_obj_t` outside that lock.
+
+## Shared Rust device-core (K10 identity, issue #367)
+
+The device's K10 crypto — secp256k1 keygen, the `device_key_hash`, and the EIP-191 `pop_sig` the
+broker `ecrecover`s — is **not** reimplemented in C. The firmware links
+[`crates/agentkeys-device-core`](../../crates/agentkeys-device-core), the **same** `#![no_std]` Rust
+crate the daemon + broker use, compiled for Xtensa as a staticlib. One implementation, two targets →
+the bytes can't drift; the daemon-vs-device parity problem becomes a build concern, not a runtime
+mystery. (This extends the same "ONE owner" pattern the wire protocol already uses across native + wasm.)
+
+- `components/agentkeys_device/CMakeLists.txt` builds the crate with
+  `cargo +esp rustc --features freestanding --crate-type staticlib --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc`
+  and links the resulting `.a` (panic=abort; the crate brings its own panic handler + a C-malloc-backed
+  global allocator under the `freestanding` feature). `-Zbuild-std` compiles core+alloc from `rust-src`
+  because the esp toolchain ships no precompiled std for `xtensa-esp32s3-none-elf`.
+- `net/device_identity.c` wraps the FFI: generate-on-first-boot from `esp_fill_random` (run **after**
+  WiFi so the RNG has RF entropy) → store the 32-byte K10 in NVS → expose `address` / `device_key_hash`
+  / `pop_sig` / `delegation_sig`. The key is born on the device and never leaves.
+- `include/agentkeys_device.h` is **generated** — `bash crates/agentkeys-device-core/gen-header.sh`
+  (cbindgen) — so the C header can't drift from `ffi.rs`. CI (`.github/workflows/firmware-sim.yml`)
+  gates the no_std build, the staticlib link, and header freshness.
+
+**Device→sandbox delegation (issue #369).** So a cloud sandbox can reach the user's workers
+(memory / creds) without ever holding the K10, the device co-signs a short-lived, scoped
+delegation to the sandbox's OWN ephemeral key — `ak_device_delegation_sig` /
+`device_identity_delegation_sig(sandbox_key, scope, expires_at)` — signing
+`keccak256("agentkeys-delegation:v1:" || device_key_hash || ":" || sandbox_key || ":" || scope_hash
+|| ":" || expires_at)`. The worker re-`ecrecover`s it (the native `verify_delegation`) and checks
+`keccak(signer) == device_key_hash`, so a sandbox compromise can't forge authority — the exact same
+no_std bytes, gated by the `delegation_sig == golden vector` check in the C smoke harness. One K10 use
+per sandbox spawn (the bootstrap), never per worker op. The broker relay that carries the sandbox key
+to the device + the worker-side `delegation_path` verify are the next slice; the boot **`delegation
+self-check (#369)`** log line is the on-device proof the co-sign path links + has crypto-worker stack.
+
+**Toolchain (one-time):** the ESP32-S3 is Xtensa, which needs Espressif's Rust fork:
+
+```bash
+cargo install espup && espup install && rustup component add rust-src --toolchain esp
+```
+
+Do **not** `source ~/export-esp.sh` for the IDF build — it prepends espup's `xtensa-esp-elf-gcc` and
+shadows ESP-IDF's own GCC (`idf.py` then fails `Tool doesn't match supported version`). The build uses
+`cargo +esp` (no GCC needed for a pure-Rust archive), so ESP-IDF's GCC stays first on PATH. After that,
+`idf.py build` drives the staticlib build automatically through the component.
 
 ## Related
 

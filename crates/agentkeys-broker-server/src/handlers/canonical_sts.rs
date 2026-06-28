@@ -106,6 +106,58 @@ pub async fn mint_canonical_sts(
         return Err(BrokerError::Forbidden("cap broker_sig invalid".into()));
     }
 
+    // 3b. #369 defense-in-depth: re-verify the device→sandbox delegation
+    //     INDEPENDENTLY of cap-mint. The canonical read's delegation scope is
+    //     otherwise enforced ONLY at cap-mint (`verify_cap_pop`) — the memory worker
+    //     just relays to this endpoint — so re-checking it on this second broker hop
+    //     means a cap-mint regression cannot widen a narrow (or wrong-device)
+    //     delegation into an operator-prefix read. Uses the SAME shared crypto +
+    //     scope matcher as cap-mint and the worker (#203), so they cannot diverge.
+    if let Some(deleg) = &req.cap.delegation_path {
+        let (Some(client_sig), Some(client_nonce), Some(client_ts)) = (
+            req.cap.client_sig.as_deref(),
+            req.cap.client_nonce.as_deref(),
+            req.cap.client_ts,
+        ) else {
+            return Err(BrokerError::Forbidden(
+                "delegated canonical cap missing client_sig/nonce/ts".into(),
+            ));
+        };
+        let preimage = agentkeys_core::device_crypto::cap_pop_payload(
+            &p.operator_omni,
+            &p.actor_omni,
+            &p.service,
+            p.op.as_str(),
+            p.data_class.as_str(),
+            client_nonce,
+            client_ts,
+        );
+        let recovered = agentkeys_core::device_crypto::ecrecover_eip191(&preimage, client_sig)
+            .map_err(|e| BrokerError::Forbidden(format!("delegated cap-PoP recover: {e}")))?;
+        if deleg.expires_at <= now {
+            return Err(BrokerError::Forbidden("delegation expired".into()));
+        }
+        if !agentkeys_core::device_crypto::cap_in_scope(
+            &deleg.scope,
+            p.data_class.as_str(),
+            p.op.as_str(),
+            &p.service,
+        ) {
+            return Err(BrokerError::Forbidden(format!(
+                "cap service {} outside delegation scope {:?}",
+                p.service, deleg.scope
+            )));
+        }
+        agentkeys_core::device_crypto::verify_delegation(
+            &p.device_key_hash,
+            &recovered,
+            &deleg.scope,
+            deleg.expires_at,
+            &deleg.delegation_sig,
+        )
+        .map_err(|e| BrokerError::Forbidden(format!("delegation verify: {e}")))?;
+    }
+
     // 4. Mint an OPERATOR-tagged OIDC JWT INTERNALLY (consumed by the AssumeRole
     //    below; NEVER returned — that is what stops the delegate re-AssumeRole'ing
     //    unscoped). The tag is the OWNER omni so STS reads bots/<operator>/memory/.

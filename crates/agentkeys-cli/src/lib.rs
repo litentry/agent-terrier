@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 pub mod agent_admin;
 pub mod cred_admin;
+pub mod delegation_admin;
 pub mod device_session;
 pub mod hook;
 pub mod inbox_curate;

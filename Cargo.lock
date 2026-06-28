@@ -66,6 +66,7 @@ dependencies = [
  "agentkeys-broker-server",
  "agentkeys-core",
  "agentkeys-mock-server",
+ "agentkeys-protocol",
  "agentkeys-provisioner",
  "agentkeys-types",
  "anyhow",
@@ -179,6 +180,7 @@ name = "agentkeys-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "agentkeys-device-core",
  "agentkeys-mock-server",
  "agentkeys-types",
  "anyhow",
@@ -252,6 +254,15 @@ dependencies = [
  "ts-rs",
  "url",
  "webauthn-rs",
+]
+
+[[package]]
+name = "agentkeys-device-core"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "k256",
+ "sha3",
 ]
 
 [[package]]
@@ -513,6 +524,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "agentkeys-core",
+ "agentkeys-protocol",
  "agentkeys-types",
  "agentkeys-worker-audit",
  "anyhow",

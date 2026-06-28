@@ -133,6 +133,9 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         pairing_request_store: Arc::new(
             agentkeys_broker_server::storage::PairingRequestStore::open_in_memory().unwrap(),
         ),
+        agent_delegation_store: Arc::new(
+            agentkeys_broker_server::storage::AgentDelegationStore::open_in_memory().unwrap(),
+        ),
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::new(Tier2State::default()),
         email_link: Some(plugin.clone()),

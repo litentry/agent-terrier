@@ -20,6 +20,7 @@
 //!   6. On-chain `K3EpochCounter.currentEpoch` == `payload.k3_epoch`
 //!      (rotation invalidates stale caps).
 
+use agentkeys_protocol::DelegationPath;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -136,6 +137,15 @@ pub struct CapToken {
     pub client_nonce: Option<String>,
     #[serde(default)]
     pub client_ts: Option<u64>,
+    /// Device→sandbox delegation (issue #369). Present when `client_sig` was
+    /// produced by a sandbox's ephemeral key rather than the device K10 directly:
+    /// the DEVICE (not the broker) signed `delegation_sig`, so the broker — which
+    /// merely echoed it here — cannot forge it. [`check_client_pop`] re-verifies it
+    /// against `payload.device_key_hash` + the recovered sandbox key. The SAME
+    /// `agentkeys_protocol::DelegationPath` the broker echoes, so the shape can't
+    /// drift (#203).
+    #[serde(default)]
+    pub delegation_path: Option<DelegationPath>,
 }
 
 pub const ROLE_CAP_MINT: u8 = 1;
@@ -180,6 +190,17 @@ pub enum VerifyError {
     CapPopStale { client_ts: u64, now: u64 },
     #[error("cap K10 proof-of-possession does not match device_key_hash")]
     CapPopMismatch,
+    #[error("delegation expired at {expires_at} (now={now})")]
+    DelegationExpired { expires_at: u64, now: u64 },
+    #[error("cap (service {service}, data_class {data_class}, op {op}) outside delegation scope {scope:?}")]
+    DelegationOutOfScope {
+        scope: String,
+        data_class: String,
+        op: String,
+        service: String,
+    },
+    #[error("delegation signature invalid: {0}")]
+    DelegationInvalid(String),
 }
 
 pub fn verify_signature(pubkey_pem: &str, token: &CapToken) -> Result<(), VerifyError> {
@@ -300,11 +321,71 @@ pub fn check_client_pop(token: &CapToken, max_age_secs: u64) -> Result<(), Verif
         .map_err(|e| VerifyError::CapPopInvalid(e.to_string()))?;
     let recovered_hash = agentkeys_core::device_crypto::device_key_hash(&recovered)
         .map_err(|e| VerifyError::CapPopInvalid(e.to_string()))?;
-    if strip_0x_lc(&recovered_hash) != strip_0x_lc(&token.payload.device_key_hash) {
-        return Err(VerifyError::CapPopMismatch);
+    // Direct K10 path (#76): the cap-PoP was signed by the device key bound on-chain.
+    if strip_0x_lc(&recovered_hash) == strip_0x_lc(&token.payload.device_key_hash) {
+        return Ok(());
     }
+    // Delegated path (#369): the cap-PoP was signed by a SANDBOX key, not K10.
+    // Accept iff a device-issued, unexpired, in-scope delegation authorizes EXACTLY
+    // this sandbox key. `recovered` (the cap signer) is passed as the sandbox_key, so
+    // the delegation is bound to the key that signed THIS cap — a delegation for key
+    // A can't redeem a cap signed by key B, and a sandbox can't self-delegate (its
+    // sig would have to recover to device_key_hash, which by construction it can't).
+    if let Some(deleg) = &token.delegation_path {
+        return check_delegation(token, &recovered, deleg, now);
+    }
+    Err(VerifyError::CapPopMismatch)
+}
+
+/// Verify a device→sandbox delegation backs a sandbox-signed cap (issue #369).
+/// Three checks, in cheapest-first order so a bad cap is rejected before the
+/// secp256k1 recover:
+///
+/// 1. unexpired (`now < expires_at`) — the device-signed TTL bound;
+/// 2. the cap's `data_class`/`op` falls within the device-signed `scope`;
+/// 3. `verify_delegation` recovers the device from `delegation_sig` and confirms
+///    `keccak(device) == payload.device_key_hash`, bound to `sandbox_key`.
+///
+/// `payload.device_key_hash` is the on-chain-bound hash (`check_chain_device`
+/// independently ties it to operator/actor), so a valid delegation chains the
+/// sandbox key → the device → the on-chain actor without K10 ever leaving the device.
+fn check_delegation(
+    token: &CapToken,
+    sandbox_key: &str,
+    deleg: &DelegationPath,
+    now: u64,
+) -> Result<(), VerifyError> {
+    if deleg.expires_at <= now {
+        return Err(VerifyError::DelegationExpired {
+            expires_at: deleg.expires_at,
+            now,
+        });
+    }
+    let data_class = token.payload.data_class.as_str();
+    let op = token.payload.op.as_str();
+    let service = token.payload.service.as_str();
+    if !agentkeys_core::device_crypto::cap_in_scope(&deleg.scope, data_class, op, service) {
+        return Err(VerifyError::DelegationOutOfScope {
+            scope: deleg.scope.clone(),
+            data_class: data_class.to_string(),
+            op: op.to_string(),
+            service: service.to_string(),
+        });
+    }
+    agentkeys_core::device_crypto::verify_delegation(
+        &token.payload.device_key_hash,
+        sandbox_key,
+        &deleg.scope,
+        deleg.expires_at,
+        &deleg.delegation_sig,
+    )
+    .map_err(|e| VerifyError::DelegationInvalid(e.to_string()))?;
     Ok(())
 }
+
+// The delegation-scope matcher is now the ONE shared
+// `agentkeys_core::device_crypto::cap_in_scope` (#203), so the broker's fast-fail
+// cap-mint check and this authoritative worker re-verify cannot diverge.
 
 pub fn check_freshness(token: &CapToken) -> Result<(), VerifyError> {
     let now = std::time::SystemTime::now()
@@ -609,6 +690,7 @@ mod tests {
             client_sig: None,
             client_nonce: None,
             client_ts: None,
+            delegation_path: None,
         }
     }
 
@@ -895,6 +977,7 @@ mod tests {
             client_sig: None,
             client_nonce: None,
             client_ts: None,
+            delegation_path: None,
         };
 
         verify_signature(&pubkey_pem, &token).unwrap();
@@ -1036,5 +1119,225 @@ mod tests {
         assert!(!is_rate_limit_error(
             &json!({"code": -32000, "message": "invalid opcode"})
         ));
+    }
+
+    // ── device→sandbox delegation (issue #369) ───────────────────────────────
+
+    /// Sign the cap-PoP with `sandbox` (NOT the device) but stamp the on-chain-bound
+    /// `device_key_hash` — i.e. exactly what a delegated sandbox presents.
+    fn sign_pop_as_sandbox(
+        token: &mut CapToken,
+        sandbox: &agentkeys_core::device_crypto::DeviceKey,
+        device_key_hash: &str,
+        ts: u64,
+    ) {
+        let nonce = "0011223344556677".to_string();
+        let sig = sandbox
+            .cap_pop_sig(
+                &token.payload.operator_omni,
+                &token.payload.actor_omni,
+                &token.payload.service,
+                token.payload.op.as_str(),
+                token.payload.data_class.as_str(),
+                &nonce,
+                ts,
+            )
+            .unwrap();
+        token.payload.device_key_hash = device_key_hash.to_string();
+        token.client_sig = Some(sig);
+        token.client_nonce = Some(nonce);
+        token.client_ts = Some(ts);
+    }
+
+    fn attach_delegation(
+        token: &mut CapToken,
+        signer: &agentkeys_core::device_crypto::DeviceKey,
+        sandbox_addr: &str,
+        scope: &str,
+        expires_at: u64,
+    ) {
+        let delegation_sig = signer
+            .delegation_sig(sandbox_addr, scope, expires_at)
+            .unwrap();
+        token.delegation_path = Some(DelegationPath {
+            scope: scope.to_string(),
+            expires_at,
+            delegation_sig,
+        });
+    }
+
+    #[test]
+    fn delegation_accepts_sandbox_cap_backed_by_device() {
+        // The happy path: a sandbox key signs the cap-PoP, and a device-issued,
+        // unexpired, in-scope delegation authorizes that exact sandbox key.
+        let device = fresh_device("ak-deleg-device.key");
+        let sandbox = fresh_device("ak-deleg-sandbox.key");
+        let mut token = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        let dkh = device.device_key_hash().unwrap();
+        sign_pop_as_sandbox(&mut token, &sandbox, &dkh, now_secs());
+        attach_delegation(
+            &mut token,
+            &device,
+            sandbox.address(),
+            "memory credentials",
+            now_secs() + 3600,
+        );
+        assert!(check_client_pop(&token, CAP_POP_MAX_AGE_SECS).is_ok());
+    }
+
+    #[test]
+    fn delegation_rejects_expired() {
+        let device = fresh_device("ak-deleg-exp-device.key");
+        let sandbox = fresh_device("ak-deleg-exp-sandbox.key");
+        let mut token = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        let dkh = device.device_key_hash().unwrap();
+        sign_pop_as_sandbox(&mut token, &sandbox, &dkh, now_secs());
+        attach_delegation(
+            &mut token,
+            &device,
+            sandbox.address(),
+            "memory",
+            now_secs() - 10,
+        );
+        assert!(matches!(
+            check_client_pop(&token, CAP_POP_MAX_AGE_SECS),
+            Err(VerifyError::DelegationExpired { .. })
+        ));
+    }
+
+    #[test]
+    fn delegation_rejects_out_of_scope() {
+        // The delegation grants `credentials`, but the cap is for `memory`.
+        let device = fresh_device("ak-deleg-scope-device.key");
+        let sandbox = fresh_device("ak-deleg-scope-sandbox.key");
+        let mut token = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        let dkh = device.device_key_hash().unwrap();
+        sign_pop_as_sandbox(&mut token, &sandbox, &dkh, now_secs());
+        attach_delegation(
+            &mut token,
+            &device,
+            sandbox.address(),
+            "credentials",
+            now_secs() + 3600,
+        );
+        assert!(matches!(
+            check_client_pop(&token, CAP_POP_MAX_AGE_SECS),
+            Err(VerifyError::DelegationOutOfScope { .. })
+        ));
+    }
+
+    #[test]
+    fn delegation_rejects_wrong_device() {
+        // A delegation signed by a DIFFERENT device than the on-chain-bound one.
+        let device = fresh_device("ak-deleg-wrong-device.key");
+        let other = fresh_device("ak-deleg-wrong-other.key");
+        let sandbox = fresh_device("ak-deleg-wrong-sandbox.key");
+        let mut token = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        let dkh = device.device_key_hash().unwrap();
+        sign_pop_as_sandbox(&mut token, &sandbox, &dkh, now_secs());
+        // `other` signs the delegation, but the token claims `device`'s hash.
+        attach_delegation(
+            &mut token,
+            &other,
+            sandbox.address(),
+            "memory",
+            now_secs() + 3600,
+        );
+        assert!(matches!(
+            check_client_pop(&token, CAP_POP_MAX_AGE_SECS),
+            Err(VerifyError::DelegationInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn delegation_rejects_sandbox_self_delegation() {
+        // THE security property: a sandbox cannot authorize ITSELF. It signs both the
+        // cap-PoP AND the delegation with its own key — verify_delegation recovers the
+        // sandbox, whose keccak != the device_key_hash, so it's rejected.
+        let device = fresh_device("ak-deleg-self-device.key");
+        let sandbox = fresh_device("ak-deleg-self-sandbox.key");
+        let mut token = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        let dkh = device.device_key_hash().unwrap();
+        sign_pop_as_sandbox(&mut token, &sandbox, &dkh, now_secs());
+        attach_delegation(
+            &mut token,
+            &sandbox,
+            sandbox.address(),
+            "memory",
+            now_secs() + 3600,
+        );
+        assert!(matches!(
+            check_client_pop(&token, CAP_POP_MAX_AGE_SECS),
+            Err(VerifyError::DelegationInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn sandbox_cap_without_delegation_is_rejected() {
+        // A sandbox-signed cap with NO delegation_path falls through to the direct
+        // #76 mismatch — the delegation path never weakens the no-delegation case.
+        let device = fresh_device("ak-deleg-none-device.key");
+        let sandbox = fresh_device("ak-deleg-none-sandbox.key");
+        let mut token = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        let dkh = device.device_key_hash().unwrap();
+        sign_pop_as_sandbox(&mut token, &sandbox, &dkh, now_secs());
+        assert!(matches!(
+            check_client_pop(&token, CAP_POP_MAX_AGE_SECS),
+            Err(VerifyError::CapPopMismatch)
+        ));
+    }
+
+    #[test]
+    fn delegation_scope_is_namespace_aware() {
+        // THE #369 e2e step-4 vs step-6 distinction: a delegation can be scoped to
+        // specific memory NAMESPACES (the cap `service`, e.g. `memory:travel`), not
+        // just the `memory` data class — so a respawned sandbox whose delegation
+        // omits travel is denied a travel recall even though its on-chain grant
+        // still covers all of memory.
+        let device = fresh_device("ak-deleg-ns-device.key");
+        let sandbox = fresh_device("ak-deleg-ns-sandbox.key");
+        let dkh = device.device_key_hash().unwrap();
+
+        // A canonical-get of memory:travel (service = the namespace).
+        let mut travel = sample_token_with_class(CapOp::CanonicalFetch, DataClass::Memory);
+        travel.payload.service = "memory:travel".into();
+        sign_pop_as_sandbox(&mut travel, &sandbox, &dkh, now_secs());
+
+        // step 4 — scope INCLUDES travel → allowed.
+        let mut ok = travel.clone();
+        attach_delegation(
+            &mut ok,
+            &device,
+            sandbox.address(),
+            "memory:travel memory:personal",
+            now_secs() + 3600,
+        );
+        assert!(check_client_pop(&ok, CAP_POP_MAX_AGE_SECS).is_ok());
+
+        // step 6 — scope EXCLUDES travel (only personal/family) → denied, even
+        // though the cap's data_class is "memory".
+        let mut deny = travel.clone();
+        attach_delegation(
+            &mut deny,
+            &device,
+            sandbox.address(),
+            "memory:personal memory:family",
+            now_secs() + 3600,
+        );
+        assert!(matches!(
+            check_client_pop(&deny, CAP_POP_MAX_AGE_SECS),
+            Err(VerifyError::DelegationOutOfScope { .. })
+        ));
+
+        // A bare `memory` scope still authorizes ANY namespace (back-compat).
+        let mut wide = travel.clone();
+        attach_delegation(
+            &mut wide,
+            &device,
+            sandbox.address(),
+            "memory",
+            now_secs() + 3600,
+        );
+        assert!(check_client_pop(&wide, CAP_POP_MAX_AGE_SECS).is_ok());
     }
 }

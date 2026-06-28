@@ -165,6 +165,33 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/agent/pairing/poll",
             post(handlers::agent::poll::pairing_poll),
         )
+        // #367 piece 1 — a bound device re-resolves {J1_agent, agent_url} each boot
+        // (pop_sig-gated; reads the durable on-chain binding, long after the §10.2
+        // request rows expire).
+        .route(
+            "/v1/agent/resolve",
+            post(handlers::agent::resolve::agent_resolve),
+        )
+        // #369 device→sandbox delegation rendezvous. The sandbox opens a request
+        // (J1-gated) + polls for the signed delegation; the device discovers it via
+        // /pending + co-signs with K10 (pop_sig-gated). The broker only relays — the
+        // worker re-verifies the device signature before any S3 touch.
+        .route(
+            "/v1/agent/delegation/request",
+            post(handlers::agent::delegation::delegation_request),
+        )
+        .route(
+            "/v1/agent/delegation/pending",
+            post(handlers::agent::delegation::delegation_pending),
+        )
+        .route(
+            "/v1/agent/delegation/sign",
+            post(handlers::agent::delegation::delegation_sign),
+        )
+        .route(
+            "/v1/agent/delegation/poll",
+            post(handlers::agent::delegation::delegation_poll),
+        )
         .route(
             "/v1/agent/pending-bindings",
             get(handlers::agent::pending::pending_bindings),

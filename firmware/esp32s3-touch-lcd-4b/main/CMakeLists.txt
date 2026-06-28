@@ -11,6 +11,7 @@ idf_component_register(
         "net/agent_client.c"
         "net/pairing.c"
         "net/wifi.c"
+        "net/device_identity.c"
     INCLUDE_DIRS "." "ui" "net"
     # `main` implicitly depends on every component, so the managed BSP (waveshare/
     # esp32_s3_touch_lcd_4b) + esp_lvgl_port + LVGL headers resolve without being listed here;
@@ -24,4 +25,6 @@ idf_component_register(
         mbedtls
         nvs_flash
         json
+        esp_hw_support  # esp_fill_random (device_identity.c K10 entropy)
+        agentkeys_device  # the shared Rust K10 crypto staticlib (#367)
 )

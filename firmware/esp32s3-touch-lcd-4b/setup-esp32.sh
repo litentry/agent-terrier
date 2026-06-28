@@ -59,6 +59,36 @@ ensure_toolchain(){
   log ok "toolchain: ready"
 }
 
+# --- 1b. Rust device-core toolchain (issue #367): the firmware links the shared
+#     agentkeys-device-core crate as an xtensa staticlib, which needs Espressif's
+#     Rust fork (the -S3 is Xtensa, not in mainline rustc). Idempotent: skip if the
+#     `esp` toolchain is already live.
+#
+#     IMPORTANT — do NOT source ~/export-esp.sh here. That env prepends espup's
+#     xtensa-esp-elf-gcc (e.g. esp-15.x) to PATH, which then SHADOWS ESP-IDF's own
+#     GCC (esp-14.x) and trips ESP-IDF's tool_version_check during the C build. The
+#     staticlib is pure Rust (no C deps, no link), so `cargo +esp` selects the
+#     toolchain on its own with no GCC env — and ESP-IDF's GCC stays first on PATH. ---
+ensure_rust_toolchain(){
+  command -v cargo >/dev/null 2>&1 || { log fail "rust: cargo not found — install Rust first (https://rustup.rs)"; exit 1; }
+  if cargo +esp --version >/dev/null 2>&1; then
+    # rust-src backs `-Zbuild-std=core,alloc` (the esp toolchain has no precompiled
+    # std for xtensa-esp32s3-none-elf). Idempotent; quiet if already present.
+    rustup component add rust-src --toolchain esp >/dev/null 2>&1 || true
+    log skip "rust: esp toolchain (xtensa) already installed"
+    return
+  fi
+  if ! command -v espup >/dev/null 2>&1; then
+    log ok "rust: installing espup (one-time)"
+    cargo install espup --locked || { log fail "rust: 'cargo install espup' failed"; exit 1; }
+  fi
+  log ok "rust: installing the esp toolchain via espup (one-time; ~1 GB)"
+  espup install || { log fail "rust: 'espup install' failed"; exit 1; }
+  rustup component add rust-src --toolchain esp >/dev/null 2>&1 || true
+  cargo +esp --version >/dev/null 2>&1 || { log fail "rust: esp toolchain missing after espup install"; exit 1; }
+  log ok "rust: esp toolchain ready (selected via 'cargo +esp'; ESP-IDF's GCC stays on PATH)"
+}
+
 # --- 2. per-device config (idempotent: create secrets.h from the example only if missing) ---
 ensure_secrets(){
   if [ -f "$FW_DIR/main/secrets.h" ]; then
@@ -142,10 +172,38 @@ choose_port(){
   fi
 }
 
+# --- release the serial port before flashing: macOS/Linux give a USB serial port an
+#     EXCLUSIVE lock, so a leftover `idf.py monitor` from a prior run (it holds the port
+#     until you Ctrl-] out) makes the next flash die with
+#       A fatal error occurred: Could not open <port> ... [Errno 35] Resource temporarily unavailable
+#     This frees the lock idempotently: no-op when nothing holds it, SIGTERM (then SIGKILL)
+#     any holder otherwise. Logs every PID it touches so the kill is auditable. ---
+release_port(){
+  local port="$1" holders pid
+  command -v lsof >/dev/null 2>&1 || { log skip "port-release: lsof unavailable — skipping pre-flash check"; return; }
+  holders="$(lsof -t "$port" 2>/dev/null | grep -vx "$$" || true)"
+  [ -n "$holders" ] || { log skip "port-release: $port already free"; return; }
+  log ok "port-release: freeing $port (held by: $(ps -o pid=,comm= -p $holders 2>/dev/null | tr '\n' ';' | sed 's/ *;/;/g'))"
+  for pid in $holders; do kill "$pid" 2>/dev/null || true; done
+  sleep 1
+  holders="$(lsof -t "$port" 2>/dev/null | grep -vx "$$" || true)"
+  if [ -n "$holders" ]; then
+    for pid in $holders; do kill -9 "$pid" 2>/dev/null || true; done
+    sleep 1
+    holders="$(lsof -t "$port" 2>/dev/null | grep -vx "$$" || true)"
+  fi
+  if [ -z "$holders" ]; then
+    log ok "port-release: $port now free"
+  else
+    log fail "port-release: $port still held by PID(s) $holders — close the monitor (Ctrl-]) and retry"; exit 1
+  fi
+}
+
 # --- 4. flash (auto / interactive port; optional monitor) ---
 flash_fw(){
   cd "$FW_DIR"
   choose_port
+  release_port "$CHOSEN_PORT"
   log ok "flash: writing to $CHOSEN_PORT"
   idf.py -p "$CHOSEN_PORT" flash
   log ok "flash: done"
@@ -158,6 +216,7 @@ flash_fw(){
 }
 
 ensure_toolchain
+ensure_rust_toolchain
 ensure_secrets
 build_fw
 if [ "$DO_FLASH" = 1 ]; then flash_fw; else log skip "flash: skipped (--no-flash)"; fi

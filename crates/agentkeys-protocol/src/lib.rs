@@ -135,6 +135,33 @@ pub struct CapMintRequest {
     pub ttl_seconds: u64,
 }
 
+/// A device→sandbox delegation (issue #369), carried alongside the cap-mint PoP
+/// when `client_sig` was produced by a sandbox's OWN ephemeral key rather than the
+/// device K10 directly. The **device** (not the broker) signs `delegation_sig`
+/// over `agentkeys_device_core::delegation_payload(device_key_hash, sandbox_key,
+/// scope, expires_at)`, so a compromised broker cannot forge it; the WORKER
+/// re-verifies it independently (`agentkeys_core::device_crypto::verify_delegation`)
+/// before any S3 touch. This is the single owner of the delegation wire shape —
+/// the broker echoes it into the minted cap-token and the worker deserializes the
+/// SAME type, so the two cannot drift (#203).
+///
+/// `sandbox_key` is deliberately NOT carried: it is the recovered cap-PoP signer,
+/// which binds the delegation to exactly the key that signed THIS cap (a
+/// delegation for key A cannot redeem a cap signed by key B).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationPath {
+    /// Canonical scope the delegation is bounded to — space-delimited `data_class`
+    /// or `data_class:op` tokens (e.g. `"memory credentials:fetch"`). Carried in
+    /// cleartext (the worker needs it to rebuild the preimage + apply its policy)
+    /// but integrity-protected by `delegation_sig`.
+    pub scope: String,
+    /// Unix-seconds expiry — the device-signed TTL bound. The worker enforces
+    /// `now < expires_at` (the device-core crate is clock-free).
+    pub expires_at: u64,
+    /// The device's EIP-191 signature over the delegation preimage.
+    pub delegation_sig: String,
+}
+
 /// Broker cap-mint request body — the exact JSON
 /// `agentkeys_broker_server::handlers::cap` deserializes for all `/v1/cap/*`
 /// endpoints, AND the on-the-wire shape the browser host
@@ -179,6 +206,12 @@ pub struct BrokerCapRequest {
     pub client_nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ts: Option<u64>,
+    /// Device→sandbox delegation (issue #369) — present only when `client_sig` was
+    /// produced by a sandbox's ephemeral key rather than the device K10 directly.
+    /// `skip_serializing_if` keeps the no-delegation body byte-identical to the
+    /// pre-#369 shape (so the #203 cap-mint fixture is unchanged).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation_path: Option<DelegationPath>,
 }
 
 /// Opaque cap-token blob — the broker signs it and the worker verifies the
@@ -922,11 +955,16 @@ mod tests {
             client_sig: None,
             client_nonce: None,
             client_ts: None,
+            delegation_path: None,
         };
         let omitted = serde_json::to_value(&base).unwrap();
         assert!(
             omitted.get("ttl_seconds").is_none(),
             "None must omit ttl_seconds so the broker applies its default"
+        );
+        assert!(
+            omitted.get("delegation_path").is_none(),
+            "None must omit delegation_path so the pre-#369 cap body is byte-identical"
         );
         let present = serde_json::to_value(BrokerCapRequest {
             ttl_seconds: Some(900),

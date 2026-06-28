@@ -8,7 +8,8 @@ use crate::oidc::OidcKeypair;
 use crate::plugins::audit::AuditPolicy;
 use crate::plugins::PluginRegistry;
 use crate::storage::{
-    AuthNonceStore, GrantStore, IdentityLinkStore, PairingRequestStore, WalletStore,
+    AgentDelegationStore, AuthNonceStore, GrantStore, IdentityLinkStore, PairingRequestStore,
+    WalletStore,
 };
 use crate::sts::StsClient;
 
@@ -52,6 +53,13 @@ pub struct AppState {
     /// `J1_agent` once claimed; `/v1/agent/pending-bindings` lets the master pull
     /// claimed-but-unbound rows to approve.
     pub pairing_request_store: Arc<PairingRequestStore>,
+    /// §369 device→sandbox delegation rendezvous. `/v1/agent/delegation/request`
+    /// (sandbox, J1-gated) opens a request; `/v1/agent/delegation/{pending,sign}`
+    /// (device, pop_sig-gated) let the device discover + co-sign it with K10;
+    /// `/v1/agent/delegation/poll` (sandbox, J1-gated) retrieves the device-signed
+    /// `delegation_path` the sandbox attaches to its cap-mints. The broker only
+    /// relays — the worker re-verifies the device signature.
+    pub agent_delegation_store: Arc<AgentDelegationStore>,
     /// Identity links (Phase B, US-028). Maps verified identities
     /// (email, oauth2 sub, secondary EVM wallet) to their owning master
     /// OmniAccount. Recovery flow consults this to find which master
