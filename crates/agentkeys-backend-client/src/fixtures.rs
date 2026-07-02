@@ -6,7 +6,7 @@
 //! wire — you cannot edit a struct field without changing the fixture. The
 //! `dump-protocol-fixtures` bin writes these to
 //! `harness/fixtures/backend-protocol/*.json`; the bash gate
-//! (`scripts/check-backend-fixture-drift.sh`) diffs the key-set of every
+//! (`scripts/utils/check-backend-fixture-drift.sh`) diffs the key-set of every
 //! hand-rolled `jq -n` cap/worker body against them. A drifted bash body
 //! (added/renamed/dropped field) then fails CI instead of surfacing as a
 //! runtime 4xx.

@@ -1335,7 +1335,7 @@ pub async fn cmd_provision(
     // against a flow that's now Clerk+password+magic-link). Route through the
     // CDP variant which already handles the current flow. Prereq: Chrome on
     // CDP_URL (default http://localhost:9222) — see
-    // `scripts/reset-chrome-for-recording.sh` or `agentkeys-provision-demo.sh`.
+    // `scripts/utils/demo/reset-chrome-for-recording.sh` or `agentkeys-provision-demo.sh`.
     let script_command: Vec<String> = match service {
         "openrouter" => vec![
             "npx".to_string(),

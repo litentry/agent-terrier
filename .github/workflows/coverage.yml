@@ -96,7 +96,7 @@ jobs:
           # Only the collecting run takes --workspace + test args.
           # Parallel threads: safe since the #258/#259/#264 sweep removed all
           # process-env mutation from tests (gated by
-          # scripts/check-no-env-mutation-in-tests.sh in rust-checks).
+          # scripts/utils/check-no-env-mutation-in-tests.sh in rust-checks).
           #
           # --exclude agentkeys-volcano-probe: the Volcano engine PROBE is an
           # operator/dev tool (not product, not in the OSS mirror) whose bulk is

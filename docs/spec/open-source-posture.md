@@ -338,7 +338,7 @@ What the writeup can honestly claim, given everything above:
 ## 14. Open TODOs for v0 release security
 
 - [ ] Set up `cargo audit` + `cargo deny` + `cargo vet` in CI
-- [x] Commit `Cargo.lock`, pin `rust-toolchain.toml` (pinned to a concrete version; gated by `scripts/check-toolchain-pin.sh` in CI)
+- [x] Commit `Cargo.lock`, pin `rust-toolchain.toml` (pinned to a concrete version; gated by `scripts/utils/check-toolchain-pin.sh` in CI)
 - [ ] Document reproducible-build steps in `BUILDING.md`
 - [ ] Publish SHA256 hashes with every release
 - [ ] Set up `minisign` or cosign for release signing, publish public key

@@ -11,7 +11,7 @@
 //!
 //! The proof-of-possession preimage is the **deployed** one —
 //! `keccak256("agentkeys-agent-pop:" || device_key_hash_hex)` — matching
-//! `scripts/heima-agent-create.sh` and the on-chain `registerAgentDevice` inputs.
+//! `scripts/operator/chain/heima-agent-create.sh` and the on-chain `registerAgentDevice` inputs.
 //! (arch.md §10.2 still shows the stale `link_code || D_pub`; the doc is being
 //! reconciled to this preimage, not the other way around.)
 

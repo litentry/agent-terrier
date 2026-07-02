@@ -27,7 +27,7 @@ agentkeys-secrets.env
 /mcp-xiaozhi-endpoint
 
 # Operator-supplied mnemonic file(s) for the chain deployer (referenced
-# by HEIMA_DEPLOYER_MNEMONIC_FILE in scripts/heima-bring-up.sh).
+# by HEIMA_DEPLOYER_MNEMONIC_FILE in scripts/operator/chain/heima-bring-up.sh).
 # Never committed — the mnemonic IS the key.
 /test-hei
 /test-hei.*

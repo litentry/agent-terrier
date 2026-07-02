@@ -10,7 +10,7 @@
 //!
 //! The proof-of-possession preimage is the **deployed** one —
 //! `keccak256("agentkeys-agent-pop:" || device_key_hash_hex)` — matching
-//! `scripts/heima-agent-create.sh` and the on-chain `registerAgentDevice` inputs.
+//! `scripts/operator/chain/heima-agent-create.sh` and the on-chain `registerAgentDevice` inputs.
 //!
 //! What is NOT here (it is platform-specific, lives in the std layer):
 //! entropy acquisition (`OsRng` on the host, `esp_fill_random` on the device)

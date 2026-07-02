@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 # Emits the canonical protocol fixtures (the serde shapes the broker/worker
 # request bodies serialize to) to disk. The harness fixture-drift gate
-# (scripts/check-backend-fixture-drift.sh) reads what this writes; a hand-rolled
+# (scripts/utils/check-backend-fixture-drift.sh) reads what this writes; a hand-rolled
 # bash body that adds/renames/drops a field then fails CI (issue #203).
 [[bin]]
 name = "dump-protocol-fixtures"

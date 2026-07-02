@@ -239,7 +239,7 @@ impl EmailSender for SesEmailSender {
         //     --email-identity $BROKER_EMAIL_FROM_ADDRESS
         //
         // (then click the verification link that SES routes to the inbound
-        // S3 bucket). See scripts/ses-verify-sender.sh for the helper.
+        // S3 bucket). See scripts/operator/cloud/ses-verify-sender.sh for the helper.
         // We deliberately do NOT fall back to the domain identity — domain
         // verification grants sending rights but obscures intent; an
         // explicit per-address identity makes the verified sender visible

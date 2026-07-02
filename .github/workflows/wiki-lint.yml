@@ -6,7 +6,7 @@ name: wiki lint
 #   - no redundant leading `# H1` (the filename already renders as the page
 #     title; a body H1 duplicates it and over-indents the sidebar TOC)
 #
-# The check lives in scripts/lint-wiki.sh (runnable locally too). The rule is
+# The check lives in scripts/utils/lint-wiki.sh (runnable locally too). The rule is
 # documented in AGENTS.md "Wiki-location policy". Companion to publish-wiki.yml,
 # which mirrors docs/wiki/ to the GitHub Wiki on push to main.
 
@@ -14,7 +14,7 @@ on:
   pull_request:
     paths:
       - 'docs/wiki/**'
-      - 'scripts/lint-wiki.sh'
+      - 'scripts/utils/lint-wiki.sh'
       - '.github/workflows/wiki-lint.yml'
   push:
     branches: [main]
@@ -28,4 +28,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Lint docs/wiki source
-        run: bash scripts/lint-wiki.sh
+        run: bash scripts/utils/lint-wiki.sh

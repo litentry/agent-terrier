@@ -3,7 +3,7 @@ name: contract-address sync + doc-literal gate
 # Issue #251: the chain profile (crates/agentkeys-core/chain-profiles/*.json,
 # .contracts[] + contract_set_version) is the single machine source of truth
 # for deployed contract addresses. This cheap gate (checkout + jq + grep,
-# seconds) runs scripts/check-deployed-contracts-sync.sh, which verifies:
+# seconds) runs scripts/utils/check-deployed-contracts-sync.sh, which verifies:
 #   1. the profile ⟷ scripts/operator-workstation.env mirror agrees, and
 #   2. no tracked markdown doc re-writes a literal address the profile owns
 #      (docs must ANCHOR — link + resolve command — never copy; historical/
@@ -40,4 +40,4 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - run: bash scripts/check-deployed-contracts-sync.sh
+      - run: bash scripts/utils/check-deployed-contracts-sync.sh

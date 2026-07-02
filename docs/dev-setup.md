@@ -12,7 +12,7 @@ The CDP demo path is **the only supported path** — earlier Gmail-backed varian
 Fresh machine? Run the bootstrap script — it installs every prerequisite below, builds the workspace, and runs the smoke tests:
 
 ```bash
-bash scripts/setup-dev-env.sh
+bash scripts/utils/setup-dev-env.sh
 ```
 
 The script is idempotent (safe to re-run), detects macOS vs Linux (apt / dnf / pacman), and handles:
@@ -36,7 +36,7 @@ Two things the script intentionally does **not** do:
 
 | Script | Audience | What it does |
 |---|---|---|
-| `scripts/setup-dev-env.sh` (operator-internal) | Anyone — fresh dev machine | Installs every prerequisite above, builds workspace, runs smoke tests. (The one you just ran.) |
+| `scripts/utils/setup-dev-env.sh` (operator-internal) | Anyone — fresh dev machine | Installs every prerequisite above, builds workspace, runs smoke tests. (The one you just ran.) |
 | the broker-host bring-up entry point (operator-internal) | Operator — fresh broker host | Provisions a Linux host into a running broker: builds binaries, creates the `agentkeys` system user, drops systemd units, optional nginx + Let's Encrypt. Idempotent. See [`stage7-wip.md` "Remote deployment"](./stage7-wip.md) for the manual long-form walk-through. |
 
 ### Manual matrix (if you'd rather pick tools yourself)
@@ -56,7 +56,7 @@ Optional but recommended:
 
 ### Toolchain pin + bump ritual
 
-[`rust-toolchain.toml`](../rust-toolchain.toml) pins the **exact** Rust version (plus the `clippy` + `rustfmt` components) for every surface — local dev, all CI jobs, and the broker-host build. rustup resolves the file automatically for any cargo command run inside the repo; nothing floats on "latest stable". CI installs via plain `rustup toolchain install` (which reads the pin), and [`scripts/check-toolchain-pin.sh`](../scripts/check-toolchain-pin.sh) (run by the `rust-checks` CI job) fails the build if the pin is loosened to a floating channel or a workflow installs around it (e.g. `dtolnay/rust-toolchain@stable`, which sets `RUSTUP_TOOLCHAIN` and bypasses the file).
+[`rust-toolchain.toml`](../rust-toolchain.toml) pins the **exact** Rust version (plus the `clippy` + `rustfmt` components) for every surface — local dev, all CI jobs, and the broker-host build. rustup resolves the file automatically for any cargo command run inside the repo; nothing floats on "latest stable". CI installs via plain `rustup toolchain install` (which reads the pin), and [`scripts/utils/check-toolchain-pin.sh`](../scripts/utils/check-toolchain-pin.sh) (run by the `rust-checks` CI job) fails the build if the pin is loosened to a floating channel or a workflow installs around it (e.g. `dtolnay/rust-toolchain@stable`, which sets `RUSTUP_TOOLCHAIN` and bypasses the file).
 
 **Why pinned:** CI runs `cargo clippy --workspace --all-targets -- -D warnings`. With a floating `stable`, a clippy lint introduced in a newer stable fails CI while passing on an older local toolchain (real case: PR #270's `needless_lifetimes` — local 1.94 green, CI latest-stable red). The pin makes local and CI identical.
 
@@ -82,7 +82,7 @@ Optional but recommended:
 
 ## 2. Build everything (everyone)
 
-If you ran `scripts/setup-dev-env.sh` in §1, the workspace is already built and tested — skip ahead to §3. Otherwise:
+If you ran `scripts/utils/setup-dev-env.sh` in §1, the workspace is already built and tested — skip ahead to §3. Otherwise:
 
 ```bash
 cd ~/Projects/agentkeys   # or wherever your checkout lives

@@ -456,7 +456,7 @@ fn build_registry(
                 // Email sender backend selector — `BROKER_EMAIL_SENDER` env var.
                 //   "stub" (default, in-process Vec — same as v0.1)
                 //   "ses"  (real aws-sdk-sesv2 SendEmail; requires verified FROM
-                //          identity per scripts/ses-verify-sender.sh)
+                //          identity per scripts/operator/cloud/ses-verify-sender.sh)
                 let sender_backend =
                     std::env::var(env::BROKER_EMAIL_SENDER).unwrap_or_else(|_| "stub".to_string());
                 let sender: Arc<dyn EmailSender> = match sender_backend.as_str() {

@@ -45,7 +45,7 @@ credited via `paymaster.deposit()`. A plain transfer to the paymaster **address*
 balance is ~0 **by design**.
 
 **See the live numbers** (deposit + every wallet) any time:
-`bash scripts/check-wallet-balances.sh` — it prints `sponsor/bundler` (①), `paymaster raw`
+`bash scripts/utils/check-wallet-balances.sh` — it prints `sponsor/bundler` (①), `paymaster raw`
 (the ~0 footgun balance), and `paymaster DEPOSIT` (②) as distinct rows. *(Snapshot
 2026-06-13: ① ≈ 9.8 HEI, ② deposit ≈ 2.08 HEI, paymaster raw = 0.)*
 
@@ -151,7 +151,7 @@ policy set in the exchange server — not on-chain, not fixed here.
   addresses live in the chain profile [`heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json)
   and the public [`deployed-contracts.md`](./deployed-contracts.md); the wallet custody /
   funding map is operator-internal (the chain-setup runbook §Wallets).
-- **Monitor the pool + wallets:** [`check-wallet-balances.sh`](../../scripts/check-wallet-balances.sh)
+- **Monitor the pool + wallets:** [`check-wallet-balances.sh`](../../scripts/utils/check-wallet-balances.sh)
   prints the deposit + every wallet (the signal the reimbursement loop would watch to
   decide when to top up).
 - The sponsor/bundler EOA is funded by a plain transfer (`heima-fund-account.sh`); only

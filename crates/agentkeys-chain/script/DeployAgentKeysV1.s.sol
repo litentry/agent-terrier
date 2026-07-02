@@ -11,7 +11,7 @@ import {K3EpochCounter} from "../src/K3EpochCounter.sol";
 import {CredentialAudit} from "../src/CredentialAudit.sol";
 
 /// @title DeployAgentKeysV1 — atomic deploy of the v2 stage-2 contract set
-/// @notice Called by `scripts/heima-bring-up.sh` step 5 via:
+/// @notice Called by `scripts/operator/chain/heima-bring-up.sh` step 5 via:
 ///         `forge script script/DeployAgentKeysV1.s.sol --rpc-url <url>
 ///          --private-key <0x...> --broadcast`
 ///

@@ -84,7 +84,7 @@ cargo build -p agentkeys-broker-server --features auth-email-link
 cargo build --release -p agentkeys-broker-server --features auth-email-link
 ```
 
-Cargo footgun (per the broker-host setup script, operator-internal — `scripts/setup-broker-host.sh:547`): never combine `-p agentkeys-broker-server -p agentkeys-mock-server --features auth-email-link` — cargo silently drops the feature flag. Always build the two binaries in separate `cargo build` invocations.
+Cargo footgun (per the broker-host setup script, operator-internal — `scripts/operator/setup-broker-host.sh:547`): never combine `-p agentkeys-broker-server -p agentkeys-mock-server --features auth-email-link` — cargo silently drops the feature flag. Always build the two binaries in separate `cargo build` invocations.
 
 ### 3.3 Run the three foreground processes
 
@@ -199,11 +199,11 @@ Then `AGENTKEYS_CHAIN=anvil` in your operator env makes every `cast send` hit an
 
 ### 4.4 Editing `setup-broker-host.sh`
 
-`scripts/setup-broker-host.sh` is the canonical "single entry point" for the broker EC2 (per AGENTS.md "Remote broker host (single entry point)" policy). When you change it, the unit-test is to dry-run it on a throwaway VM, but the practical inner loop is:
+`scripts/operator/setup-broker-host.sh` is the canonical "single entry point" for the broker EC2 (per AGENTS.md "Remote broker host (single entry point)" policy). When you change it, the unit-test is to dry-run it on a throwaway VM, but the practical inner loop is:
 
 1. Edit the script.
-2. `bash -n scripts/setup-broker-host.sh` — syntax check.
-3. SSH into the test broker EC2 (`bash scripts/ssh-broker.sh`), `cd ~/agentKeys`, `git pull`, `bash scripts/setup-broker-host.sh --test --yes` — exercise the full path.
+2. `bash -n scripts/operator/setup-broker-host.sh` — syntax check.
+3. SSH into the test broker EC2 (`bash scripts/utils/ssh-broker.sh`), `cd ~/agentKeys`, `git pull`, `bash scripts/operator/setup-broker-host.sh --test --yes` — exercise the full path.
 4. **Or** push to your PR branch and let the [CI auto-deploy](#5-inner-loop-c--ci-auto-deploy-issue-101) (PR #102) drive it on the test EC2.
 
 Step 4 is usually faster — no SSH, you get fresh logs in the GHA run, and the harness validates the deploy end-to-end.
@@ -222,8 +222,8 @@ crates/agentkeys-worker-*/**
 crates/agentkeys-signer-protocol/**
 crates/agentkeys-types/**
 crates/agentkeys-core/**
-scripts/setup-broker-host.sh
-scripts/setup-broker-host.sh.d/**
+scripts/operator/setup-broker-host.sh
+scripts/operator/setup-broker-host.sh.d/**
 scripts/broker.env
 scripts/broker.test.env
 Cargo.toml
@@ -321,7 +321,7 @@ Re-run with `--from-step N` to keep prior progress, OR `--only-step N` to test o
 | `heima-paseo` | Heima testnet | Real-chain semantics without real-money cost; default for `v2-stage1-demo.sh` | Testnet HEI (free from faucet) |
 | `heima` | Heima mainnet | The canonical chain; matches what CI's harness-e2e runs against | Real HEI — small per-run cost |
 
-Switch with `--chain` on any harness script. Contract addresses for `heima` live in the chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) (`.contracts[]`) and in [`deployed-contracts.md`](./deployed-contracts.md); add `anvil` ones by running the chain bring-up entry point (operator-internal — `scripts/setup-heima.sh --chain anvil --from-step 4 --to-step 8`) after starting your local anvil.
+Switch with `--chain` on any harness script. Contract addresses for `heima` live in the chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) (`.contracts[]`) and in [`deployed-contracts.md`](./deployed-contracts.md); add `anvil` ones by running the chain bring-up entry point (operator-internal — `scripts/operator/setup-heima.sh --chain anvil --from-step 4 --to-step 8`) after starting your local anvil.
 
 ---
 

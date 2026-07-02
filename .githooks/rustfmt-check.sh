@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared fmt gate for the git pre-commit + pre-push hooks (installed via
-# core.hooksPath=.githooks, wired by scripts/setup-dev-env.sh). Mirrors the CI
+# core.hooksPath=.githooks, wired by scripts/utils/setup-dev-env.sh). Mirrors the CI
 # "cargo fmt + clippy + test" fmt step EXACTLY — `cargo fmt --all -- --check` in
 # BOTH cargo workspaces: the root (harness-ci.yml) and the standalone viz/server
 # (viz-ci.yml, working-directory: viz/server). fmt --check only parses (no

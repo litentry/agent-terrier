@@ -19,7 +19,7 @@
 //   user-launched real Chrome avoids the flag entirely.
 //
 // Prereq: Chrome listening on CDP_URL (default http://localhost:9222). The
-// `scripts/reset-chrome-for-recording.sh` script in the repo root launches
+// `scripts/utils/demo/reset-chrome-for-recording.sh` script in the repo root launches
 // the expected throwaway profile. Alternatively:
 //   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
 //     --remote-debugging-port=9222 \

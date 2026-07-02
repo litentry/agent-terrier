@@ -808,7 +808,7 @@ pub struct BuildRegisterUserOpRequest {
 /// still pinned to `harness/fixtures/web-api/master_memory_plant.json` by a
 /// `ui_bridge` unit test, and the REMAINING non-Rust consumer
 /// (`harness/web-parity-demo.sh`) is gated against that fixture by
-/// `scripts/check-web-api-drift.sh`.
+/// `scripts/utils/check-web-api-drift.sh`.
 pub mod web_api {
     use serde::{Deserialize, Serialize};
 

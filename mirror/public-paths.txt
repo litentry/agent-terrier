@@ -7,7 +7,7 @@
 #
 # This is the single source of truth for what ships to the open-source mirror.
 # Everything NOT matched here is PRIVATE (stripped by the filter). Consumed by:
-#   - scripts/check-public-boundary.sh  (the boundary gate: no public file may
+#   - scripts/utils/check-public-boundary.sh  (the boundary gate: no public file may
 #     reference a private path or carry a real operational value)
 #   - the filter-repo mirror-publish workflow (Phase 3d) — generates the
 #     --paths-from-file allowlist from this file.
@@ -62,9 +62,9 @@ docs/assets/gas-funding-map.svg
 harness/fixtures/
 
 # ─── CI quality-gate scripts the public mirror's CI + contributors run ────────
-glob:scripts/check-*.sh
-glob:scripts/verify-*.sh
-glob:scripts/lint-*.sh
+glob:scripts/utils/check-*.sh
+glob:scripts/utils/verify-*.sh
+glob:scripts/utils/lint-*.sh
 
 # ─── Shared git hooks (pre-commit/pre-push rustfmt gate, installed via
 #     core.hooksPath; secret-free, mirrors the CI fmt step) — public so
@@ -95,7 +95,7 @@ CLAUDE.md
 .gitmodules
 scripts/operator-workstation.env.example
 
-# ─── The manifest itself: the public boundary gate (scripts/check-public-boundary.sh)
+# ─── The manifest itself: the public boundary gate (scripts/utils/check-public-boundary.sh)
 #     reads it, so it must ship. NOT the mirror/ dir prefix — a future
 #     mirror/publish-mirror.sh stays private. ────────────────────────────────────
 mirror/public-paths.txt

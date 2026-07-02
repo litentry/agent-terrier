@@ -94,7 +94,7 @@ pub struct ChainProfile {
     /// Empty for chains where AgentKeys contracts aren't deployed. **This is the
     /// single machine-readable source of truth for deployed addresses**; the
     /// human view `docs/spec/deployed-contracts.md` points HERE, and
-    /// `scripts/heima-bring-up.sh` rewrites this array (+ `contract_set_version`)
+    /// `scripts/operator/chain/heima-bring-up.sh` rewrites this array (+ `contract_set_version`)
     /// programmatically on every fresh deploy. Operators targeting a custom
     /// deploy override it via a profile file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -517,7 +517,7 @@ mod tests {
     fn heima_carries_full_contract_registry_and_version() {
         let p = ChainProfile::load_builtin("heima").unwrap();
         // heima.json is now the machine-readable SOURCE OF TRUTH for deployed
-        // addresses (scripts/heima-bring-up.sh rewrites the contracts[] array +
+        // addresses (scripts/operator/chain/heima-bring-up.sh rewrites the contracts[] array +
         // contract_set_version on every deploy). So pin SHAPE + COMPLETENESS,
         // NOT exact address values: every expected contract present, a purpose,
         // a well-formed 20-byte address, and a contract-set version. Pinning

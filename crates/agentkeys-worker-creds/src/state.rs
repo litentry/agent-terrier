@@ -4,7 +4,7 @@
 //! worker reads `AGENTKEYS_CHAIN` (default `heima`), uppercases it with
 //! `-` → `_`, and looks up env keys `{NAME}_{PROFILE_UC}`. This matches
 //! the layout `scripts/operator-workstation.env` writes via env_set in
-//! `scripts/heima-bring-up.sh` step 6.
+//! `scripts/operator/chain/heima-bring-up.sh` step 6.
 
 use std::sync::Arc;
 
