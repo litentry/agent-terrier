@@ -117,7 +117,8 @@ impl MemoryWorkerState {
             .region(aws_config::Region::new(config.region.clone()))
             .load()
             .await;
-        let s3 = S3Client::new(&sdk_config);
+        // Honors AGENTKEYS_TOS_ENDPOINT (VE TOS); plain AWS S3 when unset.
+        let s3 = agentkeys_core::s3_endpoint::s3_client(&sdk_config);
         Ok(MemoryWorkerState {
             config,
             s3,

@@ -147,7 +147,9 @@ impl S3CredentialBackend {
             loader = loader.credentials_provider(c);
         }
         let config = loader.load().await;
-        let s3 = S3Client::new(&config);
+        // Single-owner AWS↔TOS selection: honors AGENTKEYS_TOS_ENDPOINT (VE TOS)
+        // and is a plain AWS `S3Client::new` when unset (crate::s3_endpoint).
+        let s3 = crate::s3_endpoint::s3_client(&config);
         Self {
             s3,
             bucket: bucket.into(),

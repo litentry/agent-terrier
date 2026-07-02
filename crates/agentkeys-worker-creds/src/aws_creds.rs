@@ -107,7 +107,9 @@ impl StsCreds {
             .credentials_provider(SharedCredentialsProvider::new(creds))
             .load()
             .await;
-        S3Client::new(&sdk_config)
+        // Per-request STS-cred client — same AWS↔TOS seam as the default client
+        // so per-actor minted creds hit TOS on VE (honors AGENTKEYS_TOS_ENDPOINT).
+        agentkeys_core::s3_endpoint::s3_client(&sdk_config)
     }
 }
 

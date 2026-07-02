@@ -63,11 +63,14 @@ k256 = { version = "0.13", features = ["ecdsa", "sha2"], optional = true }
 # dep is mandatory. The `auth-wallet-sig` feature still pulls it via
 # the explicit feature dep below; this just removes the optional gate.
 sha3 = "0.10"
-# OAuth2 (Phase A.2 / US-020) — state HMAC + URL building. Optional, gated
-# via `auth-oauth2`. `url` is also a transitive dep of `reqwest` so the
-# dep-graph cost is zero; declaring directly keeps the API stable.
-hmac = { version = "0.12", optional = true }
+# hmac (unconditional): OAuth2 state HMAC (Phase A.2) AND the Volcengine
+# Signature V4 signer (ve_sign.rs — the VE STS AssumeRoleWithOIDC mint path).
+# `url` stays optional (OAuth2-only); it's a transitive reqwest dep so declaring
+# it directly costs nothing.
+hmac = "0.12"
 url = { version = "2", optional = true }
+# chrono: UTC timestamp for the VE Signature V4 `X-Date` header (YYYYMMDDTHHMMSSZ).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
 # Plan §3 / §3.5 — pluggable trait surface, feature-gated per layer.
@@ -81,7 +84,7 @@ default              = ["auth-wallet-sig", "wallet-keystore", "audit-sqlite"]
 # to auth-email-link; Phase A.2's OAuth2 reuses unconditional jsonwebtoken+reqwest.
 auth-wallet-sig      = ["dep:k256"]
 auth-email-link      = ["dep:aws-sdk-sesv2"]
-auth-oauth2          = ["dep:hmac", "dep:url"]
+auth-oauth2          = ["dep:url"]
 auth-oauth2-google   = ["auth-oauth2"]
 auth-oauth2-github   = ["auth-oauth2"]            # v1+
 auth-oauth2-apple    = ["auth-oauth2"]            # v1+
