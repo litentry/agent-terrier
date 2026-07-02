@@ -340,6 +340,9 @@ export interface ChainInfo {
    *  `name` when the UI is viewing another chain via `?chain=`. Optional
    *  for older daemons. */
   daemonChain?: string;
+  /** Broker URL the daemon is bound to (#373 stack identity; null/absent for
+   *  a brokerless or older daemon). */
+  daemonBroker?: string | null;
 }
 
 /** One built-in chain profile from `GET /v1/chain/list` (#282 switcher). */
@@ -354,6 +357,30 @@ export interface ChainListEntry {
 export interface ChainList {
   chains: ChainListEntry[];
   daemonChain: string;
+  /** Broker URL the daemon is bound to (#373 — the (chain, broker) stack
+   *  identity; null/absent for a brokerless or older daemon). */
+  daemonBroker?: string | null;
+}
+
+/** One operator stack — a (chain, broker) pair — from `GET /v1/stack/list`
+ *  (#373: the stack axis gained a cloud dimension; Heima-AWS and Heima-VE are
+ *  the SAME chain behind DIFFERENT brokers/data planes). */
+export interface StackEntry {
+  name: string;
+  chain: string;
+  brokerUrl: string;
+  /** This is the stack the daemon runs (chain AND broker match). */
+  active: boolean;
+  /** Live daemon-side `/healthz` probe of the stack's broker — false renders
+   *  the stack degraded (e.g. the VE broker until its runtime port boots). */
+  healthy: boolean;
+}
+
+/** The operator's stack inventory + the daemon's own binding (#373). */
+export interface StackList {
+  stacks: StackEntry[];
+  daemonChain: string;
+  daemonBroker?: string | null;
 }
 
 /** One ABI-decoded argument of a transaction's calldata. */
@@ -442,6 +469,9 @@ export interface AgentKeysClient {
   getChainInfo(chain?: string): Promise<Result<ChainInfo>>;
   /** Built-in chain profiles + the daemon's operational chain (#282). */
   getChainList(): Promise<Result<ChainList>>;
+  /** Operator stack inventory — (chain, broker) pairs + which one the daemon
+   *  runs and per-broker health (#373 stack selector). */
+  getStackList(): Promise<Result<StackList>>;
   /** Decode one audit event's CBOR envelope + on-chain calldata (#153). */
   decodeAuditEvent(id: string): Promise<Result<DecodedAuditEvent>>;
 

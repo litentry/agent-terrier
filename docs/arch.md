@@ -1637,6 +1637,8 @@ prefix  = (actor_omni_hex)            ← per-actor isolation here
 object  = the unit of data
 ```
 
+**Cloud axis (PR [#371](https://github.com/litentry/agentKeys/pull/371), issue [#373](https://github.com/litentry/agentKeys/issues/373)):** the storage/credential plane runs on **AWS** (default) or **Volcano Engine** (cn-beijing mirror — TOS S3-compat endpoint + `AssumeRoleWithOIDC`, where a per-actor **inline session policy** replaces AWS PrincipalTags; full port + live cross-actor-denial proof in [`spec/ve-broker-runtime-port.md`](spec/ve-broker-runtime-port.md)). A deployment **stack** is therefore a **(chain, cloud/broker)** pair — Heima-AWS, Base-AWS, Heima-VE — the same chain can be served by different brokers/data planes. Every stack-aware surface keys on the pair, never on the chain alone: the fleet console `c` picker + board, the daemon's `/v1/stack/list` (fed by `AGENTKEYS_STACKS_JSON`, derived from the `scripts/operator-workstation*.env` inventory), and the browser's master-identity pointers (`<key>:<chain>@<broker-host>` — a Heima-VE session never reads Heima-AWS state).
+
 ### 17.1 Why one bucket is not enough
 
 S3 exposes the following only at the **bucket** level — they cannot be set per-prefix. Different data classes need conflicting settings on these axes:

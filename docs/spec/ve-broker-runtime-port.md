@@ -137,6 +137,15 @@ The signer ([`ve_sign.rs`](../../crates/agentkeys-broker-server/src/ve_sign.rs),
 | ~~`mcp.agentterrier.ai`~~ | `mcp.litentry.org` | deferred with #152 |
 | OIDC issuer | `broker.litentry.org` (self-hosted) | **no DNS needed** — TOS-hosted bucket issuer (above). Optional later: move the issuer to `broker.agentterrier.ai` for full AWS parity (needs provider re-registration; the broker binary already serves `/.well-known/*`). |
 
+## Stack tooling (issue [#373](https://github.com/litentry/agentKeys/issues/373) — LANDED)
+
+Stack selection gained the cloud axis ahead of the follow-ups below, with the VE stack rendered **degraded** until they land (the #283 chain-degraded pattern):
+
+- **Fleet console:** the `ve` stack is inventoried from `operator-workstation.ve.env` (board line = broker `healthz` + EIP; `c` picker entry `ve (heima · https://broker.agentterrier.ai)`), and the `d` menu gained a VE deploy job — `ssh-broker.sh ve` then `setup-broker-host-ve.sh` (no outer sudo; the script escalates itself).
+- **SSH:** `bash scripts/ssh-broker.sh ve` (suggested alias `ssh-agentterrier`) — always `.pem` + `broker-manager`; VE has no EC2 Instance Connect.
+- **Daemon/web:** the fleet injects the env-file-derived stack inventory as `AGENTKEYS_STACKS_JSON` → the daemon serves `GET /v1/stack/list` (per-stack broker `healthz` probe + which stack it runs) and reports `daemonBroker` on the chain endpoints; the web chain page renders the selector (active / degraded per stack).
+- **Browser isolation:** master-identity pointers are namespaced per **(chain, broker)** (`<key>:<chain>@<broker-host>`, one-shot migration from the #313 chain-only keys) — Heima-AWS and Heima-VE sessions/onboarding never cross. Negative tests: `apps/parent-control/lib/__tests__/identityStore.test.ts` (CI: harness-ci rust-checks `npm test`).
+
 ## Remaining follow-ups (deliberately out of this port's scope)
 
 1. **Broker mint-relay endpoint for clients** — on AWS, clients exchange the broker's JWT with STS *themselves* (anonymous). On VE the exchange is broker-side, so client flows (provisioner `cmd_provision`, daemon) need a broker endpoint that returns the minted creds (the `StsClient` seam is ready; the HTTP surface + backend-client wiring lands with the worker deploy).

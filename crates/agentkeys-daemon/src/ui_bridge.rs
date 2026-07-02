@@ -111,6 +111,14 @@ pub struct UiBridgeState {
     /// onboarding is disabled (the daemon was started without `--broker-url`)
     /// and the email endpoints fail closed with `broker-not-configured`.
     pub broker_url: Option<String>,
+    /// The operator's stack inventory (#373): every known (chain, broker) pair,
+    /// parsed once at boot from `AGENTKEYS_STACKS_JSON` (the fleet console
+    /// derives it from the `scripts/operator-workstation*.env` files and injects
+    /// it into the local web-app job — data-driven end to end, no endpoint is
+    /// hardcoded). Backs `GET /v1/stack/list` for the web stack selector.
+    /// Empty ⇒ the endpoint synthesizes a single entry from the daemon's own
+    /// (chain, broker), so a bare `dev.sh` run still renders truthfully.
+    pub stacks: Vec<StackEntry>,
     /// Allowed browser origin (= the CORS origin, e.g. `http://localhost:3113`).
     /// Server-side defense-in-depth: the onboarding email endpoints reject a
     /// mismatched `Origin` header even though browser CORS already would, so a
@@ -828,6 +836,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/audit/:id/decode", get(decode_audit_event))
         .route("/v1/chain/info", get(chain_info))
         .route("/v1/chain/list", get(chain_list))
+        .route("/v1/stack/list", get(stack_list))
         .route("/v1/anchor/status", get(anchor_status))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/:id", get(get_worker))
@@ -951,6 +960,7 @@ pub fn build_state(
         master_memory: RwLock::new(HashMap::new()),
         plant_lock: tokio::sync::Mutex::new(()),
         authored_taxonomy: RwLock::new(None),
+        stacks: parse_stacks_json(std::env::var("AGENTKEYS_STACKS_JSON").ok().as_deref()),
         broker_url,
         allowed_origin: rp_origin.to_string(),
         pending_email: RwLock::new(HashMap::new()),
@@ -3937,6 +3947,92 @@ mod chain_view_tests {
     }
 }
 
+#[cfg(test)]
+mod stack_list_tests {
+    use super::{parse_stacks_json, stack_is_active, StackEntry};
+
+    fn entry(name: &str, chain: &str, broker: &str) -> StackEntry {
+        StackEntry {
+            name: name.into(),
+            chain: chain.into(),
+            broker_url: broker.into(),
+        }
+    }
+
+    #[test]
+    fn parses_the_fleet_injected_inventory() {
+        let raw = r#"[
+            {"name":"prod","chain":"heima","broker_url":"https://broker.litentry.org"},
+            {"name":"base","chain":"base","broker_url":"https://broker-base.litentry.org"},
+            {"name":"ve","chain":"heima","broker_url":"https://broker.agentterrier.ai"}
+        ]"#;
+        let stacks = parse_stacks_json(Some(raw));
+        assert_eq!(stacks.len(), 3);
+        assert_eq!(
+            stacks[2],
+            entry("ve", "heima", "https://broker.agentterrier.ai")
+        );
+    }
+
+    #[test]
+    fn unset_blank_or_malformed_yields_empty() {
+        assert!(parse_stacks_json(None).is_empty());
+        assert!(parse_stacks_json(Some("   ")).is_empty());
+        assert!(parse_stacks_json(Some("not json")).is_empty());
+        // half-valid list fails whole (never silently drop one stack)
+        assert!(parse_stacks_json(Some(r#"[{"name":"x"}]"#)).is_empty());
+    }
+
+    // The #373 isolation invariant at the selector layer: the SAME chain via a
+    // DIFFERENT broker is NOT the active stack — a Heima-VE daemon must never
+    // mark (or be marked as) the Heima-AWS stack, and vice versa.
+    #[test]
+    fn same_chain_different_broker_is_not_active() {
+        let aws = entry("prod", "heima", "https://broker.litentry.org");
+        let ve = entry("ve", "heima", "https://broker.agentterrier.ai");
+        // daemon bound to the AWS broker:
+        assert!(stack_is_active(
+            &aws,
+            "heima",
+            Some("https://broker.litentry.org")
+        ));
+        assert!(!stack_is_active(
+            &ve,
+            "heima",
+            Some("https://broker.litentry.org")
+        ));
+        // daemon bound to the VE broker:
+        assert!(stack_is_active(
+            &ve,
+            "heima",
+            Some("https://broker.agentterrier.ai")
+        ));
+        assert!(!stack_is_active(
+            &aws,
+            "heima",
+            Some("https://broker.agentterrier.ai")
+        ));
+    }
+
+    #[test]
+    fn active_matching_normalizes_case_and_trailing_slash() {
+        let ve = entry("ve", "heima", "https://broker.agentterrier.ai");
+        assert!(stack_is_active(
+            &ve,
+            "HEIMA",
+            Some("https://broker.agentterrier.ai/")
+        ));
+        // a brokerless daemon matches no inventory stack
+        assert!(!stack_is_active(&ve, "heima", None));
+        // a different chain on the same broker URL is not active either
+        assert!(!stack_is_active(
+            &ve,
+            "base",
+            Some("https://broker.agentterrier.ai")
+        ));
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct ChainInfoQuery {
     chain: Option<String>,
@@ -3978,7 +4074,100 @@ async fn chain_info(
         "finality": p.finality.default_block_tag,
         "contracts": contracts,
         "daemonChain": state.chain_profile.name,
+        "daemonBroker": state.broker_url,
     })))
+}
+
+/// One (chain, broker) pair of the operator's stack inventory (#373 — the
+/// stack axis gained a cloud dimension: the SAME chain can be served by
+/// different brokers/data planes, e.g. Heima-AWS vs Heima-VE). Parsed from
+/// `AGENTKEYS_STACKS_JSON`; field names are the env-file / fleet spellings.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct StackEntry {
+    pub name: String,
+    pub chain: String,
+    pub broker_url: String,
+}
+
+/// Parse `AGENTKEYS_STACKS_JSON` (`[{"name","chain","broker_url"}]`). Unset /
+/// blank ⇒ empty (the endpoint then synthesizes the daemon's own stack); a
+/// MALFORMED value warns loudly and yields empty rather than half a list —
+/// a silently-dropped stack would read as "that broker doesn't exist".
+fn parse_stacks_json(raw: Option<&str>) -> Vec<StackEntry> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Vec<StackEntry>>(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "ui-bridge: AGENTKEYS_STACKS_JSON is malformed — /v1/stack/list will only show the daemon's own stack");
+            Vec::new()
+        }
+    }
+}
+
+/// Whether an inventory stack IS the stack this daemon runs: same chain
+/// (case-insensitive) and same broker URL (trailing-slash-insensitive). The
+/// broker comparison is what splits Heima-AWS from Heima-VE — chain alone
+/// can't (#373).
+fn stack_is_active(entry: &StackEntry, daemon_chain: &str, daemon_broker: Option<&str>) -> bool {
+    let norm = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+    entry.chain.eq_ignore_ascii_case(daemon_chain)
+        && daemon_broker.map(norm) == Some(norm(&entry.broker_url))
+}
+
+/// `GET /v1/stack/list` — the operator's stack inventory for the web stack
+/// selector (#373): every known (chain, broker) pair, which one this daemon
+/// runs (`active`), and a live per-broker `/healthz` probe (`healthy`) so an
+/// unbootable stack (the VE broker until its runtime-port follow-ups land)
+/// renders degraded instead of selectable. Selecting a DIFFERENT stack is not
+/// a web action — the daemon binds one (chain, broker) per boot (relaunch via
+/// the fleet `c` picker / dev.sh env); that per-boot binding is exactly the
+/// isolation guarantee that a Heima-VE session never talks to the AWS broker.
+async fn stack_list(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
+    let daemon_chain = state.chain_profile.name.clone();
+    let mut stacks = state.stacks.clone();
+    if stacks.is_empty() {
+        if let Some(broker) = &state.broker_url {
+            stacks.push(StackEntry {
+                name: daemon_chain.clone(),
+                chain: daemon_chain.clone(),
+                broker_url: broker.clone(),
+            });
+        }
+    }
+    let probes = stacks.iter().map(|s| {
+        let url = format!("{}/healthz", s.broker_url.trim_end_matches('/'));
+        async move {
+            let ok = reqwest::Client::new()
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            ok
+        }
+    });
+    let healthy = futures_util::future::join_all(probes).await;
+    let rows: Vec<serde_json::Value> = stacks
+        .iter()
+        .zip(healthy)
+        .map(|(s, ok)| {
+            serde_json::json!({
+                "name": s.name,
+                "chain": s.chain,
+                "brokerUrl": s.broker_url,
+                "active": stack_is_active(s, &daemon_chain, state.broker_url.as_deref()),
+                "healthy": ok,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "stacks": rows,
+        "daemonChain": daemon_chain,
+        "daemonBroker": state.broker_url,
+    }))
 }
 
 /// `GET /v1/chain/list` — the SUPPORTED chains (profiles with a deployed
@@ -4006,6 +4195,7 @@ async fn chain_list(State(state): State<SharedUiBridgeState>) -> Json<serde_json
     Json(serde_json::json!({
         "chains": chains,
         "daemonChain": state.chain_profile.name,
+        "daemonBroker": state.broker_url,
     }))
 }
 
