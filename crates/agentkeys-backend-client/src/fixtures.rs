@@ -62,7 +62,11 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
     };
     let config_put = ConfigPutBody {
         cap: json!("<cap-token>"),
-        plaintext_b64: "<base64-plaintext>".into(),
+        // Canonical shape = the v3 client-encrypted envelope (#372 item 2);
+        // the deprecated legacy plaintext_b64 is None + skip_serializing_if,
+        // so it stays out of the fixture and its frozen key set.
+        plaintext_b64: None,
+        envelope_b64: Some("<base64-v3-envelope>".into()),
     };
     let config_get = ConfigGetBody {
         cap: json!("<cap-token>"),
@@ -243,7 +247,7 @@ mod tests {
 
     #[test]
     fn config_put_body_keys_frozen() {
-        assert_eq!(keys_of("config_put_body"), vec!["cap", "plaintext_b64"]);
+        assert_eq!(keys_of("config_put_body"), vec!["cap", "envelope_b64"]);
     }
 
     #[test]

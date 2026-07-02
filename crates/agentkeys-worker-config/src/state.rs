@@ -17,7 +17,15 @@ pub struct ConfigWorkerConfig {
     pub scope_contract: String,
     pub epoch_contract: String,
     pub chain_profile: String,
-    pub kek_hex_stage1: String,
+    /// Static stage-1 KEK — now OPTIONAL (#372 item 2): needed only to
+    /// decrypt LEGACY v2 blobs / serve legacy plaintext puts. v3 envelopes
+    /// are client-encrypted and stored verbatim; a worker with no KEK at all
+    /// is fully functional for v3 traffic.
+    pub kek_hex_stage1: Option<String>,
+    /// `AGENTKEYS_CONFIG_REQUIRE_V3=1` (#372 staged rollout, the
+    /// REQUIRE_CAP_POP pattern): reject legacy `plaintext_b64` puts so
+    /// plaintext can never reach the worker again once all clients speak v3.
+    pub require_v3: bool,
 }
 
 impl ConfigWorkerConfig {
@@ -40,38 +48,54 @@ impl ConfigWorkerConfig {
         let registry_contract = profile_env(&profile_uc, "SIDECAR_REGISTRY_ADDRESS")?;
         let scope_contract = profile_env(&profile_uc, "SCOPE_CONTRACT_ADDRESS")?;
         let epoch_contract = profile_env(&profile_uc, "K3_EPOCH_COUNTER_ADDRESS")?;
-        let kek_hex_stage1 = std::env::var("AGENTKEYS_CONFIG_KEK_HEX")
-            .context("AGENTKEYS_CONFIG_KEK_HEX must be set (32-byte hex; distinct from memory/creds KEK per arch.md §17.2)")?;
-        if kek_hex_stage1.len() != 64 {
-            return Err(anyhow!(
-                "AGENTKEYS_CONFIG_KEK_HEX must be 64 hex chars (32 bytes), got {}",
-                kek_hex_stage1.len()
-            ));
+        // #372 item 2: the KEK is now OPTIONAL — only legacy v2 blobs (and
+        // legacy plaintext puts) need it. v3 envelopes are client-encrypted
+        // (signer-derived per-actor KEK) and never touch a worker key.
+        let kek_hex_stage1 = match std::env::var("AGENTKEYS_CONFIG_KEK_HEX") {
+            Ok(v) if !v.trim().is_empty() => Some(v),
+            _ => None,
+        };
+        if let Some(kek_hex) = &kek_hex_stage1 {
+            if kek_hex.len() != 64 {
+                return Err(anyhow!(
+                    "AGENTKEYS_CONFIG_KEK_HEX must be 64 hex chars (32 bytes), got {}",
+                    kek_hex.len()
+                ));
+            }
+            // Decode to BYTES first so patterns like 0x0101… (= byte 0x01 ×32
+            // but alternating hex chars) are caught. Codex audit finding.
+            let kek_bytes = hex::decode(kek_hex)
+                .map_err(|e| anyhow!("AGENTKEYS_CONFIG_KEK_HEX not valid hex: {e}"))?;
+            if kek_bytes.iter().all(|&b| b == 0) {
+                return Err(anyhow!(
+                    "AGENTKEYS_CONFIG_KEK_HEX decodes to all zeros — rejecting (placeholder)"
+                ));
+            }
+            if kek_bytes.iter().all(|&b| b == kek_bytes[0]) {
+                return Err(anyhow!(
+                    "AGENTKEYS_CONFIG_KEK_HEX decodes to all the same byte (0x{:02x}) — \
+                     rejecting (placeholder)",
+                    kek_bytes[0]
+                ));
+            }
+            // Fail-loud WARN per arch.md §22b.2: the static KEK now serves
+            // ONLY legacy v2 reads / legacy plaintext puts; new writes are
+            // client-encrypted v3 (#372 item 2 closes the #91 gap for config).
+            eprintln!(
+                "==> ⚠️  WARN [arch.md §22b.2]: agentkeys-worker-config holds a static \
+                 legacy KEK (AGENTKEYS_CONFIG_KEK_HEX) on chain={chain_profile} — used \
+                 ONLY for pre-#372 v2 blobs. New config writes are client-encrypted v3 \
+                 (signer-derived per-actor KEK); drop the env once no v2 blobs remain."
+            );
+        } else {
+            eprintln!(
+                "==> agentkeys-worker-config: no AGENTKEYS_CONFIG_KEK_HEX — v3-only mode \
+                 (client-encrypted envelopes; legacy v2 blobs would fail loud, #372)."
+            );
         }
-        // Decode to BYTES first so patterns like 0x0101… (= byte 0x01 ×32
-        // but alternating hex chars) are caught. Codex audit finding.
-        let kek_bytes = hex::decode(&kek_hex_stage1)
-            .map_err(|e| anyhow!("AGENTKEYS_CONFIG_KEK_HEX not valid hex: {e}"))?;
-        if kek_bytes.iter().all(|&b| b == 0) {
-            return Err(anyhow!(
-                "AGENTKEYS_CONFIG_KEK_HEX decodes to all zeros — rejecting (placeholder)"
-            ));
-        }
-        if kek_bytes.iter().all(|&b| b == kek_bytes[0]) {
-            return Err(anyhow!(
-                "AGENTKEYS_CONFIG_KEK_HEX decodes to all the same byte (0x{:02x}) — \
-                 rejecting (placeholder)",
-                kek_bytes[0]
-            ));
-        }
-        // Fail-loud WARN per arch.md §22b.2 stage-1 simplifications inventory:
-        // KEK from env is a stage-1 simplification; stage 2 (#91) hardens.
-        eprintln!(
-            "==> ⚠️  WARN [arch.md §22b.2]: agentkeys-worker-config running with env-injected \
-             KEK (AGENTKEYS_CONFIG_KEK_HEX) on chain={chain_profile}. This is the stage-1 \
-             simplification. Stage 2 (issue #91) replaces with mTLS-derived KEK from the \
-             signer enclave (arch.md §15.1)."
-        );
+        let require_v3 = std::env::var("AGENTKEYS_CONFIG_REQUIRE_V3")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         Ok(ConfigWorkerConfig {
             config_bucket,
             region,
@@ -82,6 +106,7 @@ impl ConfigWorkerConfig {
             epoch_contract,
             chain_profile,
             kek_hex_stage1,
+            require_v3,
         })
     }
 }

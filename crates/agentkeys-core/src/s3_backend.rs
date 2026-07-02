@@ -62,7 +62,6 @@ use aws_credential_types::Credentials as AwsCredentials;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
-use sha2::{Digest, Sha256};
 
 use crate::actor_omni::actor_omni_hex;
 use crate::backend::{BackendError, CredentialBackend};
@@ -81,7 +80,6 @@ use agentkeys_types::{
 /// `WriteEnvelope::V2` is selected.
 const ENVELOPE_VERSION_V1: u8 = 0x01;
 const ENVELOPE_VERSION_V2: u8 = 0x02;
-const KEK_DOMAIN_TAG: &str = "agentkeys.kek.v1";
 
 /// Which envelope shape `store_credential` produces. Reads always accept
 /// both shapes during the migration window per the stage 1 plan.
@@ -224,43 +222,26 @@ impl S3CredentialBackend {
     /// Derive the 32-byte AES-256 KEK for `(wallet, service)` by asking
     /// the signer to EIP-191-sign a deterministic domain-tagged message.
     /// secp256k1 RFC 6979 makes this signature deterministic across calls,
-    /// so the same KEK comes back on every read.
+    /// so the same KEK comes back on every read. Delegates to the shared
+    /// `crate::kek` implementation (#372 — config's client-side v3 envelopes
+    /// use the same construction); the identity segment stays the lowercase
+    /// wallet address, so every existing vault blob keeps its KEK.
     async fn derive_kek(
         &self,
         wallet: &WalletAddress,
         service: &ServiceName,
     ) -> Result<[u8; 32], BackendError> {
-        let msg = format!(
-            "{}:{}:{}",
-            KEK_DOMAIN_TAG,
-            wallet.0.to_lowercase(),
-            service.0
-        );
-        let signed = self
-            .signer
-            .sign_eip191(&self.omni_account, msg.as_bytes())
-            .await
-            .map_err(map_signer_error)?;
-
-        // signed.signature is "0x" + 130 hex chars (65 bytes: r || s || v).
-        let sig_hex = signed.signature.trim_start_matches("0x");
-        let sig_bytes = hex::decode(sig_hex).map_err(|e| {
-            BackendError::Internal(format!("signer returned invalid hex signature: {e}"))
-        })?;
-        if sig_bytes.len() != 65 {
-            return Err(BackendError::Internal(format!(
-                "signer returned {}-byte signature, expected 65",
-                sig_bytes.len()
-            )));
-        }
-
-        let mut hasher = Sha256::new();
-        hasher.update(b"agentkeys.kek-derive.v1");
-        hasher.update(&sig_bytes);
-        let out = hasher.finalize();
-        let mut kek = [0u8; 32];
-        kek.copy_from_slice(&out);
-        Ok(kek)
+        crate::kek::derive_kek_via_signer(
+            self.signer.as_ref(),
+            &self.omni_account,
+            &wallet.0.to_lowercase(),
+            &service.0,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::kek::KekDeriveError::Signer(se) => map_signer_error(se),
+            other => BackendError::Internal(other.to_string()),
+        })
     }
 
     /// List service names under `prefix` (`.enc` objects only). Used by
@@ -821,6 +802,7 @@ mod tests {
         DerivedAddress, SignedMessage, SignedTypedData, SignerClient, SignerClientError,
     };
     use async_trait::async_trait;
+    use sha2::{Digest, Sha256};
     use std::sync::Mutex;
 
     /// In-memory signer that produces a deterministic 65-byte hex
