@@ -10,7 +10,7 @@ import { akLog } from '@/lib/debug';
 import type { CeremonyStep } from './types';
 import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
 import {
-  ensureActiveChain,
+  ensureActiveStack,
   getMasterCredId,
   getMasterOmni,
   setMasterCredId,
@@ -18,10 +18,11 @@ import {
 } from '@/lib/identityStore';
 
 // The master pointer (credentialId + the #242 omni it was bound for) is
-// chain-scoped — see lib/identityStore. The daemon switches between Heima and
-// Base, and a master enrolled on one chain must never be auto-selected while the
-// daemon runs the other: the omni-match guard below would reject it, silently
-// suppressing the "Sign back in with Touch ID" offer.
+// stack-scoped — see lib/identityStore. The daemon switches between
+// (chain, broker) stacks (Heima-AWS / Base-AWS / Heima-VE, #373), and a master
+// enrolled on one stack must never be auto-selected while the daemon runs
+// another: the omni-match guard below would reject it, silently suppressing
+// the "Sign back in with Touch ID" offer.
 
 const omniEq = (a: string, b: string) =>
   a.trim().replace(/^0x/, '').toLowerCase() === b.trim().replace(/^0x/, '').toLowerCase();
@@ -410,12 +411,18 @@ export function OnboardingScreen({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Bind the identity store to the daemon's live chain BEFORE reading the
-      // pointer, so a Heima↔Base switch reads THIS chain's master — not the
-      // other chain's, whose omni would mismatch and silently hide the offer.
-      await ensureActiveChain(async () => {
+      // Bind the identity store to the daemon's live (chain, broker) BEFORE
+      // reading the pointer, so a stack switch (Heima↔Base, or Heima-AWS↔
+      // Heima-VE on the same chain) reads THIS stack's master — not another
+      // stack's, whose omni would mismatch and silently hide the offer.
+      await ensureActiveStack(async () => {
         const info = await client.getChainInfo();
-        return info.ok ? info.data.daemonChain ?? info.data.name : null;
+        return info.ok
+          ? {
+              chain: info.data.daemonChain ?? info.data.name,
+              brokerUrl: info.data.daemonBroker ?? null,
+            }
+          : { chain: null, brokerUrl: null };
       });
       const st = await client.getOnboardingState();
       if (cancelled || !st.ok || !st.data.relogin) return;

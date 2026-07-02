@@ -153,6 +153,24 @@ gone until you onboard again. (You no longer need the
 `--master-device-key-hash` developer flag for the normal web loop — the device
 is recovered from your account automatically.)
 
+## Switching stacks — your sign-in is per (chain, broker) (parent-control)
+
+The app talks to exactly **one stack** — a (chain, broker) pair — per daemon
+launch: Heima-AWS, Base-AWS, or Heima-VE (the Volcano Engine mirror serves the
+**same Heima chain** through a **different broker/data plane**). The **chain
+page** lists every stack the operator's environment knows, marks the one your
+daemon is running (**active**), and shows a live health flag per broker — a
+stack whose broker isn't up yet (Heima-VE until its rollout completes) reads
+**degraded**. Switching is not a button in the web app: relaunch the dev stack
+on another stack (the fleet console's `c` picker, or
+`AGENTKEYS_CHAIN=… AGENTKEYS_BROKER_URL=… bash dev.sh`) and reload.
+
+Your browser sign-in state (passkey pointer + onboarding flag) is kept
+**separately per stack** — switching Heima-AWS → Heima-VE shows that stack's
+own login screen instead of offering the other stack's identity, and **reset
+master wipes only the active stack's** pointers. Same chain, different broker
+⇒ different session; nothing leaks across, in either direction.
+
 ## Pairing an agent + granting its permissions (parent-control)
 
 When you accept a pairing, the request card shows a **grant permissions picker**:

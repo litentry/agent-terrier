@@ -3,10 +3,10 @@
 import { useEffect, useState } from 'react';
 import {
   clearMasterIdentity,
-  ensureActiveChain,
+  ensureActiveStack,
   getMasterCredId,
   getOnboardedFlag,
-  setActiveChain,
+  setActiveStack,
   setOnboardedFlag,
 } from '@/lib/identityStore';
 import {
@@ -30,7 +30,7 @@ import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
-import type { ChainInfo, ChainListEntry, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
+import type { ChainInfo, ChainListEntry, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
 
 // #242: does a daemon error detail mean the master J1 lapsed (vs a genuine
@@ -120,9 +120,11 @@ export function App() {
       const r = await client.getChainList();
       if (!cancelled && r.ok) {
         setDaemonChain(r.data.daemonChain);
-        // Bind the chain-scoped identity store to the daemon's operational chain
-        // so master pointer reads/writes target THIS chain (Heima↔Base switch).
-        setActiveChain(r.data.daemonChain);
+        // Bind the stack-scoped identity store to the daemon's operational
+        // (chain, broker) so master pointer reads/writes target THIS stack —
+        // Heima↔Base switches AND same-chain broker switches (Heima-AWS ↔
+        // Heima-VE, #373).
+        setActiveStack(r.data.daemonChain, r.data.daemonBroker ?? '');
       }
     })();
     return () => { cancelled = true; };
@@ -131,11 +133,14 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Bind the identity store to the daemon's chain before the offline-flag
-      // read below, so the per-chain `ak_onboarded` resolves to THIS chain.
-      await ensureActiveChain(async () => {
+      // Bind the identity store to the daemon's stack before the offline-flag
+      // read below, so the per-stack `ak_onboarded` resolves to THIS
+      // (chain, broker).
+      await ensureActiveStack(async () => {
         const c = await client.getChainList();
-        return c.ok ? c.data.daemonChain : null;
+        return c.ok
+          ? { chain: c.data.daemonChain, brokerUrl: c.data.daemonBroker ?? null }
+          : { chain: null, brokerUrl: null };
       });
       // Real "logged in" = the daemon holds a verified session (W1). Fall back to
       // the local flag only for the offline/demo path (no daemon to ask).
@@ -1456,6 +1461,12 @@ function ChainPage() {
   const [chains, setChains] = useState<ChainListEntry[]>([]);
   const [daemonChain, setDaemonChain] = useState<string | null>(null);
   const [view, setView] = useState<string>('');
+  // #373 stack selector — the operator's (chain, broker) inventory. The stack
+  // axis has a CLOUD dimension: the same chain can be served by different
+  // brokers (Heima-AWS vs Heima-VE). Display + health only: the daemon binds
+  // ONE stack per boot, so switching = relaunch via the fleet `c` picker.
+  const [stacks, setStacks] = useState<StackEntry[]>([]);
+  const [daemonBroker, setDaemonBroker] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -1465,6 +1476,11 @@ function ChainPage() {
         setChains(r.data.chains);
         setDaemonChain(r.data.daemonChain);
         setView((v) => v || r.data.daemonChain);
+      }
+      const s = await client.getStackList();
+      if (alive && s.ok) {
+        setStacks(s.data.stacks);
+        setDaemonBroker(s.data.daemonBroker ?? null);
       }
     })();
     return () => { alive = false; };
@@ -1526,6 +1542,35 @@ function ChainPage() {
         <div className="stat"><div className="v">{live ? 'live' : 'reference'}</div><div className="k">source</div></div>
         <div className="stat"><div className="v">{contracts.length}</div><div className="k">contracts deployed</div></div>
       </div>
+      {stacks.length > 0 && (
+        <div className="panel">
+          <div className="panel-head"><span>── stacks · (chain, broker) pairs — the daemon runs ONE per boot</span></div>
+          <div className="panel-body flush">
+            <table className="tab">
+              <thead><tr><th>stack</th><th>chain</th><th>broker</th><th>health</th><th /></tr></thead>
+              <tbody>
+                {stacks.map((s) => (
+                  <tr key={s.name} style={s.healthy ? undefined : { opacity: 0.55 }}>
+                    <td><span style={{ fontWeight: 500 }}>{s.name}</span></td>
+                    <td className="mono" style={{ fontSize: 11 }}>{s.chain}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>{s.brokerUrl}</td>
+                    <td>{s.healthy ? 'live' : 'degraded'}</td>
+                    <td className="right">
+                      {s.active
+                        ? <span style={{ fontSize: 11, fontWeight: 600 }}>active</span>
+                        : <span className="muted" style={{ fontSize: 11 }}>switch via fleet `c` (daemon relaunch)</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="muted" style={{ fontSize: 11, padding: '6px 10px' }}>
+              browser sessions + onboarding are isolated per (chain, broker) — the same chain behind
+              another broker (e.g. Heima-VE) keeps its own sign-in{daemonBroker ? ` · this daemon → ${daemonBroker}` : ''}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="panel">
         <div className="panel-head"><span>── deployed contracts{live ? '' : ' · reference (connect a daemon for live addresses)'}</span></div>
         <div className="panel-body flush">

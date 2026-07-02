@@ -91,6 +91,10 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
+  async getStackList(): Promise<Result<import('./types').StackList>> {
+    return disconnected();
+  }
+
   async decodeAuditEvent(_id: string): Promise<Result<import('./types').DecodedAuditEvent>> {
     return disconnected();
   }
