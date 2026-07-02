@@ -23,6 +23,15 @@ pub const ENVELOPE_VERSION_V2: u8 = 0x02;
 pub const NONCE_LEN: usize = 12;
 pub const KEY_LEN: usize = 32;
 
+/// v3 (#372 item 2 / #91): CLIENT-encrypted under the signer-derived
+/// per-actor KEK. The worker stores/returns v3 envelopes VERBATIM — it holds
+/// no key that can open them. ONE owner (`agentkeys_core::envelope_v3`, also
+/// used by the daemon's encrypt/decrypt side); re-exported here so worker
+/// code keeps a single `envelope::` surface.
+pub use agentkeys_core::envelope_v3::{
+    aad_v3, decrypt_v3, encrypt_v3, version, EnvelopeV3Error, ENVELOPE_VERSION_V3, MIN_ENVELOPE_LEN,
+};
+
 #[derive(Debug, Error)]
 pub enum EnvelopeError {
     #[error("invalid KEK hex: {0}")]
@@ -35,6 +44,11 @@ pub enum EnvelopeError {
     Truncated(usize),
     #[error("unsupported envelope version 0x{0:02x}")]
     UnsupportedVersion(u8),
+    #[error(
+        "v3 envelope requires the signer-derived per-actor KEK (client-side, #372) — \
+         the static worker KEK cannot open it"
+    )]
+    V3RequiresDerivedKek,
 }
 
 /// AAD for v2 envelopes. MUST match `agentkeys-core::s3_backend::aad_for_v2`
@@ -82,8 +96,14 @@ pub fn encrypt(
 }
 
 pub fn decrypt(kek_hex: &str, envelope: &[u8], aad_bytes: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
-    if envelope.len() < 1 + NONCE_LEN + 16 {
+    if envelope.len() < MIN_ENVELOPE_LEN {
         return Err(EnvelopeError::Truncated(envelope.len()));
+    }
+    if envelope[0] == ENVELOPE_VERSION_V3 {
+        // Fail loud + specific: a v3 blob reaching a static-KEK decrypt call
+        // site is a wiring bug (the worker must return v3 envelopes verbatim
+        // for CLIENT-side decrypt), not a generic "unsupported version".
+        return Err(EnvelopeError::V3RequiresDerivedKek);
     }
     if envelope[0] != ENVELOPE_VERSION_V2 {
         return Err(EnvelopeError::UnsupportedVersion(envelope[0]));
@@ -199,5 +219,39 @@ mod tests {
     fn invalid_kek_length_errors() {
         let res = encrypt("aa", b"x", &[]);
         assert!(matches!(res, Err(EnvelopeError::InvalidKekHex(_))));
+    }
+
+    // ── v3 (#372 item 2 / #91) — the WORKER-side interplay only. The v3
+    // crypto itself is owned + tested in `agentkeys_core::envelope_v3`.
+
+    #[test]
+    fn static_kek_decrypt_of_v3_fails_loud_and_specific() {
+        // The worker must never try (and silently mangle) a v3 blob with its
+        // static env KEK — the error names the wiring bug.
+        let kek = [1u8; KEY_LEN];
+        let env = encrypt_v3(&kek, b"x", &aad_v3("0xab", "s")).unwrap();
+        let res = decrypt(&"e".repeat(64), &env, &aad_v3("0xab", "s"));
+        assert!(matches!(res, Err(EnvelopeError::V3RequiresDerivedKek)));
+    }
+
+    #[test]
+    fn derived_kek_decrypt_of_v2_is_rejected() {
+        // v2 blobs stay on the static-KEK path; decrypt_v3 refuses them
+        // instead of failing with a confusing GCM error under the wrong key.
+        let static_kek = "f".repeat(64);
+        let aad2 = aad("x", "0xab", "s", 1);
+        let env = encrypt(&static_kek, b"x", &aad2).unwrap();
+        let res = decrypt_v3(&[0u8; KEY_LEN], &env, &aad2);
+        assert!(matches!(
+            res,
+            Err(EnvelopeV3Error::UnsupportedVersion(ENVELOPE_VERSION_V2))
+        ));
+    }
+
+    #[test]
+    fn aad_v3_differs_from_v2_aad() {
+        // Distinct domain prefix: a version-byte flip can never validate
+        // against the other version's AAD even if the KEKs coincided.
+        assert_ne!(aad_v3("0xab", "s"), aad("x", "0xab", "s", 1));
     }
 }

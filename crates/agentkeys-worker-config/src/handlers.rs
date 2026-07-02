@@ -47,10 +47,15 @@ async fn healthz(State(state): State<SharedConfigWorkerState>) -> Json<HealthBod
     })
 }
 
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` (#372 item 2 / #91).
+/// Mirrors `agentkeys_protocol::ConfigPutBody` — the crate-owned wire shape.
 #[derive(Debug, Deserialize)]
 pub struct PutRequest {
     pub cap: CapToken,
-    pub plaintext_b64: String,
+    #[serde(default)]
+    pub plaintext_b64: Option<String>,
+    #[serde(default)]
+    pub envelope_b64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,10 +74,17 @@ pub struct GetRequest {
     pub cap: CapToken,
 }
 
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` is set (#372 item 2):
+/// v3 blobs come back as the raw envelope for CLIENT-side decrypt under the
+/// signer-derived KEK; legacy v2 blobs come back worker-decrypted. Mirrors
+/// `agentkeys_protocol::ConfigGetResp`.
 #[derive(Debug, Serialize)]
 pub struct GetResponse {
     pub ok: bool,
-    pub plaintext_b64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
     /// Durable-audit receipt (#229) — see [`PutResponse::audit_envelope_hash`].
     pub audit_envelope_hash: Option<String>,
 }
@@ -131,18 +143,81 @@ async fn config_put_inner(
     req: &PutRequest,
 ) -> Result<(String, Vec<u8>), ApiError> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let plaintext = STANDARD
-        .decode(&req.plaintext_b64)
-        .map_err(|e| err_400(e.to_string(), "plaintext_b64_decode"))?;
-
-    let aad = envelope::aad(
-        &req.cap.payload.operator_omni,
-        &req.cap.payload.actor_omni,
-        &req.cap.payload.service,
-        req.cap.payload.k3_epoch,
-    );
-    let env_bytes = envelope::encrypt(&state.config.kek_hex_stage1, &plaintext, &aad)
-        .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?;
+    let env_bytes = match (&req.envelope_b64, &req.plaintext_b64) {
+        (Some(_), Some(_)) => {
+            return Err(err_400(
+                "exactly one of envelope_b64 / plaintext_b64 (both given)",
+                "config_put_body_ambiguous",
+            ))
+        }
+        (None, None) => {
+            return Err(err_400(
+                "exactly one of envelope_b64 / plaintext_b64 (neither given)",
+                "config_put_body_empty",
+            ))
+        }
+        // v3 (#372 item 2): client-encrypted under the signer-derived
+        // per-actor KEK — stored VERBATIM. The worker validates only the
+        // wire shape (version byte + minimum AEAD length); it cannot (and
+        // must not) open the envelope.
+        (Some(env_b64), None) => {
+            let bytes = STANDARD
+                .decode(env_b64)
+                .map_err(|e| err_400(e.to_string(), "envelope_b64_decode"))?;
+            match envelope::version(&bytes) {
+                Some(envelope::ENVELOPE_VERSION_V3) => bytes,
+                Some(v) => {
+                    return Err(err_400(
+                        format!("envelope_b64 must be a v3 envelope (got version 0x{v:02x})"),
+                        "config_envelope_not_v3",
+                    ))
+                }
+                None => {
+                    return Err(err_400(
+                        format!(
+                            "envelope_b64 too short to be an envelope ({} bytes)",
+                            bytes.len()
+                        ),
+                        "config_envelope_truncated",
+                    ))
+                }
+            }
+        }
+        // Legacy stage-1 path: worker-side encrypt under the static env KEK.
+        // Deprecated (#372); refused entirely under AGENTKEYS_CONFIG_REQUIRE_V3=1.
+        (None, Some(pt_b64)) => {
+            if state.config.require_v3 {
+                return Err(err_403(
+                    "plaintext config puts are disabled (AGENTKEYS_CONFIG_REQUIRE_V3=1) — \
+                     send a client-encrypted v3 envelope_b64 (#372)",
+                    "config_plaintext_put_disabled",
+                ));
+            }
+            let kek_hex = state.config.kek_hex_stage1.as_deref().ok_or_else(|| {
+                err_500(
+                    "legacy plaintext put needs AGENTKEYS_CONFIG_KEK_HEX, which this \
+                     worker no longer carries — send a v3 envelope_b64 (#372)",
+                    "config_legacy_kek_missing",
+                )
+            })?;
+            tracing::warn!(
+                service = %req.cap.payload.service,
+                "config put via DEPRECATED plaintext_b64 (static-KEK stage 1) — \
+                 migrate the caller to client-encrypted v3 envelopes (#372)"
+            );
+            let plaintext = STANDARD
+                .decode(pt_b64)
+                .map_err(|e| err_400(e.to_string(), "plaintext_b64_decode"))?;
+            let aad = envelope::aad(
+                &req.cap.payload.operator_omni,
+                &req.cap.payload.actor_omni,
+                &req.cap.payload.service,
+                req.cap.payload.k3_epoch,
+            );
+            envelope::encrypt(kek_hex, &plaintext, &aad)
+                .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?
+        }
+    };
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
@@ -180,22 +255,36 @@ async fn config_get(
         .audit
         .emit(&req.cap, AuditOpKind::ConfigGet, audit_body, audit_result)
         .await;
-    let plaintext = outcome?;
+    let fetched = outcome?;
     let audit_envelope_hash = audited?;
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let (plaintext_b64, envelope_b64) = match fetched {
+        ConfigFetched::LegacyPlaintext(pt) => (Some(STANDARD.encode(&pt)), None),
+        ConfigFetched::V3Envelope(env) => (None, Some(STANDARD.encode(&env))),
+    };
     Ok(Json(GetResponse {
         ok: true,
-        plaintext_b64: STANDARD.encode(&plaintext),
+        plaintext_b64,
+        envelope_b64,
         audit_envelope_hash,
     }))
+}
+
+/// What `config_get_inner` hands back: legacy v2 blobs are worker-decrypted
+/// (static KEK); v3 blobs are returned as the raw envelope for CLIENT-side
+/// decrypt under the signer-derived KEK (#372 item 2 — the worker holds no
+/// key that opens them).
+enum ConfigFetched {
+    LegacyPlaintext(Vec<u8>),
+    V3Envelope(Vec<u8>),
 }
 
 async fn config_get_inner(
     state: &SharedConfigWorkerState,
     creds: Option<&StsCreds>,
     req: &GetRequest,
-) -> Result<Vec<u8>, ApiError> {
+) -> Result<ConfigFetched, ApiError> {
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let resp = s3
@@ -236,13 +325,29 @@ async fn config_get_inner(
         .map_err(|e| err_502(e.to_string(), "s3_body"))?
         .into_bytes();
 
+    // v3 (#372 item 2): return the client-encrypted envelope verbatim —
+    // decrypt happens caller-side under the signer-derived per-actor KEK.
+    if envelope::version(&body) == Some(envelope::ENVELOPE_VERSION_V3) {
+        return Ok(ConfigFetched::V3Envelope(body.to_vec()));
+    }
+
+    // Legacy v2 blob: worker-side decrypt under the static stage-1 KEK.
+    let kek_hex = state.config.kek_hex_stage1.as_deref().ok_or_else(|| {
+        err_500(
+            "stored config blob is a legacy v2 envelope but this worker carries no \
+             AGENTKEYS_CONFIG_KEK_HEX — restore the legacy KEK or re-plant the config \
+             as a v3 envelope (#372)",
+            "config_legacy_kek_missing",
+        )
+    })?;
     let aad = envelope::aad(
         &req.cap.payload.operator_omni,
         &req.cap.payload.actor_omni,
         &req.cap.payload.service,
         req.cap.payload.k3_epoch,
     );
-    envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
+    envelope::decrypt(kek_hex, &body, &aad)
+        .map(ConfigFetched::LegacyPlaintext)
         .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
 }
 

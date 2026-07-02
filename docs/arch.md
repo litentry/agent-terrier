@@ -1723,6 +1723,8 @@ Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 4
 
 **Why agent-side STS creds (not operator-side):** the cap binds to `actor_omni` (the agent's), so the S3 PUT path is `bots/<agent>/...`. The IAM PrincipalTag on the STS creds must match — only the agent's session JWT produces STS creds tagged with the agent's omni. The operator authorises via cap-mint; the agent identifies via its own session JWT (J1) → STS. Both must agree on actor_omni for the IAM resource ARN to allow the op.
 
+**Fifth control — the PROVISIONING identity is scoped too (#372, both clouds):** the four layers gate the *runtime* path; #372 scopes the *operator/admin* axis. The AWS admin group and the VE bootstrap admin no longer carry `AmazonS3FullAccess` / `TOSFullAccess` — they hold mirrored custom policies (single source of truth: [`scripts/policies/`](../scripts/policies/); Sid-level cross-cloud parity CI-gated by [`scripts/check-storage-policy-parity.sh`](../scripts/check-storage-policy-parity.sh)) granting bucket lifecycle management but **zero object access on the vault/memory/config data buckets** — a stolen operator credential can no longer read ciphertext or delete/overwrite data-class blobs. The VE broker *signing* identity is narrower still: STS mint only, zero storage actions. Applied idempotently by `setup-cloud.sh` step 16 / `setup-cloud-ve.sh` steps 11 + 56; stage-3 step 24 carries the negative (admin `GetObject` on a data bucket → `AccessDenied`). Side-by-side table: [`docs/spec/ve-broker-runtime-port.md`](spec/ve-broker-runtime-port.md) "Storage-plane provisioning identities".
+
 ### 17.6 Master-as-hub topology (the two channels — #295 / #339)
 
 The two sanctioned cross-actor channels above are the substrate for the product's **master-as-hub** shape (epic #295). The mental model is **git**: the **master** (`operator`) is `origin` — the bare, canonical, authoritative store + the authorizer; each **delegate** (`agent`) is a working clone that **pulls** the paths it was granted and **pushes** learnings back for a curated merge.
@@ -2142,11 +2144,22 @@ The **port from `erc4337-webauthn-sign.py` to Rust changed none of this** — th
 - `agentkeys-worker-creds` and `agentkeys-worker-memory` read their AES-256-GCM key from `AGENTKEYS_WORKER_KEK_HEX` / `AGENTKEYS_MEMORY_KEK_HEX` env at boot.
 - Length-check at startup (must be 32 bytes hex-encoded); otherwise fail-fast.
 
-**What stage 2 (#91) adds**:
+**CONFIG is no longer on this list (#372 item 2 closed the #91 gap for it).** New config
+writes are **v3 envelopes** (version byte `0x03`, AAD `agentkeys.cred.aad.v3|<actor>|<service>`)
+**client-encrypted by the daemon** under the signer-derived per-(actor, service) KEK — the
+same `agentkeys.kek.v1` / `agentkeys.kek-derive.v1` construction the vault CLI path uses,
+now owned by ONE implementation (`agentkeys-core::kek` + `agentkeys-core::envelope_v3`).
+The config worker stores/returns v3 envelopes VERBATIM (it holds no key that opens them);
+`AGENTKEYS_CONFIG_KEK_HEX` is now OPTIONAL and serves only legacy v2 blobs, and
+`AGENTKEYS_CONFIG_REQUIRE_V3=1` (staged flip, the §22b.4 pattern) refuses legacy plaintext
+puts entirely. Admin + ciphertext + every worker env can no longer decrypt config — the
+vault's confidentiality property, on both S3 and TOS (the worker is storage-agnostic).
+
+**What stage 2 (#91) still adds for creds/memory**:
 - mTLS-attested KEK derivation from the signer per §15.1. Worker presents its attestation-issued cert; signer accepts only attested workers; signer derives KEK from K3 (per-operator + per-data-class) and returns it over the mTLS channel.
 - Per-K3-epoch rotation of the KEK without re-encrypting old blobs (via the envelope's k3_epoch field; mismatch → re-derive via mTLS).
 
-**Fail-loud guarantee**: worker prints a WARN at startup citing this section + issue #91 when KEK is from env (NOT mTLS-derived).
+**Fail-loud guarantee**: worker prints a WARN at startup citing this section + issue #91 when KEK is from env (NOT mTLS-derived); the config worker's WARN now marks the env KEK as legacy-v2-only.
 
 ### 22b.3 Attestation bytes — empty `0x` blob on master/agent device registration
 
@@ -2217,6 +2230,7 @@ Known sites at HEAD:
 - `crates/agentkeys-cli/src/k11_webauthn.rs` — real WebAuthn ceremony (§22b.1).
 - `crates/agentkeys-worker-creds/src/state.rs` — `AGENTKEYS_WORKER_KEK_HEX` (§22b.2).
 - `crates/agentkeys-worker-memory/src/state.rs` — `AGENTKEYS_MEMORY_KEK_HEX` (§22b.2).
+- `crates/agentkeys-worker-config/src/state.rs` — `AGENTKEYS_CONFIG_KEK_HEX` is **legacy-v2-only** since #372 (new writes are client-encrypted v3 under the signer-derived KEK — §22b.2); `AGENTKEYS_CONFIG_REQUIRE_V3=1` is the staged flip that retires the plaintext path.
 - `crates/agentkeys-broker-server/src/handlers/cap.rs` — K10 cap-PoP **validated when present** (`verify_cap_pop`); the worker re-verifies + enforces presence under `AGENTKEYS_WORKER_REQUIRE_CAP_POP` (`verify::enforce_client_pop`). The shortcut is closed once that flag is flipped after the master-K10 rollout (§22b.4) — staged, not a permanent stage-1 omission.
 - `scripts/heima-device-register.sh` — empty attestation + empty K11 assertion on first call (§22b.1, §22b.3). **DEPRECATED escape-only** (old-model EOA wrapper, no orchestrator callers): the supported register is the #164 passkey-account path (`register_first_master` → `harness/scripts/erc4337-register-master.sh`).
 - `scripts/heima-agent-create.sh` — empty K11 / link-code-redemption stubs (§22b.3).

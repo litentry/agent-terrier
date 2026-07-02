@@ -118,8 +118,24 @@ The signer ([`ve_sign.rs`](../../crates/agentkeys-broker-server/src/ve_sign.rs),
 **Mitigation plan (restore layer-3 independence + shrink the new surface):**
 1. **Landed:** `VeStsClient` hard-refuses unscoped mints (no buckets / no omni ⇒ error, unit-tested) — the mint-code bug class fails closed, not open.
 2. **Landed:** the coarse role policy caps everything at `bots/*` on the three data buckets — even an unscoped session cannot leave the data prefix or touch other services.
-3. **Static native TOS bucket policies as the backstop** (the AWS-parity "belt"): provision deny-by-default bucket policies via the native TOS API (the S3-compat `PutBucketPolicy` was refused) restricting access to the data role's assumed-role sessions; probe whether VE supports `PrincipalTag` conditions in TOS bucket policies + a `Tags` param on `AssumeRoleWithOIDC` — if yes, reconstruct the full static tag gate. → tracked in #372's parity work.
-4. **Least-priv broker signing identity** (#372): an `sts:AssumeRoleWithOIDC`-only VE user — the broker's cloud creds can *only* mint scoped-down sessions of the data role, never touch TOS directly.
+3. **Static native TOS bucket policies as the backstop** (the AWS-parity "belt"): provision deny-by-default bucket policies via the native TOS API (the S3-compat `PutBucketPolicy` was refused) restricting access to the data role's assumed-role sessions; probe whether VE supports `PrincipalTag` conditions in TOS bucket policies + a `Tags` param on `AssumeRoleWithOIDC` — if yes, reconstruct the full static tag gate. → still open (native-API bucket policies), tracked under #372's follow-on parity work.
+4. **Least-priv broker signing identity** — ✅ **LANDED (#372)**: `agentterrier-broker-setup` now carries [`scripts/policies/ve-broker-setup.json`](../../scripts/policies/ve-broker-setup.json) — ECS read + `sts:AssumeRole`/`AssumeRoleWithOIDC` + IAM read, **zero TOS actions** (the pre-#372 grant carried `tos:*` on `*`). `setup-cloud-ve.sh` step 11 converges a drifted live policy on re-run (`ve iam UpdatePolicy`).
+
+## Storage-plane provisioning identities — scoped + mirrored (#372)
+
+The **provisioning/admin identities** on both clouds are scoped by custom policies whose single source of truth is [`scripts/policies/`](../../scripts/policies/), applied idempotently by the entry points and drift-gated in CI by [`scripts/check-storage-policy-parity.sh`](../../scripts/check-storage-policy-parity.sh) ([`storage-policy-parity.yml`](../../.github/workflows/storage-policy-parity.yml)). Runtime isolation (per-actor STS) is untouched — this scopes the **stolen-operator-credential** blast radius: no object read (ciphertext/metadata leak) and no delete/overwrite (unrecoverable DoS) on the data buckets.
+
+| | AWS | VE | Parity |
+|---|---|---|---|
+| Identity | `AgentKeyAdmin` group (was `AmazonS3FullAccess`) | `agentterrier-admin` user (was `TOSFullAccess`) | mirrored |
+| Canonical policy | [`aws-provisioning-storage.json`](../../scripts/policies/aws-provisioning-storage.json) | [`ve-admin-tos.json`](../../scripts/policies/ve-admin-tos.json) | Sid-keyed, gate-enforced |
+| `StorageBucketAdmin` | bucket lifecycle mgmt on `arn:aws:s3:::agentkeys-*` | bucket mgmt on `trn:tos:::agentterrier-*` | mirrored Sid |
+| Object grants | mail bucket only (`MailObjectRW` — SES verify flow) | OIDC/JWKS + tos-probe buckets only (`OidcObjectRW`/`ProbeObjectRW`) | documented exceptions (hybrid-email / bucket-hosted issuer) |
+| Data buckets (vault/memory/config) | **no object actions** | **no object actions** | mirrored; gate rejects regressions |
+| Broker signing identity | none needed (anonymous `AssumeRoleWithWebIdentity`) | [`ve-broker-setup.json`](../../scripts/policies/ve-broker-setup.json) — STS mint only, zero TOS | documented asymmetry |
+| Applied by | `setup-cloud.sh` step 16 | `setup-cloud-ve.sh` steps 11 + 56 | both converge drift on re-run |
+
+Accepted residual (both clouds): `ListBucket` on the data buckets (key metadata) — provisioning pre-checks and harness existence checks need it; object **contents** stay client-side-encrypted ciphertext regardless.
 5. **Workers on VE keep layer 2 unchanged:** `AGENTKEYS_WORKER_REQUIRE_STS=1` + independent cap chain-verify — a compromised broker still can't drive the workers without passing chain checks.
 6. **Stage-3-style negative tests on VE** (cross-actor denial in the harness, mirroring today's live e2e) so the isolation is a regression gate, not a one-time proof.
 
@@ -151,4 +167,4 @@ Stack selection gained the cloud axis ahead of the follow-ups below, with the VE
 1. **Broker mint-relay endpoint for clients** — on AWS, clients exchange the broker's JWT with STS *themselves* (anonymous). On VE the exchange is broker-side, so client flows (provisioner `cmd_provision`, daemon) need a broker endpoint that returns the minted creds (the `StsClient` seam is ready; the HTTP surface + backend-client wiring lands with the worker deploy).
 2. **`aud` parameterization** — `build_oidc_jwt_claims` (handlers/oidc.rs) hardcodes `aud="sts.amazonaws.com"`; the VE provider registers aud `agentkeys-ve-sts`. Make the aud config-driven when the broker starts minting VE-bound JWTs.
 3. **Workers on VE** — deploy cred/memory/config workers with `AGENTKEYS_TOS_ENDPOINT` + the relay; stage-3-style negative tests per the §17.5 invariants.
-4. **Least-priv broker signing identity** (#372) — a dedicated VE user scoped to `sts:AssumeRoleWithOIDC` only (today the scoped `agentterrier-broker-setup` works and admin is never needed at runtime).
+4. ~~**Least-priv broker signing identity** (#372)~~ — ✅ landed: `agentterrier-broker-setup` is scoped to STS mint + host/IAM read with zero TOS actions ([`scripts/policies/ve-broker-setup.json`](../../scripts/policies/ve-broker-setup.json); see "Storage-plane provisioning identities" above).

@@ -5838,6 +5838,11 @@ struct RealConfigCtx {
     j1: String,
     omni: String,
     device_key_hash: String,
+    /// Signer base URL (#372 item 2): the taxonomy is CLIENT-encrypted under
+    /// the signer-derived per-actor KEK (v3 envelopes) before it reaches the
+    /// config worker. `None` fails LOUD at store/fetch time — never a silent
+    /// fallback to worker-side plaintext.
+    signer_url: Option<String>,
 }
 
 /// Same `Ok(None)`/`Ok(Some)`/`Err` contract as `real_memory_ctx`, gated on
@@ -5860,7 +5865,33 @@ async fn real_config_ctx(state: &UiBridgeState) -> Result<Option<RealConfigCtx>,
         j1: c.j1,
         omni: c.omni,
         device_key_hash: c.device_key_hash,
+        signer_url: state.signer_url.clone(),
     }))
+}
+
+/// Derive the per-(actor, service) config KEK via the signer (#372 item 2 —
+/// the vault's `agentkeys.kek.v1` construction, `agentkeys-core::kek`). The
+/// session J1 authenticates the `/dev/sign-message` call (the signer-only
+/// listener requires a broker-session bearer, issue #74). Fails loud when the
+/// signer is unconfigured — config confidentiality now DEPENDS on it.
+async fn derive_config_kek(ctx: &RealConfigCtx, service: &str) -> Result<[u8; 32], String> {
+    let signer_url = ctx.signer_url.as_deref().ok_or(
+        "config v3: --signer-url / AGENTKEYS_SIGNER_URL missing — the taxonomy is \
+         client-encrypted under the signer-derived per-actor KEK (#372); configure the signer",
+    )?;
+    let omni_no0x = ctx.omni.trim_start_matches("0x").to_lowercase();
+    let signer = agentkeys_core::signer_client::HttpSignerClient::new(signer_url)
+        .with_session_jwt(ctx.j1.clone());
+    // Identity segment = the 0x-prefixed lowercase actor omni — the same
+    // identity the S3 key + v3 AAD bind (config is master-self: actor == operator).
+    agentkeys_core::kek::derive_kek_via_signer(
+        &signer,
+        &omni_no0x,
+        &format!("0x{omni_no0x}"),
+        service,
+    )
+    .await
+    .map_err(|e| format!("config KEK derivation via signer: {e}"))
 }
 
 /// Mint a master-self cap for the given broker route (`memory-put` /
@@ -6066,6 +6097,13 @@ async fn config_store_taxonomy(
     .await
     .map_err(|e| format!("STS relay (config): {e}"))?;
     let plaintext = serde_json::to_vec(taxonomy).map_err(|e| format!("taxonomy serialize: {e}"))?;
+    // #372 item 2: CLIENT-side encrypt under the signer-derived per-actor KEK
+    // (v3 envelope). The worker stores the envelope verbatim — plaintext never
+    // reaches it, and neither the storage plane nor any worker env can decrypt.
+    let kek = derive_config_kek(ctx, TAXONOMY_SERVICE).await?;
+    let aad = agentkeys_core::envelope_v3::aad_v3(&ctx.omni, TAXONOMY_SERVICE);
+    let envelope = agentkeys_core::envelope_v3::encrypt_v3(&kek, &plaintext, &aad)
+        .map_err(|e| format!("config v3 encrypt: {e}"))?;
     let resp = client
         .post(format!("{}/v1/config/put", ctx.config_url))
         .header("x-aws-access-key-id", creds.access_key_id)
@@ -6074,7 +6112,8 @@ async fn config_store_taxonomy(
         // Crate-owned body shape (issue #203) — config worker put body.
         .json(&agentkeys_backend_client::ConfigPutBody {
             cap,
-            plaintext_b64: STANDARD.encode(&plaintext),
+            plaintext_b64: None,
+            envelope_b64: Some(STANDARD.encode(&envelope)),
         })
         .send()
         .await
@@ -6135,17 +6174,32 @@ async fn config_fetch_taxonomy(
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("config get {status}: {body}"));
     }
-    let parsed: serde_json::Value = resp
+    // Crate-owned response shape (issue #203): exactly one of envelope_b64
+    // (v3 — client-side decrypt under the signer-derived KEK, #372) /
+    // plaintext_b64 (legacy v2 blob the worker decrypted) is set.
+    let parsed: agentkeys_backend_client::ConfigGetResp = resp
         .json()
         .await
         .map_err(|e| format!("config get parse: {e}"))?;
-    let b64 = parsed
-        .get("plaintext_b64")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let bytes = STANDARD
-        .decode(b64)
-        .map_err(|e| format!("taxonomy plaintext decode: {e}"))?;
+    let bytes = match (parsed.envelope_b64, parsed.plaintext_b64) {
+        (Some(env_b64), _) => {
+            let envelope = STANDARD
+                .decode(&env_b64)
+                .map_err(|e| format!("taxonomy envelope decode: {e}"))?;
+            let kek = derive_config_kek(ctx, TAXONOMY_SERVICE).await?;
+            let aad = agentkeys_core::envelope_v3::aad_v3(&ctx.omni, TAXONOMY_SERVICE);
+            agentkeys_core::envelope_v3::decrypt_v3(&kek, &envelope, &aad)
+                .map_err(|e| format!("config v3 decrypt (signer-derived KEK): {e}"))?
+        }
+        (None, Some(pt_b64)) => STANDARD
+            .decode(&pt_b64)
+            .map_err(|e| format!("taxonomy plaintext decode: {e}"))?,
+        (None, None) => {
+            return Err("config get: response carried neither envelope_b64 nor \
+                        plaintext_b64 — worker/client version mismatch"
+                .into())
+        }
+    };
     let taxonomy: MemoryTaxonomy =
         serde_json::from_slice(&bytes).map_err(|e| format!("taxonomy parse: {e}"))?;
     Ok(Some(taxonomy))

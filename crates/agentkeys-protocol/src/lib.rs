@@ -270,10 +270,21 @@ pub struct MemoryGetResp {
 /// master-only object (the memory-types taxonomy), so — unlike `MemoryPutBody`
 /// — there is NO `namespace` field; the object's identity is the signed cap
 /// `service` (`memory-taxonomy`).
+///
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` (#372 item 2 / #91):
+/// - `envelope_b64` — the v3 path: a client-encrypted envelope (signer-derived
+///   per-actor KEK, `agentkeys-core::kek`) the worker stores VERBATIM; the
+///   worker never sees plaintext or any key that opens it.
+/// - `plaintext_b64` — the legacy stage-1 path: the worker encrypts under its
+///   static env KEK. Deprecated; rejected once the worker runs
+///   `AGENTKEYS_CONFIG_REQUIRE_V3=1`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigPutBody {
     pub cap: CapToken,
-    pub plaintext_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
 }
 
 /// Config-worker `/v1/config/get` request body. Mirrors
@@ -283,10 +294,16 @@ pub struct ConfigGetBody {
     pub cap: CapToken,
 }
 
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` is set (#372 item 2):
+/// v3 blobs come back as the raw envelope for CLIENT-side decrypt under the
+/// signer-derived KEK; legacy v2 blobs come back worker-decrypted.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConfigGetResp {
     pub ok: bool,
-    pub plaintext_b64: String,
+    #[serde(default)]
+    pub plaintext_b64: Option<String>,
+    #[serde(default)]
+    pub envelope_b64: Option<String>,
     /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
     /// emitted for this op (`null`/absent on pre-#229 workers or when the
     /// emit failed in best-effort mode).
