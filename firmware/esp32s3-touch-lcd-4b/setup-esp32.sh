@@ -102,6 +102,18 @@ ensure_secrets(){
 # --- 3. build (idempotent: set-target only if the cache target differs; clean-retry on a corrupt download) ---
 build_fw(){
   cd "$FW_DIR"
+  # Build cache: ESP-IDF routes the C/C++ compiler through ccache when IDF_CCACHE_ENABLE=1 and
+  # ccache is on PATH (it must be set BEFORE `set-target` configures cmake, so export it here).
+  # Incremental `idf.py build` is already fast; this is the big win on the CLEAN-rebuild paths
+  # below (set-target, the corrupt-download retry, a fresh checkout) — those recompile ESP-IDF +
+  # LVGL + the BSP from scratch, and ccache makes the 2nd clean build several× faster by reusing
+  # cached objects. Harmless no-op when ccache is absent.
+  export IDF_CCACHE_ENABLE=1
+  if command -v ccache >/dev/null 2>&1; then
+    log ok "build-cache: ccache enabled (IDF_CCACHE_ENABLE=1)"
+  else
+    log skip "build-cache: ccache not installed — clean rebuilds are slower; 'brew install ccache' to speed them up"
+  fi
   if [ -f build/CMakeCache.txt ] && grep -q "IDF_TARGET:STRING=$TARGET" build/CMakeCache.txt; then
     log skip "set-target: already $TARGET"
   else
