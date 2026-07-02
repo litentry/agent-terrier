@@ -128,9 +128,9 @@ Implementation:
 
 | Site | Operation | Conformant? |
 |---|---|---|
-| `scripts/heima-scope-set.sh` (operator-internal) | scope grant | ✅ |
-| `scripts/heima-scope-revoke.sh` (operator-internal) | scope revoke | ✅ |
-| `scripts/heima-device-revoke.sh` (operator-internal) | revoke device | ✅ |
+| `scripts/operator/chain/heima-scope-set.sh` (operator-internal) | scope grant | ✅ |
+| `scripts/operator/chain/heima-scope-revoke.sh` (operator-internal) | scope revoke | ✅ |
+| `scripts/operator/chain/heima-device-revoke.sh` (operator-internal) | revoke device | ✅ |
 | `harness/scripts/heima-device-add.sh` (operator-internal) | register companion as 2nd master | ✅ |
 | `harness/scripts/heima-register-spare-master.sh` (operator-internal) | register synthetic 3rd master | ✅ |
 | `harness/scripts/heima-set-recovery-threshold.sh` (operator-internal) | set recovery threshold | ✅ |

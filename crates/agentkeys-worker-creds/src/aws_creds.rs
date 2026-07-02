@@ -11,7 +11,7 @@
 //!   X-Aws-Session-Token
 //!
 //! AWS IAM then enforces per-actor S3 scoping via `${aws:PrincipalTag/agentkeys_actor_omni}`
-//! conditions (see `scripts/provision-vault-role.sh`). The worker becomes
+//! conditions (see `scripts/operator/cloud/provision-vault-role.sh`). The worker becomes
 //! a passive credential relay — even a compromised worker can't read
 //! another actor's data because the STS creds are scoped at the AWS
 //! layer.

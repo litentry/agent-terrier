@@ -19,4 +19,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Public/private boundary gate
-        run: bash scripts/check-public-boundary.sh
+        run: bash scripts/utils/check-public-boundary.sh

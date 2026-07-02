@@ -674,7 +674,7 @@ fn handle_ops_revert_message(reason: Option<&str>, tx_hash: &str) -> String {
         ),
         "AA31" => Some(
             "the VerifyingPaymaster's EntryPoint deposit is below the one-op prefund — a \
-             funding issue, not an auth issue. Top up: bash scripts/heima-deploy-paymaster.sh \
+             funding issue, not an auth issue. Top up: bash scripts/operator/chain/heima-deploy-paymaster.sh \
              (idempotent; deposits only when below threshold)",
         ),
         "AA24" => Some(
@@ -953,7 +953,10 @@ mod tests {
     fn aa31_maps_to_paymaster_top_up_with_no_passkey_steering() {
         let msg = handle_ops_revert_message(Some("AA31 paymaster deposit too low"), "0xfeed");
         assert!(msg.contains("AA31 paymaster deposit too low"), "{msg}");
-        assert!(msg.contains("scripts/heima-deploy-paymaster.sh"), "{msg}");
+        assert!(
+            msg.contains("scripts/operator/chain/heima-deploy-paymaster.sh"),
+            "{msg}"
+        );
         assert!(msg.contains("0xfeed"), "{msg}");
         assert!(!msg.to_lowercase().contains("passkey"), "{msg}");
     }

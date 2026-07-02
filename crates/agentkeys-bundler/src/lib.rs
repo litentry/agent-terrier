@@ -8,7 +8,7 @@
 //! `eth_supportedEntryPoints`), so a self-hosted eth-infinitism bundler or a
 //! 3rd-party (Pimlico / Alchemy) drops in with zero broker code change.
 //!
-//! Why in-house instead of a stock bundler (see `scripts/erc4337-bundler.sh` +
+//! Why in-house instead of a stock bundler (see `scripts/operator/chain/erc4337-bundler.sh` +
 //! `docs/spec/heima-eth-gap.md`): Heima's Frontier RPC has no `debug` namespace
 //! (stock bundlers need `debug_traceCall` for ERC-7562 validation),
 //! `eth_estimateGas` REVERTS on `handleOps` (so the gas limit is pinned, not

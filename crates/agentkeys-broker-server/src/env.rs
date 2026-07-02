@@ -148,7 +148,7 @@ pub const BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET: &str = "BROKER_EVM_PER_IDENTI
 pub const BROKER_EMAIL_FROM_ADDRESS: &str = "BROKER_EMAIL_FROM_ADDRESS";
 /// Optional. Email sender backend selector — `stub` (default, in-process Vec) or `ses`
 /// (real `aws-sdk-sesv2` SendEmail). When `ses`, the FROM identity must be SES-verified
-/// (see `scripts/ses-verify-sender.sh`). Picks the SES region from `BROKER_AWS_REGION`
+/// (see `scripts/operator/cloud/ses-verify-sender.sh`). Picks the SES region from `BROKER_AWS_REGION`
 /// (or AWS SDK default chain).
 pub const BROKER_EMAIL_SENDER: &str = "BROKER_EMAIL_SENDER";
 /// Optional. Operator URL the broker redirects to after a successful email-link verification.

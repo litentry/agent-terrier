@@ -16,7 +16,7 @@
 //!
 //! Derivations match the broker's wallet_sig verify
 //! (`crates/agentkeys-broker-server/src/plugins/auth/wallet_sig.rs`) and the
-//! on-chain `registerAgentDevice` inputs in `scripts/heima-agent-create.sh`:
+//! on-chain `registerAgentDevice` inputs in `scripts/operator/chain/heima-agent-create.sh`:
 //!   `device_key_hash = keccak256(address_bytes)`               (cast keccak 0x<addr>)
 //!   `actor_omni      = sha256("agentkeys"||"evm"||addr_lc)`     (broker derive_omni_account)
 //!   `pop_payload     = keccak256(utf8("agentkeys-agent-pop:" || device_key_hash))`

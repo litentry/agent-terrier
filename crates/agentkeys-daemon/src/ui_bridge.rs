@@ -793,7 +793,7 @@ fn err(
 /// frontend + harness both POST — is `MASTER_MEMORY_PLANT_ROUTE`, owned by
 /// `agentkeys-protocol::web_api` (re-exported above, #275 tier-3): the React
 /// frontend gets it from the `agentkeys-web-core` wasm export (one code path),
-/// the harness demo is fixture-gated by `scripts/check-web-api-drift.sh`, and
+/// the harness demo is fixture-gated by `scripts/utils/check-web-api-drift.sh`, and
 /// the fixture (`harness/fixtures/web-api/master_memory_plant.json`) is pinned
 /// to the shared const + `ApiMemoryEntry` shape by the unit test below.
 pub const MASTER_MEMORY_ROUTE: &str = "/v1/master/memory";
@@ -1821,7 +1821,7 @@ async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_js
         "LOCAL master binding cleared, but the ON-CHAIN binding was NOT cleared (see onchain.error / \
          onchain.reason). Re-onboarding will still fail with SIG_VALIDATION until it is — confirm the \
          registry is VERSION>=0.3 (has resetMaster) and the deployer key is available, then retry, or \
-         run scripts/heima-reset-master.sh --operator-omni <omni> manually."
+         run scripts/operator/chain/heima-reset-master.sh --operator-omni <omni> manually."
     };
 
     Json(serde_json::json!({ "ok": true, "onchain": onchain, "note": note, "fleet": fleet }))

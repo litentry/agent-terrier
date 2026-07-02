@@ -113,5 +113,5 @@ These are non-negotiable. Violating them produces broken PRs / corrupted state.
 
 Don't reach for ad-hoc `systemctl`, `scp`, or `forge script` — these are wrapped:
 
-- **Remote broker host** (binary upgrades, systemd, nginx, env tweaks): `bash scripts/setup-broker-host.sh`
-- **Heima chain bring-up** (deploy, binding ceremonies, scope grants, K11 enroll, audit-row append, worker smoke): `bash scripts/setup-heima.sh`
+- **Remote broker host** (binary upgrades, systemd, nginx, env tweaks): `bash scripts/operator/setup-broker-host.sh`
+- **Heima chain bring-up** (deploy, binding ceremonies, scope grants, K11 enroll, audit-row append, worker smoke): `bash scripts/operator/setup-heima.sh`

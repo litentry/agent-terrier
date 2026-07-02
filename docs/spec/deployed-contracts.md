@@ -6,12 +6,12 @@ The **human registry** for AgentKeys' on-chain contracts: design/version notes, 
 
 | Record | Single source of truth | Notes |
 |---|---|---|
-| **Prod contract addresses** + deployed set version | chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) — `.contracts[]` + `contract_set_version` | versioned + compiled in (`include_str!`) — broker/daemon/UI serve it; rewritten by the chain bring-up entry point (operator-internal) on every deploy. Mirrored to `scripts/operator-workstation.env` (the operator-internal shell mirror); `bash scripts/check-deployed-contracts-sync.sh` verifies the mirror. |
+| **Prod contract addresses** + deployed set version | chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) — `.contracts[]` + `contract_set_version` | versioned + compiled in (`include_str!`) — broker/daemon/UI serve it; rewritten by the chain bring-up entry point (operator-internal) on every deploy. Mirrored to `scripts/operator-workstation.env` (the operator-internal shell mirror); `bash scripts/utils/check-deployed-contracts-sync.sh` verifies the mirror. |
 | **Test contract addresses** (parallel set) | `scripts/operator-workstation.test.env` (`*_ADDRESS_HEIMA`, operator-internal) — **authoritative** | the `TEST_*` GitHub secrets are a CI-consumable **copy**, synced one-way env→secrets by the CI-secrets sync helper (operator-internal; re-run it after any test redeploy). Never in the chain profile — it records the prod set only. |
 | **Wallet (EOA) addresses** | the env files (`*_DEPLOYER_ADDR_HEIMA`, `BROKER_SPONSOR_SIGNER_ADDRESS_HEIMA`) | key custody tiers + funding map: the chain-setup operator runbook §Wallets (operator-internal) |
 | **Human prose** | this doc | ABI/cutover/version notes ONLY — no addresses |
 
-**No doc may re-write a literal address that one of those sources owns** — link to the source and give a resolve command instead. CI-enforced: the doc-literal gate in [`scripts/check-deployed-contracts-sync.sh`](../../scripts/check-deployed-contracts-sync.sh) (workflow [`contracts-sync.yml`](../../.github/workflows/contracts-sync.yml)) fails any tracked `.md` containing an address currently in a chain profile. Historical/orphaned addresses pass naturally — once a redeploy moves an address out of the profile, its literal is no longer banned.
+**No doc may re-write a literal address that one of those sources owns** — link to the source and give a resolve command instead. CI-enforced: the doc-literal gate in [`scripts/utils/check-deployed-contracts-sync.sh`](../../scripts/utils/check-deployed-contracts-sync.sh) (workflow [`contracts-sync.yml`](../../.github/workflows/contracts-sync.yml)) fails any tracked `.md` containing an address currently in a chain profile. Historical/orphaned addresses pass naturally — once a redeploy moves an address out of the profile, its literal is no longer banned.
 
 Indexed from [`arch.md`](../arch.md) §5. (`docs/contracts.md` is a redirect to this file.) The operator-facing **wallet/funding map** — key custody tiers, prod-vs-test sets side by side, the funding-flow diagram, "which wallet do I fund" — is the chain-setup operator runbook §Wallets (operator-internal); update it in the same commit as any redeploy/rotation recorded here.
 
@@ -41,7 +41,7 @@ Two distinct EVM accounts deploy AgentKeys contracts. They are **different keys*
 
 > **RIP-7212 note (2026-06-12):** Heima runtime **9261** activated the P-256 precompile at `0x100` (litentry/heima#4030, spec-vector-verified on mainnet) and the same-day **0.4 redeploy consumed it** (router-wired K11, see above). #170 is resolved on both chains.
 
-> **Source of truth = the chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json).** Its `contracts[]` array holds the live addresses; `contract_set_version` holds the deployed SET version. `scripts/heima-bring-up.sh` rewrites it programmatically on every fresh deploy (step 6b), and the typed `ChainProfile` struct + `chain_profile::tests::heima_carries_full_contract_registry_and_version` enforce its shape — that is the strict-typed JSON registry. The *expected* source version lives in [`../../crates/agentkeys-chain/VERSION`](../../crates/agentkeys-chain/VERSION); a deploy redeploys + bumps the profile only when the two differ (no bytecode comparison — see "Re-deploy / replace"). **This `.md` is human PROSE only — it no longer carries an address table** (that duplication was the drift source).
+> **Source of truth = the chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json).** Its `contracts[]` array holds the live addresses; `contract_set_version` holds the deployed SET version. `scripts/operator/chain/heima-bring-up.sh` rewrites it programmatically on every fresh deploy (step 6b), and the typed `ChainProfile` struct + `chain_profile::tests::heima_carries_full_contract_registry_and_version` enforce its shape — that is the strict-typed JSON registry. The *expected* source version lives in [`../../crates/agentkeys-chain/VERSION`](../../crates/agentkeys-chain/VERSION); a deploy redeploys + bumps the profile only when the two differ (no bytecode comparison — see "Re-deploy / replace"). **This `.md` is human PROSE only — it no longer carries an address table** (that duplication was the drift source).
 
 **Read the live addresses from the profile** (don't hand-maintain them here):
 
@@ -49,7 +49,7 @@ Two distinct EVM accounts deploy AgentKeys contracts. They are **different keys*
 jq -r '"contract_set_version \(.contract_set_version)", (.contracts[] | "  \(.name): \(.address)")' \
   crates/agentkeys-core/chain-profiles/heima.json
 # Verify the profile ⟷ operator-workstation.env mirror:
-bash scripts/check-deployed-contracts-sync.sh
+bash scripts/utils/check-deployed-contracts-sync.sh
 ```
 
 The set: the 4 stage-1 cores `AgentKeysScope` / `SidecarRegistry` / `K3EpochCounter` / `CredentialAudit` (account-auth #164 E3 — redeployed 2026-06-08, replacing the pre-#164 `0xd44b375…` / `0x1Ac62f1C…` / `0x6c9e675c…` / `0x63c4545a…` set, now orphaned), the pre-deployed `P256Verifier` / `K11Verifier`, the #164 ERC-4337 infra `EntryPoint` / `P256AccountFactory`, and the `VerifyingPaymaster` (#225 — broker-co-signed gas sponsorship for the K11-gated accept UserOp; one shared EntryPoint deposit, the J1 Sybil gate). The parent-control web UI reads the same profile via `GET /v1/chain/info` (#153).
@@ -78,7 +78,7 @@ The test stack deploys the **same four contracts** with the test deployer key (`
   # key to ~/.agentkeys/heima-deployer-test.key. Add FORCE_DEPLOY=1 when
   # refreshing over a live-but-outdated test set.
   AGENTKEYS_CHAIN=heima MAINNET_CONFIRM=1 \
-    bash scripts/setup-heima.sh --ci --from-step 4 --to-step 8
+    bash scripts/operator/setup-heima.sh --ci --from-step 4 --to-step 8
   ```
 
 - The `P256Verifier` + `K11Verifier` are **shared pre-deployed** contracts — same address on prod and test (`.test.env` mirrors the chain-profile values).
@@ -136,7 +136,7 @@ Deployer: the Base prod deployer — `grep ^DEPLOYER_ADDR_BASE scripts/operator-
 
 ```bash
 # One-shot health check across the v2 set:
-AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh   # exits 0 on all-pass
+AGENTKEYS_CHAIN=heima bash scripts/utils/verify-heima-contracts.sh   # exits 0 on all-pass
 
 # Resolve addresses + RPC from the chain profile (#251 — never paste literals):
 PROFILE=crates/agentkeys-core/chain-profiles/heima.json
@@ -155,13 +155,13 @@ The verify script checks, per contract: (1) **bytecode presence** (`eth_getCode`
 
 ## Re-deploy / replace
 
-`bash scripts/heima-bring-up.sh` is **idempotent**, by VERSION not bytecode:
+`bash scripts/operator/chain/heima-bring-up.sh` is **idempotent**, by VERSION not bytecode:
 
 1. **Skip** when all four cores have on-chain code AND `crates/agentkeys-chain/VERSION` == the chain profile's `contract_set_version` (the recorded deployed version).
 2. **Redeploy** when the stored address is the `0x0` sentinel / absent or has no on-chain bytecode (chain reset). A bumped `VERSION` ≠ the recorded version is a hard stop that prints the mismatch and asks for an explicit opt-in (it orphans state + costs mainnet gas — see below) rather than auto-redeploying.
 3. **Force** a fresh deploy at new addresses (contract patch): bump `crates/agentkeys-chain/VERSION`, then re-run with `FORCE_DEPLOY=1` (blind) — or, for the #164 account-auth cutover, use the account-auth cutover helper (operator-internal; probes the live `setScope` selector + skips when already live).
 
-On a fresh deploy the bring-up script **auto-writes the chain profile** (`contracts[]` + `contract_set_version`, step 6b — the source of truth) **and `operator-workstation.env`** (step 6). It does NOT touch this markdown — so update **only the human prose here** (the version line + any ABI/cutover/historical note) when the design or version changes; the addresses live in the profile, not a table here. Confirm the two mirrors agree: `bash scripts/check-deployed-contracts-sync.sh`. No bytecode comparison anywhere — Solidity metadata + immutables make it unreliable, so the human-asserted `VERSION` is the comparison key.
+On a fresh deploy the bring-up script **auto-writes the chain profile** (`contracts[]` + `contract_set_version`, step 6b — the source of truth) **and `operator-workstation.env`** (step 6). It does NOT touch this markdown — so update **only the human prose here** (the version line + any ABI/cutover/historical note) when the design or version changes; the addresses live in the profile, not a table here. Confirm the two mirrors agree: `bash scripts/utils/check-deployed-contracts-sync.sh`. No bytecode comparison anywhere — Solidity metadata + immutables make it unreliable, so the human-asserted `VERSION` is the comparison key.
 
 ## ABI summary
 
@@ -173,7 +173,7 @@ Full ABIs in [`crates/agentkeys-chain/src/*.sol`](../../crates/agentkeys-chain/s
 - `registerAgentDevice(bytes32 deviceKeyHash, bytes32 operatorOmni, bytes32 actorOmni, bytes linkCodeRedemption, bytes agentPopSig)` — master-only (`msg.sender == operatorMasterWallet`); agents get `ROLE_CAP_MINT` only
 - `revokeAgentDevice(bytes32 deviceKeyHash)` — master-only (`msg.sender == operatorMasterWallet[entry.operatorOmni]`)
 - `revokeMasterDevice(bytes32 targetDeviceKeyHash, K11Assertion[] recoveryAssertions)` — M-of-N recovery quorum (`recoveryThreshold[operator]`); refuses to strand the operator
-- `resetMaster(bytes32 operatorOmni)` — **#225 E7, owner-ONLY** (the deployer captured at construction). Dev/recovery escape hatch: wipes the operator's whole device list + clears `operatorMasterWallet`/`recoveryThreshold`/`operatorNonce`, so a FRESH `registerFirstMasterDevice` can re-bind WITHOUT redeploying the set (needed because first-master-only makes the binding otherwise immutable). The daemon's `POST /v1/master/reset` calls this via `scripts/heima-reset-master.sh`. Emits `MasterReset(operatorOmni, clearedMaster, deviceCount)`.
+- `resetMaster(bytes32 operatorOmni)` — **#225 E7, owner-ONLY** (the deployer captured at construction). Dev/recovery escape hatch: wipes the operator's whole device list + clears `operatorMasterWallet`/`recoveryThreshold`/`operatorNonce`, so a FRESH `registerFirstMasterDevice` can re-bind WITHOUT redeploying the set (needed because first-master-only makes the binding otherwise immutable). The daemon's `POST /v1/master/reset` calls this via `scripts/operator/chain/heima-reset-master.sh`. Emits `MasterReset(operatorOmni, clearedMaster, deviceCount)`.
 - `getDevice(bytes32 deviceKeyHash) → DeviceEntry` — view
 - `isActive(bytes32 deviceKeyHash) → bool` — hot-path view for workers
 - `operatorMasterWallet(bytes32 operatorOmni) → address` — auto-generated getter
@@ -203,4 +203,4 @@ Full ABIs in [`crates/agentkeys-chain/src/*.sol`](../../crates/agentkeys-chain/s
 3. **K3 epoch advance** — `currentEpoch` monotonically increases; update the "Constructor wiring" line for the latest value
 4. **`signerGovernance` transfer** — when handoff from deployer → operational signer (or → multisig in stage 2) happens, record the new address + tx hash
 5. **Re-deploy** at fresh addresses — the chain profile is rewritten automatically; mention the old → orphaned addresses in the prose / "Historical deploys" section for the audit-trail (no table row to replace)
-6. **Test redeploy** — re-pin the addresses in `operator-workstation.test.env` (the authoritative test record), then re-run `scripts/ci-set-github-secrets.sh` so the `TEST_*` secret copies follow; this doc's "Test / CI deploy" section needs only a prose note
+6. **Test redeploy** — re-pin the addresses in `operator-workstation.test.env` (the authoritative test record), then re-run `scripts/operator/secrets/ci-set-github-secrets.sh` so the `TEST_*` secret copies follow; this doc's "Test / CI deploy" section needs only a prose note

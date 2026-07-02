@@ -78,7 +78,7 @@ impl TestEnv {
         // BROKER_EMAIL_FROM_ADDRESS matches the env var the broker reads at
         // runtime (per crates/agentkeys-broker-server/src/env.rs:143). Default
         // to noreply-test@<MAIL_DOMAIN> — must be registered + verified per
-        // scripts/ses-verify-sender.sh before this test will pass.
+        // scripts/operator/cloud/ses-verify-sender.sh before this test will pass.
         let from_address = std::env::var("BROKER_EMAIL_FROM_ADDRESS")
             .unwrap_or_else(|_| format!("{}@{}", DEFAULT_FROM_LOCAL, mail_domain));
         Some(Self {
@@ -199,10 +199,9 @@ async fn ses_send_and_receive_round_trip() {
         "verify_sender_ready: calling SES GetEmailIdentity({})",
         &[&from_address],
     );
-    sender
-        .verify_sender_ready()
-        .await
-        .expect("FROM identity not verified for sending — run scripts/ses-verify-sender.sh");
+    sender.verify_sender_ready().await.expect(
+        "FROM identity not verified for sending — run scripts/operator/cloud/ses-verify-sender.sh",
+    );
     log("verify_sender_ready: ok", &[]);
 
     let s3 = S3Client::new(&sdk_config);

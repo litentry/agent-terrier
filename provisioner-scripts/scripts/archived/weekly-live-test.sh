@@ -27,7 +27,7 @@ set -u
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 PROVISIONER_ROOT="$REPO_ROOT/provisioner-scripts"
-RESET_CHROME="$REPO_ROOT/scripts/reset-chrome-for-recording.sh"
+RESET_CHROME="$REPO_ROOT/scripts/utils/demo/reset-chrome-for-recording.sh"
 
 if [ ! -x "$RESET_CHROME" ]; then
   echo "error: $RESET_CHROME not found or not executable" >&2
