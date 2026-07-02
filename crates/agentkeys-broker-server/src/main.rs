@@ -11,6 +11,7 @@ use agentkeys_broker_server::{
     oidc::OidcKeypair,
     state::{AppState, Tier2State},
     sts::{AwsStsClient, StsClient},
+    ve_sts::VeStsClient,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -136,8 +137,34 @@ async fn main() -> anyhow::Result<()> {
     // `caller_identity_ok` startup probe; if no creds are configured (the
     // post-migration recommended posture), the probe logs a soft warning
     // instead of refusing to boot.
-    tracing::info!("STS client: SDK default chain (creds optional after issue #71 — only the GetCallerIdentity startup probe consults them)");
-    let sts = AwsStsClient::with_default_chain(&config.aws_region).await;
+    // STS provider selection (docs/spec/ve-broker-runtime-port.md). Default =
+    // AWS (SDK default chain; creds optional post-#71 — the JWT authenticates
+    // the mint). AGENTKEYS_STS_PROVIDER=ve swaps in the Volcano Engine client:
+    // VE's gateway signature-authenticates EVERY request, so on VE the mint is
+    // broker-side, signed with the broker's least-priv VE identity, and each
+    // session carries a per-actor scope-down Policy. Unknown values fail loud
+    // — never a silent fallback to a different cloud's credential plane.
+    let sts_provider = std::env::var("AGENTKEYS_STS_PROVIDER").unwrap_or_default();
+    let sts: Arc<dyn StsClient> = match sts_provider.as_str() {
+        "" | "aws" => {
+            tracing::info!("STS client: AWS SDK default chain (creds optional after issue #71 — only the GetCallerIdentity startup probe consults them)");
+            Arc::new(AwsStsClient::with_default_chain(&config.aws_region).await)
+        }
+        "ve" => {
+            tracing::info!("STS client: Volcano Engine AssumeRoleWithOIDC (AGENTKEYS_STS_PROVIDER=ve) — broker-signed mint + per-actor session policy");
+            Arc::new(VeStsClient::from_env().map_err(|e| {
+                std::io::Error::other(format!(
+                    "AGENTKEYS_STS_PROVIDER=ve but the VE STS client cannot boot: {e}"
+                ))
+            })?)
+        }
+        other => {
+            return Err(std::io::Error::other(format!(
+                "unknown AGENTKEYS_STS_PROVIDER={other:?} (expected \"aws\" or \"ve\") — refusing to guess a credential plane"
+            ))
+            .into());
+        }
+    };
 
     if !args.skip_startup_check {
         match sts.caller_identity_ok().await {
@@ -168,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
         config,
         http,
         audit,
-        sts: Arc::new(sts),
+        sts,
         oidc: boot_artifacts.oidc_keypair,
         session_keypair: boot_artifacts.session_keypair,
         registry: boot_artifacts.registry,
