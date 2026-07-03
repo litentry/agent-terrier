@@ -1,0 +1,11 @@
+[package]
+name = "agentkeys-inference-creds"
+version = "0.1.0"
+edition = "2021"
+description = "Per-family isolated loading of the Volcano inference credential families — ARK (LLM Bearer), ASR and TTS (app-token). One family, one source, zero cross-family fallback (#338)."
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

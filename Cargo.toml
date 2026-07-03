@@ -24,6 +24,7 @@ members = [
     "crates/agentkeys-worker-audit",
     "crates/agentkeys-worker-email",
     "crates/agentkeys-bundler",
+    "crates/agentkeys-inference-creds",
 ]
 
 [workspace.dependencies]
@@ -35,6 +36,7 @@ agentkeys-memory-openviking = { path = "crates/agentkeys-memory-openviking" }
 agentkeys-web-core = { path = "crates/agentkeys-web-core" }
 agentkeys-backend-client = { path = "crates/agentkeys-backend-client" }
 agentkeys-protocol = { path = "crates/agentkeys-protocol" }
+agentkeys-inference-creds = { path = "crates/agentkeys-inference-creds" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
