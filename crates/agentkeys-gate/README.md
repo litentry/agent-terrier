@@ -77,17 +77,22 @@ key touches ONE place (the relay) instead of every live sandbox.
 
 ## Deploy (VE broker host — #384 wiring)
 
-Wired into `scripts/operator/setup-broker-host-ve.sh` (steps 3–6, idempotent):
-builds + installs the binary, writes `agentkeys-gate.service` (loopback
-`127.0.0.1:$VE_GATE_PORT`, ark family via
-`AGENTKEYS_INFERENCE_CREDS_DIR=/etc/agentkeys/inference`, relay keys at
-`/etc/agentkeys/gate-keys.json` — skeleton created, never overwritten), and —
-when `VE_GATE_HOST` is set — fronts it with an nginx vhost + Let's Encrypt TLS
+Canonical entry is the unified host bootstrap **`setup-broker-host.sh --cloud ve`**
+(#376/#381 — it `exec`s the VE implementation, currently `setup-broker-host-ve.sh`,
+since the AWS-host lib migration is Stage 3b). Steps 3–6 there (idempotent) build +
+install the binary, write `agentkeys-gate.service` (loopback `127.0.0.1:$VE_GATE_PORT`,
+ark family via `AGENTKEYS_INFERENCE_CREDS_DIR=/etc/agentkeys/inference`, relay keys at
+`/etc/agentkeys/gate-keys.json` — skeleton created, never overwritten), and — when
+`VE_GATE_HOST` is set — front it with an nginx vhost + Let's Encrypt TLS
 (`proxy_buffering off` so SSE streams flow). The A record rides
-`setup-cloud-ve.sh` step 55 (same IP as the broker). Bring-up order:
+`setup-cloud.sh --cloud ve` step 55 (same IP as the broker). Bring-up order:
 
 ```bash
-# on the VE host, after setup-broker-host-ve.sh:
+# DNS (laptop, AWS Route53 profile):
+bash scripts/operator/setup-cloud.sh --cloud ve --only-step 55
+# host converge (on the VE host, as broker-manager):
+bash scripts/operator/setup-broker-host.sh --cloud ve
+# then populate creds + start:
 AGENTKEYS_INFERENCE_CREDS_DIR=/etc/agentkeys/inference \
   bash scripts/operator/secrets/rotate-inference-cred.sh ark   # key + LLM_ENDPOINT_ID
 sudoedit /etc/agentkeys/gate-keys.json                          # add relay keys
