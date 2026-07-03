@@ -75,6 +75,30 @@ api_key: ${AGENTKEYS_RELAY_KEY}          # was: ${ARK_API_KEY}
 The sandbox env then no longer needs `ARK_API_KEY` at all — rotating the vendor
 key touches ONE place (the relay) instead of every live sandbox.
 
+## Deploy (VE broker host — #384 wiring)
+
+Wired into `scripts/operator/setup-broker-host-ve.sh` (steps 3–6, idempotent):
+builds + installs the binary, writes `agentkeys-gate.service` (loopback
+`127.0.0.1:$VE_GATE_PORT`, ark family via
+`AGENTKEYS_INFERENCE_CREDS_DIR=/etc/agentkeys/inference`, relay keys at
+`/etc/agentkeys/gate-keys.json` — skeleton created, never overwritten), and —
+when `VE_GATE_HOST` is set — fronts it with an nginx vhost + Let's Encrypt TLS
+(`proxy_buffering off` so SSE streams flow). The A record rides
+`setup-cloud-ve.sh` step 55 (same IP as the broker). Bring-up order:
+
+```bash
+# on the VE host, after setup-broker-host-ve.sh:
+AGENTKEYS_INFERENCE_CREDS_DIR=/etc/agentkeys/inference \
+  bash scripts/operator/secrets/rotate-inference-cred.sh ark   # key + LLM_ENDPOINT_ID
+sudoedit /etc/agentkeys/gate-keys.json                          # add relay keys
+sudo systemctl enable --now agentkeys-gate                      # (re)start after either change
+curl -s https://$VE_GATE_HOST/healthz                           # → {"ok":true,...}
+```
+
+No audit worker runs on VE yet, so `AGENTKEYS_AUDIT_URL` is deliberately unset
+— the gate warns at boot and metering stays process-local (same GAP as the
+worker plane; wired the day the audit worker lands there).
+
 ## What this crate deliberately does NOT do
 
 - **Action control** — hooks in the Task Host + data-plane caps own that
