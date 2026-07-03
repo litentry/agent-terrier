@@ -1205,8 +1205,16 @@ and never reordered**. Grouped by 10s leaves room for related ops.
 | `ConfigPut` | 80 | `{key: string, payload_hash: [u8;32]}` | config-service (#201, #229) |
 | `ConfigGet` | 81 | `{key: string, cap_hash: [u8;32]}` | config-service (#201, #229) |
 | `ConfigTeardown` | 82 | `{actor_target: [u8;32]}` | config-service (#201, #229) |
+| `GateTurn` | 90 | `{device_id: string, api_key_id: string, model: string, streamed: bool, outcome: string, prompt_tokens: u64, completion_tokens: u64, total_tokens: u64, cached_tokens: u64, reasoning_tokens: u64}` | `agentkeys-gate` (#384 metered key-custody LLM-egress relay; usage metering per #332) |
 
-Byte ranges `3-9`, `14-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `83-89`, `90-255` are reserved for future extensions in the same family (config claimed `80-89` per #229; the memory family claimed `13` for `MemoryInboxAppend` per #339).
+Byte ranges `3-9`, `14-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `83-89`, `91-99`, `100-255` are reserved for future extensions in the same family (config claimed `80-89` per #229; the memory family claimed `13` for `MemoryInboxAppend` per #339; the gate family claimed `90-99` per #384).
+
+The `GateTurn` row records one proxied LLM turn at the egress relay: token
+usage (incl. the separately-priced `cached`/`reasoning` details, #332) plus the
+per-device / per-api-key attribution. Envelope-level `actor_omni` and
+`operator_omni` both carry the OWNING USER's omni — usage always accumulates to
+one user (#384); devices and api-keys are body-level breakdown dimensions that
+roll up into the user summary (`GET /v1/usage` on the relay).
 
 **Data-plane emit sites are LIVE (#229).** The cred / memory / config workers
 emit one envelope per store / fetch / teardown — after cap-verify, before the
@@ -2399,7 +2407,9 @@ Tier-1 coverage means one reference script bundle ports across four hosts with t
 
 ### 22d.3 Primary for certified device stacks — the in-path endpoint
 
-Certified device stacks have no agent-runtime hook surface, but they do expose one point where the LLM turn is resolved. In the Volcano device stack, RTC CustomLLM calls AgentKeys as the turn endpoint: AgentKeys runs cap-check + memory-inject + audit, then calls Ark/Doubao. The endpoint sits in the agent's execution path by construction, so the gate cannot be skipped — the same non-LLM-guarantee property hooks give a Task Host. Because the seam is scoped to a *certified* stack, we validate latency, auth, and billing end-to-end without becoming a generic gateway. This is the **Phase-1 primary seam** (strategy §3.6/§4); it is not a fallback.
+Certified device stacks have no agent-runtime hook surface, but they do expose one point where the LLM turn is resolved. The endpoint sits in the agent's execution path by construction, so the gate cannot be skipped — the same non-LLM-guarantee property hooks give a Task Host. Because the seam is scoped to a *certified* stack, we validate latency, auth, and billing end-to-end without becoming a generic gateway. This is the **Phase-1 primary seam** (strategy §3.6/§4); it is not a fallback.
+
+**Where the seam actually sits in the shipped Volcano stack (#384).** The shipped device path is firmware → `/v1/chat` → the Hermes sandbox agent (#347/#369) — the device's turn is resolved by *our own* agent runtime, so the *control* seam there is **hooks** (§22d.2) + data-plane caps, per the agent-first rule. The in-path endpoint that ships is the sandbox's **LLM egress**: [`agentkeys-gate`](../crates/agentkeys-gate/), the metered key-custody relay Hermes' OpenAI-compatible provider `base_url` points at. It holds the ONE vendor inference key (Ark is Bearer-only — not IAM/STS-mintable, so custody cannot ride the #337 STS-relay), meters each turn's `usage` per user with per-device/per-api-key rollup (#332/#384), enforces deterministic token budgets, and appends the `GateTurn` (90) row. **Custody + metering only — the relay is NOT a control point** (an egress proxy cannot deny an agent's tool calls; memory delivery stays on the `pre_llm_call` hook seam, #141). The RTC-CustomLLM form of this seam — the vendor's stack resolving the turn against an AgentKeys endpoint — remains the design pattern for stacks we do NOT run the agent runtime of; the relay is its first shipped instance, one hop deeper.
 
 **Dropped (2026-06-19) — the generic OpenAI-compatible proxy.** An earlier revision kept a fallback seam for hooks-less *unmanaged* hosts (xiaozhi-server — verified 2026-05-28: only plugin/MCP tool registration, no hooks — vendor mobile chatbots, plain `openai.ChatCompletion` scripts): an AgentKeys-hosted `OPENAI_BASE_URL` the client points at, intercepting every prompt + `tool_calls` + completion. **No longer a planned track.** AgentKeys is agent-first — a host earns an IAM guarantee by being an agent runtime (hooks) or a certified device stack (in-path endpoint), not by routing a bare chatbot through a gateway. Rationale: (1) strategy §2.4 mission-creep — a proxy in the path of every byte invites retry/fallback/caching asks that drift toward Task-Host territory; (2) competitive crowding — Vercel AI Gateway, Helicone, Portkey, OpenRouter, Cloudflare AI Gateway; (3) weak differentiation — hooks + certified stacks cover the strategically-important paths, and non-agent hosts are better reached via SDK/MCP/direct adapter.
 
@@ -2423,7 +2433,7 @@ The #384 relay (`agentkeys-gate`, GateTurn 90) exists for **key custody + per-us
 Per [strategy §2.4](agent-iam-strategy.md) zero task-orchestration hard line, AgentKeys must not become a Task Host — or a generic LLM gateway. Both seams respect that boundary, but differently:
 
 - **Hooks** sit *inside* the Task Host (Claude Code, Codex, Hermes, OpenClaw). The Task Host owns lifecycle; AgentKeys provides the policy-check tool body. No request-path orchestration on AgentKeys' side.
-- **The certified-stack in-path endpoint** sits at the one point where the stack resolves the LLM turn (Volcano RTC CustomLLM → AgentKeys → Ark/Doubao). AgentKeys touches that turn — cap-check + memory-inject + audit — not the whole task loop. Discipline is "no retry, no fallback, no caching, no orchestration"; scoping the seam to one *certified* vendor (not an open `OPENAI_BASE_URL` gateway) is what keeps the §2.4 risk bounded.
+- **The certified-stack in-path endpoint** sits at the one point where the stack resolves the LLM turn (shipped: Hermes sandbox → `agentkeys-gate` → Ark; pattern for vendor-run stacks: RTC CustomLLM → AgentKeys → Ark/Doubao). AgentKeys touches that turn — key custody + usage metering + `GateTurn` audit (#384) — not the whole task loop. Discipline is "no retry, no fallback, no caching, no orchestration"; scoping the seam to one *certified* stack (not an open `OPENAI_BASE_URL` gateway) is what keeps the §2.4 risk bounded.
 
 Both seams are agent-first and bounded — neither makes AgentKeys a Task Host or a generic LLM gateway. The generic OpenAI-compatible proxy that would have served *non-agent* hosts was dropped 2026-06-19 (§22d.3) precisely because it lacked that bound.
 
@@ -2472,6 +2482,10 @@ agentkeys/                                  # repo root
 │   │                                       #   process exposing AgentKeys tools to
 │   │                                       #   LLM hosts over stdio / HTTP / xiaozhi
 │   │                                       #   mcp-endpoint WS relay (issue #107)
+│   ├── agentkeys-gate/                     # metered key-custody LLM-egress relay
+│   │                                       #   (#384): holds the vendor inference key,
+│   │                                       #   per-user budgets + per-device/per-key
+│   │                                       #   usage rollup (#332), GateTurn audit
 │   ├── agentkeys-provisioner/              # Rust orchestrator that spawns TS scrapers
 │   ├── agentkeys-protocol/                 # The wire TYPES half of the #203 one-owner
 │   │                                       #   split (#215 re-land): pure serde, wasm-safe
@@ -2512,6 +2526,7 @@ agentkeys/                                  # repo root
 | `agentkeys-daemon` | Sidecar daemon (master / agent role per init); localhost proxy |
 | `agentkeys-mcp` | Legacy in-process MCP adapter library — used by `agentkeys-daemon`'s sidecar stdio loop (M0). |
 | `agentkeys-mcp-server` | Standalone Rust MCP server binary (issue #107). Three transports: stdio (Claude Desktop / Claude Code / Codex / Cursor / Cline / Roo / Windsurf / Gemini CLI), HTTP (broker-direct), xiaozhi `mcp-endpoint` WS relay. **One backend: `http`** (real broker + memory + audit workers — the production backend IS the shared `agentkeys-backend-client::BackendClient`). The `in-memory` fixture backend was **removed in #207 (real-data-only)**; transport/protocol conformance is now proven by the Rust `tests/transport_conformance.rs` (subprocess MCP client over HTTP + stdio against the real backend). Installed via `cargo install --git https://github.com/litentry/agentKeys agentkeys-mcp-server`. |
+| `agentkeys-gate` | The **metered key-custody LLM-egress relay** (#384). OpenAI-compatible `POST /v1/chat/completions` the sandbox agent's LLM provider points at (`base_url` swap): the relay holds the ONE vendor inference key (Ark is Bearer-only — not IAM/STS-mintable, so custody cannot ride the #337 STS-relay), meters each turn's `usage` (#332 — `stream_options.include_usage` injected on streams), enforces deterministic per-user token budgets (`429 budget_exceeded`), and appends a `GateTurn` (90) row per turn. Attribution: all usage accumulates to ONE user; per-device/per-api-key stats roll up into `GET /v1/usage`. **Custody + metering only — NOT a control point** (§22d: the agent path's IAM guarantee is hooks + data-plane caps); no retry, no fallback, no caching, no conversation rewriting. |
 | `agentkeys-provisioner` | Spawns TS scraper, encrypts obtained creds, submits via cap-store |
 | `agentkeys-chain` | Solidity contracts + Rust ABI bindings |
 

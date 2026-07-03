@@ -15,7 +15,8 @@
 //! - 60-69 email family (EmailSend=60, EmailReceive=61; 62-69 reserved)
 //! - 70-79 K3 family (K3EpochAdvance=70; 71-79 reserved)
 //! - 80-89 config family (ConfigPut=80, ConfigGet=81, ConfigTeardown=82; 83-89 reserved)
-//! - 90-255 reserved for future families
+//! - 90-99 gate family (GateTurn=90; 91-99 reserved)
+//! - 100-255 reserved for future families
 
 /// Canonical op_kind enum. The byte value MUST match the row in arch.md
 /// §15.3a. The enum is `repr(u8)` so `as u8` gives the canonical byte.
@@ -49,6 +50,9 @@ pub enum AuditOpKind {
     ConfigPut = 80,
     ConfigGet = 81,
     ConfigTeardown = 82,
+    /// #384 — one LLM turn through the metered key-custody egress relay
+    /// (`agentkeys-gate`): token usage + attribution, budgets per #332.
+    GateTurn = 90,
 }
 
 impl AuditOpKind {
@@ -78,6 +82,7 @@ impl AuditOpKind {
             80 => Self::ConfigPut,
             81 => Self::ConfigGet,
             82 => Self::ConfigTeardown,
+            90 => Self::GateTurn,
             _ => return None,
         })
     }
@@ -109,6 +114,7 @@ impl AuditOpKind {
             Self::ConfigPut => "config.put",
             Self::ConfigGet => "config.get",
             Self::ConfigTeardown => "config.teardown",
+            Self::GateTurn => "gate.turn",
         }
     }
 }
@@ -145,6 +151,7 @@ mod tests {
             AuditOpKind::ConfigPut,
             AuditOpKind::ConfigGet,
             AuditOpKind::ConfigTeardown,
+            AuditOpKind::GateTurn,
         ];
         for k in all {
             let byte = k as u8;
@@ -161,7 +168,7 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [
-            3u8, 9, 14, 19, 22, 32, 42, 53, 62, 71, 83, 89, 90, 200, 250, 255,
+            3u8, 9, 14, 19, 22, 32, 42, 53, 62, 71, 83, 89, 91, 99, 100, 200, 250, 255,
         ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),
@@ -199,6 +206,7 @@ mod tests {
             AuditOpKind::ConfigPut as u8,
             AuditOpKind::ConfigGet as u8,
             AuditOpKind::ConfigTeardown as u8,
+            AuditOpKind::GateTurn as u8,
         ];
         let s: HashSet<_> = all.iter().copied().collect();
         assert_eq!(s.len(), all.len(), "duplicate byte assignment");

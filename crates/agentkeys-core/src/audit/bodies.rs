@@ -246,6 +246,38 @@ pub struct ConfigTeardownBody {
     pub actor_target: String,
 }
 
+// ── 90..99 — gate family (#384 metered key-custody LLM-egress relay) ───
+//
+// Emitted by `agentkeys-gate` once per proxied LLM turn. The envelope-level
+// `actor_omni`/`operator_omni` both carry the OWNING USER's omni — usage
+// always accumulates to one user (#384); the per-device / per-api-key
+// attribution that rolls up into the user summary lives here in the body.
+// Token counters come from the upstream's `usage` field (#332); `cached` and
+// `reasoning` tokens are recorded separately because they are priced
+// differently from plain completion tokens.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateTurnBody {
+    /// Device the turn is attributed to (from the relay key record).
+    pub device_id: String,
+    /// Relay api-key id the caller authenticated with (never the secret).
+    pub api_key_id: String,
+    /// Upstream model / Ark endpoint id the turn ran against.
+    pub model: String,
+    /// Whether the turn was streamed (usage then comes from the final SSE
+    /// chunk via `stream_options.include_usage`).
+    pub streamed: bool,
+    /// `"ok"`, `"denied:budget_exceeded"`, or `"upstream_error"`.
+    pub outcome: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    /// `usage.prompt_tokens_details.cached_tokens` (0 when absent).
+    pub cached_tokens: u64,
+    /// `usage.completion_tokens_details.reasoning_tokens` (0 when absent).
+    pub reasoning_tokens: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +486,44 @@ mod tests {
             AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
         match decoded.typed_body().unwrap() {
             TypedAuditBody::DeviceRevoke(b) => assert_eq!(b, rev),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+    }
+
+    /// §15.3b step-5 test for the gate family (#384): canonical CBOR
+    /// roundtrip + typed decode of the metered-relay turn row.
+    #[test]
+    fn gate_family_cbor_roundtrip_and_typed_decode() {
+        use crate::audit::{envelope_for, AuditEnvelope, AuditOpKind, AuditResult, TypedAuditBody};
+
+        let body = GateTurnBody {
+            device_id: "esp32-lcd4b-01".into(),
+            api_key_id: "gk-kid-tablet".into(),
+            model: "ep-2026-doubao".into(),
+            streamed: true,
+            outcome: "ok".into(),
+            prompt_tokens: 1200,
+            completion_tokens: 340,
+            total_tokens: 1540,
+            cached_tokens: 800,
+            reasoning_tokens: 120,
+        };
+        let env = envelope_for(
+            [0x44; 32],
+            [0x44; 32],
+            AuditOpKind::GateTurn,
+            body.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(decoded.op_kind, AuditOpKind::GateTurn as u8);
+        assert_eq!(AuditOpKind::GateTurn.label(), "gate.turn");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::GateTurn(b) => assert_eq!(b, body),
             other => panic!("unexpected typed body: {other:?}"),
         }
     }
