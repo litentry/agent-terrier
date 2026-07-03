@@ -56,8 +56,8 @@ use thiserror::Error;
 pub use bodies::{
     ConfigGetBody, ConfigPutBody, ConfigTeardownBody, CredFetchBody, CredStoreBody,
     CredTeardownBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody, EmailSendBody,
-    K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody,
-    MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody, ScopeGrantBody,
+    GateTurnBody, K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody,
+    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody, ScopeGrantBody,
     ScopeRevokeBody, SignEip191Body, SignEip712Body,
 };
 pub use op_kind::AuditOpKind;
@@ -239,6 +239,7 @@ pub enum TypedAuditBody {
     ConfigPut(ConfigPutBody),
     ConfigGet(ConfigGetBody),
     ConfigTeardown(ConfigTeardownBody),
+    GateTurn(GateTurnBody),
 }
 
 impl TypedAuditBody {
@@ -281,6 +282,7 @@ impl TypedAuditBody {
             AuditOpKind::ConfigTeardown => {
                 Self::ConfigTeardown(serde_json::from_value(value).ok()?)
             }
+            AuditOpKind::GateTurn => Self::GateTurn(serde_json::from_value(value).ok()?),
         })
     }
 }

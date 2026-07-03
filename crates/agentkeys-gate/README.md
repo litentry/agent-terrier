@@ -1,0 +1,96 @@
+# agentkeys-gate — metered key-custody LLM-egress relay
+
+The thin relay of [#384](https://github.com/litentry/agentKeys/issues/384): the
+sandbox agent (Hermes) consumes its LLM as a generic OpenAI-compatible provider,
+and pointing that provider's `base_url` at this relay moves the vendor inference
+key (Ark — **Bearer-only, not IAM/STS-mintable**) out of every sandbox. The relay
+holds the one shared key, forwards each turn, and meters the response's `usage`
+field per [#332](https://github.com/litentry/agentKeys/issues/332).
+
+**Custody + metering ONLY — not a control point.** Per arch.md §22d the IAM
+guarantee for the agent path is hooks + data-plane caps. The relay does no
+retry, no fallback, no caching, no orchestration, and never rewrites the
+conversation (its only body mutations: the optional model override, and
+`stream_options.include_usage = true` on streamed turns).
+
+## Attribution model (#384)
+
+- Every turn's tokens accumulate to **one user** (the owning omni) — budgets
+  are per-user and enforced deterministically (`429 budget_exceeded`, no LLM in
+  the decision).
+- Statistics are kept **per-device** and **per-api-key**, and roll up into the
+  user-facing summary served by `GET /v1/usage`.
+- Every turn lands on the ledger as a `GateTurn` (op_kind 90) audit row with
+  usage + attribution (arch.md §15.3a).
+
+## Endpoints
+
+| Route | Auth | What |
+|---|---|---|
+| `POST /v1/chat/completions` | relay key | the proxied turn (streamed + non-streamed) |
+| `GET /v1/models` | relay key or admin | upstream passthrough |
+| `GET /v1/usage` | relay key → own user; admin → `?user_omni=` or all | the rollup summary |
+| `GET /healthz` | none | liveness |
+
+## Configuration (env-first; every flag has a `--` form)
+
+| Env | Meaning |
+|---|---|
+| `AGENTKEYS_GATE_LISTEN` | bind address (default `0.0.0.0:8077`) |
+| `AGENTKEYS_GATE_UPSTREAM_BASE_URL` | explicit upstream root override; unset → the **ark family** resolves it (#338: env `ARK_BASE_URL` > `~/.agentkeys/inference/ark.env` > the built-in Ark default) |
+| `AGENTKEYS_GATE_UPSTREAM_API_KEY[_FILE]` | explicit vendor-key override (engine-agnostic); unset → the **ark family** resolves it (env `ARK_API_KEY` > `ark.env` — rotate with `scripts/operator/secrets/rotate-inference-cred.sh ark`; inspect with `volcano-probe creds`) |
+| `AGENTKEYS_GATE_MODEL` | optional model / Ark endpoint-id override |
+| `AGENTKEYS_GATE_KEYS_FILE` | JSON: relay keys + per-user budgets (below) |
+| `AGENTKEYS_GATE_DEFAULT_BUDGET_TOKENS` | default per-user budget; unset = unlimited (still metered) |
+| `AGENTKEYS_GATE_ADMIN_TOKEN` | operator bearer for the all-users usage view |
+| `AGENTKEYS_AUDIT_URL` | audit worker base for `GateTurn` appends |
+| `AGENTKEYS_GATE_REQUIRE_AUDIT` | fail a non-streamed turn whose audit append fails |
+
+Keys file:
+
+```json
+{
+  "default_budget_tokens": 1000000,
+  "users": [
+    { "user_omni": "0x<64 hex>", "budget_tokens": 500000 }
+  ],
+  "keys": [
+    { "key": "gk_…", "key_id": "k1", "user_omni": "0x<64 hex>",
+      "device_id": "esp32-lcd4b-01", "label": "kid tablet" }
+  ]
+}
+```
+
+## Wiring Hermes through the relay
+
+In the hermes-sandbox `config.yaml` the Ark provider is a generic
+OpenAI-compatible entry; point it at the relay and hand the sandbox a relay key
+instead of the vendor key:
+
+```yaml
+api_base: http://<relay-host>:8077/v1   # was: https://ark.cn-beijing.volces.com/api/v3
+api_key: ${AGENTKEYS_RELAY_KEY}          # was: ${ARK_API_KEY}
+```
+
+The sandbox env then no longer needs `ARK_API_KEY` at all — rotating the vendor
+key touches ONE place (the relay) instead of every live sandbox.
+
+## What this crate deliberately does NOT do
+
+- **Action control** — hooks in the Task Host + data-plane caps own that
+  (arch.md §22d); an egress proxy cannot deny an agent's tool calls.
+- **Memory injection** — the memory story is hub absorption (#339/#341) + the
+  `pre_llm_call` hook seam, not egress rewriting.
+- **Persistence** — accumulators are in-memory; the durable trail is the
+  per-turn `GateTurn` row. Rebuild-on-restart from the audit feed, broker-minted
+  relay keys at sandbox spawn (#369/#337), and the ASR/TTS key families (#338)
+  are tracked follow-ups in #384.
+
+Smoke-run locally (mock any OpenAI-compatible upstream):
+
+```bash
+cargo run -p agentkeys-gate -- \
+  --upstream-base-url http://127.0.0.1:9999/v1 \
+  --upstream-api-key test-key \
+  --keys-file ./keys.json
+```

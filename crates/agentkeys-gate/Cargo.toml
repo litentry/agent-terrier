@@ -1,0 +1,50 @@
+[package]
+name = "agentkeys-gate"
+version = "0.2.0"
+edition = "2021"
+
+[[bin]]
+name = "agentkeys-gate"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_gate"
+path = "src/lib.rs"
+
+[dependencies]
+# Audit append (`/v1/audit/append/v2`) rides the shared client — the gate never
+# re-types a wire body (issue #203 — one owner).
+agentkeys-backend-client = { workspace = true }
+# `normalize_omni_0x` for key-record omnis + the AuditAppendInput wire type.
+agentkeys-protocol = { workspace = true }
+# Canonical audit op_kind table (AuditOpKind::GateTurn) + GateTurnBody.
+agentkeys-core = { workspace = true }
+# #338 — the upstream key/base resolve through the ONE per-family loader
+# (env > ~/.agentkeys/inference/ark.env > default); the AGENTKEYS_GATE_UPSTREAM_*
+# forms stay as explicit engine-agnostic overrides. Never a gate-private key path.
+agentkeys-inference-creds = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+axum = { version = "0.7", features = ["json"] }
+# reqwest pins rustls-tls so the upstream LLM call uses the same crypto provider
+# the broker host already ships; the `ring` provider is installed in main.
+# `stream` feeds the SSE tee (streamed turns are forwarded chunk-by-chunk).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+agentkeys-core = { workspace = true }
+tempfile = "3"

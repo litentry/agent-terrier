@@ -279,6 +279,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-gate"
+version = "0.2.0"
+dependencies = [
+ "agentkeys-backend-client",
+ "agentkeys-core",
+ "agentkeys-inference-creds",
+ "agentkeys-protocol",
+ "anyhow",
+ "axum",
+ "bytes",
+ "clap",
+ "futures-util",
+ "reqwest",
+ "rustls 0.23.37",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentkeys-inference-creds"
 version = "0.1.0"
 dependencies = [
