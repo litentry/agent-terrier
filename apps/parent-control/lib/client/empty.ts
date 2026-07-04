@@ -2,11 +2,13 @@ import type {
   AgentKeysClient,
   AnchorStatus,
   CapToken,
+  AgentContextView,
   ConfigPresetList,
   ConnectionStatus,
   CredCategorization,
   CredService,
   DisconnectedStatus,
+  InboxItemBody,
   EmailVerifyStart,
   EmailVerifyStatus,
   InitConfigResult,
@@ -30,6 +32,8 @@ import type {
 } from './types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
+import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditResponse';
+import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
 
 const DISCONNECTED: DisconnectedStatus = {
   kind: 'disconnected',
@@ -175,7 +179,10 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async acceptInbox(_s3Key: string): Promise<Result<{ planted: number; ns: string; key: string }>> {
+  async acceptInbox(
+    _s3Key: string,
+    _confirmContentHash?: string,
+  ): Promise<Result<{ planted: number; ns: string; key: string }>> {
     return disconnected();
   }
 
@@ -183,9 +190,35 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async getInboxItem(
-    _s3Key: string,
-  ): Promise<Result<{ body: string; ns: string; key: string; source_delegate_omni: string; ts: number }>> {
+  async getInboxItem(_s3Key: string): Promise<Result<InboxItemBody>> {
+    return disconnected();
+  }
+
+  // ── #390 — persona editor + agent restart / live context ─────────────────
+
+  async getPersona(_delegateOmni: string): Promise<Result<ApiPersonaState>> {
+    return disconnected();
+  }
+
+  async editPersona(
+    _delegateOmni: string,
+    _body: string,
+  ): Promise<Result<ApiPersonaEditResponse>> {
+    return disconnected();
+  }
+
+  async rollbackPersona(
+    _delegateOmni: string,
+    _version: number,
+  ): Promise<Result<ApiPersonaEditResponse>> {
+    return disconnected();
+  }
+
+  async restartAgent(): Promise<Result<{ restarted: boolean }>> {
+    return disconnected();
+  }
+
+  async getAgentContext(): Promise<Result<AgentContextView>> {
     return disconnected();
   }
 

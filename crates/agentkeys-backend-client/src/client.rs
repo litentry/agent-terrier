@@ -477,11 +477,15 @@ impl BackendClient {
     /// receipt — NEVER any AWS creds. The WORKER relays the bearer to the broker's
     /// `/v1/cap/inbox-sts` for a PUT-only, sub-prefix-scoped STS that never leaves
     /// the server. `agent_session_bearer` is the DELEGATE's session.
+    /// `kind` labels WHAT the delegate proposes (`knowledge`/`skill`/`persona`,
+    /// #390 §16.2) — the worker stamps it into the stored item; the master's
+    /// curate gate applies the per-kind policy (persona is never adoptable).
     pub async fn memory_inbox_append(
         &self,
         cap: CapToken,
         key: String,
         plaintext_b64: String,
+        kind: agentkeys_protocol::ContextKind,
     ) -> Result<MemoryInboxAppendResp, BackendError> {
         let bearer = self
             .agent_session_bearer
@@ -497,6 +501,7 @@ impl BackendClient {
                 cap,
                 key,
                 plaintext_b64,
+                kind,
             })
             .send()
             .await

@@ -1,8 +1,10 @@
-**Audience:** the on-device AI agent — this page is loaded into the agent's preset knowledge as
-its `AGENTS.md` context — and the hardware integrators who ship the device. It explains how the
-agent works *with* AgentKeys. It is **not** the agent's personality: that lives in the device's
-own `SOUL.md`, which is deliberately neutral and says nothing about AgentKeys. This page is the
-"how we work together" manual; the soul is "who you are."
+**Audience:** the on-device AI agent — this page ships as the agent's **locked base layer**
+`agent-terrier.md`, always appended to its `AGENTS.md` context below an owner-editable section
+(the owner customizes their part from the companion app; this preset is never editable) — and
+the hardware integrators who ship the device. It explains how the agent works *with* AgentKeys.
+It is **not** the agent's personality: that lives in the device's own `SOUL.md` (owner-editable
+from the companion app too), which is deliberately neutral and says nothing about AgentKeys.
+This page is the "how we work together" manual; the soul is "who you are."
 
 AgentKeys is the security and key-management layer your device works with. You are the
 assistant; AgentKeys holds the keys, decides what you are allowed to do, and connects you to

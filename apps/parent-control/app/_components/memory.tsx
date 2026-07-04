@@ -76,7 +76,7 @@ export function MemoryPage({
   onPlantDone: () => void;
   onLoadCategory: (ns: string) => void;
   onView: (m: PreservedMemory) => void;
-  onAcceptInbox: (s3Key: string) => void;
+  onAcceptInbox: (s3Key: string, confirmContentHash?: string) => void;
   onRejectInbox: (s3Key: string) => void;
   onRefreshInbox: () => void;
   /** #339 P2 — lazily fetch one proposal's full body for review. */
@@ -186,7 +186,8 @@ function InboxPanel({
 }: {
   inbox: ApiInboxItem[];
   busy: boolean;
-  onAccept: (s3Key: string) => void;
+  /** #390 — skill accepts carry the viewed-body watermark (the item's content_hash). */
+  onAccept: (s3Key: string, confirmContentHash?: string) => void;
   onReject: (s3Key: string) => void;
   onRefresh: () => void;
   onViewBody: (s3Key: string) => Promise<string>;
@@ -248,19 +249,45 @@ function InboxPanel({
           {inbox.map((it) => {
             const b = bodies[it.s3_key];
             const expanded = b !== undefined;
+            // #390 §16.2 — the per-kind adoption gate, mirrored in the UI:
+            // knowledge = plain accept; skill = accept DISABLED until the body
+            // was viewed (the accept then carries the content_hash watermark);
+            // persona = never inbox-adoptable (master-authored — Agent panel).
+            const kind = it.kind ?? 'knowledge';
+            const bodyViewed = typeof b === 'string';
+            const skillBlocked = kind === 'skill' && !bodyViewed;
             return (
               <Fragment key={it.s3_key}>
                 <tr>
                   <td>
                     <span className="mono" style={{ fontWeight: 500 }}>{it.key}</span>
-                    <div className="secondary">memory:{it.ns}</div>
+                    <div className="secondary">
+                      memory:{it.ns}
+                      {kind !== 'knowledge' && (
+                        <span className="count" style={{ marginLeft: 6, textTransform: 'uppercase' }}>{kind}</span>
+                      )}
+                    </div>
                   </td>
                   <td className="mono muted" title={it.source_delegate_omni}>{shortOmni(it.source_delegate_omni)}</td>
                   <td className="muted">{age(it.ts)}</td>
                   <td className="right mono">{it.bytes}</td>
                   <td className="right" style={{ whiteSpace: 'nowrap' }}>
                     <button className="btn sm" onClick={() => toggleBody(it.s3_key)}>{expanded ? 'hide' : 'view'}</button>
-                    <button className="btn primary sm" style={{ marginLeft: 6 }} disabled={busy} onClick={() => onAccept(it.s3_key)}>accept</button>
+                    {kind === 'persona' ? (
+                      <span className="muted" style={{ marginLeft: 6, fontSize: 11 }} title="Persona is master-authored — edit it in the delegate's Agent panel. Delegate persona proposals are never adoptable.">
+                        not adoptable
+                      </span>
+                    ) : (
+                      <button
+                        className="btn primary sm"
+                        style={{ marginLeft: 6 }}
+                        disabled={busy || skillBlocked}
+                        title={skillBlocked ? 'Skills must be reviewed before adoption — view the body first.' : undefined}
+                        onClick={() => onAccept(it.s3_key, kind === 'skill' ? it.content_hash : undefined)}
+                      >
+                        accept
+                      </button>
+                    )}
                     <button className="btn ghost sm" style={{ marginLeft: 6 }} disabled={busy} onClick={() => onReject(it.s3_key)}>reject</button>
                   </td>
                 </tr>

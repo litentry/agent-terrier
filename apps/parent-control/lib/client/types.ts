@@ -1,5 +1,43 @@
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
+import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditResponse';
+import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
+import type { ContextKind } from '@/lib/generated/ContextKind';
+
+/** #339/#390 — one decrypted inbox proposal (daemon `POST /v1/master/inbox/entry`).
+ *  `kind` drives the per-kind curate gate; `content_hash` is the skill accept's
+ *  viewed-body watermark. */
+export interface InboxItemBody {
+  body: string;
+  ns: string;
+  key: string;
+  source_delegate_omni: string;
+  content_hash: string;
+  ts: number;
+  kind: ContextKind;
+}
+
+/** #390 — one live context file shaping the bound agent. Shape owned by the
+ *  sandbox bridge (`hermes_bridge.py context_files()`), proxied verbatim by
+ *  the daemon (`GET /v1/master/agent/context`) — NOT a ts-rs type because the
+ *  producer is Python, not Rust. */
+export interface AgentContextFile {
+  id: 'soul' | 'agents' | 'agent_terrier' | 'config';
+  path: string;
+  editable: boolean;
+  present: boolean;
+  content?: string;
+  /** The owner-editable part of AGENTS.md (above the locked-terrier marker). */
+  owner_content?: string;
+  sha256?: string;
+  bytes?: number;
+}
+
+export interface AgentContextView {
+  /** false = no sandbox bridge configured on the daemon — a legit absent state. */
+  configured: boolean;
+  files: AgentContextFile[];
+}
 
 export type ConnectionStatus =
   | { kind: 'disconnected'; reason: 'no-backend-configured' | 'unreachable' | 'unauthorized'; detail?: string }
@@ -532,12 +570,29 @@ export interface AgentKeysClient {
   plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>>;
   // #339 P2 — absorption-inbox curate: list the queue, accept one INTO canonical
   // (merge + GC), or reject (GC only). `ApiInboxItem` is the ts-rs-generated wire type.
+  // #390 — accept takes the viewed-body watermark (the item's content_hash) REQUIRED
+  // for `skill` proposals; `persona` proposals are never adoptable (403).
   listInbox(): Promise<Result<ApiInboxItem[]>>;
-  acceptInbox(s3Key: string): Promise<Result<{ planted: number; ns: string; key: string }>>;
-  rejectInbox(s3Key: string): Promise<Result<{ deleted: boolean }>>;
-  getInboxItem(
+  acceptInbox(
     s3Key: string,
-  ): Promise<Result<{ body: string; ns: string; key: string; source_delegate_omni: string; ts: number }>>;
+    confirmContentHash?: string,
+  ): Promise<Result<{ planted: number; ns: string; key: string }>>;
+  rejectInbox(s3Key: string): Promise<Result<{ deleted: boolean }>>;
+  getInboxItem(s3Key: string): Promise<Result<InboxItemBody>>;
+
+  // #390 — the per-delegate persona (`SOUL.md`) editor + the agent restart /
+  // live-context legs (master-hub-topology.md §16). `ApiPersonaState` /
+  // `ApiPersonaEditResponse` are ts-rs-generated wire types; the context-files
+  // shape is owned by the sandbox bridge (hermes_bridge.py `context_files()`),
+  // proxied verbatim by the daemon.
+  getPersona(delegateOmni: string): Promise<Result<ApiPersonaState>>;
+  editPersona(delegateOmni: string, body: string): Promise<Result<ApiPersonaEditResponse>>;
+  rollbackPersona(
+    delegateOmni: string,
+    version: number,
+  ): Promise<Result<ApiPersonaEditResponse>>;
+  restartAgent(): Promise<Result<{ restarted: boolean }>>;
+  getAgentContext(): Promise<Result<AgentContextView>>;
 
   // §1A onboarding — config-init entry point A (default-preset bootstrap, #207
   // item 1A). `listConfigPresets` returns the bundled default taxonomies + the

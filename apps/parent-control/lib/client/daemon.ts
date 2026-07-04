@@ -5,11 +5,13 @@ import type {
   ChainInfo,
   Classification,
   ConfigPresetList,
+  AgentContextView,
   ConnectionStatus,
   CredCategorization,
   CredService,
   DecodedAuditEvent,
   DisconnectedStatus,
+  InboxItemBody,
   EmailVerifyStart,
   EmailVerifyStatus,
   InitConfigResult,
@@ -52,6 +54,8 @@ import type { ApiAnchorStatus } from '@/lib/generated/ApiAnchorStatus';
 import type { ApiAuditEvent } from '@/lib/generated/ApiAuditEvent';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { ApiMemoryEntry } from '@/lib/generated/ApiMemoryEntry';
+import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditResponse';
+import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
 import type { ApiWorker } from '@/lib/generated/ApiWorker';
 import type { BuildAcceptUserOpResponse } from '@/lib/generated/BuildAcceptUserOpResponse';
 import type { MasterMemoryPlantResponse } from '@/lib/generated/MasterMemoryPlantResponse';
@@ -488,6 +492,9 @@ export class DaemonBackend implements AgentKeysClient {
         ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
         version: m.version, updated: m.updated, preview: m.preview, body: m.body,
         content_hash: m.contentHash ?? '',
+        // #390 — planted archives are recall content; persona is NEVER planted
+        // (the daemon rejects the reserved ns; personas ride /v1/master/persona).
+        kind: 'knowledge',
       }));
       route = wasm.masterMemoryPlantRoute();
       body = wasm.buildMasterMemoryPlantBody(wireEntries);
@@ -517,10 +524,18 @@ export class DaemonBackend implements AgentKeysClient {
     return { ok: true, data: r.data.items };
   }
 
-  async acceptInbox(s3Key: string): Promise<Result<{ planted: number; ns: string; key: string }>> {
+  // #390 — `confirmContentHash` is the viewed-body watermark REQUIRED for a
+  // `skill` proposal (the daemon 428s a skill accept without it); `persona`
+  // proposals are never adoptable (403 — persona is master-authored).
+  async acceptInbox(
+    s3Key: string,
+    confirmContentHash?: string,
+  ): Promise<Result<{ planted: number; ns: string; key: string }>> {
     return this.postJson<{ planted: number; ns: string; key: string }>(
       '/v1/master/inbox/accept',
-      { s3_key: s3Key },
+      confirmContentHash
+        ? { s3_key: s3Key, confirm_content_hash: confirmContentHash }
+        : { s3_key: s3Key },
     );
   }
 
@@ -530,13 +545,47 @@ export class DaemonBackend implements AgentKeysClient {
 
   // Read one proposal's full decrypted body so the master can review it before
   // accept/reject (the daemon relays the worker's inbox-get; master-self).
-  async getInboxItem(
-    s3Key: string,
-  ): Promise<Result<{ body: string; ns: string; key: string; source_delegate_omni: string; ts: number }>> {
-    return this.postJson<{ body: string; ns: string; key: string; source_delegate_omni: string; ts: number }>(
-      '/v1/master/inbox/entry',
-      { s3_key: s3Key },
+  async getInboxItem(s3Key: string): Promise<Result<InboxItemBody>> {
+    return this.postJson<InboxItemBody>('/v1/master/inbox/entry', { s3_key: s3Key });
+  }
+
+  // ── #390 — persona editor + agent restart / live context ─────────────────
+  // ApiPersonaState / ApiPersonaEditResponse are ts-rs-generated from the
+  // daemon's Rust structs; the context-files shape is bridge-owned (python),
+  // proxied verbatim.
+
+  async getPersona(delegateOmni: string): Promise<Result<ApiPersonaState>> {
+    return this.getJson<ApiPersonaState>(
+      `/v1/master/persona?delegate=${encodeURIComponent(delegateOmni)}`,
     );
+  }
+
+  async editPersona(
+    delegateOmni: string,
+    body: string,
+  ): Promise<Result<ApiPersonaEditResponse>> {
+    return this.postJson<ApiPersonaEditResponse>('/v1/master/persona', {
+      delegate_omni: delegateOmni,
+      body,
+    });
+  }
+
+  async rollbackPersona(
+    delegateOmni: string,
+    version: number,
+  ): Promise<Result<ApiPersonaEditResponse>> {
+    return this.postJson<ApiPersonaEditResponse>('/v1/master/persona/rollback', {
+      delegate_omni: delegateOmni,
+      version,
+    });
+  }
+
+  async restartAgent(): Promise<Result<{ restarted: boolean }>> {
+    return this.postJson<{ restarted: boolean }>('/v1/master/agent/restart', {});
+  }
+
+  async getAgentContext(): Promise<Result<AgentContextView>> {
+    return this.getJson<AgentContextView>('/v1/master/agent/context');
   }
 
   async listConfigPresets(): Promise<Result<ConfigPresetList>> {

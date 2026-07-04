@@ -90,8 +90,18 @@ pub async fn inbox_list(daemon_url: &str) -> Result<String> {
         let bytes = it.get("bytes").and_then(Value::as_u64).unwrap_or(0);
         let ts = it.get("ts").and_then(Value::as_u64).unwrap_or(0);
         let s3_key = it.get("s3_key").and_then(Value::as_str).unwrap_or("?");
+        // #390 — per-kind curate policy at a glance (absent = knowledge).
+        let kind = it
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("knowledge");
+        let kind_note = match kind {
+            "skill" => " · SKILL (view required before accept)",
+            "persona" => " · PERSONA (never inbox-adoptable — reject)",
+            _ => "",
+        };
         out.push_str(&format!(
-            "\n  [{n}] memory:{ns} / {key}\n      \
+            "\n  [{n}] memory:{ns} / {key} · {kind}{kind_note}\n      \
              from delegate {from} · {bytes} bytes · ts {ts}\n      \
              s3_key: {s3_key}\n"
         ));
@@ -127,13 +137,27 @@ pub async fn inbox_view(daemon_url: &str, s3_key: &str) -> Result<String> {
         .and_then(Value::as_str)
         .unwrap_or("?");
     let ts = value.get("ts").and_then(Value::as_u64).unwrap_or(0);
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("knowledge");
     let body = value.get("body").and_then(Value::as_str).unwrap_or("");
+    let accept_hint = match kind {
+        "skill" => format!(
+            "\n\naccept this SKILL with the viewed-body watermark:\n  \
+             agentkeys memory inbox-accept --s3-key <s3_key> --confirm-content-hash {content_hash}"
+        ),
+        "persona" => "\n\npersona proposals are never inbox-adoptable (master-authored only) — \
+             reject it and edit the persona in parent-control (#390)."
+            .to_string(),
+        _ => String::new(),
+    };
     Ok(format!(
-        "proposal: memory:{ns} / {key}\n  \
+        "proposal: memory:{ns} / {key} · kind {kind}\n  \
          from delegate: {from} (worker-stamped provenance)\n  \
          content_hash: {content_hash}\n  \
          ts: {ts}\n\n\
-         --- body ---\n{body}\n------------"
+         --- body ---\n{body}\n------------{accept_hint}"
     ))
 }
 
@@ -141,17 +165,23 @@ pub async fn inbox_view(daemon_url: &str, s3_key: &str) -> Result<String> {
 /// Curates the proposal INTO canonical memory (the daemon's per-namespace MERGE
 /// plant) then GCs the inbox object. This is the master's pull-request "merge" —
 /// the delegate never wrote canonical directly.
-pub async fn inbox_accept(daemon_url: &str, s3_key: &str) -> Result<String> {
+/// #390 — `confirm_content_hash` is the viewed-body watermark REQUIRED for
+/// `skill` proposals (the hash `inbox-view` prints); the daemon's per-kind gate
+/// rejects a skill accept without it, and rejects `persona` accepts outright.
+pub async fn inbox_accept(
+    daemon_url: &str,
+    s3_key: &str,
+    confirm_content_hash: Option<&str>,
+) -> Result<String> {
     let url = format!(
         "{}/v1/master/inbox/accept",
         daemon_url.trim_end_matches('/')
     );
-    let value = daemon_call(
-        reqwest::Method::POST,
-        &url,
-        Some(json!({ "s3_key": s3_key })),
-    )
-    .await?;
+    let mut body = json!({ "s3_key": s3_key });
+    if let Some(hash) = confirm_content_hash {
+        body["confirm_content_hash"] = json!(hash);
+    }
+    let value = daemon_call(reqwest::Method::POST, &url, Some(body)).await?;
     let ns = value.get("ns").and_then(Value::as_str).unwrap_or("?");
     let key = value.get("key").and_then(Value::as_str).unwrap_or("?");
     let planted = value.get("planted").and_then(Value::as_u64).unwrap_or(0);

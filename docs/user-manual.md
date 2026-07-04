@@ -206,6 +206,39 @@ revoke from your master account itself, so "unpair · revoke on-chain" (or
 submits it, and marks the agent revoked only after re-reading the registry —
 if the prompt is cancelled, the device stays bound and nothing changes.
 
+## Editing your agent's persona + config files (parent-control, #390)
+
+A bound agent's actor page carries an **agent** panel showing the files that
+shape it, and letting you edit the ones that are yours to edit:
+
+- **`SOUL.md` (the persona)** — fully yours. Edit it in the panel and **save**:
+  it is validated (size cap, nothing secret-shaped like API keys or private
+  keys, and it may never claim to *be* AgentKeys — AgentKeys is the key layer,
+  the agent is the assistant), stored **versioned** (the last 5 versions keep a
+  **roll back** button), and — when a sandbox is connected — applied **live**:
+  the agent re-reads it and your very next chat turn speaks under the new
+  persona. If no sandbox is connected the save still succeeds and says so
+  plainly (`stored canonically; applies at next spawn`) — never a silent
+  partial success.
+- **`AGENTS.md` / `agent-terrier.md`** — the "how we work with AgentKeys"
+  context. The **agent-terrier.md base layer is locked**: it is always appended
+  to the agent's context and you cannot edit it (it's what keeps pairing,
+  permissions, and companion-app handoffs working). The section above it is
+  owner space.
+- **`config.yaml`** — view-only (secret-shaped values are redacted).
+
+Two behaviors worth knowing:
+
+- **↻ restart agent (re-source)** reloads all context files *and starts a
+  fresh conversation* — the running session IS the agent's short-term memory,
+  so a restart forgets the current chat (your shared memories are unaffected).
+  Saving a persona does this restart for you.
+- **Delegates cannot write personas.** An agent may *propose* memories or
+  skills into your inbox, but a persona proposal is never adoptable — the
+  inbox shows it as `not adoptable`; personas are authored only here. Skill
+  proposals add one guard: the **accept button stays disabled until you've
+  viewed the body** (skills steer behavior, so review is mandatory).
+
 ## Dev stack: a red "Failed to connect to MetaMask" overlay (harmless)
 
 If you run the dev stack (`dev.sh`) with the MetaMask extension installed, the

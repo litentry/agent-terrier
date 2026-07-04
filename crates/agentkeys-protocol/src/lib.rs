@@ -445,16 +445,77 @@ pub struct CanonicalStsResult {
 // NO AWS creds. Provenance (`source_delegate_omni`) is stamped by the WORKER from
 // the cap-signed `actor_omni`, NEVER from a delegate-supplied field (§8).
 
+/// The context TYPE of a context-system object (#390, master-hub-topology.md
+/// §16 / arch.md §5 "context system"). The lifecycle machinery is uniform; what
+/// varies per kind is the **adoption-gate strictness + runtime application**:
+/// `knowledge` = light curation, recalled/injected per turn (the original
+/// "memory"); `skill` = strict diff-review curation, delivered as files;
+/// `persona` = master-authored only (never inbox-adoptable), applied fresh each
+/// turn (`SOUL.md`). Wire spelling is the lowercase word; absent = `knowledge`
+/// (full back-compat — every pre-#390 object is knowledge). `resource` joins
+/// the enum when its gate policy is implemented, not before.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub enum ContextKind {
+    #[default]
+    Knowledge,
+    Skill,
+    Persona,
+}
+
+impl ContextKind {
+    /// Wire spelling (matches the serde rename) — for hand-built JSON bodies
+    /// and log lines, so nobody re-types the lowercase word.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContextKind::Knowledge => "knowledge",
+            ContextKind::Skill => "skill",
+            ContextKind::Persona => "persona",
+        }
+    }
+
+    /// Parse the wire spelling (CLI flags, env) — the inverse of [`Self::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "knowledge" => Some(ContextKind::Knowledge),
+            "skill" => Some(ContextKind::Skill),
+            "persona" => Some(ContextKind::Persona),
+            _ => None,
+        }
+    }
+}
+
+/// The RESERVED canonical namespace persona documents live in (#390). Written
+/// ONLY by the daemon's persona editor (master-authored); never granted to a
+/// delegate (`memory:persona` / `inbox:persona` are never offered), never
+/// reconciled into the recall taxonomy, and the master-memory plant rejects
+/// direct writes into it — the persona module is the single writer.
+pub const PERSONA_NAMESPACE: &str = "persona";
+
+/// Canonical persona-document key for one delegate within
+/// [`PERSONA_NAMESPACE`]: `soul:<0x-omni-lowercase>`. Version-history entries
+/// append `@<n>` (see the daemon persona module) — spell it through this
+/// helper so the key shape has one owner.
+pub fn persona_soul_key(delegate_omni: &str) -> String {
+    format!("soul:{}", normalize_omni_0x(delegate_omni).to_lowercase())
+}
+
 /// Delegate → worker `POST /v1/memory/inbox-append`. The Append cap carries
 /// `service = inbox:<ns>` (the SIGNED namespace); `key` is the delegate's
 /// proposed memory key within that namespace and `plaintext_b64` the proposed
-/// body. The worker stamps provenance + content-hash and writes the envelope to
+/// body. `kind` is the delegate's LABEL for what it proposes (a delegate can
+/// label its proposal's kind, never its authorship — provenance stays
+/// worker-stamped); absent = `knowledge`. The worker stamps provenance +
+/// content-hash and writes the envelope to
 /// `bots/<operator>/inbox/<delegate>/<ns>/<content_hash>.enc`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryInboxAppendBody {
     pub cap: CapToken,
     pub key: String,
     pub plaintext_b64: String,
+    #[serde(default)]
+    pub kind: ContextKind,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -502,6 +563,12 @@ pub struct InboxItem {
     pub body_b64: String,
     pub content_hash: String,
     pub ts: u64,
+    /// #390 — the delegate-labeled context kind (validated + stored by the
+    /// worker; absent on pre-#390 envelopes = `knowledge`). Drives the per-kind
+    /// curate gate: `persona` is never inbox-adoptable, `skill` requires a
+    /// viewed-body confirmation + size cap.
+    #[serde(default)]
+    pub kind: ContextKind,
 }
 
 /// Per-item metadata for the master's inbox listing (the curate queue). Mirrors
@@ -516,6 +583,10 @@ pub struct InboxItemMeta {
     pub content_hash: String,
     pub bytes: u64,
     pub ts: u64,
+    /// #390 — mirrors [`InboxItem::kind`] into the curate queue so the master's
+    /// list can gate per kind without decrypting bodies twice.
+    #[serde(default)]
+    pub kind: ContextKind,
 }
 
 /// Master → worker `POST /v1/memory/inbox-list`. Master-self cap (operator ==
@@ -834,6 +905,12 @@ pub mod web_api {
         pub body: String,
         #[serde(default)]
         pub content_hash: String,
+        /// #390 — the context kind (arch.md §5 "context system"); absent on
+        /// pre-#390 durable entries = `knowledge`. Canonical `persona` entries
+        /// are written only by the daemon persona module (the plant rejects the
+        /// reserved `persona` namespace).
+        #[serde(default)]
+        pub kind: crate::ContextKind,
     }
 
     /// `POST` body for [`MASTER_MEMORY_PLANT_ROUTE`].
@@ -933,6 +1010,36 @@ mod tests {
         // with agentkeys_worker_creds::verify::CapOp::Append.as_str() ("append").
         assert_eq!(CapMintOp::MemoryAppend.op_str(), "append");
         assert_eq!(CapMintOp::MemoryCanonicalGet.op_str(), "canonical_fetch");
+    }
+
+    #[test]
+    fn context_kind_wire_spelling_and_default() {
+        // §16.2 item 1: wire values are the lowercase words; absent = knowledge
+        // (full back-compat — every pre-#390 object is knowledge).
+        for (kind, wire) in [
+            (ContextKind::Knowledge, "\"knowledge\""),
+            (ContextKind::Skill, "\"skill\""),
+            (ContextKind::Persona, "\"persona\""),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+            assert_eq!(kind.as_str(), wire.trim_matches('"'));
+        }
+        // A pre-#390 InboxItem (no `kind` key) deserializes as knowledge.
+        let old: InboxItem = serde_json::from_str(
+            r#"{"source_delegate_omni":"0xabc","ns":"travel","key":"k","body_b64":"","content_hash":"h","ts":1}"#,
+        )
+        .unwrap();
+        assert_eq!(old.kind, ContextKind::Knowledge);
+        let bad: Result<ContextKind, _> = serde_json::from_str("\"resource\"");
+        assert!(bad.is_err(), "resource is not in the wire enum yet (§16.2)");
+    }
+
+    #[test]
+    fn persona_soul_key_normalizes_omni() {
+        // One key shape: 0x-prefixed, lowercased — bare and 0X inputs converge.
+        assert_eq!(persona_soul_key("0xAbC1"), "soul:0xabc1");
+        assert_eq!(persona_soul_key("abc1"), "soul:0xabc1");
+        assert_eq!(PERSONA_NAMESPACE, "persona");
     }
 
     #[test]

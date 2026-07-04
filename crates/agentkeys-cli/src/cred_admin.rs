@@ -161,6 +161,7 @@ pub async fn memory_inbox_push(
     namespace: &str,
     key: &str,
     body: &str,
+    kind: agentkeys_backend_client::protocol::ContextKind,
     operator_omni: &str,
     actor_omni: &str,
     device_key_hash: &str,
@@ -202,14 +203,16 @@ pub async fn memory_inbox_push(
         .with_context(|| format!("cap-mint memory-append for inbox namespace `{namespace}`"))?;
     let plaintext_b64 = STANDARD.encode(body.as_bytes());
     let resp = client
-        .memory_inbox_append(cap, key.to_string(), plaintext_b64)
+        .memory_inbox_append(cap, key.to_string(), plaintext_b64, kind)
         .await
         .with_context(|| {
             format!("memory worker inbox-append for namespace `{namespace}` key `{key}`")
         })?;
     Ok(format!(
-        "pushed proposal to the master's inbox → {} (content_hash {})",
-        resp.s3_key, resp.content_hash
+        "pushed {} proposal to the master's inbox → {} (content_hash {})",
+        kind.as_str(),
+        resp.s3_key,
+        resp.content_hash
     ))
 }
 
