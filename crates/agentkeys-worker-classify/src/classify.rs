@@ -10,36 +10,18 @@
 //! LLM-backed COMPILE (richer NL coverage) is the deferred enhancement (#178
 //! P2 engine / #207 item 1B) — this is the rules floor that ships first.
 
-use serde::{Deserialize, Serialize};
-
 use crate::catalog::{Catalog, Classification};
+
+// The COMPILE result types now live in `agentkeys-catalog` (the ONE definition,
+// shared with the dataset validator) — re-exported so `crate::classify::CompileResult`
+// keeps resolving for the worker's HTTP handlers.
+pub use crate::catalog::{CompileResult, ProposedCategory};
 
 /// TAG one entity → its classification (catalog lookup). The `data_class` is the
 /// authorization context (bound to the cap); the lookup itself is unified by
 /// entity, so this is a single O(1) hashmap hit.
 pub fn tag(catalog: &Catalog, entity: &str) -> Classification {
     catalog.tag(entity)
-}
-
-/// A proposed grant from a COMPILE — a `(category, sensitivity)` the master will
-/// confirm (never auto-applied; the determinism guardrail keeps the model off
-/// the gate). `matched` is the catalog entity/keyword that produced it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProposedCategory {
-    pub category: String,
-    pub sensitivity: crate::catalog::Sensitivity,
-    pub matched: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompileResult {
-    /// Distinct categories the sentence resolved to (the proposed taxonomy).
-    pub categories: Vec<ProposedCategory>,
-    /// Tokens that matched no catalog entry — surfaced so the master sees what
-    /// the deterministic tier-0 could NOT resolve (the LLM tail, #178 §8.1).
-    pub unmatched: Vec<String>,
-    /// `catalog-rules` (this deterministic tier-0) vs a future `llm` engine.
-    pub engine: &'static str,
 }
 
 /// Deterministic COMPILE tier-0: tokenize, map each known catalog entity OR
@@ -98,7 +80,7 @@ pub fn compile(catalog: &Catalog, sentence: &str) -> CompileResult {
     CompileResult {
         categories,
         unmatched,
-        engine: "catalog-rules",
+        engine: "catalog-rules".into(),
     }
 }
 
