@@ -35,7 +35,7 @@ This is also why memory feels instant: the agent reads from its own context (or 
 
 You organize memory into **namespaces** (e.g. `user-profile`, `project-x`) — and a provider has its *own* way of organizing things (OpenViking uses `viking://` paths, mem0 uses ids). These never conflict, because your namespace is the **authoritative** one — it's what the gate locks on and the audit records — and the provider's organization is just a **derived copy** AgentKeys maps onto it. Change providers and your namespaces are untouched; only the internal mapping changes.
 
-The same holds for agent-native files like **skills** and `AGENTS.md`/`CLAUDE.md`: these are a *different class* of data (capabilities and instructions, not knowledge), with their own access rules. They can optionally be mirrored into a provider for retrieval over a large library, but they always live canonically in AgentKeys first. See [`./data-classification.md`](./data-classification.md) for how AgentKeys separates classes.
+The same holds for agent-native files like **skills** and `AGENTS.md`/`CLAUDE.md`: these are context **types of their own** (capabilities and instructions, not knowledge) — the *same* context system and curation gate as memories, with **stricter adoption rules per type** (a skill is reviewed like code before you accept it; a persona document is edited only by you). This mirrors how OpenViking itself organizes memories, resources, and skills as one unified context tree. They can optionally be mirrored into a provider for retrieval over a large library, but they always live canonically in AgentKeys first. See [`./data-classification.md`](./data-classification.md) for how AgentKeys separates classes.
 
 ## What this means for you
 
