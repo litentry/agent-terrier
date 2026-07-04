@@ -1,0 +1,16 @@
+[package]
+name = "agentkeys-classify-dataset"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for the policy-intent classifier dataset (#322): validate JSONL examples against the shared catalog + safety invariants, and dump the bundled catalog for the generation harness. The deterministic validator is `agentkeys_catalog::validate` (shared with the classify worker — no drift)."
+
+[[bin]]
+name = "classify-dataset"
+path = "src/main.rs"
+
+[dependencies]
+agentkeys-catalog = { path = "../agentkeys-catalog" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }

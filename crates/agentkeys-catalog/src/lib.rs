@@ -17,6 +17,16 @@
 //! So a vendor mislabeling a door-lock "safe" cannot self-grant —
 //! `access-control` is sensitivity-gated regardless of the vendor's label.
 
+// The COMPILE result types (moved here from the worker so the validator + the
+// dataset tooling share ONE definition), the `PolicyIntent` request-parse profile
+// (#322), and the deterministic validators that gate every classify output.
+pub mod compile;
+pub mod policy_intent;
+pub mod validate;
+
+pub use compile::{CompileResult, ProposedCategory};
+pub use policy_intent::{Limit, PolicyIntent, ResourceRef};
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -96,6 +106,16 @@ pub struct Catalog {
     pub version: u32,
     entities: BTreeMap<String, Entry>,
     floors: BTreeMap<String, Sensitivity>,
+}
+
+/// A serializable view of the catalog ([`Catalog::snapshot`]) — the real
+/// `entity → category` map + `category → floor` table, emitted as JSON so the
+/// dataset generation harness grounds its seeds on the bundled values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogSnapshot {
+    pub version: u32,
+    pub entities: BTreeMap<String, String>,
+    pub floors: BTreeMap<String, Sensitivity>,
 }
 
 impl Catalog {
@@ -227,6 +247,22 @@ impl Catalog {
     /// by COMPILE to tell a real category name from an unmatched token.
     pub fn has_category(&self, category: &str) -> bool {
         self.floors.contains_key(category)
+    }
+
+    /// A serializable snapshot of the catalog (`entity → category`, `category →
+    /// floor`). The dataset generation harness reads this to ground its seeds on
+    /// the **real** bundled values rather than a hand-copied list that could
+    /// drift — "work with the real memory" made drift-proof.
+    pub fn snapshot(&self) -> CatalogSnapshot {
+        CatalogSnapshot {
+            version: self.version,
+            entities: self
+                .entities
+                .iter()
+                .map(|(k, v)| (k.clone(), v.category.clone()))
+                .collect(),
+            floors: self.floors.clone(),
+        }
     }
 
     /// Classify a MEMORY namespace (#207 item 8 — agent memory inheritance). A

@@ -43,6 +43,10 @@ rand_core = { version = "0.6", features = ["std"] }
 [dev-dependencies]
 tempfile = "3"
 agentkeys-mock-server = { path = "../agentkeys-mock-server" }
+# #322 no-drift guard: a test asserts the classifier dataset's operation
+# allowlist (`agentkeys_catalog::validate::LANDED_OPERATIONS`) stays a subset of
+# the canonical op_kind labels owned here. No cycle: catalog doesn't depend on core.
+agentkeys-catalog = { path = "../agentkeys-catalog" }
 axum = { version = "0.7", features = ["json"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 rand_core = { version = "0.6", features = ["std"] }

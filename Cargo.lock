@@ -138,6 +138,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-classify-dataset"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-catalog",
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agentkeys-cli"
 version = "0.1.0"
 dependencies = [
@@ -181,6 +192,7 @@ name = "agentkeys-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "agentkeys-catalog",
  "agentkeys-device-core",
  "agentkeys-mock-server",
  "agentkeys-types",
