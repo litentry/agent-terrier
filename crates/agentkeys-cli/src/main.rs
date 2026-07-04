@@ -1033,6 +1033,12 @@ enum MemoryAction {
         /// The proposed memory body — the learning text the master will review.
         #[arg(long)]
         body: String,
+        /// #390 — the proposal's context kind: `knowledge` (default), `skill`
+        /// (strict curate gate: the master must view the body before accepting),
+        /// or `persona` (never inbox-adoptable — always rejected at curate;
+        /// persona is master-authored in parent-control).
+        #[arg(long, default_value = "knowledge")]
+        kind: String,
         #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
         operator_omni: String,
         #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
@@ -1071,6 +1077,12 @@ enum MemoryAction {
         /// The proposal's `s3_key` (copy it from `inbox-list`).
         #[arg(long)]
         s3_key: String,
+        /// #390 — the viewed-body watermark REQUIRED for `skill` proposals: the
+        /// `content_hash` printed by `inbox-view` (proof the body was reviewed
+        /// before adoption). Ignored for `knowledge`; `persona` is never
+        /// adoptable regardless.
+        #[arg(long)]
+        confirm_content_hash: Option<String>,
         #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
         daemon_url: String,
     },
@@ -1724,6 +1736,7 @@ async fn main() {
                 namespace,
                 key,
                 body,
+                kind,
                 operator_omni,
                 actor_omni,
                 device_key_hash,
@@ -1731,29 +1744,44 @@ async fn main() {
                 broker_url,
                 memory_url,
                 region,
-            } => {
-                agentkeys_cli::cred_admin::memory_inbox_push(
-                    namespace,
-                    key,
-                    body,
-                    operator_omni,
-                    actor_omni,
-                    device_key_hash,
-                    session_bearer,
-                    broker_url,
-                    memory_url,
-                    region,
-                )
-                .await
-            }
+            } => match agentkeys_backend_client::protocol::ContextKind::parse(kind) {
+                None => Err(anyhow::anyhow!(
+                    "--kind must be one of knowledge|skill|persona (got `{kind}`)"
+                )),
+                Some(kind) => {
+                    agentkeys_cli::cred_admin::memory_inbox_push(
+                        namespace,
+                        key,
+                        body,
+                        kind,
+                        operator_omni,
+                        actor_omni,
+                        device_key_hash,
+                        session_bearer,
+                        broker_url,
+                        memory_url,
+                        region,
+                    )
+                    .await
+                }
+            },
             MemoryAction::InboxList { daemon_url } => {
                 agentkeys_cli::inbox_curate::inbox_list(daemon_url).await
             }
             MemoryAction::InboxView { s3_key, daemon_url } => {
                 agentkeys_cli::inbox_curate::inbox_view(daemon_url, s3_key).await
             }
-            MemoryAction::InboxAccept { s3_key, daemon_url } => {
-                agentkeys_cli::inbox_curate::inbox_accept(daemon_url, s3_key).await
+            MemoryAction::InboxAccept {
+                s3_key,
+                confirm_content_hash,
+                daemon_url,
+            } => {
+                agentkeys_cli::inbox_curate::inbox_accept(
+                    daemon_url,
+                    s3_key,
+                    confirm_content_hash.as_deref(),
+                )
+                .await
             }
             MemoryAction::InboxReject { s3_key, daemon_url } => {
                 agentkeys_cli::inbox_curate::inbox_reject(daemon_url, s3_key).await

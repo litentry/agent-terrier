@@ -15,6 +15,7 @@ mod companion;
 mod hardening;
 mod master_session;
 mod pairing;
+mod persona;
 mod presets;
 mod proxy;
 mod session;
@@ -248,6 +249,20 @@ struct Args {
     /// against the bundled `agentkeys-catalog` tier-0 locally (deterministic, dev/no-infra).
     #[arg(long, env = "AGENTKEYS_WORKER_CLASSIFY_URL")]
     classify_url: Option<String>,
+
+    /// #390 — the bound agent's sandbox BRIDGE base URL (hermes_bridge.py, e.g.
+    /// http://127.0.0.1:8090 for the local dev sandbox). Set ⇒ persona edits and
+    /// the restart verb APPLY live into the sandbox (file write + ACP re-source);
+    /// unset ⇒ persona edits persist canonically only (`applied: false`) and the
+    /// restart verb 503s. One sandbox today; per-delegate routing rides
+    /// spawn-on-pair.
+    #[arg(long, env = "AGENTKEYS_SANDBOX_BRIDGE_URL")]
+    sandbox_bridge_url: Option<String>,
+
+    /// #390 — bearer for the sandbox bridge (its `AGENTKEYS_BRIDGE_TOKEN`).
+    /// Unset ⇒ requests go unauthenticated (the bridge's dev mode).
+    #[arg(long, env = "AGENTKEYS_SANDBOX_BRIDGE_TOKEN")]
+    sandbox_bridge_token: Option<String>,
 
     /// #97 — the audit worker the web decode view fetches REAL `AuditEnvelope`s
     /// from (by the submit receipt hashes). Empty (the default) ⇒ the decode
@@ -1189,6 +1204,8 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.config_url.clone(),
         args.config_role_arn.clone(),
         args.classify_url.clone(),
+        args.sandbox_bridge_url.clone(),
+        args.sandbox_bridge_token.clone(),
         Some(args.audit_worker_url.clone()).filter(|u| !u.trim().is_empty()),
         args.region.clone(),
         args.master_device_key_hash.clone(),

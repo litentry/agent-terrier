@@ -246,10 +246,12 @@ export function App() {
 
   // #339 P2 — accept one proposal INTO canonical memory (merge + GC), then
   // refresh both the queue and the category list (a new namespace may appear).
-  const acceptInboxItem = async (s3Key: string) => {
+  // #390 — `confirmContentHash` is the skill viewed-body watermark; the daemon's
+  // per-kind gate 428s a skill accept without it and 403s persona outright.
+  const acceptInboxItem = async (s3Key: string, confirmContentHash?: string) => {
     if (inboxBusy) return;
     setInboxBusy(true);
-    const r = await client.acceptInbox(s3Key);
+    const r = await client.acceptInbox(s3Key, confirmContentHash);
     setInboxBusy(false);
     if (r.ok) {
       // Optimistic removal: drop the curated row immediately so the queue

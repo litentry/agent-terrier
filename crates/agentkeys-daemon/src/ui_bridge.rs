@@ -158,6 +158,17 @@ pub struct UiBridgeState {
     /// locally (deterministic, dev/no-infra). Drives cred auto-categorize (#207 item 7)
     /// + connect-time auto-distribute (#207 item 5).
     pub classify_url: Option<String>,
+    /// #390 — the bound agent's sandbox BRIDGE base URL (hermes_bridge.py,
+    /// e.g. `http://127.0.0.1:8090`): the persona/context apply + restart
+    /// target. `None` ⇒ persona edits still persist canonically but report
+    /// `applied: false` (`sandbox_unconfigured`), and the restart verb 503s.
+    /// Today ONE configured sandbox (the L1/L2 single-sandbox topology);
+    /// per-delegate routing arrives with spawn-on-pair.
+    pub sandbox_bridge_url: Option<String>,
+    /// #390 — bearer for the sandbox bridge (`AGENTKEYS_BRIDGE_TOKEN` on the
+    /// bridge side). `None` ⇒ requests are sent unauthenticated (the bridge's
+    /// dev mode).
+    pub sandbox_bridge_token: Option<String>,
     /// #97 — the audit worker the decode view fetches REAL envelopes from
     /// (by the submit receipt hashes on feed events). `None` ⇒ the decode
     /// stays a synthesized preview (dev / no-infra / tests).
@@ -251,6 +262,11 @@ pub struct RegisteredMaster {
 pub use agentkeys_backend_client::protocol::web_api::{
     ApiMemoryEntry, MasterMemoryPlantRequest, MasterMemoryPlantResponse, MASTER_MEMORY_PLANT_ROUTE,
 };
+// #390 — the typed-context substrate (kind + the reserved persona namespace),
+// owned by the same wasm-safe protocol crate.
+pub use agentkeys_backend_client::protocol::{
+    normalize_omni_0x, persona_soul_key, ContextKind, PERSONA_NAMESPACE,
+};
 
 /// Content hash over (ns ‖ key ‖ body) — the dedup key for plant idempotency
 /// AND the durable-merge identity (codex finding 1). A free function so the
@@ -294,6 +310,8 @@ impl ApiMemoryEntryExt for ApiMemoryEntry {
             body: self.body.clone(),
             updated: self.updated.clone(),
             bytes: self.bytes,
+            version: self.version.clone(),
+            kind: self.kind,
         }
     }
 
@@ -304,26 +322,38 @@ impl ApiMemoryEntryExt for ApiMemoryEntry {
             key: s.key,
             title: s.title,
             bytes: s.bytes,
-            version: "v1".to_string(),
+            version: s.version,
             updated: s.updated,
             preview,
             body: s.body,
             content_hash: String::new(),
+            kind: s.kind,
         }
     }
+}
+
+fn default_stored_version() -> String {
+    "v1".to_string()
 }
 
 /// One element of the per-namespace JSON array `memory:<ns>.enc` (#201 Phase 4).
 /// Fixes the lossy single-body overwrite: a namespace with several memories
 /// round-trips as one array. The agent reads the same blobs (W4 inheritance
 /// defers the agent WRITE path; the inject already renders this shape).
+/// `version` + `kind` (#390) are serde-defaulted so pre-#390 blobs decode
+/// unchanged (`v1` / `knowledge`); the persona namespace relies on both for
+/// its durable version history.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct StoredMemoryEntry {
-    key: String,
-    title: String,
-    body: String,
-    updated: String,
-    bytes: u64,
+pub(crate) struct StoredMemoryEntry {
+    pub(crate) key: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) updated: String,
+    pub(crate) bytes: u64,
+    #[serde(default = "default_stored_version")]
+    pub(crate) version: String,
+    #[serde(default)]
+    pub(crate) kind: ContextKind,
 }
 
 /// The `config/memory-taxonomy.enc` object (#178 §7 / #201): the master-only
@@ -407,6 +437,8 @@ fn parse_stored_blob(plaintext: &str, ns: &str) -> Vec<StoredMemoryEntry> {
         body: plaintext.to_string(),
         updated: String::new(),
         bytes: plaintext.len() as u64,
+        version: default_stored_version(),
+        kind: ContextKind::Knowledge,
     }]
 }
 
@@ -611,6 +643,11 @@ pub struct ApiInboxItem {
     pub bytes: u64,
     #[ts(type = "number")]
     pub ts: u64,
+    /// #390 — the delegate-labeled, worker-stamped context kind; drives the
+    /// per-kind curate gate in the UI (skill = view-before-accept, persona =
+    /// never adoptable). Absent on pre-#390 items = `knowledge`.
+    #[serde(default)]
+    pub kind: ContextKind,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
@@ -849,6 +886,14 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/master/inbox/entry", post(get_master_inbox_entry))
         .route("/v1/master/inbox/accept", post(accept_master_inbox))
         .route("/v1/master/inbox/reject", post(reject_master_inbox))
+        // #390 — persona editor (view/edit/rollback) + the agent restart /
+        // live-context-view legs (master-hub-topology.md §16).
+        .route("/v1/master/persona", get(get_master_persona))
+        .route("/v1/master/persona", post(edit_master_persona))
+        .route("/v1/master/persona/rollback", post(rollback_master_persona))
+        .route("/v1/master/persona/delete", post(delete_master_persona))
+        .route("/v1/master/agent/restart", post(restart_master_agent))
+        .route("/v1/master/agent/context", get(get_master_agent_context))
         .route("/v1/master/config/presets", get(list_config_presets))
         .route("/v1/master/config/init", post(init_config_default))
         .route("/v1/master/classify/tag", post(classify_tag))
@@ -898,6 +943,8 @@ pub fn build_state(
     config_url: Option<String>,
     config_role_arn: Option<String>,
     classify_url: Option<String>,
+    sandbox_bridge_url: Option<String>,
+    sandbox_bridge_token: Option<String>,
     audit_worker_url: Option<String>,
     region: String,
     master_device_key_hash: Option<String>,
@@ -972,6 +1019,8 @@ pub fn build_state(
         config_url,
         config_role_arn,
         classify_url,
+        sandbox_bridge_url,
+        sandbox_bridge_token,
         audit_worker_url,
         region,
         master_device_key_hash,
@@ -6243,7 +6292,17 @@ async fn reconcile_taxonomy(
 #[derive(Debug, serde::Deserialize)]
 struct InboxCurateRequest {
     s3_key: String,
+    /// #390 §16.2 — the viewed-body watermark for `skill` proposals: the item's
+    /// `content_hash` as returned by `/v1/master/inbox/entry`. A skill accept
+    /// WITHOUT a matching hash is rejected (the gate can't prove the master saw
+    /// the body). Ignored for `knowledge`; `persona` is never adoptable.
+    #[serde(default)]
+    confirm_content_hash: Option<String>,
 }
+
+/// #390 §16.2 — the per-kind skill size cap enforced at the curate gate
+/// (near-executable content ⇒ higher injection/behavior risk than knowledge).
+const SKILL_MAX_BYTES: usize = 64 * 1024;
 
 /// Mint a master-self inbox cap (Fetch op, `service = "inbox"`,
 /// `operator == actor == O_master` so the broker skips the on-chain scope check)
@@ -6445,6 +6504,9 @@ async fn get_master_inbox_entry(
                     "source_delegate_omni": item.get("source_delegate_omni"),
                     "content_hash": item.get("content_hash"),
                     "ts": item.get("ts"),
+                    // #390 — absent on pre-#390 envelopes ⇒ knowledge.
+                    "kind": item.get("kind").cloned()
+                        .unwrap_or_else(|| serde_json::json!("knowledge")),
                 })),
             )
                 .into_response()
@@ -6455,9 +6517,59 @@ async fn get_master_inbox_entry(
     }
 }
 
+/// #390 §16.2 — the per-kind adoption gate applied by `accept_master_inbox`
+/// BEFORE the plant. Pure so the policy is unit-testable: `knowledge` passes
+/// unchanged; `skill` requires the viewed-body watermark (`confirm_content_hash`
+/// == the item's worker-stamped hash — proof the body was reviewed) and the
+/// [`SKILL_MAX_BYTES`] cap; `persona` is NEVER inbox-adoptable (master-authored
+/// only — edited in parent-control, its gate is simply closed to delegates).
+fn curate_gate(
+    kind: ContextKind,
+    body_bytes: usize,
+    confirm_content_hash: Option<&str>,
+    item_content_hash: &str,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    match kind {
+        ContextKind::Knowledge => Ok(()),
+        ContextKind::Persona => Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "persona_not_inbox_adoptable: persona is master-authored only — reject this \
+             proposal and edit the delegate's persona in parent-control (#390)"
+                .to_string(),
+        )),
+        ContextKind::Skill => {
+            if body_bytes > SKILL_MAX_BYTES {
+                return Err((
+                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "skill_too_large: {body_bytes} bytes exceeds the {SKILL_MAX_BYTES}-byte \
+                         skill cap"
+                    ),
+                ));
+            }
+            match confirm_content_hash {
+                Some(h) if h == item_content_hash => Ok(()),
+                Some(_) => Err((
+                    axum::http::StatusCode::CONFLICT,
+                    "skill_review_stale: confirm_content_hash does not match the proposal — \
+                     re-view the body and retry with the hash it prints"
+                        .to_string(),
+                )),
+                None => Err((
+                    axum::http::StatusCode::PRECONDITION_REQUIRED,
+                    "skill_review_required: a skill accept must carry confirm_content_hash \
+                     (view the body first; the hash proves it was reviewed)"
+                        .to_string(),
+                )),
+            }
+        }
+    }
+}
+
 /// `POST /v1/master/inbox/accept` — curate one proposal INTO canonical memory
 /// (the master's PR-merge), then GC the inbox object. Reuses the existing master
-/// memory plant (read-modify-write merge + taxonomy reconcile).
+/// memory plant (read-modify-write merge + taxonomy reconcile). #390: gated
+/// per-kind by [`curate_gate`] first.
 async fn accept_master_inbox(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<InboxCurateRequest>,
@@ -6545,6 +6657,26 @@ async fn accept_master_inbox(
             .into_response();
     }
 
+    // 1b. #390 §16.2 — the PER-KIND adoption gate (direction is a gate-policy
+    // outcome, not a class property): knowledge = today's accept; skill =
+    // viewed-body watermark + size cap; persona = never inbox-adoptable.
+    let kind: ContextKind = item
+        .get("kind")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let item_hash = item
+        .get("content_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if let Err((status, reason)) = curate_gate(
+        kind,
+        body.len(),
+        req.confirm_content_hash.as_deref(),
+        item_hash,
+    ) {
+        return (status, Json(serde_json::json!({ "error": reason }))).into_response();
+    }
+
     // 2. Curate INTO canonical via the existing plant (merge + taxonomy).
     let preview: String = body.chars().take(120).collect();
     let entry = ApiMemoryEntry {
@@ -6557,6 +6689,7 @@ async fn accept_master_inbox(
         preview,
         body,
         content_hash: String::new(),
+        kind,
     };
     let plant = match plant_master_memory_inner(
         &state,
@@ -6665,6 +6798,602 @@ async fn reject_master_inbox(
     }
 }
 
+// ── #390 — persona editor + sandbox apply/restart (master-hub §16) ──────────
+//
+// Persona (`SOUL.md`) is the strictest context kind: master-authored only,
+// validated at EDIT time (crate::persona), stored VERSIONED in the reserved
+// `persona` memory namespace (key `soul:<omni>` + `soul:<omni>@<n>` history),
+// and APPLIED into the bound agent's sandbox via the bridge's
+// `/v1/context/apply` (file write + ACP re-source — hermes reloads SOUL.md at
+// session creation). Storage rides the SAME per-ns machinery as the plant
+// (real worker or in-memory fallback) but writes the array WHOLESALE under the
+// plant lock — rotation is not a merge.
+
+/// The daemon-facing persona state for one delegate (the editor's GET).
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiPersonaState {
+    pub delegate_omni: String,
+    /// The live persona document (`soul:<omni>`), if one was ever authored.
+    pub current: Option<ApiMemoryEntry>,
+    /// Superseded versions, newest first (rollback targets, max 5 kept).
+    pub versions: Vec<ApiMemoryEntry>,
+    /// Whether a sandbox bridge is configured (edits apply live vs store-only).
+    pub sandbox_configured: bool,
+}
+
+/// Outcome of a persona edit/rollback. `applied` is the sandbox leg — `false`
+/// with a reason in `apply_detail` when the sandbox is unconfigured/unreachable
+/// (the canonical store SUCCEEDED either way; never a silent partial success).
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiPersonaEditResponse {
+    pub ok: bool,
+    pub version: u32,
+    pub applied: bool,
+    pub apply_detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonaQuery {
+    delegate: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonaEditRequest {
+    delegate_omni: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonaRollbackRequest {
+    delegate_omni: String,
+    version: u32,
+}
+
+/// A delegate omni for persona keying: `0x` + ≥8 hex chars (an actor omni is
+/// 20 bytes, but the dev/harness fixtures use shorter ids — the key derivation
+/// only needs a stable, hex-shaped identifier), lowercased by
+/// [`persona_soul_key`].
+fn validate_delegate_omni(omni: &str) -> Result<(), String> {
+    let hex = omni
+        .strip_prefix("0x")
+        .or_else(|| omni.strip_prefix("0X"))
+        .unwrap_or(omni);
+    if hex.len() >= 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "delegate_omni must be a 0x-hex actor omni (≥8 hex chars), got `{omni}`"
+        ))
+    }
+}
+
+/// UTC calendar date (`YYYY-MM-DD`) for persona `updated` stamps — civil-date
+/// math from unix days (no chrono dep; Hinnant's algorithm).
+fn now_date_utc() -> String {
+    let days = (now_unix() / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// The persona storage backend: the real per-ns worker chain when configured,
+/// else the in-memory cache (dev / headless CI — same split as the plant).
+enum PersonaBackend {
+    Real(Box<RealMemoryCtx>, agentkeys_provisioner::AwsTempCreds),
+    Cache,
+}
+
+async fn persona_backend(
+    state: &SharedUiBridgeState,
+) -> Result<PersonaBackend, (axum::http::StatusCode, String)> {
+    match real_memory_ctx(state).await {
+        Ok(Some(ctx)) => {
+            let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+                &ctx.broker,
+                &ctx.j1,
+                &ctx.role_arn,
+                &ctx.region,
+            )
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("STS relay: {e}"),
+                )
+            })?;
+            Ok(PersonaBackend::Real(Box::new(ctx), creds))
+        }
+        Ok(None) => Ok(PersonaBackend::Cache),
+        Err(reason) => Err((axum::http::StatusCode::CONFLICT, reason)),
+    }
+}
+
+/// Load the WHOLE persona namespace array (all delegates). Empty when never
+/// written.
+async fn persona_load(
+    state: &SharedUiBridgeState,
+    backend: &PersonaBackend,
+) -> Result<Vec<StoredMemoryEntry>, (axum::http::StatusCode, String)> {
+    match backend {
+        PersonaBackend::Real(ctx, creds) => {
+            let client = reqwest::Client::new();
+            memory_get_ns_real(&client, ctx, creds, PERSONA_NAMESPACE)
+                .await
+                .map(|opt| opt.unwrap_or_default())
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        format!("persona read of memory:{PERSONA_NAMESPACE} failed: {e}"),
+                    )
+                })
+        }
+        PersonaBackend::Cache => {
+            let cache = state.master_memory.read().await;
+            Ok(cache
+                .values()
+                .filter(|e| e.ns == PERSONA_NAMESPACE)
+                .map(|e| e.to_stored())
+                .collect())
+        }
+    }
+}
+
+/// Write the WHOLE persona namespace array back (rotation output). The caller
+/// holds the plant lock, so this read-modify-write can't race a concurrent
+/// plant/edit.
+async fn persona_store(
+    state: &SharedUiBridgeState,
+    backend: &PersonaBackend,
+    entries: &[StoredMemoryEntry],
+) -> Result<(), (axum::http::StatusCode, String)> {
+    match backend {
+        PersonaBackend::Real(ctx, creds) => {
+            let client = reqwest::Client::new();
+            memory_put_ns_real(&client, ctx, creds, PERSONA_NAMESPACE, entries)
+                .await
+                .map(|_| ())
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        format!("persona write of memory:{PERSONA_NAMESPACE} failed: {e}"),
+                    )
+                })
+        }
+        PersonaBackend::Cache => {
+            let mut cache = state.master_memory.write().await;
+            cache.retain(|_, e| e.ns != PERSONA_NAMESPACE);
+            for s in entries {
+                let mut api = ApiMemoryEntry::from_stored(PERSONA_NAMESPACE, s.clone());
+                api.content_hash = api.compute_hash();
+                cache.insert(api.content_hash.clone(), api);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One request to the configured sandbox bridge (hermes_bridge.py). `Err` is a
+/// human-readable transport/HTTP reason — the callers surface it explicitly.
+async fn sandbox_bridge_request(
+    state: &SharedUiBridgeState,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let base = state.sandbox_bridge_url.as_deref().ok_or_else(|| {
+        "sandbox_unconfigured: no --sandbox-bridge-url / AGENTKEYS_SANDBOX_BRIDGE_URL".to_string()
+    })?;
+    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("bridge client: {e}"))?;
+    let mut req = client.request(method, &url);
+    if let Some(token) = state.sandbox_bridge_token.as_deref() {
+        req = req.bearer_auth(token);
+    }
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("bridge {url} transport: {e}"))?;
+    let status = resp.status();
+    let value: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("bridge {url} parse: {e}"))?;
+    if !status.is_success() {
+        let err = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no error body)");
+        return Err(format!("bridge {url} {status}: {err}"));
+    }
+    Ok(value)
+}
+
+/// Apply a persona body into the sandbox (file write + ACP re-source, the #390
+/// distribution leg). Returns `(applied, detail)` — an unconfigured/unreachable
+/// sandbox is NOT an edit failure (the canonical store already committed), but
+/// it is always surfaced, never silently swallowed.
+async fn apply_persona_to_sandbox(state: &SharedUiBridgeState, soul_body: &str) -> (bool, String) {
+    if state.sandbox_bridge_url.is_none() {
+        return (
+            false,
+            "sandbox_unconfigured: stored canonically; the sandbox picks it up at next spawn"
+                .to_string(),
+        );
+    }
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let body = serde_json::json!({
+        "files": { "soul": STANDARD.encode(soul_body.as_bytes()) },
+        "restart": true,
+    });
+    match sandbox_bridge_request(
+        state,
+        reqwest::Method::POST,
+        "/v1/context/apply",
+        Some(body),
+    )
+    .await
+    {
+        Ok(v) => {
+            let restarted = v
+                .get("restarted")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false);
+            (
+                true,
+                if restarted {
+                    "applied to the sandbox; agent re-sourced (fresh ACP session)".to_string()
+                } else {
+                    "applied to the sandbox (no restart — takes effect at next re-source)"
+                        .to_string()
+                },
+            )
+        }
+        Err(e) => (
+            false,
+            format!("stored canonically but sandbox apply failed: {e}"),
+        ),
+    }
+}
+
+/// `GET /v1/master/persona?delegate=0x…` — the editor state: current + history.
+async fn get_master_persona(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::Query(q): axum::extract::Query<PersonaQuery>,
+) -> axum::response::Response {
+    if let Err(e) = validate_delegate_omni(&q.delegate) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+    let backend = match persona_backend(&state).await {
+        Ok(b) => b,
+        Err((status, reason)) => {
+            return (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    };
+    let entries = match persona_load(&state, &backend).await {
+        Ok(e) => e,
+        Err((status, reason)) => {
+            return (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    };
+    let soul_key = persona_soul_key(&q.delegate);
+    let (current, versions) = crate::persona::persona_view(entries, &soul_key);
+    let view = ApiPersonaState {
+        delegate_omni: normalize_omni_0x(&q.delegate).to_lowercase(),
+        current: current.map(|s| ApiMemoryEntry::from_stored(PERSONA_NAMESPACE, s)),
+        versions: versions
+            .into_iter()
+            .map(|s| ApiMemoryEntry::from_stored(PERSONA_NAMESPACE, s))
+            .collect(),
+        sandbox_configured: state.sandbox_bridge_url.is_some(),
+    };
+    (axum::http::StatusCode::OK, Json(view)).into_response()
+}
+
+/// Shared store path for edit + rollback: rotate under the plant lock, write,
+/// apply to the sandbox, emit the audit event. `new_body` was ALREADY validated.
+async fn persona_commit(
+    state: &SharedUiBridgeState,
+    delegate_omni: &str,
+    new_body: &str,
+    audit_kind: &str,
+    audit_detail: String,
+) -> Result<ApiPersonaEditResponse, (axum::http::StatusCode, String)> {
+    let backend = persona_backend(state).await?;
+    let soul_key = persona_soul_key(delegate_omni);
+    let version;
+    {
+        // Rotation is a read-modify-write of the whole namespace array — hold
+        // the plant lock so a concurrent plant/edit can't interleave.
+        let _guard = state.plant_lock.lock().await;
+        let entries = persona_load(state, &backend).await?;
+        let (rotated, v) =
+            crate::persona::rotate_persona(entries, &soul_key, new_body, &now_date_utc());
+        persona_store(state, &backend, &rotated).await?;
+        version = v;
+    }
+    let (applied, apply_detail) = apply_persona_to_sandbox(state, new_body).await;
+    let evt = ApiAuditEvent {
+        id: format!("e-persona-{}", now_unix()),
+        ts: now_ts_hms(),
+        actor_id: "master".into(),
+        actor: "master".into(),
+        kind: audit_kind.into(),
+        detail: format!("{audit_detail} · v{version} · applied: {applied}"),
+        chip: "persona".into(),
+        sev: "ok".into(),
+        tx_hash: None,
+        audit_envelope_hashes: None,
+    };
+    push_audit(state, evt).await;
+    Ok(ApiPersonaEditResponse {
+        ok: true,
+        version,
+        applied,
+        apply_detail,
+    })
+}
+
+/// `POST /v1/master/persona` — author/replace one delegate's persona document
+/// (#390 acceptance 2). Edit-time validation (guardrail, secrets, size) happens
+/// HERE — nothing invalid enters canonical; the apply leg never re-validates.
+async fn edit_master_persona(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<PersonaEditRequest>,
+) -> axum::response::Response {
+    if let Err(e) = validate_delegate_omni(&req.delegate_omni) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+    if let Err(e) = crate::persona::validate_persona_body(&req.body) {
+        return (
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+    match persona_commit(
+        &state,
+        &req.delegate_omni,
+        &req.body,
+        "persona.edit",
+        format!(
+            "persona edited for delegate {}",
+            normalize_omni_0x(&req.delegate_omni).to_lowercase()
+        ),
+    )
+    .await
+    {
+        Ok(resp) => (axum::http::StatusCode::OK, Json(resp)).into_response(),
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+/// `POST /v1/master/persona/rollback` — promote a kept history version back to
+/// current (§16.2 item 5). The rollback is itself a new version (v<max+1>), so
+/// history stays linear and auditable.
+async fn rollback_master_persona(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<PersonaRollbackRequest>,
+) -> axum::response::Response {
+    if let Err(e) = validate_delegate_omni(&req.delegate_omni) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+    let backend = match persona_backend(&state).await {
+        Ok(b) => b,
+        Err((status, reason)) => {
+            return (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    };
+    let entries = match persona_load(&state, &backend).await {
+        Ok(e) => e,
+        Err((status, reason)) => {
+            return (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    };
+    let soul_key = persona_soul_key(&req.delegate_omni);
+    let Some(body) = crate::persona::persona_body_for_version(&entries, &soul_key, req.version)
+    else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "persona_version_not_found: v{} is not in the kept history (max {} versions)",
+                    req.version,
+                    crate::persona::PERSONA_HISTORY_KEEP
+                )
+            })),
+        )
+            .into_response();
+    };
+    match persona_commit(
+        &state,
+        &req.delegate_omni,
+        &body,
+        "persona.rollback",
+        format!(
+            "persona rolled back to v{} for delegate {}",
+            req.version,
+            normalize_omni_0x(&req.delegate_omni).to_lowercase()
+        ),
+    )
+    .await
+    {
+        Ok(resp) => (axum::http::StatusCode::OK, Json(resp)).into_response(),
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+/// `POST /v1/master/persona/delete` — remove one delegate's persona document
+/// AND its kept history (e.g. after unbinding the delegate, or demo cleanup).
+/// Other delegates' entries in the shared `persona` namespace are untouched.
+async fn delete_master_persona(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<PersonaQueryBody>,
+) -> axum::response::Response {
+    if let Err(e) = validate_delegate_omni(&req.delegate_omni) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+    let backend = match persona_backend(&state).await {
+        Ok(b) => b,
+        Err((status, reason)) => {
+            return (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    };
+    let soul_key = persona_soul_key(&req.delegate_omni);
+    let prefix = format!("{soul_key}@");
+    let removed;
+    {
+        let _guard = state.plant_lock.lock().await;
+        let entries = match persona_load(&state, &backend).await {
+            Ok(e) => e,
+            Err((status, reason)) => {
+                return (status, Json(serde_json::json!({ "error": reason }))).into_response()
+            }
+        };
+        let before = entries.len();
+        let kept: Vec<StoredMemoryEntry> = entries
+            .into_iter()
+            .filter(|e| e.key != soul_key && !e.key.starts_with(&prefix))
+            .collect();
+        removed = before - kept.len();
+        if removed > 0 {
+            if let Err((status, reason)) = persona_store(&state, &backend, &kept).await {
+                return (status, Json(serde_json::json!({ "error": reason }))).into_response();
+            }
+        }
+    }
+    if removed > 0 {
+        let evt = ApiAuditEvent {
+            id: format!("e-persona-del-{}", now_unix()),
+            ts: now_ts_hms(),
+            actor_id: "master".into(),
+            actor: "master".into(),
+            kind: "persona.delete".into(),
+            detail: format!(
+                "persona removed ({removed} version(s)) for delegate {}",
+                normalize_omni_0x(&req.delegate_omni).to_lowercase()
+            ),
+            chip: "persona".into(),
+            sev: "ok".into(),
+            tx_hash: None,
+            audit_envelope_hashes: None,
+        };
+        push_audit(&state, evt).await;
+    }
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "removed": removed })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonaQueryBody {
+    delegate_omni: String,
+}
+
+/// `POST /v1/master/agent/restart` — the explicit re-source verb (#390 issue
+/// comment: "like the `source` command in shell"). Restarts the sandbox
+/// agent's ACP session so SOUL.md / AGENTS.md re-load; NOTE it also resets the
+/// conversation (the resident session IS the conversation memory).
+async fn restart_master_agent(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    match sandbox_bridge_request(&state, reqwest::Method::POST, "/v1/agent/restart", None).await {
+        Ok(v) => {
+            let evt = ApiAuditEvent {
+                id: format!("e-agent-restart-{}", now_unix()),
+                ts: now_ts_hms(),
+                actor_id: "master".into(),
+                actor: "master".into(),
+                kind: "agent.restart".into(),
+                detail: "agent re-sourced (fresh ACP session; context files re-read)".into(),
+                chip: "persona".into(),
+                sev: "ok".into(),
+                tx_hash: None,
+                audit_envelope_hashes: None,
+            };
+            push_audit(&state, evt).await;
+            (axum::http::StatusCode::OK, Json(v)).into_response()
+        }
+        Err(e) => {
+            let status = if e.starts_with("sandbox_unconfigured") {
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                axum::http::StatusCode::BAD_GATEWAY
+            };
+            (status, Json(serde_json::json!({ "error": e }))).into_response()
+        }
+    }
+}
+
+/// `GET /v1/master/agent/context` — the VIEW leg (#390 acceptance 1): the LIVE
+/// context files shaping the bound agent (SOUL.md, AGENTS.md, the locked
+/// agent-terrier.md base layer, config.yaml redacted), read from the sandbox.
+/// An unconfigured sandbox is a legit absent state (`configured: false`), not
+/// an error; an unreachable configured one IS an error (502).
+async fn get_master_agent_context(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    if state.sandbox_bridge_url.is_none() {
+        return (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({ "configured": false, "files": [] })),
+        )
+            .into_response();
+    }
+    match sandbox_bridge_request(&state, reqwest::Method::GET, "/v1/context/files", None).await {
+        Ok(v) => {
+            let files = v.get("files").cloned().unwrap_or(serde_json::json!([]));
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({ "configured": true, "files": files })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 async fn plant_master_memory(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<MasterMemoryPlantRequest>,
@@ -6685,6 +7414,20 @@ async fn plant_master_memory_inner(
     state: &SharedUiBridgeState,
     req: MasterMemoryPlantRequest,
 ) -> Result<MasterMemoryPlantResponse, (axum::http::StatusCode, String)> {
+    // #390 — the `persona` namespace is RESERVED: its single writer is the
+    // daemon persona module (versioned, validated, master-authored). A plant
+    // (or an inbox accept riding the plant) into it would bypass the edit-time
+    // validation + version rotation, so it is rejected outright.
+    if let Some(e) = req.entries.iter().find(|e| e.ns == PERSONA_NAMESPACE) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!(
+                "persona_ns_reserved: entry `{}` targets the reserved `{PERSONA_NAMESPACE}` \
+                 namespace — personas are edited via /v1/master/persona, never planted",
+                e.key
+            ),
+        ));
+    }
     let ctx = real_memory_ctx(state).await.map_err(|reason| {
         tracing::warn!("plant_master_memory: {reason}");
         (axum::http::StatusCode::CONFLICT, reason)
@@ -7764,6 +8507,7 @@ mod tests {
             preview: "p".into(),
             body: "b".into(),
             content_hash: String::new(),
+            kind: ContextKind::Knowledge,
         };
         let mut got: Vec<String> = serde_json::to_value(&sample)
             .expect("entry serializes")
@@ -7799,6 +8543,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -7826,6 +8572,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -7850,6 +8598,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None, // master_device_key_hash — deliberately UNSET (derivation path)
@@ -8142,6 +8892,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -8279,6 +9031,7 @@ mod tests {
                 preview: "trip".into(),
                 body: "trip".into(),
                 content_hash: "h1".into(),
+                kind: ContextKind::Knowledge,
             },
         );
 
@@ -8477,6 +9230,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             Some("0xdkh".into()),
@@ -8507,6 +9262,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             Some("0xdkh".into()),
@@ -9272,6 +10029,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -9637,6 +10396,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -9703,6 +10464,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -9777,6 +10540,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -9876,6 +10641,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -10037,6 +10804,7 @@ mod tests {
             preview: body.chars().take(40).collect(),
             body: body.into(),
             content_hash: String::new(),
+            kind: ContextKind::Knowledge,
         }
     }
 
@@ -10233,6 +11001,8 @@ mod tests {
             body: body.into(),
             updated: "2026-04-02".into(),
             bytes: body.len() as u64,
+            version: default_stored_version(),
+            kind: ContextKind::Knowledge,
         }
     }
 
@@ -10303,6 +11073,8 @@ mod tests {
             Some("https://config.example".into()), // config_url set
             None,                                  // CONFIG_ROLE_ARN missing → partial config
             None,                                  // classify_url
+            None,                                  // sandbox_bridge_url — #390
+            None,                                  // sandbox_bridge_token
             None,                                  // audit_worker_url
             "us-east-1".into(),
             None,
@@ -10529,6 +11301,8 @@ mod tests {
             None,
             None,
             None,
+            None,                              // sandbox_bridge_url — #390
+            None,                              // sandbox_bridge_token
             Some("http://127.0.0.1:9".into()), // audit_worker_url — closed port
             "us-east-1".into(),
             None,
@@ -10760,6 +11534,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sandbox_bridge_url — #390, no sandbox in unit tests
+            None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
             None,
@@ -10779,5 +11555,194 @@ mod tests {
             "should explain the missing session: {:?}",
             build.chain_error
         );
+    }
+
+    // ─── #390 — per-kind curate gate + persona editor ────────────────────────
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        serde_json::from_slice(&bytes).expect("body is JSON")
+    }
+
+    #[test]
+    fn curate_gate_per_kind_policy() {
+        use axum::http::StatusCode;
+        // knowledge — today's accept, no watermark needed.
+        assert!(curate_gate(ContextKind::Knowledge, 10, None, "h").is_ok());
+        // persona — NEVER inbox-adoptable (§16.2 item 3).
+        let (status, reason) = curate_gate(ContextKind::Persona, 10, Some("h"), "h").unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(reason.contains("persona_not_inbox_adoptable"));
+        // skill — requires the viewed-body watermark…
+        let (status, _) = curate_gate(ContextKind::Skill, 10, None, "h").unwrap_err();
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+        // …the RIGHT watermark…
+        let (status, _) = curate_gate(ContextKind::Skill, 10, Some("stale"), "h").unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(curate_gate(ContextKind::Skill, 10, Some("h"), "h").is_ok());
+        // …and the size cap.
+        let (status, _) =
+            curate_gate(ContextKind::Skill, SKILL_MAX_BYTES + 1, Some("h"), "h").unwrap_err();
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn plant_rejects_reserved_persona_namespace() {
+        // #390 — the persona module is the single writer of `persona`; a plant
+        // (or an inbox accept riding it) into that ns is a 400, even in the
+        // in-memory fallback.
+        let state = make_state();
+        let mut entry = mem_entry(PERSONA_NAMESPACE, "soul:0xabc", "sneaky persona");
+        entry.kind = ContextKind::Persona;
+        let err = plant_master_memory_inner(
+            &state,
+            MasterMemoryPlantRequest {
+                entries: vec![entry],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("persona_ns_reserved"));
+    }
+
+    #[tokio::test]
+    async fn persona_edit_get_rollback_delete_fallback_roundtrip() {
+        // The full editor lifecycle on the in-memory fallback (no sandbox
+        // configured): edit → v1, edit → v2, GET shows current+history,
+        // rollback(1) → v3 with v1's body, delete removes everything.
+        let state = make_state();
+        let delegate = "0xAbCd1234";
+
+        let resp = edit_master_persona(
+            State(state.clone()),
+            Json(PersonaEditRequest {
+                delegate_omni: delegate.into(),
+                body: "Be warm and brief.".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["version"], 1);
+        // Sandbox unconfigured ⇒ stored canonically but NOT applied — surfaced,
+        // never silent (the no-silent-fallback rule).
+        assert_eq!(v["applied"], false);
+        assert!(v["apply_detail"]
+            .as_str()
+            .unwrap()
+            .contains("sandbox_unconfigured"));
+
+        let resp = edit_master_persona(
+            State(state.clone()),
+            Json(PersonaEditRequest {
+                delegate_omni: delegate.into(),
+                body: "Be concise. 说中文。".into(),
+            }),
+        )
+        .await;
+        assert_eq!(body_json(resp).await["version"], 2);
+
+        let resp = get_master_persona(
+            State(state.clone()),
+            axum::extract::Query(PersonaQuery {
+                delegate: delegate.into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let view = body_json(resp).await;
+        assert_eq!(view["current"]["version"], "v2");
+        assert_eq!(view["current"]["kind"], "persona");
+        assert_eq!(view["versions"].as_array().unwrap().len(), 1);
+        assert_eq!(view["sandbox_configured"], false);
+
+        let resp = rollback_master_persona(
+            State(state.clone()),
+            Json(PersonaRollbackRequest {
+                delegate_omni: delegate.into(),
+                version: 1,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["version"], 3);
+        let resp = get_master_persona(
+            State(state.clone()),
+            axum::extract::Query(PersonaQuery {
+                delegate: delegate.into(),
+            }),
+        )
+        .await;
+        let view = body_json(resp).await;
+        assert_eq!(view["current"]["body"], "Be warm and brief.");
+
+        // A rollback to a never-kept version is a loud 404.
+        let resp = rollback_master_persona(
+            State(state.clone()),
+            Json(PersonaRollbackRequest {
+                delegate_omni: delegate.into(),
+                version: 99,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = delete_master_persona(
+            State(state.clone()),
+            Json(PersonaQueryBody {
+                delegate_omni: delegate.into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["removed"], 3); // v3 current + 2 history
+        let resp = get_master_persona(
+            State(state),
+            axum::extract::Query(PersonaQuery {
+                delegate: delegate.into(),
+            }),
+        )
+        .await;
+        let view = body_json(resp).await;
+        assert!(view["current"].is_null());
+    }
+
+    #[tokio::test]
+    async fn persona_edit_validation_and_restart_unconfigured_fail_loud() {
+        let state = make_state();
+        // Edit-time validation → 422 with the guardrail reason.
+        let resp = edit_master_persona(
+            State(state.clone()),
+            Json(PersonaEditRequest {
+                delegate_omni: "0xAbCd1234".into(),
+                body: "You are AgentKeys itself.".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body_json(resp).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("persona_identity_claim"));
+        // A malformed delegate omni is a 400, not a stored garbage key.
+        let resp = edit_master_persona(
+            State(state.clone()),
+            Json(PersonaEditRequest {
+                delegate_omni: "not-an-omni".into(),
+                body: "fine body".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // Restart with no sandbox configured → 503, never a silent no-op.
+        let resp = restart_master_agent(State(state.clone())).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // The context VIEW treats unconfigured as a legit absent state.
+        let resp = get_master_agent_context(State(state)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["configured"], false);
     }
 }

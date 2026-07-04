@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { CHIP_STYLES, NAMESPACES } from '@/lib/constants';
 import type { ConnectionStatus } from '@/lib/client/types';
+import { AgentPanel } from './agent';
 import { AutoDistributePanel, PermissionList } from './permissions';
 import type { ProposedScope } from '@/lib/client/types';
 import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
@@ -232,6 +233,10 @@ export function ActorDetail({
           <dt>last active</dt><dd>{actor.lastActive}</dd>
         </dl>
       </Panel>
+
+      {/* #390 — the bound agent's persona editor + live context files. Agents
+          only: a master has no SOUL.md (it is the hub, not a runtime). */}
+      {!isMaster && <AgentPanel actor={actor} />}
 
       {!isMaster && (
         <Panel title="── permissions · scoped (mobile-style)">

@@ -14,7 +14,7 @@ use agentkeys_core::audit::{
     AuditOpKind, AuditResult, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody,
     MemoryTeardownBody,
 };
-use agentkeys_protocol::{InboxItem, InboxItemMeta};
+use agentkeys_protocol::{ContextKind, InboxItem, InboxItemMeta};
 use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
@@ -459,6 +459,13 @@ pub struct InboxAppendRequest {
     pub cap: CapToken,
     pub key: String,
     pub plaintext_b64: String,
+    /// #390 — the delegate's LABEL for its proposal's context kind (mirrors
+    /// `agentkeys_protocol::MemoryInboxAppendBody::kind`; serde rejects values
+    /// outside the enum, absent = `knowledge`). The worker stamps the validated
+    /// kind into the stored item next to the worker-stamped provenance — a
+    /// delegate labels the kind, never its authorship.
+    #[serde(default)]
+    pub kind: ContextKind,
 }
 
 #[derive(Debug, Serialize)]
@@ -604,6 +611,7 @@ async fn inbox_append_inner(
         body_b64: req.plaintext_b64.clone(),
         content_hash: content_hash.clone(),
         ts: now_unix(),
+        kind: req.kind,
     };
     let item_json =
         serde_json::to_vec(&item).map_err(|e| err_500(e.to_string(), "inbox_item_encode"))?;
@@ -717,6 +725,7 @@ async fn memory_inbox_list(
                 content_hash: item.content_hash,
                 bytes,
                 ts: item.ts,
+                kind: item.kind,
             }),
             Err(e) => {
                 tracing::warn!(s3_key = %obj_key, reason = %e.1.reason, "inbox-list: skipping undecryptable item");
@@ -1202,6 +1211,7 @@ mod tests {
             body_b64: "aGVsbG8=".into(),
             content_hash: "0xabc".into(),
             ts: 1,
+            kind: ContextKind::Skill,
         };
         let item_json = serde_json::to_vec(&item).unwrap();
 
@@ -1215,6 +1225,8 @@ mod tests {
         let round: InboxItem = serde_json::from_slice(&got).unwrap();
         assert_eq!(round.ns, "travel");
         assert_eq!(round.source_delegate_omni, "0xBBbb");
+        // #390 — the stamped kind survives the envelope round-trip.
+        assert_eq!(round.kind, ContextKind::Skill);
 
         // a memory-style per-ns aad must NOT decrypt an inbox blob (data-class sep).
         let memory_aad = envelope::aad(master, master, "memory:travel", epoch);
