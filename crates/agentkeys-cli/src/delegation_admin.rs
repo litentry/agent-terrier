@@ -113,7 +113,7 @@ pub async fn device_resolve(broker_url: &str, key_file: &str) -> Result<String> 
 /// for this device and co-sign each with K10, bounding the sandbox to `scope` and
 /// `ttl_seconds`. Returns the number co-signed. With `once=false` the device polls
 /// in a loop (a long-lived co-sign daemon); `once=true` drains the current queue
-/// and returns (the harness/test shape).
+/// and returns (the e2e/test shape).
 pub async fn device_cosign(
     broker_url: &str,
     key_file: &str,

@@ -1,6 +1,6 @@
 # Broker + Local Operator Dev Guide
 
-**Audience:** developers iterating on the broker, the workers, or the operator-side scripts (`harness/`, `scripts/heima-*.sh`).
+**Audience:** developers iterating on the broker, the workers, or the operator-side scripts (`e2e/`, `scripts/heima-*.sh`).
 **Scope:** the inner edit-build-test loop — running the broker stack on your laptop, exercising it with operator scripts, and knowing which knob to turn when something breaks.
 
 This guide is **not** the environment bootstrap doc (see [`docs/dev-setup.md`](../dev-setup.md)) or the deploy-to-real-host runbook (see [`docs/operator-runbook-stage7.md`](../operator-runbook-stage7.md)). Read those first if you have a fresh machine or you're standing up a new broker EC2.
@@ -136,7 +136,7 @@ For a tighter loop while editing a single module, write a unit test next to the 
 
 ## 4. Inner loop B — edit operator scripts
 
-The operator-side scripts (`harness/v2-stage{1,2,3}-demo.sh`, `scripts/heima-*.sh`, `scripts/agentkeys-*-demo.sh`) are the dev loop for the *operator workflow*: cap-mint, identity bootstrap, scope grants, S3 isolation tests. They run on your laptop and call the broker (local or remote) via plain HTTP + `cast` + `aws`.
+The operator-side scripts (`e2e/v2-stage{1,2,3}-demo.sh`, `scripts/heima-*.sh`, `scripts/agentkeys-*-demo.sh`) are the dev loop for the *operator workflow*: cap-mint, identity bootstrap, scope grants, S3 isolation tests. They run on your laptop and call the broker (local or remote) via plain HTTP + `cast` + `aws`.
 
 ### 4.1 Point the operator env at the local broker
 
@@ -166,22 +166,22 @@ AGENTKEYS_CHAIN=anvil
 
 ### 4.2 Run the canonical inner-loop demo
 
-`harness/v2-stage1-demo.sh` (operator-internal) is the end-to-end exerciser most operator edits land against. It's a 13-step script: install CLI → email-link init → identity bootstrap → S3 envelope smoke test → chain bring-up → device register → agent create → scope grant → K11 enroll → cap-mint roundtrip.
+`e2e/suite-1-foundation.sh` (operator-internal) is the end-to-end exerciser most operator edits land against. It's a 13-step script: install CLI → email-link init → identity bootstrap → S3 envelope smoke test → chain bring-up → device register → agent create → scope grant → K11 enroll → cap-mint roundtrip.
 
 ```bash
 set -a; source scripts/operator-workstation.dev.env; set +a
 
 # Full demo against local stack:
-bash harness/v2-stage1-demo.sh --chain anvil
+bash e2e/suite-1-foundation.sh --chain anvil
 
 # Re-run just one step you're iterating on:
-bash harness/v2-stage1-demo.sh --only-step 7
+bash e2e/suite-1-foundation.sh --only-step 7
 
 # Skip the slow bits (CLI build, chain deploy, S3 provisioning):
-bash harness/v2-stage1-demo.sh --skip-build --skip-deploy --skip-provision
+bash e2e/suite-1-foundation.sh --skip-build --skip-deploy --skip-provision
 
 # Stop after a specific step (useful when bisecting a regression):
-bash harness/v2-stage1-demo.sh --to-step 5
+bash e2e/suite-1-foundation.sh --to-step 5
 ```
 
 The `--from-step N` / `--to-step N` / `--only-step N` triad is the inner-loop primitive — every step prints `[step N/M]` to stderr, every step is idempotent. If step 7 fails after a script edit, fix the script, re-run with `--from-step 7`, you keep the work from steps 1–6.
@@ -214,7 +214,7 @@ Step 4 is usually faster — no SSH, you get fresh logs in the GHA run, and the 
 
 Per [PR #102](https://github.com/litentry/agentKeys/pull/102), pushing broker-affecting changes to a PR branch auto-deploys to the test EC2 via SSM and runs the full harness against the freshly-deployed broker. You see broker bugs in your own PR, not the next operator's.
 
-What counts as "broker-affecting" — the path-filter list in [`.github/workflows/harness-ci.yml`](../../.github/workflows/harness-ci.yml):
+What counts as "broker-affecting" — the path-filter list in [`.github/workflows/e2e-ci.yml`](../../.github/workflows/e2e-ci.yml):
 
 ```
 crates/agentkeys-broker-server/**
@@ -235,7 +235,7 @@ Untouched + auto-deploy is opt-in (gated on `OIDC_AWS_ROLE_ARN_DEPLOY` + `TEST_B
 To dry-run the deploy without a broker code change, dispatch manually with the override:
 
 ```bash
-gh workflow run harness-ci.yml --repo litentry/agentKeys \
+gh workflow run e2e-ci.yml --repo litentry/agentKeys \
   --ref <your-branch> \
   --field stage=1 \
   --field force_deploy_broker=true
@@ -250,7 +250,7 @@ Three files, three audiences. The "is the broker reading the right thing" debug 
 | File | Where it lives | Who reads it | Local-dev override |
 |---|---|---|---|
 | `scripts/broker.env` (operator-internal) | **Broker host** (EC2 or your laptop's broker process) | `agentkeys-broker-server` (every entry has a matching constant in `crates/agentkeys-broker-server/src/env.rs`) | `scripts/broker.dev.env` (gitignored, copied from `broker.env`, swap hosts to `127.0.0.1`) |
-| `scripts/operator-workstation.env` (operator-internal) | **Operator laptop** | Every `harness/` + `scripts/heima-*.sh` script | `scripts/operator-workstation.dev.env` (gitignored, swap hosts to `127.0.0.1:809x`) |
+| `scripts/operator-workstation.env` (operator-internal) | **Operator laptop** | Every `e2e/` + `scripts/heima-*.sh` script | `scripts/operator-workstation.dev.env` (gitignored, swap hosts to `127.0.0.1:809x`) |
 | `scripts/broker.test.env` (operator-internal) | **Test broker host** (CI auto-deploy target) | `agentkeys-broker-server` running on the test EC2 | Same shape as `broker.env`; CI workflow materializes per-run values into this on the runner |
 
 Mixing them on the wrong host is the most common config bug. The broker host should NEVER source `operator-workstation.env` — that file has AWS admin tooling vars (BUCKET, OIDC_PROVIDER_ARN) that don't exist as broker-server env vars and would silently shadow what the broker actually reads.
@@ -313,12 +313,12 @@ Re-run with `--from-step N` to keep prior progress, OR `--only-step N` to test o
 
 ## 8. Chain profile selection
 
-`AGENTKEYS_CHAIN` controls which RPC + which contract addresses every harness script talks to. Default in `v2-stage1-demo.sh` is `heima-paseo`; common alternates:
+`AGENTKEYS_CHAIN` controls which RPC + which contract addresses every harness script talks to. Default in `suite-1-foundation.sh` is `heima-paseo`; common alternates:
 
 | Profile | RPC | When to use | Cost |
 |---|---|---|---|
 | `anvil` | `http://127.0.0.1:8545` | Fully local; fastest iteration; no real-world side effects | Free |
-| `heima-paseo` | Heima testnet | Real-chain semantics without real-money cost; default for `v2-stage1-demo.sh` | Testnet HEI (free from faucet) |
+| `heima-paseo` | Heima testnet | Real-chain semantics without real-money cost; default for `suite-1-foundation.sh` | Testnet HEI (free from faucet) |
 | `heima` | Heima mainnet | The canonical chain; matches what CI's harness-e2e runs against | Real HEI — small per-run cost |
 
 Switch with `--chain` on any harness script. Contract addresses for `heima` live in the chain profile [`crates/agentkeys-core/chain-profiles/heima.json`](../../crates/agentkeys-core/chain-profiles/heima.json) (`.contracts[]`) and in [`deployed-contracts.md`](./deployed-contracts.md); add `anvil` ones by running the chain bring-up entry point (operator-internal — `scripts/operator/setup-heima.sh --chain anvil --from-step 4 --to-step 8`) after starting your local anvil.

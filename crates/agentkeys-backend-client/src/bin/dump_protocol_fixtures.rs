@@ -5,12 +5,12 @@
 //! cargo run -p agentkeys-backend-client --bin dump-protocol-fixtures -- --check
 //! ```
 //!
-//! Default: (re)writes `harness/fixtures/backend-protocol/<name>.json` from the
+//! Default: (re)writes `e2e/fixtures/backend-protocol/<name>.json` from the
 //! serde types in `agentkeys_backend_client::protocol`. `--check` instead
 //! verifies the on-disk files match what the types would emit and exits non-zero
 //! on any drift (so CI fails if a struct changed without regenerating). The
 //! output dir can be overridden with `--out <dir>` (default resolves to the
-//! repo's `harness/fixtures/backend-protocol`).
+//! repo's `e2e/fixtures/backend-protocol`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -24,8 +24,8 @@ fn default_out_dir() -> PathBuf {
     manifest
         .parent()
         .and_then(Path::parent)
-        .map(|root| root.join("harness/fixtures/backend-protocol"))
-        .unwrap_or_else(|| PathBuf::from("harness/fixtures/backend-protocol"))
+        .map(|root| root.join("e2e/fixtures/backend-protocol"))
+        .unwrap_or_else(|| PathBuf::from("e2e/fixtures/backend-protocol"))
 }
 
 fn pretty(body: &serde_json::Value) -> String {

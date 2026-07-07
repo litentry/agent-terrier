@@ -2,15 +2,15 @@
 # scripts/utils/check-web-api-drift.sh — the harness drift gate for the master-memory
 # plant contract (issue #203 / the #206 parity ladder).
 #
-# Phase 6 (web-parity-demo.sh) used to false-green: it `curl`s the daemon's
+# Phase 6 (suite-6-web-parity.sh) used to false-green: it `curl`s the daemon's
 # plant endpoint with a hand-built body that agreed with the daemon only by
 # manual coincidence. This gate ties it to ONE serde schema (the
 # `ApiMemoryEntry` + `MASTER_MEMORY_PLANT_ROUTE` owned by
 # `agentkeys-protocol::web_api`), captured in
-# harness/fixtures/web-api/master_memory_plant.json. The Rust side is pinned by
+# e2e/fixtures/web-api/master_memory_plant.json. The Rust side is pinned by
 # a unit test (ui_bridge.rs `master_memory_plant_contract_matches_fixture`);
 # this script pins the ONE remaining non-Rust consumer:
-#   - the route literal must appear verbatim at web-parity-demo.sh's call site
+#   - the route literal must appear verbatim at suite-6-web-parity.sh's call site
 #   - its `# @web-fixture: master_memory_plant`-annotated entry object literal
 #     must have exactly the fixture's `entry_keys`.
 #
@@ -27,8 +27,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-FIXTURE="$REPO_ROOT/harness/fixtures/web-api/master_memory_plant.json"
-HARNESS="$REPO_ROOT/harness/web-parity-demo.sh"
+FIXTURE="$REPO_ROOT/e2e/fixtures/web-api/master_memory_plant.json"
+HARNESS="$REPO_ROOT/e2e/suite-6-web-parity.sh"
 
 c() { [ -t 1 ] && printf '\033[%sm%s\033[0m' "$1" "$2" || printf '%s' "$2"; }
 ok()   { printf '  %s %s\n' "$(c '1;32' ok)"   "$1"; }
@@ -41,7 +41,7 @@ command -v awk >/dev/null 2>&1 || { bad "awk not found"; exit 2; }
 
 ROUTE="$(jq -r '.route' "$FIXTURE")"
 WANT_KEYS="$(jq -r '.entry_keys | sort | join(",")' "$FIXTURE")"
-info "canonical plant contract (from harness/fixtures/web-api/master_memory_plant.json):"
+info "canonical plant contract (from e2e/fixtures/web-api/master_memory_plant.json):"
 printf '    route      = %s\n    entry_keys = %s\n' "$ROUTE" "$WANT_KEYS"
 
 # Sorted CSV of top-level keys from a (possibly multi-line) bash/TS object literal.
@@ -138,11 +138,11 @@ check_consumer() {
 
 echo
 info "gating the remaining non-Rust consumer (the Rust source is pinned by the ui_bridge unit test; daemon.ts is compile-gated via the wasm builder, #275)..."
-check_consumer "harness web-parity-demo" "$HARNESS" 'curl|-X[[:space:]]+POST'
+check_consumer "harness suite-6-web-parity" "$HARNESS" 'curl|-X[[:space:]]+POST'
 
 echo
 if [ "$fails" -gt 0 ]; then
-  bad "$fails plant-contract drift(s) — align the consumer, or if the contract changed update agentkeys-protocol::web_api::ApiMemoryEntry + harness/fixtures/web-api/master_memory_plant.json (the ui_bridge test enforces the Rust half)"
+  bad "$fails plant-contract drift(s) — align the consumer, or if the contract changed update agentkeys-protocol::web_api::ApiMemoryEntry + e2e/fixtures/web-api/master_memory_plant.json (the ui_bridge test enforces the Rust half)"
   exit 1
 fi
-ok "no drift — web-parity-demo.sh agrees with the canonical plant contract"
+ok "no drift — suite-6-web-parity.sh agrees with the canonical plant contract"

@@ -1,0 +1,11 @@
+{
+  "actor_omni": "0x<actor_omni>",
+  "intent_commitment": null,
+  "intent_text": "<intent>",
+  "op_body": {},
+  "op_kind": 0,
+  "operator_omni": "0x<operator_omni>",
+  "result": 0,
+  "ts_unix": 0,
+  "version": 1
+}

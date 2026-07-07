@@ -217,7 +217,7 @@ pub const REGION: &str = "REGION";
 ///
 /// Used by:
 /// - the runbook env-var table (auto-generated from this list);
-/// - `harness/stage-7-done.sh`'s drift check (greps each name against the runbook);
+/// - `e2e/stage-7-done.sh`'s drift check (greps each name against the runbook);
 /// - tests that assert no raw `BROKER_*` literal exists outside this module.
 pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
     &[

@@ -29,7 +29,7 @@
 # A stale entry (file no longer matches) prints a loud warning so the
 # list shrinks instead of rotting. It has been EMPTY since PR #259 +
 # #264 landed — keep it that way; the parallel-threads `cargo test` in
-# harness-ci.yml rust-checks is the runtime half of this gate.
+# e2e-ci.yml rust-checks is the runtime half of this gate.
 #
 # Output convention: `ok proceeding` / `fail <reason>` per the repo's
 # idempotent-script rule.

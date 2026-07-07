@@ -187,7 +187,7 @@ pub struct UiBridgeState {
     /// on chain with CAP_MINT; its `device_key_hash` is what real cap-mint sends
     /// (takes precedence over `master_device_key_hash`).
     pub registered_master: RwLock<Option<RegisteredMaster>>,
-    /// Issue #196: path to `harness/scripts/heima-register-first-master.sh` (the
+    /// Issue #196: path to `e2e/scripts/heima-register-first-master.sh` (the
     /// §4.2 sanctioned shell-out). `None` ⇒ K11-finish does NOT submit the
     /// on-chain register (chain stays "none"); set via `--register-master-script`
     /// to enable the real web onboarding chain write.
@@ -831,7 +831,7 @@ fn err(
 /// `agentkeys-protocol::web_api` (re-exported above, #275 tier-3): the React
 /// frontend gets it from the `agentkeys-web-core` wasm export (one code path),
 /// the harness demo is fixture-gated by `scripts/utils/check-web-api-drift.sh`, and
-/// the fixture (`harness/fixtures/web-api/master_memory_plant.json`) is pinned
+/// the fixture (`e2e/fixtures/web-api/master_memory_plant.json`) is pinned
 /// to the shared const + `ApiMemoryEntry` shape by the unit test below.
 pub const MASTER_MEMORY_ROUTE: &str = "/v1/master/memory";
 
@@ -5316,7 +5316,7 @@ async fn register_pairing(
     };
     // `heima-agent-create.sh` canonically lives in `<repo>/scripts/`, while the
     // master register script (`--register-master-script`) may be in
-    // `<repo>/harness/scripts/` (dev.sh) — so it is NOT always a sibling. Try the
+    // `<repo>/e2e/scripts/` (dev.sh) — so it is NOT always a sibling. Try the
     // sibling first (co-located case), then `<repo>/scripts/` derived from the
     // master script path. (#214 register-pairing path-mismatch fix — a missing
     // script otherwise surfaced as a confusing 502 on `accept pairing`.)
@@ -5768,7 +5768,7 @@ async fn get_master_memory_entry_inner(
 // When the daemon has --memory-url + --memory-role-arn + --master-device-key-hash
 // AND a master onboarding session, the master plants its OWN memory under its
 // actor_omni (operator == actor == O_master) via the same chain the MCP
-// http_backend + phase1-wire-demo use. Otherwise plant falls back to the
+// http_backend + suite-5-wire-real use. Otherwise plant falls back to the
 // in-memory store. Per-actor by construction (cap-mint binds device.actor_omni
 // == req.actor_omni); see docs/plan/web-flow/w3-real-memory.md §1.
 
@@ -8474,19 +8474,19 @@ mod tests {
 
     /// Pin the master-memory plant CONTRACT (the daemon's web API, owned by
     /// `agentkeys-protocol::web_api` and re-exported above) to the committed
-    /// fixture that `web-parity-demo.sh` is gated against (issue #203 / the
+    /// fixture that `suite-6-web-parity.sh` is gated against (issue #203 / the
     /// #206 parity ladder). The shared struct + route const are the source of
     /// truth; this test fails the moment they drift from the fixture, so a
     /// field rename or route change can't silently leave phase 6 green on the
     /// old path. The React frontend is NOT fixture-gated anymore (#275): it
     /// consumes the wasm-exported builder, so its half is compile-checked. If
     /// you change `ApiMemoryEntry` or the route on purpose, update
-    /// `harness/fixtures/web-api/master_memory_plant.json` to match (and the
+    /// `e2e/fixtures/web-api/master_memory_plant.json` to match (and the
     /// harness consumer is re-gated by the bash check).
     #[test]
     fn master_memory_plant_contract_matches_fixture() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../harness/fixtures/web-api/master_memory_plant.json");
+            .join("../../e2e/fixtures/web-api/master_memory_plant.json");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let fixture: serde_json::Value = serde_json::from_str(&raw).expect("fixture is JSON");
@@ -8526,7 +8526,7 @@ mod tests {
         assert_eq!(
             got, want,
             "ApiMemoryEntry keys drifted from the web-api fixture — regenerate \
-             harness/fixtures/web-api/master_memory_plant.json + re-gate daemon.ts/web-parity-demo.sh"
+             e2e/fixtures/web-api/master_memory_plant.json + re-gate daemon.ts/suite-6-web-parity.sh"
         );
     }
 

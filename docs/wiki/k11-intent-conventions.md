@@ -131,10 +131,10 @@ Implementation:
 | `scripts/operator/chain/heima-scope-set.sh` (operator-internal) | scope grant | ✅ |
 | `scripts/operator/chain/heima-scope-revoke.sh` (operator-internal) | scope revoke | ✅ |
 | `scripts/operator/chain/heima-device-revoke.sh` (operator-internal) | revoke device | ✅ |
-| `harness/scripts/heima-device-add.sh` (operator-internal) | register companion as 2nd master | ✅ |
-| `harness/scripts/heima-register-spare-master.sh` (operator-internal) | register synthetic 3rd master | ✅ |
-| `harness/scripts/heima-set-recovery-threshold.sh` (operator-internal) | set recovery threshold | ✅ |
-| `harness/scripts/heima-recovery.sh` (operator-internal) PRIMARY + COMPANION | M-of-N device revoke | ✅ (both prompts uniform; companion via POST body) |
+| `e2e/scripts/heima-device-add.sh` (operator-internal) | register companion as 2nd master | ✅ |
+| `e2e/scripts/heima-register-spare-master.sh` (operator-internal) | register synthetic 3rd master | ✅ |
+| `e2e/scripts/heima-set-recovery-threshold.sh` (operator-internal) | set recovery threshold | ✅ |
+| `e2e/scripts/heima-recovery.sh` (operator-internal) PRIMARY + COMPANION | M-of-N device revoke | ✅ (both prompts uniform; companion via POST body) |
 | Future master-mutation script | (new) | MUST follow this convention before merging |
 
 ## What does NOT count as conformant
@@ -168,7 +168,7 @@ To sanity-check the typed pipeline end-to-end against the actual Touch ID confir
 ```bash
 # Trigger any K11 ceremony with --webauthn — the localhost server
 # renders the confirmation page + prints its URL to stderr.
-bash harness/v2-stage1-demo.sh --only-step 13 --webauthn
+bash e2e/suite-1-foundation.sh --only-step 13 --webauthn
 
 # Open the URL, confirm:
 #   - Headline is the canonical phrasing from the variant table above.

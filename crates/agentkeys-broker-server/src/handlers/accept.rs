@@ -670,7 +670,7 @@ fn handle_ops_revert_message(reason: Option<&str>, tx_hash: &str) -> String {
             "the SENDER account's EntryPoint deposit can't cover the op's prefund — a \
              funding issue, not an auth issue. Top up: cast send $ENTRYPOINT \
              'depositTo(address)' <master account> --value 0.2ether --legacy (the harness \
-             auto-top-up in harness/scripts/_erc4337_lib.sh derives the exact floor)",
+             auto-top-up in e2e/scripts/_erc4337_lib.sh derives the exact floor)",
         ),
         "AA31" => Some(
             "the VerifyingPaymaster's EntryPoint deposit is below the one-op prefund — a \

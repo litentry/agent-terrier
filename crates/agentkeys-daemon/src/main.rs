@@ -68,7 +68,7 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_UI_BRIDGE_RP_NAME", default_value = "AgentKeys")]
     ui_bridge_rp_name: String,
 
-    /// HARNESS/TEST SEAM (web-parity, v2-demo phase 6): seed the ui-bridge
+    /// HARNESS/TEST SEAM (web-parity, suite phase 6): seed the ui-bridge
     /// onboarding session directly with an existing master J1, bypassing the
     /// interactive email + WebAuthn onboarding. Lets the harness drive the REAL
     /// plant chain with its already-registered master (pair with
@@ -283,7 +283,7 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_MASTER_DEVICE_KEY_HASH")]
     master_device_key_hash: Option<String>,
 
-    /// Issue #196: path to `harness/scripts/heima-register-first-master.sh`. When
+    /// Issue #196: path to `e2e/scripts/heima-register-first-master.sh`. When
     /// set, the ui-bridge K11-finish handler shells out to it to register the
     /// master device on chain (un-stubbing `chain_tx_hash`) under the session
     /// omni, signed by the local deployer key. Unset ⇒ on-chain registration is
@@ -1228,7 +1228,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.ui_bridge_seed_session_jwt.clone(),
         args.ui_bridge_seed_omni.clone(),
     ) {
-        // Harness web-parity seam (v2-demo phase 6): seed the onboarding session so
+        // Harness web-parity seam (suite phase 6): seed the onboarding session so
         // the parity phase drives the REAL plant chain with the harness's already-
         // registered master, without interactive onboarding/WebAuthn. Pair with
         // --master-device-key-hash. The seed is ephemeral (never persisted).

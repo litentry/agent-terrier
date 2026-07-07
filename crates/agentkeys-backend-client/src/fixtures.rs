@@ -5,7 +5,7 @@
 //! type** in [`crate::protocol`], so its JSON keys are exactly what goes on the
 //! wire — you cannot edit a struct field without changing the fixture. The
 //! `dump-protocol-fixtures` bin writes these to
-//! `harness/fixtures/backend-protocol/*.json`; the bash gate
+//! `e2e/fixtures/backend-protocol/*.json`; the bash gate
 //! (`scripts/utils/check-backend-fixture-drift.sh`) diffs the key-set of every
 //! hand-rolled `jq -n` cap/worker body against them. A drifted bash body
 //! (added/renamed/dropped field) then fails CI instead of surfacing as a

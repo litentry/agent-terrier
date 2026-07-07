@@ -1,0 +1,11 @@
+{
+  "account_gas_limits": "0x<account_gas_limits>",
+  "call_data": "0x<executeBatch>",
+  "gas_fees": "0x<gas_fees>",
+  "init_code": "0x",
+  "nonce": "0x<nonce>",
+  "paymaster_and_data": "0x<paymaster_and_data>",
+  "pre_verification_gas": "0x<pre_verification_gas>",
+  "sender": "0x<sender>",
+  "signature": "0x<k11_assertion>"
+}

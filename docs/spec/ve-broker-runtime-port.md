@@ -137,7 +137,7 @@ The **provisioning/admin identities** on both clouds are scoped by custom polici
 
 Accepted residual (both clouds): `ListBucket` on the data buckets (key metadata) — provisioning pre-checks and harness existence checks need it; object **contents** stay client-side-encrypted ciphertext regardless.
 5. **Workers on VE keep layer 2 unchanged:** `AGENTKEYS_WORKER_REQUIRE_STS=1` + independent cap chain-verify — a compromised broker still can't drive the workers without passing chain checks.
-6. **Stage-3-style negative tests on VE** (cross-actor denial in the harness, mirroring today's live e2e) so the isolation is a regression gate, not a one-time proof.
+6. **Stage-3-style negative tests on VE** (cross-actor denial in the harness, mirroring today's live e2e) so the isolation is a regression gate, not a one-time proof. **CI half LANDED:** the `ve-stack-smoke` job in `e2e-ci.yml` (repo var `AGENTKEYS_VE_SMOKE=1`; workflow + harness are operator-internal, not in the OSS mirror) runs the zero-cred public-surface smoke (`e2e/ve-stack-smoke.sh`: DoH DNS co-location, TOS-hosted OIDC discovery+JWKS, TOS S3-compat wire, broker/gate edges) every run, plus `ve_sign_live` + `tos_live` when the `VOLCENGINE_*`/`TOS_TEST_BUCKET` secrets are set. `ve_sts_live` (the full mint→isolation e2e) deliberately stays operator-run — its issuer PRIVATE key must not become a CI secret. The remaining harness-level half (worker put/get cross-actor negatives) lands with follow-up 3 (workers on VE).
 
 ## VE stack endpoints — the `agentterrier.ai` domain
 
@@ -160,7 +160,7 @@ Stack selection gained the cloud axis ahead of the follow-ups below, with the VE
 - **Fleet console:** the `ve` stack is inventoried from `operator-workstation.ve.env` (board line = broker `healthz` + EIP; `c` picker entry `ve (heima · https://broker.agentterrier.ai)`), and the `d` menu gained a VE deploy job — `ssh-broker.sh ve` then `setup-broker-host-ve.sh` (no outer sudo; the script escalates itself).
 - **SSH:** `bash scripts/utils/ssh-broker.sh ve` (suggested alias `ssh-agentterrier`) — always `.pem` + `broker-manager`; VE has no EC2 Instance Connect.
 - **Daemon/web:** the fleet injects the env-file-derived stack inventory as `AGENTKEYS_STACKS_JSON` → the daemon serves `GET /v1/stack/list` (per-stack broker `healthz` probe + which stack it runs) and reports `daemonBroker` on the chain endpoints; the web chain page renders the selector (active / degraded per stack).
-- **Browser isolation:** master-identity pointers are namespaced per **(chain, broker)** (`<key>:<chain>@<broker-host>`, one-shot migration from the #313 chain-only keys) — Heima-AWS and Heima-VE sessions/onboarding never cross. Negative tests: `apps/parent-control/lib/__tests__/identityStore.test.ts` (CI: harness-ci rust-checks `npm test`).
+- **Browser isolation:** master-identity pointers are namespaced per **(chain, broker)** (`<key>:<chain>@<broker-host>`, one-shot migration from the #313 chain-only keys) — Heima-AWS and Heima-VE sessions/onboarding never cross. Negative tests: `apps/parent-control/lib/__tests__/identityStore.test.ts` (CI: e2e-ci rust-checks `npm test`).
 
 ## Remaining follow-ups (deliberately out of this port's scope)
 

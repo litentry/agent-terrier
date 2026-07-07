@@ -1,0 +1,15 @@
+{
+  "actor_omni": "0x<actor_omni>",
+  "agent_pop_sig": "0x<agent_pop_sig>",
+  "device_key_hash": "0x<device_key_hash>",
+  "link_code_redemption": "0x<link_code_redemption>",
+  "max_per_call": "0",
+  "max_per_period": "0",
+  "max_total": "0",
+  "operator_omni": "0x<operator_omni>",
+  "period_seconds": 0,
+  "read_only": true,
+  "services": [
+    "memory:<namespace>"
+  ]
+}

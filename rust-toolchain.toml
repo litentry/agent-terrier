@@ -11,7 +11,7 @@
 [toolchain]
 channel = "1.96.0"
 components = ["clippy", "rustfmt"]
-# wasm32: agentkeys-web-core is the browser host (wasm-pack / the harness-ci
+# wasm32: agentkeys-web-core is the browser host (wasm-pack / the e2e-ci
 # "web-core compiles to wasm32" gate). Pinning the target here keeps the pin
 # file the single source of truth — local dev, CI, and the broker host all get
 # it from `rustup toolchain install` instead of a per-machine `rustup target add`.
