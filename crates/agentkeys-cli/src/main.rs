@@ -349,10 +349,13 @@ enum Commands {
         #[arg(long, env = "AGENTKEYS_SESSION_BEARER", default_value = "")]
         session_bearer: String,
 
-        /// Memory engine baked into the pre_llm_call hook: `passthrough`
-        /// (inject the whole namespace, default) or `lexical` (deterministic
-        /// recency/relevance selection). Plan §6a / arch.md §22.
-        #[arg(long, env = "AGENTKEYS_MEMORY_ENGINE", default_value = "passthrough")]
+        /// Memory engine baked into the pre_llm_call hook. `openviking` (default —
+        /// semantic ranking behind the gate; the hermes-sandbox image bakes the
+        /// server on :1933, and the hook falls back to `lexical` then `passthrough`
+        /// when the server is absent/unreachable, so it is NEVER load-bearing),
+        /// `lexical` (deterministic query-aware selection, no models to deploy), or
+        /// `passthrough` (inject the whole namespace unranked). Plan §6a / arch.md §22.
+        #[arg(long, env = "AGENTKEYS_MEMORY_ENGINE", default_value = "openviking")]
         memory_engine: String,
 
         /// Cap how many memory lines the engine injects (omit = unbounded).

@@ -158,12 +158,19 @@ impl HermesAdapter {
                 exports.push_str(&format!("export AGENTKEYS_MEMORY_MAX_LINES={max_lines}\n"));
             }
             if req.memory_engine.eq_ignore_ascii_case("openviking") {
-                if let Some(endpoint) = req.memory_engine_endpoint.as_deref() {
-                    exports.push_str(&format!(
-                        "export OPENVIKING_ENDPOINT={}\n",
-                        shell_quote(endpoint)
-                    ));
-                }
+                // Default the endpoint to the local server (the hermes-sandbox image
+                // runs openviking-server on :1933 via supervisord) so `openviking`
+                // works out of the box; an explicit endpoint (remote / VE-managed)
+                // overrides. Without OPENVIKING_ENDPOINT the client is None and the
+                // hook silently falls back to lexical — so the default MUST be baked.
+                let endpoint = req
+                    .memory_engine_endpoint
+                    .as_deref()
+                    .unwrap_or(agentkeys_memory_openviking::DEFAULT_ENDPOINT);
+                exports.push_str(&format!(
+                    "export OPENVIKING_ENDPOINT={}\n",
+                    shell_quote(endpoint)
+                ));
                 if let Some(api_key) = req.memory_engine_api_key.as_deref() {
                     exports.push_str(&format!(
                         "export OPENVIKING_API_KEY={}\n",
@@ -656,6 +663,23 @@ mod tests {
         assert!(prellm.contains("export AGENTKEYS_MEMORY_ENGINE='openviking'"));
         assert!(prellm.contains("export OPENVIKING_ENDPOINT='http://127.0.0.1:1933'"));
         assert!(prellm.contains("export OPENVIKING_API_KEY='sk-ov-123'"));
+    }
+
+    #[test]
+    fn openviking_endpoint_defaults_to_local_server_when_unset() {
+        // The production default is `openviking` with NO explicit endpoint. The
+        // hook's OpenVikingClient::from_env is None unless OPENVIKING_ENDPOINT is
+        // set, so the wire MUST bake the local server default — else `openviking`
+        // silently degrades to lexical everywhere.
+        let a = HermesAdapter::default();
+        let mut ov = req();
+        ov.memory_engine = "openviking".into();
+        ov.memory_engine_endpoint = None;
+        let prellm = &a.scripts("/usr/local/bin/agentkeys", &ov)[2].1;
+        assert!(prellm.contains(&format!(
+            "export OPENVIKING_ENDPOINT='{}'",
+            agentkeys_memory_openviking::DEFAULT_ENDPOINT
+        )));
     }
 
     #[test]
