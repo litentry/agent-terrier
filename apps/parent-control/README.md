@@ -11,7 +11,7 @@ Design handoff source: Claude Design — iii.dev-inspired aesthetic (IBM Plex Mo
 - **audit feed** — live SSE stream filterable by worker, click any row for full event detail
 - **anchor status** — countdown to next tier-2 batch + recent Merkle roots with explorer links
 - **workers** — five worker cards (memory, credentials, audit, email, payment) with per-actor usage share; click a card to see trust profile
-- **onboarding** — first-run wizard mirroring `harness/v2-stage1-demo.sh` (operator-internal) steps (real WebAuthn lands in PR-B)
+- **onboarding** — first-run wizard mirroring `e2e/suite-1-foundation.sh` (operator-internal) steps (real WebAuthn lands in PR-B)
 - **onboarding/mobile** — stub for adding a second master device via QR pairing (real cross-device WebAuthn lands in M5)
 - **logo** — six Bedlington Terrier variants (profile, front-cute, cloud, monogram, seal, icon) for brand exploration
 

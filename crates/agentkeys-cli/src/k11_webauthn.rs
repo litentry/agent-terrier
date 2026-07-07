@@ -1725,7 +1725,7 @@ fn html_escape(s: &str) -> String {
 
 // ─── Software WebAuthn authenticator (issue #164 headless/CI register) ───────
 //
-// The Rust replacement for harness/scripts/erc4337-webauthn-sign.py (drops the
+// The Rust replacement for e2e/scripts/erc4337-webauthn-sign.py (drops the
 // python/cryptography venv). It produces the SAME WebAuthn assertion BYTES a
 // hardware Touch ID authenticator would — from a P-256 key in a file, no hardware
 // and no biometric — so the on-chain K11Verifier accepts it identically. This is

@@ -55,7 +55,7 @@ pub struct AcceptUserOpParams<'a> {
     /// direct `handleOps` (empty `paymasterAndData`; gas from the account's
     /// EntryPoint deposit, the submitter EOA fronts the outer tx + is the
     /// beneficiary). The unsponsored path mirrors the mainnet-proven
-    /// `harness/scripts/erc4337-register-master.sh`.
+    /// `e2e/scripts/erc4337-register-master.sh`.
     pub paymaster: Option<[u8; 20]>,
     pub paymaster_verification_gas_limit: u128,
     pub paymaster_post_op_gas_limit: u128,

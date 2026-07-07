@@ -1,0 +1,15 @@
+{
+  "actor_omni": "0x<actor_omni>",
+  "max_per_call": "0",
+  "max_per_period": "0",
+  "max_total": "0",
+  "operator_omni": "0x<operator_omni>",
+  "period_seconds": 0,
+  "preserve_service_ids": [
+    "0x<service_id_keccak32>"
+  ],
+  "read_only": true,
+  "services": [
+    "memory:<namespace>"
+  ]
+}

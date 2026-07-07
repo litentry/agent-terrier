@@ -57,9 +57,9 @@ docs/assets/gas-funding-map.svg
 
 # ─── Harness: fixtures + authoring contract are public; the demo ORCHESTRATORS
 #     (which drive real deploys against private infra) are PRIVATE — see the
-#     PRIVATE override in check-public-boundary.sh. harness/AGENTS.md (the
+#     PRIVATE override in check-public-boundary.sh. e2e/AGENTS.md (the
 #     authoring contract for those private orchestrators) is also PRIVATE. ──────
-harness/fixtures/
+e2e/fixtures/
 
 # ─── CI quality-gate scripts the public mirror's CI + contributors run ────────
 glob:scripts/utils/check-*.sh
@@ -72,7 +72,7 @@ glob:scripts/utils/lint-*.sh
 .githooks/
 
 # ─── Public CI workflows (build / test / wasm / contracts-sync / wiki / mcp /
-#     LLM review). harness-ci.yml + pm-auto-archive are PRIVATE (deploy
+#     LLM review). e2e-ci.yml + pm-auto-archive are PRIVATE (deploy
 #     orchestration + secrets + pm) — PRIVATE override in the gate. ─────────────
 .github/workflows/contracts-sync.yml
 .github/workflows/coverage.yml

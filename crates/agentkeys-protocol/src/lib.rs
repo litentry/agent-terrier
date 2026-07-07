@@ -11,7 +11,7 @@
 //! the #76 K10 cap-PoP fields entirely). web-core must NOT depend on
 //! `agentkeys-backend-client` instead: that crate pulls `aws-sdk-sts` +
 //! `tokio` + native `reqwest` via the provisioner and breaks the wasm build
-//! (the `wasm32` CI gate in `harness-ci.yml` enforces this).
+//! (the `wasm32` CI gate in `e2e-ci.yml` enforces this).
 //!
 //! Before the one-owner discipline the same JSON was hand-typed in three
 //! places (the MCP backend, the daemon `ui_bridge`, and bash `jq -n` bodies in
@@ -876,9 +876,9 @@ pub struct BuildRegisterUserOpRequest {
 /// wasm-exported builder instead of hand-building them, which dissolves the
 /// old runtime parity check into the type system (#275, parity-ladder rung 3 —
 /// "one code path; violating parity is a compile error"). The contract is
-/// still pinned to `harness/fixtures/web-api/master_memory_plant.json` by a
+/// still pinned to `e2e/fixtures/web-api/master_memory_plant.json` by a
 /// `ui_bridge` unit test, and the REMAINING non-Rust consumer
-/// (`harness/web-parity-demo.sh`) is gated against that fixture by
+/// (`e2e/suite-6-web-parity.sh`) is gated against that fixture by
 /// `scripts/utils/check-web-api-drift.sh`.
 pub mod web_api {
     use serde::{Deserialize, Serialize};

@@ -94,7 +94,7 @@ The test stack deploys the **same four contracts** with the test deployer key (`
 
 ## Heima Paseo testnet (chain_id = 2013)
 
-Halted (block 2,905,430 frozen since 2026-01-15). **No contracts deployed** — the `*_ADDRESS_HEIMA_PASEO` entries in `operator-workstation.env` are placeholders (`0x..01`–`0x..04`). When collators return: `AGENTKEYS_CHAIN=heima-paseo bash harness/v2-stage1-demo.sh --only-step 9` deploys + auto-funds via Alice sudo; update this doc with the live testnet addresses then.
+Halted (block 2,905,430 frozen since 2026-01-15). **No contracts deployed** — the `*_ADDRESS_HEIMA_PASEO` entries in `operator-workstation.env` are placeholders (`0x..01`–`0x..04`). When collators return: `AGENTKEYS_CHAIN=heima-paseo bash e2e/suite-1-foundation.sh --only-step 9` deploys + auto-funds via Alice sudo; update this doc with the live testnet addresses then.
 
 ---
 

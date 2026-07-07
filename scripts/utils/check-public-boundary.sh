@@ -105,8 +105,8 @@ while IFS= read -r f; do
       if [ -n "$PRIV_SCRIPTS_RE" ] && ps="$(grep -nE "\]\([^)]*scripts/([^)]*/)?($PRIV_SCRIPTS_RE)" "$f" 2>/dev/null)"; then
         echo "PRIVATE-SCRIPT LINK in $f:"; printf '%s\n' "$ps" | sed 's/^/    /'; fails=$((fails+1))
       fi
-      # private harness paths: everything under harness/ EXCEPT harness/fixtures/
-      if ph="$(grep -nE '\]\([^)]*harness/' "$f" 2>/dev/null | grep -v 'harness/fixtures/')"; then
+      # private harness paths: everything under e2e/ EXCEPT e2e/fixtures/
+      if ph="$(grep -nE '\]\([^)]*e2e/' "$f" 2>/dev/null | grep -v 'e2e/fixtures/')"; then
         echo "PRIVATE-HARNESS LINK in $f:"; printf '%s\n' "$ph" | sed 's/^/    /'; fails=$((fails+1))
       fi
       # links to a deny:'d file (stripped from the mirror)

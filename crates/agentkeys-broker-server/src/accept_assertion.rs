@@ -3,7 +3,7 @@
 //!
 //! Mirrors the mainnet-proven CLI path
 //! (`agentkeys-cli::k11_webauthn::extract_chain_assertion`) +
-//! `harness/scripts/erc4337-register-master.sh`'s
+//! `e2e/scripts/erc4337-register-master.sh`'s
 //! `cast abi-encode "x(bytes32,bytes,bytes,uint256,uint256,uint256)"`, reusing the
 //! golden-tested `agentkeys_core::erc4337::{encode_webauthn_signature,
 //! master_cred_id_hash}`. The `p256` DER decode lives here (the broker carries the

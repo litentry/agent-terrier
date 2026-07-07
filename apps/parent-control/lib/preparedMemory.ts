@@ -4,7 +4,7 @@ import type { MasterMemoryEntry } from '@/lib/client/types';
 //
 // This is NOT display mock data (the kind stripped from demoData.ts). It is the
 // real, documented demo dataset that the rest of the system already uses — the
-// "Chengdu trip" the agent-side wire demo seeds (harness/phase1-wire-demo.sh
+// "Chengdu trip" the agent-side wire demo seeds (e2e/suite-5-wire-real.sh
 // SEED_MEMORY_CONTENT) plus the per-namespace composition from the IAM strategy
 // (docs/agent-iam-strategy.md §3.5). The plant button POSTs these entries through
 // the real client seam → daemon `POST /v1/master/memory/plant` (content-hash

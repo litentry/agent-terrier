@@ -30,7 +30,7 @@ const WORD: usize = 32;
 
 /// Prefix of the master-account credential-id preimage (see [`master_cred_id_hash`]).
 /// **Terminology source-of-truth:** the bash literal in
-/// `harness/scripts/erc4337-register-master.sh` (`cast keccak
+/// `e2e/scripts/erc4337-register-master.sh` (`cast keccak
 /// "agentkeys-register-cred:0x$omni"`) MUST match this exactly.
 pub const MASTER_CRED_ID_PREFIX: &str = "agentkeys-register-cred:0x";
 
@@ -49,7 +49,7 @@ pub fn master_cred_id_hash(operator_omni: &[u8; 32]) -> [u8; 32] {
 
 /// Prefix of the master-account CREATE2-salt preimage (see [`master_account_salt`]).
 /// **Terminology source-of-truth:** the bash literal in
-/// `harness/scripts/_erc4337_lib.sh` (`cast keccak
+/// `e2e/scripts/_erc4337_lib.sh` (`cast keccak
 /// "agentkeys-master-account:0x$OPERATOR_OMNI"`) MUST match this exactly.
 pub const MASTER_ACCOUNT_SALT_PREFIX: &str = "agentkeys-master-account:0x";
 
@@ -424,7 +424,7 @@ pub fn revoke_batch_calldata(registry: &[u8; 20], device_key_hashes: &[[u8; 32]]
 /// `registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint8)`
 /// calldata — the master's first-device binding (#164 E7 / #278 D6). Eight static
 /// 32-byte words after the selector; no dynamic tail. Byte-exact with the
-/// `cast calldata ...` in `harness/scripts/_erc4337_lib.sh` (golden-tested).
+/// `cast calldata ...` in `e2e/scripts/_erc4337_lib.sh` (golden-tested).
 pub fn register_first_master_device_calldata(r: &RegisterFirstMaster) -> Vec<u8> {
     let sel = selector(
         "registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint8)",
@@ -486,7 +486,7 @@ pub fn p256_account_factory_init_code(
 /// `abi.encode(bytes32 credIdHash, bytes authenticatorData, bytes clientDataJSON,
 /// uint256 challengeLocation, uint256 r, uint256 s)` — the **P256Account UserOp
 /// signature** (`P256Account.sol::validateUserOp`, identical to the byte spec the
-/// CLI's `k11 webauthn-userop-sign` + `harness/erc4337-master-e8.sh` produce). The
+/// CLI's `k11 webauthn-userop-sign` + `e2e/erc4337-passkey-master-smoke.sh` produce). The
 /// browser's WebAuthn assertion (`navigator.credentials.get()` over the userOpHash)
 /// is encoded into this so `EntryPoint.handleOps` accepts the op. Golden-tested.
 pub fn encode_webauthn_signature(

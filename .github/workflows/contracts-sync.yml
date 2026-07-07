@@ -8,7 +8,7 @@ name: contract-address sync + doc-literal gate
 #   2. no tracked markdown doc re-writes a literal address the profile owns
 #      (docs must ANCHOR — link + resolve command — never copy; historical/
 #      orphaned addresses pass naturally once out of the profile).
-# Deliberately a SEPARATE tiny workflow: harness-ci.yml does not trigger on
+# Deliberately a SEPARATE tiny workflow: e2e-ci.yml does not trigger on
 # docs/**, and running the full rust-checks job for a doc edit would be waste.
 #
 # This job is a REQUIRED status check on main, so it MUST NOT be

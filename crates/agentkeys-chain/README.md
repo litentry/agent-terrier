@@ -38,10 +38,10 @@ forge script script/DeployAgentKeysV1.s.sol \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
   --broadcast
 
-# Deploy to Heima mainnet (driven by harness/v2-stage1-demo.sh step 9 — handles
+# Deploy to Heima mainnet (driven by e2e/suite-1-foundation.sh step 9 — handles
 # safety prompts, deployer-funding check, on-chain idempotency)
 cd ../..
-MAINNET_CONFIRM=1 bash harness/v2-stage1-demo.sh --only-step 9
+MAINNET_CONFIRM=1 bash e2e/suite-1-foundation.sh --only-step 9
 ```
 
 ## Wire shape — what the broker / workers / CLI read

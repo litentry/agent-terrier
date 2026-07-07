@@ -243,13 +243,13 @@ The user-facing CLI surface is unchanged from prior stages; the broker is invisi
 
 ## 7. Verifying your change
 
-The harness tracks stage completion in `harness/progress.json`. Before opening a PR:
+The harness tracks stage completion in `e2e/progress.json`. Before opening a PR:
 
 ```bash
 jj log --limit 10
-cat harness/progress.json
-bash harness/init.sh $(jq -r .current_stage harness/progress.json)
-bash harness/stage-$(jq -r .current_stage harness/progress.json)-done.sh
+cat e2e/progress.json
+bash e2e/init.sh $(jq -r .current_stage e2e/progress.json)
+bash e2e/stage-$(jq -r .current_stage e2e/progress.json)-done.sh
 cargo test --workspace
 npm test --prefix provisioner-scripts
 ```

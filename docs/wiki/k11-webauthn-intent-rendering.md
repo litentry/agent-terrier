@@ -192,7 +192,7 @@ Rule of thumb: **if the K11 assertion authorizes anything an operator could mean
 - `k11_intent_context_empty_is_default` — legacy callers get the no-intent rendering.
 - `k11_intent_context_with_text_is_not_empty` — sanity check on the constructor.
 
-End-to-end visual verification: open the K11 confirmation page during `harness/v2-stage1-demo.sh --webauthn`; the intent block renders above the challenge hex.
+End-to-end visual verification: open the K11 confirmation page during `e2e/suite-1-foundation.sh --webauthn`; the intent block renders above the challenge hex.
 
 ## Cross-references
 

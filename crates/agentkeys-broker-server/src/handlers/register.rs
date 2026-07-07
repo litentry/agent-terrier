@@ -3,7 +3,7 @@
 //!
 //! The legacy register is 3 chain interactions (deployer `createAccount` +
 //! deployer `EntryPoint.depositTo` + a self-deposit-funded register UserOp — see
-//! `harness/scripts/erc4337-register-master.sh`). D6 collapses them into a SINGLE
+//! `e2e/scripts/erc4337-register-master.sh`). D6 collapses them into a SINGLE
 //! paymaster-sponsored UserOp = `initCode` (counterfactual
 //! `P256AccountFactory.createAccount` deploy) + `executeBatch([
 //! registerFirstMasterDevice])`, gated by ONE master K11 Touch ID — zero deployer

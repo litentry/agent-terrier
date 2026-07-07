@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Toolchain-pin gate (read-only; wired into harness-ci.yml rust-checks).
+# Toolchain-pin gate (read-only; wired into e2e-ci.yml rust-checks).
 #
 # rust-toolchain.toml is the SINGLE source of truth for the Rust version —
 # local dev, CI, and the broker host all resolve it via rustup. Two invariants:

@@ -1,0 +1,7 @@
+{
+  "operator_omni": "0x<operator_omni>",
+  "owner_pubkey_x": "0x<owner_pubkey_x>",
+  "owner_pubkey_y": "0x<owner_pubkey_y>",
+  "roles": 0,
+  "rpid_hash": "0x<rpid_hash>"
+}
