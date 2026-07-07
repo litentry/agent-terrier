@@ -18,6 +18,10 @@
 //! retrieves it. The agent has `J1_agent` but NO scope until the master's
 //! on-chain `registerAgentDevice` + scope grant lands — the mint-oidc-jwt
 //! on-chain gate still rejects every downstream mint until then.
+//!
+//! On hosts with sandbox-lifecycle config, the claimed branch ALSO ensures the
+//! delegate's veFaaS hermes-sandbox exists (#377 create-on-pair) and returns
+//! `agent_url` + a `sandbox` outcome object, mirroring `/v1/agent/resolve`.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
@@ -116,6 +120,22 @@ pub async fn pairing_poll(
         "polled §10.2 pairing request — claimed; J1_agent minted at retrieval"
     );
 
+    // 4. #377 create-on-pair: the freshly paired delegate needs its runtime —
+    //    ensure its hermes-sandbox instance exists NOW so the first talk
+    //    doesn't 500 `no_ready_instance`. Best-effort: a veFaaS failure rides
+    //    in `sandbox.error`; the pairing itself has already succeeded.
+    let provision = crate::handlers::sandbox::ensure_for_delegate(
+        &state,
+        &device_key_hash,
+        &child_omni,
+        &operator_omni,
+    )
+    .await;
+    let (agent_url, sandbox) = match &provision {
+        Some(p) => (json!(p.agent_url), p.to_json()),
+        None => (serde_json::Value::Null, serde_json::Value::Null),
+    };
+
     Ok((
         StatusCode::OK,
         Json(json!({
@@ -126,6 +146,8 @@ pub async fn pairing_poll(
             "label": label,
             "derivation_path": derivation_path,
             "device_key_hash": device_key_hash,
+            "agent_url": agent_url,
+            "sandbox": sandbox,
         })),
     ))
 }

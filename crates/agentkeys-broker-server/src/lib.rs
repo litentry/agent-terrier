@@ -16,6 +16,7 @@ pub mod sponsored_accept;
 pub mod state;
 pub mod storage;
 pub mod sts;
+pub mod ve_faas;
 pub mod ve_sign;
 pub mod ve_sts;
 

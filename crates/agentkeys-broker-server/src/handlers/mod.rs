@@ -11,5 +11,6 @@ pub mod metrics;
 pub mod oidc;
 pub mod register;
 pub mod revoke;
+pub mod sandbox;
 pub mod scope;
 pub mod wallet;

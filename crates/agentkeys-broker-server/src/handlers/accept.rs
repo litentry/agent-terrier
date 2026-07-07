@@ -895,6 +895,16 @@ pub async fn accept_submit(
                     &packed.call_data,
                 )
                 .await;
+                // #377: an unpair also tears down the revoked devices'
+                // sandboxes (KillSandbox + SandboxTeardown envelopes). Same
+                // decode source, same best-effort posture; a non-revoke batch
+                // is a no-op.
+                crate::handlers::sandbox::teardown_for_confirmed_batch(
+                    &state,
+                    operator_omni,
+                    &packed.call_data,
+                )
+                .await;
                 return Ok(Json(serde_json::json!({
                     "ok": true, "tx_hash": tx_hash, "block_number": block_number,
                     "user_op_hash": user_op_hash,
