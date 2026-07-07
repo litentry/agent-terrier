@@ -168,3 +168,20 @@ Stack selection gained the cloud axis ahead of the follow-ups below, with the VE
 2. **`aud` parameterization** — `build_oidc_jwt_claims` (handlers/oidc.rs) hardcodes `aud="sts.amazonaws.com"`; the VE provider registers aud `agentkeys-ve-sts`. Make the aud config-driven when the broker starts minting VE-bound JWTs.
 3. **Workers on VE** — deploy cred/memory/config workers with `AGENTKEYS_TOS_ENDPOINT` + the relay; stage-3-style negative tests per the §17.5 invariants.
 4. ~~**Least-priv broker signing identity** (#372)~~ — ✅ landed: `agentterrier-broker-setup` is scoped to STS mint + host/IAM read with zero TOS actions ([`scripts/operator/policies/ve-broker-setup.json`](../../scripts/operator/policies/ve-broker-setup.json); see "Storage-plane provisioning identities" above).
+
+## Rides the same VE identity: veFaaS sandbox lifecycle (#377 — LANDED broker-side)
+
+The broker's VE credential plane gained a SECOND consumer beyond `ve_sts`:
+[`ve_faas.rs`](../../crates/agentkeys-broker-server/src/ve_faas.rs) drives the
+delegate hermes-sandbox lifecycle (`CreateSandbox` / `DescribeSandbox` /
+`ListSandboxes` / `SetSandboxTimeout` / `KillSandbox`, `service=vefaas`) on the
+SAME `ve_sign` signer and the SAME `VOLCENGINE_ACCESS_KEY`/`_SECRET_KEY`
+identity — spawn-on-pair/resolve, one instance per delegate (Metadata-labeled,
+idempotent), kill-on-unpair, `SandboxSpawn`/`SandboxTeardown` audit envelopes
+(arch.md §15.3a bytes 53/54). Cloud grant: `setup-cloud-ve.sh` step 15
+([`policies/ve-broker-vefaas.json`](../../scripts/operator/policies/ve-broker-vefaas.json)
+— the five instance actions only). Enabled by `SANDBOX_FUNCTION_ID` +
+`SANDBOX_GATEWAY_URL` in the broker unit env; it therefore ACTIVATES together
+with follow-up 1's cred wiring (the unit carrying the VE AK/SK), needing no
+extra step of its own. Live conformance:
+[`tests/ve_faas_live.rs`](../../crates/agentkeys-broker-server/tests/ve_faas_live.rs).

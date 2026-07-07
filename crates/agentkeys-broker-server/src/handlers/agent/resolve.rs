@@ -9,9 +9,15 @@
 //! once, during the claim window): `/resolve` works for the lifetime of the
 //! binding, long after the §10.2 request rows have expired.
 //!
-//! `agent_url` is the device's assigned runtime (its hermes-sandbox bridge). It is
-//! `null` until a sandbox registers it (#367 piece 2); while null the device falls
-//! back to its compiled `AGENT_BASE_URL`.
+//! `agent_url` is the device's assigned runtime (its hermes-sandbox bridge).
+//! When the broker carries sandbox-lifecycle config (#377), resolve ALSO
+//! ensures the delegate's veFaaS instance exists (idempotent spawn — the
+//! create-on-boot half of "create-on-pair, broker-driven") and returns the
+//! gateway URL as `agent_url`, plus a `sandbox` object reporting this call's
+//! ensure outcome (a spawn failure rides in `sandbox.error`; the resolve
+//! itself still succeeds — the device needs its JWT regardless). On hosts
+//! without sandbox config it stays `null` and the device falls back to its
+//! compiled `AGENT_BASE_URL`.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
@@ -90,11 +96,28 @@ pub async fn agent_resolve(
         "resolved §10.2 binding — J1_agent minted"
     );
 
+    // 4. #377: the bound device needs its runtime — ensure its hermes-sandbox
+    //    instance exists (idempotent; extends the lifetime of a live one).
+    //    Best-effort against the resolve: a veFaaS failure is surfaced in
+    //    `sandbox.error`, never a resolve failure.
+    let provision = crate::handlers::sandbox::ensure_for_delegate(
+        &state,
+        &device_key_hash,
+        &device.actor_omni,
+        &device.operator_omni,
+    )
+    .await;
+    let (agent_url, sandbox) = match &provision {
+        Some(p) => (json!(p.agent_url), p.to_json()),
+        None => (serde_json::Value::Null, serde_json::Value::Null),
+    };
+
     Ok((
         StatusCode::OK,
         Json(json!({
             "session_jwt": session_jwt,
-            "agent_url": serde_json::Value::Null, // #367 piece 2 populates this
+            "agent_url": agent_url,
+            "sandbox": sandbox,
             "operator_omni": device.operator_omni,
             "actor_omni": device.actor_omni,
         })),

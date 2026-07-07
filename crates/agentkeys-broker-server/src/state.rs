@@ -65,6 +65,11 @@ pub struct AppState {
     /// OmniAccount. Recovery flow consults this to find which master
     /// should sign the recovery grant.
     pub identity_link_store: Arc<IdentityLinkStore>,
+    /// #377 broker-driven veFaaS sandbox lifecycle (one hermes-sandbox per
+    /// delegate device, spawned on pair/resolve, killed on unpair). `None`
+    /// when the host carries no sandbox config (`SANDBOX_FUNCTION_ID` unset —
+    /// the AWS broker), and every hook site is then a no-op.
+    pub ve_faas: Option<Arc<crate::ve_faas::VeFaasClient>>,
     /// Atomic counters surfaced via /metrics (Phase D-rest, US-036).
     pub metrics: Arc<Metrics>,
     pub tier2: Arc<Tier2State>,

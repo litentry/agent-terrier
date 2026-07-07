@@ -142,6 +142,7 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
         agent_delegation_store: Arc::new(
             agentkeys_broker_server::storage::AgentDelegationStore::open_in_memory().unwrap(),
         ),
+        ve_faas: None,
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::new(Tier2State::default()),
         #[cfg(feature = "auth-email-link")]

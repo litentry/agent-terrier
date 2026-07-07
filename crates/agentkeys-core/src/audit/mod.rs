@@ -57,8 +57,9 @@ pub use bodies::{
     ConfigGetBody, ConfigPutBody, ConfigTeardownBody, CredFetchBody, CredStoreBody,
     CredTeardownBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody, EmailSendBody,
     GateTurnBody, K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody,
-    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody, ScopeGrantBody,
-    ScopeRevokeBody, SignEip191Body, SignEip712Body,
+    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody,
+    SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body,
+    SignEip712Body,
 };
 pub use op_kind::AuditOpKind;
 
@@ -233,6 +234,8 @@ pub enum TypedAuditBody {
     DeviceAdd(DeviceAddBody),
     DeviceRevoke(DeviceRevokeBody),
     K10Rotate(K10RotateBody),
+    SandboxSpawn(SandboxSpawnBody),
+    SandboxTeardown(SandboxTeardownBody),
     EmailSend(EmailSendBody),
     EmailReceive(EmailReceiveBody),
     K3EpochAdvance(K3EpochAdvanceBody),
@@ -272,6 +275,10 @@ impl TypedAuditBody {
             AuditOpKind::DeviceAdd => Self::DeviceAdd(serde_json::from_value(value).ok()?),
             AuditOpKind::DeviceRevoke => Self::DeviceRevoke(serde_json::from_value(value).ok()?),
             AuditOpKind::K10Rotate => Self::K10Rotate(serde_json::from_value(value).ok()?),
+            AuditOpKind::SandboxSpawn => Self::SandboxSpawn(serde_json::from_value(value).ok()?),
+            AuditOpKind::SandboxTeardown => {
+                Self::SandboxTeardown(serde_json::from_value(value).ok()?)
+            }
             AuditOpKind::EmailSend => Self::EmailSend(serde_json::from_value(value).ok()?),
             AuditOpKind::EmailReceive => Self::EmailReceive(serde_json::from_value(value).ok()?),
             AuditOpKind::K3EpochAdvance => {
@@ -437,6 +444,65 @@ mod tests {
         match env.typed_body() {
             Some(TypedAuditBody::CredStore(body)) => {
                 assert_eq!(body.service, "openrouter");
+            }
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+    }
+
+    /// #377 sandbox lifecycle op_kinds (53/54): canonical fixtures round-trip
+    /// through canonical CBOR and decode to the typed bodies (the "worker
+    /// test" required by the §15.3b ritual).
+    #[test]
+    fn sandbox_spawn_and_teardown_bodies_roundtrip_cbor() {
+        use crate::audit::client::envelope_for;
+
+        let spawn = envelope_for(
+            [0x33; 32],
+            [0x22; 32],
+            AuditOpKind::SandboxSpawn,
+            SandboxSpawnBody {
+                device_key_hash: format!("0x{}", "11".repeat(32)),
+                sandbox_id: "sbx-test-1".into(),
+                function_id: "fn-test".into(),
+            },
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&spawn.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(decoded.op_kind, AuditOpKind::SandboxSpawn as u8);
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::SandboxSpawn(b) => {
+                assert_eq!(b.device_key_hash, format!("0x{}", "11".repeat(32)));
+                assert_eq!(b.sandbox_id, "sbx-test-1");
+                assert_eq!(b.function_id, "fn-test");
+            }
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        let teardown = envelope_for(
+            [0x22; 32],
+            [0x22; 32],
+            AuditOpKind::SandboxTeardown,
+            SandboxTeardownBody {
+                device_key_hash: format!("0x{}", "11".repeat(32)),
+                sandbox_id: "sbx-test-1".into(),
+                reason: "unpair".into(),
+            },
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&teardown.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(decoded.op_kind, AuditOpKind::SandboxTeardown as u8);
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::SandboxTeardown(b) => {
+                assert_eq!(b.reason, "unpair");
+                assert_eq!(b.sandbox_id, "sbx-test-1");
             }
             other => panic!("unexpected typed body: {other:?}"),
         }

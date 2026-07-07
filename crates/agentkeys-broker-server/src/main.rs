@@ -183,6 +183,24 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // #377 broker-driven veFaaS sandbox lifecycle. Enabled by presence of
+    // SANDBOX_FUNCTION_ID (+ SANDBOX_GATEWAY_URL + the VE AK/SK); absent =
+    // clean no-op (the AWS broker host). A half-set config refuses to boot —
+    // never a silently degraded spawn path.
+    let ve_faas = agentkeys_broker_server::ve_faas::VeFaasClient::from_env()
+        .map_err(|e| std::io::Error::other(format!("veFaaS sandbox lifecycle config: {e}")))?
+        .map(Arc::new);
+    match &ve_faas {
+        Some(c) => tracing::info!(
+            function_id = %c.config.function_id,
+            gateway = %c.config.gateway_url,
+            "veFaaS sandbox lifecycle ENABLED — delegates get a hermes-sandbox on pair/resolve (#377)"
+        ),
+        None => tracing::info!(
+            "veFaaS sandbox lifecycle disabled (SANDBOX_FUNCTION_ID unset) — devices use their compiled AGENT_BASE_URL"
+        ),
+    }
+
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(5))
@@ -206,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
         identity_link_store: boot_artifacts.identity_link_store,
         pairing_request_store: boot_artifacts.pairing_request_store,
         agent_delegation_store: boot_artifacts.agent_delegation_store,
+        ve_faas,
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::clone(&tier2),
         #[cfg(feature = "auth-email-link")]

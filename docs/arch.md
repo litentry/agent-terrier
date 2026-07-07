@@ -1201,6 +1201,8 @@ and never reordered**. Grouped by 10s leaves room for related ops.
 | `DeviceAdd` | 50 | `{device_key_hash: [u8;32], role_bits: u8, attestation_hash: [u8;32]}` | broker submit relay (#97) |
 | `DeviceRevoke` | 51 | `{device_key_hash: [u8;32]}` | broker submit relay (#97) |
 | `K10Rotate` | 52 | `{old_device_key_hash: [u8;32], new_device_key_hash: [u8;32]}` | SidecarRegistry hook |
+| `SandboxSpawn` | 53 | `{device_key_hash: [u8;32], sandbox_id: string, function_id: string}` | broker sandbox lifecycle (#377 — emitted only on an actual create; an idempotent reuse is silent) |
+| `SandboxTeardown` | 54 | `{device_key_hash: [u8;32], sandbox_id: string, reason: string}` | broker sandbox lifecycle (#377 — `reason: "unpair"` on a confirmed `revokeAgentDevice`; veFaaS timeout expiry is not broker-observed) |
 | `EmailSend` | 60 | `{to_hash: [u8;32], subject_hash: [u8;32], message_id: string}` | email-service |
 | `EmailReceive` | 61 | `{from_hash: [u8;32], message_id: string, payload_hash: [u8;32]}` | email-service |
 | `K3EpochAdvance` | 70 | `{old_epoch: u64, new_epoch: u64, gov_tx: [u8;32]}` | K3EpochCounter hook |
@@ -1209,7 +1211,7 @@ and never reordered**. Grouped by 10s leaves room for related ops.
 | `ConfigTeardown` | 82 | `{actor_target: [u8;32]}` | config-service (#201, #229) |
 | `GateTurn` | 90 | `{device_id: string, api_key_id: string, model: string, streamed: bool, outcome: string, prompt_tokens: u64, completion_tokens: u64, total_tokens: u64, cached_tokens: u64, reasoning_tokens: u64}` | `agentkeys-gate` (#384 metered key-custody LLM-egress relay; usage metering per #332) |
 
-Byte ranges `3-9`, `14-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `83-89`, `91-99`, `100-255` are reserved for future extensions in the same family (config claimed `80-89` per #229; the memory family claimed `13` for `MemoryInboxAppend` per #339; the gate family claimed `90-99` per #384).
+Byte ranges `3-9`, `14-19`, `22-29`, `32-39`, `42-49`, `55-59`, `62-69`, `71-79`, `83-89`, `91-99`, `100-255` are reserved for future extensions in the same family (config claimed `80-89` per #229; the memory family claimed `13` for `MemoryInboxAppend` per #339; the gate family claimed `90-99` per #384; the device family claimed `53`/`54` for the sandbox lifecycle per #377).
 
 The `GateTurn` row records one proxied LLM turn at the egress relay: token
 usage (incl. the separately-priced `cached`/`reasoning` details, #332) plus the

@@ -25,6 +25,9 @@ agentkeys-protocol = { workspace = true }
 # reads, reusing assume_role_with_jwt — so the delegate never holds the operator
 # session bearer (Codex critical fix).
 agentkeys-provisioner = { path = "../agentkeys-provisioner" }
+# #377 — delegate sandboxes get their Ark env from the #338 isolated ark
+# family (one loader, no cross-family fallback), resolved per spawn.
+agentkeys-inference-creds = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }

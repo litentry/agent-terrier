@@ -43,7 +43,8 @@ const AGENT_ROLE_BITS: u8 = 1;
 /// Default audit-worker URL: the broker is co-located with the audit worker
 /// on the broker host (same default as the data-plane workers' emitter).
 /// Override with `AGENTKEYS_AUDIT_WORKER_URL` for split deployments.
-const DEFAULT_AUDIT_WORKER_URL: &str = "http://127.0.0.1:9092";
+/// Shared with the #377 sandbox-lifecycle emits (`handlers::sandbox`).
+pub(crate) const DEFAULT_AUDIT_WORKER_URL: &str = "http://127.0.0.1:9092";
 
 /// Decode a confirmed `executeBatch` UserOp calldata into the audit envelopes
 /// for what landed. Pure — no I/O, fully unit-testable. `session_omni` is the
