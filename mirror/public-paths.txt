@@ -51,6 +51,11 @@ docs/assets/brand/
 docs/assets/component-architecture.svg
 docs/assets/key-map.svg
 docs/assets/gas-funding-map.svg
+# Channel-decoupling design diagrams — arch.md §22e ← topology; the public channel
+# spec (docs/spec/agent-channel-decoupling.md) ← both. No op-values; visual
+# companions to public docs, same posture as the three arch diagrams above.
+docs/assets/agent-device-decoupling-topology.svg
+docs/assets/device-bind-sandbox-spawn-security.svg
 # docs/research/ is PRIVATE (competitive/China-market/hardware research) — omitted
 # from the allowlist. The hardware/volcano cluster lives in docs/hardware/ (also
 # omitted → private). Both stay out of the mirror.
