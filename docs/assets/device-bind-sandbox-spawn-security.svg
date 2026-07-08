@@ -1,0 +1,247 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 1200" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="slate" markerWidth="11" markerHeight="11" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <marker id="green" markerWidth="11" markerHeight="11" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#16a34a"/></marker>
+    <marker id="blue" markerWidth="11" markerHeight="11" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    <marker id="amber" markerWidth="11" markerHeight="11" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97706"/></marker>
+    <marker id="violet" markerWidth="11" markerHeight="11" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/></marker>
+  </defs>
+
+  <rect x="0" y="0" width="1300" height="1200" rx="16" fill="#ffffff"/>
+
+  <text x="650" y="38" text-anchor="middle" font-size="23" font-weight="700" fill="#0f172a">Device binding &amp; sandbox spawn — the key-custody &amp; security view</text>
+  <text x="650" y="61" text-anchor="middle" font-size="13" fill="#64748b">who holds which key · what proves possession · why no single party can forge, bind, or spawn on its own</text>
+
+  <!-- ============================ KEY CUSTODY LEGEND ============================ -->
+  <rect x="40" y="80" width="1220" height="172" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="56" y="103" font-size="13" font-weight="700" fill="#0f172a">KEY INVENTORY — where each secret lives &amp; who can see it  <tspan fill="#64748b" font-weight="400" font-size="11">(colour = trust boundary; the anchor of every step below)</tspan></text>
+
+  <!-- K11 -->
+  <rect x="52" y="116" width="196" height="126" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+  <text x="64" y="137" font-size="13" font-weight="700" fill="#1d4ed8">K11 · passkey</text>
+  <text x="64" y="156" font-size="10" fill="#0f172a">WebAuthn P-256, master-only</text>
+  <text x="64" y="174" font-size="10" font-weight="600" fill="#1d4ed8">Secure Enclave (phone)</text>
+  <text x="64" y="192" font-size="9.5" fill="#334155">= human presence / Touch ID</text>
+  <text x="64" y="212" font-size="9.5" font-weight="700" fill="#b91c1c">SECRET · never leaves SE</text>
+  <text x="64" y="230" font-size="9" font-style="italic" fill="#64748b">agents never hold it</text>
+
+  <!-- K10 -->
+  <rect x="254" y="116" width="196" height="126" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+  <text x="266" y="137" font-size="13" font-weight="700" fill="#15803d">K10 · device key</text>
+  <text x="266" y="156" font-size="10" fill="#0f172a">D_priv / D_pub, per-actor HDKD</text>
+  <text x="266" y="174" font-size="10" font-weight="600" fill="#15803d">device flash / its sandbox</text>
+  <text x="266" y="192" font-size="9.5" fill="#334155">signs cap requests (PoP)</text>
+  <text x="266" y="212" font-size="9.5" font-weight="700" fill="#b91c1c">SECRET · D_priv never leaves</text>
+  <text x="266" y="230" font-size="9" font-style="italic" fill="#64748b">generated in-place, reused</text>
+
+  <!-- omni -->
+  <rect x="456" y="116" width="196" height="126" rx="9" fill="#e2e8f0" stroke="#475569" stroke-width="1.6"/>
+  <text x="468" y="137" font-size="13" font-weight="700" fill="#334155">O_master / O_agent</text>
+  <text x="468" y="156" font-size="10" fill="#0f172a">actor omni — HDKD tree node</text>
+  <text x="468" y="174" font-size="10" font-weight="600" fill="#334155">S3 path · PrincipalTag · cap</text>
+  <text x="468" y="192" font-size="9.5" fill="#334155">O_agent = SHA256(O_master//L)</text>
+  <text x="468" y="212" font-size="9.5" font-weight="700" fill="#0369a1">PUBLIC · recomputable</text>
+  <text x="468" y="230" font-size="9" font-style="italic" fill="#64748b">identity, not a secret</text>
+
+  <!-- J1 -->
+  <rect x="658" y="116" width="196" height="126" rx="9" fill="#f1f5f9" stroke="#64748b" stroke-width="1.6"/>
+  <text x="670" y="137" font-size="13" font-weight="700" fill="#334155">J1 · session JWT</text>
+  <text x="670" y="156" font-size="10" fill="#0f172a">bearer, broker-signed (K1)</text>
+  <text x="670" y="174" font-size="10" font-weight="600" fill="#334155">master J1 · agent J1</text>
+  <text x="670" y="192" font-size="9.5" fill="#334155">carries actor_omni claim</text>
+  <text x="670" y="212" font-size="9.5" font-weight="700" fill="#b45309">TTL'd · minted fresh</text>
+  <text x="670" y="230" font-size="9" font-style="italic" fill="#64748b">issued only at retrieval</text>
+
+  <!-- cap-token -->
+  <rect x="860" y="116" width="196" height="126" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="1.6"/>
+  <text x="872" y="137" font-size="13" font-weight="700" fill="#b45309">cap-token</text>
+  <text x="872" y="156" font-size="10" fill="#0f172a">authorizes ONE operation</text>
+  <text x="872" y="174" font-size="10" font-weight="600" fill="#b45309">broker-minted (K1 co-sig)</text>
+  <text x="872" y="192" font-size="9.5" fill="#334155">K10-PoP bound + on-chain scope</text>
+  <text x="872" y="212" font-size="9.5" font-weight="700" fill="#b91c1c">short-TTL · revocable</text>
+  <text x="872" y="230" font-size="9" font-style="italic" fill="#64748b">re-verified every call</text>
+
+  <!-- pop / pairing_code -->
+  <rect x="1062" y="116" width="192" height="126" rx="9" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"/>
+  <text x="1074" y="137" font-size="12.5" font-weight="700" fill="#86198f">pop_sig · pairing_code</text>
+  <text x="1074" y="156" font-size="10" fill="#0f172a">pop = EIP-191 over key-hash</text>
+  <text x="1074" y="174" font-size="10" font-weight="600" fill="#86198f">= proof-of-possession</text>
+  <text x="1074" y="192" font-size="9.5" fill="#334155">pairing_code = claim ticket</text>
+  <text x="1074" y="212" font-size="9.5" font-weight="700" fill="#b91c1c">high-entropy · owner-only</text>
+  <text x="1074" y="230" font-size="9" font-style="italic" fill="#64748b">whoever holds it, binds</text>
+
+  <!-- ============================ PHASE A — DEVICE BINDING ============================ -->
+  <rect x="40" y="270" width="430" height="23" rx="11.5" fill="#eff6ff" stroke="#2563eb" stroke-width="1"/>
+  <text x="52" y="286.5" font-size="12" font-weight="700" fill="#1d4ed8">Ⓐ  MACHINE→ACTOR BINDING — agent-initiated pairing (§10.2)</text>
+  <text x="470" y="286.5" font-size="9.5" font-style="italic" fill="#64748b">same ceremony for every machine — a device (channel grants at claim, ≥1 required) or a delegate sandbox (in-band claim, no QR)</text>
+
+  <!-- lane headers -->
+  <rect x="48" y="302" width="258" height="44" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="177" y="320" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">MACHINE being bound</text>
+  <text x="177" y="337" text-anchor="middle" font-size="9" fill="#64748b">ESP32 flash OR sandbox · own K10 · signs itself</text>
+
+  <rect x="372" y="302" width="230" height="44" rx="9" fill="#e2e8f0" stroke="#475569" stroke-width="2"/>
+  <text x="487" y="322" text-anchor="middle" font-size="12.5" font-weight="700" fill="#334155">BROKER · always-on</text>
+  <text x="487" y="338" text-anchor="middle" font-size="9.5" fill="#64748b">rendezvous · mints J1 · relays</text>
+
+  <rect x="668" y="302" width="230" height="44" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="783" y="322" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1d4ed8">MASTER · phone</text>
+  <text x="783" y="338" text-anchor="middle" font-size="9.5" fill="#64748b">holds K11 · J1_master</text>
+
+  <rect x="964" y="302" width="290" height="44" rx="9" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+  <text x="1109" y="322" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6d28d9">CHAIN · SidecarRegistry + Scope</text>
+  <text x="1109" y="338" text-anchor="middle" font-size="9.5" fill="#64748b">the only source of truth for authority</text>
+
+  <!-- lifelines -->
+  <line x1="177" y1="346" x2="177" y2="720" stroke="#16a34a" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="487" y1="346" x2="487" y2="720" stroke="#475569" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="783" y1="346" x2="783" y2="720" stroke="#2563eb" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="1109" y1="346" x2="1109" y2="720" stroke="#7c3aed" stroke-width="1" stroke-dasharray="3 4"/>
+
+  <!-- step 1 : device self — generate K10 -->
+  <rect x="72" y="356" width="210" height="34" rx="7" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+  <circle cx="84" cy="373" r="9" fill="#16a34a"/><text x="84" y="376.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">1</text>
+  <text x="99" y="370" font-size="10" font-weight="600" fill="#15803d">generate K10 on the machine (ESP32 flash / sandbox)</text>
+  <text x="99" y="384" font-size="9" fill="#334155">secp256k1, signed on-device · D_priv persisted, never leaves</text>
+
+  <!-- step 2 : device -> broker -->
+  <line x1="177" y1="412" x2="487" y2="412" stroke="#475569" stroke-width="2.2" marker-end="url(#slate)"/>
+  <circle cx="177" cy="412" r="9" fill="#475569"/><text x="177" y="415.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">2</text>
+  <text x="332" y="405" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">POST /pairing/request { D_pub, pop_sig }</text>
+  <text x="332" y="426" text-anchor="middle" font-size="9" font-style="italic" fill="#b91c1c">no bearer — endpoint is PoP-gated, so a bad sig writes no row</text>
+
+  <!-- step 3 : broker self — verify + unbound -->
+  <rect x="377" y="436" width="220" height="34" rx="7" fill="#e2e8f0" stroke="#475569" stroke-width="1.4"/>
+  <circle cx="389" cy="453" r="9" fill="#475569"/><text x="389" y="456.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">3</text>
+  <text x="404" y="450" font-size="10" font-weight="600" fill="#334155">verify pop_sig → store UNBOUND request</text>
+  <text x="404" y="464" font-size="9" fill="#334155">names NO master · TTL 600s · inert until claimed</text>
+
+  <!-- step 4 : broker -> device -->
+  <line x1="487" y1="490" x2="177" y2="490" stroke="#475569" stroke-width="2.2" marker-end="url(#slate)"/>
+  <circle cx="487" cy="490" r="9" fill="#475569"/><text x="487" y="493.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">4</text>
+  <text x="332" y="483" text-anchor="middle" font-size="10" font-weight="600" fill="#334155">pairing_code (DISPLAY) + request_id (secret ticket)</text>
+
+  <!-- step 5 : device -> master out of band -->
+  <line x1="177" y1="524" x2="783" y2="524" stroke="#a21caf" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#slate)"/>
+  <circle cx="177" cy="524" r="9" fill="#a21caf"/><text x="177" y="527.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">5</text>
+  <text x="480" y="517" text-anchor="middle" font-size="10" font-weight="600" fill="#86198f">owner carries the pairing_code (QR on screen) → master scans</text>
+  <text x="480" y="538" text-anchor="middle" font-size="9" font-style="italic" fill="#64748b">out-of-band, human proximity — the one step no key protects, so show it only to the owner</text>
+
+  <!-- step 6 : master -> broker claim -->
+  <line x1="783" y1="566" x2="487" y2="566" stroke="#2563eb" stroke-width="2.2" marker-end="url(#blue)"/>
+  <circle cx="783" cy="566" r="9" fill="#2563eb"/><text x="783" y="569.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">6</text>
+  <text x="635" y="559" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">/pairing/claim { code } + Bearer J1_master</text>
+  <text x="635" y="580" text-anchor="middle" font-size="9" font-style="italic" fill="#334155">broker derives O_agent = SHA256(O_master // label); returns device artifact to review</text>
+
+  <!-- step 7 : master self — Touch ID -->
+  <rect x="668" y="590" width="230" height="46" rx="7" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+  <circle cx="680" cy="609" r="9" fill="#2563eb"/><text x="680" y="612.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">7</text>
+  <text x="695" y="606" font-size="10" font-weight="700" fill="#1d4ed8">ONE Touch ID (K11) signs the userOpHash</text>
+  <text x="695" y="620" font-size="9" fill="#334155">builds P256Account.executeBatch([</text>
+  <text x="695" y="632" font-size="9" fill="#334155">registerAgentDevice + setScope ]) — install + permit = 1 gesture</text>
+
+  <!-- step 8 : master -> chain -->
+  <line x1="898" y1="659" x2="1109" y2="659" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#violet)"/>
+  <line x1="783" y1="636" x2="783" y2="659" stroke="#7c3aed" stroke-width="2.4"/>
+  <line x1="783" y1="659" x2="898" y2="659" stroke="#7c3aed" stroke-width="2.4"/>
+  <circle cx="783" cy="659" r="9" fill="#7c3aed"/><text x="783" y="662.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">8</text>
+  <text x="1000" y="652" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">sponsored UserOp (paymaster gas)</text>
+  <text x="1000" y="674" text-anchor="middle" font-size="9" font-style="italic" fill="#b91c1c">broker only RELAYS /accept/{build,submit} — it never writes chain</text>
+
+  <!-- step 9 : chain self write -->
+  <rect x="964" y="682" width="290" height="30" rx="7" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+  <circle cx="976" cy="697" r="9" fill="#7c3aed"/><text x="976" y="700.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">9</text>
+  <text x="991" y="700" font-size="9.5" fill="#334155">binds D_pub→O_agent (tier AGENT, CAP_MINT, k11=0) + scope</text>
+
+  <!-- outcome note under broker/device -->
+  <text x="332" y="700" text-anchor="middle" font-size="9.5" font-style="italic" fill="#15803d">then device polls → broker mints J1_agent FRESH (scope now live → cap-mint works)</text>
+
+  <!-- ============================ PHASE B — SANDBOX SPAWN ============================ -->
+  <rect x="40" y="738" width="430" height="23" rx="11.5" fill="#fff7ed" stroke="#d97706" stroke-width="1"/>
+  <text x="52" y="754.5" font-size="12" font-weight="700" fill="#b45309">Ⓑ  SANDBOX SPAWN — master authorizes, broker executes</text>
+  <text x="494" y="754.5" font-size="9.5" font-style="italic" fill="#64748b">NEVER triggered by device pairing — the default delegate spawns at onboarding, more by option; a device claim only attaches channels (plan §4.4)</text>
+
+  <!-- lane headers B -->
+  <rect x="48" y="770" width="200" height="44" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="148" y="790" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">MASTER</text>
+  <text x="148" y="806" text-anchor="middle" font-size="9.5" fill="#64748b">signs, never runs it</text>
+
+  <rect x="300" y="770" width="200" height="44" rx="9" fill="#e2e8f0" stroke="#475569" stroke-width="2"/>
+  <text x="400" y="790" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">BROKER</text>
+  <text x="400" y="806" text-anchor="middle" font-size="9.5" fill="#64748b">validates → mints prov. cap</text>
+
+  <rect x="552" y="770" width="224" height="44" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="664" y="790" text-anchor="middle" font-size="12" font-weight="700" fill="#b45309">SPAWN-WORKER</text>
+  <text x="664" y="806" text-anchor="middle" font-size="9.5" fill="#64748b">own IAM · placement · launch</text>
+
+  <rect x="828" y="770" width="214" height="44" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="935" y="790" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">SANDBOX · O_agent_A</text>
+  <text x="935" y="806" text-anchor="middle" font-size="9.5" fill="#64748b">hermes + daemon (K10)</text>
+
+  <rect x="1094" y="770" width="160" height="44" rx="9" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="1174" y="790" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">S3 STORE</text>
+  <text x="1174" y="806" text-anchor="middle" font-size="9.5" fill="#64748b">per-actor prefix</text>
+
+  <!-- lifelines B -->
+  <line x1="148" y1="814" x2="148" y2="990" stroke="#2563eb" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="400" y1="814" x2="400" y2="990" stroke="#475569" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="664" y1="814" x2="664" y2="990" stroke="#d97706" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="935" y1="814" x2="935" y2="990" stroke="#16a34a" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="1174" y1="814" x2="1174" y2="990" stroke="#64748b" stroke-width="1" stroke-dasharray="3 4"/>
+
+  <!-- B1 master -> broker -->
+  <line x1="148" y1="852" x2="400" y2="852" stroke="#2563eb" stroke-width="2.2" marker-end="url(#blue)"/>
+  <circle cx="148" cy="852" r="9" fill="#2563eb"/><text x="148" y="855.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">1</text>
+  <text x="274" y="845" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">biometric-signed "provision O_agent_A"</text>
+  <text x="274" y="866" text-anchor="middle" font-size="9" font-style="italic" fill="#64748b">a phone never launches cloud infra directly</text>
+
+  <!-- B2 broker -> spawn -->
+  <line x1="400" y1="896" x2="664" y2="896" stroke="#d97706" stroke-width="2.2" marker-end="url(#amber)"/>
+  <circle cx="400" cy="896" r="9" fill="#d97706"/><text x="400" y="899.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">2</text>
+  <text x="532" y="889" text-anchor="middle" font-size="10" font-weight="600" fill="#b45309">provisioning cap (delegated)</text>
+  <text x="532" y="910" text-anchor="middle" font-size="9" font-style="italic" fill="#64748b">broker validates the intent + audits</text>
+
+  <!-- B3 spawn -> sandbox -->
+  <line x1="664" y1="896" x2="935" y2="896" stroke="#16a34a" stroke-width="2.2" marker-end="url(#green)"/>
+  <circle cx="664" cy="896" r="9" fill="#16a34a"/><text x="664" y="899.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">3</text>
+  <text x="800" y="889" text-anchor="middle" font-size="10" font-weight="600" fill="#15803d">launch sandbox(ACTOR_OMNI=O_agent_A)</text>
+
+  <!-- B4 sandbox -> S3 -->
+  <line x1="935" y1="936" x2="1174" y2="936" stroke="#64748b" stroke-width="2.2" marker-end="url(#slate)"/>
+  <circle cx="935" cy="936" r="9" fill="#64748b"/><text x="935" y="939.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">4</text>
+  <text x="1054" y="929" text-anchor="middle" font-size="9.5" font-weight="600" fill="#334155">load bots/O_agent_A/* </text>
+  <text x="1054" y="949" text-anchor="middle" font-size="9" font-style="italic" fill="#b91c1c">SCOPED STS, server-side — sandbox holds no long-lived S3 creds</text>
+
+  <!-- B5 sandbox -> broker register back -->
+  <line x1="935" y1="976" x2="400" y2="976" stroke="#475569" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#slate)"/>
+  <circle cx="935" cy="976" r="9" fill="#475569"/><text x="935" y="979.5" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">5</text>
+  <text x="668" y="969" text-anchor="middle" font-size="9.5" font-weight="600" fill="#334155">register back: O_agent_A ↔ sandbox ↔ device_key → surfaced in the Master hub</text>
+
+  <!-- ============================ FOOTER — TRUST CHAIN + INVARIANTS ============================ -->
+  <rect x="40" y="1004" width="1220" height="60" rx="10" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.2"/>
+  <text x="56" y="1025" font-size="12" font-weight="700" fill="#15803d">THE TRUST CHAIN — no link can be skipped, each is a different key held by a different party</text>
+  <!-- chain pills -->
+  <rect x="56" y="1034" width="200" height="22" rx="11" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="156" y="1049" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">master human</text>
+  <line x1="256" y1="1045" x2="300" y2="1045" stroke="#475569" stroke-width="2" marker-end="url(#slate)"/>
+  <rect x="300" y="1034" width="230" height="22" rx="11" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="415" y="1049" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">K11 Touch ID (presence)</text>
+  <line x1="530" y1="1045" x2="574" y2="1045" stroke="#475569" stroke-width="2" marker-end="url(#slate)"/>
+  <rect x="574" y="1034" width="330" height="22" rx="11" fill="#ede9fe" stroke="#7c3aed" stroke-width="1"/>
+  <text x="739" y="1049" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">master J1 + master-submitted on-chain binding</text>
+  <line x1="904" y1="1045" x2="948" y2="1045" stroke="#475569" stroke-width="2" marker-end="url(#slate)"/>
+  <rect x="948" y="1034" width="300" height="22" rx="11" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+  <text x="1098" y="1049" text-anchor="middle" font-size="10" font-weight="600" fill="#15803d">agent K10 binding → cap-mint works</text>
+
+  <!-- invariants -->
+  <rect x="40" y="1074" width="1220" height="112" rx="10" fill="#fef2f2" stroke="#ef4444" stroke-width="1.2"/>
+  <text x="56" y="1096" font-size="12" font-weight="700" fill="#b91c1c">SECURITY INVARIANTS — what the design guarantees no matter who is compromised</text>
+  <text x="56" y="1117" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#b91c1c">✗</tspan>  agent never holds K11 — K10-only, no human-presence credential of its own</text>
+  <text x="56" y="1136" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#b91c1c">✗</tspan>  broker never writes chain — it relays the master's UserOp; authority lands only under the master's key</text>
+  <text x="56" y="1155" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#b91c1c">✗</tspan>  D_priv (K10) never leaves the device / sandbox — a leaked K10 touches only that one actor's wallet + prefix</text>
+  <text x="56" y="1174" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#b91c1c">✗</tspan>  pairing request is UNBOUND + inert — Sybil-safe: names no master, does nothing until a master claims the code</text>
+  <text x="668" y="1117" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#15803d">✓</tspan>  cap-token is short-TTL + revocable; workers re-verify scope on-chain every call (§17.5 four-layer)</text>
+  <text x="668" y="1136" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#15803d">✓</tspan>  per-actor omni → own S3 prefix + IAM PrincipalTag; the sandbox reads via a scoped, server-side STS</text>
+  <text x="668" y="1155" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#15803d">✓</tspan>  master = ERC-4337 P-256 account — no client ever custodies a secp256k1 key; gas is paymaster-sponsored</text>
+  <text x="668" y="1174" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#15803d">✓</tspan>  revoke = master setScope → the next cap-mint is refused, then the cap TTL bounds the offline window</text>
+</svg>

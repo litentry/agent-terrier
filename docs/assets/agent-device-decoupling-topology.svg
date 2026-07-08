@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 754" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="slate" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0,0 L9,5 L0,10 z" fill="#475569"/></marker>
+    <marker id="green" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0,0 L9,5 L0,10 z" fill="#16a34a"/></marker>
+    <marker id="fuchsia" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0,0 L9,5 L0,10 z" fill="#a21caf"/></marker>
+  </defs>
+
+  <rect x="0" y="0" width="1300" height="754" rx="16" fill="#ffffff"/>
+
+  <text x="650" y="36" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">Agent ↔ device decoupling — K10 binds a MACHINE to an ACTOR (not an agent to a device)</text>
+  <text x="650" y="59" text-anchor="middle" font-size="12.5" fill="#64748b">every device is a channel endpoint, every delegate is sandbox-resident — separate (machine, actor) pairs, each with its own K10, meeting only through master-signed channel grants</text>
+
+  <!-- ================= THREE BINDING CLASSES ================= -->
+  <!-- Card 1 : device + its delegate -->
+  <rect x="40" y="76" width="400" height="312" rx="12" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+  <text x="60" y="100" font-size="14" font-weight="700" fill="#15803d">① DEVICE + ITS DELEGATE</text>
+  <text x="60" y="118" font-size="10.5" fill="#64748b">the console is a duplex channel endpoint — it does not root an agent</text>
+
+  <rect x="60" y="150" width="112" height="90" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+  <text x="116" y="171" text-anchor="middle" font-size="11.5" font-weight="700" fill="#15803d">ESP32-S3</text>
+  <text x="116" y="189" text-anchor="middle" font-size="9.5" fill="#0f172a">K10 · secp256k1</text>
+  <text x="116" y="205" text-anchor="middle" font-size="9.5" font-weight="700" fill="#15803d">actor O_console</text>
+  <text x="116" y="223" text-anchor="middle" font-size="9.5" fill="#0f172a">pub + sub (duplex)</text>
+
+  <rect x="186" y="163" width="108" height="64" rx="9" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"/>
+  <text x="240" y="184" text-anchor="middle" font-size="10.5" font-weight="700" fill="#86198f">channel</text>
+  <text x="240" y="201" text-anchor="middle" font-size="9.5" fill="#0f172a">console-chat</text>
+  <text x="240" y="217" text-anchor="middle" font-size="8.5" font-style="italic" fill="#64748b">session · no feed</text>
+
+  <rect x="308" y="150" width="108" height="90" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+  <text x="362" y="171" text-anchor="middle" font-size="10.5" font-weight="700" fill="#15803d">default delegate</text>
+  <text x="362" y="189" text-anchor="middle" font-size="9.5" fill="#0f172a">sandbox K10</text>
+  <text x="362" y="205" text-anchor="middle" font-size="9.5" font-weight="700" fill="#15803d">actor O_agent</text>
+  <text x="362" y="223" text-anchor="middle" font-size="9.5" fill="#0f172a">runtime (hermes)</text>
+
+  <line x1="172" y1="195" x2="186" y2="195" stroke="#a21caf" stroke-width="2.2" marker-end="url(#fuchsia)"/>
+  <line x1="294" y1="195" x2="308" y2="195" stroke="#a21caf" stroke-width="2.2" marker-end="url(#fuchsia)"/>
+  <text x="116" y="256" font-size="8.5" font-weight="600" fill="#86198f" text-anchor="middle">channel-pub/sub grants</text>
+  <text x="362" y="256" font-size="8.5" font-weight="600" fill="#86198f" text-anchor="middle">channel-sub/pub grants</text>
+
+  <line x1="60" y1="266" x2="420" y2="266" stroke="#bbf7d0" stroke-width="1"/>
+  <text x="60" y="288" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#15803d">TWO</tspan> actors, TWO K10s — joined by a session channel:</text>
+  <text x="60" y="305" font-size="10" fill="#0f172a">live chat streams direct to the delegate's bridge,</text>
+  <text x="60" y="322" font-size="10" fill="#0f172a">grant-gated; realtime speech stays on the gate path.</text>
+  <text x="60" y="344" font-size="9.5" font-style="italic" fill="#64748b">the legacy #369 device→sandbox delegation_sig is transitional</text>
+  <text x="60" y="360" font-size="9.5" font-style="italic" fill="#64748b">until re-bind — one firmware cycle, one Touch ID per device.</text>
+
+  <!-- Card 2 : channel-device -->
+  <rect x="460" y="76" width="400" height="312" rx="12" fill="#fdf4ff" stroke="#a21caf" stroke-width="1.6"/>
+  <text x="480" y="100" font-size="14" font-weight="700" fill="#86198f">② DEVICE → ANOTHER DELEGATE (feed)</text>
+  <text x="480" y="118" font-size="10.5" fill="#64748b">a camera feeds the doorkeeper — fully decoupled</text>
+
+  <rect x="480" y="150" width="112" height="90" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+  <text x="536" y="171" text-anchor="middle" font-size="11.5" font-weight="700" fill="#15803d">camera</text>
+  <text x="536" y="189" text-anchor="middle" font-size="9.5" fill="#0f172a">K10 · secp256k1</text>
+  <text x="536" y="205" text-anchor="middle" font-size="9.5" font-weight="700" fill="#15803d">actor O_cam</text>
+  <text x="536" y="223" text-anchor="middle" font-size="9.5" fill="#0f172a">pub-only</text>
+
+  <rect x="606" y="163" width="108" height="64" rx="9" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"/>
+  <text x="660" y="184" text-anchor="middle" font-size="10.5" font-weight="700" fill="#86198f">channel</text>
+  <text x="660" y="201" text-anchor="middle" font-size="9.5" fill="#0f172a">front-door</text>
+  <text x="660" y="217" text-anchor="middle" font-size="8.5" font-style="italic" fill="#64748b">durable feed</text>
+
+  <rect x="728" y="150" width="112" height="90" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+  <text x="784" y="171" text-anchor="middle" font-size="11.5" font-weight="700" fill="#15803d">doorkeeper</text>
+  <text x="784" y="189" text-anchor="middle" font-size="9.5" fill="#0f172a">sandbox K10</text>
+  <text x="784" y="205" text-anchor="middle" font-size="9.5" font-weight="700" fill="#15803d">actor O_door</text>
+  <text x="784" y="223" text-anchor="middle" font-size="9.5" fill="#0f172a">sub-only</text>
+
+  <line x1="592" y1="195" x2="606" y2="195" stroke="#a21caf" stroke-width="2.2" marker-end="url(#fuchsia)"/>
+  <line x1="714" y1="195" x2="728" y2="195" stroke="#a21caf" stroke-width="2.2" marker-end="url(#fuchsia)"/>
+  <text x="536" y="256" font-size="8.5" font-weight="600" fill="#86198f" text-anchor="middle">channel-pub grant</text>
+  <text x="784" y="256" font-size="8.5" font-weight="600" fill="#86198f" text-anchor="middle">channel-sub grant</text>
+
+  <line x1="480" y1="272" x2="840" y2="272" stroke="#f5d0fe" stroke-width="1"/>
+  <text x="480" y="294" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#86198f">TWO</tspan> machines · <tspan font-weight="700" fill="#86198f">TWO</tspan> actors · <tspan font-weight="700" fill="#86198f">TWO</tspan> K10s.</text>
+  <text x="480" y="311" font-size="10" fill="#0f172a">Joined ONLY by a master-signed channel grant —</text>
+  <text x="480" y="328" font-size="10" fill="#0f172a">no shared key, no device↔agent bond.</text>
+  <text x="480" y="350" font-size="9.5" font-style="italic" fill="#64748b">the camera can NEVER read the doorkeeper's memory;</text>
+  <text x="480" y="366" font-size="9.5" font-style="italic" fill="#64748b">it can only publish frames its grant permits.</text>
+
+  <!-- Card 3 : headless delegate -->
+  <rect x="880" y="76" width="380" height="312" rx="12" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+  <text x="900" y="100" font-size="14" font-weight="700" fill="#15803d">③ THE DELEGATE ITSELF</text>
+  <text x="900" y="118" font-size="10.5" fill="#64748b">sandbox-resident, the only form — first one spawns at onboarding</text>
+
+  <rect x="900" y="150" width="164" height="96" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+  <text x="982" y="171" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">sandbox</text>
+  <text x="982" y="190" text-anchor="middle" font-size="10" fill="#0f172a">K10 · secp256k1</text>
+  <text x="982" y="207" text-anchor="middle" font-size="10" font-weight="700" fill="#15803d">actor O_agent</text>
+  <text x="982" y="224" text-anchor="middle" font-size="9.5" fill="#0f172a">wakes on event</text>
+  <text x="982" y="240" text-anchor="middle" font-size="9" font-style="italic" fill="#64748b">the delegate's host</text>
+
+  <rect x="1088" y="150" width="150" height="96" rx="9" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <text x="1163" y="200" text-anchor="middle" font-size="11" font-style="italic" fill="#94a3b8">— no device —</text>
+
+  <line x1="900" y1="272" x2="1240" y2="272" stroke="#bbf7d0" stroke-width="1"/>
+  <text x="900" y="294" font-size="10" fill="#0f172a">K10 lives in the sandbox = the delegate's</text>
+  <text x="900" y="311" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#15803d">runtime host</tspan>, not a gadget.</text>
+  <text x="900" y="333" font-size="10" fill="#0f172a">Proof that K10 binds a machine to an actor,</text>
+  <text x="900" y="350" font-size="10" fill="#0f172a">never a device. Reachable only via channels.</text>
+
+  <!-- ================= ESP32 SUFFICIENCY + KEY CUSTODY ================= -->
+  <rect x="40" y="402" width="780" height="164" rx="12" fill="#ecfdf5" stroke="#16a34a" stroke-width="1.4"/>
+  <text x="58" y="424" font-size="12.5" font-weight="700" fill="#15803d">ESP32-S3 SUFFICIENCY — the device already does ALL its own crypto</text>
+  <text x="58" y="440" font-size="9.5" font-style="italic" fill="#64748b">firmware: firmware/esp32s3-touch-lcd-4b/main/net/device_identity.c + the shared agentkeys-device-core (Rust FFI)</text>
+  <text x="58" y="462" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#15803d">✓</tspan>  generates K10 (secp256k1) from hardware entropy (esp_fill_random CSPRNG) · persists it in NVS · <tspan font-weight="600">D_priv never transmitted</tspan></text>
+  <text x="58" y="483" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#15803d">✓</tspan>  signs on-device: pop_sig (pairing PoP) · key-hash · delegation sig (#369 — legacy, transitional) — RFC6979 ECDSA, 32 KB static crypto worker (#367)</text>
+  <text x="58" y="504" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#15803d">✓</tspan>  the box runs its OWN half of §10.2 — shows the pairing QR, proves possession, polls for J1 — with no external signer</text>
+  <text x="58" y="527" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#b45309">△</tspan>  secp256k1 is SOFTWARE (the S3's HW-ECC does P-256 only) → sign once per cap / per stream, <tspan font-weight="600">not per frame</tspan></text>
+  <text x="58" y="548" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#b45309">△</tspan>  K10 sits in plain NVS today → <tspan font-weight="600">enable flash-encryption</tspan> so a physical flash dump can't lift D_priv (blast radius is one actor either way)</text>
+
+  <rect x="836" y="402" width="424" height="164" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="854" y="424" font-size="12.5" font-weight="700" fill="#0f172a">KEY CUSTODY BY PRINCIPAL</text>
+  <text x="854" y="446" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#1d4ed8">Master</tspan> — K11 (Secure Enclave, P-256) + per-device K10  <tspan font-weight="700" fill="#15803d">keyed</tspan></text>
+  <text x="854" y="465" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#15803d">Delegate / agent</tspan> — K10 only (secp256k1)  <tspan font-weight="700" fill="#15803d">keyed</tspan></text>
+  <text x="854" y="484" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#15803d">Device (ESP32)</tspan> — K10 only, in NVS  <tspan font-weight="700" fill="#15803d">keyed</tspan></text>
+  <text x="854" y="503" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#15803d">Sandbox</tspan> — its own K10 (the delegate's identity root)  <tspan font-weight="700" fill="#15803d">keyed</tspan></text>
+  <text x="854" y="522" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#86198f">Contact (family)</tspan> — none; a channel identity  <tspan font-weight="700" fill="#b91c1c">keyless</tspan></text>
+  <text x="854" y="541" font-size="10" fill="#0f172a"><tspan font-weight="700" fill="#334155">Broker / Worker / Gateway</tspan> — K1/K2/relay keys  <tspan font-weight="700" fill="#334155">infra</tspan></text>
+  <text x="854" y="560" font-size="9" font-style="italic" fill="#64748b">only master holds a human-presence credential (K11); agents + devices are K10-only.</text>
+
+  <!-- ================= WHY STILL A MASTER ================= -->
+  <rect x="40" y="580" width="1220" height="150" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.2"/>
+  <text x="58" y="602" font-size="12.5" font-weight="700" fill="#1d4ed8">So why is there still a master + Touch ID, if the device signs for itself?  <tspan fill="#b91c1c">— it was never a crypto limit</tspan></text>
+  <text x="58" y="626" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#1d4ed8">INPUT</tspan>  ·  a no-keyboard device can SHOW a code (QR on its LCD) but can't accept one typed in → pairing is device-initiated, the master claims the code (§10.2)</text>
+  <text x="58" y="650" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#1d4ed8">PRESENCE</tspan>  ·  the device has no human-presence credential — K11 / WebAuthn needs a biometric + secure element it lacks → the master supplies presence; agents are K10-only by role</text>
+  <text x="58" y="674" font-size="10.5" fill="#0f172a"><tspan font-weight="700" fill="#1d4ed8">AUTHORITY</tspan>  ·  only the master writes the on-chain binding + scope (its sponsored UserOp) → the device proves possession (pop_sig), the master grants what it may touch</text>
+  <text x="58" y="702" font-size="10.5" font-style="italic" fill="#334155">Net: the ESP32 is a full keyed principal that signs its own operations. The master is not a co-signer of the device's ops — it is the authority that decides which actor a device is, and what that actor is allowed to do.</text>
+  <text x="58" y="720" font-size="9.5" font-style="italic" fill="#64748b">The design is sufficient today (proven in firmware); the only hardening item is turning on NVS/flash encryption for K10-at-rest.</text>
+</svg>
