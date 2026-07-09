@@ -344,6 +344,38 @@ pub struct ConfigGetResp {
 // notification path. Feed-backed (async) kinds only; `session`-kind channels
 // are direct-transport and carry no feed.
 
+/// The transport shape of a channel (#408 §4/D1). **Feed-backed** channels are
+/// async + durable (camera → doorkeeper, weixin, UI feeds): the channel worker's
+/// S3 feed + the §14.12 NRT long-poll. **Session** channels stream direct to a
+/// live adapter endpoint (the console's chat to its delegate's sandbox bridge) —
+/// grant-gated the SAME (`channel-pub/sub:<id>` caps), but with **no durable
+/// feed** (latency). A `session` channel is the phase-3 replacement for the
+/// legacy #369 device→sandbox delegation for NEW device↔delegate binds. Wire
+/// spelling lowercase; absent = `feed_backed` (every pre-#408 channel is a feed).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelKind {
+    #[default]
+    FeedBacked,
+    Session,
+}
+
+impl ChannelKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChannelKind::FeedBacked => "feed_backed",
+            ChannelKind::Session => "session",
+        }
+    }
+
+    /// Whether this kind persists events in a durable feed. `session` channels are
+    /// direct-transport (no feed) — a poll/subscribe against a session channel has
+    /// nothing to read; delivery is the live bridge.
+    pub fn has_feed(&self) -> bool {
+        matches!(self, ChannelKind::FeedBacked)
+    }
+}
+
 /// The direction an event flows relative to a keyed actor's grant. Carried on
 /// [`ChannelEvent`] for the subscriber's provenance display; the AUTHORIZATION
 /// direction is the SIGNED cap op (publish vs subscribe), never this field.
@@ -499,6 +531,378 @@ pub struct ChannelTeardownResp {
     pub keys_deleted: usize,
     #[serde(default)]
     pub audit_envelope_hash: Option<String>,
+}
+
+// ── gateway + contacts (#407 phase 2) — the WeChat gateway PEP ────────────────
+//
+// A `gateway` is the capability boundary between externally-authenticated
+// humans (`contact`s — the family) and agents (`docs/spec/agent-channel-decoupling.md`
+// D4/D5/§7). It custodies the ONE scarce transport credential (a WeChat bot per
+// KYC'd account — the #384 custody pattern, never in any agent env),
+// authenticates each contact via the transport identity (weixin openid),
+// enforces L3 audience policy BEFORE anything reaches an agent, and routes.
+// **A PEP, never an authority** — grants stay master-signed + chain-verified; a
+// contact holds NO keys and NO caps (`ChannelProducer::Contact`, §4.1).
+
+/// A household tier from the D5 template. Tiers are the master-editable POLICY
+/// vocabulary (not wire-frozen — the master may add household-specific tiers),
+/// but the template six are the defaults the bind ceremony proposes among.
+/// Serialized lowercase; unknown wire values are rejected so a typo can't
+/// silently create a phantom tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[serde(rename_all = "lowercase")]
+pub enum ContactTier {
+    Owner,
+    Partner,
+    Elder,
+    Kid,
+    Helper,
+    Guest,
+}
+
+impl ContactTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContactTier::Owner => "owner",
+            ContactTier::Partner => "partner",
+            ContactTier::Elder => "elder",
+            ContactTier::Kid => "kid",
+            ContactTier::Helper => "helper",
+            ContactTier::Guest => "guest",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "owner" => Some(ContactTier::Owner),
+            "partner" => Some(ContactTier::Partner),
+            "elder" => Some(ContactTier::Elder),
+            "kid" => Some(ContactTier::Kid),
+            "helper" => Some(ContactTier::Helper),
+            "guest" => Some(ContactTier::Guest),
+            _ => None,
+        }
+    }
+
+    /// The full household template, in descending trust order.
+    pub fn household_template() -> [ContactTier; 6] {
+        [
+            ContactTier::Owner,
+            ContactTier::Partner,
+            ContactTier::Elder,
+            ContactTier::Kid,
+            ContactTier::Helper,
+            ContactTier::Guest,
+        ]
+    }
+
+    /// Whether this tier may EVER be proposed operator-grade reach. Operator-grade
+    /// data (spend stats, audit) requires operator-grade auth (a session/K11),
+    /// NEVER a matching openid alone (L3 rule, §5) — so even `owner` gets the
+    /// parent-control deep-link, not the data, over the gateway. This flag is the
+    /// gateway's coarse guard that a NON-owner tier can't be granted an
+    /// operator-grade alias in its reach.
+    pub fn may_hold_operator_grade_reach(&self) -> bool {
+        matches!(self, ContactTier::Owner)
+    }
+}
+
+/// An externally-authenticated, KEYLESS principal in the master-curated registry
+/// (D5). The transport authenticates the human (weixin openid today); the master
+/// maps + tiers them. NEVER an actor: no omni, no keys, no caps; no feed-history
+/// visibility (D13). `reach` is the per-agent `/alias` allowlist this contact may
+/// address (e.g. `["chef", "storyteller"]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact {
+    pub contact_id: String,
+    /// The transport this identity is authenticated on (`"weixin"` today).
+    pub transport: String,
+    /// The transport-native id — the weixin openid. The gateway authenticates on
+    /// this; it never leaves the gateway/registry (contacts are addressed by
+    /// `contact_id` everywhere else).
+    pub transport_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    /// The agents (by `/alias`) this contact may reach. Empty = reaches nothing
+    /// until the master grants reach (a `guest` default).
+    #[serde(default)]
+    pub reach: Vec<String>,
+}
+
+/// The master-curated contact registry (a `policy`/`config`-data-class document,
+/// §14.5 — master-authored, gateway-read; agents see only the worker-stamped
+/// `(contact_id, tier)` on events, never the registry). `bound` are live
+/// contacts; `pending` are openids that sent a bind code but await master
+/// approval (the bind ceremony, §7.2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContactRegistry {
+    #[serde(default)]
+    pub bound: Vec<Contact>,
+    #[serde(default)]
+    pub pending: Vec<PendingBind>,
+    /// Master-minted OPEN invites (#418 bind ceremony) — not yet echoed to the
+    /// bot. `default` keeps pre-#418 registry files parseable unchanged.
+    #[serde(default)]
+    pub invites: Vec<BindInvite>,
+}
+
+impl ContactRegistry {
+    /// Resolve a transport identity (openid) to a BOUND contact. Unknown ids
+    /// return `None` — the gateway DROPS them (never reaches an agent).
+    pub fn resolve(&self, transport: &str, transport_id: &str) -> Option<&Contact> {
+        self.bound
+            .iter()
+            .find(|c| c.transport == transport && c.transport_id == transport_id)
+    }
+}
+
+/// An openid that sent a valid bind code and awaits the master's tier+reach
+/// confirmation. The small model PROPOSES `proposal`; the registry gains a
+/// `Contact` ONLY when the master confirms (advisory-only, D10 — no registry
+/// write without the master-confirm call).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBind {
+    pub transport: String,
+    pub transport_id: String,
+    /// The one-time bind code the master issued + the human echoed to the bot.
+    pub bind_code: String,
+    /// The model's ADVISORY proposal (never authoritative). `None` until the
+    /// tier-proposer runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<TierProposal>,
+}
+
+/// The tiny-model's ADVISORY tier+reach proposal for a pending bind (D5/D10).
+/// The master confirms every assignment; the confirm card shows the proposed
+/// `reach` diff (§9 threat 7 — the confirm must show reach, not just the tier
+/// name). This is data the master reviews, NEVER an authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierProposal {
+    pub tier: ContactTier,
+    pub reach: Vec<String>,
+    /// One-line human-readable rationale (from the invite context) — shown on
+    /// the master's confirm card.
+    pub rationale: String,
+}
+
+/// The D13-safe view of a contact for the operator's parent-control surface
+/// (#410). The operator has global visibility, but even the operator's view
+/// carries **no transport_id (openid)** and **no history** — those never leave
+/// the gateway/registry. This is `(contact_id, display_name, tier, reach)` only:
+/// the routing policy the operator manages, not the third-party PII.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ContactSummary {
+    pub contact_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    pub reach: Vec<String>,
+}
+
+impl From<&Contact> for ContactSummary {
+    fn from(c: &Contact) -> Self {
+        ContactSummary {
+            contact_id: c.contact_id.clone(),
+            display_name: c.display_name.clone(),
+            tier: c.tier,
+            reach: c.reach.clone(),
+        }
+    }
+}
+
+// ── gateway admin surface (#418) — operator-driven login + bind ceremony ─────
+//
+// The parent-control app drives the gateway THROUGH the daemon proxy
+// (`/v1/master/gateway/*` → the gateway's admin-bearer-gated `/v1/gateway/admin/*`).
+// These are the ONE-owner wire shapes for that surface (ts-rs-exported so the
+// React app compiles against them — a rename here is a frontend compile error).
+
+/// An OPEN bind invite the master minted (parent-control "邀请家人"). Registry-
+/// resident until an unknown sender echoes `bind_code` to the bot (→ a
+/// `PendingBind` claims it) and the master approves (→ a bound `Contact`).
+/// The invite carries the master's INTENDED identity/tier/reach — the model
+/// proposal (D10) may suggest, the master's invite + confirm decide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindInvite {
+    /// One-time short code the family member sends to the bot (e.g. `AK-7Q2M9X`).
+    pub bind_code: String,
+    pub contact_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    #[serde(default)]
+    pub reach: Vec<String>,
+}
+
+/// `GET /v1/gateway/admin/status` — the parent-control gateway card.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayStatusView {
+    pub ok: bool,
+    /// `oa` | `ilink`.
+    pub transport: String,
+    /// iLink: a bot token is loaded and the inbound loop is running.
+    pub online: bool,
+    /// The bound bot id (`…@im.bot`), when known (set by the login ceremony).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    pub bound_contacts: u32,
+    /// Open invites not yet echoed to the bot.
+    pub open_invites: u32,
+    /// Claimed binds awaiting the master's approve.
+    pub pending_binds: u32,
+    /// Millis of the iLink loop's last successful poll (`null` = never / OA).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub ilink_last_ok_ms: Option<u64>,
+}
+
+/// `POST /v1/gateway/admin/login/start` response — render `qrcode_url` as a QR
+/// in parent-control; the operator scans it with the SPARE personal-WeChat
+/// account (never a family member's daily account — that account BECOMES the bot).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayLoginStartResponse {
+    pub ok: bool,
+    pub login_id: String,
+    pub qrcode_url: String,
+}
+
+/// `GET /v1/gateway/admin/login/status?login_id=` response. `status` ∈
+/// `wait | scaned | need_verifycode | verify_code_blocked | expired |
+/// already_bound | connected | failed`. One call = one server-held poll step
+/// (up to ~35 s), so the app just loops until a terminal status.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayLoginStatusResponse {
+    pub ok: bool,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    /// The scanning account's ilink user id (informational provenance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// `POST /v1/gateway/admin/login/verify` — the phone showed a pairing number;
+/// the operator types it in parent-control and the next status poll carries it.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayLoginVerifyRequest {
+    pub login_id: String,
+    pub verify_code: String,
+}
+
+/// `POST /v1/gateway/admin/bind/invite` — mint a bind invite for a family member.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayBindInviteRequest {
+    pub contact_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    #[serde(default)]
+    pub reach: Vec<String>,
+}
+
+/// The minted invite. `send_text` is the exact message the family member sends
+/// to the bot (parent-control renders it as a QR + copyable text).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayBindInviteResponse {
+    pub ok: bool,
+    pub bind_code: String,
+    pub send_text: String,
+}
+
+/// `GET /v1/gateway/admin/bind/pending` — the master's approve queue, D13-SAFE:
+/// keyed by `bind_code`, NEVER carrying the claiming openid.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayPendingBindView {
+    pub bind_code: String,
+    pub contact_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    pub reach: Vec<String>,
+    /// True once an unknown sender echoed the code (an openid is attached
+    /// gateway-side); only a CLAIMED invite can be approved.
+    pub claimed: bool,
+}
+
+/// `POST /v1/gateway/admin/bind/approve` — the master's confirm (D5: the master
+/// CONFIRMS every bind; tier/reach here override the invite's when set).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayApproveRequest {
+    pub bind_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ContactTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Vec<String>>,
+}
+
+/// Approve response — the now-bound contact (D13-safe summary).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayApproveResponse {
+    pub ok: bool,
+    pub contact: ContactSummary,
+}
+
+/// `GET /v1/gateway/admin/contacts` (proxied as `/v1/master/gateway/contacts`) —
+/// the typed contacts-view envelope (#410's endpoint, now a one-owner shape).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactsResponse {
+    pub ok: bool,
+    pub contacts: Vec<ContactSummary>,
+}
+
+/// A normalized inbound message the gateway builds from a verified transport
+/// callback (the transport-specific parsing lives in each gateway worker; this
+/// is the canonical shape the L3/routing logic consumes). `alias` is the
+/// `/alias` deterministic-routing target when the message starts with one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayInbound {
+    pub transport: String,
+    pub transport_id: String,
+    /// The message text with any leading `/alias ` stripped into `alias`.
+    pub text: String,
+    /// The `/alias` routing target, if the message began with `/<alias> `.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
+/// The L3 audience decision — may THIS contact reach THAT agent through this
+/// gateway, and at what grain (§5 L3). Computed BEFORE anything reaches an agent.
+/// `operator_grade_deeplink` is set when the contact asked for operator-grade
+/// data (spend stats/audit): the answer is the parent-control deep-link, never
+/// the data over the gateway (the L3 rule that operator-grade needs operator-grade
+/// auth).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3Decision {
+    pub allowed: bool,
+    /// The routed agent alias when `allowed` (deterministic `/alias` only in
+    /// phase 2; the advisory router is phase 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_alias: Option<String>,
+    /// A stable reason code for audit + the (never-in-channel, D13) parent-control
+    /// view: `ok` / `unknown_contact` / `out_of_reach` / `rate_limited` /
+    /// `operator_grade_requires_session` / `no_alias`.
+    pub reason: String,
+    /// Set when the ask was operator-grade — the parent-control deep-link the
+    /// contact gets instead of the data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_grade_deeplink: Option<String>,
+    /// #410 — how the target was chosen: absent = deterministic `/alias`;
+    /// `"advisory_router"` = the tiny-model/keyword router picked it (D10 — the
+    /// router is ADVISORY, so this is worker-stamped routing metadata for the
+    /// parent-control view; it NEVER widened authority, the pick is always within
+    /// the contact's reach).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_by: Option<String>,
 }
 
 // ── cred worker (`/v1/cred/fetch`) — #216 agent-side vaulted-key fetch ────────
@@ -899,6 +1303,53 @@ pub struct BuildAcceptUserOpRequest {
     pub max_per_period: String,
     pub max_total: String,
     pub period_seconds: u32,
+    /// #408 — the actor being bound is a **device** (a channel endpoint), not a
+    /// runtime-hosting delegate. Set by the accept card when the claim is a
+    /// device pairing; the broker uses it to WARN when a device accept attaches
+    /// ZERO channel grants (§14.10 — a device claim must attach ≥1 channel; the
+    /// accept card hard-enforces, the broker warns — a grant-less device actor is
+    /// inert, not dangerous). `skip_serializing_if` keeps the pre-#408 body
+    /// byte-identical (the frozen key-set + fixtures are unchanged for delegates).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_device: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Count the channel grants (`channel-pub:<id>` / `channel-sub:<id>`) in an
+/// accept/scope `services` list (#408). A DEVICE binds with ONLY channel grants
+/// (D6); this is what the §14.10 "≥1 channel" rule counts. Direction-agnostic —
+/// a device may be pub-only (camera), sub-only (display), or duplex (console).
+pub fn channel_grant_count(services: &[String]) -> usize {
+    services
+        .iter()
+        .filter(|s| {
+            let l = s.to_lowercase();
+            l.starts_with("channel-pub:") || l.starts_with("channel-sub:")
+        })
+        .count()
+}
+
+/// Whether a bind's `requested_scope` (space- OR comma-delimited service list)
+/// is a DEVICE bind — NON-EMPTY and every grant is a channel grant (D6). This is
+/// the signal the broker uses to enforce **"device pairing never spawns"** (#409
+/// D9): a device is a channel endpoint, so its §10.2 claim must NOT trigger the
+/// #377 create-on-pair sandbox spawn (only DELEGATE onboarding spawns). An EMPTY
+/// scope is NOT a device (an un-scoped delegate claim awaiting a grant still
+/// spawns) — only an explicitly channel-only bind suppresses the spawn.
+pub fn scope_is_device_only(requested_scope: &str) -> bool {
+    let services: Vec<&str> = requested_scope
+        .split([' ', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    !services.is_empty()
+        && services.iter().all(|s| {
+            let l = s.to_lowercase();
+            l.starts_with("channel-pub:") || l.starts_with("channel-sub:")
+        })
 }
 
 /// ERC-4337 v0.7 `PackedUserOperation`, hex-encoded for the wire. Mirrors
@@ -1167,6 +1618,30 @@ pub fn service_channel_sub(channel_id: &str) -> String {
     format!("channel-sub:{channel_id}")
 }
 
+/// Parse a leading `/alias ` deterministic-routing token from a gateway message
+/// (#407 §7.3 — `/alias` is the deterministic override; the advisory router is
+/// phase 5). Returns `(Some(alias), remaining_text)` for `"/chef 今晚吃什么"` →
+/// `(Some("chef"), "今晚吃什么")`; `(None, text)` when there is no leading slash
+/// token. The alias charset is `[a-z0-9_-]` (an agent alias), so a bare `/`
+/// or a slash mid-sentence is NOT treated as routing.
+pub fn parse_alias(text: &str) -> (Option<String>, String) {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return (None, text.to_string());
+    };
+    let mut split = rest.splitn(2, char::is_whitespace);
+    let alias = split.next().unwrap_or("");
+    if alias.is_empty()
+        || !alias
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return (None, text.to_string());
+    }
+    let remaining = split.next().unwrap_or("").trim_start().to_string();
+    (Some(alias.to_string()), remaining)
+}
+
 /// Normalize an omni to the broker's expected `0x`-prefixed lower-hex shape.
 ///
 /// The broker cap-mint input-validates that `operator_omni`/`actor_omni` start
@@ -1242,6 +1717,161 @@ mod tests {
             service_channel_pub("cam-frontdoor"),
             service_channel_sub("cam-frontdoor")
         );
+    }
+
+    #[test]
+    fn channel_grant_count_counts_only_channel_services() {
+        // #408 §14.10: a device binds with ONLY channel grants; count them
+        // direction-agnostically. Memory/cred grants don't count.
+        let camera = vec!["channel-pub:cam-frontdoor".to_string()];
+        assert_eq!(channel_grant_count(&camera), 1);
+        let duplex = vec![
+            "channel-pub:console".to_string(),
+            "channel-sub:console".to_string(),
+        ];
+        assert_eq!(channel_grant_count(&duplex), 2);
+        let delegate = vec!["memory:travel".to_string(), "cred:openrouter".to_string()];
+        assert_eq!(channel_grant_count(&delegate), 0);
+        assert_eq!(channel_grant_count(&[]), 0);
+    }
+
+    #[test]
+    fn scope_is_device_only_gates_the_spawn() {
+        // #409 D9: a channel-only scope is a device (never spawns); a scope with
+        // any memory/cred grant is a delegate (spawns); empty is a delegate.
+        assert!(scope_is_device_only("channel-pub:cam-frontdoor"));
+        assert!(scope_is_device_only(
+            "channel-pub:console channel-sub:console"
+        ));
+        assert!(scope_is_device_only(
+            "channel-sub:display,channel-pub:touch"
+        ));
+        assert!(!scope_is_device_only("memory:travel"));
+        assert!(!scope_is_device_only("channel-pub:cam memory:travel")); // mixed = delegate
+        assert!(!scope_is_device_only("")); // un-scoped delegate claim still spawns
+        assert!(!scope_is_device_only("   "));
+    }
+
+    #[test]
+    fn channel_kind_wire_and_feed_semantics() {
+        assert_eq!(ChannelKind::default(), ChannelKind::FeedBacked);
+        assert_eq!(
+            serde_json::to_string(&ChannelKind::Session).unwrap(),
+            "\"session\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ChannelKind::FeedBacked).unwrap(),
+            "\"feed_backed\""
+        );
+        assert!(ChannelKind::FeedBacked.has_feed());
+        assert!(
+            !ChannelKind::Session.has_feed(),
+            "session channels have no durable feed"
+        );
+        // Absent = feed_backed (back-compat: every pre-#408 channel is a feed).
+        let old: ChannelKind = serde_json::from_str("\"feed_backed\"").unwrap();
+        assert_eq!(old, ChannelKind::FeedBacked);
+    }
+
+    #[test]
+    fn build_accept_is_device_defaults_false_and_skips() {
+        // #408: is_device is back-compat — absent on the wire = false, and a
+        // false value is skipped so the pre-#408 accept body is byte-identical.
+        let json = serde_json::to_value(BuildAcceptUserOpRequest {
+            operator_omni: "0xop".into(),
+            actor_omni: "0xactor".into(),
+            device_key_hash: "0xdkh".into(),
+            agent_pop_sig: "0xsig".into(),
+            link_code_redemption: "0xred".into(),
+            services: vec!["channel-pub:cam".into()],
+            read_only: true,
+            max_per_call: "0".into(),
+            max_per_period: "0".into(),
+            max_total: "0".into(),
+            period_seconds: 0,
+            is_device: false,
+        })
+        .unwrap();
+        assert!(
+            json.get("is_device").is_none(),
+            "false is_device must be skipped"
+        );
+        // A device accept round-trips true.
+        let dev: BuildAcceptUserOpRequest = serde_json::from_value(serde_json::json!({
+            "operator_omni":"0xop","actor_omni":"0xa","device_key_hash":"0xd",
+            "agent_pop_sig":"0xs","link_code_redemption":"0xr","services":["channel-sub:display"],
+            "read_only":true,"max_per_call":"0","max_per_period":"0","max_total":"0",
+            "period_seconds":0,"is_device":true
+        }))
+        .unwrap();
+        assert!(dev.is_device);
+    }
+
+    #[test]
+    fn contact_tier_wire_roundtrip_and_template() {
+        for t in ContactTier::household_template() {
+            assert_eq!(ContactTier::parse(t.as_str()), Some(t));
+            assert_eq!(
+                serde_json::to_string(&t).unwrap(),
+                format!("\"{}\"", t.as_str())
+            );
+        }
+        assert!(
+            ContactTier::parse("sovereign").is_none(),
+            "phantom tier rejected"
+        );
+        // Only owner may hold operator-grade reach (the L3 guard).
+        assert!(ContactTier::Owner.may_hold_operator_grade_reach());
+        assert!(!ContactTier::Kid.may_hold_operator_grade_reach());
+        assert!(!ContactTier::Guest.may_hold_operator_grade_reach());
+    }
+
+    #[test]
+    fn contact_registry_resolves_only_bound_ids() {
+        let reg = ContactRegistry {
+            bound: vec![Contact {
+                contact_id: "c-kid-1".into(),
+                transport: "weixin".into(),
+                transport_id: "openid-abc".into(),
+                display_name: "小明".into(),
+                tier: ContactTier::Kid,
+                reach: vec!["storyteller".into()],
+            }],
+            pending: vec![],
+            invites: vec![],
+        };
+        assert_eq!(
+            reg.resolve("weixin", "openid-abc").unwrap().contact_id,
+            "c-kid-1"
+        );
+        // Unknown openid → None (the gateway DROPS it, never reaches an agent).
+        assert!(reg.resolve("weixin", "openid-stranger").is_none());
+        // Right id on the wrong transport → None.
+        assert!(reg.resolve("telegram", "openid-abc").is_none());
+    }
+
+    #[test]
+    fn parse_alias_deterministic_routing() {
+        assert_eq!(
+            parse_alias("/chef 今晚吃什么"),
+            (Some("chef".into()), "今晚吃什么".into())
+        );
+        assert_eq!(
+            parse_alias("  /doorkeeper hi"),
+            (Some("doorkeeper".into()), "hi".into())
+        );
+        // No leading slash → no alias.
+        assert_eq!(
+            parse_alias("just a message"),
+            (None, "just a message".into())
+        );
+        // A slash mid-sentence is not routing.
+        assert_eq!(parse_alias("and/or this"), (None, "and/or this".into()));
+        // A bare slash or an invalid alias charset is not routing.
+        assert_eq!(parse_alias("/ hello"), (None, "/ hello".into()));
+        assert_eq!(parse_alias("/CHEF loud"), (None, "/CHEF loud".into()));
+        // Alias with no body.
+        assert_eq!(parse_alias("/chef"), (Some("chef".into()), "".into()));
     }
 
     #[test]

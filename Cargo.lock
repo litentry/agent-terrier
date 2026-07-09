@@ -551,6 +551,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-worker-channel-weixin"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-core",
+ "agentkeys-protocol",
+ "agentkeys-worker-creds",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "hex",
+ "qrcode",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "sha3",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentkeys-worker-classify"
 version = "0.1.0"
 dependencies = [

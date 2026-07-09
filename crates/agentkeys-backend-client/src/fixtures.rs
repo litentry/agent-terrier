@@ -94,6 +94,9 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         max_per_period: "0".into(),
         max_total: "0".into(),
         period_seconds: 0,
+        // #408: false = a delegate accept (skip_serializing_if keeps the fixture
+        // + frozen key-set byte-identical to the pre-#408 shape).
+        is_device: false,
     };
     let wire_user_op = WireUserOp {
         sender: "0x<sender>".into(),

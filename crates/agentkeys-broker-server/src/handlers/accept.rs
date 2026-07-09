@@ -31,6 +31,23 @@ pub struct BuildAcceptRequest {
     pub max_per_period: String,
     pub max_total: String,
     pub period_seconds: u32,
+    /// #408 — the actor being bound is a device (channel endpoint). Back-compat
+    /// default false; drives the §14.10 ≥1-channel broker warn.
+    #[serde(default)]
+    pub is_device: bool,
+}
+
+/// Count channel grants (`channel-pub:<id>` / `channel-sub:<id>`) in a services
+/// list — the §14.10 "≥1 channel" measure for a device accept (#408). Mirrors
+/// `agentkeys_protocol::channel_grant_count`.
+pub(crate) fn channel_grant_count(services: &[String]) -> usize {
+    services
+        .iter()
+        .filter(|s| {
+            let l = s.to_lowercase();
+            l.starts_with("channel-pub:") || l.starts_with("channel-sub:")
+        })
+        .count()
 }
 
 /// On-chain scope service ids: `keccak256(lowercase(service))` per service — the
@@ -571,6 +588,21 @@ pub async fn accept_build(
         return Err(aerr(StatusCode::FORBIDDEN, "operator_mismatch"));
     }
 
+    // §14.10 (#408): a device claim must attach ≥1 channel. The accept CARD is the
+    // hard enforcer (the UI won't submit a zero-channel device bind); the broker
+    // WARNS (a grant-less device actor is inert, not dangerous — decision-10). We
+    // never block here: a false negative on `is_device` must not brick a legit
+    // accept, and a legitimately grant-less bind (rare) still lands.
+    if req.is_device && channel_grant_count(&req.services) == 0 {
+        tracing::warn!(
+            actor_omni = %req.actor_omni,
+            services = ?req.services,
+            "accept binds a DEVICE with ZERO channel grants (§14.10) — a device is a channel \
+             endpoint and should attach ≥1 channel-pub/sub grant; the resulting actor is inert \
+             (no channels to publish/subscribe). The accept card should have enforced this."
+        );
+    }
+
     // 2. config + co-sign key from env.
     let (cfg, broker_sk) =
         load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
@@ -945,6 +977,7 @@ mod tests {
             agent_pop_sig: format!("0x{}", "55".repeat(65)),
             link_code_redemption: "0xdeadbeef".into(),
             services: vec!["memory:personal".into()],
+            is_device: false,
             read_only: true,
             max_per_call: "1000".into(),
             max_per_period: "0".into(),
@@ -1040,6 +1073,19 @@ mod tests {
             format!("0x{}", hex::encode(grant.services[0])),
             MEMORY_PERSONAL_ID
         );
+    }
+
+    #[test]
+    fn channel_grant_count_measures_device_channels() {
+        // §14.10 (#408): the ≥1-channel measure — counts channel-pub/sub grants
+        // (case-insensitive), ignores memory/cred. Matches the protocol helper.
+        assert_eq!(channel_grant_count(&["channel-pub:cam".into()]), 1);
+        assert_eq!(
+            channel_grant_count(&["Channel-Sub:Display".into(), "channel-pub:touch".into()]),
+            2
+        );
+        assert_eq!(channel_grant_count(&["memory:travel".into()]), 0);
+        assert_eq!(channel_grant_count(&[]), 0);
     }
 
     #[test]

@@ -34,6 +34,33 @@ use crate::storage::{DelegationPoll, DelegationSign, SignTarget, DELEGATION_REQU
 const MIN_DELEGATION_TTL_SECONDS: u64 = 60;
 const MAX_DELEGATION_TTL_SECONDS: u64 = 86_400;
 
+/// #409 §14.11: the device→sandbox delegation-sig (#369) is a **legacy,
+/// transitional** mechanism. Under the channels model a device is its own
+/// channel-endpoint actor and a delegate's identity roots in its sandbox K10 —
+/// so once the one-firmware-cycle migration is complete the operator flips
+/// `AGENTKEYS_DELEGATION_RETIRED=1` and every `/v1/agent/delegation/*` endpoint
+/// **refuses loudly** (an actionable error, not a silent 404) so a stale device
+/// still on the old path learns it must re-bind. Default OFF (the path stays
+/// live through the migration window).
+pub fn delegation_retired() -> bool {
+    matches!(
+        std::env::var("AGENTKEYS_DELEGATION_RETIRED").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+/// The loud refusal returned by every delegation endpoint once retired.
+fn delegation_retired_err() -> BrokerError {
+    BrokerError::Forbidden(
+        "device→sandbox delegation (#369) is RETIRED on this broker \
+         (AGENTKEYS_DELEGATION_RETIRED=1, #409 §14.11 migration complete). A device is now its \
+         own channel-endpoint actor and a delegate roots in its sandbox K10 — re-bind this \
+         device via the §10.2 pairing with channel grants (the delegation-sig path no longer \
+         mints caps). See docs/spec/agent-channel-decoupling.md §11."
+            .into(),
+    )
+}
+
 /// Verify a device `pop_sig` (stateless) and return its `device_key_hash`. Same
 /// proof the §10.2 pairing/resolve endpoints use: a bad signature touches no
 /// state. Local to this module (the pairing handlers inline the same steps).
@@ -86,6 +113,9 @@ pub async fn delegation_request(
     headers: HeaderMap,
     Json(body): Json<DelegationRequestBody>,
 ) -> Result<impl IntoResponse, BrokerError> {
+    if delegation_retired() {
+        return Err(delegation_retired_err());
+    }
     let session = require_session_jwt(&headers, &state)?;
     let (_device_pubkey, device_key_hash) =
         session_device_key_hash(session.agentkeys.device_pubkey)?;
@@ -148,6 +178,9 @@ pub async fn delegation_pending(
     State(state): State<SharedState>,
     Json(body): Json<DelegationPendingBody>,
 ) -> Result<impl IntoResponse, BrokerError> {
+    if delegation_retired() {
+        return Err(delegation_retired_err());
+    }
     let device_key_hash = verify_device_pop(&body.device_pubkey, &body.pop_sig)?;
     let now = unix_now()?;
     let pending = state
@@ -176,6 +209,9 @@ pub async fn delegation_sign(
     State(state): State<SharedState>,
     Json(body): Json<DelegationSignBody>,
 ) -> Result<impl IntoResponse, BrokerError> {
+    if delegation_retired() {
+        return Err(delegation_retired_err());
+    }
     let device_key_hash = verify_device_pop(&body.device_pubkey, &body.pop_sig)?;
     let now = unix_now()?;
 
@@ -251,6 +287,9 @@ pub async fn delegation_poll(
     headers: HeaderMap,
     Json(body): Json<DelegationPollBody>,
 ) -> Result<impl IntoResponse, BrokerError> {
+    if delegation_retired() {
+        return Err(delegation_retired_err());
+    }
     let session = require_session_jwt(&headers, &state)?;
     let (_device_pubkey, device_key_hash) =
         session_device_key_hash(session.agentkeys.device_pubkey)?;

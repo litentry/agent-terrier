@@ -1,0 +1,40 @@
+[package]
+name = "agentkeys-worker-channel-weixin"
+version = "0.1.0"
+edition = "2021"
+description = "WeChat gateway worker (#407 / docs/spec/agent-channel-decoupling.md §7) — the household bot custody + contact registry + L3 PEP + /alias routing"
+
+[[bin]]
+name = "agentkeys-worker-channel-weixin"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_worker_channel_weixin"
+path = "src/lib.rs"
+
+[dependencies]
+# The gateway is a PER-TRANSPORT worker (spec §14.4). It reuses the durable audit
+# emitter from the creds worker and the contact/L3 wire types from the protocol
+# crate; it custodies the ONE WeChat bot credential the #384 gate-custody way.
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+base64 = "0.22"
+sha1 = "0.10"
+sha3 = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+# Terminal QR render for the iLink `--login` ceremony (no image features).
+qrcode = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true }

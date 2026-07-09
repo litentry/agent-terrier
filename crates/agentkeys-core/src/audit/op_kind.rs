@@ -16,7 +16,7 @@
 //! - 70-79 K3 family (K3EpochAdvance=70; 71-79 reserved)
 //! - 80-89 config family (ConfigPut=80, ConfigGet=81, ConfigTeardown=82; 83-89 reserved)
 //! - 90-99 gate family (GateTurn=90; 91-99 reserved)
-//! - 100-109 channel family (ChannelPublish=100, ChannelSubscribe=101, ChannelTeardown=102; 103-109 reserved)
+//! - 100-109 channel family (ChannelPublish=100, ChannelSubscribe=101, ChannelTeardown=102, GatewayRelay=103, ContactBind=104; 105-109 reserved)
 //! - 110-255 reserved for future families
 
 /// Canonical op_kind enum. The byte value MUST match the row in arch.md
@@ -67,6 +67,12 @@ pub enum AuditOpKind {
     ChannelSubscribe = 101,
     /// #406 — a channel's whole feed was torn down (owner-scoped GC).
     ChannelTeardown = 102,
+    /// #407 — the WeChat gateway relayed ONE inbound turn from a contact to an
+    /// agent (or refused it at L3). The provenance is the contact, worker-stamped.
+    GatewayRelay = 103,
+    /// #407 — a contact bind transitioned (pending → bound / declined) after the
+    /// master's confirm (the tier proposal is advisory; this row is the write).
+    ContactBind = 104,
 }
 
 impl AuditOpKind {
@@ -102,6 +108,8 @@ impl AuditOpKind {
             100 => Self::ChannelPublish,
             101 => Self::ChannelSubscribe,
             102 => Self::ChannelTeardown,
+            103 => Self::GatewayRelay,
+            104 => Self::ContactBind,
             _ => return None,
         })
     }
@@ -139,6 +147,8 @@ impl AuditOpKind {
             Self::ChannelPublish => "channel.publish",
             Self::ChannelSubscribe => "channel.subscribe",
             Self::ChannelTeardown => "channel.teardown",
+            Self::GatewayRelay => "gateway.relay",
+            Self::ContactBind => "gateway.contact_bind",
         }
     }
 }
@@ -181,6 +191,8 @@ mod tests {
             AuditOpKind::ChannelPublish,
             AuditOpKind::ChannelSubscribe,
             AuditOpKind::ChannelTeardown,
+            AuditOpKind::GatewayRelay,
+            AuditOpKind::ContactBind,
         ];
         for k in all {
             let byte = k as u8;
@@ -197,7 +209,7 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [
-            3u8, 9, 14, 19, 22, 32, 42, 55, 62, 71, 83, 89, 91, 99, 103, 109, 110, 200, 250, 255,
+            3u8, 9, 14, 19, 22, 32, 42, 55, 62, 71, 83, 89, 91, 99, 105, 109, 110, 200, 250, 255,
         ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),
@@ -241,6 +253,8 @@ mod tests {
             AuditOpKind::ChannelPublish as u8,
             AuditOpKind::ChannelSubscribe as u8,
             AuditOpKind::ChannelTeardown as u8,
+            AuditOpKind::GatewayRelay as u8,
+            AuditOpKind::ContactBind as u8,
         ];
         let s: HashSet<_> = all.iter().copied().collect();
         assert_eq!(s.len(), all.len(), "duplicate byte assignment");

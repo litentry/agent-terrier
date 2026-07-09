@@ -341,6 +341,37 @@ pub struct ChannelTeardownBody {
     pub actor_target: String,
 }
 
+/// #407 — one gateway relay turn. The contact is the provenance (worker-stamped,
+/// never a body-supplied actor); the family member's message text NEVER lands in
+/// the audit row (D13 privacy — only the routing decision + a content hash).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayRelayBody {
+    pub transport: String,
+    /// The registry contact id (NOT the raw openid — that stays in the registry).
+    pub contact_id: String,
+    pub tier: String,
+    /// The routed agent alias, or empty when the turn was refused at L3.
+    pub target_alias: String,
+    /// The L3 decision reason code (`ok` / `unknown_contact` / `out_of_reach` / …).
+    pub decision: String,
+    /// `keccak256(message bytes)` — proves what was relayed without storing the
+    /// third-party personal text (D13).
+    pub message_hash: String,
+}
+
+/// #407 — a contact bind write (pending → bound / declined) AFTER the master's
+/// confirm. `tier`/`reach_count` are the CONFIRMED values (the model's proposal
+/// is advisory and never audited as authoritative).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContactBindBody {
+    pub transport: String,
+    pub contact_id: String,
+    /// `bound` or `declined`.
+    pub outcome: String,
+    pub tier: String,
+    pub reach_count: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +471,88 @@ mod tests {
             AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
         match decoded.typed_body().unwrap() {
             TypedAuditBody::ConfigTeardown(b) => assert_eq!(b, td),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+    }
+
+    /// §15.3b step-5 worker test for the channel + gateway family (#406/#407):
+    /// canonical CBOR roundtrip + typed decode for the pub/sub feed rows and the
+    /// gateway relay/bind rows.
+    #[test]
+    fn channel_and_gateway_family_cbor_roundtrip_and_typed_decode() {
+        use crate::audit::{envelope_for, AuditEnvelope, AuditOpKind, AuditResult, TypedAuditBody};
+
+        let pubb = ChannelPublishBody {
+            key: "bots/abc/channel/cam-frontdoor/0000000001-0.enc".into(),
+            channel_id: "cam-frontdoor".into(),
+            event_id: "0000000001-0000000000000000".into(),
+            payload_hash: format!("0x{}", "ab".repeat(32)),
+        };
+        let env = envelope_for(
+            [0x22; 32],
+            [0x22; 32],
+            AuditOpKind::ChannelPublish,
+            pubb.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(AuditOpKind::ChannelPublish.label(), "channel.publish");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::ChannelPublish(b) => assert_eq!(b, pubb),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        let relay = GatewayRelayBody {
+            transport: "weixin".into(),
+            contact_id: "c-owner".into(),
+            tier: "owner".into(),
+            target_alias: "chef".into(),
+            decision: "ok".into(),
+            message_hash: format!("0x{}", "cd".repeat(32)),
+        };
+        let env = envelope_for(
+            [0x22; 32],
+            [0x22; 32],
+            AuditOpKind::GatewayRelay,
+            relay.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(AuditOpKind::GatewayRelay.label(), "gateway.relay");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::GatewayRelay(b) => assert_eq!(b, relay),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        let bind = ContactBindBody {
+            transport: "weixin".into(),
+            contact_id: "c-kid".into(),
+            outcome: "bound".into(),
+            tier: "kid".into(),
+            reach_count: 1,
+        };
+        let env = envelope_for(
+            [0x22; 32],
+            [0x22; 32],
+            AuditOpKind::ContactBind,
+            bind.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::ContactBind(b) => assert_eq!(b, bind),
             other => panic!("unexpected typed body: {other:?}"),
         }
     }
