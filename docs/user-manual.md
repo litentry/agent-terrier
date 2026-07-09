@@ -315,3 +315,62 @@ banner instead of failing.
 Scope grants are **set-replace**: the envelope's `service_ids` list is the
 FULL replacement grant (an empty set is the revoke-all), so compare two
 consecutive grant envelopes to see what changed.
+
+## Channels — how devices and family reach your agents (#404)
+
+AgentKeys separates *who runs* (agents/delegates, which live in cloud sandboxes)
+from *how information reaches them* (**channels**). Two things you'll notice:
+
+**Devices are channel endpoints, not agents.** When you pair a device — a
+camera, a display, the ESP32 console — its claim attaches **one or more
+channels** (a camera gets a *publish* channel; a display gets a *subscribe*
+channel; the console gets both). A device **never** runs an agent and **never**
+gets memory or credential access — it can only publish to / subscribe from the
+channels you grant it. If you try to pair a device with **no** channel, the
+accept card won't let you (a device with no channel is inert). Pairing a device
+**does not** spin up a sandbox — only adding a *delegate* does.
+
+**The WeChat gateway lets your family reach agents by chat.** One household bot
+(a WeChat 公众号, or a spare personal account connected as a bot) is the front
+door: each family member is a **contact** you add in parent-control with a
+**tier** (`owner / partner / elder / kid / helper / guest`) and a **reach**
+(which agents they may talk to). To route, they either type `/<agent> …` (e.g.
+`/chef 今晚吃什么`) or just ask — the gateway's advisory router picks an agent
+**only from that contact's reach**, and if it's unsure it asks them to name one.
+It **can never** reach an agent you didn't grant them, no matter how a message
+is phrased.
+
+**Connecting the bot and adding family are both in-app.** In parent-control's
+微信网关 card, *you* scan the connect QR once with the **spare** account (that
+account becomes the bot; it stays connected across restarts). To add a family
+member: **邀请家人** mints a one-time bind code (shown as a QR + text like
+`绑定 AK-7Q2M9X`); they send that text to the bot from their own WeChat, the bot
+acks it, and the bind waits for **your confirm** in parent-control — nothing
+joins the family without your approval, and their WeChat identity is never
+shown to you or anyone (you manage them by the name and tier you chose). A
+stranger messaging the bot without a valid code still gets silence.
+
+Three things the gateway will not do, by design:
+
+- A **stranger's** message (an openid you haven't added) is silently dropped.
+- A **kid** (or any contact) asking an agent outside their reach is refused.
+- **Anyone** asking for operator-grade data over chat ("what did we spend this
+  week?") gets a **parent-control deep-link**, never the numbers — money/usage
+  data needs *your* sign-in, never a matching WeChat account. Kids asking are
+  simply refused.
+
+**Contacts see no history.** A family member only ever gets live replies
+addressed to them, or an agent's answer from its own memory ("did the kids come
+home?" → the doorkeeper answers). **All** of the chat log, every contact, and
+every routing decision live **only in parent-control** — you have full
+visibility; contacts have none. There is no in-chat "this was logged" notice.
+
+## Migrating an older device-rooted delegate (#369 → channels)
+
+If you paired a device under the older model (where the device's key rooted a
+delegate directly), re-pair it once under the channels model — the device
+becomes its own endpoint (with channel grants) and the delegate roots in its own
+sandbox. After your household finishes migrating, the operator may retire the old
+delegation path; a stale device still on it gets a **loud, actionable error**
+("delegation is retired — re-bind this device") rather than a silent failure, so
+you know to re-pair it.

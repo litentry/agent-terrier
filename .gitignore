@@ -20,6 +20,14 @@ pairing-qr.png
 
 # Local developer secrets — template is checked in as .env.example.
 agentkeys-secrets.env
+# WeChat gateway bot credentials from `--login-write` (the doc's laptop example
+# writes ./weixin-secrets.env at the repo root — never commit the bot token).
+weixin-secrets.env
+*weixin-secrets*.env
+# Local contact registry (holds family openids / PII — the doc's laptop example
+# writes ./weixin-contacts.json). The master authors it; never commit it.
+weixin-contacts.json
+*weixin-contact*.json
 
 # xiaozhi MCP-endpoint URL — contains a bearer JWT, never commit.
 # Used by scripts/run-mcp-local.sh as an optional convenience cache so

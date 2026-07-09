@@ -55,11 +55,12 @@ use thiserror::Error;
 
 pub use bodies::{
     ChannelPublishBody, ChannelSubscribeBody, ChannelTeardownBody, ConfigGetBody, ConfigPutBody,
-    ConfigTeardownBody, CredFetchBody, CredStoreBody, CredTeardownBody, DeviceAddBody,
-    DeviceRevokeBody, EmailReceiveBody, EmailSendBody, GateTurnBody, K10RotateBody,
-    K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody,
-    PaymentDirectBody, PaymentEscrowRedeemBody, SandboxSpawnBody, SandboxTeardownBody,
-    ScopeGrantBody, ScopeRevokeBody, SignEip191Body, SignEip712Body,
+    ConfigTeardownBody, ContactBindBody, CredFetchBody, CredStoreBody, CredTeardownBody,
+    DeviceAddBody, DeviceRevokeBody, EmailReceiveBody, EmailSendBody, GateTurnBody,
+    GatewayRelayBody, K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody,
+    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody,
+    SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body,
+    SignEip712Body,
 };
 pub use op_kind::AuditOpKind;
 
@@ -246,6 +247,8 @@ pub enum TypedAuditBody {
     ChannelPublish(ChannelPublishBody),
     ChannelSubscribe(ChannelSubscribeBody),
     ChannelTeardown(ChannelTeardownBody),
+    GatewayRelay(GatewayRelayBody),
+    ContactBind(ContactBindBody),
 }
 
 impl TypedAuditBody {
@@ -302,6 +305,8 @@ impl TypedAuditBody {
             AuditOpKind::ChannelTeardown => {
                 Self::ChannelTeardown(serde_json::from_value(value).ok()?)
             }
+            AuditOpKind::GatewayRelay => Self::GatewayRelay(serde_json::from_value(value).ok()?),
+            AuditOpKind::ContactBind => Self::ContactBind(serde_json::from_value(value).ok()?),
         })
     }
 }

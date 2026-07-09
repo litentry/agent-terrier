@@ -138,6 +138,14 @@ pub struct UiBridgeState {
     pub signer_url: Option<String>,
     /// Chain id for the managed-wallet attestation (mirrors `--init-chain-id`).
     pub chain_id: u64,
+    /// #418 — the WeChat gateway worker base URL (`AGENTKEYS_WORKER_WEIXIN_URL`).
+    /// `None` ⇒ the `/v1/master/gateway/*` proxies fail closed
+    /// (`gateway-not-configured`).
+    pub weixin_gateway_url: Option<String>,
+    /// #418 — the gateway admin bearer (`AGENTKEYS_WEIXIN_ADMIN_TOKEN`, copied
+    /// by the operator from the broker's weixin-secrets.env). Injected
+    /// server-side on every gateway proxy call — the browser NEVER sees it.
+    pub weixin_admin_token: Option<String>,
     /// W3 real-memory chain — the memory worker base URL (e.g. `https://memory.example.invalid`).
     /// `None` ⇒ master-memory plant/list fall back to the in-memory store (dev/no-infra).
     pub memory_url: Option<String>,
@@ -916,6 +924,35 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/accept/submit", post(accept_submit_proxy))
         .route("/v1/scope/build", post(scope_build_proxy))
         .route("/v1/scope/submit", post(scope_submit_proxy))
+        // #418 — the WeChat gateway admin proxy (parent-control drives the
+        // gateway's admin surface through the daemon; the admin bearer is
+        // injected server-side, never in the browser):
+        .route("/v1/master/gateway/status", get(gateway_status_proxy))
+        .route(
+            "/v1/master/gateway/login/start",
+            post(gateway_login_start_proxy),
+        )
+        .route(
+            "/v1/master/gateway/login/status",
+            get(gateway_login_status_proxy),
+        )
+        .route(
+            "/v1/master/gateway/login/verify",
+            post(gateway_login_verify_proxy),
+        )
+        .route(
+            "/v1/master/gateway/bind/invite",
+            post(gateway_bind_invite_proxy),
+        )
+        .route(
+            "/v1/master/gateway/bind/pending",
+            get(gateway_bind_pending_proxy),
+        )
+        .route(
+            "/v1/master/gateway/bind/approve",
+            post(gateway_bind_approve_proxy),
+        )
+        .route("/v1/master/gateway/contacts", get(gateway_contacts_proxy))
         .route("/v1/revoke/build", post(revoke_build_proxy))
         .route("/v1/revoke/submit", post(revoke_submit_proxy))
         .route("/v1/dev/seed", post(dev_seed))
@@ -992,6 +1029,18 @@ pub fn build_state(
         );
         chain_profile.rpc.http = rpc;
     }
+    // #418 — the WeChat gateway admin proxy coordinates (env-sourced like
+    // AGENTKEYS_STACKS_JSON above). The admin token is a SECRET the operator
+    // copies from the broker's weixin-secrets.env into the daemon's local env;
+    // the daemon injects it server-side — the browser never sees it.
+    let weixin_gateway_url = std::env::var("AGENTKEYS_WORKER_WEIXIN_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    let weixin_admin_token = std::env::var("AGENTKEYS_WEIXIN_ADMIN_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     Ok(Arc::new(UiBridgeState {
         webauthn,
         enroll: RwLock::new(EnrollState::default()),
@@ -1022,6 +1071,8 @@ pub fn build_state(
         sandbox_bridge_url,
         sandbox_bridge_token,
         audit_worker_url,
+        weixin_gateway_url,
+        weixin_admin_token,
         region,
         master_device_key_hash,
         registered_master: RwLock::new(None),
@@ -5247,6 +5298,175 @@ fn submit_receipts(v: &serde_json::Value) -> (Option<String>, Option<Vec<String>
         })
         .filter(|h| !h.is_empty());
     (tx_hash, hashes)
+}
+
+// ── #418 WeChat gateway admin proxy ──────────────────────────────────────────
+//
+// Parent-control never talks to the gateway (or holds its admin bearer)
+// directly: these thin forwards require the DAEMON's master session, then call
+// the gateway's `/v1/gateway/admin/*` with the operator-configured bearer. The
+// response passes through verbatim (one-owner shapes in `agentkeys-protocol`,
+// ts-rs-exported for the frontend). The 60 s client timeout covers the
+// gateway's ~35 s server-held login-status poll.
+
+async fn forward_to_gateway(
+    state: &SharedUiBridgeState,
+    method: reqwest::Method,
+    sub_path: &str,
+    raw_query: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> axum::response::Response {
+    if state.onboarding_session.read().await.is_none() {
+        return pairing_err(StatusCode::FORBIDDEN, "no master session");
+    }
+    let Some(gw) = state.weixin_gateway_url.clone() else {
+        return pairing_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway-not-configured — set AGENTKEYS_WORKER_WEIXIN_URL",
+        );
+    };
+    let Some(admin) = state.weixin_admin_token.clone() else {
+        return pairing_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway-admin-not-configured — set AGENTKEYS_WEIXIN_ADMIN_TOKEN (from the broker's \
+             weixin-secrets.env)",
+        );
+    };
+    let mut url = format!("{gw}{sub_path}");
+    if let Some(q) = raw_query.filter(|q| !q.is_empty()) {
+        url.push('?');
+        url.push_str(q);
+    }
+    let client = reqwest::Client::new();
+    let mut req = client
+        .request(method, &url)
+        .timeout(std::time::Duration::from_secs(60))
+        .bearer_auth(admin);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let st =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let txt = resp.text().await.unwrap_or_default();
+            (
+                st,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                txt,
+            )
+                .into_response()
+        }
+        Err(e) => pairing_err(StatusCode::BAD_GATEWAY, &format!("gateway {sub_path}: {e}")),
+    }
+}
+
+async fn gateway_status_proxy(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/status",
+        None,
+        None,
+    )
+    .await
+}
+
+async fn gateway_login_start_proxy(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/login/start",
+        None,
+        Some(serde_json::json!({})),
+    )
+    .await
+}
+
+async fn gateway_login_status_proxy(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/login/status",
+        q.as_deref(),
+        None,
+    )
+    .await
+}
+
+async fn gateway_login_verify_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/login/verify",
+        None,
+        Some(body),
+    )
+    .await
+}
+
+async fn gateway_bind_invite_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/bind/invite",
+        None,
+        Some(body),
+    )
+    .await
+}
+
+async fn gateway_bind_pending_proxy(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/bind/pending",
+        None,
+        None,
+    )
+    .await
+}
+
+async fn gateway_bind_approve_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/bind/approve",
+        None,
+        Some(body),
+    )
+    .await
+}
+
+async fn gateway_contacts_proxy(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/contacts",
+        None,
+        None,
+    )
+    .await
 }
 
 /// POST `body` to `<broker><path>` with the master J1 bearer; relay the broker's

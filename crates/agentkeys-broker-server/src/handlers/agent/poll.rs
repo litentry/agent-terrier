@@ -63,40 +63,39 @@ pub async fn pairing_poll(
 
     // 2. Read request state (lookup is bound to device_pubkey inside the store).
     let now = unix_now()?;
-    let (operator_omni, child_omni, label) =
-        match state
-            .pairing_request_store
-            .poll(&body.request_id, &body.device_pubkey, now)?
-        {
-            PairingPoll::Pending => {
-                return Ok((StatusCode::OK, Json(json!({ "status": "pending" }))));
-            }
-            PairingPoll::Claimed {
-                operator_omni,
-                child_omni,
-                label,
-                ..
-            } => (operator_omni, child_omni, label),
-            PairingPoll::Expired => {
-                return Err(BrokerError::Unauthorized(
-                    "pairing request expired before any master claimed it".into(),
-                ));
-            }
-            PairingPoll::NotFound => {
-                return Err(BrokerError::Unauthorized(
-                    "unknown pairing request or device mismatch".into(),
-                ));
-            }
-            PairingPoll::RetrieveExpired => {
-                // Claimed, but the post-claim retrieve window elapsed — the row no
-                // longer mints J1_agent (caps replay of the static poll tuple).
-                // The agent re-requests with --request-pairing if it genuinely
-                // missed the window.
-                return Err(BrokerError::Unauthorized(
-                    "pairing retrieval window elapsed — re-request with --request-pairing".into(),
-                ));
-            }
-        };
+    let (operator_omni, child_omni, label, requested_scope) = match state
+        .pairing_request_store
+        .poll(&body.request_id, &body.device_pubkey, now)?
+    {
+        PairingPoll::Pending => {
+            return Ok((StatusCode::OK, Json(json!({ "status": "pending" }))));
+        }
+        PairingPoll::Claimed {
+            operator_omni,
+            child_omni,
+            label,
+            requested_scope,
+        } => (operator_omni, child_omni, label, requested_scope),
+        PairingPoll::Expired => {
+            return Err(BrokerError::Unauthorized(
+                "pairing request expired before any master claimed it".into(),
+            ));
+        }
+        PairingPoll::NotFound => {
+            return Err(BrokerError::Unauthorized(
+                "unknown pairing request or device mismatch".into(),
+            ));
+        }
+        PairingPoll::RetrieveExpired => {
+            // Claimed, but the post-claim retrieve window elapsed — the row no
+            // longer mints J1_agent (caps replay of the static poll tuple).
+            // The agent re-requests with --request-pairing if it genuinely
+            // missed the window.
+            return Err(BrokerError::Unauthorized(
+                "pairing retrieval window elapsed — re-request with --request-pairing".into(),
+            ));
+        }
+    };
 
     // 3. Mint J1_agent fresh (HDKD omni + lineage). The agent authenticates with
     //    this immediately, but has NO scope until the master approves the binding.
@@ -120,17 +119,29 @@ pub async fn pairing_poll(
         "polled §10.2 pairing request — claimed; J1_agent minted at retrieval"
     );
 
-    // 4. #377 create-on-pair: the freshly paired delegate needs its runtime —
-    //    ensure its hermes-sandbox instance exists NOW so the first talk
-    //    doesn't 500 `no_ready_instance`. Best-effort: a veFaaS failure rides
-    //    in `sandbox.error`; the pairing itself has already succeeded.
-    let provision = crate::handlers::sandbox::ensure_for_delegate(
-        &state,
-        &device_key_hash,
-        &child_omni,
-        &operator_omni,
-    )
-    .await;
+    // 4. #377 create-on-pair — but **device pairing NEVER spawns** (#409 D9). A
+    //    device is a channel endpoint (its scope is channel-only, D6): binding it
+    //    attaches channels, never a runtime. Only a DELEGATE claim (any non-
+    //    channel grant, or an as-yet-unscoped delegate) gets its hermes-sandbox
+    //    ensured so the first talk doesn't 500 `no_ready_instance`. Best-effort:
+    //    a veFaaS failure rides in `sandbox.error`; the pairing already succeeded.
+    let is_device = agentkeys_protocol::scope_is_device_only(&requested_scope);
+    let provision = if is_device {
+        tracing::info!(
+            child_omni = %child_omni,
+            requested_scope = %requested_scope,
+            "device pairing — channel-only scope, NO sandbox spawn (#409 D9: device pairing never spawns)"
+        );
+        None
+    } else {
+        crate::handlers::sandbox::ensure_for_delegate(
+            &state,
+            &device_key_hash,
+            &child_omni,
+            &operator_omni,
+        )
+        .await
+    };
     let (agent_url, sandbox) = match &provision {
         Some(p) => (json!(p.agent_url), p.to_json()),
         None => (serde_json::Value::Null, serde_json::Value::Null),

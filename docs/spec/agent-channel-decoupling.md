@@ -1,6 +1,6 @@
 # Agent ↔ device decoupling — channels, gateways, contacts
 
-**Status:** DESIGN (proposal, nothing built). Authored 2026-07-06 from an owner design brief + the ByteDance definition study (`research/bytedance-agent-channel-model.md`, operator-internal); revised 2026-07-07 after owner review — **§14 is the resolved-decisions record**. This is a **public design spec** (it lives in `docs/spec/` because [arch.md §22e](../arch.md#22e-channels--agent--device-decoupling-design) canonicalizes it as the forward architecture and links here); the [arch.md promotion map](#12-archmd-promotion-map) is the ship-time checklist. **Tracked by epic [#404](https://github.com/litentry/agentKeys/issues/404) (milestone M8)** — steps: e2e suite [#405](https://github.com/litentry/agentKeys/issues/405), phases 1–6 [#406](https://github.com/litentry/agentKeys/issues/406)–[#411](https://github.com/litentry/agentKeys/issues/411). Still to file after this PR merges: the §14 follow-ups (F2 long-poll, F3 spawn-at-submit inside #396, device-key hardening) — deliberately outside the epic.
+**Status:** SHIPPED (all six phases' substrate landed; the live/hardware legs are operator-gated follow-ups — see the completion record at the end of §11). Authored from an owner design brief + the ByteDance definition study (`research/bytedance-agent-channel-model.md`, operator-internal); owner-reviewed — **§14 is the resolved-decisions record**. This is a **public spec** (it lives in `docs/spec/` because [arch.md §22e](../arch.md) canonicalizes it and links here); the [arch.md promotion map](#12-archmd-promotion-map) was the ship-time checklist. **Tracked by epic [#404](https://github.com/litentry/agentKeys/issues/404) (milestone M8)** — e2e suite [#405](https://github.com/litentry/agentKeys/issues/405), phases 1–6 [#406](https://github.com/litentry/agentKeys/issues/406)–[#411](https://github.com/litentry/agentKeys/issues/411). The §14 follow-ups (F2 long-poll, F3 spawn-at-submit inside #396, device-key hardening) are deliberately outside the epic.
 **Relates to:** [`arch.md`](../arch.md) §5 (canonical names), §10.2 (pairing), §15.4 (email-service), §17.5/§17.6 (isolation + master-as-hub), §22c.4 (vendor device pairing), §22d (hooks + the #384 gate relay); the master-hub-topology + spawn-sandbox-on-pair design docs (`docs/plan/`, operator-internal — roles/context system + #377 sandbox lifecycle); [`agent-background-job-harness.md`](agent-background-job-harness.md); [`ses-email-architecture.md`](ses-email-architecture.md); the ByteDance ArkClaw read (`docs/research/bytedance.md`, operator-internal — Layer 4).
 
 > **In one line:** a **channel** is a declarative, policy-bearing conduit (camera, display, mic, chat session, WeChat, a UI feed) that keyed actors **publish to / subscribe from** under master-signed grants. **Every device is a channel endpoint** (never a runtime host); **every delegate is sandbox-resident** (the first one spawns by default at onboarding); the two only ever meet *through* channels. Externally-authenticated humans (**contacts** — the family) are authorized at a **gateway** by policy, not keys; the **operator has global visibility** over everything, surfaced only in parent-control. This is AgentKeys' build-out of ArkClaw's Layer 4 — *Interaction Identity (Gateway/Policy)* — with authority kept sovereign.
@@ -227,7 +227,7 @@ The brief's "constraints and mitigations", tabled (per-platform details re-verif
 
 | Kind | Platform identity | Mintable per agent? | Constraints | Consequence (D4/D8) |
 |---|---|---|---|---|
-| **weixin** | official account / bot | ❌ one per KYC'd account; re-binding overwrites; user-initiated reply windows (~48 h); content review | **shared gateway**; operator-owned feed; contacts authn'd by openid; agent replies ride the reply window — proactive pushes need template-message rights (L2 `initiate` right models this) | the v1 priority channel |
+| **weixin** | **two drivers, one PEP (decided 2026-07-09):** iLink personal bot (`ilink` — experiment) / official account (`oa` — production) | ❌ one per KYC'd account either way; re-binding overwrites; `oa`: user-initiated reply windows (~48 h) + content review; `ilink`: DM-only, per-message `context_token` reply authorization | **shared gateway**; operator-owned feed; contacts authn'd by sender id (openid / ilink user id); `oa` replies ride the reply window — proactive pushes need template-message rights (L2 `initiate` right models this); `ilink` replies echo the stored `context_token` | the v1 priority channel |
 | **telegram** | BotFather bots | ⚠️ bots are mintable, but the owning account is phone-KYC'd; bots cannot message a user first | gateway (shared account custody) even though bots could be per-agent; first-contact = user starts the bot (a natural contact-bind ceremony) | |
 | **chat session (device ↔ its delegate)** | the device's K10 | ✅ | live text/commands streaming to the delegate's sandbox bridge; `session` transport — **no durable feed** (latency); grant-gated like every channel | duplex `channel-pub/sub` on the console; replaces the legacy #369 delegation as the device→delegate authorization |
 | **realtime speech** | none (proximity) | n/a | ~1 s turn budget | **NOT a channel** — realtime voice keeps the §22d.3a gate path end-to-end (postponed as a channel concern, §14.6); channels carry text, commands, and `audio-clip` events only |
@@ -237,6 +237,8 @@ The brief's "constraints and mitigations", tabled (per-platform details re-verif
 | **email** | address on our domain | ✅ (SES aliasing, §15.4) | inbound = spam/phish surface; sender identity spoofable → no L3 contacts | **deprioritized (§13)** — the §15.4 email worker keeps running as-is outside the channel model until prioritized |
 
 ## 7. The WeChat gateway (concrete first instance — the v1 priority)
+
+**Transport decision (owner, 2026-07-09): the FIRST EXPERIMENT runs on the Tencent iLink personal-bot API** (the MIT-licensed [`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) wire protocol, re-implemented natively in the gateway worker — no OpenClaw agent runtime in the message path, which would blur the PEP boundary). Why: QR-scan a spare personal account in minutes vs. an entity-verified 服务号 in weeks; the long-poll needs **no public callback endpoint**; and the flagship chef scenario below (all-day family DMs + a proactive 16:00 send) fits the personal-bot DM model natively where the OA reply-window/template regime constrains it. **The 公众号 (`oa`) driver stays shipped as the production/compliance path** — flip `AGENTKEYS_WEIXIN_TRANSPORT` when contact scale or entity readiness demands; both drivers converge on one relay core (registry, L3, router, audit never fork per transport). Operator ceremonies for both live in the operator-internal wechat-gateway-setup doc.
 
 One household bot; every family member subscribes to the same bot; the gateway behind it:
 
@@ -292,6 +294,28 @@ Net-new inventions are exactly three: the **ChannelEvent envelope + feeds**, the
 | 6 | **Promotion** | arch.md §5/§17.6 edits per §12; threat-model spec update; user-manual entries | any shipped phase |
 
 (Email-as-channel was dropped from the phase list — deprioritized, §13.) Per the plan-completion policy: any PR implementing a phase enumerates its rows and reports skipped items explicitly.
+
+### Completion record (plan-completion policy)
+
+**What landed** (per phase → PR):
+
+- **e2e gate (#405)** — `e2e/channel-e2e-decoupling`… → `e2e/channel-e2e-demo.sh`, the independent regression gate on `_demo_lib.sh`; grows one step-family per phase (14 steps at phase 5), `--ci` green-with-skips, `--headless` strict, wired into `suite.sh --stage channel` + `e2e-ci.yml`.
+- **Phase 1 substrate (#406)** — `DataClass::Channel`, `channel-pub/sub:<id>` grants + service builders, `/v1/cap/channel-{pub,sub}`, `ChannelEvent` envelope, `agentkeys-worker-channel` with the §14.12 NRT worker-held long-poll, channel-family audit op_kinds 100-102, the `channel` bucket+role+provision scripts, the §17.5 four-layer negatives.
+- **Phase 2 WeChat gateway (#407)** — `agentkeys-worker-channel-weixin`: #384 bot-credential custody, the `contact` registry with household tiers, the L3 PEP, `/alias` routing, GatewayRelay/ContactBind op_kinds, D13 contact-zero-history; mock-driver e2e + the operator setup doc.
+- **Phase 3 devices-as-endpoints (#408)** — the `is_device` accept signal + the §14.10 ≥1-channel broker warn, `ak_device_cap_pop_sig` (a device signs its own channel caps on-device), the `session` `ChannelKind`.
+- **Phase 4 lifecycle (#409)** — **device pairing never spawns** (D9, `scope_is_device_only`); the #369 delegation-sig retirement switch (§14.11).
+- **Phase 5 router + surface (#410)** — the advisory router (structurally can-never-widen), `routed_by` worker-stamping, the admin-gated D13-safe `GET /v1/gateway/contacts` operator view.
+- **Phase 6 promotion (#411)** — arch.md §5/§15/§17.5/§22e canonical-name + endpoint + status rows, this record, the user-manual channel/contact/gateway/device entries, the threat-model deltas (§9).
+- **iLink transport driver** (post-epic — the §7 transport decision) — the native `ilink` driver inside `agentkeys-worker-channel-weixin`: the `--login` QR ceremony, the resumable `getupdates` long-poll, in-channel decision replies with `context_token` echo, the stale-token (-14) loud-pause; the OA webhook and the iLink loop converge on one relay core; proven against a mock-iLink server in `tests/ilink_flow.rs`.
+
+**What did NOT land** (operator/hardware-gated live legs, tracked as follow-ups, NOT silently dropped):
+
+- **Live WeChat proof** — for the decided `ilink` experiment path: a spare personal account through the `--login` ceremony + a real DM round-trip (minutes of operator work; wechat-gateway-setup Path A). The `oa` live leg (a real 公众号 + IP whitelist; Path B) stays the production gate. CI remains on the mock drivers for both.
+- **Outbound send / reply-window L2 + the model-driven tier PROPOSER** — the outbound half needs the app-secret + access-token lifecycle; the registry is master-authored today.
+- **Camera/display/`session` firmware paths + a bound-device feed round-trip** — no camera on the `esp32s3-touch-lcd-4b`; firmware doesn't build in CI. The device-core FFI enabler ships; the firmware wiring is the release-cycle gate.
+- **veFaaS-live lifecycle** — default-delegate onboarding auto-spawn, channel-event wake-on-reason, the #369 firmware re-bind cycle (needs VE keys + `SANDBOX_FUNCTION_ID` + Touch-ID onboarding).
+- **The parent-control React UI** — channel/contact management panels + the feed-history browser (the backend read contract + the D13-safe view shipped in #410; the frontend is the follow-up).
+- **`session`-kind sandbox-bridge wiring + the registry-from-config-data-class sync** — noted in the crate docs.
 
 ## 12. arch.md promotion map
 

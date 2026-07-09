@@ -45,20 +45,36 @@ jobs:
     name: cargo-llvm-cov (non-blocking)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # Coverage source mapping is embedded by `-C instrument-coverage`
+      # independently of DWARF, so the test profile's default `debug = 2` (full
+      # DWARF: types + variables) is pure object-file bloat under instrumentation.
+      # It ballooned the llvm-cov-target/ dir until `ld` died with SIGBUS (ENOSPC
+      # on its mmap'd output) while linking the biggest crates (provisioner,
+      # mock-server — aws-lc-sys + ring + AWS-SDK + sqlite). The channels epic's
+      # new crates were the straw: red on EVERY branch incl. main since phase 1
+      # (2026-07-09). `line-tables-only` keeps file:line for accurate coverage
+      # and drops the multi-GB type/variable DWARF. (`test` inherits `dev`; both
+      # set explicitly.)
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       # The instrumented workspace target/ cache is multi-GB; restoring it on a
       # stock ubuntu-latest runner has hit "No space left on device" mid-restore
-      # (two PR #256 runs died at the Cache step before any test ran). Drop the
-      # ~14 GB of preinstalled toolchains we never use BEFORE the restore.
-      - name: Free runner disk (android/dotnet/ghc/codeql)
+      # (two PR #256 runs died at the Cache step before any test ran) and, once
+      # the channels epic grew the workspace, `ld` SIGBUS'd mid-link. Drop the
+      # ~20 GB of preinstalled toolchains we never use BEFORE the restore.
+      - name: Free runner disk (android/dotnet/ghc/codeql/swift/boost + docker)
         run: |
           set -euo pipefail
           df -h / | tail -1
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift /usr/local/share/powershell /usr/local/share/boost
+          sudo docker image prune --all --force 2>/dev/null || true
           df -h / | tail -1
 
       # Pinned by rust-toolchain.toml (single source of truth — no floating

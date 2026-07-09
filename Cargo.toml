@@ -20,6 +20,7 @@ members = [
     "crates/agentkeys-worker-memory",
     "crates/agentkeys-worker-config",
     "crates/agentkeys-worker-channel",
+    "crates/agentkeys-worker-channel-weixin",
     "crates/agentkeys-catalog",
     "crates/agentkeys-classify-dataset",
     "crates/agentkeys-worker-classify",

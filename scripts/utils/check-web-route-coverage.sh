@@ -73,6 +73,14 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/scope/submit	needs a signed UserOp (gas); build half covered (suite-6 step 7); headless submit = sign userOpHash with the software passkey — planned
 /v1/revoke/build	revoke build proxy — needs a revocable throwaway device fixture
 /v1/revoke/submit	same throwaway-device fixture + signed UserOp
+/v1/master/gateway/status	#418 thin bearer-injecting forward to the weixin gateway admin surface; gateway behavior proven headlessly by the crate's ilink_admin_e2e (channel demo step 15); live daemon-side coverage needs a deployed gateway + AGENTKEYS_WEIXIN_ADMIN_TOKEN in the test env
+/v1/master/gateway/login/start	same gateway-admin forward — removed by a suite-6 step once the test env deploys the gateway with an admin token
+/v1/master/gateway/login/status	same gateway-admin forward (35 s server-held poll)
+/v1/master/gateway/login/verify	same gateway-admin forward
+/v1/master/gateway/bind/invite	same gateway-admin forward — bind ceremony proven in ilink_admin_e2e
+/v1/master/gateway/bind/pending	same gateway-admin forward
+/v1/master/gateway/bind/approve	same gateway-admin forward
+/v1/master/gateway/contacts	same gateway-admin forward (worker route /v1/gateway/contacts also asserted by channel demo step 14)
 EOF
 
 # ── 1. extract served routes ────────────────────────────────────────────────

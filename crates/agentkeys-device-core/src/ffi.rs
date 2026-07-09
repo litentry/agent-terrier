@@ -16,8 +16,8 @@
 use core::ffi::{c_char, CStr};
 
 use crate::{
-    agent_pop_payload, delegation_payload, device_key_hash, eip191_sign, evm_address,
-    signing_key_from_bytes,
+    agent_pop_payload, cap_pop_payload, delegation_payload, device_key_hash, eip191_sign,
+    evm_address, signing_key_from_bytes,
 };
 
 /// Result codes returned across the C ABI.
@@ -194,5 +194,128 @@ pub unsafe extern "C" fn ak_device_delegation_sig(
     match eip191_sign(&sk, &payload) {
         Ok(sig) => write_cstr(out, cap, &sig),
         Err(_) => Ak::SignFailed,
+    }
+}
+
+/// EIP-191 **cap-mint proof-of-possession** signature (issue #76) over the K10 in
+/// `priv_` (32 bytes): `eip191_sign(cap_pop_payload(operator, actor, service, op,
+/// data_class, client_nonce, client_ts))`. This is what lets a **device be a
+/// channel endpoint that mints its OWN caps** (#408): a camera signs a
+/// `channel-pub:<id>` PoP (op=`channel_publish`, data_class=`channel`), a display
+/// a `channel-sub:<id>` PoP — directly on-device, so the K10 never leaves NVS and
+/// the #369 delegation detour is not needed for a device acting for itself. The
+/// device signs **once per cap / per stream, not per frame** (secp256k1 is
+/// software on the ESP32-S3 — §6 camera row). `out` >= 133 bytes for the
+/// `0x`+130hex (`r||s||v`) signature the broker + worker re-verify (cf.
+/// [`ak_device_pop_sig`], which signs the *pairing* PoP).
+///
+/// # Safety
+/// `priv_` must point to 32 readable bytes; the string args must be valid C
+/// strings; `out` to `cap` writable bytes.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ak_device_cap_pop_sig(
+    priv_: *const u8,
+    operator_omni: *const c_char,
+    actor_omni: *const c_char,
+    service: *const c_char,
+    op: *const c_char,
+    data_class: *const c_char,
+    client_nonce: *const c_char,
+    client_ts: u64,
+    out: *mut c_char,
+    cap: usize,
+) -> Ak {
+    if priv_.is_null() || out.is_null() {
+        return Ak::NullPtr;
+    }
+    let (operator, actor, service, op, data_class, nonce) = match (
+        read_cstr(operator_omni),
+        read_cstr(actor_omni),
+        read_cstr(service),
+        read_cstr(op),
+        read_cstr(data_class),
+        read_cstr(client_nonce),
+    ) {
+        (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)) => (a, b, c, d, e, f),
+        _ => return Ak::NullPtr,
+    };
+    let key_bytes = core::slice::from_raw_parts(priv_, 32);
+    let sk = match signing_key_from_bytes(key_bytes) {
+        Ok(sk) => sk,
+        Err(_) => return Ak::BadKey,
+    };
+    let payload = cap_pop_payload(operator, actor, service, op, data_class, nonce, client_ts);
+    match eip191_sign(&sk, &payload) {
+        Ok(sig) => write_cstr(out, cap, &sig),
+        Err(_) => Ak::SignFailed,
+    }
+}
+
+#[cfg(test)]
+mod cap_pop_ffi_tests {
+    use super::*;
+    use crate::ecrecover_eip191;
+    use alloc::ffi::CString;
+
+    #[test]
+    fn ak_device_cap_pop_sig_matches_rust_path_and_recovers_to_device() {
+        // #408: a device signing a channel-pub cap-PoP over the C ABI must produce
+        // the SAME signature as the Rust path — and it must ecrecover to the
+        // device's own address (the broker/worker's #76 check).
+        let priv_ = [7u8; 32];
+        let sk = signing_key_from_bytes(&priv_).unwrap();
+        let (operator, actor, service, op, dc, nonce, ts) = (
+            "0xAABB",
+            "0xccdd",
+            "channel-pub:cam-frontdoor",
+            "channel_publish",
+            "channel",
+            "00112233",
+            1_700_000_000u64,
+        );
+
+        // The Rust reference signature.
+        let want = eip191_sign(
+            &sk,
+            &cap_pop_payload(operator, actor, service, op, dc, nonce, ts),
+        )
+        .unwrap();
+
+        // The C-ABI signature.
+        let c = |s: &str| CString::new(s).unwrap();
+        let (co, ca, cs, cop, cdc, cn) =
+            (c(operator), c(actor), c(service), c(op), c(dc), c(nonce));
+        let mut out = [0u8; 160];
+        let rc = unsafe {
+            ak_device_cap_pop_sig(
+                priv_.as_ptr(),
+                co.as_ptr(),
+                ca.as_ptr(),
+                cs.as_ptr(),
+                cop.as_ptr(),
+                cdc.as_ptr(),
+                cn.as_ptr(),
+                ts,
+                out.as_mut_ptr() as *mut c_char,
+                out.len(),
+            )
+        };
+        assert!(matches!(rc, Ak::Ok));
+        let got = unsafe { CStr::from_ptr(out.as_ptr() as *const c_char) }
+            .to_str()
+            .unwrap();
+        assert_eq!(got, want, "C ABI cap-PoP sig must equal the Rust path");
+
+        // It ecrecovers to the device's own address.
+        let recovered = ecrecover_eip191(
+            &cap_pop_payload(operator, actor, service, op, dc, nonce, ts),
+            got,
+        )
+        .unwrap();
+        assert_eq!(
+            recovered.to_lowercase(),
+            evm_address(sk.verifying_key()).to_lowercase()
+        );
     }
 }

@@ -78,6 +78,32 @@ Ak ak_device_delegation_sig(const uint8_t *priv_,
                             char *out,
                             uintptr_t cap);
 
+// EIP-191 **cap-mint proof-of-possession** signature (issue #76) over the K10 in
+// `priv_` (32 bytes): `eip191_sign(cap_pop_payload(operator, actor, service, op,
+// data_class, client_nonce, client_ts))`. This is what lets a **device be a
+// channel endpoint that mints its OWN caps** (#408): a camera signs a
+// `channel-pub:<id>` PoP (op=`channel_publish`, data_class=`channel`), a display
+// a `channel-sub:<id>` PoP — directly on-device, so the K10 never leaves NVS and
+// the #369 delegation detour is not needed for a device acting for itself. The
+// device signs **once per cap / per stream, not per frame** (secp256k1 is
+// software on the ESP32-S3 — §6 camera row). `out` >= 133 bytes for the
+// `0x`+130hex (`r||s||v`) signature the broker + worker re-verify (cf.
+// [`ak_device_pop_sig`], which signs the *pairing* PoP).
+//
+// # Safety
+// `priv_` must point to 32 readable bytes; the string args must be valid C
+// strings; `out` to `cap` writable bytes.
+Ak ak_device_cap_pop_sig(const uint8_t *priv_,
+                         const char *operator_omni,
+                         const char *actor_omni,
+                         const char *service,
+                         const char *op,
+                         const char *data_class,
+                         const char *client_nonce,
+                         uint64_t client_ts,
+                         char *out,
+                         uintptr_t cap);
+
 void rust_eh_personality(void);
 
 #ifdef __cplusplus
