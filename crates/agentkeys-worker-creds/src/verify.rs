@@ -58,6 +58,13 @@ pub enum CapOp {
     /// category) call — NOT an S3 touch. The storage workers reject a
     /// Classify cap via `check_op`; the classify worker accepts only this op.
     Classify,
+    /// #406 channels — PUBLISH an event into a channel feed. Distinct SIGNED op
+    /// from `ChannelSubscribe` (direction isolation, D2): the channel worker
+    /// rejects a publish cap at `/v1/channel/poll` and a subscribe cap at
+    /// `/v1/channel/publish` via `check_op`. Storage/config workers reject it.
+    ChannelPublish,
+    /// #406 channels — SUBSCRIBE (consume) events from a channel feed.
+    ChannelSubscribe,
 }
 
 impl CapOp {
@@ -71,6 +78,8 @@ impl CapOp {
             CapOp::Append => "append",
             CapOp::Teardown => "teardown",
             CapOp::Classify => "classify",
+            CapOp::ChannelPublish => "channel_publish",
+            CapOp::ChannelSubscribe => "channel_subscribe",
         }
     }
 }
@@ -90,6 +99,10 @@ pub enum DataClass {
     /// Policy / memory-types taxonomy (#178 §7). Master-only; own bucket + role.
     /// A Config cap presented to the cred or memory worker fails check_data_class.
     Config,
+    /// #406 channels data class — durable pub/sub feeds (own bucket + role).
+    /// A Channel cap presented to the cred/memory/config worker fails
+    /// check_data_class; the channel worker rejects every non-Channel cap.
+    Channel,
 }
 
 impl DataClass {
@@ -101,6 +114,7 @@ impl DataClass {
             DataClass::Credentials => "credentials",
             DataClass::Memory => "memory",
             DataClass::Config => "config",
+            DataClass::Channel => "channel",
         }
     }
 }
@@ -782,6 +796,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DataClass::Config).unwrap(),
             "\"config\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DataClass::Channel).unwrap(),
+            "\"channel\""
         );
     }
 

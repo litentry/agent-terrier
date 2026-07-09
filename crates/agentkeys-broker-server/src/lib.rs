@@ -102,6 +102,12 @@ pub fn create_router(state: SharedState) -> Router {
         // Classifier-service compute-gate cap (#178 §15.6, #207 items 2-3).
         // op=Classify; data_class comes from the request body (spans data classes).
         .route("/v1/cap/classify", post(handlers::cap::cap_classify))
+        // Per-data-class CHANNEL caps (#406 channels phase 1). data_class=Channel;
+        // the route fixes the DIRECTION — channel-pub mints ChannelPublish,
+        // channel-sub mints ChannelSubscribe (distinct on-chain grants). The
+        // channel worker rejects a cross-direction or cross-class cap.
+        .route("/v1/cap/channel-pub", post(handlers::cap::cap_channel_pub))
+        .route("/v1/cap/channel-sub", post(handlers::cap::cap_channel_sub))
         // #225 / #164 E7 — Touch-ID-gated agent accept: assemble the sponsored
         // executeBatch([registerAgentDevice, setScope]) UserOp + return the userOpHash.
         .route("/v1/accept/build", post(handlers::accept::accept_build))

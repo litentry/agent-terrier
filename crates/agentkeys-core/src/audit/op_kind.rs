@@ -16,7 +16,8 @@
 //! - 70-79 K3 family (K3EpochAdvance=70; 71-79 reserved)
 //! - 80-89 config family (ConfigPut=80, ConfigGet=81, ConfigTeardown=82; 83-89 reserved)
 //! - 90-99 gate family (GateTurn=90; 91-99 reserved)
-//! - 100-255 reserved for future families
+//! - 100-109 channel family (ChannelPublish=100, ChannelSubscribe=101, ChannelTeardown=102; 103-109 reserved)
+//! - 110-255 reserved for future families
 
 /// Canonical op_kind enum. The byte value MUST match the row in arch.md
 /// §15.3a. The enum is `repr(u8)` so `as u8` gives the canonical byte.
@@ -58,6 +59,14 @@ pub enum AuditOpKind {
     /// #384 — one LLM turn through the metered key-custody egress relay
     /// (`agentkeys-gate`): token usage + attribution, budgets per #332.
     GateTurn = 90,
+    /// #406 — a keyed actor PUBLISHED an event into a channel feed
+    /// (`docs/spec/agent-channel-decoupling.md`). The channel worker emits this
+    /// after the envelope-encrypted event lands durably in `$CHANNEL_BUCKET`.
+    ChannelPublish = 100,
+    /// #406 — a keyed actor SUBSCRIBED (consumed) events from a channel feed.
+    ChannelSubscribe = 101,
+    /// #406 — a channel's whole feed was torn down (owner-scoped GC).
+    ChannelTeardown = 102,
 }
 
 impl AuditOpKind {
@@ -90,6 +99,9 @@ impl AuditOpKind {
             81 => Self::ConfigGet,
             82 => Self::ConfigTeardown,
             90 => Self::GateTurn,
+            100 => Self::ChannelPublish,
+            101 => Self::ChannelSubscribe,
+            102 => Self::ChannelTeardown,
             _ => return None,
         })
     }
@@ -124,6 +136,9 @@ impl AuditOpKind {
             Self::ConfigGet => "config.get",
             Self::ConfigTeardown => "config.teardown",
             Self::GateTurn => "gate.turn",
+            Self::ChannelPublish => "channel.publish",
+            Self::ChannelSubscribe => "channel.subscribe",
+            Self::ChannelTeardown => "channel.teardown",
         }
     }
 }
@@ -163,6 +178,9 @@ mod tests {
             AuditOpKind::ConfigGet,
             AuditOpKind::ConfigTeardown,
             AuditOpKind::GateTurn,
+            AuditOpKind::ChannelPublish,
+            AuditOpKind::ChannelSubscribe,
+            AuditOpKind::ChannelTeardown,
         ];
         for k in all {
             let byte = k as u8;
@@ -179,7 +197,7 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [
-            3u8, 9, 14, 19, 22, 32, 42, 55, 62, 71, 83, 89, 91, 99, 100, 200, 250, 255,
+            3u8, 9, 14, 19, 22, 32, 42, 55, 62, 71, 83, 89, 91, 99, 103, 109, 110, 200, 250, 255,
         ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),
@@ -220,6 +238,9 @@ mod tests {
             AuditOpKind::ConfigGet as u8,
             AuditOpKind::ConfigTeardown as u8,
             AuditOpKind::GateTurn as u8,
+            AuditOpKind::ChannelPublish as u8,
+            AuditOpKind::ChannelSubscribe as u8,
+            AuditOpKind::ChannelTeardown as u8,
         ];
         let s: HashSet<_> = all.iter().copied().collect();
         assert_eq!(s.len(), all.len(), "duplicate byte assignment");

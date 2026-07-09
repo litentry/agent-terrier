@@ -54,12 +54,12 @@ use sha3::{Digest, Keccak256};
 use thiserror::Error;
 
 pub use bodies::{
-    ConfigGetBody, ConfigPutBody, ConfigTeardownBody, CredFetchBody, CredStoreBody,
-    CredTeardownBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody, EmailSendBody,
-    GateTurnBody, K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody,
-    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody,
-    SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body,
-    SignEip712Body,
+    ChannelPublishBody, ChannelSubscribeBody, ChannelTeardownBody, ConfigGetBody, ConfigPutBody,
+    ConfigTeardownBody, CredFetchBody, CredStoreBody, CredTeardownBody, DeviceAddBody,
+    DeviceRevokeBody, EmailReceiveBody, EmailSendBody, GateTurnBody, K10RotateBody,
+    K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody,
+    PaymentDirectBody, PaymentEscrowRedeemBody, SandboxSpawnBody, SandboxTeardownBody,
+    ScopeGrantBody, ScopeRevokeBody, SignEip191Body, SignEip712Body,
 };
 pub use op_kind::AuditOpKind;
 
@@ -243,6 +243,9 @@ pub enum TypedAuditBody {
     ConfigGet(ConfigGetBody),
     ConfigTeardown(ConfigTeardownBody),
     GateTurn(GateTurnBody),
+    ChannelPublish(ChannelPublishBody),
+    ChannelSubscribe(ChannelSubscribeBody),
+    ChannelTeardown(ChannelTeardownBody),
 }
 
 impl TypedAuditBody {
@@ -290,6 +293,15 @@ impl TypedAuditBody {
                 Self::ConfigTeardown(serde_json::from_value(value).ok()?)
             }
             AuditOpKind::GateTurn => Self::GateTurn(serde_json::from_value(value).ok()?),
+            AuditOpKind::ChannelPublish => {
+                Self::ChannelPublish(serde_json::from_value(value).ok()?)
+            }
+            AuditOpKind::ChannelSubscribe => {
+                Self::ChannelSubscribe(serde_json::from_value(value).ok()?)
+            }
+            AuditOpKind::ChannelTeardown => {
+                Self::ChannelTeardown(serde_json::from_value(value).ok()?)
+            }
         })
     }
 }

@@ -19,9 +19,9 @@ use serde_json::{json, Value};
 
 use crate::protocol::{
     AcceptAssertion, AuditAppendV2, BrokerCapRequest, BuildAcceptUserOpRequest,
-    BuildRegisterUserOpRequest, BuildRevokeUserOpRequest, BuildScopeUserOpRequest, ConfigGetBody,
-    ConfigPutBody, MemoryGetBody, MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp,
-    ENVELOPE_VERSION,
+    BuildRegisterUserOpRequest, BuildRevokeUserOpRequest, BuildScopeUserOpRequest,
+    ChannelEventKind, ChannelPollBody, ChannelPublishBody, ConfigGetBody, ConfigPutBody,
+    MemoryGetBody, MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp, ENVELOPE_VERSION,
 };
 
 /// One canonical fixture: the on-disk file stem + the sample body.
@@ -137,6 +137,22 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         rpid_hash: "0x<rpid_hash>".into(),
         roles: 0,
     };
+    // #406 channels: the canonical publish body carries an inline base64 payload
+    // (body_ref None + skip_serializing_if, so it stays out of the fixture); poll
+    // carries the cursor + long-poll wait.
+    let channel_publish = ChannelPublishBody {
+        cap: json!("<cap-token>"),
+        kind: ChannelEventKind::Text,
+        direction: crate::protocol::ChannelDirection::In,
+        body_b64: Some("<base64-plaintext>".into()),
+        body_ref: None,
+        correlation: None,
+    };
+    let channel_poll = ChannelPollBody {
+        cap: json!("<cap-token>"),
+        after: "<feed-cursor>".into(),
+        wait_seconds: 25,
+    };
     vec![
         Fixture {
             name: "cap_mint_request",
@@ -185,6 +201,14 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         Fixture {
             name: "build_register_userop_request",
             body: serde_json::to_value(&build_register).expect("build_register serializes"),
+        },
+        Fixture {
+            name: "channel_publish_body",
+            body: serde_json::to_value(&channel_publish).expect("channel_publish serializes"),
+        },
+        Fixture {
+            name: "channel_poll_body",
+            body: serde_json::to_value(&channel_poll).expect("channel_poll serializes"),
         },
     ]
 }
@@ -253,6 +277,25 @@ mod tests {
     #[test]
     fn config_get_body_keys_frozen() {
         assert_eq!(keys_of("config_get_body"), vec!["cap"]);
+    }
+
+    #[test]
+    fn channel_publish_body_keys_frozen() {
+        // #406: the canonical publish body — body_ref + correlation are OPTIONAL
+        // (skip_serializing_if) and omitted here; the inline body_b64 is the
+        // canonical small-payload shape.
+        assert_eq!(
+            keys_of("channel_publish_body"),
+            vec!["body_b64", "cap", "direction", "kind"]
+        );
+    }
+
+    #[test]
+    fn channel_poll_body_keys_frozen() {
+        assert_eq!(
+            keys_of("channel_poll_body"),
+            vec!["after", "cap", "wait_seconds"]
+        );
     }
 
     #[test]
