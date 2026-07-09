@@ -303,6 +303,44 @@ pub struct GateTurnBody {
     pub reasoning_tokens: u64,
 }
 
+// ── 100..109 — channel family (#406 channels data class, audited per #229) ─
+//
+// Emitted by `agentkeys-worker-channel` once per publish/subscribe/teardown.
+// Provenance (who produced/consumed) is the envelope-level `actor_omni` from
+// the cap-signed identity — NEVER a body field (§4.1 worker-stamped rule). The
+// body carries only the channel + event coordinates and content hashes, never
+// plaintext (the same posture as the config/cred bodies).
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelPublishBody {
+    /// Feed S3 object key the worker wrote (`bots/<owner>/channel/<id>/<event>.enc`).
+    pub key: String,
+    /// The channel the event was published into.
+    pub channel_id: String,
+    /// The worker-assigned event id (feed key tail).
+    pub event_id: String,
+    /// `keccak256(envelope_ciphertext)` — the stored bytes, never plaintext.
+    pub payload_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelSubscribeBody {
+    pub channel_id: String,
+    /// The cursor the subscriber read from (feed key it passed as `after`).
+    pub cursor: String,
+    /// Number of events released to the subscriber on this poll.
+    pub event_count: u64,
+    /// `keccak256(cap payload canonical bytes)` — binds the read to the cap.
+    pub cap_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelTeardownBody {
+    pub channel_id: String,
+    /// The owner-actor whose channel feed was torn down.
+    pub actor_target: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,40 @@
+[package]
+name = "agentkeys-worker-channel"
+version = "0.1.0"
+edition = "2021"
+description = "Channel-service worker (#406 / docs/spec/agent-channel-decoupling.md) — durable pub/sub feeds with NRT worker-held long-poll (§14.12)"
+
+[[bin]]
+name = "agentkeys-worker-channel"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_worker_channel"
+path = "src/lib.rs"
+
+[dependencies]
+# Reuse the shared envelope + cap-verify + audit modules from the credentials
+# worker, exactly as the config worker (#201) does — the channel worker has the
+# same cap-mint / AES-GCM / S3 flow; only the S3 prefix + bucket + the accepted
+# DataClass (Channel) + the NRT long-poll wakeup differ.
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

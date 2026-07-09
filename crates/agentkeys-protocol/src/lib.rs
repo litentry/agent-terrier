@@ -63,6 +63,18 @@ pub enum CapMintOp {
     /// cred + memory workers reject a Config cap via `verify::check_data_class`.
     ConfigStore,
     ConfigFetch,
+    /// #406 channels phase 1 — the `channel` data class (`docs/spec/agent-channel-decoupling.md`
+    /// D2/D7). PUBLISH an event into a channel feed. Mints `CapOp::ChannelPublish`/
+    /// `DataClass::Channel` at `/v1/cap/channel-pub`; `op_str` is `"channel_publish"`.
+    /// Direction is carried in the SIGNED op (and the `channel-pub:<id>` service),
+    /// so a publish cap can NEVER be redeemed at the subscribe endpoint (D2 — the
+    /// direction-denial isolation gate).
+    ChannelPublish,
+    /// #406 channels phase 1 — SUBSCRIBE (consume) events from a channel feed.
+    /// Mints `CapOp::ChannelSubscribe`/`DataClass::Channel` at `/v1/cap/channel-sub`;
+    /// `op_str` is `"channel_subscribe"`. Distinct on-chain grant (`channel-sub:<id>`)
+    /// from the publish grant — granting one never grants the other.
+    ChannelSubscribe,
 }
 
 impl CapMintOp {
@@ -76,6 +88,8 @@ impl CapMintOp {
             "memory_append" => Some(Self::MemoryAppend),
             "config_store" => Some(Self::ConfigStore),
             "config_fetch" => Some(Self::ConfigFetch),
+            "channel_publish" => Some(Self::ChannelPublish),
+            "channel_subscribe" => Some(Self::ChannelSubscribe),
             _ => None,
         }
     }
@@ -90,6 +104,8 @@ impl CapMintOp {
             Self::MemoryAppend => "/v1/cap/memory-append",
             Self::ConfigStore => "/v1/cap/config-store",
             Self::ConfigFetch => "/v1/cap/config-fetch",
+            Self::ChannelPublish => "/v1/cap/channel-pub",
+            Self::ChannelSubscribe => "/v1/cap/channel-sub",
         }
     }
 
@@ -100,6 +116,7 @@ impl CapMintOp {
                 "memory"
             }
             Self::ConfigStore | Self::ConfigFetch => "config",
+            Self::ChannelPublish | Self::ChannelSubscribe => "channel",
         }
     }
 
@@ -118,6 +135,12 @@ impl CapMintOp {
             // #339 P2 — must match agentkeys_worker_creds::verify::CapOp::Append
             // (and the broker's) so the K10 cap-PoP preimage agrees byte-for-byte.
             Self::MemoryAppend => "append",
+            // #406 — must match agentkeys_worker_creds::verify::CapOp::ChannelPublish/
+            // ChannelSubscribe (and the broker's) so the K10 cap-PoP preimage agrees
+            // byte-for-byte. Direction is the signed op — a publish cap and a subscribe
+            // cap recover to DIFFERENT preimages even for the same channel.
+            Self::ChannelPublish => "channel_publish",
+            Self::ChannelSubscribe => "channel_subscribe",
         }
     }
 }
@@ -307,6 +330,173 @@ pub struct ConfigGetResp {
     /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
     /// emitted for this op (`null`/absent on pre-#229 workers or when the
     /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+// ── channel worker (`/v1/channel/{publish,poll,teardown}`) — #406 channels ───
+//
+// The `channel` data class (`docs/spec/agent-channel-decoupling.md` D7): a
+// durable, envelope-encrypted feed under the per-data-class `$CHANNEL_BUCKET`,
+// with the NRT decision (§14.12) — the channel worker is the ONLY write path,
+// so it completes held consumer long-polls in-process the instant an event
+// lands (write-through wakeup). S3/TOS is the durable record, never the
+// notification path. Feed-backed (async) kinds only; `session`-kind channels
+// are direct-transport and carry no feed.
+
+/// The direction an event flows relative to a keyed actor's grant. Carried on
+/// [`ChannelEvent`] for the subscriber's provenance display; the AUTHORIZATION
+/// direction is the SIGNED cap op (publish vs subscribe), never this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChannelDirection {
+    /// Toward the agent (contact/device → agent) — the inbound feed.
+    In,
+    /// Away from the agent (agent → contact/device) — the outbound feed.
+    Out,
+}
+
+/// The producer of a [`ChannelEvent`] — EXACTLY ONE of a keyed actor XOR an
+/// externally-authenticated contact (`docs/spec/agent-channel-decoupling.md`
+/// §4.1). **Stamped by the worker/adapter, NEVER self-attributed by the
+/// payload** (the absorption-inbox provenance rule): the channel worker sets
+/// `Actor` from the cap-signed `actor_omni`; the gateway sets `Contact` from
+/// the transport-verified identity. A delegate can label an event's `kind`,
+/// never its `producer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelProducer {
+    /// A keyed actor (delegate or device) — the `0x`-omni the cap was signed by.
+    Actor { actor_omni: String },
+    /// An externally-authenticated, keyless contact (the family), verified at
+    /// the gateway. `contact_id` is the registry id; `tier` is the household
+    /// tier (D5). No keys, no omni — the transport authenticated them.
+    Contact { contact_id: String, tier: String },
+}
+
+/// The payload kind of a [`ChannelEvent`]. Continuous media (realtime
+/// speech/video) is deliberately NOT here — it stays on the §22d.3a gate path;
+/// channels carry text, commands, docs, discrete frames, and `audio-clip`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChannelEventKind {
+    Text,
+    Image,
+    AudioClip,
+    Frame,
+    Command,
+    Doc,
+}
+
+/// The one canonical channel event envelope (`docs/spec/agent-channel-decoupling.md`
+/// §4.1). This is the DECRYPTED shape the worker stores inside the standard
+/// envelope and hands back to authorized subscribers; `producer` is
+/// worker/gateway-stamped. `body` carries small inline payloads (text/command);
+/// `body_ref` is an S3 key into the feed for large payloads (frames/docs) —
+/// exactly one is set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelEvent {
+    /// Worker-assigned unique id (also the tail of the feed S3 key), so a
+    /// subscriber can dedup and a producer cannot forge ordering.
+    pub event_id: String,
+    pub channel_id: String,
+    pub direction: ChannelDirection,
+    /// Worker/gateway-stamped — never a payload-supplied field (§4.1).
+    pub producer: ChannelProducer,
+    pub kind: ChannelEventKind,
+    /// Inline payload (base64) for small kinds. Exactly one of `body`/`body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// S3 key into the feed for large payloads. Exactly one of `body`/`body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    /// Worker-stamped unix-millis — the feed ordering key + poll cursor source.
+    pub ts_millis: u64,
+    /// Optional conversation/turn correlation id (a reply threads to a prompt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<String>,
+}
+
+/// Channel-worker `POST /v1/channel/publish` request body. The publish cap
+/// (`service = channel-pub:<id>`, SIGNED) authorizes the write; the worker
+/// stamps `producer`/`event_id`/`ts_millis` and appends the envelope-encrypted
+/// event to the feed, completing any held consumer long-poll in-process.
+/// `kind`/`direction`/`body`/`correlation` are the producer's declared content;
+/// `producer` is NEVER accepted from the body (worker-stamped from the cap).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPublishBody {
+    pub cap: CapToken,
+    pub kind: ChannelEventKind,
+    #[serde(default = "channel_direction_in")]
+    pub direction: ChannelDirection,
+    /// Inline base64 payload for small kinds (exactly one of body/body_ref).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<String>,
+}
+
+fn channel_direction_in() -> ChannelDirection {
+    ChannelDirection::In
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelPublishResp {
+    pub ok: bool,
+    /// The worker-assigned event id (feed key tail).
+    pub event_id: String,
+    /// The feed S3 key the encrypted event landed at (the durable record).
+    pub s3_key: String,
+    /// Durable-audit receipt (#229) — see [`MemoryPutResp::audit_envelope_hash`].
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+/// Channel-worker `POST /v1/channel/poll` request body — the NRT long-poll
+/// (§14.12). The subscribe cap (`service = channel-sub:<id>`, SIGNED) authorizes
+/// the read. Returns every event whose feed key sorts AFTER `after` (the cursor
+/// = the last `s3_key`/`event_id` seen, empty = from the start); if none are
+/// pending, the worker HOLDS the request up to `wait_seconds`, completing it the
+/// instant a matching publish lands (write-through wakeup), else returns empty.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPollBody {
+    pub cap: CapToken,
+    /// Cursor: return events strictly after this feed key. Empty = from start.
+    #[serde(default)]
+    pub after: String,
+    /// Max seconds to hold the connection when no event is immediately
+    /// available (0 = return immediately; worker clamps to its ceiling).
+    #[serde(default)]
+    pub wait_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelPollResp {
+    pub ok: bool,
+    /// Events after the cursor, oldest-first (each `body` is base64 plaintext).
+    pub events: Vec<ChannelEvent>,
+    /// The new cursor to pass as `after` on the next poll (the last event's
+    /// feed key, or the request's `after` unchanged when `events` is empty).
+    pub cursor: String,
+    /// Durable-audit receipt (#229) for the subscribe read.
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+/// Channel-worker `POST /v1/channel/teardown` — GC a channel's whole feed
+/// (master-self / owner-scoped). Mirrors the config/memory teardown shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelTeardownBody {
+    pub cap: CapToken,
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelTeardownResp {
+    pub ok: bool,
+    pub keys_deleted: usize,
     #[serde(default)]
     pub audit_envelope_hash: Option<String>,
 }
@@ -961,6 +1151,22 @@ pub fn service_inbox(namespace: &str) -> String {
     format!("inbox:{namespace}")
 }
 
+/// Build the signed cap **service** string for a channel PUBLISH grant —
+/// `channel-pub:<id>` (#406, D2). This is a **distinct** on-chain service-id
+/// from [`service_channel_sub`]'s `channel-sub:<id>`: `keccak("channel-pub:cam") !=
+/// keccak("channel-sub:cam")`, so a device granted publish on a camera channel
+/// can NEVER subscribe to it (and vice-versa) — the direction-denial isolation
+/// gate lives in the service name, mirroring the #339 `memory:`/`inbox:` split.
+pub fn service_channel_pub(channel_id: &str) -> String {
+    format!("channel-pub:{channel_id}")
+}
+
+/// Build the signed cap **service** string for a channel SUBSCRIBE grant —
+/// `channel-sub:<id>` (#406, D2). Distinct from [`service_channel_pub`].
+pub fn service_channel_sub(channel_id: &str) -> String {
+    format!("channel-sub:{channel_id}")
+}
+
 /// Normalize an omni to the broker's expected `0x`-prefixed lower-hex shape.
 ///
 /// The broker cap-mint input-validates that `operator_omni`/`actor_omni` start
@@ -996,12 +1202,79 @@ mod tests {
             ("memory_append", "/v1/cap/memory-append", "memory"),
             ("config_store", "/v1/cap/config-store", "config"),
             ("config_fetch", "/v1/cap/config-fetch", "config"),
+            ("channel_publish", "/v1/cap/channel-pub", "channel"),
+            ("channel_subscribe", "/v1/cap/channel-sub", "channel"),
         ] {
             let op = CapMintOp::parse(s).unwrap();
             assert_eq!(op.broker_path(), path);
             assert_eq!(op.data_class(), class);
         }
         assert!(CapMintOp::parse("bogus").is_none());
+    }
+
+    #[test]
+    fn channel_op_str_matches_worker_direction() {
+        // #406: the K10 cap-PoP preimage uses op_str; it MUST agree byte-for-byte
+        // with agentkeys_worker_creds::verify::CapOp::ChannelPublish/Subscribe.
+        // Publish and subscribe are DISTINCT signed ops (direction isolation).
+        assert_eq!(CapMintOp::ChannelPublish.op_str(), "channel_publish");
+        assert_eq!(CapMintOp::ChannelSubscribe.op_str(), "channel_subscribe");
+        assert_ne!(
+            CapMintOp::ChannelPublish.op_str(),
+            CapMintOp::ChannelSubscribe.op_str()
+        );
+    }
+
+    #[test]
+    fn service_channel_pub_sub_are_distinct_grants() {
+        // #406 D2: pub and sub are distinct on-chain service-ids for the SAME
+        // channel, so a publish grant can never authorize a subscribe (and
+        // vice-versa) — keccak(channel-pub:id) != keccak(channel-sub:id).
+        assert_eq!(
+            service_channel_pub("cam-frontdoor"),
+            "channel-pub:cam-frontdoor"
+        );
+        assert_eq!(
+            service_channel_sub("cam-frontdoor"),
+            "channel-sub:cam-frontdoor"
+        );
+        assert_ne!(
+            service_channel_pub("cam-frontdoor"),
+            service_channel_sub("cam-frontdoor")
+        );
+    }
+
+    #[test]
+    fn channel_event_producer_is_actor_xor_contact() {
+        // §4.1: producer is EXACTLY ONE of a keyed actor XOR a contact — the
+        // serde tag makes a two-producer envelope impossible to represent.
+        let actor = ChannelEvent {
+            event_id: "e1".into(),
+            channel_id: "cam-frontdoor".into(),
+            direction: ChannelDirection::In,
+            producer: ChannelProducer::Actor {
+                actor_omni: "0xcam".into(),
+            },
+            kind: ChannelEventKind::Frame,
+            body: None,
+            body_ref: Some("bots/0xop/channel/cam-frontdoor/1.bin".into()),
+            ts_millis: 1,
+            correlation: None,
+        };
+        let json = serde_json::to_value(&actor).unwrap();
+        assert_eq!(json["producer"]["actor"]["actor_omni"], "0xcam");
+        // A contact-produced inbound text event round-trips.
+        let contact: ChannelEvent = serde_json::from_value(serde_json::json!({
+            "event_id": "e2",
+            "channel_id": "family-weixin",
+            "direction": "in",
+            "producer": {"contact": {"contact_id": "c-kid-1", "tier": "kid"}},
+            "kind": "text",
+            "body": "d2d1bg==",
+            "ts_millis": 2,
+        }))
+        .unwrap();
+        assert!(matches!(contact.producer, ChannelProducer::Contact { .. }));
     }
 
     #[test]

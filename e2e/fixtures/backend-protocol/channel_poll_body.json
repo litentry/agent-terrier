@@ -1,0 +1,5 @@
+{
+  "after": "<feed-cursor>",
+  "cap": "<cap-token>",
+  "wait_seconds": 25
+}

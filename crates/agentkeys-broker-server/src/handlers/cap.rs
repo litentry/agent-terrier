@@ -85,6 +85,12 @@ pub enum CapOp {
     /// fresh code — the classifier audits via the tier-1 audit worker, NOT the
     /// on-chain `CredentialAudit.OP_*` path, so no chain-enum change is needed.
     Classify,
+    /// #406 channels — PUBLISH into a channel feed. Distinct SIGNED op from
+    /// `ChannelSubscribe` (direction isolation, D2). `as_u8` = 6 audits via the
+    /// tier-1 audit worker (`AuditOpKind::ChannelPublish`), NOT the on-chain path.
+    ChannelPublish,
+    /// #406 channels — SUBSCRIBE (consume) from a channel feed. `as_u8` = 7.
+    ChannelSubscribe,
 }
 
 impl CapOp {
@@ -96,6 +102,8 @@ impl CapOp {
             CapOp::Classify => 3,
             CapOp::CanonicalFetch => 4,
             CapOp::Append => 5,
+            CapOp::ChannelPublish => 6,
+            CapOp::ChannelSubscribe => 7,
         }
     }
 
@@ -110,6 +118,8 @@ impl CapOp {
             CapOp::Append => "append",
             CapOp::Teardown => "teardown",
             CapOp::Classify => "classify",
+            CapOp::ChannelPublish => "channel_publish",
+            CapOp::ChannelSubscribe => "channel_subscribe",
         }
     }
 }
@@ -129,6 +139,11 @@ pub enum DataClass {
     /// role per §17.2. `/v1/cap/config-*` mints this; cred + memory workers
     /// reject a Config cap via `verify::check_data_class`.
     Config,
+    /// #406 channels data class (`docs/spec/agent-channel-decoupling.md` D7).
+    /// Its own `$CHANNEL_BUCKET` + IAM role (arch.md §17.2); the cred/memory/
+    /// config workers reject a Channel cap via `verify::check_data_class`, and
+    /// the channel worker rejects every non-Channel cap.
+    Channel,
 }
 
 impl DataClass {
@@ -140,6 +155,7 @@ impl DataClass {
             DataClass::Credentials => "credentials",
             DataClass::Memory => "memory",
             DataClass::Config => "config",
+            DataClass::Channel => "channel",
         }
     }
 }
@@ -388,6 +404,46 @@ pub async fn cap_config_fetch(
     mint_cap(state, headers, req, CapOp::Fetch, DataClass::Config)
         .await
         .map(Json)
+}
+
+// Channel cap-mint endpoints (#406 channels phase 1). data_class=Channel; the
+// route fixes the DIRECTION via the signed op — `channel-pub` mints
+// ChannelPublish, `channel-sub` mints ChannelSubscribe. The channel worker
+// rejects a cross-direction cap (a publish cap at /poll) via check_op, and any
+// non-Channel worker rejects a Channel cap via check_data_class. The scope
+// check consults the on-chain `channel-pub:<id>` / `channel-sub:<id>` grant
+// (distinct service-ids) when operator != actor (a device/delegate publishing
+// or subscribing); master-self channels skip the scope check like every class.
+pub async fn cap_channel_pub(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    mint_cap(
+        state,
+        headers,
+        req,
+        CapOp::ChannelPublish,
+        DataClass::Channel,
+    )
+    .await
+    .map(Json)
+}
+
+pub async fn cap_channel_sub(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    mint_cap(
+        state,
+        headers,
+        req,
+        CapOp::ChannelSubscribe,
+        DataClass::Channel,
+    )
+    .await
+    .map(Json)
 }
 
 /// Classifier-service cap-mint (#178 §15.6, #207 items 2-3). Unlike the storage
