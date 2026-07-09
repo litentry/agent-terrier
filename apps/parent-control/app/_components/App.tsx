@@ -25,6 +25,7 @@ import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import { MemoryPage } from './memory';
 import { CredentialsPage } from './credentials';
 import { PairingPage } from './pairing';
+import { ChannelsPage, ContactsPage } from './gateway';
 import { getAssertionOverHash } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
@@ -40,7 +41,7 @@ import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } fr
 const looksSessionExpired = (detail?: string): boolean =>
   !!detail && /session expired|re-?authenticate/i.test(detail);
 
-type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'pairing' | 'audit' | 'decode' | 'chain' | 'logo';
+type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'pairing' | 'channels' | 'contacts' | 'audit' | 'decode' | 'chain' | 'logo';
 
 type PendingAction =
   | { kind: 'revoke-device'; actor: Actor; intent: Intent }
@@ -1048,7 +1049,7 @@ export function App() {
 
   const currentActor = actorId ? actors.find((a) => a.id === actorId) : null;
   const master = actors.find((a) => a.role === 'master');
-  const sectionAttr = page === 'decode' ? 'audit' : ((['audit', 'memory', 'pairing', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
+  const sectionAttr = page === 'decode' ? 'audit' : ((['audit', 'memory', 'pairing', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
 
   // ─── Onboarding gate (workflow 1) ──────────────────────────────
   if (!onboarded) {
@@ -1130,6 +1131,14 @@ export function App() {
         <button className={`nav-item ${page === 'pairing' ? 'active' : ''}`} onClick={() => go('pairing')}>
           <span className="marker">[⇄]</span> pairing
           {pairingRequests.length > 0 && <span className="count" style={{ color: 'var(--accent)' }}>{pairingRequests.length}●</span>}
+        </button>
+
+        <div className="nav-section">household</div>
+        <button className={`nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
+          <span className="marker">[≋]</span> channels
+        </button>
+        <button className={`nav-item ${page === 'contacts' ? 'active' : ''}`} onClick={() => go('contacts')}>
+          <span className="marker">[◑]</span> contacts
         </button>
 
         <div className="nav-section">telemetry</div>
@@ -1220,6 +1229,10 @@ export function App() {
         )}
         {page === 'pairing' && (
           <PairingPage requests={pairingRequests} actors={actors} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} />
+        )}
+        {page === 'channels' && <ChannelsPage />}
+        {page === 'contacts' && (
+          <ContactsPage deeplinkReach={actors.filter((a) => a.role === 'agent').map((a) => a.label.replace(' (revoked)', ''))} />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
