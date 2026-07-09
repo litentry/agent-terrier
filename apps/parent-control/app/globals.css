@@ -59,6 +59,10 @@ a:hover { text-decoration-color: var(--ink); }
 .app-main[data-section="anchor"]  { --hue: 240; --section-name: 'anchor'; }
 .app-main[data-section="workers"] { --hue: 300; --section-name: 'workers'; }
 .app-main[data-section="logo"]    { --hue: 25;  --section-name: 'logo'; }
+/* #419 — the channels/contacts household layer (hues from the Parent Control
+   design system: channels = 200, contacts = 330). */
+.app-main[data-section="channels"]{ --hue: 200; --section-name: 'channels'; }
+.app-main[data-section="contacts"]{ --hue: 330; --section-name: 'contacts'; }
 
 .app-main[data-section] {
   --section: oklch(0.5 0.12 var(--hue));
