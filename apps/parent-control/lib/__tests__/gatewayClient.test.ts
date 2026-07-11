@@ -45,14 +45,14 @@ describe('gatewayClient', () => {
     let seenBody = '';
     vi.stubGlobal(
       'fetch',
-      mockFetch(200, { ok: true, bind_code: 'AK-ABC123', send_text: '绑定 AK-ABC123' }, (_u, i) => {
+      mockFetch(200, { ok: true, bind_code: '123456', send_text: '绑定 123456' }, (_u, i) => {
         seenBody = (i?.body as string) ?? '';
       }),
     );
     const r = await gatewayClient.bindInvite({ contact_id: 'c-1', display_name: '奶奶', tier: 'elder', reach: ['chef'] });
     expect(JSON.parse(seenBody)).toMatchObject({ contact_id: 'c-1', tier: 'elder', reach: ['chef'] });
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value.bind_code).toBe('AK-ABC123');
+    if (r.ok) expect(r.value.bind_code).toBe('123456');
   });
 
   it('decodes an {ok:false, reason, detail} error envelope even on a 200', async () => {

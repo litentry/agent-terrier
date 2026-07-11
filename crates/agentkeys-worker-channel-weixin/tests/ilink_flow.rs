@@ -134,6 +134,8 @@ fn config(base_url: String, registry_file: String, state_file: String) -> Weixin
         ilink_bot_token: Some("test-ilink-token".into()),
         ilink_base_url: base_url,
         ilink_state_file: state_file,
+        history_file: String::new(),
+        activity_file: String::new(),
         secrets_file: std::env::temp_dir()
             .join(format!("ak-ilink-flow-secrets-{}.env", std::process::id()))
             .to_string_lossy()

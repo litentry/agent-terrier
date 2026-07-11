@@ -27,4 +27,12 @@ pending_binds: number,
 /**
  * Millis of the iLink loop's last successful poll (`null` = never / OA).
  */
-ilink_last_ok_ms?: number, };
+ilink_last_ok_ms?: number, 
+/**
+ * True when the TAMPER-PROOF on-chain audit is armed — the audit worker is
+ * wired AND the operator omni is valid 32-byte hex (#419). False means
+ * contact bind/reject/revoke are recorded in the local activity log but NOT
+ * anchored on-chain; the operator must set AGENTKEYS_WEIXIN_OPERATOR_OMNI.
+ * (Surfaced so the skip is LOUD, never a silent drop.)
+ */
+audit_on_chain: boolean, };

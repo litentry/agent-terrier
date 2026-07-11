@@ -10,13 +10,36 @@ import type { GatewayBindInviteRequest } from '@/lib/generated/GatewayBindInvite
 import type { GatewayBindInviteResponse } from '@/lib/generated/GatewayBindInviteResponse';
 import type { GatewayPendingBindView } from '@/lib/generated/GatewayPendingBindView';
 import type { GatewayApproveRequest } from '@/lib/generated/GatewayApproveRequest';
+import type { GatewayBindRejectRequest } from '@/lib/generated/GatewayBindRejectRequest';
 import type { GatewayApproveResponse } from '@/lib/generated/GatewayApproveResponse';
 import type { ContactSummary } from '@/lib/generated/ContactSummary';
+import type { GatewayContactUpdateRequest } from '@/lib/generated/GatewayContactUpdateRequest';
+import type { GatewayContactRevokeRequest } from '@/lib/generated/GatewayContactRevokeRequest';
+import type { GatewayMonitorResponse } from '@/lib/generated/GatewayMonitorResponse';
+import type { GatewayHistoryResponse } from '@/lib/generated/GatewayHistoryResponse';
+import type { GatewayActivityResponse } from '@/lib/generated/GatewayActivityResponse';
 
 const DEFAULT_BASE_URL = 'http://localhost:3114';
 
 function baseUrl(): string {
   return (process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+}
+
+/** Front-end gateway tracing (#419 connect/login diagnostics). ON by default so
+ *  the whole ceremony is inspectable in DevTools; silence at runtime WITHOUT a
+ *  rebuild via `localStorage.gatewayDebug = '0'` (re-enable with any other value
+ *  or `removeItem`). Every request + parsed response is logged — this is how you
+ *  tell a fresh `wait → scaned → connected` from a re-scan that returns
+ *  `already_bound` (the bot was already connected; the phone's authorize page is
+ *  leftover and can be closed). */
+export function gwlog(...args: unknown[]): void {
+  try {
+    if (globalThis.localStorage?.getItem('gatewayDebug') === '0') return;
+  } catch {
+    /* no localStorage (SSR/no-DOM) — trace anyway */
+  }
+  // eslint-disable-next-line no-console
+  console.info('%c[gateway]', 'color:#0a7;font-weight:600', ...args);
 }
 
 /** A gateway call outcome: `ok` with the typed body, or a reason + detail the
@@ -30,6 +53,7 @@ async function call<T>(
   path: string,
   body?: unknown,
 ): Promise<GatewayResult<T>> {
+  gwlog('→', method, path, body ?? '');
   let resp: Response;
   try {
     resp = await fetch(`${baseUrl()}${path}`, {
@@ -39,6 +63,7 @@ async function call<T>(
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
+    gwlog('✗', method, path, 'network:', (e as Error).message);
     return { ok: false, reason: 'daemon_unreachable', detail: (e as Error).message, status: 0 };
   }
   const text = await resp.text();
@@ -47,8 +72,10 @@ async function call<T>(
     json = text ? JSON.parse(text) : undefined;
   } catch {
     // non-JSON error body (e.g. a plain-text 502) — surface it as the detail.
+    gwlog('✗', method, path, resp.status, 'non-JSON body:', text.slice(0, 200));
     return { ok: false, reason: 'bad_response', detail: text.slice(0, 200), status: resp.status };
   }
+  gwlog('←', method, path, resp.status, json);
   const obj = (json ?? {}) as Record<string, unknown>;
   if (!resp.ok || obj.ok === false) {
     // The gateway WORKER answers {ok:false, reason, detail}; the DAEMON proxy's
@@ -98,6 +125,11 @@ export const gatewayClient = {
       verify_code: verifyCode,
     } satisfies { login_id: string; verify_code: string }),
 
+  // Operator disconnect — clears the bot token (runtime + secrets) → bot goes
+  // OFFLINE and the next connect is a clean QR from scratch (re-test the scan).
+  disconnect: () =>
+    call<{ ok: boolean; online?: boolean }>('POST', '/v1/master/gateway/login/disconnect'),
+
   // Bind ceremony (D5 — the master invites, the member echoes the code, the
   // master approves).
   bindInvite: (req: GatewayBindInviteRequest) =>
@@ -110,8 +142,52 @@ export const gatewayClient = {
   bindApprove: (req: GatewayApproveRequest) =>
     call<GatewayApproveResponse>('POST', '/v1/master/gateway/bind/approve', req),
 
+  // Operator WITHDRAWS an invite (open or claimed) before it binds — the code
+  // dies; a claimed sender gets unknown-sender silence from then on.
+  bindReject: (bindCode: string) =>
+    call<{ ok: boolean; removed?: boolean }>('POST', '/v1/master/gateway/bind/reject', {
+      bind_code: bindCode,
+    } satisfies GatewayBindRejectRequest),
+
   contacts: () =>
     call<{ ok: boolean; contacts: ContactSummary[] }>('GET', '/v1/master/gateway/contacts'),
+
+  // Live message monitor (#1) — poll with the last cursor; returns turns with
+  // seq >= after + the next cursor. A fresh poll (after=0) returns the ring.
+  monitor: (after: number) =>
+    call<GatewayMonitorResponse>('GET', `/v1/master/gateway/monitor?after=${after}`),
+
+  // Durable message history (#419) — newest-first, backward-paginated. Omit
+  // `before` for the newest page; pass the response's `next_before_ts` to page
+  // older. Survives restarts (read from the append-only log).
+  history: (before?: number, limit = 50) =>
+    call<GatewayHistoryResponse>(
+      'GET',
+      `/v1/master/gateway/history?limit=${limit}${before ? `&before=${before}` : ''}`,
+    ),
+
+  // Durable control-action audit trail (#419) — invite / claim / bound /
+  // rejected / revoked, newest-first. Survives daemon + worker restarts.
+  activity: (before?: number, limit = 50) =>
+    call<GatewayActivityResponse>(
+      'GET',
+      `/v1/master/gateway/activity?limit=${limit}${before ? `&before=${before}` : ''}`,
+    ),
+
+  // Operator edits a bound contact's routing policy (tier/reach); omit a field
+  // to leave it unchanged.
+  contactsUpdate: (req: GatewayContactUpdateRequest) =>
+    call<{ ok: boolean; contact?: ContactSummary }>(
+      'POST',
+      '/v1/master/gateway/contacts/update',
+      req,
+    ),
+
+  // Operator unbinds a contact — they can no longer reach any agent.
+  contactsRevoke: (contactId: string) =>
+    call<{ ok: boolean; removed?: boolean }>('POST', '/v1/master/gateway/contacts/revoke', {
+      contact_id: contactId,
+    } satisfies GatewayContactRevokeRequest),
 };
 
 /** The terminal login statuses — the poll loop stops on any of these. */

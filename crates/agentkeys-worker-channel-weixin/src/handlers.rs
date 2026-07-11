@@ -40,10 +40,26 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
         .route("/v1/gateway/admin/login/start", post(admin::login_start))
         .route("/v1/gateway/admin/login/status", get(admin::login_status))
         .route("/v1/gateway/admin/login/verify", post(admin::login_verify))
+        .route(
+            "/v1/gateway/admin/login/disconnect",
+            post(admin::login_disconnect),
+        )
         .route("/v1/gateway/admin/bind/invite", post(admin::bind_invite))
         .route("/v1/gateway/admin/bind/pending", get(admin::bind_pending))
         .route("/v1/gateway/admin/bind/approve", post(admin::bind_approve))
+        .route("/v1/gateway/admin/bind/reject", post(admin::bind_reject))
         .route("/v1/gateway/admin/contacts", get(admin::admin_contacts))
+        .route("/v1/gateway/admin/monitor", get(admin::monitor))
+        .route("/v1/gateway/admin/history", get(admin::history))
+        .route("/v1/gateway/admin/activity", get(admin::activity))
+        .route(
+            "/v1/gateway/admin/contacts/update",
+            post(admin::contacts_update),
+        )
+        .route(
+            "/v1/gateway/admin/contacts/revoke",
+            post(admin::contacts_revoke),
+        )
         .with_state(state)
 }
 
@@ -65,7 +81,7 @@ async fn healthz(State(state): State<SharedWeixinGatewayState>) -> Json<HealthBo
         ok: true,
         transport: state.config.transport.as_str(),
         bound_contacts: state.registry.snapshot().bound.len(),
-        outbound_enabled: state.config.outbound_enabled(),
+        outbound_enabled: state.outbound_enabled(),
         ilink_last_ok_ms: state.ilink_last_ok_ms(),
         version: env!("CARGO_PKG_VERSION"),
     })

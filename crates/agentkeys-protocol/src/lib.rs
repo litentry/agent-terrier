@@ -755,6 +755,13 @@ pub struct GatewayStatusView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub ilink_last_ok_ms: Option<u64>,
+    /// True when the TAMPER-PROOF on-chain audit is armed — the audit worker is
+    /// wired AND the operator omni is valid 32-byte hex (#419). False means
+    /// contact bind/reject/revoke are recorded in the local activity log but NOT
+    /// anchored on-chain; the operator must set AGENTKEYS_WEIXIN_OPERATOR_OMNI.
+    /// (Surfaced so the skip is LOUD, never a silent drop.)
+    #[serde(default)]
+    pub audit_on_chain: bool,
 }
 
 /// `POST /v1/gateway/admin/login/start` response — render `qrcode_url` as a QR
@@ -851,6 +858,37 @@ pub struct GatewayApproveResponse {
     pub contact: ContactSummary,
 }
 
+/// `POST /v1/gateway/admin/contacts/update` — the operator edits a BOUND
+/// contact's routing policy (#3 parent-control). Fields left `None` are
+/// unchanged; a tier that may not hold operator-grade reach is rejected if the
+/// (new) reach still names an operator-grade alias.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactUpdateRequest {
+    pub contact_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ContactTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Vec<String>>,
+}
+
+/// `POST /v1/gateway/admin/contacts/revoke` — the operator UNBINDS a contact;
+/// they can no longer reach any agent through the gateway.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactRevokeRequest {
+    pub contact_id: String,
+}
+
+/// `POST /v1/gateway/admin/bind/reject` — the master WITHDRAWS an invite (open
+/// or claimed) before it binds: the code dies immediately; a claimed sender gets
+/// silence from then on. The remove half of the D5 approve gate.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayBindRejectRequest {
+    pub bind_code: String,
+}
+
 /// `GET /v1/gateway/admin/contacts` (proxied as `/v1/master/gateway/contacts`) —
 /// the typed contacts-view envelope (#410's endpoint, now a one-owner shape).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -858,6 +896,85 @@ pub struct GatewayApproveResponse {
 pub struct GatewayContactsResponse {
     pub ok: bool,
     pub contacts: Vec<ContactSummary>,
+}
+
+/// One line in the operator's LIVE message monitor (#1) — a single inbound turn
+/// and the L3 decision it produced. D13-safe: the SENDER is the resolved bound
+/// contact's `display_name` (or `"unknown"` for an unbound sender), NEVER the
+/// openid; `text` is a short truncated preview for the operator's household view.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayMonitorEvent {
+    #[ts(type = "number")]
+    pub seq: u64,
+    #[ts(type = "number")]
+    pub ts_ms: u64,
+    pub contact: String,
+    pub tier: String,
+    pub text: String,
+    pub allowed: bool,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target: Option<String>,
+}
+
+/// `GET /v1/gateway/admin/monitor?after=<cursor>` — the poll response. `events`
+/// are those with `seq >= after`; poll again with `after = cursor`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayMonitorResponse {
+    pub ok: bool,
+    #[ts(type = "number")]
+    pub cursor: u64,
+    pub events: Vec<GatewayMonitorEvent>,
+}
+
+/// `GET /v1/gateway/admin/history?before=<ts_ms>&limit=<n>` — the owner's DURABLE
+/// message history (#419), newest-first, backward-paginated. Same D13-safe event
+/// shape as the live monitor, but read from the append-only log so it survives
+/// restarts. Page older by re-requesting with `before = next_before_ts`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayHistoryResponse {
+    pub ok: bool,
+    pub events: Vec<GatewayMonitorEvent>,
+    /// Oldest `ts_ms` in `events` — the next `before` to page older. Absent when
+    /// the page is empty (no older turns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub next_before_ts: Option<u64>,
+}
+
+/// One CONTROL-plane action on the gateway (#419) — the operator-facing audit
+/// trail of contact management, distinct from message turns (`GatewayMonitorEvent`)
+/// and durable (append-only log, survives restarts, unlike the daemon's ephemeral
+/// in-memory audit buffer). D13-safe: `contact` is the display_name, never an openid.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayActivityEvent {
+    #[ts(type = "number")]
+    pub ts_ms: u64,
+    /// `invite` | `claim` | `bound` | `rejected` | `revoked` | `connected` | `disconnected`.
+    pub action: String,
+    /// The contact's display_name (or `—` for a gateway-level action).
+    pub contact: String,
+    /// Human-readable specifics (tier · reach count, the 6-digit code, the bot id…).
+    pub detail: String,
+    /// True when this action was ALSO anchored on-chain (operator omni armed).
+    pub on_chain: bool,
+}
+
+/// `GET /v1/gateway/admin/activity?before=<ts_ms>&limit=<n>` — the durable
+/// control-action audit trail, newest-first, backward-paginated.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayActivityResponse {
+    pub ok: bool,
+    pub events: Vec<GatewayActivityEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub next_before_ts: Option<u64>,
 }
 
 /// A normalized inbound message the gateway builds from a verified transport

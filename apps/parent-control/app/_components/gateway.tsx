@@ -18,11 +18,13 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Reac
 import { QRCodeSVG } from 'qrcode.react';
 
 import { PageHead, Panel, Modal, Dot } from './shared';
-import { gatewayClient, gatewayNotConfigured, isTerminalLoginStatus } from '@/lib/gatewayClient';
+import { gatewayClient, gatewayNotConfigured, gwlog, isTerminalLoginStatus } from '@/lib/gatewayClient';
 import type { GatewayStatusView } from '@/lib/generated/GatewayStatusView';
 import type { GatewayPendingBindView } from '@/lib/generated/GatewayPendingBindView';
 import type { ContactSummary } from '@/lib/generated/ContactSummary';
 import type { ContactTier } from '@/lib/generated/ContactTier';
+import type { GatewayMonitorEvent } from '@/lib/generated/GatewayMonitorEvent';
+import type { GatewayActivityEvent } from '@/lib/generated/GatewayActivityEvent';
 
 const TIERS: ContactTier[] = ['owner', 'partner', 'elder', 'kid', 'helper', 'guest'];
 
@@ -115,27 +117,246 @@ function Toast({ toast }: { toast: string | null }) {
   );
 }
 
-// ── Channels page (data-section="channels", hue 200) — the conduits ─────────────
+// ── Channels page (data-section="channels", hue 200) — device endpoints ─────────
+// The WeChat gateway + family contacts + message monitor moved to the Contacts
+// page (#419); Channels is now the home for DEVICE endpoints paired under actors.
 export function ChannelsPage() {
-  const { status, statusErr, notConfigured, refreshStatus } = useGatewayStatus();
-  const { toast, flash } = useToast();
   return (
     <>
       <PageHead
         crumb="household / channels"
         title="Channels"
-        desc="The conduits your agents talk through. The WeChat gateway is one household bot — connect it once with a spare account. (Devices — display, camera, mic — are channel endpoints you pair under actors.)"
-        actions={<button className="btn sm" onClick={() => void refreshStatus()}>↻ refresh</button>}
+        desc="Device endpoints — a display, camera, or mic you pair under an actor. (The WeChat gateway and family contacts now live on the Contacts page.)"
       />
-      <Toast toast={toast} />
-      <ConnectPanel status={status} statusErr={statusErr} notConfigured={notConfigured} onChange={() => void refreshStatus()} onFlash={flash} />
+      <Panel title="devices">
+        <div className="muted" style={{ fontSize: 13, lineHeight: 1.7 }}>
+          Device pairing lands here — display / camera / mic endpoints under each actor. Coming soon.
+          <br />
+          Looking for the WeChat bot or family binding? They’re on <strong>Contacts</strong>.
+        </div>
+      </Panel>
     </>
+  );
+}
+
+// ── live monitor (#1) ───────────────────────────────────────────────────────────
+// Polls /v1/master/gateway/monitor every 3 s while the bot is online, appending
+// new turns. Each row: time · sender (display_name, D13 — never the openid) ·
+// tier · text preview · the L3 decision (✓ → target, or ✕ + reason).
+function MonitorPanel({ online }: { online: boolean }) {
+  const [events, setEvents] = useState<GatewayMonitorEvent[]>([]);
+  const cursorRef = useRef(0);
+
+  useEffect(() => {
+    if (!online) return;
+    let alive = true;
+    const tick = async () => {
+      const r = await gatewayClient.monitor(cursorRef.current);
+      if (!alive || !r.ok) return;
+      cursorRef.current = r.value.cursor;
+      if (r.value.events.length) {
+        setEvents((prev) => [...prev, ...r.value.events].slice(-100));
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 3000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [online]);
+
+  const fmtTime = (ms: number) => new Date(ms).toLocaleTimeString();
+
+  return (
+    <Panel
+      title="live monitor"
+      right={<span className="muted" style={{ fontSize: 11 }}>{online ? '· polling every 3s' : '· offline'}</span>}
+    >
+      {!online ? (
+        <div className="muted" style={{ fontSize: 13 }}>Connect the bot to watch messages live.</div>
+      ) : events.length === 0 ? (
+        <div className="muted" style={{ fontSize: 13 }}>
+          No messages yet. Every inbound turn — allowed, denied, or an unknown-sender attempt — appears here as it happens.
+        </div>
+      ) : (
+        <div style={{ maxHeight: 300, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {[...events].reverse().map((e) => (
+            <div key={e.seq} style={{ fontSize: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
+              <span className="muted" style={{ fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{fmtTime(e.ts_ms)}</span>
+              <span style={{ flexShrink: 0 }}><strong>{e.contact}</strong> <span className="muted">{e.tier}</span></span>
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.text || '—'}</span>
+              <span style={{ flexShrink: 0, color: e.allowed ? 'var(--ok, #1a7f5a)' : 'var(--danger)' }}>
+                {e.allowed ? `✓ → ${e.target ?? '?'}` : `✕ ${e.reason}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+        Live tail (last 100 turns). The full durable record is below in <strong>history</strong>. Senders show as their contact name — WeChat identity is never exposed (D13).
+      </div>
+    </Panel>
+  );
+}
+
+// ── durable history (#419) ──────────────────────────────────────────────────────
+// Reads the append-only log (survives restarts, the full record + future stats
+// home). Loads the newest page on demand, "load older" pages backward by ts_ms.
+function HistoryPanel() {
+  const [events, setEvents] = useState<GatewayMonitorEvent[]>([]);
+  const [beforeTs, setBeforeTs] = useState<number | undefined>(undefined);
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const load = useCallback(async (before?: number) => {
+    setBusy(true);
+    const r = await gatewayClient.history(before, 50);
+    setBusy(false);
+    setLoaded(true);
+    if (!r.ok) return;
+    setEvents((prev) => (before ? [...prev, ...r.value.events] : r.value.events));
+    setBeforeTs(r.value.next_before_ts ?? undefined);
+    if (r.value.events.length < 50) setDone(true);
+  }, []);
+
+  const fmt = (ms: number) => new Date(ms).toLocaleString();
+
+  return (
+    <Panel
+      title="history"
+      right={
+        loaded ? (
+          <span className="muted" style={{ fontSize: 11 }}>· durable · {events.length}</span>
+        ) : (
+          <button className="btn sm" onClick={() => void load()}>load</button>
+        )
+      }
+    >
+      {!loaded ? (
+        <div className="muted" style={{ fontSize: 13 }}>
+          Every inbound turn is kept durably (survives restarts) — the owner’s full message record and the future home of message stats. Click <strong>load</strong> to view it.
+        </div>
+      ) : events.length === 0 ? (
+        <div className="muted" style={{ fontSize: 13 }}>No messages recorded yet.</div>
+      ) : (
+        <>
+          <div style={{ maxHeight: 360, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 5 }}>
+            {events.map((e) => (
+              <div key={`${e.ts_ms}-${e.seq}`} style={{ fontSize: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span className="muted" style={{ fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{fmt(e.ts_ms)}</span>
+                <span style={{ flexShrink: 0 }}><strong>{e.contact}</strong> <span className="muted">{e.tier}</span></span>
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.text || '—'}</span>
+                <span style={{ flexShrink: 0, color: e.allowed ? 'var(--ok, #1a7f5a)' : 'var(--danger)' }}>
+                  {e.allowed ? `✓ → ${e.target ?? '?'}` : `✕ ${e.reason}`}
+                </span>
+              </div>
+            ))}
+          </div>
+          {!done && (
+            <div style={{ marginTop: 8 }}>
+              <button className="btn sm" disabled={busy} onClick={() => void load(beforeTs)}>
+                {busy ? 'loading…' : 'load older'}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+// ── contact audit / activity (#419) ─────────────────────────────────────────────
+// The DURABLE control-action trail (invite/claim/bound/rejected/revoked), read
+// from the gateway's append-only log — survives daemon AND worker restarts,
+// unlike the master audit feed's in-memory buffer. `auditOff` warns when the
+// tamper-proof on-chain anchor is disarmed (operator omni unset).
+const ACTION_ICON: Record<string, string> = {
+  invite: '✎',
+  claim: '↩',
+  bound: '✓',
+  rejected: '✕',
+  revoked: '⊘',
+  connected: '⚡',
+  disconnected: '⏻',
+};
+
+function ActivityPanel({ auditOff }: { auditOff: boolean }) {
+  const [events, setEvents] = useState<GatewayActivityEvent[]>([]);
+  const [beforeTs, setBeforeTs] = useState<number | undefined>(undefined);
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const load = useCallback(async (before?: number) => {
+    setBusy(true);
+    const r = await gatewayClient.activity(before, 50);
+    setBusy(false);
+    setLoaded(true);
+    if (!r.ok) return;
+    setEvents((prev) => (before ? [...prev, ...r.value.events] : r.value.events));
+    setBeforeTs(r.value.next_before_ts ?? undefined);
+    if (r.value.events.length < 50) setDone(true);
+  }, []);
+
+  const fmt = (ms: number) => new Date(ms).toLocaleString();
+
+  return (
+    <Panel
+      title="contact audit · 活动"
+      right={
+        loaded ? (
+          <span className="muted" style={{ fontSize: 11 }}>· durable · {events.length}</span>
+        ) : (
+          <button className="btn sm" onClick={() => void load()}>load</button>
+        )
+      }
+    >
+      {auditOff && (
+        <div className="banner warn" style={{ marginBottom: 10 }}>
+          <span className="lbl">⚠</span>
+          <span>
+            On-chain audit is <strong>off</strong> — actions are recorded durably here but NOT anchored
+            on-chain. Set <code>AGENTKEYS_WEIXIN_OPERATOR_OMNI</code> on the broker + restart the gateway.
+          </span>
+        </div>
+      )}
+      {!loaded ? (
+        <div className="muted" style={{ fontSize: 13 }}>
+          Every bind / reject / revoke is kept durably (survives restarts). Click <strong>load</strong> to view the audit trail.
+        </div>
+      ) : events.length === 0 ? (
+        <div className="muted" style={{ fontSize: 13 }}>No contact actions recorded yet.</div>
+      ) : (
+        <>
+          <div style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 5 }}>
+            {events.map((e, i) => (
+              <div key={`${e.ts_ms}-${i}`} style={{ fontSize: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span className="muted" style={{ fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{fmt(e.ts_ms)}</span>
+                <span style={{ flexShrink: 0, width: 72 }}>{ACTION_ICON[e.action] ?? '·'} {e.action}</span>
+                <span style={{ flexShrink: 0 }}><strong>{e.contact}</strong></span>
+                <span className="muted" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.detail}</span>
+                <span style={{ flexShrink: 0 }} title={e.on_chain ? 'anchored on-chain' : 'local record only'}>{e.on_chain ? '⛓' : '·'}</span>
+              </div>
+            ))}
+          </div>
+          {!done && (
+            <div style={{ marginTop: 8 }}>
+              <button className="btn sm" disabled={busy} onClick={() => void load(beforeTs)}>
+                {busy ? 'loading…' : 'load older'}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </Panel>
   );
 }
 
 // ── Contacts page (data-section="contacts", hue 330) — the family ──────────────
 export function ContactsPage({ deeplinkReach }: { deeplinkReach?: string[] }) {
-  const { status, notConfigured, refreshStatus } = useGatewayStatus(false);
+  const { status, statusErr, notConfigured, refreshStatus } = useGatewayStatus(false);
   const { toast, flash } = useToast();
   const [contacts, setContacts] = useState<ContactSummary[]>([]);
   const [pending, setPending] = useState<GatewayPendingBindView[]>([]);
@@ -143,7 +364,7 @@ export function ContactsPage({ deeplinkReach }: { deeplinkReach?: string[] }) {
   const refresh = useCallback(async () => {
     const ok = await refreshStatus();
     // Gateway down / not configured → skip the dependent fetches (they'd only
-    // 503 too, spamming the console). The status card carries the reason.
+    // 503 too, spamming the console). The connect card carries the reason.
     if (!ok) {
       setContacts([]);
       setPending([]);
@@ -158,30 +379,150 @@ export function ContactsPage({ deeplinkReach }: { deeplinkReach?: string[] }) {
     void refresh();
   }, [refresh]);
 
+  // While setup is incomplete (no bound contact yet), poll so the guided
+  // stepper advances LIVE — the claim lands (step 2 → 3) without a manual
+  // refresh. Stops the moment the first contact binds.
+  const setupIncomplete = !notConfigured && contacts.length === 0;
+  useEffect(() => {
+    if (!setupIncomplete) return;
+    const id = window.setInterval(() => void refresh(), 4000);
+    return () => window.clearInterval(id);
+  }, [setupIncomplete, refresh]);
+
+  const online = !!status?.online;
   return (
     <>
       <PageHead
         crumb="household / contacts"
         title="Contacts"
-        desc="Every family member is a contact with a tier + reach (which agents they may talk to). Invite them to the WeChat bot; nothing binds without your approval, and no one’s WeChat identity is ever shown (D13)."
+        desc="Connect the household WeChat bot, then invite family members — each a contact with a tier + reach (which agents they may talk to). Nothing binds without your approval, and no one’s WeChat identity is ever shown (D13)."
         actions={<button className="btn sm" onClick={() => void refresh()}>↻ refresh</button>}
       />
       <Toast toast={toast} />
-      {notConfigured ? (
-        <div className="banner" style={{ marginBottom: 14 }}>
-          <span className="lbl">i</span>
-          <span>No WeChat gateway is set up for this daemon yet — see <strong>Channels</strong> to connect one. Family binding needs a live gateway.</span>
-        </div>
-      ) : status && !status.online ? (
-        <div className="banner warn" style={{ marginBottom: 14 }}>
-          <span className="lbl">⚠</span>
-          <span>The WeChat bot isn’t connected yet — connect it under <strong>Channels</strong> before family members can reach agents.</span>
-        </div>
-      ) : null}
-      <InvitePanel deeplinkReach={deeplinkReach} onInvited={() => void refresh()} onFlash={flash} />
+      <SetupStepper
+        online={online}
+        notConfigured={notConfigured}
+        boundCount={contacts.length}
+        claimedCount={pending.filter((p) => p.claimed).length}
+        deeplinkReach={deeplinkReach}
+        onChange={() => void refresh()}
+        onFlash={flash}
+      />
+      <ConnectPanel status={status} statusErr={statusErr} notConfigured={notConfigured} onChange={() => void refresh()} onFlash={flash} />
+      <InvitePanel deeplinkReach={deeplinkReach} online={online} onInvited={() => void refresh()} onFlash={flash} />
       <PendingPanel pending={pending} onChange={() => void refresh()} onFlash={flash} />
-      <ContactsPanel contacts={contacts} />
+      <ContactsPanel contacts={contacts} onChange={() => void refresh()} onFlash={flash} />
+      <ActivityPanel auditOff={online && status?.audit_on_chain === false} />
+      <MonitorPanel online={online} />
+      <HistoryPanel />
     </>
+  );
+}
+
+// ── guided setup (#419) ─────────────────────────────────────────────────────────
+// The two WeChat ceremonies chained into ONE operator flow. They can't literally
+// be one step — the QR logs the BOT in (the spare account, iLink requires the
+// scan) while the 6-digit code binds a MEMBER (their daily account), and the bot
+// can't message first (passive-reply-only) — but the stepper walks you straight
+// through: ① connect → ② invite yourself (one click, owner + all agents) →
+// ③ approve the claim. Hides once the first contact is bound.
+function SetupStepper({
+  online,
+  notConfigured,
+  boundCount,
+  claimedCount,
+  deeplinkReach,
+  onChange,
+  onFlash,
+}: {
+  online: boolean;
+  notConfigured: boolean;
+  boundCount: number;
+  claimedCount: number;
+  deeplinkReach?: string[];
+  onChange: () => void;
+  onFlash: (m: string) => void;
+}) {
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [minted, setMinted] = useState<{ code: string; sendText: string; name: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (notConfigured || boundCount > 0) return null;
+
+  const step = !online ? 1 : claimedCount > 0 ? 3 : 2;
+
+  const inviteSelf = async () => {
+    setBusy(true);
+    // Fixed contact_id: re-clicking replaces the open self-invite instead of
+    // littering the registry with stale codes.
+    const r = await gatewayClient.bindInvite({
+      contact_id: 'self-owner',
+      display_name: '我自己',
+      tier: 'owner',
+      reach: deeplinkReach ?? [],
+    });
+    setBusy(false);
+    if (!r.ok) {
+      onFlash(`Self-invite failed — ${reason(r)}`);
+      return;
+    }
+    setMinted({ code: r.value.bind_code, sendText: r.value.send_text, name: '我自己' });
+    onChange();
+  };
+
+  const stepStyle = (n: number): CSSProperties => ({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    opacity: n === step ? 1 : 0.55,
+    fontWeight: n === step ? 600 : 400,
+  });
+  const mark = (n: number) => (n < step ? '✓' : `${n}`);
+
+  return (
+    <Panel title="快速设置 · guided setup">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
+        <div style={stepStyle(1)}>
+          <span className={step > 1 ? '' : 'muted'}>{mark(1)}</span>
+          <span>Connect the bot — scan the QR with the <strong>spare</strong> WeChat account (it becomes the bot).</span>
+          {step === 1 && (
+            <button className="btn primary sm" onClick={() => setConnectOpen(true)}>⊕ connect</button>
+          )}
+        </div>
+        <div style={stepStyle(2)}>
+          <span className={step > 2 ? '' : 'muted'}>{mark(2)}</span>
+          <span>Bind yourself — text the 6-digit code to the bot from your <strong>daily</strong> WeChat.</span>
+          {step === 2 && (
+            <button className="btn primary sm" disabled={busy} onClick={() => void inviteSelf()}>
+              {busy ? 'minting…' : '⊕ invite myself (owner · all agents)'}
+            </button>
+          )}
+        </div>
+        <div style={stepStyle(3)}>
+          <span className="muted">{mark(3)}</span>
+          <span>Approve the claim below (待确认) — then you’re bound and every message shows your name.</span>
+          {step === 3 && <span style={{ color: 'var(--accent)' }}>↓ approve below</span>}
+        </div>
+      </div>
+      {connectOpen && (
+        <ConnectModal
+          onClose={() => setConnectOpen(false)}
+          onConnected={(botId) => {
+            setConnectOpen(false);
+            onChange();
+            onFlash(`Bot connected · ${botId} — now bind yourself (step 2)`);
+          }}
+        />
+      )}
+      {minted && (
+        <InviteModal
+          name={minted.name}
+          code={minted.code}
+          sendText={minted.sendText}
+          onClose={() => setMinted(null)}
+          onCopied={() => onFlash('Code copied — text it to the bot from your daily WeChat')}
+        />
+      )}
+    </Panel>
   );
 }
 
@@ -251,14 +592,28 @@ function ConnectButton({
   onFlash: (m: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   if (transport === 'oa') {
     return <span className="muted" style={{ fontSize: 12 }}>公众号 transport — configured via the WeChat console, no QR connect.</span>;
   }
+  const disconnect = async () => {
+    if (!window.confirm('Disconnect the WeChat bot? It goes offline and you’ll scan a fresh QR to reconnect.')) return;
+    setDisconnecting(true);
+    const r = await gatewayClient.disconnect();
+    setDisconnecting(false);
+    onChange();
+    onFlash(r.ok ? 'Bot disconnected — connect again for a clean QR' : `Disconnect failed: ${reason(r)}`);
+  };
   return (
-    <>
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
       <button className="btn primary" onClick={() => setOpen(true)}>
         {online ? '↻ reconnect' : '⊕ connect bot'}
       </button>
+      {online && (
+        <button className="btn" disabled={disconnecting} onClick={() => void disconnect()}>
+          {disconnecting ? '…' : '⏻ disconnect'}
+        </button>
+      )}
       {open && (
         <ConnectModal
           onClose={() => setOpen(false)}
@@ -269,7 +624,7 @@ function ConnectButton({
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 
@@ -277,30 +632,62 @@ type LoginPhase =
   | { kind: 'starting' }
   | { kind: 'scan'; loginId: string; qr: string }
   | { kind: 'verify'; loginId: string; qr: string; detail: string }
+  | { kind: 'done'; message: string }
   | { kind: 'error'; message: string };
 
 function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnected: (botId: string) => void }) {
   const [phase, setPhase] = useState<LoginPhase>({ kind: 'starting' });
   const [code, setCode] = useState('');
-  const cancelled = useRef(false);
+  // A per-run token, NOT a shared bool. React StrictMode (dev) double-mounts the
+  // effect (mount → cleanup → mount), and rapid re-clicks re-run start(); a
+  // shared `cancelled` ref gets reset by the second run, so the FIRST login's
+  // poll keeps going against a login_id the server already replaced → 404
+  // no_active_login rendered as a spurious "session expired". Each start() bumps
+  // runIdRef; a poll acts only while its captured runId is still current.
+  const runIdRef = useRef(0);
 
   // Drive the whole ceremony: start → loop login/status → (verify) → connected.
-  const runPoll = useCallback(async (loginId: string, qr: string) => {
+  const runPoll = useCallback(async (runId: number, loginId: string, qr: string) => {
+    let transientStreak = 0;
     for (;;) {
-      if (cancelled.current) return;
+      if (runId !== runIdRef.current) return; // superseded by a newer start()
       const s = await gatewayClient.loginStatus(loginId);
-      if (cancelled.current) return;
+      if (runId !== runIdRef.current) return;
       if (!s.ok) {
+        // 5xx/504 or a network blip (status 0) is TRANSIENT: the ~35 s
+        // server-held long-poll can be cut short by a proxy read-timeout or a
+        // brief daemon/worker restart. Keep polling — only a real 4xx (e.g. 404
+        // no_active_login = login truly expired) is terminal. Bound the streak so
+        // a persistent proxy problem surfaces a message instead of hanging.
+        if (s.status >= 500 || s.status === 0) {
+          if (++transientStreak >= 6) {
+            setPhase({ kind: 'error', message: `网关反复超时（HTTP ${s.status}）— 请稍后重试或检查 weixin 网关代理超时` });
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
         setPhase({ kind: 'error', message: reason(s) });
         return;
       }
+      transientStreak = 0;
       const st = s.value;
+      gwlog('login/status', loginId, '→', st.status, st.detail ?? '');
       if (st.status === 'need_verifycode') {
         setPhase({ kind: 'verify', loginId, qr, detail: st.detail ?? '输入手机上显示的数字' });
         return; // wait for the operator to submit the code (submitVerify resumes)
       }
       if (st.status === 'connected') {
         onConnected(st.bot_id ?? 'bot');
+        return;
+      }
+      // `already_bound` = a re-scan of an account already connected to THIS
+      // gateway: the existing token is reused (nothing changed) and the phone's
+      // authorize page is just leftover — you can close it. This is the common
+      // "web says online but my phone still shows the connect page" case; show it
+      // as a benign outcome, never the red error the other terminal statuses get.
+      if (st.status === 'already_bound') {
+        setPhase({ kind: 'done', message: st.detail ?? '该账号已连接，沿用现有 token。手机上的授权页可直接关闭。' });
         return;
       }
       if (isTerminalLoginStatus(st.status)) {
@@ -312,24 +699,38 @@ function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnect
   }, [onConnected]);
 
   const start = useCallback(async () => {
+    const runId = ++runIdRef.current; // supersede any in-flight run
     setPhase({ kind: 'starting' });
     const r = await gatewayClient.loginStart();
-    if (cancelled.current) return;
+    if (runId !== runIdRef.current) return;
     if (!r.ok) {
       setPhase({ kind: 'error', message: reason(r) });
       return;
     }
     setPhase({ kind: 'scan', loginId: r.value.login_id, qr: r.value.qrcode_url });
-    void runPoll(r.value.login_id, r.value.qrcode_url);
+    void runPoll(runId, r.value.login_id, r.value.qrcode_url);
   }, [runPoll]);
 
+  // Run the ceremony ONCE per modal open. `start` is kept in a ref so this
+  // effect is MOUNT-ONLY: ancestor re-renders (a status refresh re-renders
+  // ChannelsPage → ConnectPanel → ConnectButton, handing ConnectModal fresh
+  // inline callbacks → a new `start` identity) would, under a `[start]` dep,
+  // RE-RUN the whole ceremony each time — minting a fresh login/start + QR and
+  // spawning COMPETING iLink login sessions on the server. That's what made the
+  // phone flash "connected" then revert to the QR page: it authorized one
+  // session while others dangled. The setTimeout makes it StrictMode-safe — the
+  // dev double-mount's first timer is cleared by its cleanup before it fires, so
+  // exactly one login/start goes out.
+  const startRef = useRef(start);
+  startRef.current = start;
   useEffect(() => {
-    cancelled.current = false;
-    void start();
+    const t = setTimeout(() => void startRef.current(), 0);
     return () => {
-      cancelled.current = true;
+      clearTimeout(t);
+      runIdRef.current++; // invalidate any in-flight run on unmount
     };
-  }, [start]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submitVerify = async (loginId: string, qr: string) => {
     const v = await gatewayClient.loginVerify(loginId, code.trim());
@@ -339,7 +740,7 @@ function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnect
       return;
     }
     setPhase({ kind: 'scan', loginId, qr });
-    void runPoll(loginId, qr);
+    void runPoll(runIdRef.current, loginId, qr);
   };
 
   return (
@@ -377,6 +778,13 @@ function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnect
           </div>
         )}
 
+        {phase.kind === 'done' && (
+          <>
+            <div className="muted" style={{ color: 'var(--ok, #1a7f5a)', lineHeight: 1.6 }}>✓ {phase.message}</div>
+            <button className="btn" onClick={onClose}>close</button>
+          </>
+        )}
+
         {phase.kind === 'error' && (
           <>
             <div className="muted" style={{ color: 'var(--danger)', lineHeight: 1.6 }}>⚠ {phase.message}</div>
@@ -390,28 +798,56 @@ function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnect
 
 // ── invite ──────────────────────────────────────────────────────────────────
 
+// A toggle chip (reach selector). Selected = filled accent; unselected = outline.
+const CHIP = (on: boolean): CSSProperties => ({
+  padding: '4px 11px',
+  borderRadius: 999,
+  fontSize: 12,
+  cursor: 'pointer',
+  border: `1px solid ${on ? 'var(--accent, #1a7f5a)' : 'var(--border, #d8d8cf)'}`,
+  background: on ? 'var(--accent, #1a7f5a)' : 'transparent',
+  color: on ? '#fff' : 'inherit',
+});
+
 function InvitePanel({
   deeplinkReach,
+  online,
   onInvited,
   onFlash,
 }: {
   deeplinkReach?: string[];
+  online: boolean;
   onInvited: () => void;
   onFlash: (m: string) => void;
 }) {
+  const options = deeplinkReach ?? [];
   const [displayName, setDisplayName] = useState('');
   const [tier, setTier] = useState<ContactTier>('kid');
+  const [reach, setReach] = useState<Set<string>>(new Set());
   const [reachText, setReachText] = useState('');
   const [busy, setBusy] = useState(false);
   const [minted, setMinted] = useState<{ code: string; sendText: string; name: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const allSelected = options.length > 0 && options.every((a) => reach.has(a));
+  const toggle = (a: string) =>
+    setReach((prev) => {
+      const n = new Set(prev);
+      if (n.has(a)) n.delete(a);
+      else n.add(a);
+      return n;
+    });
+  const toggleAll = () => setReach(allSelected ? new Set() : new Set(options));
+
   const submit = async () => {
     setErr(null);
     setBusy(true);
-    const reach = reachText.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+    const reachList =
+      options.length > 0
+        ? Array.from(reach)
+        : reachText.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
     const contactId = `${displayName.trim().toLowerCase().replace(/\s+/g, '-')}-${Math.random().toString(36).slice(2, 6)}`;
-    const r = await gatewayClient.bindInvite({ contact_id: contactId, display_name: displayName.trim(), tier, reach });
+    const r = await gatewayClient.bindInvite({ contact_id: contactId, display_name: displayName.trim(), tier, reach: reachList });
     setBusy(false);
     if (!r.ok) {
       setErr(reason(r));
@@ -419,6 +855,7 @@ function InvitePanel({
     }
     setMinted({ code: r.value.bind_code, sendText: r.value.send_text, name: displayName.trim() });
     setDisplayName('');
+    setReach(new Set());
     setReachText('');
     onInvited();
   };
@@ -434,17 +871,26 @@ function InvitePanel({
             {TIERS.map((t) => <option key={t} value={t}>{t} · {tierLabel(t)}</option>)}
           </select>
         </Field>
-        <Field label={<>reach <span className="muted">(agent aliases, comma-separated)</span></>}>
-          <input style={INPUT_STYLE} placeholder="chef, storyteller" value={reachText} onChange={(e) => setReachText(e.target.value)} list="gw-reach" />
-          {deeplinkReach && deeplinkReach.length > 0 && (
-            <datalist id="gw-reach">{deeplinkReach.map((a) => <option key={a} value={a} />)}</datalist>
+        <Field label={<>reach <span className="muted">(which agents they may talk to)</span></>}>
+          {options.length > 0 ? (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              <button type="button" onClick={toggleAll} style={CHIP(allSelected)}>{allSelected ? '✓ all' : 'all'}</button>
+              {options.map((a) => (
+                <button type="button" key={a} onClick={() => toggle(a)} style={CHIP(reach.has(a))}>
+                  {reach.has(a) ? '✓ ' : ''}{a}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <input style={INPUT_STYLE} placeholder="chef, storyteller" value={reachText} onChange={(e) => setReachText(e.target.value)} />
           )}
         </Field>
         {err && <div className="muted" style={{ color: 'var(--danger)' }}>⚠ {err}</div>}
         <div>
-          <button className="btn primary" disabled={busy || !displayName.trim()} onClick={() => void submit()}>
+          <button className="btn primary" disabled={busy || !displayName.trim() || !online} onClick={() => void submit()}>
             {busy ? 'minting…' : '⊕ mint invite'}
           </button>
+          {!online && <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>connect the bot first</span>}
         </div>
       </div>
 
@@ -454,7 +900,7 @@ function InvitePanel({
           code={minted.code}
           sendText={minted.sendText}
           onClose={() => setMinted(null)}
-          onCopied={() => onFlash('Invite text copied — share it with the family member')}
+          onCopied={() => onFlash('Invite copied — share it with the family member')}
         />
       )}
     </Panel>
@@ -477,14 +923,10 @@ function InviteModal({
   return (
     <Modal title={`Invite for ${name}`} onClose={onClose}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center', textAlign: 'center' }}>
-        <div style={{ background: '#fff', padding: 14, borderRadius: 10 }}>
-          <QRCodeSVG value={sendText} size={200} includeMargin />
+        <div style={{ fontSize: 13, lineHeight: 1.7, maxWidth: 360 }}>
+          Ask <strong>{name}</strong> to send this 6-digit code to the bot from their own WeChat:
         </div>
-        <div style={{ fontSize: 13, lineHeight: 1.7, maxWidth: 340 }}>
-          Ask <strong>{name}</strong> to send this to the bot from their own WeChat (scan the QR, or copy the text). One-time code:
-          <div style={{ fontFamily: 'var(--mono, monospace)', fontSize: 18, letterSpacing: '0.06em', margin: '8px 0' }}>{sendText}</div>
-          Once they send it, it appears below in <strong>待确认</strong> for your approval.
-        </div>
+        <div style={{ fontFamily: 'var(--mono, monospace)', fontSize: 40, fontWeight: 700, letterSpacing: '0.16em' }}>{code}</div>
         <button
           className="btn"
           onClick={() => {
@@ -492,9 +934,11 @@ function InviteModal({
             onCopied();
           }}
         >
-          ⧉ copy text
+          ⧉ copy “{sendText}”
         </button>
-        <div className="muted" style={{ fontSize: 11 }}>code: {code}</div>
+        <div className="muted" style={{ fontSize: 12, lineHeight: 1.6, maxWidth: 360 }}>
+          Once they text it, it appears below in <strong>待确认 · awaiting approval</strong> for you to confirm. One-time &amp; expiring.
+        </div>
       </div>
     </Modal>
   );
@@ -524,9 +968,12 @@ function PendingPanel({
         <div style={{ display: 'grid', gap: 8 }}>
           {claimed.map((p) => <PendingRow key={p.bind_code} p={p} onChange={onChange} onFlash={onFlash} />)}
           {open.map((p) => (
-            <div key={p.bind_code} className="row" style={{ opacity: 0.6, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 4px' }}>
+            <div key={p.bind_code} className="row" style={{ opacity: 0.6, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '8px 4px' }}>
               <span>{p.display_name} · <span className="muted">{p.tier}</span></span>
-              <span className="muted" style={{ fontSize: 12 }}>waiting for {p.display_name} to send <code>{`绑定 ${p.bind_code}`}</code></span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="muted" style={{ fontSize: 12 }}>waiting for {p.display_name} to send <code>{`绑定 ${p.bind_code}`}</code></span>
+                <RejectButton bindCode={p.bind_code} name={p.display_name} onChange={onChange} onFlash={onFlash} />
+              </span>
             </div>
           ))}
         </div>
@@ -557,14 +1004,58 @@ function PendingRow({ p, onChange, onFlash }: { p: GatewayPendingBindView; onCha
         <div className="muted" style={{ fontSize: 12 }}>reach: {p.reach.length ? p.reach.join(', ') : '—'}</div>
         {err && <div className="muted" style={{ color: 'var(--danger)', fontSize: 12 }}>⚠ {err}</div>}
       </div>
-      <button className="btn primary sm" disabled={busy} onClick={() => void approve()}>{busy ? 'approving…' : '✓ approve'}</button>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <RejectButton bindCode={p.bind_code} name={p.display_name} onChange={onChange} onFlash={onFlash} />
+        <button className="btn primary sm" disabled={busy} onClick={() => void approve()}>{busy ? 'approving…' : '✓ approve'}</button>
+      </span>
     </div>
+  );
+}
+
+// Withdraw an invite (open or claimed) — the code dies immediately; a claimed
+// sender gets unknown-sender silence from then on. Low-stakes (re-invite is one
+// click), so no confirm dialog.
+function RejectButton({
+  bindCode,
+  name,
+  onChange,
+  onFlash,
+}: {
+  bindCode: string;
+  name: string;
+  onChange: () => void;
+  onFlash: (m: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const remove = async () => {
+    setBusy(true);
+    const r = await gatewayClient.bindReject(bindCode);
+    setBusy(false);
+    if (!r.ok) {
+      onFlash(`Remove failed — ${reason(r)}`);
+      return;
+    }
+    onFlash(`Invite for ${name} withdrawn`);
+    onChange();
+  };
+  return (
+    <button className="btn sm" disabled={busy} title="withdraw this invite" onClick={() => void remove()}>
+      {busy ? '…' : '✕ remove'}
+    </button>
   );
 }
 
 // ── contacts ──────────────────────────────────────────────────────────────────
 
-function ContactsPanel({ contacts }: { contacts: ContactSummary[] }) {
+function ContactsPanel({
+  contacts,
+  onChange,
+  onFlash,
+}: {
+  contacts: ContactSummary[];
+  onChange: () => void;
+  onFlash: (m: string) => void;
+}) {
   return (
     <Panel title="family" right={<span className="count">{contacts.length}</span>}>
       {contacts.length === 0 ? (
@@ -572,15 +1063,16 @@ function ContactsPanel({ contacts }: { contacts: ContactSummary[] }) {
       ) : (
         <table className="tab" style={{ width: '100%' }}>
           <thead>
-            <tr><th style={{ textAlign: 'left' }}>name</th><th style={{ textAlign: 'left' }}>tier</th><th style={{ textAlign: 'left' }}>reach</th></tr>
+            <tr>
+              <th style={{ textAlign: 'left' }}>name</th>
+              <th style={{ textAlign: 'left' }}>tier</th>
+              <th style={{ textAlign: 'left' }}>reach</th>
+              <th />
+            </tr>
           </thead>
           <tbody>
             {contacts.map((c) => (
-              <tr key={c.contact_id}>
-                <td>{c.display_name}</td>
-                <td>{c.tier} · <span className="muted">{tierLabel(c.tier)}</span></td>
-                <td className="muted">{c.reach.length ? c.reach.join(', ') : '—'}</td>
-              </tr>
+              <ContactRow key={c.contact_id} contact={c} onChange={onChange} onFlash={onFlash} />
             ))}
           </tbody>
         </table>
@@ -589,5 +1081,99 @@ function ContactsPanel({ contacts }: { contacts: ContactSummary[] }) {
         Contacts have no chat history here (and their WeChat identity is never shown) — D13: you have full visibility in the audit feed, they have none in-chat.
       </div>
     </Panel>
+  );
+}
+
+// One contact row — read-only until you hit `edit`, then a tier picker + reach
+// editor (comma/space separated) that POSTs the new routing policy; `revoke`
+// unbinds. Both refresh the list on success.
+function ContactRow({
+  contact,
+  onChange,
+  onFlash,
+}: {
+  contact: ContactSummary;
+  onChange: () => void;
+  onFlash: (m: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [tier, setTier] = useState<ContactTier>(contact.tier);
+  const [reachText, setReachText] = useState(contact.reach.join(', '));
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    const reach = reachText.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+    const r = await gatewayClient.contactsUpdate({ contact_id: contact.contact_id, tier, reach });
+    setBusy(false);
+    if (r.ok) {
+      setEditing(false);
+      onChange();
+      onFlash(`Updated ${contact.display_name}`);
+    } else {
+      onFlash(`Update failed: ${reason(r)}`);
+    }
+  };
+
+  const revoke = async () => {
+    if (!window.confirm(`Unbind ${contact.display_name}? They can no longer reach any agent through the bot.`)) return;
+    setBusy(true);
+    const r = await gatewayClient.contactsRevoke(contact.contact_id);
+    setBusy(false);
+    if (r.ok) {
+      onChange();
+      onFlash(`Revoked ${contact.display_name}`);
+    } else {
+      onFlash(`Revoke failed: ${reason(r)}`);
+    }
+  };
+
+  if (editing) {
+    return (
+      <tr>
+        <td>{contact.display_name}</td>
+        <td>
+          <select value={tier} onChange={(e) => setTier(e.target.value as ContactTier)} style={INPUT_STYLE}>
+            {TIERS.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+        </td>
+        <td>
+          <input
+            value={reachText}
+            onChange={(e) => setReachText(e.target.value)}
+            placeholder="chef, storyteller"
+            style={{ ...INPUT_STYLE, width: '100%' }}
+          />
+        </td>
+        <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
+          <button className="btn sm" disabled={busy} onClick={() => void save()}>save</button>{' '}
+          <button
+            className="btn sm"
+            disabled={busy}
+            onClick={() => {
+              setEditing(false);
+              setTier(contact.tier);
+              setReachText(contact.reach.join(', '));
+            }}
+          >
+            cancel
+          </button>
+        </td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr>
+      <td>{contact.display_name}</td>
+      <td>{contact.tier} · <span className="muted">{tierLabel(contact.tier)}</span></td>
+      <td className="muted">{contact.reach.length ? contact.reach.join(', ') : '—'}</td>
+      <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
+        <button className="btn sm" disabled={busy} onClick={() => setEditing(true)}>edit</button>{' '}
+        <button className="btn sm" disabled={busy} onClick={() => void revoke()} style={{ color: 'var(--danger)' }}>revoke</button>
+      </td>
+    </tr>
   );
 }

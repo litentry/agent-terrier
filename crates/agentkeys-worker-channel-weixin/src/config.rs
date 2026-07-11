@@ -14,6 +14,10 @@ const DEFAULT_OPERATOR_GRADE_ALIASES: &str = "spend,usage,stats,cost,audit,billi
 /// (override with `AGENTKEYS_WEIXIN_ILINK_STATE_FILE`; the systemd unit's
 /// state dir is writable by the service user).
 const DEFAULT_ILINK_STATE_FILE: &str = "/var/lib/agentkeys/weixin-ilink-state.json";
+/// Durable message-history log — the writable state dir (append-only, #419).
+const DEFAULT_HISTORY_FILE: &str = "/var/lib/agentkeys/weixin-history.jsonl";
+/// Durable control-action audit log — the writable state dir (#419).
+const DEFAULT_ACTIVITY_FILE: &str = "/var/lib/agentkeys/weixin-activity.jsonl";
 
 /// Which WeChat transport this gateway instance drives. ONE gateway process =
 /// ONE transport; the relay core (L3/registry/router/audit) is shared.
@@ -85,6 +89,16 @@ pub struct WeixinGatewayConfig {
     /// Path to the master-authored contact registry JSON (`policy`-class doc,
     /// §14.5). Gateway-READ only; the master writes it (parent-control / CLI).
     pub registry_file: String,
+    /// Append-only JSONL log of EVERY inbound turn — the owner's durable,
+    /// restart-surviving message history + the future stats source (#419).
+    /// `AGENTKEYS_WEIXIN_HISTORY_FILE`, default under the writable state dir.
+    /// Empty disables durable history (the live ring still works).
+    pub history_file: String,
+    /// Append-only JSONL log of every CONTROL action (invite / claim / bound /
+    /// rejected / revoked / connect) — the operator's durable contact-audit
+    /// trail (#419), surfaced in parent-control. `AGENTKEYS_WEIXIN_ACTIVITY_FILE`,
+    /// default under the writable state dir; empty disables it.
+    pub activity_file: String,
     /// The channel-worker base URL the gateway relays inbound turns into (the
     /// operator-owned household feed). `None` = decision-only mode (the mock e2e
     /// asserts the routed event without a live feed).
@@ -181,6 +195,16 @@ impl WeixinGatewayConfig {
             .unwrap_or_else(|| crate::ilink::ILINK_BOOTSTRAP_BASE_URL.to_string());
         let ilink_state_file = std::env::var("AGENTKEYS_WEIXIN_ILINK_STATE_FILE")
             .unwrap_or_else(|_| DEFAULT_ILINK_STATE_FILE.to_string());
+        let history_file = std::env::var("AGENTKEYS_WEIXIN_HISTORY_FILE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_HISTORY_FILE.to_string());
+        let activity_file = std::env::var("AGENTKEYS_WEIXIN_ACTIVITY_FILE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_ACTIVITY_FILE.to_string());
         let secrets_file = std::env::var("AGENTKEYS_WEIXIN_SECRETS_FILE")
             .ok()
             .map(|s| s.trim().to_string())
@@ -284,6 +308,8 @@ impl WeixinGatewayConfig {
             ilink_bot_token,
             ilink_base_url,
             ilink_state_file,
+            history_file,
+            activity_file,
             secrets_file,
             ilink_bootstrap_url,
             bot_agent,

@@ -99,6 +99,25 @@ pub async fn process_inbound(
 
     emit_relay_audit(state, &inbound, &decision, &contact_id, &tier).await;
 
+    // Live monitor (#1): record this turn for the operator's poll feed. D13-safe
+    // — the resolved bound display_name (or "unknown"), NEVER the openid.
+    let sender_name = contact
+        .map(|c| c.display_name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let preview: String = raw_text.chars().take(80).collect();
+    state.push_monitor_event(
+        sender_name,
+        if tier.is_empty() {
+            "—".to_string()
+        } else {
+            tier.clone()
+        },
+        preview,
+        decision.allowed,
+        decision.reason.clone(),
+        decision.target_alias.clone(),
+    );
+
     RelayOutcome {
         inbound,
         decision,

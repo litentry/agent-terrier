@@ -278,6 +278,26 @@ pub fn write_secrets_file(path: &Path, outcome: &LoginOutcome) -> anyhow::Result
     Ok(rebound)
 }
 
+/// Blank the persisted iLink token (operator DISCONNECT) so a restart stays
+/// OFFLINE until the next login. In-place rewrite that keeps every non-managed
+/// line (admin token, operator omni, OA creds, comments) — only the managed
+/// `BOT_TOKEN`/`BASE_URL` are emptied. `config::secret_from_env` treats an empty
+/// token as UNSET, so the next boot idles instead of long-polling with a dead
+/// token. No-op if the file doesn't exist.
+pub fn clear_secrets_file(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let cleared = LoginOutcome {
+        bot_token: String::new(),
+        base_url: String::new(),
+        bot_id: String::new(),
+        scanned_by: String::new(),
+    };
+    write_secrets_file(path, &cleared)?;
+    Ok(())
+}
+
 fn set_0600(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
