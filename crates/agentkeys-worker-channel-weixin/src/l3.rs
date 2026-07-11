@@ -142,6 +142,8 @@ mod tests {
             ilink_bot_token: None,
             ilink_base_url: crate::ilink::ILINK_BOOTSTRAP_BASE_URL.into(),
             ilink_state_file: "/dev/null".into(),
+            history_file: String::new(),
+            activity_file: String::new(),
             secrets_file: "/dev/null".into(),
             ilink_bootstrap_url: crate::ilink::ILINK_BOOTSTRAP_BASE_URL.into(),
             bot_agent: "AgentKeys/test".into(),

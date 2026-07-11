@@ -81,6 +81,10 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/master/gateway/bind/pending	same gateway-admin forward
 /v1/master/gateway/bind/approve	same gateway-admin forward
 /v1/master/gateway/contacts	same gateway-admin forward (worker route /v1/gateway/contacts also asserted by channel demo step 14)
+/v1/master/gateway/bind/reject	same gateway-admin forward — withdraw-invite ceremony proven headlessly by gateway_flow::bind_reject
+/v1/master/gateway/monitor	same gateway-admin forward — live message monitor; behavior proven by the crate's gateway_flow tests; live daemon-side coverage needs a deployed gateway + admin token (same as gateway/status)
+/v1/master/gateway/history	same gateway-admin forward — durable message history; append/read proven by gateway_flow::durable_history; same deployed-gateway limitation
+/v1/master/gateway/activity	same gateway-admin forward — durable contact-audit trail; append/read proven by gateway_flow::durable_activity; same deployed-gateway limitation
 EOF
 
 # ── 1. extract served routes ────────────────────────────────────────────────

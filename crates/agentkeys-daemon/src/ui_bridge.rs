@@ -928,6 +928,9 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         // gateway's admin surface through the daemon; the admin bearer is
         // injected server-side, never in the browser):
         .route("/v1/master/gateway/status", get(gateway_status_proxy))
+        .route("/v1/master/gateway/monitor", get(gateway_monitor_proxy))
+        .route("/v1/master/gateway/history", get(gateway_history_proxy))
+        .route("/v1/master/gateway/activity", get(gateway_activity_proxy))
         .route(
             "/v1/master/gateway/login/start",
             post(gateway_login_start_proxy),
@@ -941,6 +944,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             post(gateway_login_verify_proxy),
         )
         .route(
+            "/v1/master/gateway/login/disconnect",
+            post(gateway_login_disconnect_proxy),
+        )
+        .route(
             "/v1/master/gateway/bind/invite",
             post(gateway_bind_invite_proxy),
         )
@@ -952,7 +959,19 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             "/v1/master/gateway/bind/approve",
             post(gateway_bind_approve_proxy),
         )
+        .route(
+            "/v1/master/gateway/bind/reject",
+            post(gateway_bind_reject_proxy),
+        )
         .route("/v1/master/gateway/contacts", get(gateway_contacts_proxy))
+        .route(
+            "/v1/master/gateway/contacts/update",
+            post(gateway_contacts_update_proxy),
+        )
+        .route(
+            "/v1/master/gateway/contacts/revoke",
+            post(gateway_contacts_revoke_proxy),
+        )
         .route("/v1/revoke/build", post(revoke_build_proxy))
         .route("/v1/revoke/submit", post(revoke_submit_proxy))
         .route("/v1/dev/seed", post(dev_seed))
@@ -967,6 +986,46 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 // Runtime-config constructor: the params ARE the daemon's config surface (RP +
 // broker/signer + chain + W3 memory). Bundling into a config struct is deferred
 // (W2 adds more chain config here); clippy's documented escape for constructors.
+/// Derive a co-located worker's public URL from the broker URL, mirroring the
+/// operator scripts' `derive_companion` (setup-broker-host.sh) + the env files'
+/// `<worker><suffix>.<zone>` convention — so the daemon reasons the gateway (and
+/// any co-located worker) from the broker it already points at, instead of a
+/// hardcoded per-stack env var. Returns `None` when the broker host isn't a
+/// recognized `broker*.<zone>` public host (e.g. a bare IP / localhost for a
+/// dev broker); the worker is then simply unreachable and the caller treats it
+/// as not-configured.
+///
+/// Stack → suffix (from the broker host's first DNS label):
+/// - `broker.<zone>`        → `""`        (prod)
+/// - `test-broker.<zone>`   → `"-test"`   (#265 slot 1 — grandfathered `test-` prefix)
+/// - `broker-test-2.<zone>` → `"-test-2"` (test-fleet slot N)
+/// - `broker-base.<zone>`   → `"-base"`   (#282 Base stack)
+fn derive_worker_url(broker_url: &str, worker: &str) -> Option<String> {
+    let host = broker_url
+        .rsplit("://")
+        .next()
+        .unwrap_or(broker_url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    let (first, zone) = host.split_once('.')?;
+    if zone.is_empty() {
+        return None;
+    }
+    let suffix = match first {
+        "broker" => String::new(),
+        "test-broker" => "-test".to_string(),
+        other => match other.strip_prefix("broker-") {
+            Some(rest) if !rest.is_empty() => format!("-{rest}"),
+            _ => return None,
+        },
+    };
+    Some(format!("https://{worker}{suffix}.{zone}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_state(
     rp_id: &str,
@@ -1030,13 +1089,21 @@ pub fn build_state(
         chain_profile.rpc.http = rpc;
     }
     // #418 — the WeChat gateway admin proxy coordinates (env-sourced like
-    // AGENTKEYS_STACKS_JSON above). The admin token is a SECRET the operator
-    // copies from the broker's weixin-secrets.env into the daemon's local env;
-    // the daemon injects it server-side — the browser never sees it.
+    // AGENTKEYS_STACKS_JSON above). The URL is DERIVED from the broker URL
+    // (`weixin<stack-suffix>.<zone>`, mirroring the operator scripts'
+    // `derive_companion`) so the operator never hardcodes a per-stack worker URL
+    // — an explicit `AGENTKEYS_WORKER_WEIXIN_URL` still overrides. The admin
+    // token is a SECRET the operator retrieves from the broker's
+    // weixin-secrets.env; the daemon injects it server-side (never the browser).
     let weixin_gateway_url = std::env::var("AGENTKEYS_WORKER_WEIXIN_URL")
         .ok()
         .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            broker_url
+                .as_deref()
+                .and_then(|b| derive_worker_url(b, "weixin"))
+        });
     let weixin_admin_token = std::env::var("AGENTKEYS_WEIXIN_ADMIN_TOKEN")
         .ok()
         .map(|s| s.trim().to_string())
@@ -5322,7 +5389,8 @@ async fn forward_to_gateway(
     let Some(gw) = state.weixin_gateway_url.clone() else {
         return pairing_err(
             StatusCode::SERVICE_UNAVAILABLE,
-            "gateway-not-configured — set AGENTKEYS_WORKER_WEIXIN_URL",
+            "gateway-not-configured — the daemon derives the gateway URL from its broker \
+             (weixin.<zone>); point it at a deployed broker, or set AGENTKEYS_WORKER_WEIXIN_URL",
         );
     };
     let Some(admin) = state.weixin_admin_token.clone() else {
@@ -5401,6 +5469,48 @@ async fn gateway_login_status_proxy(
     .await
 }
 
+async fn gateway_monitor_proxy(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/monitor",
+        q.as_deref(),
+        None,
+    )
+    .await
+}
+
+async fn gateway_history_proxy(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/history",
+        q.as_deref(),
+        None,
+    )
+    .await
+}
+
+async fn gateway_activity_proxy(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/activity",
+        q.as_deref(),
+        None,
+    )
+    .await
+}
+
 async fn gateway_login_verify_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
@@ -5411,6 +5521,19 @@ async fn gateway_login_verify_proxy(
         "/v1/gateway/admin/login/verify",
         None,
         Some(body),
+    )
+    .await
+}
+
+async fn gateway_login_disconnect_proxy(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/login/disconnect",
+        None,
+        None,
     )
     .await
 }
@@ -5442,6 +5565,20 @@ async fn gateway_bind_pending_proxy(
     .await
 }
 
+async fn gateway_bind_reject_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/bind/reject",
+        None,
+        Some(body),
+    )
+    .await
+}
+
 async fn gateway_bind_approve_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
@@ -5465,6 +5602,34 @@ async fn gateway_contacts_proxy(
         "/v1/gateway/admin/contacts",
         None,
         None,
+    )
+    .await
+}
+
+async fn gateway_contacts_update_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/contacts/update",
+        None,
+        Some(body),
+    )
+    .await
+}
+
+async fn gateway_contacts_revoke_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/contacts/revoke",
+        None,
+        Some(body),
     )
     .await
 }
@@ -8548,6 +8713,54 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derive_worker_url_reasons_the_gateway_per_stack() {
+        // The four operator stacks — mirrors the env files' `weixin<suffix>.<zone>`
+        // (scripts/operator-workstation*.env) so the daemon reasons the URL from
+        // the broker instead of a hardcoded per-stack env var.
+        let cases = [
+            ("https://broker.litentry.org", "https://weixin.litentry.org"),
+            (
+                "https://test-broker.litentry.org",
+                "https://weixin-test.litentry.org",
+            ),
+            (
+                "https://broker-test-2.litentry.org",
+                "https://weixin-test-2.litentry.org",
+            ),
+            (
+                "https://broker-base.litentry.org",
+                "https://weixin-base.litentry.org",
+            ),
+        ];
+        for (broker, want) in cases {
+            assert_eq!(
+                derive_worker_url(broker, "weixin").as_deref(),
+                Some(want),
+                "broker {broker}"
+            );
+        }
+        // The helper generalizes to any co-located worker.
+        assert_eq!(
+            derive_worker_url("https://broker.litentry.org", "memory").as_deref(),
+            Some("https://memory.litentry.org")
+        );
+        // A scheme-less / trailing-path broker host still resolves.
+        assert_eq!(
+            derive_worker_url("broker-base.litentry.org/", "weixin").as_deref(),
+            Some("https://weixin-base.litentry.org")
+        );
+        // A local/dev broker (bare IP / localhost / single label) → None, so the
+        // caller reports not-configured rather than fabricating a bogus host.
+        for local in [
+            "http://127.0.0.1:8081",
+            "http://localhost:8081",
+            "https://broker",
+        ] {
+            assert_eq!(derive_worker_url(local, "weixin"), None, "local {local}");
+        }
+    }
 
     /// #339 — the security distinction the inbox grant rests on: a `memory:<ns>`
     /// grant confers READ (the master's shared canonical memory) but NEVER write,

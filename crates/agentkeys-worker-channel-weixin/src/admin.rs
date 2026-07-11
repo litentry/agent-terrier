@@ -27,10 +27,12 @@ use tracing::{info, warn};
 
 use agentkeys_core::audit::{envelope_for, AuditOpKind, AuditResult, ContactBindBody};
 use agentkeys_protocol::{
-    BindInvite, Contact, GatewayApproveRequest, GatewayApproveResponse, GatewayBindInviteRequest,
-    GatewayBindInviteResponse, GatewayContactsResponse, GatewayLoginStartResponse,
-    GatewayLoginStatusResponse, GatewayLoginVerifyRequest, GatewayPendingBindView,
-    GatewayStatusView, PendingBind, TierProposal,
+    BindInvite, Contact, GatewayActivityResponse, GatewayApproveRequest, GatewayApproveResponse,
+    GatewayBindInviteRequest, GatewayBindInviteResponse, GatewayBindRejectRequest,
+    GatewayContactRevokeRequest, GatewayContactUpdateRequest, GatewayContactsResponse,
+    GatewayHistoryResponse, GatewayLoginStartResponse, GatewayLoginStatusResponse,
+    GatewayLoginVerifyRequest, GatewayMonitorResponse, GatewayPendingBindView, GatewayStatusView,
+    PendingBind, TierProposal,
 };
 
 use crate::config::WeixinTransport;
@@ -111,6 +113,7 @@ pub(crate) async fn admin_status(
         open_invites,
         pending_binds,
         ilink_last_ok_ms: state.ilink_last_ok_ms(),
+        audit_on_chain: state.audit_on_chain(),
     };
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -370,6 +373,35 @@ pub(crate) async fn login_verify(
     }
 }
 
+/// `POST /v1/gateway/admin/login/disconnect` — operator DISCONNECT. Clears the
+/// runtime identity (bot offline immediately) AND blanks the persisted token
+/// (stays offline across restarts) so the next connect is a clean QR from
+/// scratch. Idempotent: disconnecting an already-offline bot is a no-op `ok`.
+pub(crate) async fn login_disconnect(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let was = state.current_ilink_bot_id();
+    state.clear_ilink_identity();
+    *state.admin_login.lock().await = None;
+    let mut detail: Option<String> = None;
+    if let Err(e) =
+        ilink_login::clear_secrets_file(std::path::Path::new(&state.config.secrets_file))
+    {
+        warn!(error = %e, "disconnect: runtime cleared but the secrets-file blank FAILED — a restart may reload the old token");
+        detail = Some(format!("secrets_clear_failed: {e}"));
+    }
+    info!(was = ?was, "operator disconnect — iLink identity cleared, bot offline");
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "online": false, "was_bot_id": was, "detail": detail})),
+    )
+        .into_response()
+}
+
 // ── bind ceremony (D5) ────────────────────────────────────────────────────────
 
 /// `POST /v1/gateway/admin/bind/invite` — mint a one-time invite for a family
@@ -435,6 +467,12 @@ pub(crate) async fn bind_invite(
     match result {
         Ok(code) => {
             info!(contact_id = %req.contact_id, "bind invite minted");
+            state.push_activity(
+                "invite",
+                &req.display_name,
+                &format!("{} · {} agent(s)", req.tier.as_str(), req.reach.len()),
+                false,
+            );
             let resp = GatewayBindInviteResponse {
                 ok: true,
                 bind_code: code.clone(),
@@ -535,6 +573,16 @@ pub(crate) async fn bind_approve(
     match approved {
         Ok(contact) => {
             emit_contact_bind_audit(&state, &contact, "bound").await;
+            state.push_activity(
+                "bound",
+                &contact.display_name,
+                &format!(
+                    "{} · {} agent(s)",
+                    contact.tier.as_str(),
+                    contact.reach.len()
+                ),
+                state.audit_on_chain(),
+            );
             info!(contact_id = %contact.contact_id, tier = contact.tier.as_str(), "contact BOUND (master approve)");
             let resp = GatewayApproveResponse {
                 ok: true,
@@ -562,6 +610,89 @@ pub(crate) async fn bind_approve(
     }
 }
 
+/// `POST /v1/gateway/admin/bind/reject` — the master WITHDRAWS an invite before
+/// it binds (the remove half of the D5 gate). Works on BOTH row kinds: an open
+/// (unclaimed) invite — the code simply dies — and a claimed pending bind — the
+/// claimant is dropped and gets unknown-sender silence from then on. Idempotent:
+/// an already-gone code returns `removed: false`.
+pub(crate) async fn bind_reject(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayBindRejectRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let code = req.bind_code.trim().to_string();
+    let removed: anyhow::Result<(bool, Option<Contact>)> = state.registry.mutate(|reg| {
+        // A claimed pending carries the transport identity — capture it so the
+        // withdrawal of a CLAIMED bind leaves an audit row like approve does.
+        let rejected_contact = reg
+            .pending
+            .iter()
+            .find(|p| p.bind_code.eq_ignore_ascii_case(&code))
+            .and_then(|p| {
+                reg.invites
+                    .iter()
+                    .find(|i| i.bind_code.eq_ignore_ascii_case(&code))
+                    .map(|i| Contact {
+                        contact_id: i.contact_id.clone(),
+                        transport: p.transport.clone(),
+                        transport_id: p.transport_id.clone(),
+                        display_name: i.display_name.clone(),
+                        tier: i.tier,
+                        reach: i.reach.clone(),
+                    })
+            });
+        let before = reg.invites.len() + reg.pending.len();
+        reg.invites
+            .retain(|i| !i.bind_code.eq_ignore_ascii_case(&code));
+        reg.pending
+            .retain(|p| !p.bind_code.eq_ignore_ascii_case(&code));
+        Ok((
+            before != reg.invites.len() + reg.pending.len(),
+            rejected_contact,
+        ))
+    });
+    match removed {
+        Ok((removed, rejected_contact)) => {
+            if let Some(contact) = rejected_contact.as_ref() {
+                emit_contact_bind_audit(&state, contact, "rejected").await;
+            }
+            if removed {
+                let name = rejected_contact
+                    .as_ref()
+                    .map(|c| c.display_name.clone())
+                    .unwrap_or_else(|| format!("code {code}"));
+                state.push_activity(
+                    "rejected",
+                    &name,
+                    if rejected_contact.is_some() {
+                        "claimed invite withdrawn"
+                    } else {
+                        "open invite withdrawn"
+                    },
+                    rejected_contact.is_some() && state.audit_on_chain(),
+                );
+                info!(
+                    claimed = rejected_contact.is_some(),
+                    "bind invite WITHDRAWN (master reject)"
+                );
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "removed": removed})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "reason": "registry_write_failed", "detail": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 /// `GET /v1/gateway/admin/contacts` — the typed contacts view (the #410
 /// endpoint's admin-path twin; same D13-safe payload).
 pub(crate) async fn admin_contacts(
@@ -579,11 +710,204 @@ pub(crate) async fn admin_contacts(
     (StatusCode::OK, Json(body)).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct MonitorQuery {
+    #[serde(default)]
+    pub after: u64,
+}
+
+/// `GET /v1/gateway/admin/monitor?after=<cursor>` — the operator's LIVE message
+/// monitor (#1): recent inbound turns + their L3 decision. Poll with the returned
+/// `cursor`. Ephemeral (in-memory ring; D13-safe — display_name, never openid).
+pub(crate) async fn monitor(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Query(q): Query<MonitorQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let (cursor, events) = state.monitor_since(q.after);
+    (
+        StatusCode::OK,
+        Json(GatewayMonitorResponse {
+            ok: true,
+            cursor,
+            events,
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct HistoryQuery {
+    /// Page older than this `ts_ms` (exclusive). Absent = newest page.
+    #[serde(default)]
+    pub before: Option<u64>,
+    /// Page size (default 50, capped at 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /v1/gateway/admin/history?before=<ts_ms>&limit=<n>` — the owner's DURABLE
+/// message history (#419): every inbound turn from the append-only log, newest
+/// first, backward-paginated. Survives restarts (unlike `monitor`). D13-safe —
+/// the same display_name-only event shape.
+pub(crate) async fn history(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let events = state.history(limit, q.before);
+    let next_before_ts = events.last().map(|e| e.ts_ms);
+    (
+        StatusCode::OK,
+        Json(GatewayHistoryResponse {
+            ok: true,
+            events,
+            next_before_ts,
+        }),
+    )
+        .into_response()
+}
+
+/// `GET /v1/gateway/admin/activity?before=<ts_ms>&limit=<n>` — the DURABLE
+/// control-action audit trail (invite / claim / bound / rejected / revoked /
+/// connect), newest-first. Survives daemon AND worker restarts (unlike the
+/// daemon's ephemeral master-audit buffer). D13-safe (display_name, never openid).
+pub(crate) async fn activity(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let events = state.activity(limit, q.before);
+    let next_before_ts = events.last().map(|e| e.ts_ms);
+    (
+        StatusCode::OK,
+        Json(GatewayActivityResponse {
+            ok: true,
+            events,
+            next_before_ts,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /v1/gateway/admin/contacts/update` — operator edits a bound contact's
+/// tier/reach (#3). Unchanged fields stay; an operator-grade alias under a tier
+/// that may not hold one is rejected (same guard as approve). 404 if not bound.
+pub(crate) async fn contacts_update(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayContactUpdateRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let updated: anyhow::Result<Contact> = state.registry.mutate(|reg| {
+        let c = reg
+            .bound
+            .iter_mut()
+            .find(|c| c.contact_id == req.contact_id)
+            .ok_or_else(|| anyhow::anyhow!("contact_unknown"))?;
+        // Validate the RESULTING policy BEFORE mutating `c`, so a rejected edit
+        // leaves the in-memory registry untouched (mutate only persists on Ok).
+        let new_tier = req.tier.unwrap_or(c.tier);
+        let new_reach = req.reach.unwrap_or_else(|| c.reach.clone());
+        if !new_tier.may_hold_operator_grade_reach() {
+            if let Some(bad) = new_reach
+                .iter()
+                .find(|a| state.config.operator_grade_aliases.contains(a))
+            {
+                anyhow::bail!("operator_grade_reach_denied:{bad}");
+            }
+        }
+        c.tier = new_tier;
+        c.reach = new_reach;
+        Ok(c.clone())
+    });
+    match updated {
+        Ok(c) => {
+            let summary: agentkeys_protocol::ContactSummary = (&c).into();
+            info!(contact = %c.contact_id, "contact routing policy updated by operator");
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "contact": summary})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            let code = if reason == "contact_unknown" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({"ok": false, "reason": reason}))).into_response()
+        }
+    }
+}
+
+/// `POST /v1/gateway/admin/contacts/revoke` — operator UNBINDS a contact (#3):
+/// they can no longer reach any agent. Idempotent — an unknown id is `ok` with
+/// `removed:false`.
+pub(crate) async fn contacts_revoke(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayContactRevokeRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let removed: anyhow::Result<Option<Contact>> = state.registry.mutate(|reg| {
+        let found = reg
+            .bound
+            .iter()
+            .find(|c| c.contact_id == req.contact_id)
+            .cloned();
+        reg.bound.retain(|c| c.contact_id != req.contact_id);
+        Ok(found)
+    });
+    match removed {
+        Ok(found) => {
+            let removed = found.is_some();
+            if let Some(contact) = found.as_ref() {
+                emit_contact_bind_audit(&state, contact, "revoked").await;
+                state.push_activity(
+                    "revoked",
+                    &contact.display_name,
+                    &format!("{} · unbound", contact.tier.as_str()),
+                    state.audit_on_chain(),
+                );
+                info!(contact = %req.contact_id, "contact revoked (unbound) by operator");
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "removed": removed})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "reason": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 // ── claim (called by the RELAY on an unknown sender echoing a code) ──────────
 
 /// Try to claim an open invite with an unknown sender's message text. Returns
 /// the ack reply on success (`None` = not a bind attempt → stay silent, §9
-/// threat 1). The code may be bare or prefixed (`绑定 AK-…` / `bind AK-…`).
+/// threat 1). The code may be bare (`123456`) or prefixed (`绑定 123456`).
 pub(crate) fn try_claim_bind(
     state: &crate::state::WeixinGatewayState,
     transport: &str,
@@ -625,6 +949,12 @@ pub(crate) fn try_claim_bind(
     match claim {
         Ok(()) => {
             info!(contact_id = %invite.contact_id, "bind code CLAIMED — awaiting master approve");
+            state.push_activity(
+                "claim",
+                &invite.display_name,
+                "sent the 6-digit code",
+                false,
+            );
             Some(format!(
                 "✅ 已收到绑定码（{}）。等待管理员在家长控制台确认后即可使用。",
                 invite.display_name
@@ -646,23 +976,24 @@ fn now_nanos() -> u128 {
         .unwrap_or(0)
 }
 
-/// A short, unambiguous one-time code: `AK-` + 6 chars from an alphabet with no
-/// confusables (no 0/O/1/I). Not a lone security boundary — one-time, replaced
-/// on re-invite, and the master's approve gates the actual bind.
+/// A plain 6-digit one-time code the contact types into WeChat (#419). Not a
+/// lone security boundary — one-time, replaced on re-invite, and the master's
+/// approve gates the actual bind.
 fn mint_bind_code(salt: u64) -> String {
     use sha3::{Digest, Keccak256};
-    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut h = Keccak256::new();
     h.update(now_nanos().to_le_bytes());
     h.update(std::process::id().to_le_bytes());
     h.update(salt.to_le_bytes());
     let digest = h.finalize();
-    let chars: String = digest
-        .iter()
-        .take(6)
-        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
-        .collect();
-    format!("AK-{chars}")
+    // A plain 6-digit number (000000..=999999) the contact simply types into
+    // WeChat (the #419 flow redesign — was an `AK-` base32 string, which was
+    // awkward to relay). Not a lone security boundary: one-time, replaced on
+    // re-invite, expiring, and the master's approve still gates the bind — so an
+    // accidental 6-digit collision from an unknown sender lands in `awaiting
+    // approve`, never auto-binds.
+    let n = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
+    format!("{n:06}")
 }
 
 async fn emit_contact_bind_audit(
@@ -707,14 +1038,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bind_codes_use_the_safe_alphabet_and_vary_by_salt() {
+    fn bind_codes_are_six_digits_and_vary_by_salt() {
         let a = mint_bind_code(0);
         let b = mint_bind_code(1);
         for code in [&a, &b] {
-            assert!(code.starts_with("AK-") && code.len() == 9, "{code}");
-            assert!(code[3..]
-                .chars()
-                .all(|c| "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(c)));
+            // A plain 6-digit number the contact types into WeChat (#419).
+            assert_eq!(code.len(), 6, "{code}");
+            assert!(code.chars().all(|c| c.is_ascii_digit()), "{code}");
         }
         assert_ne!(a, b, "salt must vary the code");
     }

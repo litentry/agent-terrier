@@ -44,6 +44,8 @@ fn config(registry_file: String) -> WeixinGatewayConfig {
         ilink_bot_token: None,
         ilink_base_url: agentkeys_worker_channel_weixin::ilink::ILINK_BOOTSTRAP_BASE_URL.into(),
         ilink_state_file: "/dev/null".into(),
+        history_file: String::new(),
+        activity_file: String::new(),
         secrets_file: "/dev/null".into(),
         ilink_bootstrap_url: agentkeys_worker_channel_weixin::ilink::ILINK_BOOTSTRAP_BASE_URL
             .into(),
@@ -107,6 +109,156 @@ async fn bound_contact_reaching_allowed_agent_is_routed_with_contact_provenance(
     // No credential of any kind is echoed to the contact-facing response.
     let raw = body.to_string().to_lowercase();
     assert!(!raw.contains("app_secret") && !raw.contains("secret") && !raw.contains("aws"));
+}
+
+#[tokio::test]
+async fn bind_reject_withdraws_the_invite_and_kills_the_code() {
+    let base = spawn().await;
+    let c = reqwest::Client::new();
+
+    // Mint an invite (admin surface) → one open row in the pending view.
+    let inv: serde_json::Value = c
+        .post(format!("{base}/v1/gateway/admin/bind/invite"))
+        .bearer_auth("admin-secret")
+        .json(&serde_json::json!({
+            "contact_id": "c-new", "display_name": "新成员", "tier": "kid", "reach": ["chef"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(inv["ok"], true);
+    let code = inv["bind_code"].as_str().unwrap().to_string();
+    let pending: serde_json::Value = c
+        .get(format!("{base}/v1/gateway/admin/bind/pending"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending["pending"].as_array().unwrap().len(), 1);
+
+    // Withdraw it → the row is gone…
+    let rej: serde_json::Value = c
+        .post(format!("{base}/v1/gateway/admin/bind/reject"))
+        .bearer_auth("admin-secret")
+        .json(&serde_json::json!({"bind_code": code}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rej["ok"], true);
+    assert_eq!(rej["removed"], true);
+    let pending: serde_json::Value = c
+        .get(format!("{base}/v1/gateway/admin/bind/pending"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending["pending"].as_array().unwrap().len(), 0);
+
+    // …the dead code no longer claims (unknown-sender silence, not a bind)…
+    let (status, body) = post_msg(&base, "openid-stranger", &format!("绑定 {code}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["decision"]["reason"], "unknown_contact");
+
+    // …and a re-reject is an idempotent no-op.
+    let rej2: serde_json::Value = c
+        .post(format!("{base}/v1/gateway/admin/bind/reject"))
+        .bearer_auth("admin-secret")
+        .json(&serde_json::json!({"bind_code": code}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rej2["removed"], false);
+}
+
+#[tokio::test]
+async fn durable_activity_records_control_actions_and_audit_flag() {
+    let dir = std::env::temp_dir().join(format!("wx-act-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let act = dir.join("activity.jsonl").to_string_lossy().to_string();
+    let mut cfg = config(write_registry());
+    cfg.activity_file = act.clone();
+    let state = WeixinGatewayState::build(cfg).unwrap();
+
+    // The test config has a VALID operator omni but NO audit worker → the
+    // on-chain audit is NOT armed, and the status flag must say so (the loud
+    // surfacing of the silent skip, #419 part 1).
+    assert!(!state.audit_on_chain());
+
+    state.push_activity("invite", "Emma", "kid · 1 agent(s)", false);
+    state.push_activity("bound", "Emma", "kid · 1 agent(s)", false);
+
+    // One durable JSONL line per action, survives a fresh read (part 2).
+    let raw = std::fs::read_to_string(&act).unwrap();
+    assert_eq!(raw.lines().count(), 2);
+
+    let events = state.activity(10, None);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].action, "bound"); // newest first
+    assert_eq!(events[0].contact, "Emma");
+    assert!(!events[0].on_chain);
+    assert_eq!(events[1].action, "invite");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn durable_history_appends_and_reads_back_newest_first() {
+    let dir = std::env::temp_dir().join(format!("wx-hist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let hist = dir.join("history.jsonl").to_string_lossy().to_string();
+    let mut cfg = config(write_registry());
+    cfg.history_file = hist.clone();
+    let state = WeixinGatewayState::build(cfg).unwrap();
+
+    state.push_monitor_event(
+        "Emma".into(),
+        "kid".into(),
+        "hello".into(),
+        true,
+        "ok".into(),
+        Some("chef".into()),
+    );
+    state.push_monitor_event(
+        "unknown".into(),
+        String::new(),
+        "哈哈".into(),
+        false,
+        "unknown_contact".into(),
+        None,
+    );
+
+    // One JSON line per turn in the append-only log — the durable record.
+    let raw = std::fs::read_to_string(&hist).unwrap();
+    assert_eq!(raw.lines().count(), 2, "two turns appended durably");
+
+    // history() returns them newest-first with full content intact.
+    let events = state.history(10, None);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].text, "哈哈");
+    assert!(!events[0].allowed);
+    assert_eq!(events[0].reason, "unknown_contact");
+    assert_eq!(events[1].text, "hello");
+    assert_eq!(events[1].target.as_deref(), Some("chef"));
+
+    // The page limit is honored.
+    assert_eq!(state.history(1, None).len(), 1);
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]

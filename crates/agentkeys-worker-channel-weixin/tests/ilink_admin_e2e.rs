@@ -164,6 +164,8 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
         ilink_bot_token: None,
         ilink_base_url: ilink_base.clone(),
         ilink_state_file: state_file.clone(),
+        history_file: String::new(),
+        activity_file: String::new(),
         secrets_file: secrets_file.clone(),
         // The QR ceremony boots from the bootstrap host — point it at the mock
         // (the prod default is the fixed Tencent host).
