@@ -60,6 +60,17 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
             "/v1/gateway/admin/contacts/revoke",
             post(admin::contacts_revoke),
         )
+        // #424 §2 — the durable-copy surface: the daemon exports the FULL
+        // registry into the master-only Config-class doc after every mutation,
+        // and imports it back onto an EMPTY (rebuilt) gateway host.
+        .route(
+            "/v1/gateway/admin/registry/export",
+            get(admin::registry_export),
+        )
+        .route(
+            "/v1/gateway/admin/registry/import",
+            post(admin::registry_import),
+        )
         .with_state(state)
 }
 

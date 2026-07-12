@@ -121,6 +121,23 @@ pub struct UiBridgeState {
     /// Config UNCONFIGURED (dev / no-infra) it is the only home (mutations then
     /// report `storage:"cached"`). `None` until first load.
     pub channel_registry: RwLock<Option<ChannelRegistry>>,
+    /// #424 — the binding manifest: per bound actor, the readable pairing
+    /// metadata the chain deliberately does NOT store (label, delegate-vs-device
+    /// kind, granted service NAMES). Durable home is the Config-class doc
+    /// `config/binding-manifest.enc`; this is a write-through cache (taxonomy
+    /// posture — cache-only when Config is unconfigured). Written on accept +
+    /// scope commit; read by the #233 fleet reconcile so a device survives a
+    /// daemon restart with its kind + channel chips intact.
+    pub binding_manifest: RwLock<Option<BindingManifest>>,
+    /// #424 — the scope-commit stash: `user_op_hash` (from `/v1/scope/build`) →
+    /// `(actor_omni, services)`, consumed by `scope_submit_proxy` on a confirmed
+    /// commit to upsert the binding manifest with the NAMES the set-replace
+    /// actually granted (the chain stores only keccak ids).
+    pub scope_services_by_op_hash: RwLock<HashMap<String, (String, Vec<String>)>>,
+    /// #424 — once-per-process latch for the gateway contact-registry reconcile
+    /// (migrate-up / restore-down against the Config-class doc), run on the
+    /// first contacts read so a rebuilt gateway host self-heals.
+    pub gateway_registry_synced: std::sync::atomic::AtomicBool,
     /// Broker base URL for the W1 onboarding email→verify flow. `None` ⇒ email
     /// onboarding is disabled (the daemon was started without `--broker-url`)
     /// and the email endpoints fail closed with `broker-not-configured`.
@@ -436,6 +453,133 @@ pub struct ChannelRegistry {
     version: u32,
     #[serde(default)]
     channels: Vec<ApiChannel>,
+}
+
+/// The signed `service` of the Config-class BINDING MANIFEST object (→ S3 key
+/// `bots/<O_master>/config/binding-manifest.enc`) — #424 §1. Per bound actor it
+/// records what the chain deliberately does NOT (no PII, no per-edit gas):
+/// label, delegate-vs-device kind, and the granted service NAMES. On-chain both
+/// kinds bind as `TIER_AGENT` rows (`registerAgentDevice`) and scope is keccak
+/// hashes, so after a daemon restart the kind + names are unrecoverable from
+/// chain alone; the manifest is the deterministic off-chain dictionary the #233
+/// reconcile hydrates from (the channel-registry hash-match stays as SECONDARY
+/// enrichment for grants the manifest predates).
+const BINDING_MANIFEST_SERVICE: &str = "binding-manifest";
+
+/// The signed `service` of the Config-class GATEWAY CONTACT REGISTRY object
+/// (→ S3 key `bots/<O_master>/config/gateway-contact-registry.enc`) — #424 §2.
+/// The durable, master-only copy of the WeChat gateway's contact registry; the
+/// gateway-host file stays the working cache. The daemon write-throughs it on
+/// every mutating gateway admin proxy and restores it to an EMPTY (rebuilt)
+/// gateway on the first contacts read.
+const GATEWAY_CONTACTS_SERVICE: &str = "gateway-contact-registry";
+
+/// One bound actor's readable pairing metadata (#424 §1). `actor_omni` +
+/// `device_key_hash` anchor the entry to the on-chain `SidecarRegistry` row;
+/// everything else is the readable layer the chain never stores.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BindingManifestEntry {
+    /// `0x`+64-hex actor omni (normalized lowercase) — the join key against
+    /// `DeviceEntry.actorOmni` at reconcile time.
+    pub actor_omni: String,
+    /// `0x`+64-hex on-chain device key hash (secondary join key).
+    #[serde(default)]
+    pub device_key_hash: String,
+    /// The pairing label the accept card showed (`ApiActor.label`).
+    pub label: String,
+    /// `"device"` (channel-endpoint, §14.10) or `"delegate"` (sandbox-resident).
+    pub kind: String,
+    /// The service NAMES the operator actually granted (`channel-pub:<id>`,
+    /// `memory:<ns>`, `cred:<service>`, …) — the readable twin of the on-chain
+    /// keccak scope set.
+    #[serde(default)]
+    pub granted_service_names: Vec<String>,
+    /// Unix seconds of the last upsert (accept or scope commit).
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+/// The durable manifest doc (config-class, master-only). Small: one entry per
+/// bound actor in the household fleet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BindingManifest {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    bindings: Vec<BindingManifestEntry>,
+}
+
+/// Bare-hex lowercase form for manifest joins — lowercase FIRST so `0X` strips
+/// too (`normalize_omni_0x` only guarantees a prefix, not case).
+fn manifest_norm(s: &str) -> String {
+    let lower = s.trim().to_lowercase();
+    lower.trim_start_matches("0x").to_string()
+}
+
+impl BindingManifest {
+    /// Look up an entry by actor omni (primary) or device key hash (secondary),
+    /// both compared 0x-normalized lowercase.
+    pub fn entry_for(
+        &self,
+        actor_omni: &str,
+        device_key_hash: &str,
+    ) -> Option<&BindingManifestEntry> {
+        let (a, d) = (manifest_norm(actor_omni), manifest_norm(device_key_hash));
+        self.bindings
+            .iter()
+            .find(|e| manifest_norm(&e.actor_omni) == a)
+            .or_else(|| {
+                if d.is_empty() {
+                    return None;
+                }
+                self.bindings.iter().find(|e| {
+                    !e.device_key_hash.is_empty() && manifest_norm(&e.device_key_hash) == d
+                })
+            })
+    }
+
+    /// Upsert by actor omni (0x-normalized). An existing entry keeps its `kind`
+    /// unless the incoming entry states one explicitly — a scope re-grant must
+    /// never silently flip a device into a delegate.
+    pub fn upsert(&mut self, mut entry: BindingManifestEntry) {
+        entry.actor_omni = format!("0x{}", manifest_norm(&entry.actor_omni));
+        if !entry.device_key_hash.is_empty() {
+            entry.device_key_hash = format!("0x{}", manifest_norm(&entry.device_key_hash));
+        }
+        match self
+            .bindings
+            .iter_mut()
+            .find(|e| manifest_norm(&e.actor_omni) == manifest_norm(&entry.actor_omni))
+        {
+            Some(existing) => {
+                if entry.kind.is_empty() {
+                    entry.kind = existing.kind.clone();
+                }
+                if entry.label.is_empty() {
+                    entry.label = existing.label.clone();
+                }
+                if entry.device_key_hash.is_empty() {
+                    entry.device_key_hash = existing.device_key_hash.clone();
+                }
+                *existing = entry;
+            }
+            None => {
+                if entry.kind.is_empty() {
+                    // A scope commit on an actor the manifest never saw — derive
+                    // the kind with the SAME predicate the accept card / D9
+                    // spawn gate use (all-channel grants = device).
+                    let joined = entry.granted_service_names.join(" ");
+                    entry.kind =
+                        if agentkeys_backend_client::protocol::scope_is_device_only(&joined) {
+                            "device".into()
+                        } else {
+                            "delegate".into()
+                        };
+                }
+                self.bindings.push(entry);
+            }
+        }
+    }
 }
 
 /// Channel-id shape: the on-chain anchor must be stable + lowercase (service
@@ -1195,6 +1339,9 @@ pub fn build_state(
         authored_taxonomy: RwLock::new(None),
         accept_grants_by_request: RwLock::new(HashMap::new()),
         channel_registry: RwLock::new(None),
+        binding_manifest: RwLock::new(None),
+        scope_services_by_op_hash: RwLock::new(HashMap::new()),
+        gateway_registry_synced: std::sync::atomic::AtomicBool::new(false),
         stacks: parse_stacks_json(std::env::var("AGENTKEYS_STACKS_JSON").ok().as_deref()),
         broker_url,
         allowed_origin: rp_origin.to_string(),
@@ -3317,6 +3464,22 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
         .map(|m| m.email.clone())
         .filter(|e| !e.is_empty());
 
+    // #424 §1 — the binding manifest is the PRIMARY hydration source for what
+    // the chain can't say: each restored row's label, delegate-vs-device kind,
+    // and granted service NAMES. Deterministic (no hash-guessing) and
+    // independent of the channel registry, which stays the SECONDARY
+    // enrichment below. Best-effort: an unreachable Config only skips it.
+    let manifest = match ensure_binding_manifest(state).await {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::debug!(
+                target: "agentkeys.daemon.ui_bridge",
+                "binding manifest unavailable for fleet hydration: {e}"
+            );
+            None
+        }
+    };
+
     let mut guard = state.actors.write().await;
     let known_omnis: std::collections::HashSet<String> =
         guard.values().map(|a| norm(&a.omni_hex)).collect();
@@ -3364,29 +3527,55 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
         {
             continue; // the live pairing row is richer — in-memory wins
         }
+        // #424 §1 — hydrate the restored row from the binding manifest: real
+        // label, device-vs-delegate kind, granted service NAMES. Without an
+        // entry (paired before the manifest existed / Config unreachable) the
+        // row keeps the placeholder shape and the channel-registry match below
+        // may still name its channel grants.
+        let entry = manifest
+            .as_ref()
+            .and_then(|m| m.entry_for(&d.actor_omni, &d.device_key_hash))
+            .cloned();
         let short = &norm(&d.actor_omni)[..8];
+        let (id, label) = match entry.as_ref().filter(|e| !e.label.is_empty()) {
+            Some(e) => (format!("agent-{}", e.label), e.label.clone()),
+            None => (format!("agent-0x{short}"), format!("agent 0x{short}…")),
+        };
+        let is_device = entry.as_ref().is_some_and(|e| e.kind == "device");
+        let services = entry
+            .as_ref()
+            .map(|e| e.granted_service_names.clone())
+            .filter(|s| !s.is_empty());
         guard.insert(
-            format!("agent-0x{short}"),
+            id.clone(),
             ApiActor {
-                id: format!("agent-0x{short}"),
+                id,
                 omni: d.actor_omni.clone(),
                 omni_hex: d.actor_omni.clone(),
-                label: format!("agent 0x{short}…"),
+                label,
                 role: "agent".into(),
                 parent: Some("master".into()),
                 derivation: String::new(),
-                device: "restored from chain".into(),
+                device: match (&entry, is_device) {
+                    (Some(_), true) => "channel-endpoint device (§10.2)".into(),
+                    (Some(_), false) => "sandbox device (§10.2)".into(),
+                    (None, _) => "restored from chain".into(),
+                },
                 device_pubkey: String::new(),
                 last_active: "restored from chain".into(),
                 status: "ok".into(),
-                vendor: String::new(),
+                vendor: if is_device {
+                    "device".into()
+                } else {
+                    String::new()
+                },
                 k11: false,
                 device_key_hash: Some(d.device_key_hash.clone()),
                 scope: None,
                 scope_unknown_service_ids: None,
                 payment_cap: None,
                 time_window: None,
-                services: None,
+                services,
                 account_address: None,
                 account_type: None,
             },
@@ -3443,6 +3632,23 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
                                 if !services.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
                                     services.push(name);
                                 }
+                            }
+                        }
+                        // #424 §1 — manifest self-heal for rows that predate the
+                        // manifest fetch in this process (placeholder rows from
+                        // an earlier reconcile): fill missing service NAMES +
+                        // the device kind; never overwrite live pairing data.
+                        if let Some(e) = manifest.as_ref().and_then(|m| {
+                            m.entry_for(&actor_omni, a.device_key_hash.as_deref().unwrap_or(""))
+                        }) {
+                            if a.services.as_deref().unwrap_or_default().is_empty()
+                                && !e.granted_service_names.is_empty()
+                            {
+                                a.services = Some(e.granted_service_names.clone());
+                            }
+                            if e.kind == "device" && a.vendor.is_empty() {
+                                a.vendor = "device".into();
+                                a.device = "channel-endpoint device (§10.2)".into();
                             }
                         }
                     }
@@ -5022,6 +5228,23 @@ async fn ack_pairing(
                         (toks, dev)
                     }
                 };
+                // #424 §1 — the accept is the durability boundary: persist this
+                // actor's readable metadata (kind + granted NAMES) to the
+                // Config-class binding manifest so it survives a daemon restart
+                // (the chain row alone can never recover them). Best-effort:
+                // a store failure warns loudly, never blocks the ack.
+                let manifest_entry = BindingManifestEntry {
+                    actor_omni: omni_hex.clone(),
+                    device_key_hash: device_key_hash.clone(),
+                    label: label.clone(),
+                    kind: if was_device_accept {
+                        "device".into()
+                    } else {
+                        "delegate".into()
+                    },
+                    granted_service_names: services.clone(),
+                    updated_at: now_unix(),
+                };
                 let agent_actor = ApiActor {
                     id: format!("agent-{label}"),
                     omni: omni_hex.clone(),
@@ -5064,6 +5287,7 @@ async fn ack_pairing(
                     .write()
                     .await
                     .insert(agent_actor.id.clone(), agent_actor);
+                upsert_binding_manifest_entry(&state, manifest_entry).await;
                 tracing::info!(
                     target: "agentkeys.daemon.ui_bridge",
                     label = %label,
@@ -5313,6 +5537,7 @@ async fn scope_build_proxy(
         Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
         _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
     };
+    let (actor_omni, services) = (req.actor_omni.clone(), req.services.clone());
     let body = agentkeys_backend_client::protocol::BuildScopeUserOpRequest {
         operator_omni,
         actor_omni: req.actor_omni,
@@ -5333,7 +5558,25 @@ async fn scope_build_proxy(
             )
         }
     };
-    forward_to_broker(&broker, "/v1/scope/build", &j1, &body).await
+    let (resp, parsed) = forward_to_broker_value(&broker, "/v1/scope/build", &j1, &body).await;
+    if resp.status().is_success() {
+        // #424 §1 — stash the readable grant NAMES keyed by the op hash; the
+        // submit proxy consumes it on a confirmed commit to upsert the binding
+        // manifest (the chain stores only keccak ids).
+        if let Some(hash) = parsed
+            .as_ref()
+            .and_then(|v| v.get("user_op_hash"))
+            .and_then(|v| v.as_str())
+            .filter(|h| !h.is_empty())
+        {
+            state
+                .scope_services_by_op_hash
+                .write()
+                .await
+                .insert(hash.to_string(), (actor_omni, services));
+        }
+    }
+    resp
 }
 
 /// POST /v1/scope/submit — forward the K11-signed setScope op to the broker's
@@ -5355,6 +5598,31 @@ async fn scope_submit_proxy(
     let (resp, parsed) = forward_to_broker_value(&broker, "/v1/scope/submit", &j1, &body).await;
     if resp.status().is_success() {
         invalidate_fleet_sync(&state);
+        // #424 §1 — the commit landed: upsert the binding manifest with the
+        // grant NAMES stashed at build time (keyed by the op hash), so a scope
+        // re-grant / channel edit stays restart-durable, not RAM-only.
+        if let Some((actor_omni, services)) = {
+            let hash = parsed
+                .as_ref()
+                .and_then(|v| v.get("user_op_hash"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            state.scope_services_by_op_hash.write().await.remove(&hash)
+        } {
+            upsert_binding_manifest_entry(
+                &state,
+                BindingManifestEntry {
+                    actor_omni,
+                    device_key_hash: String::new(), // kept from the existing entry
+                    label: String::new(),           // kept from the existing entry
+                    kind: String::new(),            // kept from the existing entry
+                    granted_service_names: services,
+                    updated_at: now_unix(),
+                },
+            )
+            .await;
+        }
         // #97: record the confirmed set-replace commit with the broker's real
         // receipts. The envelope (fetched by hash in the decode view) carries
         // the FULL replacement grant — incl. whether it was a revoke-all.
@@ -5707,18 +5975,28 @@ async fn gateway_login_disconnect_proxy(
     .await
 }
 
+/// #424 §2 — forward a REGISTRY-MUTATING gateway admin call, then write-through
+/// the gateway's full contact registry into the Config-class doc so it survives
+/// a gateway host rebuild. Best-effort: the gateway mutation already landed, so
+/// a sync failure WARNS loudly (the next successful mutation re-syncs the full
+/// snapshot) but never fails the request.
+async fn forward_gateway_mutation(
+    state: &SharedUiBridgeState,
+    sub_path: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    let resp = forward_to_gateway(state, reqwest::Method::POST, sub_path, None, Some(body)).await;
+    if resp.status().is_success() {
+        sync_gateway_registry_to_config(state).await;
+    }
+    resp
+}
+
 async fn gateway_bind_invite_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    forward_to_gateway(
-        &state,
-        reqwest::Method::POST,
-        "/v1/gateway/admin/bind/invite",
-        None,
-        Some(body),
-    )
-    .await
+    forward_gateway_mutation(&state, "/v1/gateway/admin/bind/invite", body).await
 }
 
 async fn gateway_bind_pending_proxy(
@@ -5738,33 +6016,23 @@ async fn gateway_bind_reject_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    forward_to_gateway(
-        &state,
-        reqwest::Method::POST,
-        "/v1/gateway/admin/bind/reject",
-        None,
-        Some(body),
-    )
-    .await
+    forward_gateway_mutation(&state, "/v1/gateway/admin/bind/reject", body).await
 }
 
 async fn gateway_bind_approve_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    forward_to_gateway(
-        &state,
-        reqwest::Method::POST,
-        "/v1/gateway/admin/bind/approve",
-        None,
-        Some(body),
-    )
-    .await
+    forward_gateway_mutation(&state, "/v1/gateway/admin/bind/approve", body).await
 }
 
 async fn gateway_contacts_proxy(
     State(state): State<SharedUiBridgeState>,
 ) -> axum::response::Response {
+    // #424 §2 — once per process, reconcile the gateway's local registry with
+    // the durable Config-class doc (migrate a legacy on-host file UP; restore a
+    // rebuilt/empty gateway DOWN) before serving the contacts view.
+    reconcile_gateway_registry(&state).await;
     forward_to_gateway(
         &state,
         reqwest::Method::GET,
@@ -5779,28 +6047,224 @@ async fn gateway_contacts_update_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    forward_to_gateway(
-        &state,
-        reqwest::Method::POST,
-        "/v1/gateway/admin/contacts/update",
-        None,
-        Some(body),
-    )
-    .await
+    forward_gateway_mutation(&state, "/v1/gateway/admin/contacts/update", body).await
 }
 
 async fn gateway_contacts_revoke_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    forward_to_gateway(
-        &state,
-        reqwest::Method::POST,
-        "/v1/gateway/admin/contacts/revoke",
+    forward_gateway_mutation(&state, "/v1/gateway/admin/contacts/revoke", body).await
+}
+
+// ── #424 §2 — gateway contact-registry durability (Config-class doc) ─────────
+
+/// Raw admin-bearer JSON call to the gateway (the sync/reconcile plumbing —
+/// distinct from [`forward_to_gateway`], which proxies a browser request).
+async fn gateway_admin_call(
+    state: &UiBridgeState,
+    method: reqwest::Method,
+    sub_path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let gw = state
+        .weixin_gateway_url
+        .clone()
+        .ok_or("gateway-not-configured")?;
+    let admin = state
+        .weixin_admin_token
+        .clone()
+        .ok_or("gateway-admin-not-configured")?;
+    let client = reqwest::Client::new();
+    let mut req = client
+        .request(method, format!("{gw}{sub_path}"))
+        .timeout(std::time::Duration::from_secs(15))
+        .bearer_auth(admin);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("gateway {sub_path}: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("gateway {sub_path} {status}: {text}"));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("gateway {sub_path} parse: {e}"))
+}
+
+/// A gateway `ContactRegistry` JSON with no bound contacts, no open invites and
+/// no pending claims — the "fresh host" shape the restore path may overwrite.
+fn gateway_registry_is_empty(reg: &serde_json::Value) -> bool {
+    ["bound", "invites", "pending"].iter().all(|k| {
+        reg.get(*k)
+            .and_then(|v| v.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true)
+    })
+}
+
+/// Export the gateway's full registry and store it as the Config-class doc.
+/// Best-effort at every call site (the gateway mutation already landed): a
+/// failure WARNS loudly; the next successful mutation re-syncs the snapshot.
+async fn sync_gateway_registry_to_config(state: &UiBridgeState) {
+    let reg = match gateway_admin_call(
+        state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/registry/export",
         None,
-        Some(body),
     )
     .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                "gateway registry export failed — contact registry NOT synced to the \
+                 durable config doc ({e}); next successful contact mutation retries"
+            );
+            return;
+        }
+    };
+    match real_config_ctx(state).await {
+        Ok(Some(ctx)) => {
+            let bytes = match serde_json::to_vec(&reg) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "agentkeys.daemon.ui_bridge",
+                        "gateway registry serialize failed: {e}"
+                    );
+                    return;
+                }
+            };
+            let client = reqwest::Client::new();
+            match config_store_doc(&client, &ctx, GATEWAY_CONTACTS_SERVICE, &bytes).await {
+                Ok(()) => tracing::info!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    "gateway contact registry synced to the durable config doc"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    "gateway contact registry config store failed — NOT durable ({e}); \
+                     next successful contact mutation retries"
+                ),
+            }
+        }
+        Ok(None) => tracing::debug!(
+            target: "agentkeys.daemon.ui_bridge",
+            "Config unconfigured (dev/no-infra) — gateway registry stays gateway-local"
+        ),
+        Err(e) => tracing::warn!(
+            target: "agentkeys.daemon.ui_bridge",
+            "config ctx unavailable — gateway contact registry NOT synced ({e})"
+        ),
+    }
+}
+
+/// Once per daemon process (latched): reconcile the gateway's local registry
+/// with the durable Config-class doc.
+///
+/// - gateway NON-empty → store the snapshot up (the one-time migration of a
+///   legacy on-host file, and the drift heal; idempotent — full-snapshot PUT).
+/// - gateway EMPTY + durable doc non-empty → import the doc back into the
+///   gateway (the host-rebuild restore; `force:false`, so a racing bind on the
+///   gateway wins and the import refuses rather than clobbers).
+/// - both empty / Config unconfigured → nothing.
+///
+/// Transient failures un-latch so a later contacts read retries.
+async fn reconcile_gateway_registry(state: &UiBridgeState) {
+    use std::sync::atomic::Ordering;
+    if state.gateway_registry_synced.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let unlatch = || state.gateway_registry_synced.store(false, Ordering::SeqCst);
+    let gw_reg = match gateway_admin_call(
+        state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/registry/export",
+        None,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(
+                target: "agentkeys.daemon.ui_bridge",
+                "gateway registry reconcile skipped (export: {e})"
+            );
+            unlatch();
+            return;
+        }
+    };
+    if !gateway_registry_is_empty(&gw_reg) {
+        sync_gateway_registry_to_config(state).await;
+        return;
+    }
+    // Gateway is EMPTY — a fresh/rebuilt host. Restore the durable copy, if any.
+    let doc = match real_config_ctx(state).await {
+        Ok(Some(ctx)) => {
+            let client = reqwest::Client::new();
+            match config_fetch_doc(&client, &ctx, GATEWAY_CONTACTS_SERVICE).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "agentkeys.daemon.ui_bridge",
+                        "gateway registry restore skipped (config fetch: {e})"
+                    );
+                    unlatch();
+                    return;
+                }
+            }
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::debug!(
+                target: "agentkeys.daemon.ui_bridge",
+                "gateway registry reconcile skipped (config ctx: {e})"
+            );
+            unlatch();
+            return;
+        }
+    };
+    let Some(bytes) = doc else {
+        return; // nothing durable yet — a genuinely fresh household
+    };
+    let durable: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                "durable gateway registry doc unparsable — restore skipped ({e})"
+            );
+            return;
+        }
+    };
+    if gateway_registry_is_empty(&durable) {
+        return;
+    }
+    match gateway_admin_call(
+        state,
+        reqwest::Method::POST,
+        "/v1/gateway/admin/registry/import",
+        Some(serde_json::json!({ "registry": durable, "force": false })),
+    )
+    .await
+    {
+        Ok(counts) => tracing::info!(
+            target: "agentkeys.daemon.ui_bridge",
+            "gateway contact registry RESTORED from the durable config doc: {counts}"
+        ),
+        Err(e) => {
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                "gateway contact registry restore FAILED ({e})"
+            );
+            unlatch();
+        }
+    }
 }
 
 /// POST `body` to `<broker><path>` with the master J1 bearer; relay the broker's
@@ -6889,6 +7353,86 @@ async fn persist_channel_registry(
     };
     *state.channel_registry.write().await = Some(next);
     Ok(storage)
+}
+
+// ── #424 binding manifest — durable readable pairing metadata ────────────────
+
+/// Load the binding manifest through the taxonomy-style cache: in-memory if
+/// present, else config-fetch (`Ok(None)` = never created → empty), else —
+/// Config UNCONFIGURED (dev / no-infra) — an empty cached-only manifest.
+async fn ensure_binding_manifest(state: &UiBridgeState) -> Result<BindingManifest, String> {
+    if let Some(m) = state.binding_manifest.read().await.clone() {
+        return Ok(m);
+    }
+    let loaded = match real_config_ctx(state).await? {
+        Some(ctx) => {
+            let client = reqwest::Client::new();
+            match config_fetch_doc(&client, &ctx, BINDING_MANIFEST_SERVICE).await? {
+                Some(bytes) => serde_json::from_slice::<BindingManifest>(&bytes)
+                    .map_err(|e| format!("binding-manifest parse: {e}"))?,
+                None => BindingManifest::default(),
+            }
+        }
+        None => BindingManifest::default(),
+    };
+    *state.binding_manifest.write().await = Some(loaded.clone());
+    Ok(loaded)
+}
+
+/// Persist + cache a mutated manifest (channel-registry posture: durable when
+/// Config is configured, cache-only otherwise; a configured-but-FAILING store
+/// returns `Err` without touching the cache).
+async fn persist_binding_manifest(
+    state: &UiBridgeState,
+    next: BindingManifest,
+) -> Result<&'static str, String> {
+    let storage = match real_config_ctx(state).await? {
+        Some(ctx) => {
+            let client = reqwest::Client::new();
+            let bytes =
+                serde_json::to_vec(&next).map_err(|e| format!("manifest serialize: {e}"))?;
+            config_store_doc(&client, &ctx, BINDING_MANIFEST_SERVICE, &bytes).await?;
+            "ok"
+        }
+        None => "cached",
+    };
+    *state.binding_manifest.write().await = Some(next);
+    Ok(storage)
+}
+
+/// Upsert one bound actor's entry (accept / scope commit). Best-effort from the
+/// caller's perspective — the on-chain bind already landed, so a store failure
+/// must WARN loudly (the actor's kind + names would not survive a restart) but
+/// never fail the ceremony that triggered it.
+async fn upsert_binding_manifest_entry(state: &UiBridgeState, entry: BindingManifestEntry) {
+    let label = entry.label.clone();
+    let mut manifest = match ensure_binding_manifest(state).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                label = %label,
+                "binding manifest LOAD failed — {e}; this actor's kind + service names \
+                 will NOT survive a daemon restart until the next successful upsert"
+            );
+            return;
+        }
+    };
+    manifest.upsert(entry);
+    match persist_binding_manifest(state, manifest).await {
+        Ok(storage) => tracing::info!(
+            target: "agentkeys.daemon.ui_bridge",
+            label = %label,
+            storage,
+            "binding manifest upserted"
+        ),
+        Err(e) => tracing::warn!(
+            target: "agentkeys.daemon.ui_bridge",
+            label = %label,
+            "binding manifest STORE failed — {e}; this actor's kind + service names \
+             will NOT survive a daemon restart until the next successful upsert"
+        ),
+    }
 }
 
 /// `keccak(channel-pub:<id>)` / `keccak(channel-sub:<id>)` (`0x`-hex, the
@@ -11755,6 +12299,221 @@ mod tests {
                     .load(std::sync::atomic::Ordering::Relaxed),
             "chain sync invalidated so the next read re-reconciles"
         );
+    }
+
+    // ─── issue #424 §1: the binding manifest ────────────────────────────────
+
+    #[test]
+    fn binding_manifest_upsert_normalizes_and_preserves_kind() {
+        let mut m = BindingManifest::default();
+        m.upsert(BindingManifestEntry {
+            actor_omni: format!("0X{}", "AB".repeat(32)), // mixed case, 0X
+            device_key_hash: "cd".repeat(32),             // bare (no 0x)
+            label: "cam-frontdoor".into(),
+            kind: "device".into(),
+            granted_service_names: vec!["channel-pub:frontdoor".into()],
+            updated_at: 1,
+        });
+        // Normalized on write; found by omni AND by device hash, any casing.
+        let by_omni = m
+            .entry_for(&format!("0x{}", "ab".repeat(32)), "")
+            .expect("by omni");
+        assert_eq!(by_omni.actor_omni, format!("0x{}", "ab".repeat(32)));
+        assert_eq!(by_omni.device_key_hash, format!("0x{}", "cd".repeat(32)));
+        assert!(m
+            .entry_for(&format!("0x{}", "99".repeat(32)), &"CD".repeat(32))
+            .is_some());
+
+        // A scope re-grant (empty kind/label — the submit proxy knows only the
+        // services) must UPDATE the names but never flip the kind or drop the
+        // label/device hash.
+        m.upsert(BindingManifestEntry {
+            actor_omni: format!("0x{}", "ab".repeat(32)),
+            device_key_hash: String::new(),
+            label: String::new(),
+            kind: String::new(),
+            granted_service_names: vec![
+                "channel-pub:frontdoor".into(),
+                "channel-sub:frontdoor".into(),
+            ],
+            updated_at: 2,
+        });
+        assert_eq!(m.bindings.len(), 1, "upsert, not append");
+        let e = m.entry_for(&format!("0x{}", "ab".repeat(32)), "").unwrap();
+        assert_eq!(e.kind, "device", "kind preserved across re-grants");
+        assert_eq!(e.label, "cam-frontdoor", "label preserved");
+        assert_eq!(e.device_key_hash, format!("0x{}", "cd".repeat(32)));
+        assert_eq!(e.granted_service_names.len(), 2);
+
+        // A NEW entry arriving via a scope commit (no kind known) derives the
+        // kind from its grants with the SAME predicate as the D9 spawn gate.
+        m.upsert(BindingManifestEntry {
+            actor_omni: format!("0x{}", "ee".repeat(32)),
+            device_key_hash: String::new(),
+            label: String::new(),
+            kind: String::new(),
+            granted_service_names: vec!["memory:travel".into()],
+            updated_at: 3,
+        });
+        assert_eq!(
+            m.entry_for(&format!("0x{}", "ee".repeat(32)), "")
+                .unwrap()
+                .kind,
+            "delegate"
+        );
+        // Serde round-trip (the config-doc payload).
+        let bytes = serde_json::to_vec(&m).unwrap();
+        let back: BindingManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.bindings.len(), 2);
+        assert_eq!(
+            back.entry_for(&m.bindings[0].actor_omni, "").unwrap().kind,
+            "device"
+        );
+    }
+
+    #[tokio::test]
+    async fn ack_pairing_persists_the_binding_manifest_entry() {
+        // #424 §1 — the accept is the durability boundary: a device accept must
+        // land its kind + granted NAMES in the binding manifest (cache-only
+        // here — Config unconfigured — but the same write path).
+        let app = Router::new()
+            .route(
+                "/v1/agent/pending-bindings",
+                axum::routing::get(|| async {
+                    Json(serde_json::json!({ "pending": [{
+                        "request_id": "req-dev",
+                        "label": "cam-frontdoor",
+                        "child_omni": format!("0x{}", "dd".repeat(32)),
+                        "device_key_hash": "ee".repeat(32),
+                        "device_pubkey": "0xPUBKEY",
+                    }] }))
+                }),
+            )
+            .route(
+                "/v1/agent/pending-bindings/ack",
+                post(|| async { Json(serde_json::json!({ "ok": true })) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            Some(format!("http://{addr}")),
+            None,
+            84532,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "us-east-1".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "m@x".into(),
+            omni: format!("0x{}", "77".repeat(32)),
+            j1: "eyJ.fake.jwt".into(),
+            wallet: "0xW".into(),
+        });
+        // The accept proxy stashed the card's FINAL grant set + device flag.
+        state.accept_grants_by_request.write().await.insert(
+            "req-dev".into(),
+            (vec!["channel-pub:frontdoor".into()], true),
+        );
+
+        let resp = ack_pairing(
+            State(state.clone()),
+            Json(serde_json::json!({ "request_id": "req-dev" })),
+        )
+        .await;
+        assert!(resp.status().is_success());
+
+        let actors = state.actors.read().await;
+        let agent = actors.get("agent-cam-frontdoor").expect("surfaced");
+        assert_eq!(agent.vendor, "device");
+        assert_eq!(
+            agent.services.as_deref(),
+            Some(&["channel-pub:frontdoor".to_string()][..])
+        );
+        drop(actors);
+
+        let manifest = state
+            .binding_manifest
+            .read()
+            .await
+            .clone()
+            .expect("manifest cached by the ack upsert");
+        let e = manifest
+            .entry_for(&format!("0x{}", "dd".repeat(32)), "")
+            .expect("entry for the accepted device");
+        assert_eq!(e.kind, "device");
+        assert_eq!(e.label, "cam-frontdoor");
+        assert_eq!(e.device_key_hash, format!("0x{}", "ee".repeat(32)));
+        assert_eq!(e.granted_service_names, vec!["channel-pub:frontdoor"]);
+    }
+
+    #[tokio::test]
+    async fn fleet_reconcile_hydrates_kind_and_names_from_the_binding_manifest() {
+        // #424 §1 acceptance — the reproduced 2026-07-12 bug: after a daemon
+        // restart the chain-reconstructed device row lost its kind + channel
+        // names (`services: null` → filed under delegates). With a manifest
+        // entry the restored row must carry label, `vendor:"device"` and the
+        // granted service NAMES — deterministically, no hash-guessing.
+        let addr = spawn_chain_stub().await;
+        let mut state = make_state_real(None);
+        set_chain_rpc(&mut state, &format!("http://{addr}"));
+        *state.registered_master.write().await = Some(RegisteredMaster {
+            device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
+            operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
+            tx_hash: None,
+            account: None,
+        });
+        // The durable manifest (pre-seeded cache — the same doc the config
+        // class serves in prod) knows the stub's active agent is a DEVICE.
+        let mut manifest = BindingManifest::default();
+        manifest.upsert(BindingManifestEntry {
+            actor_omni: format!("0x{}", T233_AGENT_OMNI.repeat(32)),
+            device_key_hash: format!("0x{}", T233_AGENT_HASH.repeat(32)),
+            label: "cam-frontdoor".into(),
+            kind: "device".into(),
+            granted_service_names: vec!["channel-pub:frontdoor".into()],
+            updated_at: 1,
+        });
+        *state.binding_manifest.write().await = Some(manifest);
+
+        let resp = list_actors(State(state.clone())).await.into_response();
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let agent = json["actors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["role"] == "agent")
+            .expect("restored agent")
+            .clone();
+        assert_eq!(agent["label"], "cam-frontdoor", "real label restored");
+        assert_eq!(agent["id"], "agent-cam-frontdoor");
+        assert_eq!(
+            agent["vendor"], "device",
+            "device kind survives the restart"
+        );
+        assert_eq!(agent["device"], "channel-endpoint device (§10.2)");
+        let services: Vec<String> = agent["services"]
+            .as_array()
+            .expect("services populated after restart (the #424 §1 bug)")
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        assert!(services.contains(&"channel-pub:frontdoor".to_string()));
     }
 
     #[tokio::test]
