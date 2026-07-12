@@ -24,15 +24,18 @@ import { LogoPage } from './logos';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import { MemoryPage } from './memory';
 import { CredentialsPage } from './credentials';
-import { PairingPage } from './pairing';
-import { ChannelsPage, ContactsPage } from './gateway';
+import { DelegatesPage } from './pairing';
+import { DevicesPage } from './devices';
+import { ChannelRegistryPage } from './channels';
+import { ContactsPage } from './gateway';
 import { getAssertionOverHash } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
-import type { ChainInfo, ChainListEntry, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
+import type { ChainInfo, ChainListEntry, ChannelDef, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
+import { actorIsChannelEndpoint, isChannelService } from './types';
 
 // #242: does a daemon error detail mean the master J1 lapsed (vs a genuine
 // missing-config / transport error)? The daemon says "master session expired —
@@ -41,7 +44,10 @@ import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } fr
 const looksSessionExpired = (detail?: string): boolean =>
   !!detail && /session expired|re-?authenticate/i.test(detail);
 
-type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'pairing' | 'channels' | 'contacts' | 'audit' | 'decode' | 'chain' | 'logo';
+// #404 IA: household = delegates (sandbox agents) / devices (channel endpoints)
+// / channels (the id-anchored registry) / contacts (WeChat gateway + family).
+// The former top-level 'pairing' page became 'delegates'.
+type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'contacts' | 'audit' | 'decode' | 'chain' | 'logo';
 
 type PendingAction =
   | { kind: 'revoke-device'; actor: Actor; intent: Intent }
@@ -71,6 +77,10 @@ export function App() {
 
   const [onboarded, setOnboarded] = useState(false);
   const [identity, setIdentity] = useState<{ email?: string; omni?: string } | null>(null);
+  // #404 — the channel registry (id-anchored definitions; channels page = CRUD,
+  // device pairing = selection). "cached" storage = dev-only (no config worker).
+  const [channels, setChannels] = useState<ChannelDef[]>([]);
+  const [channelStorage, setChannelStorage] = useState('ok');
   const [maskEm, setMaskEm] = useState(true);
   // #201 Phase 4: the list is CATEGORIES (from the durable taxonomy, no decrypt);
   // per-namespace entries decrypt lazily into `entriesByNs` when a category opens
@@ -309,13 +319,19 @@ export function App() {
     if (!onboarded) return;
     let cancelled = false;
     (async () => {
-      const [a, e] = await Promise.all([
+      const [a, e, ch] = await Promise.all([
         client.listActors(),
         client.listRecentAuditEvents({ limit: 80 }),
+        // #404 — the channel registry (optional: daemon backend only).
+        client.listChannels ? client.listChannels() : Promise.resolve(null),
       ]);
       if (cancelled) return;
       if (a.ok) setActors(a.data);
       if (e.ok) setEvents(e.data.map((x) => ({ ...x })));
+      if (ch?.ok) {
+        setChannels(ch.data.channels);
+        setChannelStorage(ch.data.storage);
+      }
     })();
     return () => { cancelled = true; };
   }, [onboarded, client]);
@@ -562,7 +578,12 @@ export function App() {
   // via the broker → bundler → EntryPoint.handleOps. Returns true on success so
   // the panel clears its staged state; the #233 mirror then re-reads the grant
   // from chain on the refetch below (persistence across refetch + restart).
-  const commitScope = async (actor: Actor, services: string[], readOnly: boolean): Promise<boolean> => {
+  // `preserveOverride` (#408): the device channel editor passes `[]` — a device's
+  // grant set is channel-only by construction (D6), so the staged channel list IS
+  // the full replacement and blind-preserving the mirror's unknown hashes would
+  // resurrect the very grants being removed. Memory-panel callers omit it and
+  // keep the #248 preserve behavior.
+  const commitScope = async (actor: Actor, services: string[], readOnly: boolean, preserveOverride?: string[]): Promise<boolean> => {
     if (status.kind !== 'connected') {
       showToast('Connect a daemon to commit scope changes.');
       return false;
@@ -584,7 +605,7 @@ export function App() {
     const built = await client.scopeBuild({
       actorOmni: actor.omniHex,
       services,
-      preserveServiceIds: actor.scopeUnknownServiceIds ?? [],
+      preserveServiceIds: preserveOverride ?? actor.scopeUnknownServiceIds ?? [],
       readOnly,
     });
     if (!built.ok) {
@@ -736,6 +757,17 @@ export function App() {
       showToast('Connect a daemon to approve a pairing.');
       return;
     }
+    // #408 §14.10 — the accept card HARD-enforces the device rule: a channel-
+    // endpoint device must attach ≥1 channel grant (a grant-less device is inert;
+    // the broker layer only warns). The device accept card disables its button
+    // too — this is the belt for any other caller.
+    const isDevice = req.isDevice === true;
+    if (isDevice && !services.some(isChannelService)) {
+      showToast(
+        `${req.agent} is a DEVICE claim — attach at least one channel (channel-pub/-sub) before accepting (§14.10).`,
+      );
+      return;
+    }
     // #225 E7 — the real Touch-ID gate: build the sponsored executeBatch UserOp on
     // the broker, sign its userOpHash with K11 (Touch ID), submit → handleOps. This
     // does BOTH registerAgentDevice (P.2) + setScope (P.3) atomically, in one block.
@@ -762,6 +794,7 @@ export function App() {
       maxPerPeriod: '0',
       maxTotal: '0',
       periodSeconds: 0,
+      isDevice,
     });
     if (!built.ok) {
       showToast(`Accept build failed — ${built.status?.detail ?? 'check master session + chain (cutover?)'}`);
@@ -911,6 +944,93 @@ export function App() {
     await refreshPairing();
   };
 
+  // #408 D6 — claim a DEVICE's pairing code from the channels page: the declared
+  // scope is the channel attachment (channel-pub/-sub:<id> only), which is what
+  // makes the broker treat the claim as a device (D9 no-spawn) and the daemon
+  // flag it `isDevice` for the channel-page accept card. ≥1 channel enforced
+  // here too (§14.10 — the claim is where the attachment is first declared).
+  const claimDevicePairing = async (input: { code: string; label: string; channels: string[] }) => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to claim a device pairing code.');
+      return;
+    }
+    const channelServices = input.channels.filter(isChannelService);
+    if (channelServices.length === 0) {
+      showToast('A device claim must attach at least one channel (§14.10).');
+      return;
+    }
+    setClaiming(true);
+    const r = await client.claimPairing({
+      code: input.code,
+      label: input.label,
+      scope: channelServices.join(','),
+    });
+    setClaiming(false);
+    if (!r.ok) {
+      showToast('Device claim failed — check the code + that your master session is active.');
+      return;
+    }
+    showToast(`Claimed device ${input.label} — review + accept below (Touch ID).`);
+    await refreshPairing();
+  };
+
+  // ─── #404 channel registry — CRUD against the daemon's config-class doc ───
+  // Channels are created HERE (or via the devices page's explicit inline
+  // creator) and only ever SELECTED at pairing — never minted silently. The id
+  // is the immutable on-chain anchor; delete is refused while grants hold it.
+  const refreshChannels = async () => {
+    if (!client.listChannels) return;
+    const r = await client.listChannels();
+    if (r.ok) {
+      setChannels(r.data.channels);
+      setChannelStorage(r.data.storage);
+    } else {
+      showToast(`Channel registry unavailable — ${r.status?.detail ?? 'check the daemon'}`);
+    }
+  };
+  const createChannel = async (input: { id: string; name: string; note?: string }): Promise<ChannelDef | null> => {
+    if (!client.createChannel) {
+      showToast('This backend has no channel registry.');
+      return null;
+    }
+    const r = await client.createChannel(input);
+    if (!r.ok) {
+      showToast(`Create channel failed — ${r.status?.detail ?? 'check master session'}`);
+      return null;
+    }
+    await refreshChannels();
+    showToast(`Channel ${r.data.id} registered — its id is now the immutable anchor.`);
+    return r.data;
+  };
+  const updateChannel = async (id: string, input: { name?: string; note?: string }): Promise<boolean> => {
+    if (!client.updateChannel) return false;
+    const r = await client.updateChannel(id, input);
+    if (!r.ok) {
+      showToast(`Rename failed — ${r.status?.detail ?? 'check master session'}`);
+      return false;
+    }
+    await refreshChannels();
+    showToast(`Channel ${id} updated (id unchanged — ids never rename).`);
+    return true;
+  };
+  const deleteChannel = async (id: string): Promise<boolean> => {
+    if (!client.deleteChannel) return false;
+    const r = await client.deleteChannel(id);
+    if (!r.ok) {
+      const detail = r.status?.detail ?? '';
+      const holders = detail.match(/"holders":\[([^\]]*)\]/)?.[1]?.replaceAll('"', '') ?? '';
+      showToast(
+        holders
+          ? `Channel ${id} is in use by ${holders} — revoke those grants first.`
+          : `Delete failed — ${detail || 'check master session'}`,
+      );
+      return false;
+    }
+    await refreshChannels();
+    showToast(`Channel ${id} removed from the registry.`);
+    return true;
+  };
+
   const handleRevokeDevice = (actor: Actor) => {
     setPendingAction({
       kind: 'revoke-device',
@@ -1044,12 +1164,17 @@ export function App() {
     const a = await client.listActors();
     if (a.ok) setActors(a.data);
     showToast(`${req.agent} paired · cap-tokens minted · session key handed off.`);
-    go('pairing');
+    go('delegates');
   };
 
   const currentActor = actorId ? actors.find((a) => a.id === actorId) : null;
   const master = actors.find((a) => a.role === 'master');
-  const sectionAttr = page === 'decode' ? 'audit' : ((['audit', 'memory', 'pairing', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
+  // Theme hues: delegates keeps the former 'pairing' section styling; devices
+  // shares the channels hue (both are the conduit family).
+  const sectionAttr = page === 'decode' ? 'audit'
+    : page === 'delegates' ? 'pairing'
+    : page === 'devices' ? 'channels'
+    : ((['audit', 'memory', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
 
   // ─── Onboarding gate (workflow 1) ──────────────────────────────
   if (!onboarded) {
@@ -1067,7 +1192,7 @@ export function App() {
             const head = summary.already
               ? `✓ You're set up — ${n} ${noun} already configured.`
               : `✓ ${n} ${noun} authored${summary.dev ? ' (dev only — no config worker)' : ''}.`;
-            showToast(`${head}  Next: connect an agent — open the Pairing tab to pair one.`, true);
+            showToast(`${head}  Next: connect an agent — open the Delegates tab to pair one.`, true);
           }
         }}
       />
@@ -1101,7 +1226,9 @@ export function App() {
           <span style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{(daemonChain ?? CHAIN_PROFILE.name)} · {status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
           <button
             className={`bell ${pairingRequests.length ? 'has-req' : ''}`}
-            onClick={() => go('pairing')}
+            // Route to where the pending claims actually are: delegate claims →
+            // delegates page; device-only claims → devices page.
+            onClick={() => go(pairingRequests.some((r) => !r.isDevice) || pairingRequests.length === 0 ? 'delegates' : 'devices')}
             aria-label="pairing requests"
             title={pairingRequests.length ? `${pairingRequests.length} pairing request` : 'no pending requests'}
           >
@@ -1128,14 +1255,21 @@ export function App() {
         <button className={`nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
           <span className="marker">[$]</span> credentials<span className="count">{credentials.length || '∅'}</span>
         </button>
-        <button className={`nav-item ${page === 'pairing' ? 'active' : ''}`} onClick={() => go('pairing')}>
-          <span className="marker">[⇄]</span> pairing
-          {pairingRequests.length > 0 && <span className="count" style={{ color: 'var(--accent)' }}>{pairingRequests.length}●</span>}
-        </button>
 
+        {/* #404 IA — household: delegates (sandbox agents) · devices (channel
+            endpoints) · channels (the id-anchored registry) · contacts (WeChat
+            gateway + family). The former top-level pairing page is retired. */}
         <div className="nav-section">household</div>
+        <button className={`nav-item ${page === 'delegates' ? 'active' : ''}`} onClick={() => go('delegates')}>
+          <span className="marker">[⇄]</span> delegates
+          {pairingRequests.filter((r) => !r.isDevice).length > 0 && <span className="count" style={{ color: 'var(--accent)' }}>{pairingRequests.filter((r) => !r.isDevice).length}●</span>}
+        </button>
+        <button className={`nav-item ${page === 'devices' ? 'active' : ''}`} onClick={() => go('devices')}>
+          <span className="marker">[▣]</span> devices
+          {pairingRequests.filter((r) => r.isDevice).length > 0 && <span className="count" style={{ color: 'var(--accent)' }}>{pairingRequests.filter((r) => r.isDevice).length}●</span>}
+        </button>
         <button className={`nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
-          <span className="marker">[≋]</span> channels
+          <span className="marker">[≋]</span> channels<span className="count">{channels.length || '∅'}</span>
         </button>
         <button className={`nav-item ${page === 'contacts' ? 'active' : ''}`} onClick={() => go('contacts')}>
           <span className="marker">[◑]</span> contacts
@@ -1227,12 +1361,46 @@ export function App() {
         {page === 'credentials' && (
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
         )}
-        {page === 'pairing' && (
-          <PairingPage requests={pairingRequests} actors={actors} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} />
+        {page === 'delegates' && (
+          <DelegatesPage requests={pairingRequests.filter((r) => !r.isDevice)} actors={actors.filter((a) => !actorIsChannelEndpoint(a))} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} deviceRequestCount={pairingRequests.filter((r) => r.isDevice).length} onGoDevices={() => go('devices')} />
         )}
-        {page === 'channels' && <ChannelsPage />}
+        {page === 'devices' && (
+          <DevicesPage
+            devices={{
+              requests: pairingRequests.filter((r) => r.isDevice === true),
+              actors: actors.filter((a) => actorIsChannelEndpoint(a)),
+              channels,
+              claiming,
+              onClaim: claimDevicePairing,
+              onAccept: acceptPairing,
+              onDecline: declinePairing,
+              onRefresh: () => { void refreshPairing(); void refreshChannels(); },
+              onUnpair: handleRevokeDevice,
+              onManage: (id: string) => go('detail', id),
+              onCreateChannel: createChannel,
+              onGoChannels: () => go('channels'),
+              onCommitChannels: commitScope,
+            }}
+          />
+        )}
+        {page === 'channels' && (
+          <ChannelRegistryPage
+            registry={{
+              channels,
+              storage: channelStorage,
+              actors,
+              onCreate: createChannel,
+              onUpdate: updateChannel,
+              onDelete: deleteChannel,
+              onRefresh: () => void refreshChannels(),
+              onGoDevices: () => go('devices'),
+            }}
+          />
+        )}
         {page === 'contacts' && (
-          <ContactsPage deeplinkReach={actors.filter((a) => a.role === 'agent').map((a) => a.label.replace(' (revoked)', ''))} />
+          // Reach = agents a contact may TALK to — sandbox delegates only; a
+          // channel-endpoint device (camera/display) is never a conversation target.
+          <ContactsPage deeplinkReach={actors.filter((a) => a.role === 'agent' && !actorIsChannelEndpoint(a)).map((a) => a.label.replace(' (revoked)', ''))} />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}

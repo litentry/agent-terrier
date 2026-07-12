@@ -87,13 +87,20 @@ fn expand(p: &str) -> String {
 /// `agentkeys delegation resolve` (device) — re-derive `J1` from the durable
 /// on-chain binding (pop_sig-gated `/v1/agent/resolve`). Emits the JSON the sandbox
 /// consumes: `{session_jwt, operator_omni, actor_omni, agent_url, device_key_hash}`.
-pub async fn device_resolve(broker_url: &str, key_file: &str) -> Result<String> {
+/// `is_device` (#409 D9) marks the caller a channel-endpoint DEVICE so the broker
+/// skips the boot-time sandbox ensure (spawn-suppressing only — it can never
+/// widen authority).
+pub async fn device_resolve(broker_url: &str, key_file: &str, is_device: bool) -> Result<String> {
     let dk = DeviceKey::load_or_generate(key_file, false)
         .with_context(|| format!("load device K10 {key_file}"))?;
     let base = broker_url.trim_end_matches('/');
+    let mut body = json!({ "device_pubkey": dk.address(), "pop_sig": dk.pop_sig()? });
+    if is_device {
+        body["is_device"] = json!(true);
+    }
     let resp = client()?
         .post(format!("{base}/v1/agent/resolve"))
-        .json(&json!({ "device_pubkey": dk.address(), "pop_sig": dk.pop_sig()? }))
+        .json(&body)
         .send()
         .await
         .context("POST /v1/agent/resolve")?;

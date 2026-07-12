@@ -647,6 +647,9 @@ export interface AgentKeysClient {
     maxPerPeriod: string;
     maxTotal: string;
     periodSeconds: number;
+    /** #408 — a channel-endpoint DEVICE accept (channels page): forwarded to the
+     *  broker's `is_device` (§14.10 warn); the card hard-enforces ≥1 channel. */
+    isDevice?: boolean;
   }): Promise<
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   >;
@@ -687,4 +690,22 @@ export interface AgentKeysClient {
   // a new one. Real durable data — no in-memory stand-in.
   listCredentials(): Promise<Result<CredService[]>>;
   storeCredential(service: string, secret: string): Promise<Result<{ service: string; category: string }>>;
+
+  // #404 — the master's channel REGISTRY (id-anchored channel definitions,
+  // durable config-class doc). The devices pages SELECT from it — channels are
+  // never created silently at pairing; `id` is the immutable on-chain anchor
+  // (only `name`/`note` are editable; delete is refused while grants hold it).
+  // Optional: only the daemon backend serves the registry.
+  listChannels?(): Promise<Result<{ channels: ChannelDef[]; storage: string }>>;
+  createChannel?(input: { id: string; name: string; note?: string }): Promise<Result<ChannelDef>>;
+  updateChannel?(id: string, input: { name?: string; note?: string }): Promise<Result<ChannelDef>>;
+  deleteChannel?(id: string): Promise<Result<void>>;
+}
+
+/** #404 — one channel definition (mirror of the generated ApiChannel). */
+export interface ChannelDef {
+  id: string;
+  name: string;
+  note?: string;
+  createdAt: number;
 }

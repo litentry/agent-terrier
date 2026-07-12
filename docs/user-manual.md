@@ -330,6 +330,39 @@ channels you grant it. If you try to pair a device with **no** channel, the
 accept card won't let you (a device with no channel is inert). Pairing a device
 **does not** spin up a sandbox — only adding a *delegate* does.
 
+**The household section has four pages — one per kind.**
+
+- **delegates** — pair + manage *agents* (sandbox delegates): claim the code,
+  pick memory namespaces, one Touch ID. Only delegates have a persona
+  (`SOUL.md`) and memory scopes.
+- **devices** — pair + manage *AI devices* (camera, display, console): claim
+  the device's code **with a channel attachment selected from the registry**
+  (publish / subscribe per channel), review its accept card (which refuses to
+  accept with zero channels), and manage bound devices — their channel chips
+  and **edit channels → commit · Touch ID** (set-replace: devices hold *only*
+  channel grants; removing every channel is refused — unpair instead). A
+  device's actor page shows binding + channels only — no persona, no memory:
+  a device is a conduit, not a runtime.
+- **channels** — the **channel registry**, the only place channels are
+  created, renamed, or deleted. The **channel id is the immutable anchor**:
+  it is exactly what the on-chain `channel-pub/sub:<id>` grants hash, so it
+  never changes even when you rename the display name. Pairing never creates
+  a channel silently — the devices page *selects* from this registry (its
+  inline "new channel" button is the same explicit create). Deleting a
+  channel is refused while any device/agent still holds a grant on it.
+- **contacts** — the WeChat gateway + your family (tiers, reach, invites).
+
+If you claim a device and then look on the delegates page, you'll find a
+banner pointing you to devices — device claims never render there. Every
+essential action (bind, channel grant change, unpair, registry-backed
+re-grant) returns the same on-chain **audit receipts** as agent pairing,
+visible on the audit page.
+
+Because the registry remembers every channel id, the app can re-derive a
+device's channel *names* from the on-chain grant hashes even after a daemon
+restart — a device only reads "grants on chain (names pending)" if its ids
+were never registered here.
+
 **The WeChat gateway lets your family reach agents by chat.** One household bot
 (a WeChat 公众号, or a spare personal account connected as a bot) is the front
 door: each family member is a **contact** you add in parent-control with a

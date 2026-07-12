@@ -35,6 +35,15 @@ pub struct ResolveBody {
     pub device_pubkey: String,
     /// EIP-191 `pop_sig` over `keccak256("agentkeys-agent-pop:" || device_key_hash)`.
     pub pop_sig: String,
+    /// #409 D9 (spec §4.4) — the caller is a channel-endpoint DEVICE, not a
+    /// runtime-hosting delegate: skip the #377 sandbox ensure. Self-declared and
+    /// spawn-suppressing ONLY (it can never widen authority — a delegate that
+    /// sets it just doesn't get its sandbox ensured on this call), which is why
+    /// a body flag is acceptable here: the on-chain scope stores keccak service
+    /// ids, so the broker cannot re-derive "channel-only" from chain the way
+    /// `poll` derives it from the claim's plaintext `requested_scope`.
+    #[serde(default)]
+    pub is_device: bool,
 }
 
 pub async fn agent_resolve(
@@ -96,17 +105,26 @@ pub async fn agent_resolve(
         "resolved §10.2 binding — J1_agent minted"
     );
 
-    // 4. #377: the bound device needs its runtime — ensure its hermes-sandbox
-    //    instance exists (idempotent; extends the lifetime of a live one).
-    //    Best-effort against the resolve: a veFaaS failure is surfaced in
-    //    `sandbox.error`, never a resolve failure.
-    let provision = crate::handlers::sandbox::ensure_for_delegate(
-        &state,
-        &device_key_hash,
-        &device.actor_omni,
-        &device.operator_omni,
-    )
-    .await;
+    // 4. #377: a DELEGATE needs its runtime — ensure its hermes-sandbox instance
+    //    exists (idempotent; extends the lifetime of a live one). Best-effort
+    //    against the resolve: a veFaaS failure is surfaced in `sandbox.error`,
+    //    never a resolve failure. #409 D9: a channel-endpoint DEVICE never
+    //    spawns — the boot-path twin of the `poll.rs` scope_is_device_only gate.
+    let provision = if body.is_device {
+        tracing::info!(
+            actor_omni = %device.actor_omni,
+            "device resolve — channel endpoint, NO sandbox ensure (#409 D9: device pairing never spawns)"
+        );
+        None
+    } else {
+        crate::handlers::sandbox::ensure_for_delegate(
+            &state,
+            &device_key_hash,
+            &device.actor_omni,
+            &device.operator_omni,
+        )
+        .await
+    };
     let (agent_url, sandbox) = match &provision {
         Some(p) => (json!(p.agent_url), p.to_json()),
         None => (serde_json::Value::Null, serde_json::Value::Null),
@@ -122,4 +140,23 @@ pub async fn agent_resolve(
             "actor_omni": device.actor_omni,
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #409 D9 back-compat: the pre-#409 resolve body (no `is_device`) must keep
+    /// deserializing with the flag defaulted FALSE (delegates keep their boot-time
+    /// sandbox ensure), and an explicit `true` must parse (devices skip it).
+    #[test]
+    fn resolve_body_is_device_defaults_false() {
+        let legacy: ResolveBody =
+            serde_json::from_str(r#"{"device_pubkey":"0xabc","pop_sig":"0xdef"}"#).unwrap();
+        assert!(!legacy.is_device);
+        let device: ResolveBody =
+            serde_json::from_str(r#"{"device_pubkey":"0xabc","pop_sig":"0xdef","is_device":true}"#)
+                .unwrap();
+        assert!(device.is_device);
+    }
 }

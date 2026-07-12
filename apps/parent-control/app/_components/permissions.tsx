@@ -4,6 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { NAMESPACES } from '@/lib/constants';
 import { Dot, Panel } from './shared';
 import type { Actor, Namespace, ScopeBits, VaultItem } from './types';
+import { isChannelService } from './types';
 import type { ProposedScope } from '@/lib/client/types';
 
 // Segmented control: deny | read | read+write
@@ -113,9 +114,34 @@ export function PermissionList({
   const vaultForActor = vaultItems.filter((v) => v.actor === actor.id);
   const hasEmail = services.includes('email');
   const hasPay = (actor.paymentCap?.perTx ?? 0) > 0;
+  // #408 D2 — per-direction channel grants (channel-pub:<id> = produce into,
+  // channel-sub:<id> = consume from). Shown read-only here for a CONSISTENT
+  // permission picture; grant edits live on the channels page (devices) / the
+  // staged scope commit (delegates).
+  const channelGrants = services.filter(isChannelService);
 
   return (
     <div className="perm-list">
+      {/* CHANNELS */}
+      {channelGrants.length > 0 && (
+        <PermSection title="Channels" summary={`${channelGrants.length} grant${channelGrants.length === 1 ? '' : 's'}`}>
+          {channelGrants.map((svc) => {
+            const pub = svc.toLowerCase().startsWith('channel-pub:');
+            const id = svc.split(':').slice(1).join(':');
+            return (
+              <PermRow
+                key={svc}
+                icon={pub ? '↥' : '↧'}
+                title={id}
+                why={pub ? 'publish — this actor produces events into the channel feed' : 'subscribe — this actor consumes events from the channel feed'}
+                state={`${svc} · cap-gated · worker chain re-verify (§17.5)`}
+                granted={true}
+                control={<span className="perm-readonly on">{pub ? 'pub' : 'sub'}</span>}
+              />
+            );
+          })}
+        </PermSection>
+      )}
       {/* MEMORY */}
       <PermSection title="Memory access" summary={`${memGranted.length} of ${NAMESPACES.length} namespaces`}>
         {NAMESPACES.map((ns) => {
