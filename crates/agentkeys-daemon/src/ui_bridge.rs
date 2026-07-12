@@ -107,6 +107,20 @@ pub struct UiBridgeState {
     /// can show its categories before any memory is planted. `None` until the
     /// master picks a preset (or NL→COMPILE, #207 item 1B, lands).
     pub authored_taxonomy: RwLock<Option<MemoryTaxonomy>>,
+    /// #408 — the accept card's FINAL grant set + `is_device` flag, stashed by
+    /// `accept_build_proxy` keyed by `request_id` and consumed by `ack_pairing`,
+    /// so the freshly-surfaced actor row carries the service NAMES the operator
+    /// actually approved (the on-chain scope stores only keccak ids — names are
+    /// unrecoverable from chain). In-memory only: after a daemon restart a
+    /// chain-reconstructed row falls back to hash-only display; the mirror's
+    /// preserve semantics (`scope_unknown_service_ids`) are untouched either way.
+    pub accept_grants_by_request: RwLock<HashMap<String, (Vec<String>, bool)>>,
+    /// #404 — the master's channel registry (id-anchored channel definitions),
+    /// taxonomy-style: the durable home is the Config-class doc
+    /// `config/channel-registry.enc` and this is a write-through cache; with
+    /// Config UNCONFIGURED (dev / no-infra) it is the only home (mutations then
+    /// report `storage:"cached"`). `None` until first load.
+    pub channel_registry: RwLock<Option<ChannelRegistry>>,
     /// Broker base URL for the W1 onboarding email→verify flow. `None` ⇒ email
     /// onboarding is disabled (the daemon was started without `--broker-url`)
     /// and the email endpoints fail closed with `broker-not-configured`.
@@ -386,6 +400,56 @@ pub struct MemoryCategory {
 /// `bots/<O_master>/config/memory-taxonomy.enc`). Config is master-only, so the
 /// broker + worker skip the on-chain scope check for `operator == actor` (#195).
 const TAXONOMY_SERVICE: &str = "memory-taxonomy";
+
+/// The signed `service` of the Config-class CHANNEL REGISTRY object (→ S3 key
+/// `bots/<O_master>/config/channel-registry.enc`) — the master-curated catalog
+/// of channel definitions (#404). This is the "registry-from-config-data-class
+/// sync" the channel worker crate docs deferred: the worker/broker stay
+/// grant-anchored (a channel id is free-form at the chain layer); the registry
+/// is the MASTER's bookkeeping — which ids exist, their display names — so the
+/// web app can offer selection instead of silent free-text creation, and the
+/// daemon can re-name on-chain grant hashes after a restart.
+const CHANNEL_REGISTRY_SERVICE: &str = "channel-registry";
+
+/// One channel DEFINITION in the master's registry (#404). `id` is the
+/// IMMUTABLE anchor — it is the exact string hashed into the on-chain
+/// `channel-pub:<id>` / `channel-sub:<id>` service ids, so it can never be
+/// renamed (rename = a different channel). `name`/`note` are display-only and
+/// freely editable.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiChannel {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+    #[ts(type = "number")]
+    pub created_at: u64,
+}
+
+/// The durable registry doc (config-class, master-only). Version field for
+/// forward evolution; the vec is small (a household's channel count).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChannelRegistry {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    channels: Vec<ApiChannel>,
+}
+
+/// Channel-id shape: the on-chain anchor must be stable + lowercase (service
+/// ids are keccak'd over the LOWERCASED string on every path), and short enough
+/// to read on a device card. Mirrors the label discipline elsewhere.
+fn valid_channel_id(id: &str) -> bool {
+    let n = id.len();
+    (1..=48).contains(&n)
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+}
 
 /// Title-case a namespace for its display label (`travel` → `Travel`). The
 /// taxonomy object is the durable label home; this is the derivation used when
@@ -902,6 +966,12 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/master/persona/delete", post(delete_master_persona))
         .route("/v1/master/agent/restart", post(restart_master_agent))
         .route("/v1/master/agent/context", get(get_master_agent_context))
+        // #404 — the master's channel registry (id-anchored channel definitions;
+        // the device pages SELECT from it — channels are never created silently):
+        .route("/v1/channels", get(list_channels))
+        .route("/v1/channels", post(create_channel))
+        .route("/v1/channels/:id", post(update_channel))
+        .route("/v1/channels/:id/delete", post(delete_channel))
         .route("/v1/master/config/presets", get(list_config_presets))
         .route("/v1/master/config/init", post(init_config_default))
         .route("/v1/master/classify/tag", post(classify_tag))
@@ -1123,6 +1193,8 @@ pub fn build_state(
         master_memory: RwLock::new(HashMap::new()),
         plant_lock: tokio::sync::Mutex::new(()),
         authored_taxonomy: RwLock::new(None),
+        accept_grants_by_request: RwLock::new(HashMap::new()),
+        channel_registry: RwLock::new(None),
         stacks: parse_stacks_json(std::env::var("AGENTKEYS_STACKS_JSON").ok().as_deref()),
         broker_url,
         allowed_origin: rp_origin.to_string(),
@@ -3329,6 +3401,20 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
     // (`None` for no/empty grant → the panel's DENY is then chain-accurate).
     // Best-effort per agent; a read failure leaves that row's scope untouched.
     if let Some(scope_contract) = scope_contract_address(state) {
+        // #404: registry-derived reverse map (keccak(channel-pub/sub:<id>) →
+        // name) so channel grants re-NAME after a daemon restart — this is what
+        // keeps device detection + channel chips durable across restarts.
+        // Best-effort: an unreachable registry only skips the naming.
+        let channel_candidates = match ensure_channel_registry(state).await {
+            Ok(reg) => channel_service_candidates(&reg),
+            Err(e) => {
+                tracing::debug!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    "channel registry unavailable for scope naming: {e}"
+                );
+                HashMap::new()
+            }
+        };
         let agent_rows: Vec<(String, String)> = state
             .actors
             .read()
@@ -3340,10 +3426,25 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
         for (id, actor_omni) in agent_rows {
             match fetch_actor_scope_from_chain(&rpc, &scope_contract, &omni, &actor_omni).await {
                 Ok((scope, unknown_ids)) => {
+                    // Registry match — names recovered from hashes. unknown_ids
+                    // stays UNCHANGED (the #248 preserve semantics: a memory
+                    // commit must keep echoing every non-memory hash).
+                    let matched: Vec<String> = unknown_ids
+                        .iter()
+                        .filter_map(|h| channel_candidates.get(&h.to_lowercase()).cloned())
+                        .collect();
                     if let Some(a) = state.actors.write().await.get_mut(&id) {
                         a.scope = scope;
                         a.scope_unknown_service_ids =
                             (!unknown_ids.is_empty()).then_some(unknown_ids);
+                        if !matched.is_empty() {
+                            let services = a.services.get_or_insert_with(Vec::new);
+                            for name in matched {
+                                if !services.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+                                    services.push(name);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => tracing::debug!(
@@ -4765,13 +4866,31 @@ fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
             serde_json::json!({ "cap": cap, "ns": ns, "reason": "requested at pairing" })
         })
         .collect();
+    // #408 D6 — a claim whose scope is ONLY channel-pub/sub grants is a channel-
+    // endpoint DEVICE bind (same predicate the broker's poll uses for the D9
+    // no-spawn). The web app routes device claims to the channel section and
+    // sandbox-delegate claims to the pairing section on this flag.
+    let is_device = agentkeys_backend_client::protocol::scope_is_device_only(&requested_scope);
+    // The declared column is self-reported placeholder context either way
+    // (never a basis for approval) — but the sandbox wording is WRONG for a
+    // device claim, so vary it by the derived kind.
+    let (device_lbl, machine_lbl, runtime_lbl) = if is_device {
+        (
+            "channel-endpoint device (K10)",
+            "device",
+            "none — channel endpoint (no runtime)",
+        )
+    } else {
+        ("sandbox device (K10)", "aiosandbox", "hermes")
+    };
     serde_json::json!({
         "id": request_id,
         "agent": label,
-        "vendor": "agent",
-        "device": "sandbox device (K10)",
-        "machine": "aiosandbox",
-        "runtime": "hermes",
+        "vendor": if is_device { "device" } else { "agent" },
+        "device": device_lbl,
+        "machine": machine_lbl,
+        "runtime": runtime_lbl,
+        "isDevice": is_device,
         "dpub": short(&device_pubkey),
         "dpubFull": device_pubkey,
         // #224: the operator cross-checks `deviceKeyHash` (+ `dpubFull`, both printed
@@ -4879,6 +4998,30 @@ async fn ack_pairing(
                 } else {
                     format!("0x{actor_omni}")
                 };
+                // #408: the accept proxy stashed the FINAL granted service names +
+                // device flag under this request_id — consume them so the actor
+                // row is named (channel chips, audit decode) and device-labelled.
+                // Fallback: the claim's requested_scope tokens (legacy register
+                // path, or a build that never ran through this daemon).
+                let stashed = state
+                    .accept_grants_by_request
+                    .write()
+                    .await
+                    .remove(&request_id);
+                let (services, was_device_accept) = match stashed {
+                    Some((svcs, dev)) => (svcs, dev),
+                    None => {
+                        let scope = field("requested_scope");
+                        let toks: Vec<String> = scope
+                            .split([',', ' '])
+                            .map(str::trim)
+                            .filter(|t| !t.is_empty())
+                            .map(str::to_string)
+                            .collect();
+                        let dev = agentkeys_backend_client::protocol::scope_is_device_only(&scope);
+                        (toks, dev)
+                    }
+                };
                 let agent_actor = ApiActor {
                     id: format!("agent-{label}"),
                     omni: omni_hex.clone(),
@@ -4887,11 +5030,19 @@ async fn ack_pairing(
                     role: "agent".into(),
                     parent: Some("master".into()),
                     derivation: format!("//{label}"),
-                    device: "sandbox device (§10.2)".into(),
+                    device: if was_device_accept {
+                        "channel-endpoint device (§10.2)".into()
+                    } else {
+                        "sandbox device (§10.2)".into()
+                    },
                     device_pubkey: field("device_pubkey"),
                     last_active: "just paired".into(),
                     status: "ok".into(),
-                    vendor: String::new(),
+                    vendor: if was_device_accept {
+                        "device".into()
+                    } else {
+                        String::new()
+                    },
                     k11: false,
                     device_key_hash: (!device_key_hash.is_empty()).then(|| {
                         if device_key_hash.starts_with("0x") {
@@ -4904,7 +5055,7 @@ async fn ack_pairing(
                     scope_unknown_service_ids: None,
                     payment_cap: None,
                     time_window: None,
-                    services: None,
+                    services: (!services.is_empty()).then_some(services),
                     account_address: None,
                     account_type: None,
                 };
@@ -5006,6 +5157,12 @@ pub struct DaemonAcceptBuildRequest {
     pub max_per_period: String,
     pub max_total: String,
     pub period_seconds: u32,
+    /// #408 — the accept card declares the claim a channel-endpoint DEVICE bind
+    /// (spec §14.10: the card hard-enforces ≥1 channel; the broker warns).
+    /// Forwarded to the broker's `BuildAcceptRequest.is_device` — omitting it
+    /// here was the gap that made the broker warn unreachable from the web.
+    #[serde(default)]
+    pub is_device: bool,
 }
 
 /// POST /v1/accept/build — resolve the binding + forward to the broker's
@@ -5047,7 +5204,7 @@ async fn accept_build_proxy(
             .unwrap_or("")
             .to_string()
     };
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "operator_omni": operator_omni,
         "actor_omni": field("child_omni"),
         "device_key_hash": field("device_key_hash"),
@@ -5060,6 +5217,18 @@ async fn accept_build_proxy(
         "max_total": req.max_total,
         "period_seconds": req.period_seconds,
     });
+    // #408: present only when true — keeps the delegate body byte-identical to
+    // the pre-#408 shape (mirrors the protocol type's skip_serializing_if).
+    if req.is_device {
+        body["is_device"] = serde_json::json!(true);
+    }
+    // Stash the operator's FINAL grant set (the picker may have edited the
+    // claim's requested_scope) so ack_pairing can surface the actor with the
+    // service NAMES the accept actually granted — chain stores only keccak ids.
+    state.accept_grants_by_request.write().await.insert(
+        req.request_id.clone(),
+        (req.services.clone(), req.is_device),
+    );
     forward_to_broker(&broker, "/v1/accept/build", &j1, &body).await
 }
 
@@ -6512,6 +6681,21 @@ async fn config_store_taxonomy(
     ctx: &RealConfigCtx,
     taxonomy: &MemoryTaxonomy,
 ) -> Result<(), String> {
+    let plaintext = serde_json::to_vec(taxonomy).map_err(|e| format!("taxonomy serialize: {e}"))?;
+    config_store_doc(client, ctx, TAXONOMY_SERVICE, &plaintext).await
+}
+
+/// Generic Config-class doc STORE (#201/#372 shape, service-parameterized):
+/// master-self cap (`config-store`, `service`) → STS under the CONFIG role →
+/// client-side v3 encrypt under the signer-derived per-(actor, service) KEK →
+/// config worker `/v1/config/put`. Used by the taxonomy (`memory-taxonomy`)
+/// and the #404 channel registry (`channel-registry`).
+async fn config_store_doc(
+    client: &reqwest::Client,
+    ctx: &RealConfigCtx,
+    service: &str,
+    plaintext: &[u8],
+) -> Result<(), String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
         &ctx.broker,
@@ -6519,7 +6703,7 @@ async fn config_store_taxonomy(
         &ctx.omni,
         &ctx.device_key_hash,
         "config-store",
-        TAXONOMY_SERVICE,
+        service,
     )
     .await?;
     let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
@@ -6530,13 +6714,12 @@ async fn config_store_taxonomy(
     )
     .await
     .map_err(|e| format!("STS relay (config): {e}"))?;
-    let plaintext = serde_json::to_vec(taxonomy).map_err(|e| format!("taxonomy serialize: {e}"))?;
     // #372 item 2: CLIENT-side encrypt under the signer-derived per-actor KEK
     // (v3 envelope). The worker stores the envelope verbatim — plaintext never
     // reaches it, and neither the storage plane nor any worker env can decrypt.
-    let kek = derive_config_kek(ctx, TAXONOMY_SERVICE).await?;
-    let aad = agentkeys_core::envelope_v3::aad_v3(&ctx.omni, TAXONOMY_SERVICE);
-    let envelope = agentkeys_core::envelope_v3::encrypt_v3(&kek, &plaintext, &aad)
+    let kek = derive_config_kek(ctx, service).await?;
+    let aad = agentkeys_core::envelope_v3::aad_v3(&ctx.omni, service);
+    let envelope = agentkeys_core::envelope_v3::encrypt_v3(&kek, plaintext, &aad)
         .map_err(|e| format!("config v3 encrypt: {e}"))?;
     let resp = client
         .post(format!("{}/v1/config/put", ctx.config_url))
@@ -6571,6 +6754,22 @@ async fn config_fetch_taxonomy(
     client: &reqwest::Client,
     ctx: &RealConfigCtx,
 ) -> Result<Option<MemoryTaxonomy>, String> {
+    let Some(bytes) = config_fetch_doc(client, ctx, TAXONOMY_SERVICE).await? else {
+        return Ok(None);
+    };
+    let taxonomy: MemoryTaxonomy =
+        serde_json::from_slice(&bytes).map_err(|e| format!("taxonomy parse: {e}"))?;
+    Ok(Some(taxonomy))
+}
+
+/// Generic Config-class doc FETCH (service-parameterized twin of
+/// [`config_store_doc`]). `Ok(None)` ONLY on confirmed-missing (404); any other
+/// failure is an `Err` the caller must surface (never silently downgrade).
+async fn config_fetch_doc(
+    client: &reqwest::Client,
+    ctx: &RealConfigCtx,
+    service: &str,
+) -> Result<Option<Vec<u8>>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
         &ctx.broker,
@@ -6578,7 +6777,7 @@ async fn config_fetch_taxonomy(
         &ctx.omni,
         &ctx.device_key_hash,
         "config-fetch",
-        TAXONOMY_SERVICE,
+        service,
     )
     .await?;
     let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
@@ -6619,24 +6818,335 @@ async fn config_fetch_taxonomy(
         (Some(env_b64), _) => {
             let envelope = STANDARD
                 .decode(&env_b64)
-                .map_err(|e| format!("taxonomy envelope decode: {e}"))?;
-            let kek = derive_config_kek(ctx, TAXONOMY_SERVICE).await?;
-            let aad = agentkeys_core::envelope_v3::aad_v3(&ctx.omni, TAXONOMY_SERVICE);
+                .map_err(|e| format!("{service} envelope decode: {e}"))?;
+            let kek = derive_config_kek(ctx, service).await?;
+            let aad = agentkeys_core::envelope_v3::aad_v3(&ctx.omni, service);
             agentkeys_core::envelope_v3::decrypt_v3(&kek, &envelope, &aad)
                 .map_err(|e| format!("config v3 decrypt (signer-derived KEK): {e}"))?
         }
         (None, Some(pt_b64)) => STANDARD
             .decode(&pt_b64)
-            .map_err(|e| format!("taxonomy plaintext decode: {e}"))?,
+            .map_err(|e| format!("{service} plaintext decode: {e}"))?,
         (None, None) => {
             return Err("config get: response carried neither envelope_b64 nor \
                         plaintext_b64 — worker/client version mismatch"
                 .into())
         }
     };
-    let taxonomy: MemoryTaxonomy =
-        serde_json::from_slice(&bytes).map_err(|e| format!("taxonomy parse: {e}"))?;
-    Ok(Some(taxonomy))
+    Ok(Some(bytes))
+}
+
+// ── #404 channel registry — master-curated channel definitions ──────────────
+//
+// The registry is the master's id-anchored catalog of channels. The chain layer
+// stays grant-anchored (free-form ids hashed into `channel-pub/sub:<id>`); the
+// registry adds the operator-facing truths: WHICH ids exist, their display
+// names, and therefore (a) the web app offers SELECTION at device pairing —
+// never silent free-text creation — and (b) the daemon can re-derive channel
+// names + device-ness from on-chain grant hashes after a restart (keccak of
+// `channel-pub/sub:<id>` over every registry id).
+
+/// Load the registry through the taxonomy-style cache: in-memory if present,
+/// else config-fetch (`Ok(None)` = never created → empty), else — Config
+/// UNCONFIGURED (dev / no-infra) — an empty cached-only registry.
+async fn ensure_channel_registry(state: &UiBridgeState) -> Result<ChannelRegistry, String> {
+    if let Some(r) = state.channel_registry.read().await.clone() {
+        return Ok(r);
+    }
+    let loaded = match real_config_ctx(state).await? {
+        Some(ctx) => {
+            let client = reqwest::Client::new();
+            match config_fetch_doc(&client, &ctx, CHANNEL_REGISTRY_SERVICE).await? {
+                Some(bytes) => serde_json::from_slice::<ChannelRegistry>(&bytes)
+                    .map_err(|e| format!("channel-registry parse: {e}"))?,
+                None => ChannelRegistry::default(),
+            }
+        }
+        None => ChannelRegistry::default(),
+    };
+    *state.channel_registry.write().await = Some(loaded.clone());
+    Ok(loaded)
+}
+
+/// Persist + cache a mutated registry. Durable when Config is configured
+/// (`"ok"`); dev/no-infra keeps cache-only (`"cached"`, taxonomy posture). A
+/// configured-but-FAILING store returns `Err` WITHOUT touching the cache — the
+/// mutation is rejected whole, never half-applied (no silent cache↔durable
+/// divergence).
+async fn persist_channel_registry(
+    state: &UiBridgeState,
+    next: ChannelRegistry,
+) -> Result<&'static str, String> {
+    let storage = match real_config_ctx(state).await? {
+        Some(ctx) => {
+            let client = reqwest::Client::new();
+            let bytes =
+                serde_json::to_vec(&next).map_err(|e| format!("registry serialize: {e}"))?;
+            config_store_doc(&client, &ctx, CHANNEL_REGISTRY_SERVICE, &bytes).await?;
+            "ok"
+        }
+        None => "cached",
+    };
+    *state.channel_registry.write().await = Some(next);
+    Ok(storage)
+}
+
+/// `keccak(channel-pub:<id>)` / `keccak(channel-sub:<id>)` (`0x`-hex, the
+/// on-chain service-id spelling) → the service NAME, for every registry id.
+/// The reverse map that re-names an actor's opaque scope hashes.
+fn channel_service_candidates(registry: &ChannelRegistry) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for ch in &registry.channels {
+        for dir in ["channel-pub", "channel-sub"] {
+            let name = format!("{dir}:{}", ch.id.to_lowercase());
+            let h = format!(
+                "0x{}",
+                hex::encode(agentkeys_core::device_crypto::keccak256(name.as_bytes()))
+            );
+            map.insert(h, name);
+        }
+    }
+    map
+}
+
+/// Which actors hold a grant on channel `id` — by NAME (in `services`) or by
+/// on-chain HASH (in `scope_unknown_service_ids`). Pure for testability; the
+/// delete handler refuses while this is non-empty (revoke the grants first —
+/// deleting a definition under live grants would orphan them back to hashes).
+fn channel_holders(actors: &HashMap<String, ApiActor>, id: &str) -> Vec<String> {
+    let idl = id.to_lowercase();
+    let names = [format!("channel-pub:{idl}"), format!("channel-sub:{idl}")];
+    let hashes: Vec<String> = names
+        .iter()
+        .map(|n| {
+            format!(
+                "0x{}",
+                hex::encode(agentkeys_core::device_crypto::keccak256(n.as_bytes()))
+            )
+        })
+        .collect();
+    let mut holders: Vec<String> = actors
+        .values()
+        .filter(|a| {
+            a.services
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|s| names.contains(&s.to_lowercase()))
+                || a.scope_unknown_service_ids
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|h| hashes.contains(&h.to_lowercase()))
+        })
+        .map(|a| a.label.clone())
+        .collect();
+    holders.sort();
+    holders.dedup();
+    holders
+}
+
+fn registry_err(status: StatusCode, msg: &str) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+/// The `storage` flag every registry response carries: `"ok"` = durable
+/// Config-class doc; `"cached"` = Config unconfigured (dev-only, in-memory).
+fn registry_storage_label(state: &UiBridgeState) -> &'static str {
+    if state.config_url.is_some() {
+        "ok"
+    } else {
+        "cached"
+    }
+}
+
+async fn require_master_session(state: &UiBridgeState) -> Result<(), axum::response::Response> {
+    match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => Ok(()),
+        _ => Err(registry_err(
+            StatusCode::FORBIDDEN,
+            "no master session — sign in first",
+        )),
+    }
+}
+
+/// GET /v1/channels — the registry, master-session-gated.
+async fn list_channels(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
+    if let Err(r) = require_master_session(&state).await {
+        return r;
+    }
+    match ensure_channel_registry(&state).await {
+        Ok(reg) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "channels": reg.channels,
+                "storage": registry_storage_label(&state),
+            })),
+        )
+            .into_response(),
+        Err(e) => registry_err(StatusCode::BAD_GATEWAY, &format!("channel registry: {e}")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateChannelRequest {
+    id: String,
+    name: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// POST /v1/channels — create a channel definition. The id is validated +
+/// IMMUTABLE from here on (it is the on-chain anchor); duplicates 409.
+async fn create_channel(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<CreateChannelRequest>,
+) -> axum::response::Response {
+    if let Err(r) = require_master_session(&state).await {
+        return r;
+    }
+    let id = req.id.trim().to_lowercase();
+    if !valid_channel_id(&id) {
+        return registry_err(
+            StatusCode::BAD_REQUEST,
+            "channel id must be 1-48 chars of [a-z0-9-], not starting/ending with '-' — it is the immutable on-chain anchor",
+        );
+    }
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return registry_err(StatusCode::BAD_REQUEST, "channel name must not be empty");
+    }
+    let mut reg = match ensure_channel_registry(&state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("channel registry: {e}")),
+    };
+    if reg.channels.iter().any(|c| c.id == id) {
+        return registry_err(
+            StatusCode::CONFLICT,
+            "a channel with this id already exists (ids are immutable anchors — pick another)",
+        );
+    }
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let channel = ApiChannel {
+        id,
+        name,
+        note: req
+            .note
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty()),
+        created_at,
+    };
+    reg.channels.push(channel.clone());
+    match persist_channel_registry(&state, reg).await {
+        Ok(storage) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "channel": channel, "storage": storage })),
+        )
+            .into_response(),
+        Err(e) => registry_err(
+            StatusCode::BAD_GATEWAY,
+            &format!("channel registry store failed — nothing created: {e}"),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateChannelRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// POST /v1/channels/:id — edit DISPLAY fields (name/note). The id is the
+/// immutable anchor: there is deliberately no rename — even when the display
+/// name changes, the id stays what the on-chain grants hash.
+async fn update_channel(
+    State(state): State<SharedUiBridgeState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateChannelRequest>,
+) -> axum::response::Response {
+    if let Err(r) = require_master_session(&state).await {
+        return r;
+    }
+    let mut reg = match ensure_channel_registry(&state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("channel registry: {e}")),
+    };
+    let idl = id.to_lowercase();
+    let Some(ch) = reg.channels.iter_mut().find(|c| c.id == idl) else {
+        return registry_err(StatusCode::NOT_FOUND, "no channel with that id");
+    };
+    if let Some(name) = req.name {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return registry_err(StatusCode::BAD_REQUEST, "channel name must not be empty");
+        }
+        ch.name = name;
+    }
+    if let Some(note) = req.note {
+        let note = note.trim().to_string();
+        ch.note = (!note.is_empty()).then_some(note);
+    }
+    let updated = reg.channels.iter().find(|c| c.id == idl).cloned();
+    match persist_channel_registry(&state, reg).await {
+        Ok(storage) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "channel": updated, "storage": storage })),
+        )
+            .into_response(),
+        Err(e) => registry_err(
+            StatusCode::BAD_GATEWAY,
+            &format!("channel registry store failed — nothing changed: {e}"),
+        ),
+    }
+}
+
+/// POST /v1/channels/:id/delete — remove a definition. REFUSED while any actor
+/// still holds a grant on the id (by name or on-chain hash): revoke those first
+/// (device page / actor page), else the live grants would orphan back to
+/// unreadable hashes. Mirrors the "no silent divergence" posture.
+async fn delete_channel(
+    State(state): State<SharedUiBridgeState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    if let Err(r) = require_master_session(&state).await {
+        return r;
+    }
+    let mut reg = match ensure_channel_registry(&state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("channel registry: {e}")),
+    };
+    let idl = id.to_lowercase();
+    if !reg.channels.iter().any(|c| c.id == idl) {
+        return registry_err(StatusCode::NOT_FOUND, "no channel with that id");
+    }
+    let holders = channel_holders(&*state.actors.read().await, &idl);
+    if !holders.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "channel is in use — revoke its grants first",
+                "holders": holders,
+            })),
+        )
+            .into_response();
+    }
+    reg.channels.retain(|c| c.id != idl);
+    match persist_channel_registry(&state, reg).await {
+        Ok(storage) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "storage": storage })),
+        )
+            .into_response(),
+        Err(e) => registry_err(
+            StatusCode::BAD_GATEWAY,
+            &format!("channel registry store failed — nothing deleted: {e}"),
+        ),
+    }
 }
 
 /// Read-modify-write the durable taxonomy: config-fetch the current
@@ -8867,6 +9377,131 @@ mod tests {
         assert_eq!(requested[0]["cap"], "memory");
         assert_eq!(requested[0]["ns"][0], "travel");
         assert_eq!(requested[1]["ns"][0], "family");
+        // A memory-scoped claim is a sandbox DELEGATE, never a device.
+        assert_eq!(pr["isDevice"], false);
+        assert_eq!(pr["vendor"], "agent");
+        assert_eq!(pr["runtime"], "hermes");
+    }
+
+    /// #408 D6 — a claim whose requested_scope is ONLY channel-pub/sub grants
+    /// maps with `isDevice: true` (the same `scope_is_device_only` predicate the
+    /// broker's D9 no-spawn gate uses), and the declared placeholders stop
+    /// claiming a sandbox/hermes runtime the device does not have. The web app
+    /// splits the pairing page (delegates) from the channel page (devices) on
+    /// this flag.
+    #[test]
+    fn pending_binding_channel_only_scope_maps_to_device_request() {
+        let row = serde_json::json!({
+            "request_id": "req-device01",
+            "child_omni": "0xchildomni",
+            "operator_omni": "0xmasteromni",
+            "label": "cam-frontdoor",
+            "requested_scope": "channel-pub:cam-frontdoor,channel-sub:kitchen-display",
+            "device_pubkey": "0x04aabbccddeeff00112233445566778899aabbcc",
+            "device_key_hash": "0xdkh",
+            "pop_sig": "0xsig",
+            "pairing_code": "code",
+            "created_at": 1_700_000_000_i64,
+            "expires_at": 1_700_000_600_i64,
+        });
+        let pr = pending_binding_to_request(&row);
+        assert_eq!(pr["isDevice"], true);
+        assert_eq!(pr["vendor"], "device");
+        assert_eq!(pr["device"], "channel-endpoint device (K10)");
+        assert_eq!(pr["runtime"], "none — channel endpoint (no runtime)");
+        // The channel tokens still flow into the accept card's picker rows.
+        let requested = pr["requested"].as_array().expect("requested array");
+        assert_eq!(requested[0]["cap"], "channel-pub");
+        assert_eq!(requested[0]["ns"][0], "cam-frontdoor");
+        assert_eq!(requested[1]["cap"], "channel-sub");
+        assert_eq!(requested[1]["ns"][0], "kitchen-display");
+        // Mixed scope (a channel grant + memory) is a DELEGATE (spec: mixed =
+        // delegate) — the device flag must not fire.
+        let mut mixed = row.clone();
+        mixed["requested_scope"] = serde_json::json!("channel-pub:cam,memory:travel");
+        assert_eq!(pending_binding_to_request(&mixed)["isDevice"], false);
+    }
+
+    /// #404 channel registry — the id is the immutable on-chain anchor, so its
+    /// shape is strict: lowercase [a-z0-9-], 1-48 chars, no edge hyphens.
+    #[test]
+    fn channel_id_validation() {
+        assert!(valid_channel_id("cam-frontdoor"));
+        assert!(valid_channel_id("a"));
+        assert!(valid_channel_id("kitchen-display-2"));
+        assert!(!valid_channel_id(""));
+        assert!(!valid_channel_id("Cam")); // uppercase — ids hash LOWERCASED
+        assert!(!valid_channel_id("-cam"));
+        assert!(!valid_channel_id("cam-"));
+        assert!(!valid_channel_id("cam frontdoor"));
+        assert!(!valid_channel_id(&"x".repeat(49)));
+    }
+
+    /// #404 — the registry's reverse map recovers channel service NAMES from
+    /// the on-chain keccak hashes (restart-proof naming), and `channel_holders`
+    /// finds grant holders by name AND by hash (the delete-in-use guard).
+    #[test]
+    fn channel_registry_candidates_and_holders() {
+        let reg = ChannelRegistry {
+            version: 1,
+            channels: vec![ApiChannel {
+                id: "cam-frontdoor".into(),
+                name: "Front door camera".into(),
+                note: None,
+                created_at: 0,
+            }],
+        };
+        let cand = channel_service_candidates(&reg);
+        let pub_hash = format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(
+                b"channel-pub:cam-frontdoor"
+            ))
+        );
+        assert_eq!(
+            cand.get(&pub_hash).map(String::as_str),
+            Some("channel-pub:cam-frontdoor")
+        );
+        assert_eq!(cand.len(), 2, "pub + sub per registry channel");
+
+        // Holders: one actor by NAME, one by on-chain HASH, one unrelated.
+        let mk = |id: &str, label: &str| ApiActor {
+            id: id.into(),
+            omni: "0x1".into(),
+            omni_hex: "0x1".into(),
+            label: label.into(),
+            role: "agent".into(),
+            parent: None,
+            derivation: String::new(),
+            device: String::new(),
+            device_pubkey: String::new(),
+            last_active: String::new(),
+            status: "ok".into(),
+            vendor: String::new(),
+            k11: false,
+            device_key_hash: None,
+            scope: None,
+            scope_unknown_service_ids: None,
+            payment_cap: None,
+            time_window: None,
+            services: None,
+            account_address: None,
+            account_type: None,
+        };
+        let mut actors = HashMap::new();
+        let mut by_name = mk("a1", "cam-by-name");
+        by_name.services = Some(vec!["channel-pub:cam-frontdoor".into()]);
+        actors.insert("a1".into(), by_name);
+        let mut by_hash = mk("a2", "cam-by-hash");
+        by_hash.scope_unknown_service_ids = Some(vec![pub_hash]);
+        actors.insert("a2".into(), by_hash);
+        let mut other = mk("a3", "unrelated");
+        other.services = Some(vec!["memory:travel".into()]);
+        actors.insert("a3".into(), other);
+
+        let holders = channel_holders(&actors, "cam-frontdoor");
+        assert_eq!(holders, vec!["cam-by-hash", "cam-by-name"]);
+        assert!(channel_holders(&actors, "kitchen-display").is_empty());
     }
 
     /// #214: the pairing routes (poll / claim / register) require a configured

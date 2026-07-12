@@ -3,6 +3,7 @@ import type {
   AnchorStatus,
   CapToken,
   ChainInfo,
+  ChannelDef,
   Classification,
   ConfigPresetList,
   AgentContextView,
@@ -50,6 +51,7 @@ import type {
 // regenerates the .ts and the mappers below stop compiling (rung-3 drift gate;
 // CI also git-diffs the generated dir after `cargo test` regenerates it).
 import type { ApiActor } from '@/lib/generated/ApiActor';
+import type { ApiChannel } from '@/lib/generated/ApiChannel';
 import type { ApiAnchorStatus } from '@/lib/generated/ApiAnchorStatus';
 import type { ApiAuditEvent } from '@/lib/generated/ApiAuditEvent';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
@@ -726,6 +728,10 @@ export class DaemonBackend implements AgentKeysClient {
     maxPerPeriod: string;
     maxTotal: string;
     periodSeconds: number;
+    /** #408 — the accept is a channel-endpoint DEVICE bind (channels page). The
+     *  daemon forwards it to the broker's BuildAcceptRequest.is_device (§14.10
+     *  broker warn); the card itself hard-enforces ≥1 channel before calling. */
+    isDevice?: boolean;
   }): Promise<Result<BuildAcceptUserOpResponse>> {
     return this.postJson('/v1/accept/build', {
       request_id: input.requestId,
@@ -735,6 +741,7 @@ export class DaemonBackend implements AgentKeysClient {
       max_per_period: input.maxPerPeriod,
       max_total: input.maxTotal,
       period_seconds: input.periodSeconds,
+      ...(input.isDevice ? { is_device: true } : {}),
     });
   }
 
@@ -788,6 +795,39 @@ export class DaemonBackend implements AgentKeysClient {
     if (!r.ok) return r;
     return { ok: true, data: { service: r.data.service, category: r.data.category } };
   }
+
+  // #404 — the channel registry (id-anchored channel definitions; durable
+  // config-class doc). ids are immutable anchors; delete 409s while in use.
+  async listChannels(): Promise<Result<{ channels: ChannelDef[]; storage: string }>> {
+    const r = await this.getJson<{ channels: ApiChannel[]; storage: string }>('/v1/channels');
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      data: { channels: r.data.channels.map(apiToChannelDef), storage: r.data.storage },
+    };
+  }
+
+  async createChannel(input: { id: string; name: string; note?: string }): Promise<Result<ChannelDef>> {
+    const r = await this.postJson<{ channel: ApiChannel }>('/v1/channels', input);
+    if (!r.ok) return r;
+    return { ok: true, data: apiToChannelDef(r.data.channel) };
+  }
+
+  async updateChannel(id: string, input: { name?: string; note?: string }): Promise<Result<ChannelDef>> {
+    const r = await this.postJson<{ channel: ApiChannel }>(`/v1/channels/${encodeURIComponent(id)}`, input);
+    if (!r.ok) return r;
+    return { ok: true, data: apiToChannelDef(r.data.channel) };
+  }
+
+  async deleteChannel(id: string): Promise<Result<void>> {
+    const r = await this.postJson<{ ok: boolean }>(`/v1/channels/${encodeURIComponent(id)}/delete`, {});
+    if (!r.ok) return r;
+    return { ok: true, data: undefined };
+  }
+}
+
+function apiToChannelDef(c: ApiChannel): ChannelDef {
+  return { id: c.id, name: c.name, note: c.note ?? undefined, createdAt: c.created_at };
 }
 
 // ─── Wire types are imported from @/lib/generated (ts-rs, generated from the

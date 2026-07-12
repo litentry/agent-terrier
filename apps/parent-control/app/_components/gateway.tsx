@@ -117,27 +117,11 @@ function Toast({ toast }: { toast: string | null }) {
   );
 }
 
-// ── Channels page (data-section="channels", hue 200) — device endpoints ─────────
-// The WeChat gateway + family contacts + message monitor moved to the Contacts
-// page (#419); Channels is now the home for DEVICE endpoints paired under actors.
-export function ChannelsPage() {
-  return (
-    <>
-      <PageHead
-        crumb="household / channels"
-        title="Channels"
-        desc="Device endpoints — a display, camera, or mic you pair under an actor. (The WeChat gateway and family contacts now live on the Contacts page.)"
-      />
-      <Panel title="devices">
-        <div className="muted" style={{ fontSize: 13, lineHeight: 1.7 }}>
-          Device pairing lands here — display / camera / mic endpoints under each actor. Coming soon.
-          <br />
-          Looking for the WeChat bot or family binding? They’re on <strong>Contacts</strong>.
-        </div>
-      </Panel>
-    </>
-  );
-}
+// (#404 IA: the "channels" page is now the channel REGISTRY — `channels.tsx`
+// (id-anchored definitions: create / rename / delete). Devices pair on the
+// devices page (`devices.tsx`). This file owns the WeChat gateway + contacts
+// surface — its ConnectPanel / monitor / history / activity render inside
+// ContactsPage below.)
 
 // ── live monitor (#1) ───────────────────────────────────────────────────────────
 // Polls /v1/master/gateway/monitor every 3 s while the bot is online, appending

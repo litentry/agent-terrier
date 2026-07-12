@@ -429,6 +429,11 @@ enum DelegationAction {
             help = "Device K10 file (0600) — NEVER leaves the device"
         )]
         key_file: String,
+        #[arg(
+            long,
+            help = "This machine is a channel-endpoint DEVICE (#409 D9): skip the boot-time sandbox ensure"
+        )]
+        is_device: bool,
     },
     /// DEVICE: discover pending delegation requests for this device and co-sign
     /// each with K10, bounding the sandbox to `--scope`. The per-spawn bound can be
@@ -1183,6 +1188,61 @@ enum AgentAction {
         )]
         session_bearer: String,
     },
+    /// HEADLESS accept of a claimed pairing (#225 E7, CI/test masters only): one
+    /// sponsored executeBatch(registerAgentDevice + setScope) UserOp, K11-signed
+    /// by the #164 SOFTWARE passkey — the CLI twin of the parent-control accept
+    /// card. Both decoupled pairings (#404): a sandbox DELEGATE accept grants
+    /// memory/context services; a channel-endpoint DEVICE accept (--is-device)
+    /// grants ONLY channel-pub/sub:<id> services and hard-enforces ≥1 channel
+    /// (§14.10). A real operator master uses the web accept card (Touch ID).
+    #[command(
+        about = "Master (headless/CI): accept a claimed pairing on-chain via software passkey"
+    )]
+    Accept {
+        #[arg(long, help = "The pending binding's request_id (from `agent pending`)")]
+        request_id: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Granted services, comma/space-separated (e.g. 'memory:travel' or 'channel-pub:cam-1'); empty = zero-grant bind"
+        )]
+        services: String,
+        #[arg(
+            long,
+            help = "The bound actor is a channel-endpoint DEVICE (#408 D6): never spawns, must attach ≥1 channel grant"
+        )]
+        is_device: bool,
+        #[arg(
+            long,
+            env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE",
+            help = "Software P-256 passkey PEM (from `agentkeys k11 software-keygen`) enrolled as this master's K11"
+        )]
+        k11_key_file: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP id the software passkey was enrolled under"
+        )]
+        rp_id: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Operator omni (64-hex); defaults to the J1's agentkeys.omni_account claim"
+        )]
+        operator_omni: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
 }
 
 async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
@@ -1823,6 +1883,35 @@ async fn main() {
                 broker_url,
                 session_bearer,
             } => agentkeys_cli::agent_admin::agent_pending(broker_url, session_bearer).await,
+            AgentAction::Accept {
+                request_id,
+                services,
+                is_device,
+                k11_key_file,
+                rp_id,
+                operator_omni,
+                broker_url,
+                session_bearer,
+            } => {
+                // Same load-bearing notice as `k11 software-sign` (headless/CI
+                // stand-in — an on-disk key, no hardware boundary, no biometric).
+                eprintln!(
+                    "==> ⚠️  WARN: headless accept signs with the SOFTWARE P-256 passkey on disk \
+                     — CI / headless / throwaway-TEST masters ONLY. A real operator master \
+                     accepts in parent-control (Touch ID). See arch.md §9 / §22b.1."
+                );
+                agentkeys_cli::agent_admin::agent_accept(
+                    broker_url,
+                    request_id,
+                    services,
+                    *is_device,
+                    k11_key_file,
+                    rp_id,
+                    operator_omni,
+                    session_bearer,
+                )
+                .await
+            }
         },
         Commands::Cred { action } => match action {
             CredAction::Fetch {
@@ -1923,7 +2012,11 @@ async fn main() {
             DelegationAction::Resolve {
                 broker_url,
                 key_file,
-            } => agentkeys_cli::delegation_admin::device_resolve(broker_url, key_file).await,
+                is_device,
+            } => {
+                agentkeys_cli::delegation_admin::device_resolve(broker_url, key_file, *is_device)
+                    .await
+            }
             DelegationAction::Cosign {
                 broker_url,
                 key_file,

@@ -129,7 +129,25 @@ export interface PairingRequest {
    */
   expiresAt: number;
   attestation: string;
+  /**
+   * #408 D6 — the claim's scope is ONLY channel-pub/sub grants ⇒ this is a
+   * channel-endpoint DEVICE claim (camera, display, console). Device claims are
+   * handled on the channels page (its accept card hard-enforces ≥1 channel,
+   * §14.10); the pairing page keeps sandbox DELEGATE claims only. Derived by the
+   * daemon with the same predicate the broker's D9 no-spawn gate uses.
+   */
+  isDevice?: boolean;
 }
+
+/** `channel-pub:<id>` / `channel-sub:<id>` — the only grants a device may hold (D6). */
+export const isChannelService = (svc: string): boolean => /^channel-(pub|sub):/i.test(svc.trim());
+
+/** A bound actor whose known grants are all channel services = a channel-endpoint
+ *  device (D6). Only decidable when the daemon knows the service NAMES (accepts
+ *  done through this daemon session); after a daemon restart a chain-reconstructed
+ *  device falls back to the pairing page's delegate grid with hash-only grants. */
+export const actorIsChannelEndpoint = (a: Actor): boolean =>
+  (a.services?.length ?? 0) > 0 && (a.services ?? []).every(isChannelService);
 
 export interface ContractInfo {
   name: string;

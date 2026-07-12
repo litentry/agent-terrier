@@ -8,6 +8,7 @@ import { AutoDistributePanel, PermissionList } from './permissions';
 import type { ProposedScope } from '@/lib/client/types';
 import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
 import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
+import { actorIsChannelEndpoint, isChannelService } from './types';
 
 // ─── Actors list ─────────────────────────────────────────────────
 export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status: ConnectionStatus; onPick: (id: string) => void }) {
@@ -75,6 +76,9 @@ export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status
                 <td><Dot status={a.status} pulse={a.lastActive.endsWith('m ago')} /></td>
                 <td>
                   <span style={{ fontWeight: 500 }}>{a.label}</span>
+                  {/* #404 D6 — channel-endpoint devices are visibly a different
+                      kind from sandbox delegates (no runtime, channel grants only). */}
+                  {actorIsChannelEndpoint(a) && <Chip kind="device">device</Chip>}
                   <div className="secondary">{a.omni}</div>
                 </td>
                 <td className="mono">{a.derivation}</td>
@@ -124,6 +128,10 @@ export function ActorDetail({
 }) {
   const events = recentEvents.filter((e) => e.actorId === actor.id).slice(0, 6);
   const isMaster = actor.role === 'master';
+  // #404 D6 — a channel-endpoint device: binding + channel grants only (no
+  // persona, no memory scopes, no auto-distribution — those are delegate/runtime
+  // concepts a conduit cannot hold).
+  const isDevice = actorIsChannelEndpoint(actor);
 
   // #248 — memory toggles STAGE locally (the chain mirror would overwrite an
   // optimistic write on the next refetch); the commit bar lands them on chain
@@ -234,11 +242,33 @@ export function ActorDetail({
         </dl>
       </Panel>
 
-      {/* #390 — the bound agent's persona editor + live context files. Agents
-          only: a master has no SOUL.md (it is the hub, not a runtime). */}
-      {!isMaster && <AgentPanel actor={actor} />}
+      {/* #404 D6 — a channel-endpoint DEVICE has no runtime: no persona, no
+          memory scopes, no auto-distribution. Its page is binding + channel
+          grants (managed on the devices page) + activity + revoke. */}
+      {isDevice && (
+        <Panel title="── channels · this device's grants">
+          <div className="muted" style={{ fontSize: 11, marginBottom: 10 }}>
+            A device is a conduit — it holds ONLY channel grants (D6), never memory, credentials, or a persona.
+            Edit its channels (add / remove / re-direction) on the <strong>devices</strong> page; every change is one on-chain setScope (Touch ID) with an audit receipt.
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {(actor.services ?? []).filter(isChannelService).map((s) => (
+              <span key={s} className="chip mono">{s}</span>
+            ))}
+            {(actor.services ?? []).filter(isChannelService).length === 0 && (
+              <span className="muted" style={{ fontSize: 11.5 }}>grants on chain — names return once the ids are in the channel registry</span>
+            )}
+          </div>
+        </Panel>
+      )}
 
-      {!isMaster && (
+      {/* #390 — the bound agent's persona editor + live context files. Sandbox
+          DELEGATES only: a master has no SOUL.md (it is the hub, not a runtime)
+          and a DEVICE has no runtime at all (#404 D6 — personas are a delegate
+          concept; a camera cannot hold one). */}
+      {!isMaster && !isDevice && <AgentPanel actor={actor} />}
+
+      {!isMaster && !isDevice && (
         <Panel title="── permissions · scoped (mobile-style)">
           <div className="muted" style={{ fontSize: 11, marginBottom: 12 }}>
             Maps to ScopeContract[O_master][{actor.omni}]. Memory toggles stage below; <strong>commit · Touch ID</strong> lands
@@ -275,7 +305,7 @@ export function ActorDetail({
         </Panel>
       )}
 
-      {!isMaster && (
+      {!isMaster && !isDevice && (
         <AutoDistributePanel
           actor={actor}
           proposals={proposals}

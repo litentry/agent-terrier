@@ -40,7 +40,7 @@ function scopeOptions(
 // that a card is a STALE / duplicate request to refuse rather than approve (the
 // two-duplicate-cards incident this issue fixes). `expiresAt` of 0 means the broker
 // row predates the field → "expiry unknown" rather than a bogus countdown.
-function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
+export function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
     const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
@@ -63,8 +63,9 @@ function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
   );
 }
 
-// Workflows 3–8: incoming pairing requests + device view + permission view.
-export function PairingPage({
+// household / delegates — pairing + management of SANDBOX DELEGATES (#404 IA:
+// the former top-level "pairing" page; devices pair on the devices page).
+export function DelegatesPage({
   requests,
   actors,
   namespaces,
@@ -76,7 +77,12 @@ export function PairingPage({
   justPaired,
   onManage,
   onUnpair,
+  deviceRequestCount = 0,
+  onGoDevices,
 }: {
+  /** Pending SANDBOX-DELEGATE claims only — device claims (isDevice) are routed
+   *  to the devices page by App (the #404 decoupling: this page pairs agents
+   *  that run in sandboxes; devices are channel endpoints). */
   requests: PairingRequest[];
   actors: Actor[];
   /** Grantable memory namespaces (taxonomy categories, falling back to the canonical four). */
@@ -89,6 +95,9 @@ export function PairingPage({
   justPaired: string | null;
   onManage?: (id: string) => void;
   onUnpair?: (a: Actor) => void;
+  /** #408 — device claims currently pending (shown as a redirect banner here). */
+  deviceRequestCount?: number;
+  onGoDevices?: () => void;
 }) {
   const [view, setView] = useState<'devices' | 'permissions'>('devices');
   const [claimCode, setClaimCode] = useState('');
@@ -105,11 +114,26 @@ export function PairingPage({
   return (
     <>
       <PageHead
-        crumb="pairing · agent-initiated (method A) · arch §10.2"
-        title={<><span className="muted serif">/</span> pairing</>}
-        desc="An agent on another machine shows a one-time pairing code; you claim it here (J1_master-gated), review the device + requested scope, then approve with one Touch ID — which submits registerAgentDevice + the scope grant. Granted scope becomes on-chain cap-tokens."
+        crumb="household / delegates · agent-initiated (method A) · arch §10.2"
+        title="Delegates"
+        desc="Pair AGENTS (sandbox delegates) here: an agent shows a one-time pairing code; you claim it (J1_master-gated), review the identity + requested scope, then approve with one Touch ID — registerAgentDevice + the scope grant in one block. Physical AI devices (camera, display, console) are channel endpoints — pair those on the devices page instead."
         actions={<button className="btn" onClick={onRefresh}>↻ check for codes</button>}
       />
+
+      {/* #408 — device claims never render here: a device is a channel endpoint
+          (its accept enforces ≥1 channel + never spawns), so its card lives on
+          the devices page. Surface a pointer so a scanned device isn't "lost". */}
+      {deviceRequestCount > 0 && (
+        <div className="banner warn" style={{ marginBottom: 14 }}>
+          <span className="lbl">⚠</span>
+          <span>
+            {deviceRequestCount} device claim{deviceRequestCount > 1 ? 's are' : ' is'} waiting on the <strong>devices</strong> page (devices attach channels, not memory scopes).
+          </span>
+          {onGoDevices && (
+            <button className="btn sm" style={{ marginLeft: 'auto' }} onClick={onGoDevices}>open devices →</button>
+          )}
+        </div>
+      )}
 
       {/* #214 §10.2 P.1 — the master claims the agent's one-time pairing code
           (typed here, or scanned from the device's runtime QR). This binds the
