@@ -118,6 +118,18 @@ impl Meter {
             .unwrap_or(0)
     }
 
+    /// Tokens accumulated to ONE api-key of the user — the #427 per-delegate
+    /// budget comparand (keys are per-user, so the pair addresses the bucket).
+    pub fn used_total_for_key(&self, user_omni: &str, api_key_id: &str) -> u64 {
+        self.users
+            .read()
+            .expect("meter lock poisoned")
+            .get(user_omni)
+            .and_then(|u| u.by_key.get(api_key_id))
+            .map(|b| b.counters.total_tokens)
+            .unwrap_or(0)
+    }
+
     /// Roll one user's breakdowns up into the presentation summary.
     pub fn summary(&self, user_omni: &str, budget_tokens: Option<u64>) -> UsageSummary {
         let users = self.users.read().expect("meter lock poisoned");

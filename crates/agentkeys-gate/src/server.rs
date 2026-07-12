@@ -23,6 +23,13 @@ pub fn router(relay: Arc<Relay>) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
+        // #427 — broker-driven per-delegate provisioning (admin bearer): spawn
+        // mints a relay key, archive disables it. See `admin.rs`.
+        .route("/v1/admin/keys", post(crate::admin::provision_key))
+        .route(
+            "/v1/admin/keys/:key_id/disable",
+            post(crate::admin::disable_key),
+        )
         .with_state(relay)
 }
 
@@ -54,8 +61,8 @@ async fn chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let caller = match auth::authenticate(&relay.config, auth_header(&headers)) {
-        Ok(c) => c.clone(),
+    let caller = match authenticate_live(&relay, &headers) {
+        Ok(c) => c,
         Err(e) => return error_response(e),
     };
     match relay.handle_chat(&caller, &body).await {
@@ -80,8 +87,18 @@ async fn chat_completions(
     }
 }
 
+/// Resolve the bearer against the LIVE key registry (#427 — the store, not
+/// the boot snapshot: broker-minted keys authenticate, disabled keys refuse).
+fn authenticate_live(
+    relay: &Relay,
+    headers: &HeaderMap,
+) -> Result<crate::config::RelayKey, GateError> {
+    let token = auth::bearer(auth_header(headers))?;
+    relay.keys.authenticate(token)
+}
+
 async fn models(State(relay): State<Arc<Relay>>, headers: HeaderMap) -> Response {
-    if auth::authenticate(&relay.config, auth_header(&headers)).is_err()
+    if authenticate_live(&relay, &headers).is_err()
         && !auth::is_admin(&relay.config, auth_header(&headers))
     {
         return error_response(GateError::Unauthorized("unknown relay key".into()));
@@ -117,7 +134,7 @@ async fn usage(
             }
         };
     }
-    match auth::authenticate(&relay.config, header) {
+    match authenticate_live(&relay, &headers) {
         Ok(key) => {
             if let Some(requested) = &q.user_omni {
                 if requested != &key.user_omni {

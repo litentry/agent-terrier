@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use agentkeys_inference_creds::Resolver;
 use agentkeys_protocol::normalize_omni_0x;
@@ -83,7 +83,9 @@ pub struct Cli {
 
 /// One relay key record: the caller credential a sandbox/device presents,
 /// bound to the owning user + the device it is attributed to.
-#[derive(Debug, Clone, Deserialize)]
+/// Serialize too (#427): the key registry write-throughs back to the keys
+/// file after an admin provision/disable, so restarts re-hydrate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayKey {
     /// The bearer secret the caller presents. Never logged, never audited.
     pub key: String,
@@ -95,16 +97,29 @@ pub struct RelayKey {
     pub device_id: String,
     #[serde(default)]
     pub label: String,
+    /// #427 — the delegate actor omni this key attributes to (broker-minted
+    /// per-delegate keys). `None` for hand-provisioned device keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegate_omni: Option<String>,
+    /// #427 — per-DELEGATE token ceiling UNDER the user budget (epic #425
+    /// decision 6: budgets keyed by delegate, rolling up to the user).
+    /// `None` = only the user-level budget applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u64>,
+    /// #427 — archive deprovisions by DISABLING (turns refuse with 401), so
+    /// usage history + the key row survive for rollups.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserBudget {
     pub user_omni: String,
     pub budget_tokens: u64,
 }
 
 /// On-disk shape of `--keys-file`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeysFile {
     #[serde(default)]
     pub default_budget_tokens: Option<u64>,
@@ -125,11 +140,17 @@ pub struct UpstreamConfig {
 pub struct GateConfig {
     pub listen: SocketAddr,
     pub upstream: UpstreamConfig,
+    /// BOOT-time key set. The LIVE registry is `keys::KeyStore` (seeded from
+    /// this at startup) — #427 admin provisioning mutates the store, never
+    /// this snapshot.
     pub keys: Vec<RelayKey>,
     /// Per-user budget overrides (user omni → tokens).
     pub user_budgets: HashMap<String, u64>,
     pub default_budget_tokens: Option<u64>,
     pub admin_token: Option<String>,
+    /// The keys-file path, retained so the live key store can write-through
+    /// admin mutations (#427). `None` = in-memory only (loudly logged).
+    pub keys_file: Option<PathBuf>,
     pub audit_url: Option<String>,
     pub require_audit: bool,
     pub aws_region: String,
@@ -215,6 +236,7 @@ impl GateConfig {
             user_budgets,
             default_budget_tokens: default_budget,
             admin_token: cli.admin_token,
+            keys_file: cli.keys_file,
             audit_url: cli.audit_url,
             require_audit: cli.require_audit,
             aws_region: cli.aws_region,
@@ -247,6 +269,7 @@ mod tests {
             user_budgets: budgets.iter().map(|(u, b)| (u.to_string(), *b)).collect(),
             default_budget_tokens: default,
             admin_token: None,
+            keys_file: None,
             audit_url: None,
             require_audit: false,
             aws_region: "us-east-1".into(),

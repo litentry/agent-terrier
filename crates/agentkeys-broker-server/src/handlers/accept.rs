@@ -432,7 +432,17 @@ pub fn build_accept_response(
         register: &register,
         grant: &grant,
     };
-    let assembled = assemble_accept_userop(&params, broker_sk).map_err(|e| e.to_string())?;
+    // #427 on-chain kind split: a DEVICE accept binds via `registerAgentDevice`
+    // (TIER_DEVICE, no agent slot — devices only attach channels); everything
+    // else is a DELEGATE and binds via the slot-consuming `registerDelegate`
+    // (TIER_AGENT) — the CLI `--request-pairing` delegates included, so no
+    // registration path bypasses the business quota (arch.md §17.7).
+    let assembled = if req.is_device {
+        assemble_accept_userop(&params, broker_sk).map_err(|e| e.to_string())?
+    } else {
+        crate::sponsored_accept::assemble_spawn_userop(&params, broker_sk)
+            .map_err(|e| e.to_string())?
+    };
     Ok(assembled.into_build_response(&cfg.entry_point, cfg.chain_id))
 }
 
@@ -606,6 +616,25 @@ pub async fn accept_build(
     // 2. config + co-sign key from env.
     let (cfg, broker_sk) =
         load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
+
+    // #427: a non-device accept binds a DELEGATE and consumes an agent slot —
+    // pre-check the allowance for the loud early 409 (the contract enforces
+    // atomically inside registerDelegate regardless).
+    if !req.is_device {
+        let (used, total) = crate::handlers::spawn::call_agent_slots(
+            &state.http,
+            &cfg.rpc_url,
+            &cfg.registry,
+            &req.operator_omni,
+        )
+        .await
+        .map_err(|e| aerr(StatusCode::BAD_GATEWAY, e))?;
+        if used >= total {
+            return Err(crate::handlers::spawn::allowance_exhausted_error(
+                used, total,
+            ));
+        }
+    }
 
     // 3. chain reads: the master account + its EntryPoint nonce.
     let master_account =
@@ -937,11 +966,27 @@ pub async fn accept_submit(
                     &packed.call_data,
                 )
                 .await;
-                return Ok(Json(serde_json::json!({
+                // #427: a spawn/archive ceremony finalizes here — gate
+                // provision/deprovision, sandbox spawn with identity envs,
+                // DelegateSpawn/DelegateArchive anchors. Same decode source,
+                // same best-effort posture; a non-ceremony batch yields None.
+                let ceremony = crate::handlers::spawn::finalize_for_confirmed_batch(
+                    &state,
+                    operator_omni,
+                    &packed.call_data,
+                )
+                .await;
+                let mut resp = serde_json::json!({
                     "ok": true, "tx_hash": tx_hash, "block_number": block_number,
                     "user_op_hash": user_op_hash,
                     "audit_envelope_hashes": audit_envelope_hashes,
-                })));
+                });
+                // Key present only on ceremony batches — mirrors the protocol
+                // type's skip_serializing_if (frozen key-set discipline).
+                if let Some(ceremony) = ceremony {
+                    resp["ceremony"] = ceremony;
+                }
+                return Ok(Json(resp));
             }
             // Transient bundler/RPC hiccup mid-poll: tolerate until the deadline.
             Err(_) => {}

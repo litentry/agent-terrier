@@ -146,9 +146,26 @@ fn enc_bytes(b: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)` calldata (P.2).
+/// `registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)` calldata (P.2) —
+/// the channel-endpoint DEVICE leg (post-#427: `TIER_DEVICE`, consumes no
+/// agent slot; devices only ever attach channels).
 pub fn register_agent_device_calldata(r: &AgentRegister) -> Vec<u8> {
-    let sel = selector("registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)");
+    register_k10_actor_calldata(
+        "registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)",
+        r,
+    )
+}
+
+/// `registerDelegate(bytes32,bytes32,bytes32,bytes,bytes)` calldata — the #427
+/// slot-consuming DELEGATE leg (`TIER_AGENT`; the registry reverts
+/// `AgentSlotAllowanceExhausted` when the operator's allowance is full). Same
+/// arg shape as the device leg; only the selector differs.
+pub fn register_delegate_calldata(r: &AgentRegister) -> Vec<u8> {
+    register_k10_actor_calldata("registerDelegate(bytes32,bytes32,bytes32,bytes,bytes)", r)
+}
+
+fn register_k10_actor_calldata(sig: &str, r: &AgentRegister) -> Vec<u8> {
+    let sel = selector(sig);
     let enc_link = enc_bytes(&r.link_code_redemption);
     let enc_pop = enc_bytes(&r.agent_pop_sig);
     // Head: dkh, op, actor (inline bytes32) + 2 offsets for the dynamic `bytes`.
@@ -367,6 +384,28 @@ pub fn accept_batch_calldata(
     grant: &ScopeGrant,
 ) -> Vec<u8> {
     let register_cd = register_agent_device_calldata(reg);
+    let scope_cd = set_scope_calldata(&reg.operator_omni, &reg.actor_omni, grant);
+    execute_batch_calldata(
+        &[*registry, *scope],
+        &[0u128, 0u128],
+        &[register_cd, scope_cd],
+    )
+}
+
+/// **The #427 spawn ceremony** — the atomic delegate-spawn batch as one
+/// `executeBatch` callData: `registerDelegate` (the slot-consuming bind) +
+/// `setScope` (the template grant). Identical shape to
+/// [`accept_batch_calldata`] with the delegate entrypoint swapped in; the slot
+/// consume lives INSIDE `registerDelegate`, so an exhausted allowance reverts
+/// the WHOLE batch — no grant without a slot, no slot without a grant, and the
+/// single UserOp signature (ONE Touch ID) authorizes all of it.
+pub fn spawn_batch_calldata(
+    registry: &[u8; 20],
+    scope: &[u8; 20],
+    reg: &AgentRegister,
+    grant: &ScopeGrant,
+) -> Vec<u8> {
+    let register_cd = register_delegate_calldata(reg);
     let scope_cd = set_scope_calldata(&reg.operator_omni, &reg.actor_omni, grant);
     execute_batch_calldata(
         &[*registry, *scope],
@@ -1036,6 +1075,58 @@ mod tests {
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    #[test]
+    fn register_delegate_differs_from_device_leg_only_in_selector() {
+        // The delegate leg (#427) shares the device leg's exact ABI tail — the
+        // cast golden for registerAgentDevice therefore covers the encoding;
+        // this pins the two selectors (`cast sig`) + tail equality byte-exactly.
+        let reg = sample_register();
+        let device = register_agent_device_calldata(&reg);
+        let delegate = register_delegate_calldata(&reg);
+        assert_eq!(hex::encode(&device[..4]), "9847ca95");
+        assert_eq!(hex::encode(&delegate[..4]), "f3a09c45");
+        assert_eq!(&delegate[4..], &device[4..]);
+    }
+
+    #[test]
+    fn spawn_batch_is_atomic_pair_with_the_delegate_entrypoint() {
+        // #427: the spawn ceremony batch = [registerDelegate, setScope] — same
+        // atomicity property as the accept batch, with the slot-consuming
+        // entrypoint and NO device-leg selector anywhere inside.
+        let reg = sample_register();
+        let grant = sample_grant();
+        let register_cd = register_delegate_calldata(&reg);
+        let scope_cd = set_scope_calldata(&reg.operator_omni, &reg.actor_omni, &grant);
+        let batch = spawn_batch_calldata(&addr(0xa1), &addr(0xa2), &reg, &grant);
+        assert_eq!(
+            batch,
+            execute_batch_calldata(
+                &[addr(0xa1), addr(0xa2)],
+                &[0u128, 0u128],
+                &[register_cd.clone(), scope_cd.clone()]
+            )
+        );
+        assert!(find_subslice(&batch, &register_cd).is_some());
+        assert!(find_subslice(&batch, &scope_cd).is_some());
+        assert_eq!(&scope_cd[4 + 32..4 + 64], &reg.actor_omni);
+        let device_sel = selector("registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)");
+        assert!(find_subslice(&batch[4..], &device_sel).is_none());
+    }
+
+    #[test]
+    fn decode_execute_batch_round_trips_the_spawn_batch() {
+        // The #97 relay decoder resolves the spawn batch's inner calls — the
+        // registerDelegate leg lands on the audit decoder's FnDef.
+        let reg = sample_register();
+        let grant = sample_grant();
+        let batch = spawn_batch_calldata(&addr(0xa1), &addr(0xa2), &reg, &grant);
+        let calls = decode_execute_batch(&batch).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].calldata, register_delegate_calldata(&reg));
+        let inner = crate::audit::calldata::decode_calldata(&calls[0].calldata).unwrap();
+        assert_eq!(inner.function, "registerDelegate");
     }
 
     #[test]

@@ -39,6 +39,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 futures-util = "0.3"
 tokio-stream = "0.1"
 bytes = "1"
+# #427 — admin-minted relay-key secrets (same OsRng agentkeys-core keygen uses).
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

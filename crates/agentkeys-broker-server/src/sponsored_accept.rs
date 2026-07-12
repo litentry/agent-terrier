@@ -107,6 +107,20 @@ pub fn assemble_register_userop(
     assemble_userop_with_calldata(p, call_data, init_code, broker_sk)
 }
 
+/// **The #427 spawn sibling** — assemble the delegate-spawn UserOp
+/// (`executeBatch([registerDelegate, setScope])`): the accept shape with the
+/// slot-consuming entrypoint swapped in. An exhausted allowance reverts the
+/// WHOLE batch on-chain (`AgentSlotAllowanceExhausted`); the build handler
+/// pre-checks `agentSlots` so the user never Touch-IDs a doomed op.
+pub fn assemble_spawn_userop(
+    p: &AcceptUserOpParams,
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data =
+        agentkeys_core::erc4337::spawn_batch_calldata(&p.registry, &p.scope, p.register, p.grant);
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
 /// **The #248 sibling** — assemble the scope-only re-grant UserOp
 /// (`executeBatch([setScope])`, no register; the device binding already exists).
 /// `p.register` supplies only the omni pair (`operator_omni` + `actor_omni`);

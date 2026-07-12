@@ -61,6 +61,9 @@ contract AgentKeysV1Test is Test {
     uint256 k11PubX = uint256(keccak256("stub-k11-pubX"));
     uint256 k11PubY = uint256(keccak256("stub-k11-pubY"));
 
+    // #427: the test-deploy default agent-slot allowance (delegates per operator).
+    uint16 constant DEFAULT_SLOTS = 3;
+
     function setUp() public {
         master = makeAddr("master");
         // Account model (#164 E7): the master is the operator's P256Account — a
@@ -71,7 +74,7 @@ contract AgentKeysV1Test is Test {
         attacker = makeAddr("attacker");
         p256 = new P256Verifier();
         k11 = new K11Verifier(address(p256));
-        registry = new SidecarRegistry(address(k11));
+        registry = new SidecarRegistry(address(k11), DEFAULT_SLOTS);
         scope = new AgentKeysScope(address(registry));
         epoch = new K3EpochCounter(address(this));
         audit = new CredentialAudit(address(registry));
@@ -247,8 +250,8 @@ contract AgentKeysV1Test is Test {
         );
     }
 
-    // ─── SidecarRegistry: agent ──────────────────────────────────────────
-    function test_RegisterAgent_RequiresMasterCaller() public {
+    // ─── SidecarRegistry: K10 actors (device + delegate, #427 kind split) ─
+    function test_RegisterAgentDevice_RequiresMasterCaller_AndIsDeviceTier() public {
         _registerFirstMaster();
         vm.prank(attacker);
         vm.expectRevert(
@@ -262,11 +265,156 @@ contract AgentKeysV1Test is Test {
             deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"deadbeef", hex"cafe"
         );
         SidecarRegistry.DeviceEntry memory entry = registry.getDevice(deviceKeyHashAgentA);
-        assertEq(uint256(entry.tier), uint256(registry.TIER_AGENT()));
+        assertEq(uint256(entry.tier), uint256(registry.TIER_DEVICE()));
         assertEq(uint256(entry.roles), uint256(registry.ROLE_CAP_MINT()));
         assertEq(entry.k11CredId, bytes32(0));
         assertEq(entry.k11PubX, 0);
         assertEq(entry.k11PubY, 0);
+        // Devices never consume an agent slot (D9: devices only attach channels).
+        (uint16 used,) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(used), 0);
+    }
+
+    function test_RegisterDelegate_RequiresMasterCaller_ConsumesSlot() public {
+        _registerFirstMaster();
+        vm.prank(attacker);
+        vm.expectRevert(
+            abi.encodeWithSelector(SidecarRegistry.NotAuthorized.selector, attacker, master)
+        );
+        registry.registerDelegate(
+            deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"deadbeef", hex"cafe"
+        );
+        vm.prank(master);
+        registry.registerDelegate(
+            deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"deadbeef", hex"cafe"
+        );
+        SidecarRegistry.DeviceEntry memory entry = registry.getDevice(deviceKeyHashAgentA);
+        assertEq(uint256(entry.tier), uint256(registry.TIER_AGENT()));
+        assertEq(uint256(entry.roles), uint256(registry.ROLE_CAP_MINT()));
+        (uint16 used, uint16 total) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(used), 1);
+        assertEq(uint256(total), DEFAULT_SLOTS);
+    }
+
+    function test_RegisterDelegate_RevertsWhenAllowanceExhausted() public {
+        _registerFirstMaster();
+        for (uint256 i = 0; i < DEFAULT_SLOTS; ++i) {
+            vm.prank(master);
+            registry.registerDelegate(
+                keccak256(abi.encodePacked("D_pub_delegate", i)),
+                operatorOmni,
+                keccak256(abi.encodePacked(operatorOmni, "//delegate", i)),
+                hex"",
+                hex""
+            );
+        }
+        // The business gate: loud, actionable, names the quota.
+        vm.prank(master);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SidecarRegistry.AgentSlotAllowanceExhausted.selector,
+                operatorOmni,
+                DEFAULT_SLOTS,
+                DEFAULT_SLOTS
+            )
+        );
+        registry.registerDelegate(
+            deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"", hex""
+        );
+    }
+
+    function test_RevokeDelegate_FreesSlot_SuccessorCanSpawn() public {
+        _registerFirstMaster();
+        for (uint256 i = 0; i < DEFAULT_SLOTS; ++i) {
+            vm.prank(master);
+            registry.registerDelegate(
+                keccak256(abi.encodePacked("D_pub_delegate", i)),
+                operatorOmni,
+                keccak256(abi.encodePacked(operatorOmni, "//delegate", i)),
+                hex"",
+                hex""
+            );
+        }
+        // Archive one → slot returns → a successor spawn fits again.
+        vm.prank(master);
+        registry.revokeAgentDevice(keccak256(abi.encodePacked("D_pub_delegate", uint256(0))));
+        (uint16 used,) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(used), DEFAULT_SLOTS - 1);
+        vm.prank(master);
+        registry.registerDelegate(
+            deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"", hex""
+        );
+        (used,) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(used), DEFAULT_SLOTS);
+    }
+
+    function test_RevokeDevice_DoesNotTouchSlots() public {
+        _registerFirstMaster();
+        vm.prank(master);
+        registry.registerDelegate(
+            deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"", hex""
+        );
+        bytes32 deviceHash = keccak256("D_pub_camera");
+        vm.prank(master);
+        registry.registerAgentDevice(
+            deviceHash, operatorOmni, keccak256("camera-actor"), hex"", hex""
+        );
+        vm.prank(master);
+        registry.revokeAgentDevice(deviceHash);
+        (uint16 used,) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(used), 1); // the delegate's slot is untouched
+    }
+
+    function test_AgentSlotAllowance_OwnerSettersAndOverride() public {
+        _registerFirstMaster();
+        // Non-owner (the operator's master!) must NOT be able to raise its own quota.
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(SidecarRegistry.NotOwner.selector, master));
+        registry.setAgentSlotAllowance(operatorOmni, 100);
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(SidecarRegistry.NotOwner.selector, master));
+        registry.setDefaultAgentSlotAllowance(100);
+
+        // Owner (this test contract deployed the registry) sets the override.
+        registry.setAgentSlotAllowance(operatorOmni, 1);
+        (, uint16 total) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(total), 1);
+        vm.prank(master);
+        registry.registerDelegate(
+            deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"", hex""
+        );
+        vm.prank(master);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SidecarRegistry.AgentSlotAllowanceExhausted.selector, operatorOmni, 1, 1
+            )
+        );
+        registry.registerDelegate(
+            keccak256("D_pub_delegate_extra"), operatorOmni, keccak256("extra"), hex"", hex""
+        );
+
+        // Clear → back to the platform default.
+        registry.clearAgentSlotAllowance(operatorOmni);
+        (, total) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(total), DEFAULT_SLOTS);
+
+        // Default retune applies to operators without an override.
+        registry.setDefaultAgentSlotAllowance(7);
+        (, total) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(total), 7);
+    }
+
+    function test_ResetMaster_ZeroesSlotsAndOverride() public {
+        _registerFirstMaster();
+        registry.setAgentSlotAllowance(operatorOmni, 5);
+        vm.prank(master);
+        registry.registerDelegate(
+            deviceKeyHashAgentA, operatorOmni, actorOmniAgentA, hex"", hex""
+        );
+        registry.resetMaster(operatorOmni);
+        (uint16 used, uint16 total) = registry.agentSlots(operatorOmni);
+        assertEq(uint256(used), 0);
+        assertEq(uint256(total), DEFAULT_SLOTS); // override cleared with the wipe
     }
 
     function test_RegisterAgent_RejectsBeforeOperatorBootstrap() public {

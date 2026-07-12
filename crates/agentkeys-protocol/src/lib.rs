@@ -1547,6 +1547,14 @@ pub struct SubmitAcceptUserOpResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pending: Option<bool>,
+    /// #427: present when the confirmed batch was a spawn/archive ceremony —
+    /// the finalization summary (`spawned[]`/`archived[]`: gate provisioning
+    /// status, sandbox provision, `DelegateSpawn`/`DelegateArchive` anchor
+    /// hashes). Absent on plain accept/scope/revoke submits and pre-#427
+    /// brokers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
+    pub ceremony: Option<serde_json::Value>,
 }
 
 // ── #248 — on-chain K11-gated scope re-grant for an ALREADY-bound agent ──────
@@ -1623,6 +1631,100 @@ pub struct BuildRegisterUserOpRequest {
     pub owner_pubkey_y: String,
     pub rpid_hash: String,
     pub roles: u8,
+}
+
+// ── #427 (epic #425) — the delegate SPAWN + ARCHIVE ceremonies ───────────────
+//
+// Spawn: ONE `P256Account.executeBatch([registerDelegate, setScope])` UserOp,
+// ONE master Touch ID — the D9 headless in-band claim as a first-class endpoint
+// (no pairing rendezvous). `registerDelegate` consumes an agent slot ATOMICALLY
+// (the on-chain business quota; `AgentSlotAllowanceExhausted` reverts the whole
+// batch, and the build pre-checks `agentSlots` for a loud early 409
+// `agent_slot_allowance_exhausted`). Archive: the revoke op for ONE delegate,
+// recording the keep-vs-delete resource choice (#425 O4); the slot frees
+// in-contract. Broker endpoints `/v1/agent/spawn/{build,submit}` +
+// `/v1/agent/archive/{build,submit}`; both submits reuse
+// [`SubmitAcceptUserOpRequest`] / [`SubmitAcceptUserOpResponse`] (the shared
+// relay), whose `ceremony` field carries the finalization summary.
+
+/// Daemon → broker `POST /v1/agent/spawn/build`. The broker derives the child
+/// omni (`HDKD(O_master, label)`), generates the delegate K10, and assembles
+/// the template grants (the delegate's duplex operator-chat channel pair + its
+/// `memory:<ns>`) — the caller supplies only the ceremony choices.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildSpawnUserOpRequest {
+    pub operator_omni: String,
+    /// The delegate's name — also the HDKD derivation label
+    /// (`^[a-z0-9-]{1,32}$`).
+    pub label: String,
+    /// Repo preset slug (#428 catalog); `""` = blank spawn. Recorded in the
+    /// `DelegateSpawn` anchor + the #424 binding manifest.
+    #[serde(default)]
+    pub preset_id: String,
+    /// The template `memory:<ns>` namespace. `None` ⇒ fresh, named after the
+    /// label; `Some` + `memory_inherited` ⇒ an archived delegate's KEPT
+    /// namespace (#425 O2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ns: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub memory_inherited: bool,
+}
+
+/// Broker → daemon response to `/v1/agent/spawn/build`: the sponsored-UserOp
+/// build envelope ([`BuildAcceptUserOpResponse`] fields) plus the ceremony
+/// facts the client renders before the ONE Touch ID.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct BuildSpawnUserOpResponse {
+    pub user_op: WireUserOp,
+    pub user_op_hash: String,
+    pub entry_point: String,
+    #[ts(type = "number")]
+    pub chain_id: u64,
+    /// The delegate's HDKD child omni.
+    pub actor_omni: String,
+    pub device_key_hash: String,
+    /// The duplex operator-chat channel id in the template grant (S4).
+    pub chat_channel_id: String,
+    pub memory_ns: String,
+    pub memory_inherited: bool,
+    /// The template grant NAMES (their keccak ids are what `setScope` signs).
+    pub services: Vec<String>,
+    /// Allowance state at build time (pre-consume) — the UI quota meter.
+    #[ts(type = "number")]
+    pub slots_used: u16,
+    #[ts(type = "number")]
+    pub slots_total: u16,
+}
+
+/// Daemon → broker `POST /v1/agent/archive/build` — archive ONE delegate
+/// (`TIER_AGENT`; devices unbind via `/v1/revoke/build`, masters via the
+/// recovery flow). The slot returns in-contract; `resources_kept` records the
+/// #425 O4 keep-vs-delete choice (kept resources become inheritable; the
+/// data-plane teardown of deleted ones is the daemon's follow-through).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildArchiveUserOpRequest {
+    pub operator_omni: String,
+    pub device_key_hash: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resources_kept: bool,
+    /// The delegate's `memory:<ns>` name when the caller knows it (grants are
+    /// keccak ids on-chain) — recorded for #425 O2 inheritance discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ns: Option<String>,
+}
+
+/// Broker → daemon response to `/v1/agent/archive/build`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct BuildArchiveUserOpResponse {
+    pub user_op: WireUserOp,
+    pub user_op_hash: String,
+    pub entry_point: String,
+    #[ts(type = "number")]
+    pub chain_id: u64,
+    pub device_key_hash: String,
+    pub resources_kept: bool,
 }
 
 // ── the daemon's web-API plant contract (#275 tier-3) ───────────────────────

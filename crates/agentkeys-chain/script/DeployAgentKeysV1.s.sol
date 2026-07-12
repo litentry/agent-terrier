@@ -25,6 +25,11 @@ import {CredentialAudit} from "../src/CredentialAudit.sol";
 contract DeployAgentKeysV1 is Script {
     function run() external {
         address signerGov = vm.envOr("SIGNER_GOVERNANCE", address(0));
+        // #427: the free-tier delegate allowance (agent slots per operator).
+        // Env-overridable at deploy time; owner can retune post-deploy via
+        // setDefaultAgentSlotAllowance / per-operator setAgentSlotAllowance.
+        uint256 slotDefault = vm.envOr("AGENTKEYS_AGENT_SLOT_DEFAULT", uint256(3));
+        require(slotDefault <= type(uint16).max, "AGENTKEYS_AGENT_SLOT_DEFAULT > uint16");
 
         vm.startBroadcast();
         if (signerGov == address(0)) {
@@ -39,7 +44,7 @@ contract DeployAgentKeysV1 is Script {
         // when a precompile activates.
         P256Router p256router = new P256Router(address(p256));
         K11Verifier k11 = new K11Verifier(address(p256router));
-        SidecarRegistry registry = new SidecarRegistry(address(k11));
+        SidecarRegistry registry = new SidecarRegistry(address(k11), uint16(slotDefault));
         // #164 E3: AgentKeysScope no longer verifies K11 itself (scope writes are
         // authorized by the operator's ERC-4337 master account). Constructor takes
         // only the registry now.

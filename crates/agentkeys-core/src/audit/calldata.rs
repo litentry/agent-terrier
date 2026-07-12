@@ -153,6 +153,19 @@ pub const REGISTRY: &[FnDef] = &[
             ("agentPopSig", "bytes"),
         ],
     },
+    // #427: the slot-consuming delegate-spawn entrypoint (same shape as the
+    // device leg; only the selector differs — 0xf3a09c45).
+    FnDef {
+        contract: "SidecarRegistry",
+        name: "registerDelegate",
+        params: params![
+            ("deviceKeyHash", "bytes32"),
+            ("operatorOmni", "bytes32"),
+            ("actorOmni", "bytes32"),
+            ("linkCodeRedemption", "bytes"),
+            ("agentPopSig", "bytes"),
+        ],
+    },
     FnDef {
         contract: "SidecarRegistry",
         name: "revokeAgentDevice",
@@ -530,6 +543,8 @@ mod tests {
             ("appendRoot(bytes32,bytes32,uint64)", "0x28d3a294"),
             ("appendRootV2(bytes32,bytes32,bytes32,uint64)", "0xbcfe3f8d"),
             ("registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)", "0x9847ca95"),
+            // #427 delegate-spawn entrypoint (cast sig, 2026-07-12).
+            ("registerDelegate(bytes32,bytes32,bytes32,bytes,bytes)", "0xf3a09c45"),
             ("revokeAgentDevice(bytes32)", "0xb269f9fb"),
             // DEPLOYED stage-1 scope forms — struct param expands in the
             // selector (verified present in mainnet bytecode at 0xd44b375…).

@@ -5,6 +5,7 @@ pub mod boot;
 pub mod config;
 pub mod env;
 pub mod error;
+pub mod gate_admin;
 pub mod handlers;
 pub mod identity;
 pub mod jwt;
@@ -124,6 +125,25 @@ pub fn create_router(state: SharedState) -> Router {
         // (no EOA — incl. the deployer script — can sign it).
         .route("/v1/revoke/build", post(handlers::revoke::revoke_build))
         .route("/v1/revoke/submit", post(handlers::accept::accept_submit))
+        // #427 (epic #425) — the delegate SPAWN + ARCHIVE ceremonies: ONE
+        // Touch ID over executeBatch([registerDelegate, setScope]) (spawn,
+        // slot-consuming) / executeBatch([revokeAgentDevice]) (archive, slot-
+        // freeing). Submits reuse the shared relay; the ceremony finalization
+        // (gate provision/deprovision, sandbox spawn, DelegateSpawn/Archive
+        // anchors) rides its confirmed-batch hook.
+        .route("/v1/agent/spawn/build", post(handlers::spawn::spawn_build))
+        .route(
+            "/v1/agent/spawn/submit",
+            post(handlers::accept::accept_submit),
+        )
+        .route(
+            "/v1/agent/archive/build",
+            post(handlers::spawn::archive_build),
+        )
+        .route(
+            "/v1/agent/archive/submit",
+            post(handlers::accept::accept_submit),
+        )
         // #278 D6 — the ONE sponsored master-register UserOp (initCode +
         // executeBatch([registerFirstMasterDevice])). submit reuses the accept
         // relay verbatim, exactly as scope/revoke do.

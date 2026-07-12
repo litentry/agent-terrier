@@ -70,6 +70,10 @@ pub struct AppState {
     /// when the host carries no sandbox config (`SANDBOX_FUNCTION_ID` unset —
     /// the AWS broker), and every hook site is then a no-op.
     pub ve_faas: Option<Arc<crate::ve_faas::VeFaasClient>>,
+    /// #427 spawn/archive ceremony context, build → submit (IN-MEMORY by
+    /// design — the pending-spawn row carries the delegate K10 secret, which
+    /// must never sit at rest; see `handlers::spawn`).
+    pub pending_ceremonies: Arc<crate::handlers::spawn::PendingCeremonyStore>,
     /// Atomic counters surfaced via /metrics (Phase D-rest, US-036).
     pub metrics: Arc<Metrics>,
     pub tier2: Arc<Tier2State>,

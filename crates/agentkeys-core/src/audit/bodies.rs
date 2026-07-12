@@ -216,6 +216,39 @@ pub struct SandboxTeardownBody {
     pub reason: String,
 }
 
+/// #427 — the delegate-spawn CEREMONY anchor, emitted by the broker's spawn
+/// relay on a CONFIRMED spawn UserOp (`registerDelegate` slot consume + the
+/// template `setScope`, ONE master Touch ID). Carries the ceremony context the
+/// calldata-decoded rows (`DeviceAdd`/`ScopeGrant`) can't: which preset shaped
+/// the delegate, the label commitment, and the memory-namespace decision
+/// (#425 O2). The READABLE label lives in the #424 binding manifest; the row
+/// carries only its hash (household names are PII).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegateSpawnBody {
+    /// `keccak256(K10_pubkey || 0x01)` — the delegate binding this anchors.
+    pub device_key_hash: String,
+    /// Repo preset slug (`default-assistant`, `watchdog`, …); `""` = blank spawn.
+    pub preset_id: String,
+    /// `keccak256(label.as_bytes())` — commitment to the household label.
+    pub label_hash: String,
+    /// The template `memory:<ns>` namespace granted at spawn.
+    pub memory_ns: String,
+    /// #425 O2 — `true` when the namespace was inherited from an archived
+    /// delegate; `false` for a fresh empty namespace.
+    pub memory_inherited: bool,
+}
+
+/// #427 — the archive CEREMONY anchor: the delegate was revoked (its agent
+/// slot freed) and the operator chose keep-vs-delete for its resources
+/// (#425 O4). Manifest + audit rows are always retained regardless.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegateArchiveBody {
+    pub device_key_hash: String,
+    /// `true` = delegate-specific resources (its `memory:<ns>`) were kept and
+    /// become inheritable by a future spawn; `false` = deleted with the archive.
+    pub resources_kept: bool,
+}
+
 // ── 60..69 — email family ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

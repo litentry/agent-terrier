@@ -13,13 +13,20 @@ retry, no fallback, no caching, no orchestration, and never rewrites the
 conversation (its only body mutations: the optional model override, and
 `stream_options.include_usage = true` on streamed turns).
 
-## Attribution model (#384)
+## Attribution model (#384, extended per-delegate by #427)
 
 - Every turn's tokens accumulate to **one user** (the owning omni) — budgets
   are per-user and enforced deterministically (`429 budget_exceeded`, no LLM in
   the decision).
 - Statistics are kept **per-device** and **per-api-key**, and roll up into the
   user-facing summary served by `GET /v1/usage`.
+- **#427 (epic #425 decision 6):** a relay key may carry its own
+  `budget_tokens` — a per-DELEGATE ceiling enforced UNDER the user budget
+  (same deterministic 429; usage still rolls up to the user). The broker mints
+  such keys at delegate SPAWN and disables them at ARCHIVE via the admin
+  surface below — a delegate *exists* by the chain (agent-slot allowance) but
+  is *usable* only while gate-provisioned. Custody + metering only, still not
+  a control point.
 - Every turn lands on the ledger as a `GateTurn` (op_kind 90) audit row with
   usage + attribution (arch.md §15.3a).
 
@@ -30,7 +37,13 @@ conversation (its only body mutations: the optional model override, and
 | `POST /v1/chat/completions` | relay key | the proxied turn (streamed + non-streamed) |
 | `GET /v1/models` | relay key or admin | upstream passthrough |
 | `GET /v1/usage` | relay key → own user; admin → `?user_omni=` or all | the rollup summary |
+| `POST /v1/admin/keys` | admin | #427 provision/rotate a relay key (broker spawn-finalize; secret returned ONCE) |
+| `POST /v1/admin/keys/:key_id/disable` | admin | #427 deprovision (idempotent; usage history + row retained) |
 | `GET /healthz` | none | liveness |
+
+Admin mutations write-through to the keys file (0600, atomic tmp+rename) so
+restarts re-hydrate; with no keys file configured they are in-memory only and
+the boot log WARNs.
 
 ## Configuration (env-first; every flag has a `--` form)
 

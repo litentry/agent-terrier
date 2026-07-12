@@ -60,10 +60,22 @@ pub async fn ensure_for_delegate(
     actor_omni: &str,
     operator_omni: &str,
 ) -> Option<SandboxProvision> {
+    ensure_for_delegate_with_envs(state, device_key_hash, actor_omni, operator_omni, &[]).await
+}
+
+/// #427 spawn-ceremony variant: the same ensure with the delegate identity +
+/// gate-relay envs threaded into a freshly created instance.
+pub async fn ensure_for_delegate_with_envs(
+    state: &SharedState,
+    device_key_hash: &str,
+    actor_omni: &str,
+    operator_omni: &str,
+    extra_envs: &[(String, String)],
+) -> Option<SandboxProvision> {
     let client = state.ve_faas.as_ref()?;
     let agent_url = client.agent_url().to_string();
     match client
-        .ensure_for_delegate(device_key_hash, actor_omni)
+        .ensure_for_delegate_with_envs(device_key_hash, actor_omni, extra_envs)
         .await
     {
         Ok(outcome) => {

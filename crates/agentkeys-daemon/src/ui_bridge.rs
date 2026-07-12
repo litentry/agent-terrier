@@ -129,6 +129,12 @@ pub struct UiBridgeState {
     /// scope commit; read by the #233 fleet reconcile so a device survives a
     /// daemon restart with its kind + channel chips intact.
     pub binding_manifest: RwLock<Option<BindingManifest>>,
+    /// #427 — the spawn/archive ceremony stash: `device_key_hash` (from the
+    /// broker build response) → the ceremony context (label, preset, memory
+    /// namespace, template service names / keep-choice), consumed by the
+    /// matching submit proxy on a CONFIRMED ceremony to write the binding-
+    /// manifest row. In-memory only, same posture as the accept stash above.
+    pub ceremony_context_by_dkh: RwLock<HashMap<String, serde_json::Value>>,
     /// #424 — the scope-commit stash: `user_op_hash` (from `/v1/scope/build`) →
     /// `(actor_omni, services)`, consumed by `scope_submit_proxy` on a confirmed
     /// commit to upsert the binding manifest with the NAMES the set-replace
@@ -477,7 +483,7 @@ const GATEWAY_CONTACTS_SERVICE: &str = "gateway-contact-registry";
 /// One bound actor's readable pairing metadata (#424 §1). `actor_omni` +
 /// `device_key_hash` anchor the entry to the on-chain `SidecarRegistry` row;
 /// everything else is the readable layer the chain never stores.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct BindingManifestEntry {
     /// `0x`+64-hex actor omni (normalized lowercase) — the join key against
     /// `DeviceEntry.actorOmni` at reconcile time.
@@ -497,6 +503,22 @@ pub struct BindingManifestEntry {
     /// Unix seconds of the last upsert (accept or scope commit).
     #[serde(default)]
     pub updated_at: u64,
+    /// #427 — the preset the delegate was spawned from (`""`/absent = blank
+    /// spawn or a pre-#427 binding). Readable-layer only, like `label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    /// #427 — the delegate's `memory:<ns>` namespace name (the #425 O2
+    /// inheritance-discovery key; grants on-chain are keccak ids).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ns: Option<String>,
+    /// #427 — set when the delegate was ARCHIVED. The row is retained (epic
+    /// acceptance: manifest + audit rows survive the archive) so a kept
+    /// namespace stays discoverable for a successor spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<u64>,
+    /// #427/#425 O4 — the operator's keep-vs-delete choice at archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources_kept: Option<bool>,
 }
 
 /// The durable manifest doc (config-class, master-only). Small: one entry per
@@ -560,6 +582,20 @@ impl BindingManifest {
                 }
                 if entry.device_key_hash.is_empty() {
                     entry.device_key_hash = existing.device_key_hash.clone();
+                }
+                // #427 readable-layer fields survive an upsert that doesn't
+                // state them (a scope re-grant must not wipe the spawn record).
+                if entry.preset_id.is_none() {
+                    entry.preset_id = existing.preset_id.clone();
+                }
+                if entry.memory_ns.is_none() {
+                    entry.memory_ns = existing.memory_ns.clone();
+                }
+                if entry.archived_at.is_none() {
+                    entry.archived_at = existing.archived_at;
+                }
+                if entry.resources_kept.is_none() {
+                    entry.resources_kept = existing.resources_kept;
                 }
                 *existing = entry;
             }
@@ -1138,6 +1174,13 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/accept/submit", post(accept_submit_proxy))
         .route("/v1/scope/build", post(scope_build_proxy))
         .route("/v1/scope/submit", post(scope_submit_proxy))
+        // #427 — the delegate spawn/archive ceremonies (ONE Touch ID each; the
+        // broker enforces the on-chain agent-slot allowance; the daemon writes
+        // the #424 binding-manifest row on confirm):
+        .route("/v1/agent/spawn/build", post(spawn_build_proxy))
+        .route("/v1/agent/spawn/submit", post(spawn_submit_proxy))
+        .route("/v1/agent/archive/build", post(archive_build_proxy))
+        .route("/v1/agent/archive/submit", post(archive_submit_proxy))
         // #418 — the WeChat gateway admin proxy (parent-control drives the
         // gateway's admin surface through the daemon; the admin bearer is
         // injected server-side, never in the browser):
@@ -1338,6 +1381,7 @@ pub fn build_state(
         plant_lock: tokio::sync::Mutex::new(()),
         authored_taxonomy: RwLock::new(None),
         accept_grants_by_request: RwLock::new(HashMap::new()),
+        ceremony_context_by_dkh: RwLock::new(HashMap::new()),
         channel_registry: RwLock::new(None),
         binding_manifest: RwLock::new(None),
         scope_services_by_op_hash: RwLock::new(HashMap::new()),
@@ -5244,6 +5288,12 @@ async fn ack_pairing(
                     },
                     granted_service_names: services.clone(),
                     updated_at: now_unix(),
+                    // #427 fields ride only the spawn ceremony; a pairing
+                    // accept states none (upsert preserves any existing).
+                    preset_id: None,
+                    memory_ns: None,
+                    archived_at: None,
+                    resources_kept: None,
                 };
                 let agent_actor = ApiActor {
                     id: format!("agent-{label}"),
@@ -5503,6 +5553,268 @@ async fn accept_submit_proxy(
     resp
 }
 
+/// #427 — the parent-control spawn ceremony, daemon half. The browser sends
+/// only the ceremony choices; the daemon fills `operator_omni` from the master
+/// session (never the browser) and forwards to the broker's
+/// `/v1/agent/spawn/build`, stashing the returned ceremony context (label,
+/// preset, namespace, template service NAMES) by `device_key_hash` so the
+/// submit proxy can write the #424 binding-manifest row on confirm.
+#[derive(Debug, Deserialize)]
+pub struct DaemonSpawnBuildRequest {
+    pub label: String,
+    #[serde(default)]
+    pub preset_id: String,
+    #[serde(default)]
+    pub memory_ns: Option<String>,
+    #[serde(default)]
+    pub memory_inherited: bool,
+}
+
+/// POST /v1/agent/spawn/build — forward to the broker (#427); the body shape is
+/// crate-owned (`agentkeys_backend_client::protocol::BuildSpawnUserOpRequest`).
+async fn spawn_build_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<DaemonSpawnBuildRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let mut body = serde_json::json!({
+        "operator_omni": operator_omni,
+        "label": req.label,
+        "preset_id": req.preset_id,
+    });
+    if let Some(ns) = &req.memory_ns {
+        body["memory_ns"] = serde_json::json!(ns);
+    }
+    if req.memory_inherited {
+        body["memory_inherited"] = serde_json::json!(true);
+    }
+    let (resp, parsed) =
+        forward_to_broker_value(&broker, "/v1/agent/spawn/build", &j1, &body).await;
+    if resp.status().is_success() {
+        if let Some(built) = parsed.as_ref() {
+            if let Some(dkh) = built.get("device_key_hash").and_then(|v| v.as_str()) {
+                // Stash the readable ceremony context the manifest row needs
+                // at submit-confirm (chain stores only keccak ids + hashes).
+                state
+                    .ceremony_context_by_dkh
+                    .write()
+                    .await
+                    .insert(dkh.to_lowercase(), built.clone());
+            }
+        }
+    }
+    resp
+}
+
+/// POST /v1/agent/spawn/submit — forward the K11-signed spawn op to the broker;
+/// on a CONFIRMED ceremony write the #424 binding-manifest row (kind=delegate,
+/// preset, label, template grant names, memory namespace) and un-latch the
+/// fleet sync.
+async fn spawn_submit_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let (resp, parsed) =
+        forward_to_broker_value(&broker, "/v1/agent/spawn/submit", &j1, &body).await;
+    if resp.status().is_success() {
+        invalidate_fleet_sync(&state);
+        for spawned in parsed
+            .as_ref()
+            .and_then(|v| v.pointer("/ceremony/spawned"))
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let dkh = spawned
+                .get("device_key_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let stashed = state.ceremony_context_by_dkh.write().await.remove(&dkh);
+            let ctx = stashed.as_ref().unwrap_or(spawned);
+            let sfield = |v: &serde_json::Value, k: &str| {
+                v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+            };
+            let services = ctx
+                .get("services")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let label = {
+                let l = sfield(spawned, "label");
+                if l.is_empty() {
+                    sfield(ctx, "label")
+                } else {
+                    l
+                }
+            };
+            upsert_binding_manifest_entry(
+                &state,
+                BindingManifestEntry {
+                    actor_omni: sfield(ctx, "actor_omni"),
+                    device_key_hash: dkh,
+                    label,
+                    kind: "delegate".into(),
+                    granted_service_names: services,
+                    updated_at: now_unix(),
+                    preset_id: Some(sfield(spawned, "preset_id")),
+                    memory_ns: Some(sfield(ctx, "memory_ns")),
+                    archived_at: None,
+                    resources_kept: None,
+                },
+            )
+            .await;
+        }
+    }
+    resp
+}
+
+/// #427 — the archive ceremony, daemon half.
+#[derive(Debug, Deserialize)]
+pub struct DaemonArchiveBuildRequest {
+    pub device_key_hash: String,
+    #[serde(default)]
+    pub resources_kept: bool,
+    #[serde(default)]
+    pub memory_ns: Option<String>,
+}
+
+/// POST /v1/agent/archive/build — forward to the broker (#427).
+async fn archive_build_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<DaemonArchiveBuildRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let mut body = serde_json::json!({
+        "operator_omni": operator_omni,
+        "device_key_hash": req.device_key_hash,
+    });
+    if req.resources_kept {
+        body["resources_kept"] = serde_json::json!(true);
+    }
+    if let Some(ns) = &req.memory_ns {
+        body["memory_ns"] = serde_json::json!(ns);
+    }
+    forward_to_broker(&broker, "/v1/agent/archive/build", &j1, &body).await
+}
+
+/// POST /v1/agent/archive/submit — forward; on a CONFIRMED archive mark the
+/// manifest row archived (RETAINED, per the epic acceptance — a kept namespace
+/// stays discoverable for #425 O2 inheritance) and un-latch the fleet sync.
+async fn archive_submit_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let (resp, parsed) =
+        forward_to_broker_value(&broker, "/v1/agent/archive/submit", &j1, &body).await;
+    if resp.status().is_success() {
+        invalidate_fleet_sync(&state);
+        for archived in parsed
+            .as_ref()
+            .and_then(|v| v.pointer("/ceremony/archived"))
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let dkh = archived
+                .get("device_key_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let kept = archived
+                .get("resources_kept")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let ns = archived
+                .get("memory_ns")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            mark_binding_archived(&state, dkh, kept, ns).await;
+        }
+    }
+    resp
+}
+
+/// Mark a manifest row archived in place (retained, never deleted — the row is
+/// the O2 inheritance-discovery record). Missing row = WARN, not an error.
+async fn mark_binding_archived(
+    state: &UiBridgeState,
+    device_key_hash: &str,
+    resources_kept: bool,
+    memory_ns: Option<String>,
+) {
+    let mut manifest = match ensure_binding_manifest(state).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                device_key_hash = %device_key_hash,
+                "binding manifest LOAD failed on archive — {e}"
+            );
+            return;
+        }
+    };
+    let Some(entry) = manifest.entry_for("", device_key_hash).cloned() else {
+        tracing::warn!(
+            target: "agentkeys.daemon.ui_bridge",
+            device_key_hash = %device_key_hash,
+            "archive confirmed but no manifest row to mark (headless spawn or pre-#427 binding)"
+        );
+        return;
+    };
+    let mut updated = entry;
+    updated.archived_at = Some(now_unix());
+    updated.resources_kept = Some(resources_kept);
+    if updated.memory_ns.is_none() {
+        updated.memory_ns = memory_ns;
+    }
+    updated.updated_at = now_unix();
+    manifest.upsert(updated);
+    match persist_binding_manifest(state, manifest).await {
+        Ok(storage) => tracing::info!(
+            target: "agentkeys.daemon.ui_bridge",
+            device_key_hash = %device_key_hash,
+            resources_kept,
+            storage,
+            "binding manifest row marked archived"
+        ),
+        Err(e) => tracing::warn!(
+            target: "agentkeys.daemon.ui_bridge",
+            device_key_hash = %device_key_hash,
+            "binding manifest archive-mark persist FAILED — {e}"
+        ),
+    }
+}
+
 /// #248 — the Touch-ID-gated scope re-grant for an ALREADY-bound agent (the
 /// permissions panel's commit). The browser stages the new namespace set, calls
 /// `build` (→ broker assembles the `executeBatch([setScope])` UserOp + returns
@@ -5619,6 +5931,10 @@ async fn scope_submit_proxy(
                     kind: String::new(),            // kept from the existing entry
                     granted_service_names: services,
                     updated_at: now_unix(),
+                    preset_id: None,      // kept from the existing entry (#427)
+                    memory_ns: None,      // kept from the existing entry (#427)
+                    archived_at: None,    // kept from the existing entry (#427)
+                    resources_kept: None, // kept from the existing entry (#427)
                 },
             )
             .await;
@@ -12313,6 +12629,7 @@ mod tests {
             kind: "device".into(),
             granted_service_names: vec!["channel-pub:frontdoor".into()],
             updated_at: 1,
+            ..Default::default()
         });
         // Normalized on write; found by omni AND by device hash, any casing.
         let by_omni = m
@@ -12337,6 +12654,7 @@ mod tests {
                 "channel-sub:frontdoor".into(),
             ],
             updated_at: 2,
+            ..Default::default()
         });
         assert_eq!(m.bindings.len(), 1, "upsert, not append");
         let e = m.entry_for(&format!("0x{}", "ab".repeat(32)), "").unwrap();
@@ -12354,6 +12672,7 @@ mod tests {
             kind: String::new(),
             granted_service_names: vec!["memory:travel".into()],
             updated_at: 3,
+            ..Default::default()
         });
         assert_eq!(
             m.entry_for(&format!("0x{}", "ee".repeat(32)), "")
@@ -12487,6 +12806,7 @@ mod tests {
             kind: "device".into(),
             granted_service_names: vec!["channel-pub:frontdoor".into()],
             updated_at: 1,
+            ..Default::default()
         });
         *state.binding_manifest.write().await = Some(manifest);
 

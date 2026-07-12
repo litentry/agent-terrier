@@ -108,6 +108,9 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
             agentkeys_broker_server::storage::AgentDelegationStore::open_in_memory().unwrap(),
         ),
         ve_faas: None,
+        pending_ceremonies: Arc::new(
+            agentkeys_broker_server::handlers::spawn::PendingCeremonyStore::new(),
+        ),
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: std::sync::Arc::new(agentkeys_broker_server::state::Tier2State::default()),
         #[cfg(feature = "auth-email-link")]

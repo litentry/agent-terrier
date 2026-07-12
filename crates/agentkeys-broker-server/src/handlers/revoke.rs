@@ -117,8 +117,11 @@ pub fn parse_device_probe(raw: &str) -> Result<DeviceProbe, String> {
     })
 }
 
-/// `SidecarRegistry.TIER_AGENT` — the only tier `revokeAgentDevice` accepts.
+/// `SidecarRegistry.TIER_AGENT` (delegates) — revocable; frees an agent slot.
 const TIER_AGENT: u8 = 2;
+/// `SidecarRegistry.TIER_DEVICE` (channel endpoints, #427) — revocable; no
+/// slot change. Masters (tier 1) stay excluded (M-of-N recovery flow).
+const TIER_DEVICE: u8 = 3;
 
 /// **PURE** — split the probed hashes into the batch (active agent devices of
 /// THIS operator) and the skipped set (already revoked / never registered —
@@ -145,9 +148,9 @@ pub fn filter_revocable(
                 hex::encode(hash)
             ));
         }
-        if probe.tier != TIER_AGENT {
+        if probe.tier != TIER_AGENT && probe.tier != TIER_DEVICE {
             return Err(format!(
-                "device 0x{} is not an agent-tier device (tier {}) — masters are revoked via \
+                "device 0x{} is not a K10-actor binding (tier {}) — masters are revoked via \
                  the M-of-N recovery flow, not the unpair",
                 hex::encode(hash),
                 probe.tier
@@ -409,7 +412,14 @@ mod tests {
         let master = vec![([0x66; 32], probe(0x22, 1, true, false))];
         assert!(filter_revocable(&omni, &master)
             .unwrap_err()
-            .contains("not an agent-tier"));
+            .contains("not a K10-actor binding"));
+
+        // #427 kind split: a TIER_DEVICE channel endpoint IS revocable (the
+        // device unbind), same batch as delegates — only masters are excluded.
+        let device = vec![([0x77; 32], probe(0x22, TIER_DEVICE, true, false))];
+        let (included, skipped) = filter_revocable(&omni, &device).unwrap();
+        assert_eq!(included, vec![[0x77; 32]]);
+        assert!(skipped.is_empty());
     }
 
     #[test]

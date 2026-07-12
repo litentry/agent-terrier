@@ -19,9 +19,10 @@ use serde_json::{json, Value};
 
 use crate::protocol::{
     AcceptAssertion, AuditAppendV2, BrokerCapRequest, BuildAcceptUserOpRequest,
-    BuildRegisterUserOpRequest, BuildRevokeUserOpRequest, BuildScopeUserOpRequest,
-    ChannelEventKind, ChannelPollBody, ChannelPublishBody, ConfigGetBody, ConfigPutBody,
-    MemoryGetBody, MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp, ENVELOPE_VERSION,
+    BuildArchiveUserOpRequest, BuildRegisterUserOpRequest, BuildRevokeUserOpRequest,
+    BuildScopeUserOpRequest, BuildSpawnUserOpRequest, ChannelEventKind, ChannelPollBody,
+    ChannelPublishBody, ConfigGetBody, ConfigPutBody, MemoryGetBody, MemoryPutBody,
+    SubmitAcceptUserOpRequest, WireUserOp, ENVELOPE_VERSION,
 };
 
 /// One canonical fixture: the on-disk file stem + the sample body.
@@ -140,6 +141,24 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         rpid_hash: "0x<rpid_hash>".into(),
         roles: 0,
     };
+    // #427 spawn/archive ceremonies. The canonical spawn shape names the
+    // memory namespace explicitly; `memory_inherited` is false +
+    // skip_serializing_if (an INHERIT body adds that one key — annotate such a
+    // negative-path curl accordingly). Archive: `resources_kept`/`memory_ns`
+    // are the optional keep-choice keys, omitted in the minimal shape.
+    let build_spawn = BuildSpawnUserOpRequest {
+        operator_omni: "0x<operator_omni>".into(),
+        label: "<label>".into(),
+        preset_id: "<preset_id>".into(),
+        memory_ns: Some("<namespace>".into()),
+        memory_inherited: false,
+    };
+    let build_archive = BuildArchiveUserOpRequest {
+        operator_omni: "0x<operator_omni>".into(),
+        device_key_hash: "0x<device_key_hash>".into(),
+        resources_kept: false,
+        memory_ns: None,
+    };
     // #406 channels: the canonical publish body carries an inline base64 payload
     // (body_ref None + skip_serializing_if, so it stays out of the fixture); poll
     // carries the cursor + long-poll wait.
@@ -204,6 +223,14 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         Fixture {
             name: "build_register_userop_request",
             body: serde_json::to_value(&build_register).expect("build_register serializes"),
+        },
+        Fixture {
+            name: "build_spawn_userop_request",
+            body: serde_json::to_value(&build_spawn).expect("build_spawn serializes"),
+        },
+        Fixture {
+            name: "build_archive_userop_request",
+            body: serde_json::to_value(&build_archive).expect("build_archive serializes"),
         },
         Fixture {
             name: "channel_publish_body",
@@ -402,6 +429,26 @@ mod tests {
                 "roles",
                 "rpid_hash",
             ]
+        );
+    }
+
+    #[test]
+    fn build_spawn_userop_request_keys_frozen() {
+        // #427: memory_inherited is false + skip_serializing_if — the INHERIT
+        // variant adds that single key.
+        assert_eq!(
+            keys_of("build_spawn_userop_request"),
+            vec!["label", "memory_ns", "operator_omni", "preset_id"]
+        );
+    }
+
+    #[test]
+    fn build_archive_userop_request_keys_frozen() {
+        // #427: the minimal shape — resources_kept/memory_ns ride only on the
+        // keep-choice variant (both skip_serializing_if their defaults).
+        assert_eq!(
+            keys_of("build_archive_userop_request"),
+            vec!["device_key_hash", "operator_omni"]
         );
     }
 }

@@ -11,7 +11,7 @@
 //! - 20-29 signs family (SignEip191=20, SignEip712=21; 22-29 reserved)
 //! - 30-39 payments family (PaymentEscrowRedeem=30, PaymentDirect=31; 32-39 reserved)
 //! - 40-49 scope family (ScopeGrant=40, ScopeRevoke=41; 42-49 reserved)
-//! - 50-59 device family (DeviceAdd=50, DeviceRevoke=51, K10Rotate=52, SandboxSpawn=53, SandboxTeardown=54; 55-59 reserved)
+//! - 50-59 device family (DeviceAdd=50, DeviceRevoke=51, K10Rotate=52, SandboxSpawn=53, SandboxTeardown=54, DelegateSpawn=55, DelegateArchive=56; 57-59 reserved)
 //! - 60-69 email family (EmailSend=60, EmailReceive=61; 62-69 reserved)
 //! - 70-79 K3 family (K3EpochAdvance=70; 71-79 reserved)
 //! - 80-89 config family (ConfigPut=80, ConfigGet=81, ConfigTeardown=82; 83-89 reserved)
@@ -50,6 +50,13 @@ pub enum AuditOpKind {
     SandboxSpawn = 53,
     /// #377 — the broker killed a delegate's sandbox instance (unpair).
     SandboxTeardown = 54,
+    /// #427 — the delegate-spawn CEREMONY anchor: ONE master Touch ID
+    /// authorized `registerDelegate` (slot consume) + the template `setScope`;
+    /// the body carries the preset/label context the calldata rows can't.
+    DelegateSpawn = 55,
+    /// #427 — the archive-ceremony anchor: delegate revoked, slot freed, and
+    /// the operator's keep-vs-delete choice for its resources recorded.
+    DelegateArchive = 56,
     EmailSend = 60,
     EmailReceive = 61,
     K3EpochAdvance = 70,
@@ -98,6 +105,8 @@ impl AuditOpKind {
             52 => Self::K10Rotate,
             53 => Self::SandboxSpawn,
             54 => Self::SandboxTeardown,
+            55 => Self::DelegateSpawn,
+            56 => Self::DelegateArchive,
             60 => Self::EmailSend,
             61 => Self::EmailReceive,
             70 => Self::K3EpochAdvance,
@@ -137,6 +146,8 @@ impl AuditOpKind {
             Self::K10Rotate => "device.k10_rotate",
             Self::SandboxSpawn => "sandbox.spawn",
             Self::SandboxTeardown => "sandbox.teardown",
+            Self::DelegateSpawn => "delegate.spawn",
+            Self::DelegateArchive => "delegate.archive",
             Self::EmailSend => "email.send",
             Self::EmailReceive => "email.receive",
             Self::K3EpochAdvance => "k3.epoch_advance",
@@ -181,6 +192,8 @@ mod tests {
             AuditOpKind::K10Rotate,
             AuditOpKind::SandboxSpawn,
             AuditOpKind::SandboxTeardown,
+            AuditOpKind::DelegateSpawn,
+            AuditOpKind::DelegateArchive,
             AuditOpKind::EmailSend,
             AuditOpKind::EmailReceive,
             AuditOpKind::K3EpochAdvance,
@@ -209,7 +222,7 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [
-            3u8, 9, 14, 19, 22, 32, 42, 55, 62, 71, 83, 89, 91, 99, 105, 109, 110, 200, 250, 255,
+            3u8, 9, 14, 19, 22, 32, 42, 57, 62, 71, 83, 89, 91, 99, 105, 109, 110, 200, 250, 255,
         ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),
@@ -243,6 +256,8 @@ mod tests {
             AuditOpKind::K10Rotate as u8,
             AuditOpKind::SandboxSpawn as u8,
             AuditOpKind::SandboxTeardown as u8,
+            AuditOpKind::DelegateSpawn as u8,
+            AuditOpKind::DelegateArchive as u8,
             AuditOpKind::EmailSend as u8,
             AuditOpKind::EmailReceive as u8,
             AuditOpKind::K3EpochAdvance as u8,
