@@ -56,11 +56,11 @@ use thiserror::Error;
 pub use bodies::{
     ChannelPublishBody, ChannelSubscribeBody, ChannelTeardownBody, ConfigGetBody, ConfigPutBody,
     ConfigTeardownBody, ContactBindBody, CredFetchBody, CredStoreBody, CredTeardownBody,
-    DeviceAddBody, DeviceRevokeBody, EmailReceiveBody, EmailSendBody, GateTurnBody,
-    GatewayRelayBody, K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody,
-    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody,
-    SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body,
-    SignEip712Body,
+    DelegateArchiveBody, DelegateSpawnBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody,
+    EmailSendBody, GateTurnBody, GatewayRelayBody, K10RotateBody, K3EpochAdvanceBody,
+    MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody, PaymentDirectBody,
+    PaymentEscrowRedeemBody, SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody,
+    ScopeRevokeBody, SignEip191Body, SignEip712Body,
 };
 pub use op_kind::AuditOpKind;
 
@@ -237,6 +237,8 @@ pub enum TypedAuditBody {
     K10Rotate(K10RotateBody),
     SandboxSpawn(SandboxSpawnBody),
     SandboxTeardown(SandboxTeardownBody),
+    DelegateSpawn(DelegateSpawnBody),
+    DelegateArchive(DelegateArchiveBody),
     EmailSend(EmailSendBody),
     EmailReceive(EmailReceiveBody),
     K3EpochAdvance(K3EpochAdvanceBody),
@@ -284,6 +286,10 @@ impl TypedAuditBody {
             AuditOpKind::SandboxSpawn => Self::SandboxSpawn(serde_json::from_value(value).ok()?),
             AuditOpKind::SandboxTeardown => {
                 Self::SandboxTeardown(serde_json::from_value(value).ok()?)
+            }
+            AuditOpKind::DelegateSpawn => Self::DelegateSpawn(serde_json::from_value(value).ok()?),
+            AuditOpKind::DelegateArchive => {
+                Self::DelegateArchive(serde_json::from_value(value).ok()?)
             }
             AuditOpKind::EmailSend => Self::EmailSend(serde_json::from_value(value).ok()?),
             AuditOpKind::EmailReceive => Self::EmailReceive(serde_json::from_value(value).ok()?),
@@ -520,6 +526,66 @@ mod tests {
             TypedAuditBody::SandboxTeardown(b) => {
                 assert_eq!(b.reason, "unpair");
                 assert_eq!(b.sandbox_id, "sbx-test-1");
+            }
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+    }
+
+    /// #427 delegate ceremony op_kinds (55/56): canonical fixtures round-trip
+    /// through canonical CBOR and decode to the typed bodies (the §15.3b
+    /// ritual's roundtrip test).
+    #[test]
+    fn delegate_spawn_and_archive_bodies_roundtrip_cbor() {
+        use crate::audit::client::envelope_for;
+
+        let spawn = envelope_for(
+            [0x33; 32],
+            [0x22; 32],
+            AuditOpKind::DelegateSpawn,
+            DelegateSpawnBody {
+                device_key_hash: format!("0x{}", "11".repeat(32)),
+                preset_id: "watchdog".into(),
+                label_hash: format!("0x{}", "44".repeat(32)),
+                memory_ns: "watchdog-1".into(),
+                memory_inherited: false,
+            },
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&spawn.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(decoded.op_kind, AuditOpKind::DelegateSpawn as u8);
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::DelegateSpawn(b) => {
+                assert_eq!(b.preset_id, "watchdog");
+                assert_eq!(b.memory_ns, "watchdog-1");
+                assert!(!b.memory_inherited);
+            }
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        let archive = envelope_for(
+            [0x33; 32],
+            [0x22; 32],
+            AuditOpKind::DelegateArchive,
+            DelegateArchiveBody {
+                device_key_hash: format!("0x{}", "11".repeat(32)),
+                resources_kept: true,
+            },
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&archive.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(decoded.op_kind, AuditOpKind::DelegateArchive as u8);
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::DelegateArchive(b) => {
+                assert!(b.resources_kept);
+                assert_eq!(b.device_key_hash, format!("0x{}", "11".repeat(32)));
             }
             other => panic!("unexpected typed body: {other:?}"),
         }

@@ -1243,6 +1243,107 @@ enum AgentAction {
         )]
         session_bearer: String,
     },
+    /// HEADLESS #427 delegate SPAWN (CI/test masters only): zero rendezvous, ONE
+    /// ceremony — the broker derives the HDKD child omni, generates the delegate
+    /// K10, pre-checks the on-chain agent-slot allowance (loud 409 when
+    /// exhausted), and assembles executeBatch(registerDelegate + template
+    /// setScope); this signs the userOpHash with the #164 SOFTWARE passkey and
+    /// submits. The CLI twin of the parent-control "New agent" flow (#429). A
+    /// real operator master uses the web flow (Touch ID).
+    #[command(
+        about = "Master (headless/CI): spawn a delegate under the agent-slot allowance (#427)"
+    )]
+    Spawn {
+        #[arg(long, help = "Delegate name + HDKD label (^[a-z0-9-]{1,32}$)")]
+        label: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Preset slug (#428 catalog); empty = blank spawn"
+        )]
+        preset: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "memory:<ns> namespace; empty = fresh, named after the label"
+        )]
+        memory_ns: String,
+        #[arg(
+            long,
+            help = "The namespace is INHERITED from an archived delegate (#425 O2)"
+        )]
+        memory_inherited: bool,
+        #[arg(
+            long,
+            env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE",
+            help = "Software P-256 passkey PEM enrolled as this master's K11"
+        )]
+        k11_key_file: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP id the software passkey was enrolled under"
+        )]
+        rp_id: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
+    /// HEADLESS #427 delegate ARCHIVE (CI/test masters only): revoke ONE
+    /// delegate (its agent slot returns in-contract), record keep-vs-delete for
+    /// its resources (#425 O4), deprovision its gate relay key, tear down its
+    /// sandbox. Devices unbind via the revoke flow; masters via recovery.
+    #[command(
+        about = "Master (headless/CI): archive a delegate — slot returns, resources keep-vs-delete"
+    )]
+    Archive {
+        #[arg(long, help = "The delegate's on-chain device_key_hash (0x + 64 hex)")]
+        device_key_hash: String,
+        #[arg(
+            long,
+            help = "KEEP the delegate's resources (memory:<ns> stays inheritable); default deletes"
+        )]
+        keep_resources: bool,
+        #[arg(
+            long,
+            default_value = "",
+            help = "The delegate's memory:<ns> name (recorded for O2 inheritance discovery)"
+        )]
+        memory_ns: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE",
+            help = "Software P-256 passkey PEM enrolled as this master's K11"
+        )]
+        k11_key_file: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP id the software passkey was enrolled under"
+        )]
+        rp_id: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
 }
 
 async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
@@ -1908,6 +2009,57 @@ async fn main() {
                     k11_key_file,
                     rp_id,
                     operator_omni,
+                    session_bearer,
+                )
+                .await
+            }
+            AgentAction::Spawn {
+                label,
+                preset,
+                memory_ns,
+                memory_inherited,
+                k11_key_file,
+                rp_id,
+                broker_url,
+                session_bearer,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless spawn signs with the SOFTWARE P-256 passkey on disk \
+                     — CI / headless / throwaway-TEST masters ONLY. A real operator master \
+                     spawns in parent-control (Touch ID). See arch.md §9 / §22b.1."
+                );
+                agentkeys_cli::agent_admin::agent_spawn(
+                    broker_url,
+                    label,
+                    preset,
+                    memory_ns,
+                    *memory_inherited,
+                    k11_key_file,
+                    rp_id,
+                    session_bearer,
+                )
+                .await
+            }
+            AgentAction::Archive {
+                device_key_hash,
+                keep_resources,
+                memory_ns,
+                k11_key_file,
+                rp_id,
+                broker_url,
+                session_bearer,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless archive signs with the SOFTWARE P-256 passkey on \
+                     disk — CI / headless / throwaway-TEST masters ONLY."
+                );
+                agentkeys_cli::agent_admin::agent_archive(
+                    broker_url,
+                    device_key_hash,
+                    *keep_resources,
+                    memory_ns,
+                    k11_key_file,
+                    rp_id,
                     session_bearer,
                 )
                 .await

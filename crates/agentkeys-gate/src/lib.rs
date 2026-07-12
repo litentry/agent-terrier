@@ -17,10 +17,12 @@
 //! statistics that roll up into the user-facing summary (`GET /v1/usage`).
 //! Each turn lands on the ledger as a `GateTurn` (op_kind 90) audit row.
 
+pub mod admin;
 pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod keys;
 pub mod meter;
 pub mod openai;
 pub mod relay;

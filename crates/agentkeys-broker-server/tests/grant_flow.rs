@@ -119,6 +119,9 @@ async fn spawn_broker() -> Harness {
             agentkeys_broker_server::storage::AgentDelegationStore::open_in_memory().unwrap(),
         ),
         ve_faas: None,
+        pending_ceremonies: Arc::new(
+            agentkeys_broker_server::handlers::spawn::PendingCeremonyStore::new(),
+        ),
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::new(Tier2State::default()),
         #[cfg(feature = "auth-email-link")]

@@ -114,4 +114,4 @@ These are non-negotiable. Violating them produces broken PRs / corrupted state.
 Don't reach for ad-hoc `systemctl`, `scp`, or `forge script` — these are wrapped:
 
 - **Remote broker host** (binary upgrades, systemd, nginx, env tweaks): `bash scripts/operator/setup-broker-host.sh`
-- **Heima chain bring-up** (deploy, binding ceremonies, scope grants, K11 enroll, audit-row append, worker smoke): `bash scripts/operator/setup-heima.sh`
+- **Heima chain bring-up** (deploy + verify the shared contract SET): `bash scripts/operator/setup-heima.sh`. Master/agent binding is per-user onboarding via the parent-control app (#435); add `--verify` to also register a throwaway software master + demo agent for smoke.

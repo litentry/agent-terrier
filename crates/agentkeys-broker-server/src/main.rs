@@ -225,6 +225,9 @@ async fn main() -> anyhow::Result<()> {
         pairing_request_store: boot_artifacts.pairing_request_store,
         agent_delegation_store: boot_artifacts.agent_delegation_store,
         ve_faas,
+        pending_ceremonies: Arc::new(
+            agentkeys_broker_server::handlers::spawn::PendingCeremonyStore::new(),
+        ),
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::clone(&tier2),
         #[cfg(feature = "auth-email-link")]

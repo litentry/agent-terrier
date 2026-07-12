@@ -40,9 +40,16 @@ contract SidecarRegistry {
     uint8 public constant ROLE_RECOVERY = 1 << 1;
     uint8 public constant ROLE_SCOPE_MGMT = 1 << 2;
 
-    // ─── Device tier (arch.md §10.1 vs §10.2) ────────────────────────────
+    // ─── Device tier (arch.md §10.1 vs §10.2; #427 on-chain kind split) ──
+    /// TIER_MASTER — a master device (holds K11).
+    /// TIER_AGENT  — a DELEGATE (sandbox-resident agent actor; K10-only).
+    ///               Registered via `registerDelegate`, consumes an agent slot.
+    /// TIER_DEVICE — a channel-endpoint DEVICE (camera/display/speaker; K10-only).
+    ///               Registered via `registerAgentDevice`, consumes NO slot —
+    ///               devices only ever attach channels (decoupling spec D9/§4.4).
     uint8 public constant TIER_MASTER = 1;
     uint8 public constant TIER_AGENT = 2;
+    uint8 public constant TIER_DEVICE = 3;
 
     /// @notice Operation kind codes used in challenge-msg construction.
     bytes32 public constant OP_REGISTER_1ST_MASTER = keccak256("agentkeys:v1:register-first-master");
@@ -90,6 +97,27 @@ contract SidecarRegistry {
     mapping(bytes32 => uint8) public recoveryThreshold; // default 1 (single master can revoke)
     mapping(bytes32 => uint256) public operatorNonce; // ++ on every K11-gated mutation
 
+    // ─── Agent-slot allowance (#425 S1/S6, #427) ─────────────────────────
+    // The business quota: how many DELEGATES may exist per operator. The
+    // EXISTENCE plane of the two-plane entitlement model (the usage plane is
+    // the gate's per-delegate budgets); both derive from one tier definition.
+    // Enforced ATOMICALLY inside `registerDelegate` so no registration path
+    // can mint a delegate without consuming a slot; `revokeAgentDevice` of a
+    // TIER_AGENT row frees the slot (archive). Totals are OWNER-set (the
+    // platform/billing side) — an operator must never raise their own quota.
+    struct AgentSlotOverride {
+        bool set;
+        uint16 total;
+    }
+
+    /// @notice Platform default delegate allowance for every operator without
+    ///         a per-operator override (the free-tier N; deploy-time param).
+    uint16 public defaultAgentSlotAllowance;
+    /// @notice Per-operator paid override (business action; owner-set).
+    mapping(bytes32 => AgentSlotOverride) public agentSlotOverride;
+    /// @notice Live count of ACTIVE (non-revoked) delegates per operator.
+    mapping(bytes32 => uint16) public agentSlotsUsed;
+
     event DeviceRegistered(
         bytes32 indexed deviceKeyHash,
         bytes32 indexed operatorOmni,
@@ -102,6 +130,9 @@ contract SidecarRegistry {
     event OperatorBootstrapped(bytes32 indexed operatorOmni, address indexed masterWallet);
     event RecoveryThresholdSet(bytes32 indexed operatorOmni, uint8 newThreshold);
     event MasterReset(bytes32 indexed operatorOmni, address indexed clearedMaster, uint256 deviceCount);
+    event DefaultAgentSlotAllowanceSet(uint16 newDefault);
+    event AgentSlotAllowanceSet(bytes32 indexed operatorOmni, uint16 total);
+    event AgentSlotAllowanceCleared(bytes32 indexed operatorOmni);
 
     error DeviceAlreadyRegistered(bytes32 deviceKeyHash);
     error NotOwner(address caller);
@@ -117,10 +148,15 @@ contract SidecarRegistry {
     error StaleSignCount(uint32 got, uint32 last);
     error InvalidRecoveryThreshold();
     error K11RoleMissing(uint8 required);
+    /// @notice The business gate, loud + actionable (#425 acceptance): the
+    ///         operator has `slotsUsed` of `slotsTotal` delegates — archive one
+    ///         or extend the allowance (platform action) before spawning more.
+    error AgentSlotAllowanceExhausted(bytes32 operatorOmni, uint16 slotsUsed, uint16 slotsTotal);
 
-    constructor(address k11VerifierAddr) {
+    constructor(address k11VerifierAddr, uint16 defaultAllowance) {
         k11Verifier = K11Verifier(k11VerifierAddr);
         owner = msg.sender; // the deployer — the only resetMaster caller
+        defaultAgentSlotAllowance = defaultAllowance;
     }
 
     /// @notice **Dev/recovery affordance** — unbind an operator's master so a fresh
@@ -148,6 +184,8 @@ contract SidecarRegistry {
         operatorMasterWallet[operatorOmni] = address(0);
         recoveryThreshold[operatorOmni] = 0;
         operatorNonce[operatorOmni] = 0;
+        agentSlotsUsed[operatorOmni] = 0; // every delegate was just deleted
+        delete agentSlotOverride[operatorOmni]; // re-onboard from scratch = tier default
         emit MasterReset(operatorOmni, cleared, n);
     }
 
@@ -273,8 +311,10 @@ contract SidecarRegistry {
         attestation;
     }
 
-    /// @notice Register an agent device (link-code redeem path, K10-only).
-    ///         Per arch.md §10.2 — agents never hold K11.
+    /// @notice Register a channel-endpoint DEVICE (link-code redeem path,
+    ///         K10-only; never holds K11). Consumes NO agent slot — devices
+    ///         only ever attach channels (#404 D9; the on-chain kind split is
+    ///         #427). Delegates go through `registerDelegate`.
     function registerAgentDevice(
         bytes32 deviceKeyHash,
         bytes32 operatorOmni,
@@ -282,6 +322,44 @@ contract SidecarRegistry {
         bytes calldata linkCodeRedemption,
         bytes calldata agentPopSig
     ) external {
+        _registerK10Actor(deviceKeyHash, operatorOmni, actorOmni, TIER_DEVICE);
+        linkCodeRedemption;
+        agentPopSig;
+    }
+
+    /// @notice Register a DELEGATE (sandbox-resident agent actor; K10-only) —
+    ///         the #427 slot-gated spawn entrypoint. Consumes one agent slot
+    ///         ATOMICALLY (reverts `AgentSlotAllowanceExhausted` when the
+    ///         operator's allowance is full); `revokeAgentDevice` (archive)
+    ///         frees it. Same master-account gate as every bind: `msg.sender`
+    ///         must be the operator's P256Account, so the passkey (ONE Touch
+    ///         ID) authorized this calldata via `validateUserOp`.
+    function registerDelegate(
+        bytes32 deviceKeyHash,
+        bytes32 operatorOmni,
+        bytes32 actorOmni,
+        bytes calldata linkCodeRedemption,
+        bytes calldata agentPopSig
+    ) external {
+        uint16 used = agentSlotsUsed[operatorOmni];
+        uint16 total = _agentSlotAllowance(operatorOmni);
+        if (used >= total) {
+            revert AgentSlotAllowanceExhausted(operatorOmni, used, total);
+        }
+        _registerK10Actor(deviceKeyHash, operatorOmni, actorOmni, TIER_AGENT);
+        agentSlotsUsed[operatorOmni] = used + 1;
+        linkCodeRedemption;
+        agentPopSig;
+    }
+
+    /// @dev Shared K10-actor registration (delegate + device legs). The slot
+    ///      gate lives in `registerDelegate` so it wraps this atomically.
+    function _registerK10Actor(
+        bytes32 deviceKeyHash,
+        bytes32 operatorOmni,
+        bytes32 actorOmni,
+        uint8 tier
+    ) internal {
         if (devices[deviceKeyHash].registeredAt != 0) {
             revert DeviceAlreadyRegistered(deviceKeyHash);
         }
@@ -296,7 +374,7 @@ contract SidecarRegistry {
             k11RpIdHash: bytes32(0),
             k11PubX: 0,
             k11PubY: 0,
-            tier: TIER_AGENT,
+            tier: tier,
             roles: ROLE_CAP_MINT,
             registeredAt: uint64(block.timestamp),
             lastSignCount: 0,
@@ -304,25 +382,68 @@ contract SidecarRegistry {
         });
         operatorDevices[operatorOmni].push(deviceKeyHash);
 
-        emit DeviceRegistered(
-            deviceKeyHash, operatorOmni, actorOmni, TIER_AGENT, ROLE_CAP_MINT, bytes32(0)
-        );
-        linkCodeRedemption;
-        agentPopSig;
+        emit DeviceRegistered(deviceKeyHash, operatorOmni, actorOmni, tier, ROLE_CAP_MINT, bytes32(0));
     }
 
-    /// @notice Revoke an agent device. K10-only (no K11 — agents have none).
+    /// @notice Revoke a K10 actor — a delegate (TIER_AGENT; archive, frees its
+    ///         agent slot) or a device (TIER_DEVICE; unbind, no slot change).
+    ///         K10-only rows (no K11 — K10 actors have none).
     function revokeAgentDevice(bytes32 deviceKeyHash) external {
         DeviceEntry storage entry = devices[deviceKeyHash];
         if (entry.registeredAt == 0) revert DeviceNotRegistered(deviceKeyHash);
         if (entry.revoked) revert DeviceAlreadyRevoked(deviceKeyHash);
-        if (entry.tier != TIER_AGENT) revert NotAuthorized(msg.sender, address(0));
+        if (entry.tier != TIER_AGENT && entry.tier != TIER_DEVICE) {
+            revert NotAuthorized(msg.sender, address(0));
+        }
 
         address master = operatorMasterWallet[entry.operatorOmni];
         if (msg.sender != master) revert NotAuthorized(msg.sender, master);
 
         entry.revoked = true;
+        if (entry.tier == TIER_AGENT) {
+            uint16 used = agentSlotsUsed[entry.operatorOmni];
+            if (used > 0) {
+                agentSlotsUsed[entry.operatorOmni] = used - 1;
+            }
+        }
         emit DeviceRevoked(deviceKeyHash, entry.operatorOmni);
+    }
+
+    // ─── Agent-slot allowance admin (owner = platform/billing side) ──────
+    /// @notice Set the platform default allowance (free-tier N). Owner-only —
+    ///         the tier definition is a platform decision, never operator-set.
+    function setDefaultAgentSlotAllowance(uint16 newDefault) external {
+        if (msg.sender != owner) revert NotOwner(msg.sender);
+        defaultAgentSlotAllowance = newDefault;
+        emit DefaultAgentSlotAllowanceSet(newDefault);
+    }
+
+    /// @notice Set a per-operator allowance override (the "buy/extend slots"
+    ///         business action). Owner-only. Setting total below slotsUsed is
+    ///         allowed: existing delegates stay, further spawns revert until
+    ///         archives bring the count back under.
+    function setAgentSlotAllowance(bytes32 operatorOmni, uint16 total) external {
+        if (msg.sender != owner) revert NotOwner(msg.sender);
+        agentSlotOverride[operatorOmni] = AgentSlotOverride({set: true, total: total});
+        emit AgentSlotAllowanceSet(operatorOmni, total);
+    }
+
+    /// @notice Drop a per-operator override — back to the platform default.
+    function clearAgentSlotAllowance(bytes32 operatorOmni) external {
+        if (msg.sender != owner) revert NotOwner(msg.sender);
+        delete agentSlotOverride[operatorOmni];
+        emit AgentSlotAllowanceCleared(operatorOmni);
+    }
+
+    function _agentSlotAllowance(bytes32 operatorOmni) internal view returns (uint16) {
+        AgentSlotOverride storage o = agentSlotOverride[operatorOmni];
+        return o.set ? o.total : defaultAgentSlotAllowance;
+    }
+
+    /// @notice The allowance state a spawn UI / broker pre-check reads:
+    ///         `(slotsUsed, slotsTotal)` for the operator.
+    function agentSlots(bytes32 operatorOmni) external view returns (uint16 used, uint16 total) {
+        return (agentSlotsUsed[operatorOmni], _agentSlotAllowance(operatorOmni));
     }
 
     /// @notice Revoke a master device. Requires M-of-N K11 assertions where M =

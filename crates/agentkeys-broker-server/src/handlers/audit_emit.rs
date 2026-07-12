@@ -85,8 +85,12 @@ fn envelope_for_inner_call(
     call: &DecodedCall,
 ) -> Result<Option<AuditEnvelope>, String> {
     match (call.contract.as_str(), call.function.as_str()) {
-        ("SidecarRegistry", "registerAgentDevice") => {
-            // registerAgentDevice(deviceKeyHash, operatorOmni, actorOmni, link, pop)
+        // #427 kind split: both K10-actor registration legs share the arg
+        // shape and both anchor a DeviceAdd binding row (the ceremony-level
+        // DelegateSpawn 55 is the spawn finalize hook's, which carries the
+        // preset/label context calldata can't).
+        ("SidecarRegistry", "registerAgentDevice") | ("SidecarRegistry", "registerDelegate") => {
+            // register{AgentDevice,Delegate}(deviceKeyHash, operatorOmni, actorOmni, link, pop)
             let device_key_hash = hex_string(call, 0)?;
             let operator = hex32(call, 1)?;
             let actor = hex32(call, 2)?;

@@ -31,6 +31,9 @@ use crate::upstream::UpstreamClient;
 pub struct Relay {
     pub config: GateConfig,
     pub meter: Arc<Meter>,
+    /// #427 — the LIVE key registry (boot keys + broker-minted per-delegate
+    /// keys), seeded from `config.keys` and mutated only via the admin surface.
+    pub keys: Arc<crate::keys::KeyStore>,
     upstream: UpstreamClient,
     auditor: Option<Arc<Auditor>>,
 }
@@ -58,9 +61,11 @@ impl Relay {
             .audit_url
             .clone()
             .map(|url| Arc::new(Auditor::new(url, config.aws_region.clone())));
+        let keys = Arc::new(crate::keys::KeyStore::from_config(&config));
         Self {
             config,
             meter: Arc::new(Meter::default()),
+            keys,
             upstream,
             auditor,
         }
@@ -130,6 +135,29 @@ impl Relay {
                 self.audit_best_effort(&caller.user_omni, turn).await;
                 return Err(GateError::Budget(format!(
                     "user token budget exhausted ({used}/{budget})"
+                )));
+            }
+        }
+        // #427 per-DELEGATE ceiling under the user budget (epic #425 decision
+        // 6: budgets keyed by delegate, rolling up to the user). Read LIVE so
+        // an admin re-provision applies without re-auth. Same deterministic
+        // 429, same audit row.
+        if let Some(key_budget) = self.keys.budget_for_key(&caller.key_id) {
+            let key_used = self
+                .meter
+                .used_total_for_key(&caller.user_omni, &caller.key_id);
+            if key_used >= key_budget {
+                let turn = Self::turn_body(
+                    caller,
+                    &model,
+                    streamed,
+                    "denied:budget_exceeded",
+                    &UsageCounters::default(),
+                );
+                self.audit_best_effort(&caller.user_omni, turn).await;
+                return Err(GateError::Budget(format!(
+                    "delegate token budget exhausted ({key_used}/{key_budget} for key {})",
+                    caller.key_id
                 )));
             }
         }

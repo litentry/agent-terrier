@@ -138,6 +138,9 @@ fn relay_keys() -> Vec<RelayKey> {
             user_omni: user_omni(),
             device_id: "esp32-01".into(),
             label: "kid tablet".into(),
+            delegate_omni: None,
+            budget_tokens: None,
+            disabled: false,
         },
         RelayKey {
             key: RELAY_KEY_2.into(),
@@ -145,6 +148,9 @@ fn relay_keys() -> Vec<RelayKey> {
             user_omni: user_omni(),
             device_id: "esp32-02".into(),
             label: "living room".into(),
+            delegate_omni: None,
+            budget_tokens: None,
+            disabled: false,
         },
     ]
 }
@@ -169,6 +175,7 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
         user_budgets: Default::default(),
         default_budget_tokens: budget,
         admin_token: Some("admintok".into()),
+        keys_file: None,
         audit_url: Some(format!("http://{audit_addr}")),
         require_audit: false,
         aws_region: "us-east-1".into(),
@@ -486,4 +493,163 @@ async fn models_passthrough_requires_a_key() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["data"][0]["id"], "ep-doubao");
+}
+
+// ─── #427 — broker-driven provisioning + per-delegate budgets ────────────────
+
+#[tokio::test]
+async fn admin_provisions_a_delegate_key_and_disable_refuses_turns() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let delegate_dkh = format!("0x{}", "11".repeat(32));
+
+    // Non-admin provisioning is refused (a relay key is NOT an admin).
+    let resp = client
+        .post(format!("{}/v1/admin/keys", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"key_id": delegate_dkh, "user_omni": user_omni(), "device_id": delegate_dkh}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Admin provision (the broker's spawn-finalize call) → a one-shot secret.
+    let resp = client
+        .post(format!("{}/v1/admin/keys", gate.base))
+        .bearer_auth("admintok")
+        .json(&json!({
+            "key_id": delegate_dkh,
+            "user_omni": user_omni(),
+            "delegate_omni": format!("0x{}", "cc".repeat(32)),
+            "device_id": delegate_dkh,
+            "label": "watchdog"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let minted: Value = resp.json().await.unwrap();
+    let secret = minted["secret"].as_str().unwrap().to_string();
+    assert!(secret.starts_with("gk_"));
+
+    // The minted key relays a turn and rolls up under its key_id.
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(&secret)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(&secret)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["by_api_key"][0]["api_key_id"], delegate_dkh);
+
+    // Archive → disable (idempotent) → the very same secret is a plain 401.
+    let resp = client
+        .post(format!(
+            "{}/v1/admin/keys/{delegate_dkh}/disable",
+            gate.base
+        ))
+        .bearer_auth("admintok")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["disabled"], true);
+    let resp = client
+        .post(format!(
+            "{}/v1/admin/keys/{delegate_dkh}/disable",
+            gate.base
+        ))
+        .bearer_auth("admintok")
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["disabled"], false);
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(&secret)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn per_delegate_budget_429s_deterministically_under_the_user_budget() {
+    // No user-level budget; the DELEGATE key carries its own 100-token ceiling.
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/admin/keys", gate.base))
+        .bearer_auth("admintok")
+        .json(&json!({
+            "key_id": "delegate-b", "user_omni": user_omni(),
+            "device_id": "delegate-b", "budget_tokens": 100u64
+        }))
+        .send()
+        .await
+        .unwrap();
+    let secret = resp.json::<Value>().await.unwrap()["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // First turn burns 140 tokens (over the 100 ceiling) — allowed (pre-burn
+    // gate compares BEFORE the turn), second is the deterministic 429.
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(&secret)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(&secret)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "budget_exceeded");
+
+    // The sibling boot key (same user) is untouched — the ceiling was
+    // per-delegate, not per-user.
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Denial audited as a GateTurn with the denied outcome.
+    wait_for(
+        || {
+            gate.audit
+                .envelopes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e["op_body"]["outcome"] == "denied:budget_exceeded")
+        },
+        "denied GateTurn envelope",
+    )
+    .await;
 }

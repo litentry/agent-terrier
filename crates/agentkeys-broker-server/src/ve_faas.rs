@@ -393,14 +393,28 @@ impl VeFaasClient {
     }
 
     /// `CreateSandbox` labeled for the delegate → the new `SandboxId`.
-    async fn create_for_delegate(&self, device_key_hash: &str, actor_omni: &str) -> Result<String> {
+    /// `extra_envs` (#427 spawn ceremony) are merged OVER the resolver set —
+    /// a colliding key (e.g. `ARK_BASE_URL`/`ARK_API_KEY` pointed at the
+    /// per-delegate gate relay key) replaces the direct-ark value.
+    async fn create_for_delegate(
+        &self,
+        device_key_hash: &str,
+        actor_omni: &str,
+        extra_envs: &[(String, String)],
+    ) -> Result<String> {
         let mut body = serde_json::json!({
             "FunctionId": self.config.function_id,
             "Timeout": self.config.timeout_minutes,
             "Metadata": label_map(&delegate_labels(device_key_hash, actor_omni)),
         });
-        let envs: Vec<serde_json::Value> = self
-            .instance_envs()?
+        let mut merged = self.instance_envs()?;
+        for (k, v) in extra_envs {
+            match merged.iter_mut().find(|(mk, _)| mk == k) {
+                Some(slot) => slot.1 = v.clone(),
+                None => merged.push((k.clone(), v.clone())),
+            }
+        }
+        let envs: Vec<serde_json::Value> = merged
             .into_iter()
             .map(|(k, v)| serde_json::json!({ "Key": k, "Value": v }))
             .collect();
@@ -427,6 +441,22 @@ impl VeFaasClient {
         &self,
         device_key_hash: &str,
         actor_omni: &str,
+    ) -> Result<EnsureOutcome> {
+        self.ensure_for_delegate_with_envs(device_key_hash, actor_omni, &[])
+            .await
+    }
+
+    /// #427 spawn-ceremony variant: same idempotent ensure, with extra envs
+    /// (delegate K10 + gate relay key) merged into a CREATED instance's env.
+    /// A REUSED live instance keeps its boot-time env (veFaaS can't mutate a
+    /// running instance's env) — the spawn path never hits reuse in practice
+    /// (a fresh device_key_hash has no prior instance), and the outcome's
+    /// `created` flag tells the caller which case it got.
+    pub async fn ensure_for_delegate_with_envs(
+        &self,
+        device_key_hash: &str,
+        actor_omni: &str,
+        extra_envs: &[(String, String)],
     ) -> Result<EnsureOutcome> {
         let _guard = self.ensure_lock.lock().await;
 
@@ -456,7 +486,7 @@ impl VeFaasClient {
         }
 
         let id = self
-            .create_for_delegate(device_key_hash, actor_omni)
+            .create_for_delegate(device_key_hash, actor_omni, extra_envs)
             .await?;
 
         // Quota-invariant self-check: the fresh instance must be findable by

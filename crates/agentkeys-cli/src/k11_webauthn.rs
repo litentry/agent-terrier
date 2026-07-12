@@ -1648,15 +1648,23 @@ function b64urlEncode(buf) {{
 document.getElementById('go').onclick = async () => {{
   const status = document.getElementById('status');
   try {{
-    const cred = await navigator.credentials.get({{
-      publicKey: {{
-        rpId: "{rp_id_js}",
-        challenge: b64urlDecode(challenge),
-        allowCredentials: [{{ id: b64urlDecode(credId), type: "public-key" }}],
-        userVerification: "required",
-        timeout: 60000
-      }}
-    }});
+    const pk = {{
+      rpId: "{rp_id_js}",
+      challenge: b64urlDecode(challenge),
+      userVerification: "required",
+      timeout: 60000
+    }};
+    // #164/#427 fix: an EMPTY credId (the register flow's sign step passes no
+    // --allow-credential) must OMIT allowCredentials so the browser uses the
+    // DISCOVERABLE resident master passkey (keygen enrolls it as a
+    // residentKey:"preferred" PLATFORM credential) and routes straight to
+    // Touch ID. Sending `[{{ id: <zero-length> }}]` instead matches NOTHING and
+    // ALSO defeats the discoverable fallback, so Chrome shows the cross-device
+    // "Passkeys & Security Keys" (QR + security-key) picker and never Touch ID.
+    // When a credId IS known, pin transports:["internal"] to force the local
+    // authenticator (mirrors apps/parent-control/lib/webauthn.ts).
+    if (credId) pk.allowCredentials = [{{ id: b64urlDecode(credId), type: "public-key", transports: ["internal"] }}];
+    const cred = await navigator.credentials.get({{ publicKey: pk }});
     const resp = cred.response;
     const payload = {{
       id: cred.id,

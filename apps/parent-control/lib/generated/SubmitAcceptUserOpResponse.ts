@@ -22,4 +22,12 @@ audit_envelope_hashes?: Array<string>,
 /**
  * #230: broadcast but receipt-poll timed out — NOT an error.
  */
-pending?: boolean, };
+pending?: boolean, 
+/**
+ * #427: present when the confirmed batch was a spawn/archive ceremony —
+ * the finalization summary (`spawned[]`/`archived[]`: gate provisioning
+ * status, sandbox provision, `DelegateSpawn`/`DelegateArchive` anchor
+ * hashes). Absent on plain accept/scope/revoke submits and pre-#427
+ * brokers.
+ */
+ceremony?: unknown, };
