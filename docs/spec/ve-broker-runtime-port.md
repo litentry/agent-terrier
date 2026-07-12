@@ -168,6 +168,7 @@ Stack selection gained the cloud axis ahead of the follow-ups below, with the VE
 2. **`aud` parameterization** — `build_oidc_jwt_claims` (handlers/oidc.rs) hardcodes `aud="sts.amazonaws.com"`; the VE provider registers aud `agentkeys-ve-sts`. Make the aud config-driven when the broker starts minting VE-bound JWTs.
 3. **Workers on VE** — deploy cred/memory/config workers with `AGENTKEYS_TOS_ENDPOINT` + the relay; stage-3-style negative tests per the §17.5 invariants.
 4. ~~**Least-priv broker signing identity** (#372)~~ — ✅ landed: `agentterrier-broker-setup` is scoped to STS mint + host/IAM read with zero TOS actions ([`scripts/operator/policies/ve-broker-setup.json`](../../scripts/operator/policies/ve-broker-setup.json); see "Storage-plane provisioning identities" above).
+5. **WeChat gateway + the #424 pairing-metadata surfaces** ([#433](https://github.com/litentry/agentKeys/issues/433)) — the weixin worker (vhost/unit/TLS on the VE host), the `WEIXIN_OPERATOR_OMNI` stamping (a placeholder key sits in `operator-workstation.ve.env`; nothing consumes it yet), the `binding-manifest` / `gateway-contact-registry` config docs on TOS (rides follow-up 3's config worker), and the gateway's ContactBind audit anchoring. **Gated on 备案** (the `.cn` path, #397) in addition to follow-ups 1–3.
 
 ## Rides the same VE identity: veFaaS sandbox lifecycle (#377 — LANDED broker-side)
 

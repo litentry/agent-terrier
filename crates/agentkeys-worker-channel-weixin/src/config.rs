@@ -244,6 +244,18 @@ impl WeixinGatewayConfig {
 
         let operator_omni = std::env::var("AGENTKEYS_WEIXIN_OPERATOR_OMNI")
             .context("AGENTKEYS_WEIXIN_OPERATOR_OMNI must be set (the household operator omni)")?;
+        // #424 §3 — a template placeholder / malformed omni silently DISARMED
+        // the on-chain contact audit (#419's silent-skip). Boot must be LOUD:
+        // the value passes (relay/monitor still run) but every bind/reject/
+        // revoke skips its chain anchor until the operator arms it.
+        if crate::relay::decode_omni_32(&operator_omni).is_none() {
+            eprintln!(
+                "==> ⚠️  agentkeys-worker-channel-weixin: AGENTKEYS_WEIXIN_OPERATOR_OMNI is not \
+                 0x+64-hex — ON-CHAIN CONTACT AUDIT UNARMED: bind/reject/revoke will NOT anchor \
+                 on chain. Set WEIXIN_OPERATOR_OMNI in the operator-workstation env file and \
+                 re-run setup-broker-host.sh (it stamps the gateway secrets file), #424 §3."
+            );
+        }
 
         let audit_worker_url = std::env::var("AGENTKEYS_AUDIT_WORKER_URL")
             .ok()

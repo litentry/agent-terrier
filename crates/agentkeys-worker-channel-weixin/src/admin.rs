@@ -903,6 +903,103 @@ pub(crate) async fn contacts_revoke(
     }
 }
 
+// ── registry export / import (#424 §2 — durable Config-class copy) ───────────
+
+/// `GET /v1/gateway/admin/registry/export` — the FULL contact registry
+/// snapshot (bound + invites + pending, openids included). This is the durable-
+/// backup surface the DAEMON write-throughs into the master-only Config-class
+/// doc after every contact mutation (the doc is client-encrypted under the
+/// master's signer-derived KEK, so openids-at-rest are stronger there than in
+/// this host's `0600` file). D13 governs the *contacts view*, not the master's
+/// own registry copy — this stays admin-bearer-gated like every write.
+pub(crate) async fn registry_export(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    (StatusCode::OK, Json(state.registry.snapshot())).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RegistryImportRequest {
+    pub registry: agentkeys_protocol::ContactRegistry,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /v1/gateway/admin/registry/import` — replace this gateway's registry
+/// with a durable copy (the daemon's host-rebuild restore, #424 §2). Refuses a
+/// NON-empty local registry unless `force` — a live registry is never silently
+/// clobbered by a stale backup; the write-through direction heals drift instead.
+pub(crate) async fn registry_import(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<RegistryImportRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let local = state.registry.snapshot();
+    let local_empty =
+        local.bound.is_empty() && local.invites.is_empty() && local.pending.is_empty();
+    if !local_empty && !req.force {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "reason": "registry_not_empty",
+                "detail": "this gateway already has contacts/invites — import only restores an \
+                           EMPTY (rebuilt) gateway; pass force:true to overwrite deliberately",
+                "bound": local.bound.len(),
+                "invites": local.invites.len(),
+                "pending": local.pending.len(),
+            })),
+        )
+            .into_response();
+    }
+    let incoming = req.registry;
+    let (bound, invites, pending) = (
+        incoming.bound.len(),
+        incoming.invites.len(),
+        incoming.pending.len(),
+    );
+    match state.registry.mutate(|reg| {
+        *reg = incoming;
+        Ok(())
+    }) {
+        Ok(()) => {
+            info!(
+                bound,
+                invites,
+                pending,
+                forced = req.force,
+                "contact registry imported (restore)"
+            );
+            state.push_activity(
+                "registry_restore",
+                "-",
+                &format!(
+                    "bound={bound} invites={invites} pending={pending} forced={}",
+                    req.force
+                ),
+                false,
+            );
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "bound": bound, "invites": invites, "pending": pending})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "reason": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 // ── claim (called by the RELAY on an unknown sender echoing a code) ──────────
 
 /// Try to claim an open invite with an unknown sender's message text. Returns

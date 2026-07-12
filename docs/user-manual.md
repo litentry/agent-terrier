@@ -206,6 +206,15 @@ revoke from your master account itself, so "unpair · revoke on-chain" (or
 submits it, and marks the agent revoked only after re-reading the registry —
 if the prompt is cancelled, the device stays bound and nothing changes.
 
+**A pending pairing request does NOT survive a broker restart — re-request it.**
+Before you accept, the request lives only in a short-lived rendezvous (it also
+expires on its own countdown). If it vanishes (broker restart / expiry), nothing
+is wrong: have the agent run `--request-pairing` again and claim the fresh code.
+Everything **accepted** is durable — the binding is on chain, and the app keeps
+each paired actor's name, delegate-vs-device kind and granted service names in
+your encrypted config store, so devices stay on the devices page with their
+channel chips intact across app and broker restarts (#424).
+
 ## Editing your agent's persona + config files (parent-control, #390)
 
 A bound agent's actor page carries an **agent** panel showing the files that
@@ -397,6 +406,18 @@ addressed to them, or an agent's answer from its own memory ("did the kids come
 home?" → the doorkeeper answers). **All** of the chat log, every contact, and
 every routing decision live **only in parent-control** — you have full
 visibility; contacts have none. There is no in-chat "this was logged" notice.
+
+**Your contact list survives a gateway rebuild (#424).** Every contact change
+you make in parent-control (invite / approve / rename / revoke) is also saved
+into your encrypted config store; if the gateway host is ever rebuilt, opening
+the contacts page restores the whole list automatically. Only an **unapproved**
+claim (someone sent the bind code but you hadn't approved yet) is lost — they
+just send the code again. The message history and activity views read the
+gateway's own log files, so a host rebuild starts them fresh (their durable home
+is a follow-up); the bind/approve/revoke *actions* themselves anchor on-chain in
+your audit trail once the operator arms the gateway's audit identity — if the
+audit section shows no gateway rows, that arming is the missing step (ask your
+operator; the gateway status card shows whether on-chain audit is armed).
 
 ## Migrating an older device-rooted delegate (#369 → channels)
 
