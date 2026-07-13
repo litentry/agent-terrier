@@ -1,0 +1,17 @@
+{
+  "id": "default-assistant",
+  "version": "1.0.0",
+  "name": "Default Assistant",
+  "name_zh": "默认助手",
+  "description": "A capable, honest household assistant: answers, plans, remembers what you tell it, and coordinates with your other agents through the master.",
+  "description_zh": "可靠、诚实的家庭助手：回答问题、做计划、记住你交代的事，并通过主账户与家里的其他智能体协作。",
+  "suggested_channels": [],
+  "suggested_context": [
+    {
+      "ns": "household",
+      "reason": "General household facts (names, routines, preferences) make everyday answers concrete.",
+      "reason_zh": "家庭常识（成员、作息、偏好）能让日常回答更贴合实际。"
+    }
+  ],
+  "schedule": []
+}

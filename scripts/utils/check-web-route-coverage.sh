@@ -72,10 +72,15 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/scope/submit	needs a signed UserOp (gas); build half covered (suite-6 step 7); headless submit = sign userOpHash with the software passkey — planned
 /v1/revoke/build	revoke build proxy — needs a revocable throwaway device fixture
 /v1/revoke/submit	same throwaway-device fixture + signed UserOp
+/v1/presets	#428 broker preset-catalog GET proxy (static compiled-in content) — broker-side unit tests pin the catalog; retire with a suite-6 step reading the catalog through the daemon
+/v1/presets/:id	#428 preset bundle GET proxy — same broker-side unit coverage; the vitest client test pins the URL shape
 /v1/agent/spawn/build	#427 spawn build proxy — allowance pre-check + broker K10 gen; needs the 0.5 registry live in the test env; ceremony proven headlessly by `agentkeys agent spawn` (CLI twin) + suite-1 step-12 allowance positive/negative
 /v1/agent/spawn/submit	same 0.5-registry dependency + signed UserOp (gas) — the broker relay/finalize path is unit-tested; retire with a suite-6 headless-spawn step post-redeploy
 /v1/agent/archive/build	#427 archive build proxy — needs a spawned throwaway delegate fixture (pair with the spawn waiver)
 /v1/agent/archive/submit	same throwaway-delegate fixture + signed UserOp; manifest archive-mark covered by the daemon unit layer
+/v1/agent/inheritable-namespaces	#429 O2 bookkeeping read (manifest-derived) — daemon unit layer covers the filter; retire with a suite-6 archive→inherit step
+/v1/master/agent/chat/send	#430 operator chat publish (master-self channel cap → worker) — needs the redeployed D8 channel worker + a spawned delegate in the test env; retire with a suite-6 duplex step
+/v1/master/agent/chat/poll	#430 transcript read/long-poll — same redeployed-worker + delegate fixture; the channel-e2e step-3 harness is the pattern
 /v1/master/gateway/status	#418 thin bearer-injecting forward to the weixin gateway admin surface; gateway behavior proven headlessly by the crate's ilink_admin_e2e (channel demo step 15); live daemon-side coverage needs a deployed gateway + AGENTKEYS_WEIXIN_ADMIN_TOKEN in the test env
 /v1/master/gateway/login/start	same gateway-admin forward — removed by a suite-6 step once the test env deploys the gateway with an admin token
 /v1/master/gateway/login/status	same gateway-admin forward (35 s server-held poll)

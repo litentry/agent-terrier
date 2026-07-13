@@ -222,6 +222,19 @@ pub(crate) async fn call_agent_slots(
     Ok((word_u16(0)?, word_u16(1)?))
 }
 
+/// THE spawn template (#425 S2) — the ONLY grants a spawn ever mints: the
+/// delegate's duplex operator-chat channel pair + its memory namespace.
+/// Presets are content, never authority (#428): nothing a preset suggests is
+/// added here; suggestions become grants only via a later explicit ceremony.
+/// The template pin test below is the #428 nothing-auto-granted negative.
+pub(crate) fn spawn_template_services(chat_channel_id: &str, memory_ns: &str) -> Vec<String> {
+    vec![
+        agentkeys_protocol::service_channel_pub(chat_channel_id),
+        agentkeys_protocol::service_channel_sub(chat_channel_id),
+        agentkeys_protocol::service_memory(memory_ns),
+    ]
+}
+
 /// The loud, actionable business-gate error (#425 acceptance: "spawning beyond
 /// the allowance fails loud and actionable — never silently").
 pub(crate) fn allowance_exhausted_error(
@@ -339,11 +352,7 @@ pub async fn spawn_build(
     // (both directions) + its memory namespace (fresh or inherited, #425 O2).
     let chat_channel_id = format!("opchat-{}", req.label);
     let memory_ns = req.memory_ns.clone().unwrap_or_else(|| req.label.clone());
-    let services = vec![
-        agentkeys_protocol::service_channel_pub(&chat_channel_id),
-        agentkeys_protocol::service_channel_sub(&chat_channel_id),
-        agentkeys_protocol::service_memory(&memory_ns),
-    ];
+    let services = spawn_template_services(&chat_channel_id, &memory_ns);
 
     let build_req = BuildAcceptRequest {
         operator_omni: req.operator_omni.clone(),
@@ -688,6 +697,26 @@ async fn finalize_spawn(
         "AGENTKEYS_OPERATOR_OMNI".into(),
         format!("0x{}", hex::encode(session_omni)),
     ));
+    // #430 — the in-sandbox chat loop's contract: its duplex feed id + where
+    // to resolve/mint (broker) and poll/publish (channel worker). The
+    // sandbox-resident daemon starts the loop only when the FULL set is
+    // present (partial = loud warn there, never silent).
+    if !chat_channel_id.is_empty() {
+        extra_envs.push(("AGENTKEYS_CHAT_CHANNEL_ID".into(), chat_channel_id.clone()));
+    }
+    if let Ok(issuer) = std::env::var("BROKER_OIDC_ISSUER") {
+        if !issuer.trim().is_empty() {
+            extra_envs.push(("AGENTKEYS_BROKER_URL".into(), issuer.trim().to_string()));
+        }
+    }
+    if let Ok(worker) = std::env::var("AGENTKEYS_WORKER_CHANNEL_URL") {
+        if !worker.trim().is_empty() {
+            extra_envs.push((
+                "AGENTKEYS_CHANNEL_WORKER_URL".into(),
+                worker.trim().to_string(),
+            ));
+        }
+    }
     let sandbox = crate::handlers::sandbox::ensure_for_delegate_with_envs(
         state,
         device_key_hash,
@@ -868,6 +897,21 @@ mod tests {
         let msg = v["message"].as_str().unwrap();
         assert!(msg.contains("archive a"), "{msg}");
         assert!(msg.contains("setAgentSlotAllowance"), "{msg}");
+    }
+
+    #[test]
+    fn spawn_template_is_exactly_chat_pair_plus_memory_ns() {
+        // #428 nothing-auto-granted negative: the template is EXACTLY the
+        // duplex opchat pair + the memory namespace — a preset (or any other
+        // input) can never widen it without changing this pinned set.
+        assert_eq!(
+            spawn_template_services("opchat-watchdog", "watchdog"),
+            vec![
+                "channel-pub:opchat-watchdog".to_string(),
+                "channel-sub:opchat-watchdog".to_string(),
+                "memory:watchdog".to_string(),
+            ]
+        );
     }
 
     #[test]

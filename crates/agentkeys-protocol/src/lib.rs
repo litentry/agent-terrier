@@ -1727,6 +1727,104 @@ pub struct BuildArchiveUserOpResponse {
     pub resources_kept: bool,
 }
 
+// ── #428 (epic #425 S3/O3) — the broker-served preset catalog ────────────────
+//
+// A preset is the customization unit for a spawned delegate: persona
+// (`SOUL.md`, the #390 `persona` kind) + skills docs (`skills/*.md`) + a
+// manifest of SUGGESTIONS. **Content, never authority** — suggested channels /
+// context / schedules render as inert affordances; grants only ever come from
+// the phase-1 spawn template or an explicit later ceremony. Bundle sources are
+// repo-resident (`presets/<id>/`), compiled into the broker (`include_str!`,
+// versioned with the deployed ref), served at `GET /v1/presets` (summaries) +
+// `GET /v1/presets/:id` (full bundle). A marketplace later means new bundles
+// server-side under these SAME wire shapes — no client release.
+
+/// A preset's suggested channel — inert until the operator grants it.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSuggestedChannel {
+    pub id: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub reason_zh: String,
+}
+
+/// A preset's suggested context namespace — inert until granted.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSuggestedContext {
+    pub ns: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub reason_zh: String,
+}
+
+/// A preset's suggested schedule entry. Phase-2 renders it in the panel; the
+/// execution substrate (the #340 in-sandbox job harness) wires up later —
+/// the field is DATA, not a live cron.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSchedule {
+    pub cron: String,
+    pub label: String,
+    #[serde(default)]
+    pub label_zh: String,
+    pub prompt: String,
+}
+
+/// `preset.json` — the manifest half of a repo-resident bundle (also the
+/// catalog-list row). Names/descriptions are bilingual (EN + 中文).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSummary {
+    pub id: String,
+    pub version: String,
+    pub name: String,
+    #[serde(default)]
+    pub name_zh: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub description_zh: String,
+    #[serde(default)]
+    pub suggested_channels: Vec<PresetSuggestedChannel>,
+    #[serde(default)]
+    pub suggested_context: Vec<PresetSuggestedContext>,
+    #[serde(default)]
+    pub schedule: Vec<PresetSchedule>,
+}
+
+/// One skills doc of a bundle (`presets/<id>/skills/<filename>`).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSkillDoc {
+    pub filename: String,
+    pub content: String,
+}
+
+/// `GET /v1/presets/:id` — the full bundle: manifest + persona + skills.
+/// `soul_md` is the persona LAYER only (the #390 locked base layer is appended
+/// by the system at apply time, never stored in a bundle).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetBundle {
+    pub manifest: PresetSummary,
+    pub soul_md: String,
+    #[serde(default)]
+    pub skills: Vec<PresetSkillDoc>,
+}
+
+/// `GET /v1/presets` — the catalog. `catalog_version` is the deployed ref the
+/// bundles were compiled from (bundle edits ship as a broker redeploy).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetCatalogResponse {
+    pub catalog_version: String,
+    pub presets: Vec<PresetSummary>,
+}
+
 // ── the daemon's web-API plant contract (#275 tier-3) ───────────────────────
 
 /// The daemon's **web-API plant contract** — the frontend↔daemon surface, as

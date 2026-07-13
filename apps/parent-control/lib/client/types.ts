@@ -2,7 +2,21 @@ import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } 
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditResponse';
 import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
+import type { ApiChatEvent } from '@/lib/generated/ApiChatEvent';
+import type { ApiRegisterState } from '@/lib/generated/ApiRegisterState';
+import type { BuildArchiveUserOpResponse } from '@/lib/generated/BuildArchiveUserOpResponse';
+import type { BuildSpawnUserOpResponse } from '@/lib/generated/BuildSpawnUserOpResponse';
 import type { ContextKind } from '@/lib/generated/ContextKind';
+import type { PresetCatalogResponse } from '@/lib/generated/PresetCatalogResponse';
+import type { SubmitAcceptUserOpResponse } from '@/lib/generated/SubmitAcceptUserOpResponse';
+
+/** #429 — one inheritable (kept, archived, currently-unheld) memory namespace. */
+export interface InheritableNamespace {
+  ns: string;
+  /** The archived delegate the namespace came from. */
+  fromLabel: string;
+  archivedAt: number;
+}
 
 /** #339/#390 — one decrypted inbox proposal (daemon `POST /v1/master/inbox/entry`).
  *  `kind` drives the per-kind curate gate; `content_hash` is the skill accept's
@@ -544,6 +558,9 @@ export interface AgentKeysClient {
   pollEmailVerify(requestId: string): Promise<Result<EmailVerifyStatus>>;
   // Real "logged in" state, held by the daemon (replaces the ak_onboarded flag).
   getOnboardingState(): Promise<Result<OnboardingState>>;
+  // #435 — the FRESH on-chain bound-probe (operatorMasterWallet), consulted
+  // BEFORE any navigator.credentials.create: bound ⇒ skip enroll+register.
+  getRegisterState(): Promise<Result<ApiRegisterState>>;
   logout(): Promise<Result<void>>;
   // #242 — one-Touch-ID master re-login after a logout (no email round-trip).
   // start → broker challenge for the held identity; the browser signs it with
@@ -684,6 +701,43 @@ export interface AgentKeysClient {
     Result<{ user_op: Record<string, string>; user_op_hash: string; entry_point: string; chain_id: number }>
   >;
   revokeSubmit(body: unknown): Promise<Result<SubmitResult>>;
+
+  // #429 (epic #425) — the delegate SPAWN + ARCHIVE ceremonies: ONE Touch ID
+  // each, zero rendezvous. `spawnBuild` → the broker pre-checks the agent-slot
+  // allowance (409 agent_slot_allowance_exhausted rides through verbatim),
+  // derives the child omni + K10, and returns the userOpHash to K11-sign;
+  // `spawnSubmit` relays it and the response's `ceremony` carries the
+  // finalization (gate/sandbox/preset apply). `archiveBuild` records the
+  // keep-vs-delete choice (#425 O4); the slot returns in-contract.
+  presetCatalog(): Promise<Result<PresetCatalogResponse>>;
+  spawnBuild(input: {
+    label: string;
+    presetId: string;
+    /** Unset = fresh namespace named after the label; set + inherited = an
+     *  archived delegate's KEPT namespace (#425 O2). */
+    memoryNs?: string;
+    memoryInherited?: boolean;
+  }): Promise<Result<BuildSpawnUserOpResponse>>;
+  spawnSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse>>;
+  archiveBuild(input: {
+    deviceKeyHash: string;
+    resourcesKept: boolean;
+    memoryNs?: string;
+  }): Promise<Result<BuildArchiveUserOpResponse>>;
+  archiveSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse>>;
+  /** Kept namespaces of archived delegates, inheritable by AT MOST one live
+   *  delegate (#429 bookkeeping — served from the #424 manifest). */
+  inheritableNamespaces(): Promise<Result<InheritableNamespace[]>>;
+
+  // #430 — the operator chat over the delegate's opchat feed (D8 operator-
+  // owned; D13 operator-session-only). `chatPoll` doubles as the generic
+  // feed-history read for ANY granted channel id (#431 Feeds tab).
+  chatSend(channelId: string, text: string): Promise<Result<{ event_id: string }>>;
+  chatPoll(
+    channelId: string,
+    after: string,
+    waitSeconds: number,
+  ): Promise<Result<{ events: ApiChatEvent[]; cursor: string }>>;
 
   // §credentials data class (#207). The SAME abstraction as memory: list the
   // master's stored credential services (categorized via the catalog) and vault

@@ -11,6 +11,7 @@ use clap::Parser;
 use tracing::info;
 
 mod audit_decode;
+mod chat_loop;
 mod companion;
 mod hardening;
 mod master_session;
@@ -1251,6 +1252,10 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         // /v1/onboarding/state reports session: "expired" and the web app prompts
         // exactly one passkey re-auth.
         ui_bridge::rehydrate_master_session(&state).await;
+        // #430 — the in-sandbox delegate chat loop (env-gated: only a spawned
+        // sandbox's supervisord env carries the chat vars; a host daemon is a
+        // clean no-op).
+        chat_loop::spawn_if_configured();
     }
     let app = ui_bridge::build_router(state, &args.ui_bridge_origin);
 

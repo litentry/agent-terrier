@@ -24,8 +24,11 @@ pub struct ChannelWorkerConfig {
     pub epoch_contract: String,
     pub chain_profile: String,
     /// Worker-held envelope KEK (stage 1 — the channel feed is worker-encrypted
-    /// today, exactly like the memory worker). The operator-owned-feed +
-    /// signer-derived-KEK v3 path (D8) is a phase-2/3 refinement.
+    /// today, exactly like the memory worker). Feeds are OPERATOR-owned since
+    /// #430 (D8: `bots/<operator>/channel/<id>/` is the household bus every
+    /// granted actor meets on); the signer-derived-KEK v3 path stays a
+    /// follow-up, as does per-actor STS for cross-actor channel S3 (today the
+    /// cross-actor path rides the worker role when the caller passes no STS).
     pub kek_hex: String,
     /// Long-poll ceiling: the max seconds a `/v1/channel/poll` request is held
     /// when no event is immediately available (§14.12 NRT).

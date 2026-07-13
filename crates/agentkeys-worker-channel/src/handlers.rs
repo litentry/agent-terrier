@@ -206,7 +206,11 @@ async fn channel_publish_inner(
     let now_millis = unix_millis();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let event_id = format!("{now_millis:013}-{seq:016x}");
-    let owner = normalize_omni(&req.cap.payload.actor_omni);
+    // D8 (#430): the feed is OPERATOR-owned — `bots/<operator>/channel/<id>/`
+    // is the household bus every granted actor meets on (a delegate's reply
+    // and the operator's send land in ONE feed). Master-self caps
+    // (operator == actor) are byte-identical to the pre-#430 layout.
+    let owner = normalize_omni(&req.cap.payload.operator_omni);
 
     // Provenance is WORKER-STAMPED from the cap-signed actor — never a body
     // field (§4.1). A delegate labels the event's `kind`, never its producer.
@@ -215,7 +219,9 @@ async fn channel_publish_inner(
         channel_id: channel_id.to_string(),
         direction: req.direction,
         producer: ChannelProducer::Actor {
-            actor_omni: format!("0x{owner}"),
+            // Provenance stays the cap-signed ACTOR (who spoke), independent
+            // of the operator-owned feed prefix (where it lives).
+            actor_omni: format!("0x{}", normalize_omni(&req.cap.payload.actor_omni)),
         },
         kind: req.kind,
         body,
@@ -255,7 +261,8 @@ async fn channel_poll(
 ) -> Result<Json<PollResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::ChannelSubscribe).await?;
     let channel_id = channel_id_from_service(&req.cap.payload.service)?;
-    let owner = normalize_omni(&req.cap.payload.actor_omni);
+    // D8 (#430): read from the OPERATOR-owned feed (see channel_publish_inner).
+    let owner = normalize_omni(&req.cap.payload.operator_omni);
 
     // Grab the wakeup handle BEFORE the first list so a publish landing during
     // the list still wakes us (§14.12 race note in wakeup.rs).
@@ -364,7 +371,8 @@ async fn channel_teardown(
 ) -> Result<Json<TeardownResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Teardown).await?;
     let channel_id = channel_id_from_service(&req.cap.payload.service)?;
-    let owner = normalize_omni(&req.cap.payload.actor_omni);
+    // D8 (#430): teardown sweeps the OPERATOR-owned feed prefix.
+    let owner = normalize_omni(&req.cap.payload.operator_omni);
 
     let outcome = channel_teardown_inner(&state, creds.as_ref(), &owner, &channel_id).await;
     let audit_body = agentkeys_core::audit::ChannelTeardownBody {

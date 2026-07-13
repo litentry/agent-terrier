@@ -1,0 +1,35 @@
+{
+  "id": "health-master",
+  "version": "1.0.0",
+  "name": "Health Master",
+  "name_zh": "健康管家",
+  "description": "Tracks the family's meals and calories, and proposes a concrete dinner plan every day at 16:00 — grounded in what was actually eaten, never invented.",
+  "description_zh": "跟踪全家的饮食与热量，每天 16:00 给出具体的晚餐方案——基于真实记录，绝不凭空编造。",
+  "suggested_channels": [
+    {
+      "id": "family-weixin",
+      "reason": "Family members report meals and ask diet questions over the WeChat gateway.",
+      "reason_zh": "家人通过微信网关上报三餐、咨询饮食问题。"
+    },
+    {
+      "id": "kitchen",
+      "reason": "A kitchen device (display/speaker) can receive the dinner plan where it is cooked.",
+      "reason_zh": "厨房设备（屏幕/音箱）可以在做饭的地方直接收到晚餐方案。"
+    }
+  ],
+  "suggested_context": [
+    {
+      "ns": "family-health",
+      "reason": "Allergies, dietary restrictions, and health goals curated by the operator make plans safe and personal.",
+      "reason_zh": "由主人维护的过敏、忌口与健康目标信息，让方案安全且个性化。"
+    }
+  ],
+  "schedule": [
+    {
+      "cron": "0 16 * * *",
+      "label": "Dinner plan",
+      "label_zh": "晚餐方案",
+      "prompt": "Review today's logged meals and calories for each family member, then propose tonight's dinner: dishes, portions per person, and why — balancing what is missing from today's intake. Publish it to the granted channels."
+    }
+  ]
+}

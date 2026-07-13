@@ -52,32 +52,48 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
   // passkey → SIG_VALIDATION_FAILED). Reuse the already-bound passkey instead.
   const existingCred = getMasterCredId();
   const st = await client.getOnboardingState();
-  if (st.ok && st.data.chain === 'master-registered') {
+  // #435 — the FRESH on-chain probe (operatorMasterWallet), not just the
+  // daemon's session-cached `chain` field: a bound omni on a FRESH daemon or
+  // browser must be detected BEFORE credentials.create mints a stranded key.
+  const probe = await client.getRegisterState();
+  if (probe.ok && probe.data.probe === 'error') {
+    akLog('onboarding: register probe FAILED — refusing to mint a passkey blind (fail-safe)', {
+      error: probe.data.probe_error,
+    });
+    return { mode: 'fallback' }; // cannot verify bound-ness; retry, never auto-mint
+  }
+  const boundOnChain =
+    (probe.ok && probe.data.bound) || (st.ok && st.data.chain === 'master-registered');
+  if (boundOnChain) {
     // #242: the pointer must belong to THIS session's identity. A stored omni
     // from a different identity means the pointer's passkey is NOT the one bound
     // for this omni — reusing it would sign with the wrong key. (No stored omni
     // = a pre-#242 pointer; the daemon's omni-keyed `chain` already vouches that
     // the binding is this session's, so accept + backfill.)
+    // #435: the session omni may come from either source — the probe carries it
+    // even when the onboarding-state read failed.
+    const sessionOmni =
+      (st.ok ? st.data.omni : undefined) ?? (probe.ok ? probe.data.operator_omni : undefined);
     const pointerOmni = getMasterOmni();
-    const pointerMatches = !pointerOmni || !st.data.omni || omniEq(pointerOmni, st.data.omni);
+    const pointerMatches = !pointerOmni || !sessionOmni || omniEq(pointerOmni, sessionOmni);
     if (existingCred && pointerMatches) {
-      if (!pointerOmni && st.data.omni) {
-        setMasterOmni(st.data.omni);
+      if (!pointerOmni && sessionOmni) {
+        setMasterOmni(sessionOmni);
       }
       akLog('onboarding: master already bound — REUSING passkey (no new create)', {
         boundCredentialId: existingCred,
-        omni: st.data.omni,
+        omni: sessionOmni,
       });
       return { mode: 'real' }; // already onboarded; the bound-passkey pointer is intact
     }
     if (existingCred && !pointerMatches) {
       akLog('onboarding: passkey pointer belongs to a DIFFERENT identity — not reusing', {
         pointerOmni,
-        sessionOmni: st.data.omni,
+        sessionOmni,
       });
     } else {
       akLog('onboarding: master bound on chain but NO local passkey pointer — reset + re-onboard needed', {
-        omni: st.data.omni,
+        omni: sessionOmni,
       });
     }
     // Bound on chain but no USABLE pointer (storage cleared / different browser /

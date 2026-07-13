@@ -1,0 +1,28 @@
+{
+  "id": "kid-bestie",
+  "version": "1.0.0",
+  "name": "Kid Bestie",
+  "name_zh": "孩子密友",
+  "description": "A patient companion for the kids: listens to their day, notices how they feel, and gives parents grounded, gentle education advice.",
+  "description_zh": "孩子的耐心伙伴：倾听他们的一天、体察情绪变化，并给家长有依据、温和的教育建议。",
+  "suggested_channels": [
+    {
+      "id": "kids-room",
+      "reason": "A kid-facing device (speaker/display) is where the companionship happens.",
+      "reason_zh": "孩子房间的设备（音箱/屏幕）是陪伴发生的地方。"
+    },
+    {
+      "id": "family-weixin",
+      "reason": "Parents share observations and receive advice over the WeChat gateway.",
+      "reason_zh": "家长通过微信网关分享观察、接收建议。"
+    }
+  ],
+  "suggested_context": [
+    {
+      "ns": "family-kids",
+      "reason": "Operator-curated facts about each child (age, school rhythm, sensitivities) keep advice appropriate.",
+      "reason_zh": "由主人维护的孩子信息（年龄、学校节奏、敏感点）让建议得体、合适。"
+    }
+  ],
+  "schedule": []
+}

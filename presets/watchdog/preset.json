@@ -1,0 +1,35 @@
+{
+  "id": "watchdog",
+  "version": "1.0.0",
+  "name": "Watchdog",
+  "name_zh": "看门狗",
+  "description": "Watches the front-door camera feed: daily summaries and honest statistics — how many times the dog went out, how long the kids played outside.",
+  "description_zh": "盯着门口摄像头：每日总结与真实统计——狗出门几次、孩子在外面玩了多久。",
+  "suggested_channels": [
+    {
+      "id": "frontdoor-cam",
+      "reason": "The camera device publishes doorway events into this feed; without it the watchdog is blind.",
+      "reason_zh": "门口摄像头把事件发布到这个频道；没有它，看门狗什么也看不见。"
+    },
+    {
+      "id": "family-weixin",
+      "reason": "Daily summaries and unusual-activity notes reach the family over the WeChat gateway.",
+      "reason_zh": "每日总结与异常提醒通过微信网关送达家人。"
+    }
+  ],
+  "suggested_context": [
+    {
+      "ns": "household",
+      "reason": "Knowing who and what belongs (family members, the dog, regular visitors) separates routine from unusual.",
+      "reason_zh": "知道谁是家人、哪只是自家的狗、谁常来访，才能分清日常与异常。"
+    }
+  ],
+  "schedule": [
+    {
+      "cron": "0 21 * * *",
+      "label": "Daily doorway summary",
+      "label_zh": "每日门口总结",
+      "prompt": "Summarize today's doorway events from your memory statistics: dog outings (count, longest), kids' outdoor play (total duration), deliveries and visitors, anything unusual. Publish the summary to the granted channels."
+    }
+  ]
+}

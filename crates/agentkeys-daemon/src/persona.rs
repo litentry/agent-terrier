@@ -294,3 +294,36 @@ mod tests {
         assert_eq!(hist.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod preset_bundle_tests {
+    use super::validate_persona_body;
+
+    /// #428 acceptance — every repo preset's SOUL.md must pass the SAME
+    /// validation gate the persona editor enforces, or the spawn-time seed
+    /// would loudly skip it (a repo-bundle build bug caught here, not live).
+    #[test]
+    fn repo_preset_souls_pass_the_editor_gate() {
+        for (id, soul) in [
+            (
+                "default-assistant",
+                include_str!("../../../presets/default-assistant/SOUL.md"),
+            ),
+            (
+                "health-master",
+                include_str!("../../../presets/health-master/SOUL.md"),
+            ),
+            (
+                "kid-bestie",
+                include_str!("../../../presets/kid-bestie/SOUL.md"),
+            ),
+            (
+                "watchdog",
+                include_str!("../../../presets/watchdog/SOUL.md"),
+            ),
+        ] {
+            validate_persona_body(soul)
+                .unwrap_or_else(|e| panic!("preset '{id}' SOUL.md fails the persona gate: {e}"));
+        }
+    }
+}

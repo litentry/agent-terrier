@@ -41,6 +41,10 @@ export interface Actor {
   paymentCap?: { perTx: number; daily: number; currency: string };
   timeWindow?: { start: string; end: string; tz: string };
   services?: string[];
+  /** #429 — the preset the delegate was spawned from (#424 manifest layer). */
+  presetId?: string;
+  /** #429 — the delegate's memory:<ns> namespace name (manifest layer). */
+  memoryNs?: string;
   justPaired?: boolean;
 }
 
