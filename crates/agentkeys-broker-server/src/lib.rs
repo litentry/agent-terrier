@@ -131,6 +131,10 @@ pub fn create_router(state: SharedState) -> Router {
         // freeing). Submits reuse the shared relay; the ceremony finalization
         // (gate provision/deprovision, sandbox spawn, DelegateSpawn/Archive
         // anchors) rides its confirmed-batch hook.
+        // #428 — the broker-served preset catalog: static compiled-in product
+        // content (unauthenticated by design — handlers/presets.rs header).
+        .route("/v1/presets", get(handlers::presets::list_presets))
+        .route("/v1/presets/:id", get(handlers::presets::get_preset))
         .route("/v1/agent/spawn/build", post(handlers::spawn::spawn_build))
         .route(
             "/v1/agent/spawn/submit",

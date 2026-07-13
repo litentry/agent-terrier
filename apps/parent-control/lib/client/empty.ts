@@ -19,6 +19,7 @@ import type {
   RegisterMasterResult,
   ReloginResult,
   ReloginStart,
+  InheritableNamespace,
   MasterMemoryEntry,
   MasterResetResult,
   MemoryCategory,
@@ -34,6 +35,12 @@ import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } 
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditResponse';
 import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
+import type { ApiChatEvent } from '@/lib/generated/ApiChatEvent';
+import type { ApiRegisterState } from '@/lib/generated/ApiRegisterState';
+import type { BuildArchiveUserOpResponse } from '@/lib/generated/BuildArchiveUserOpResponse';
+import type { BuildSpawnUserOpResponse } from '@/lib/generated/BuildSpawnUserOpResponse';
+import type { PresetCatalogResponse } from '@/lib/generated/PresetCatalogResponse';
+import type { SubmitAcceptUserOpResponse } from '@/lib/generated/SubmitAcceptUserOpResponse';
 
 const DISCONNECTED: DisconnectedStatus = {
   kind: 'disconnected',
@@ -60,6 +67,10 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async getOnboardingState(): Promise<Result<OnboardingState>> {
+    return disconnected();
+  }
+
+  async getRegisterState(): Promise<Result<ApiRegisterState>> {
     return disconnected();
   }
 
@@ -302,6 +313,51 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async revokeSubmit(_body: unknown): Promise<Result<SubmitResult>> {
+    return disconnected();
+  }
+
+  async presetCatalog(): Promise<Result<PresetCatalogResponse>> {
+    return disconnected();
+  }
+
+  async spawnBuild(_input: {
+    label: string;
+    presetId: string;
+    memoryNs?: string;
+    memoryInherited?: boolean;
+  }): Promise<Result<BuildSpawnUserOpResponse>> {
+    return disconnected();
+  }
+
+  async spawnSubmit(_body: unknown): Promise<Result<SubmitAcceptUserOpResponse>> {
+    return disconnected();
+  }
+
+  async archiveBuild(_input: {
+    deviceKeyHash: string;
+    resourcesKept: boolean;
+    memoryNs?: string;
+  }): Promise<Result<BuildArchiveUserOpResponse>> {
+    return disconnected();
+  }
+
+  async archiveSubmit(_body: unknown): Promise<Result<SubmitAcceptUserOpResponse>> {
+    return disconnected();
+  }
+
+  async inheritableNamespaces(): Promise<Result<InheritableNamespace[]>> {
+    return disconnected();
+  }
+
+  async chatSend(_channelId: string, _text: string): Promise<Result<{ event_id: string }>> {
+    return disconnected();
+  }
+
+  async chatPoll(
+    _channelId: string,
+    _after: string,
+    _waitSeconds: number,
+  ): Promise<Result<{ events: ApiChatEvent[]; cursor: string }>> {
     return disconnected();
   }
 

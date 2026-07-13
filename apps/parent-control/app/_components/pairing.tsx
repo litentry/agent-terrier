@@ -77,6 +77,8 @@ export function DelegatesPage({
   justPaired,
   onManage,
   onUnpair,
+  onNewAgent,
+  onArchive,
   deviceRequestCount = 0,
   onGoDevices,
 }: {
@@ -95,6 +97,10 @@ export function DelegatesPage({
   justPaired: string | null;
   onManage?: (id: string) => void;
   onUnpair?: (a: Actor) => void;
+  /** #429 — open the "New agent" spawn modal (one Touch ID, zero rendezvous). */
+  onNewAgent?: () => void;
+  /** #429 — open the archive dialog (keep-vs-delete, slot returns). */
+  onArchive?: (a: Actor) => void;
   /** #408 — device claims currently pending (shown as a redirect banner here). */
   deviceRequestCount?: number;
   onGoDevices?: () => void;
@@ -117,7 +123,16 @@ export function DelegatesPage({
         crumb="household / delegates · agent-initiated (method A) · arch §10.2"
         title="Delegates"
         desc="Pair AGENTS (sandbox delegates) here: an agent shows a one-time pairing code; you claim it (J1_master-gated), review the identity + requested scope, then approve with one Touch ID — registerAgentDevice + the scope grant in one block. Physical AI devices (camera, display, console) are channel endpoints — pair those on the devices page instead."
-        actions={<button className="btn" onClick={onRefresh}>↻ check for codes</button>}
+        actions={
+          <>
+            {onNewAgent && (
+              <button className="btn primary" onClick={onNewAgent}>
+                ＋ New agent
+              </button>
+            )}
+            <button className="btn" onClick={onRefresh}>↻ check for codes</button>
+          </>
+        }
       />
 
       {/* #408 — device claims never render here: a device is a channel endpoint
@@ -207,6 +222,11 @@ export function DelegatesPage({
                   onClick={() => onUnpair(a)}
                 >
                   unpair · revoke on-chain
+                </button>
+              )}
+              {a.status !== 'bad' && onArchive && a.deviceKeyHash && (
+                <button className="btn sm" onClick={() => onArchive(a)}>
+                  archive · slot returns
                 </button>
               )}
             </div>

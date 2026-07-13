@@ -560,6 +560,11 @@ impl BindingManifest {
             })
     }
 
+    /// Every manifest row (read view — #429 inheritance bookkeeping etc.).
+    pub fn entries(&self) -> &[BindingManifestEntry] {
+        &self.bindings
+    }
+
     /// Upsert by actor omni (0x-normalized). An existing entry keeps its `kind`
     /// unless the incoming entry states one explicitly — a scope re-grant must
     /// never silently flip a device into a delegate.
@@ -813,6 +818,15 @@ pub struct ApiActor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub account_type: Option<String>,
+    /// #429 — the preset the delegate was spawned from (#424 manifest
+    /// readable layer). Absent for devices/masters/pre-#427 bindings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preset_id: Option<String>,
+    /// #429 — the delegate's `memory:<ns>` namespace name (manifest layer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub memory_ns: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
@@ -1104,6 +1118,9 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/k11/enroll/begin", post(enroll_begin))
         .route("/v1/k11/enroll/finish", post(enroll_finish))
         .route("/v1/master/register/submit", post(master_register_submit))
+        // #435 — the fresh on-chain bound-probe onboarding consults BEFORE
+        // minting a passkey (register-if-first / skip-if-bound):
+        .route("/v1/master/register/state", get(master_register_state))
         .route("/v1/master/reset", post(master_reset))
         .route("/v1/auth/email/start", post(auth_email_start))
         .route("/v1/auth/email/status", get(auth_email_status))
@@ -1153,6 +1170,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/channels/:id", post(update_channel))
         .route("/v1/channels/:id/delete", post(delete_channel))
         .route("/v1/master/config/presets", get(list_config_presets))
+        // #428 — the spawn preset catalog (broker-served, static; proxied so
+        // the web app keeps its single daemon origin):
+        .route("/v1/presets", get(presets_catalog_proxy))
+        .route("/v1/presets/:id", get(preset_bundle_proxy))
         .route("/v1/master/config/init", post(init_config_default))
         .route("/v1/master/classify/tag", post(classify_tag))
         .route("/v1/master/classify/propose", post(classify_propose))
@@ -1181,6 +1202,16 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/agent/spawn/submit", post(spawn_submit_proxy))
         .route("/v1/agent/archive/build", post(archive_build_proxy))
         .route("/v1/agent/archive/submit", post(archive_submit_proxy))
+        // #429 — O2 inheritance bookkeeping (kept namespaces of archived
+        // delegates, at most one live inheritor by construction):
+        .route(
+            "/v1/agent/inheritable-namespaces",
+            get(list_inheritable_namespaces),
+        )
+        // #430 — the operator chat surface over the delegate's opchat feed
+        // (D8 operator-owned; D13: operator session only):
+        .route("/v1/master/agent/chat/send", post(master_chat_send))
+        .route("/v1/master/agent/chat/poll", post(master_chat_poll))
         // #418 — the WeChat gateway admin proxy (parent-control drives the
         // gateway's admin surface through the daemon; the admin bearer is
         // injected server-side, never in the browser):
@@ -3560,6 +3591,8 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
                         services: None,
                         account_address: None,
                         account_type: None,
+                        preset_id: None,
+                        memory_ns: None,
                     },
                 );
                 added += 1;
@@ -3620,6 +3653,8 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
                 payment_cap: None,
                 time_window: None,
                 services,
+                preset_id: entry.as_ref().and_then(|e| e.preset_id.clone()),
+                memory_ns: entry.as_ref().and_then(|e| e.memory_ns.clone()),
                 account_address: None,
                 account_type: None,
             },
@@ -3729,6 +3764,101 @@ fn invalidate_fleet_sync(state: &UiBridgeState) {
 async fn mark_master_registered(state: &UiBridgeState, registered: RegisteredMaster) {
     *state.registered_master.write().await = Some(registered);
     invalidate_fleet_sync(state);
+}
+
+/// #435 — `GET /v1/master/register/state`: the ON-CHAIN truth for "does this
+/// operator already have a bound master?", read fresh (never the session
+/// cache). Onboarding calls this BEFORE `navigator.credentials.create`:
+/// - `bound` + `probe:"chain"` → SKIP enroll+register (rehydrate/re-auth the
+///   existing passkey instead — a fresh passkey here would strand the browser
+///   on a key the registry doesn't hold).
+/// - unbound + `probe:"chain"` → the register ceremony is safe to run
+///   (first-master-only hasn't fired; a replacement passkey is harmless).
+/// - `probe:"unconfigured"|"error"` → the chain could not answer; the app must
+///   NOT auto-mint (fail-safe) — retry or proceed only on explicit user intent.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiRegisterState {
+    pub operator_omni: String,
+    pub bound: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub master_account: Option<String>,
+    /// `"chain"` (fresh read) · `"unconfigured"` (no RPC/registry on this
+    /// daemon — dev/no-infra) · `"error"` (read failed; see `probe_error`).
+    pub probe: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub probe_error: Option<String>,
+}
+
+async fn master_register_state(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    let Some(omni) = held_operator_omni(&state).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "no master session — verify email first (the probe is omni-keyed)"
+            })),
+        )
+            .into_response();
+    };
+    let omni = normalize_omni_0x(&omni).to_lowercase();
+    let rpc = state.chain_profile.rpc.http.clone();
+    let view = match registry_address(&state) {
+        Some(registry) if !rpc.is_empty() => {
+            match probe_operator_master_wallet(&rpc, &registry, &omni).await {
+                Ok(Some(account)) => {
+                    // Idempotent bookkeeping: the chain says bound — mirror it
+                    // so onboarding-state + cap-mint resolve without a fresh
+                    // register (the #220 rehydrate posture).
+                    if let Ok(dkh) = agentkeys_core::device_crypto::device_key_hash_from_omni(&omni)
+                    {
+                        mark_master_registered(
+                            &state,
+                            RegisteredMaster {
+                                device_key_hash: dkh,
+                                operator_omni: omni.clone(),
+                                tx_hash: None,
+                                account: Some(account.clone()),
+                            },
+                        )
+                        .await;
+                    }
+                    ApiRegisterState {
+                        operator_omni: omni,
+                        bound: true,
+                        master_account: Some(account),
+                        probe: "chain".into(),
+                        probe_error: None,
+                    }
+                }
+                Ok(None) => ApiRegisterState {
+                    operator_omni: omni,
+                    bound: false,
+                    master_account: None,
+                    probe: "chain".into(),
+                    probe_error: None,
+                },
+                Err(e) => ApiRegisterState {
+                    operator_omni: omni,
+                    bound: false,
+                    master_account: None,
+                    probe: "error".into(),
+                    probe_error: Some(e),
+                },
+            }
+        }
+        _ => ApiRegisterState {
+            operator_omni: omni,
+            bound: false,
+            master_account: None,
+            probe: "unconfigured".into(),
+            probe_error: None,
+        },
+    };
+    Json(view).into_response()
 }
 
 /// Lazy #233 sync gate for the read paths: reconstruct the actor tree from chain
@@ -3846,16 +3976,38 @@ async fn master_account_address(state: &SharedUiBridgeState) -> Option<String> {
 /// `operatorMasterWallet[omni]` — `None` when unset (zero address) or the read
 /// fails. Shared by the #233 reconcile backfill and the live actor-page read.
 async fn fetch_operator_master_wallet(rpc: &str, registry: &str, omni_0x: &str) -> Option<String> {
+    probe_operator_master_wallet(rpc, registry, omni_0x)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// #435 — the register-probe variant: distinguishes UNBOUND (`Ok(None)`) from
+/// a FAILED read (`Err`). The onboarding register-or-skip decision must never
+/// treat an RPC hiccup as "unbound" — minting a fresh passkey for an omni
+/// whose chain binding simply couldn't be read would strand the browser on a
+/// key the registry doesn't hold (every later ceremony SIG_VALIDATION-fails).
+async fn probe_operator_master_wallet(
+    rpc: &str,
+    registry: &str,
+    omni_0x: &str,
+) -> Result<Option<String>, String> {
     let omni_bare = omni_0x.trim_start_matches("0x").to_lowercase();
     let data = format!(
         "0x{}{omni_bare}",
         chain_selector("operatorMasterWallet(bytes32)")
     );
-    match daemon_eth_call(rpc, registry, &data).await {
-        Ok(raw) if raw.len() >= 32 && raw[12..32].iter().any(|b| *b != 0) => {
-            Some(format!("0x{}", hex::encode(&raw[12..32])))
-        }
-        _ => None,
+    let raw = daemon_eth_call(rpc, registry, &data).await?;
+    if raw.len() < 32 {
+        return Err(format!(
+            "operatorMasterWallet short return ({} bytes)",
+            raw.len()
+        ));
+    }
+    if raw[12..32].iter().any(|b| *b != 0) {
+        Ok(Some(format!("0x{}", hex::encode(&raw[12..32]))))
+    } else {
+        Ok(None)
     }
 }
 
@@ -5331,6 +5483,8 @@ async fn ack_pairing(
                     services: (!services.is_empty()).then_some(services),
                     account_address: None,
                     account_type: None,
+                    preset_id: None,
+                    memory_ns: None,
                 };
                 state
                     .actors
@@ -5681,6 +5835,39 @@ async fn spawn_submit_proxy(
                 },
             )
             .await;
+            // #430 — name the opchat channel so its grant chips render
+            // readably after restarts.
+            let chat_id = sfield(ctx, "chat_channel_id");
+            if !chat_id.is_empty() {
+                let display = {
+                    let l = sfield(spawned, "label");
+                    if l.is_empty() {
+                        sfield(ctx, "label")
+                    } else {
+                        l
+                    }
+                };
+                ensure_channel_named(&state, &chat_id, &format!("Chat · {display}")).await;
+            }
+            // #428 — distribute the preset content into the fresh delegate
+            // (persona canonical + sandbox apply + skills docs). Best-effort
+            // loud; the ceremony is already final on-chain.
+            let preset_id = sfield(spawned, "preset_id");
+            let delegate_omni = sfield(ctx, "actor_omni");
+            let sandbox_id = spawned
+                .pointer("/sandbox/sandbox_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if !preset_id.is_empty() && !delegate_omni.is_empty() {
+                apply_preset_at_spawn(
+                    &state,
+                    &broker,
+                    &preset_id,
+                    &delegate_omni,
+                    sandbox_id.as_deref(),
+                )
+                .await;
+            }
         }
     }
     resp
@@ -5813,6 +6000,572 @@ async fn mark_binding_archived(
             "binding manifest archive-mark persist FAILED — {e}"
         ),
     }
+}
+
+/// #429 — `GET /v1/agent/inheritable-namespaces`: the kept namespaces of
+/// ARCHIVED delegates a spawn may inherit (#425 O2). A namespace qualifies
+/// when its manifest row is archived with `resources_kept` AND no LIVE
+/// delegate row currently holds the same `memory_ns` — "inheritable by at
+/// most one live delegate at a time" is enforced by construction here (the
+/// spawn modal only offers what this returns).
+async fn list_inheritable_namespaces(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    if let Err(resp) = require_master_session(&state).await {
+        return resp;
+    }
+    let manifest = match ensure_binding_manifest(&state).await {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": format!("binding manifest: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let live_held: std::collections::HashSet<String> = manifest
+        .entries()
+        .iter()
+        .filter(|e| e.kind == "delegate" && e.archived_at.is_none())
+        .filter_map(|e| e.memory_ns.clone())
+        .collect();
+    // Latest archive wins per namespace (a ns can cycle through delegates).
+    let mut by_ns: std::collections::HashMap<String, (String, u64)> =
+        std::collections::HashMap::new();
+    for e in manifest.entries() {
+        let (Some(at), Some(true), Some(ns)) =
+            (e.archived_at, e.resources_kept, e.memory_ns.clone())
+        else {
+            continue;
+        };
+        if live_held.contains(&ns) {
+            continue;
+        }
+        match by_ns.get(&ns) {
+            Some((_, prev)) if *prev >= at => {}
+            _ => {
+                by_ns.insert(ns, (e.label.clone(), at));
+            }
+        }
+    }
+    let mut namespaces: Vec<serde_json::Value> = by_ns
+        .into_iter()
+        .map(|(ns, (from_label, archived_at))| {
+            serde_json::json!({ "ns": ns, "from_label": from_label, "archived_at": archived_at })
+        })
+        .collect();
+    namespaces.sort_by(|a, b| b["archived_at"].as_u64().cmp(&a["archived_at"].as_u64()));
+    Json(serde_json::json!({ "namespaces": namespaces })).into_response()
+}
+
+/// #430 — auto-register a spawn's opchat channel id with a display name, so
+/// its grants render with a NAME after daemon restarts (the registry is the
+/// id→name dictionary; the keccak re-name map alone yields a raw-id chip).
+/// Insert-if-absent; best-effort loud.
+async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: &str) {
+    if !valid_channel_id(id) {
+        return;
+    }
+    let mut registry = match ensure_channel_registry(state).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                id,
+                "channel registry LOAD failed for opchat auto-name — {e}"
+            );
+            return;
+        }
+    };
+    if registry.channels.iter().any(|c| c.id == id) {
+        return;
+    }
+    registry.channels.push(ApiChannel {
+        id: id.to_string(),
+        name: name.to_string(),
+        note: Some("auto-registered at spawn (#430 operator chat)".to_string()),
+        created_at: now_unix(),
+    });
+    match persist_channel_registry(state, registry).await {
+        Ok(storage) => tracing::info!(id, storage, "opchat channel auto-named"),
+        Err(e) => tracing::warn!(id, "opchat auto-name persist FAILED — {e}"),
+    }
+}
+
+// ── #430 — the master-side chat surface (operator-owned duplex feed, D8) ────
+
+/// One rendered chat turn for the web app — the feed event with its payload
+/// decoded (the raw `ChannelEvent` carries base64; the UI wants text).
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiChatEvent {
+    pub event_id: String,
+    /// `"in"` = operator → delegate; `"out"` = the delegate's reply.
+    pub direction: String,
+    pub text: String,
+    /// The cap-signed producer (worker-stamped provenance, §4.1).
+    pub producer_omni: String,
+    #[ts(type = "number")]
+    pub ts_millis: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub correlation: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChatSendRequest {
+    pub channel_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChatPollRequest {
+    pub channel_id: String,
+    #[serde(default)]
+    pub after: String,
+    #[serde(default)]
+    pub wait_seconds: u64,
+}
+
+/// The channel worker the daemon talks to — same env family as every worker
+/// URL (`AGENTKEYS_WORKER_CHANNEL_URL`, wired by dev.sh / the host env files).
+fn channel_worker_url() -> Result<String, String> {
+    std::env::var("AGENTKEYS_WORKER_CHANNEL_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .ok_or_else(|| {
+            "AGENTKEYS_WORKER_CHANNEL_URL not set — the chat surface needs the channel worker"
+                .to_string()
+        })
+}
+
+/// Master-self channel cap (operator == actor — the session-authenticated
+/// operator path of the channel-kind matrix; no operator K10 involved beyond
+/// the daemon's own device key for the #76 PoP when configured).
+async fn master_channel_cap(
+    state: &UiBridgeState,
+    direction_service: String,
+    op: agentkeys_backend_client::protocol::CapMintOp,
+) -> Result<(serde_json::Value, SessionCoords), String> {
+    let coords = resolve_session_coords(state).await?;
+    let client = agentkeys_backend_client::BackendClient::new(
+        Some(coords.broker.clone()),
+        None,
+        None,
+        None,
+        Some(coords.j1.clone()),
+        None,
+        None,
+        coords.region.clone(),
+    );
+    let cap = client
+        .cap_mint(
+            op,
+            agentkeys_backend_client::protocol::CapMintRequest {
+                operator_omni: coords.omni.clone(),
+                actor_omni: coords.omni.clone(),
+                service: direction_service,
+                device_key_hash: coords.device_key_hash.clone(),
+                ttl_seconds: 120,
+            },
+            &coords.j1,
+        )
+        .await
+        .map_err(|e| format!("channel cap mint: {e}"))?;
+    let cap_json = serde_json::to_value(&cap).map_err(|e| format!("cap serialize: {e}"))?;
+    Ok((cap_json, coords))
+}
+
+fn chat_event_from_value(v: &serde_json::Value) -> ApiChatEvent {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let text = v
+        .get("body")
+        .and_then(|b| b.as_str())
+        .and_then(|b64| STANDARD.decode(b64).ok())
+        .and_then(|b| String::from_utf8(b).ok())
+        .unwrap_or_else(|| "(non-text event)".to_string());
+    ApiChatEvent {
+        event_id: v
+            .get("event_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        direction: v
+            .get("direction")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        text,
+        producer_omni: v
+            .pointer("/producer/actor_omni")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        ts_millis: v.get("ts_millis").and_then(|n| n.as_u64()).unwrap_or(0),
+        correlation: v
+            .get("correlation")
+            .and_then(|s| s.as_str())
+            .map(str::to_string),
+    }
+}
+
+/// `POST /v1/master/agent/chat/send` — publish one operator turn
+/// (`direction: in`) into the delegate's opchat feed. The delegate's
+/// in-sandbox loop consumes it and replies `direction: out`.
+async fn master_chat_send(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ChatSendRequest>,
+) -> axum::response::Response {
+    if let Err(resp) = require_master_session(&state).await {
+        return resp;
+    }
+    if !valid_channel_id(&req.channel_id) || req.text.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "channel_id (1-48 [a-z0-9-]) and text required" })),
+        )
+            .into_response();
+    }
+    let worker = match channel_worker_url() {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    let (cap, _coords) = match master_channel_cap(
+        &state,
+        format!("channel-pub:{}", req.channel_id),
+        agentkeys_backend_client::protocol::CapMintOp::ChannelPublish,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    // @backend-fixture: channel_publish_body
+    let body = serde_json::json!({
+        "cap": cap,
+        "kind": "text",
+        "direction": "in",
+        "body_b64": STANDARD.encode(req.text.as_bytes()),
+    });
+    match reqwest::Client::new()
+        .post(format!("{worker}/v1/channel/publish"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let st =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let txt = resp.text().await.unwrap_or_default();
+            (
+                st,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                txt,
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("channel worker publish: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/master/agent/chat/poll` — the transcript read (D13: operator
+/// session only) + the NRT long-poll for new turns.
+async fn master_chat_poll(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ChatPollRequest>,
+) -> axum::response::Response {
+    if let Err(resp) = require_master_session(&state).await {
+        return resp;
+    }
+    if !valid_channel_id(&req.channel_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid channel_id" })),
+        )
+            .into_response();
+    }
+    let worker = match channel_worker_url() {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    let (cap, _coords) = match master_channel_cap(
+        &state,
+        format!("channel-sub:{}", req.channel_id),
+        agentkeys_backend_client::protocol::CapMintOp::ChannelSubscribe,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    // @backend-fixture: channel_poll_body
+    let body = serde_json::json!({
+        "cap": cap,
+        "after": req.after,
+        "wait_seconds": req.wait_seconds.min(25),
+    });
+    let resp = match reqwest::Client::new()
+        .post(format!("{worker}/v1/channel/poll"))
+        .timeout(std::time::Duration::from_secs(40))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("channel worker poll: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    if !resp.status().is_success() {
+        let st = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let txt = resp.text().await.unwrap_or_default();
+        return (
+            st,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            txt,
+        )
+            .into_response();
+    }
+    let v: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("poll parse: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let events: Vec<ApiChatEvent> = v
+        .get("events")
+        .and_then(|e| e.as_array())
+        .map(|a| a.iter().map(chat_event_from_value).collect())
+        .unwrap_or_default();
+    let cursor = v
+        .get("cursor")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Json(serde_json::json!({ "events": events, "cursor": cursor })).into_response()
+}
+
+/// #428 — spawn-time preset apply: fetch the bundle from the broker's
+/// compiled-in catalog, seed the delegate's persona canonical (the #390 store
+/// — versioned; the locked base layer is appended at apply) + apply it into
+/// the FRESH sandbox (instance-routed via `x-faas-instance-name`), and
+/// distribute the skills docs to `$HERMES_HOME/skills/`. Best-effort LOUD:
+/// the on-chain ceremony is already final, so every failure surfaces in the
+/// audit feed + logs and never fails the submit. Content, never authority —
+/// nothing here grants anything beyond the phase-1 template.
+async fn apply_preset_at_spawn(
+    state: &SharedUiBridgeState,
+    broker: &str,
+    preset_id: &str,
+    delegate_omni: &str,
+    sandbox_id: Option<&str>,
+) {
+    let url = format!("{}/v1/presets/{}", broker.trim_end_matches('/'), preset_id);
+    let bundle: agentkeys_backend_client::protocol::PresetBundle =
+        match reqwest::Client::new().get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.json().await {
+                Ok(b) => b,
+                Err(e) => {
+                    preset_apply_audit(
+                        state,
+                        preset_id,
+                        delegate_omni,
+                        format!("bundle parse failed: {e}"),
+                        "warn",
+                    )
+                    .await;
+                    return;
+                }
+            },
+            Ok(resp) => {
+                preset_apply_audit(
+                    state,
+                    preset_id,
+                    delegate_omni,
+                    format!("catalog fetch HTTP {} — unknown preset?", resp.status()),
+                    "warn",
+                )
+                .await;
+                return;
+            }
+            Err(e) => {
+                preset_apply_audit(
+                    state,
+                    preset_id,
+                    delegate_omni,
+                    format!("catalog unreachable: {e}"),
+                    "warn",
+                )
+                .await;
+                return;
+            }
+        };
+
+    // Persona: the SAME validation gate as the editor — nothing invalid enters
+    // canonical. A repo bundle failing it is a build bug; loud, never partial.
+    let persona_note = if let Err(e) = crate::persona::validate_persona_body(&bundle.soul_md) {
+        tracing::error!(
+            target: "agentkeys.daemon.ui_bridge",
+            preset_id,
+            error = %e,
+            "preset SOUL.md failed the persona validation gate — repo-bundle bug"
+        );
+        format!("persona SKIPPED (bundle invalid: {e})")
+    } else {
+        match persona_commit(
+            state,
+            delegate_omni,
+            &bundle.soul_md,
+            "persona.preset",
+            format!(
+                "preset '{preset_id}' persona seeded at spawn for {}",
+                normalize_omni_0x(delegate_omni).to_lowercase()
+            ),
+            sandbox_id,
+        )
+        .await
+        {
+            Ok(r) => format!("persona v{} (applied: {})", r.version, r.applied),
+            Err((_, e)) => {
+                tracing::warn!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    preset_id,
+                    "preset persona seed failed — {e}"
+                );
+                format!("persona seed FAILED: {e}")
+            }
+        }
+    };
+
+    // Skills → the sandbox skills dir. The bridge's `skills_written` response
+    // key is the capability signal: absent = pre-#428 image, called out loud.
+    let skills_note = if bundle.skills.is_empty() {
+        "no skills in bundle".to_string()
+    } else {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let mut skills = serde_json::Map::new();
+        for doc in &bundle.skills {
+            skills.insert(
+                doc.filename.clone(),
+                serde_json::Value::String(STANDARD.encode(doc.content.as_bytes())),
+            );
+        }
+        let body = serde_json::json!({ "skills": skills, "restart": false });
+        match sandbox_bridge_request_instanced(
+            state,
+            reqwest::Method::POST,
+            "/v1/context/apply",
+            Some(body),
+            sandbox_id,
+        )
+        .await
+        {
+            Ok(v) => match v.get("skills_written").and_then(|s| s.as_array()) {
+                Some(w) => format!("{} skills doc(s) distributed", w.len()),
+                None => {
+                    tracing::warn!(
+                        target: "agentkeys.daemon.ui_bridge",
+                        preset_id,
+                        "bridge accepted the apply but returned no skills_written — the \
+                         sandbox image predates #428 skills distribution; rebuild \
+                         docker/hermes-sandbox"
+                    );
+                    "skills NOT distributed (pre-#428 sandbox image — rebuild required)".into()
+                }
+            },
+            Err(e) if e.contains("files and/or skills") || e.contains("files must be") => {
+                tracing::warn!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    preset_id,
+                    "bridge rejected the skills apply ({e}) — pre-#428 sandbox image; \
+                     rebuild docker/hermes-sandbox"
+                );
+                "skills NOT distributed (pre-#428 sandbox image — rebuild required)".into()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    preset_id,
+                    "skills distribution failed — {e}"
+                );
+                format!("skills distribution failed: {e}")
+            }
+        }
+    };
+
+    preset_apply_audit(
+        state,
+        preset_id,
+        delegate_omni,
+        format!("{persona_note}; {skills_note}"),
+        "ok",
+    )
+    .await;
+}
+
+/// One audit-feed line per preset apply — the operator-visible record of what
+/// the spawn actually distributed (or loudly failed to).
+async fn preset_apply_audit(
+    state: &SharedUiBridgeState,
+    preset_id: &str,
+    delegate_omni: &str,
+    detail: String,
+    sev: &str,
+) {
+    let evt = ApiAuditEvent {
+        id: format!("e-preset-{}", now_unix()),
+        ts: now_ts_hms(),
+        actor_id: "master".into(),
+        actor: "master".into(),
+        kind: "agent.preset_applied".into(),
+        detail: format!(
+            "preset '{preset_id}' → {}: {detail}",
+            normalize_omni_0x(delegate_omni).to_lowercase()
+        ),
+        chip: "spawn".into(),
+        sev: sev.into(),
+        tx_hash: None,
+        audit_envelope_hashes: None,
+    };
+    push_audit(state, evt).await;
 }
 
 /// #248 — the Touch-ID-gated scope re-grant for an ALREADY-bound agent (the
@@ -6614,6 +7367,58 @@ async fn forward_to_broker(
     }
 }
 
+/// GET-forward to an UNAUTHENTICATED broker route (#428 preset catalog —
+/// static compiled-in product content; the broker side documents why no
+/// bearer). The web app only ever talks to the daemon, so this is its window.
+async fn forward_broker_get(broker: &str, path: &str) -> axum::response::Response {
+    let url = format!("{}{}", broker.trim_end_matches('/'), path);
+    match reqwest::Client::new().get(&url).send().await {
+        Ok(resp) => {
+            let st =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let txt = resp.text().await.unwrap_or_default();
+            (
+                st,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                txt,
+            )
+                .into_response()
+        }
+        Err(e) => pairing_err(StatusCode::BAD_GATEWAY, &format!("broker {path}: {e}")),
+    }
+}
+
+/// GET /v1/presets — proxy the #428 broker preset catalog for the web app.
+async fn presets_catalog_proxy(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    forward_broker_get(&broker, "/v1/presets").await
+}
+
+/// GET /v1/presets/:id — proxy one full preset bundle.
+async fn preset_bundle_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    // The id charset is the channel-id/label discipline — reject anything that
+    // couldn't be a bundle id before it reaches a URL path.
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || id.is_empty()
+        || id.len() > 48
+    {
+        return pairing_err(StatusCode::BAD_REQUEST, "invalid preset id");
+    }
+    forward_broker_get(&broker, &format!("/v1/presets/{id}")).await
+}
+
 /// POST /v1/agent/pairing/register — the master approves a claimed agent: submit
 /// `registerAgentDevice` on chain for its sandbox-generated device key, then ack
 /// the broker so it clears from pending (#214, §10.2 P.2). The device fields come
@@ -6789,6 +7594,8 @@ async fn register_pairing(
         services: None,
         account_address: None,
         account_type: None,
+        preset_id: None,
+        memory_ns: None,
     };
     state
         .actors
@@ -8745,6 +9552,21 @@ async fn sandbox_bridge_request(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
+    sandbox_bridge_request_instanced(state, method, path, body, None).await
+}
+
+/// #428/#430 per-delegate variant: when `instance` is set, the request carries
+/// the veFaaS session-affinity header `x-faas-instance-name: <SandboxId>` so
+/// the shared gateway routes it to THAT delegate's sandbox. `None` keeps the
+/// single-bridge behavior (local dev / one-sandbox hosts, where a direct
+/// bridge ignores the header harmlessly).
+async fn sandbox_bridge_request_instanced(
+    state: &SharedUiBridgeState,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    instance: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let base = state.sandbox_bridge_url.as_deref().ok_or_else(|| {
         "sandbox_unconfigured: no --sandbox-bridge-url / AGENTKEYS_SANDBOX_BRIDGE_URL".to_string()
     })?;
@@ -8756,6 +9578,9 @@ async fn sandbox_bridge_request(
     let mut req = client.request(method, &url);
     if let Some(token) = state.sandbox_bridge_token.as_deref() {
         req = req.bearer_auth(token);
+    }
+    if let Some(id) = instance.filter(|i| !i.is_empty()) {
+        req = req.header("x-faas-instance-name", id);
     }
     if let Some(b) = body {
         req = req.json(&b);
@@ -8783,7 +9608,11 @@ async fn sandbox_bridge_request(
 /// distribution leg). Returns `(applied, detail)` — an unconfigured/unreachable
 /// sandbox is NOT an edit failure (the canonical store already committed), but
 /// it is always surfaced, never silently swallowed.
-async fn apply_persona_to_sandbox(state: &SharedUiBridgeState, soul_body: &str) -> (bool, String) {
+async fn apply_persona_to_sandbox(
+    state: &SharedUiBridgeState,
+    soul_body: &str,
+    instance: Option<&str>,
+) -> (bool, String) {
     if state.sandbox_bridge_url.is_none() {
         return (
             false,
@@ -8796,11 +9625,12 @@ async fn apply_persona_to_sandbox(state: &SharedUiBridgeState, soul_body: &str) 
         "files": { "soul": STANDARD.encode(soul_body.as_bytes()) },
         "restart": true,
     });
-    match sandbox_bridge_request(
+    match sandbox_bridge_request_instanced(
         state,
         reqwest::Method::POST,
         "/v1/context/apply",
         Some(body),
+        instance,
     )
     .await
     {
@@ -8872,6 +9702,7 @@ async fn persona_commit(
     new_body: &str,
     audit_kind: &str,
     audit_detail: String,
+    instance: Option<&str>,
 ) -> Result<ApiPersonaEditResponse, (axum::http::StatusCode, String)> {
     let backend = persona_backend(state).await?;
     let soul_key = persona_soul_key(delegate_omni);
@@ -8886,7 +9717,7 @@ async fn persona_commit(
         persona_store(state, &backend, &rotated).await?;
         version = v;
     }
-    let (applied, apply_detail) = apply_persona_to_sandbox(state, new_body).await;
+    let (applied, apply_detail) = apply_persona_to_sandbox(state, new_body, instance).await;
     let evt = ApiAuditEvent {
         id: format!("e-persona-{}", now_unix()),
         ts: now_ts_hms(),
@@ -8938,6 +9769,7 @@ async fn edit_master_persona(
             "persona edited for delegate {}",
             normalize_omni_0x(&req.delegate_omni).to_lowercase()
         ),
+        None,
     )
     .await
     {
@@ -8999,6 +9831,7 @@ async fn rollback_master_persona(
             req.version,
             normalize_omni_0x(&req.delegate_omni).to_lowercase()
         ),
+        None,
     )
     .await
     {
@@ -10347,6 +11180,8 @@ mod tests {
             services: None,
             account_address: None,
             account_type: None,
+            preset_id: None,
+            memory_ns: None,
         };
         let mut actors = HashMap::new();
         let mut by_name = mk("a1", "cam-by-name");
@@ -11468,6 +12303,8 @@ mod tests {
             services: None,
             account_address: None,
             account_type: None,
+            preset_id: None,
+            memory_ns: None,
         };
         let cloned = actor.clone();
         let st = state.clone();
@@ -11501,6 +12338,8 @@ mod tests {
             services: None,
             account_address: None,
             account_type: None,
+            preset_id: None,
+            memory_ns: None,
         };
         state
             .actors
@@ -11545,6 +12384,8 @@ mod tests {
                 services: None,
                 account_address: None,
                 account_type: None,
+                preset_id: None,
+                memory_ns: None,
             },
         );
         actors.insert(
@@ -11571,6 +12412,8 @@ mod tests {
                 services: None,
                 account_address: None,
                 account_type: None,
+                preset_id: None,
+                memory_ns: None,
             },
         );
         drop(actors);
@@ -12909,6 +13752,8 @@ mod tests {
                     services: None,
                     account_address: None,
                     account_type: None,
+                    preset_id: None,
+                    memory_ns: None,
                 }],
                 caps: HashMap::new(),
                 workers: vec![ApiWorker {

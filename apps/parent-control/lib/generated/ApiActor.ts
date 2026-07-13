@@ -29,4 +29,13 @@ account_address?: string,
  * "p256account" (bound master) | "none" (unbound master → register CTA) |
  * "device" (agent).
  */
-account_type?: string, };
+account_type?: string, 
+/**
+ * #429 — the preset the delegate was spawned from (#424 manifest
+ * readable layer). Absent for devices/masters/pre-#427 bindings.
+ */
+preset_id?: string, 
+/**
+ * #429 — the delegate's `memory:<ns>` namespace name (manifest layer).
+ */
+memory_ns?: string, };

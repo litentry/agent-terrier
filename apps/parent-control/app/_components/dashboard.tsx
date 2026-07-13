@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { CHIP_STYLES, NAMESPACES } from '@/lib/constants';
 import type { ConnectionStatus } from '@/lib/client/types';
-import { AgentPanel } from './agent';
+import { AgentTabsPanel } from './agent_tabs';
 import { AutoDistributePanel, PermissionList } from './permissions';
 import type { ProposedScope } from '@/lib/client/types';
 import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
@@ -266,7 +266,7 @@ export function ActorDetail({
           DELEGATES only: a master has no SOUL.md (it is the hub, not a runtime)
           and a DEVICE has no runtime at all (#404 D6 — personas are a delegate
           concept; a camera cannot hold one). */}
-      {!isMaster && !isDevice && <AgentPanel actor={actor} />}
+      {!isMaster && !isDevice && <AgentTabsPanel actor={actor} />}
 
       {!isMaster && !isDevice && (
         <Panel title="── permissions · scoped (mobile-style)">

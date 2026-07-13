@@ -25,6 +25,7 @@ import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import { MemoryPage } from './memory';
 import { CredentialsPage } from './credentials';
 import { DelegatesPage } from './pairing';
+import { ArchiveAgentDialog, SpawnAgentModal } from './spawn';
 import { DevicesPage } from './devices';
 import { ChannelRegistryPage } from './channels';
 import { ContactsPage } from './gateway';
@@ -66,6 +67,9 @@ export function App() {
   const client = useClient();
   const status = useConnectionStatus();
   const [actors, setActors] = useState<Actor[]>([]);
+  // #429 — the spawn modal + archive dialog (one Touch ID each, zero rendezvous).
+  const [spawnOpen, setSpawnOpen] = useState(false);
+  const [archiveActor, setArchiveActor] = useState<Actor | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [page, setPage] = useState<Page>('actors');
   const [actorId, setActorId] = useState<string | null>(null);
@@ -335,6 +339,24 @@ export function App() {
     })();
     return () => { cancelled = true; };
   }, [onboarded, client]);
+
+  // #432 (epic #425 O5) — the onboarding DEFAULT delegate rides the SAME spawn
+  // path as every other agent: once the master is bound on chain and the
+  // household has no delegate yet, auto-open the New-agent modal ONCE (Default
+  // assistant preselected, fully skippable). One code path — the D9
+  // `onboarding` and `option` legs converge on this modal; there is no second
+  // spawn implementation.
+  useEffect(() => {
+    if (!onboarded || spawnOpen) return;
+    if (typeof window === 'undefined') return;
+    if (window.localStorage.getItem('ak_default_spawn_offered') === '1') return;
+    const hasDelegate = actors.some((a) => a.role === 'agent' && !actorIsChannelEndpoint(a));
+    const masterBound = actors.some((a) => a.role === 'master' && a.accountType === 'p256account');
+    if (masterBound && !hasDelegate) {
+      window.localStorage.setItem('ak_default_spawn_offered', '1');
+      setSpawnOpen(true);
+    }
+  }, [onboarded, actors, spawnOpen]);
 
   // Live audit stream (tier-1 SSE) — real events only, no synthetic feed.
   useEffect(() => {
@@ -1362,7 +1384,7 @@ export function App() {
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
         )}
         {page === 'delegates' && (
-          <DelegatesPage requests={pairingRequests.filter((r) => !r.isDevice)} actors={actors.filter((a) => !actorIsChannelEndpoint(a))} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} deviceRequestCount={pairingRequests.filter((r) => r.isDevice).length} onGoDevices={() => go('devices')} />
+          <DelegatesPage requests={pairingRequests.filter((r) => !r.isDevice)} actors={actors.filter((a) => !actorIsChannelEndpoint(a))} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} onNewAgent={() => setSpawnOpen(true)} onArchive={(a) => setArchiveActor(a)} deviceRequestCount={pairingRequests.filter((r) => r.isDevice).length} onGoDevices={() => go('devices')} />
         )}
         {page === 'devices' && (
           <DevicesPage
@@ -1407,6 +1429,33 @@ export function App() {
         {page === 'chain' && <ChainPage />}
         {page === 'logo' && <LogoPage />}
       </main>
+      {spawnOpen && (
+        <SpawnAgentModal
+          client={client}
+          onClose={() => setSpawnOpen(false)}
+          onSpawned={() => {
+            void (async () => {
+              const a = await client.listActors();
+              if (a.ok) setActors(a.data);
+            })();
+          }}
+          showToast={showToast}
+        />
+      )}
+      {archiveActor && (
+        <ArchiveAgentDialog
+          client={client}
+          actor={archiveActor}
+          onClose={() => setArchiveActor(null)}
+          onArchived={() => {
+            void (async () => {
+              const a = await client.listActors();
+              if (a.ok) setActors(a.data);
+            })();
+          }}
+          showToast={showToast}
+        />
+      )}
 
       {pendingAction && (
         <WebAuthnModal intent={pendingAction.intent} onConfirm={confirmAction} onCancel={() => setPendingAction(null)} />

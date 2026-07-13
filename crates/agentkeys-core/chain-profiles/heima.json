@@ -41,37 +41,37 @@
   "contracts": [
     {
       "name": "AgentKeysScope",
-      "address": "0xF1EeAb3746Aa1ef7b7B227b242BDBbb3b7E93487",
+      "address": "0xbB608CDD7374D625839D2B8793422C10A4Cff99e",
       "purpose": "per-actor scope grants — services, namespaces, spend/time windows",
       "deployed_at": "Heima mainnet · stage-1"
     },
     {
       "name": "SidecarRegistry",
-      "address": "0x5Aa08E50FCe38ABeAbb55479D3cf96F6F85BE354",
+      "address": "0x8B50b673A479ddd084890f8D666ECAA6c9aFd172",
       "purpose": "D_pub ↔ (operator_omni, actor_omni, roles) device bindings + K11 cred storage",
       "deployed_at": "Heima mainnet · stage-1"
     },
     {
       "name": "K3EpochCounter",
-      "address": "0xd718dA4452dE84216921F208C0B282711013A1B2",
+      "address": "0x1Af7af89D7d69Ce88f42e73eb34bC2E3798D9aD9",
       "purpose": "current K3 epoch; bumps trigger signer-side KEK + K4 derivation rotation",
       "deployed_at": "Heima mainnet · stage-1"
     },
     {
       "name": "CredentialAudit",
-      "address": "0xbA24215f7B4309cF5Bfa96e531687B7E595fEce9",
+      "address": "0x5e7067b2572035e8722CE14944E6DAaCa230117e",
       "purpose": "per-actor append-only audit log + tier-2 Merkle root anchor every 2 min",
       "deployed_at": "Heima mainnet · stage-1"
     },
     {
       "name": "P256Verifier",
-      "address": "0x84959a6Fbdae9361091D707C7940f479859D19e8",
+      "address": "0xD6a39b47F419700Ba736B2637A8dC95eE344ca5a",
       "purpose": "P-256 (secp256r1) signature verifier for WebAuthn/passkey master auth",
       "deployed_at": "Heima mainnet · pre-deployed"
     },
     {
       "name": "K11Verifier",
-      "address": "0x0293A1b4322e134Db75591F663cd9dB45cf5D788",
+      "address": "0x60eeB5C9D631889eA0c36801a50F3f442C765F89",
       "purpose": "K11 WebAuthn assertion verifier used by scope + registry master mutations",
       "deployed_at": "Heima mainnet · pre-deployed"
     },
@@ -83,7 +83,7 @@
     },
     {
       "name": "P256AccountFactory",
-      "address": "0x350aC4bFB9d22F26ae331358B9b0b887609528E1",
+      "address": "0x8eC563DFDc2016A0C2790A526b3Ed0018d6Cbf27",
       "purpose": "CREATE2 factory for P256Account passkey-master smart-accounts; constructor(entryPoint, k11Verifier)",
       "deployed_at": "Heima mainnet · #164"
     },
@@ -95,12 +95,12 @@
     },
     {
       "name": "P256Router",
-      "address": "0x6F03B0247aa42AE6f4a1b4DB3a7A8D362AE29096",
+      "address": "0x3E4788C23fd9Db10154f4F9a8CbD0eb33887c908",
       "purpose": "precompile-first P-256 verifier (RIP-7212 at 0x100, Solidity fallback) — K11Verifier p256Addr, issue #170",
       "deployed_at": "heima · 2026-06-12"
     }
   ],
-  "contract_set_version": "0.4",
+  "contract_set_version": "0.5",
   "funding": {
     "deploy_min_wei": "1000000000000000000",
     "paymaster_deposit_wei": "2000000000000000000",

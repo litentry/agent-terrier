@@ -23,6 +23,7 @@ import type {
   RegisterMasterResult,
   ReloginResult,
   ReloginStart,
+  InheritableNamespace,
   MasterMemoryEntry,
   MasterResetResult,
   MemoryCategory,
@@ -58,6 +59,12 @@ import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { ApiMemoryEntry } from '@/lib/generated/ApiMemoryEntry';
 import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditResponse';
 import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
+import type { ApiChatEvent } from '@/lib/generated/ApiChatEvent';
+import type { ApiRegisterState } from '@/lib/generated/ApiRegisterState';
+import type { BuildArchiveUserOpResponse } from '@/lib/generated/BuildArchiveUserOpResponse';
+import type { BuildSpawnUserOpResponse } from '@/lib/generated/BuildSpawnUserOpResponse';
+import type { PresetCatalogResponse } from '@/lib/generated/PresetCatalogResponse';
+import type { SubmitAcceptUserOpResponse } from '@/lib/generated/SubmitAcceptUserOpResponse';
 import type { ApiWorker } from '@/lib/generated/ApiWorker';
 import type { BuildAcceptUserOpResponse } from '@/lib/generated/BuildAcceptUserOpResponse';
 import type { MasterMemoryPlantResponse } from '@/lib/generated/MasterMemoryPlantResponse';
@@ -314,6 +321,77 @@ export class DaemonBackend implements AgentKeysClient {
     return r.ok ? { ok: true, data: apiToSubmitResult(r.data) } : r;
   }
 
+  // #429 (epic #425) — the spawn/archive ceremonies + their bookkeeping reads.
+  async presetCatalog(): Promise<Result<PresetCatalogResponse>> {
+    return this.getJson<PresetCatalogResponse>('/v1/presets');
+  }
+
+  async spawnBuild(input: {
+    label: string;
+    presetId: string;
+    memoryNs?: string;
+    memoryInherited?: boolean;
+  }): Promise<Result<BuildSpawnUserOpResponse>> {
+    const body: Record<string, unknown> = {
+      label: input.label,
+      preset_id: input.presetId,
+    };
+    if (input.memoryNs) body.memory_ns = input.memoryNs;
+    if (input.memoryInherited) body.memory_inherited = true;
+    return this.postJson<BuildSpawnUserOpResponse>('/v1/agent/spawn/build', body);
+  }
+
+  async spawnSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse>> {
+    return this.postJson<SubmitAcceptUserOpResponse>('/v1/agent/spawn/submit', body);
+  }
+
+  async archiveBuild(input: {
+    deviceKeyHash: string;
+    resourcesKept: boolean;
+    memoryNs?: string;
+  }): Promise<Result<BuildArchiveUserOpResponse>> {
+    const body: Record<string, unknown> = { device_key_hash: input.deviceKeyHash };
+    if (input.resourcesKept) body.resources_kept = true;
+    if (input.memoryNs) body.memory_ns = input.memoryNs;
+    return this.postJson<BuildArchiveUserOpResponse>('/v1/agent/archive/build', body);
+  }
+
+  async archiveSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse>> {
+    return this.postJson<SubmitAcceptUserOpResponse>('/v1/agent/archive/submit', body);
+  }
+
+  async chatSend(channelId: string, text: string): Promise<Result<{ event_id: string }>> {
+    return this.postJson('/v1/master/agent/chat/send', { channel_id: channelId, text });
+  }
+
+  async chatPoll(
+    channelId: string,
+    after: string,
+    waitSeconds: number,
+  ): Promise<Result<{ events: ApiChatEvent[]; cursor: string }>> {
+    return this.postJson('/v1/master/agent/chat/poll', {
+      channel_id: channelId,
+      after,
+      wait_seconds: waitSeconds,
+    });
+  }
+
+  async inheritableNamespaces(): Promise<Result<InheritableNamespace[]>> {
+    const r = await this.getJson<{
+      namespaces: { ns: string; from_label: string; archived_at: number }[];
+    }>('/v1/agent/inheritable-namespaces');
+    return r.ok
+      ? {
+          ok: true,
+          data: r.data.namespaces.map((n) => ({
+            ns: n.ns,
+            fromLabel: n.from_label,
+            archivedAt: n.archived_at,
+          })),
+        }
+      : r;
+  }
+
   async revokeCap(actorId: string, capName: string, intent: RevokeIntent): Promise<Result<void>> {
     const r = await this.postJson<unknown>(
       `/v1/actors/${encodeURIComponent(actorId)}/caps/revoke`,
@@ -336,6 +414,10 @@ export class DaemonBackend implements AgentKeysClient {
 
   async getOnboardingState(): Promise<Result<OnboardingState>> {
     return this.getJson<OnboardingState>('/v1/onboarding/state');
+  }
+
+  async getRegisterState(): Promise<Result<ApiRegisterState>> {
+    return this.getJson<ApiRegisterState>('/v1/master/register/state');
   }
 
   async logout(): Promise<Result<void>> {
@@ -860,6 +942,8 @@ function apiToActor(a: ApiActor): Actor {
       : undefined,
     timeWindow: a.time_window,
     services: a.services,
+    presetId: a.preset_id ?? undefined,
+    memoryNs: a.memory_ns ?? undefined,
   };
 }
 
