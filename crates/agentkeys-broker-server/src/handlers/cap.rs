@@ -502,6 +502,26 @@ pub async fn cap_classify(
 
 // ─── cap construction ──────────────────────────────────────────────────
 
+/// Ops minted with the ACTOR's own session (`session == actor`) instead of the
+/// operator's. Two families:
+///   - the #295/#339 context flows — `CanonicalFetch` (canonical READ) and
+///     `Append` (inbox PUSH): a sandboxed delegate mints with its own J1;
+///   - the #406 channel pair — `ChannelPublish`/`ChannelSubscribe` (#423): a
+///     paired DEVICE (ESP32 display/camera) or sandbox delegate publishes and
+///     subscribes with its OWN J1 (the child-omni session minted at
+///     pairing-poll / `/v1/agent/resolve`) — it never holds the operator
+///     bearer. The master's on-chain `channel-pub/sub:<id>` grant is the
+///     authorization (operator != actor runs the scope check).
+///
+/// Master-self mints are unaffected either way: operator == actor makes the
+/// two arms coincide, so the demo/UI master-self channel paths keep working.
+fn op_requires_actor_session(op: CapOp) -> bool {
+    matches!(
+        op,
+        CapOp::CanonicalFetch | CapOp::Append | CapOp::ChannelPublish | CapOp::ChannelSubscribe
+    )
+}
+
 async fn mint_cap(
     state: SharedState,
     headers: HeaderMap,
@@ -540,14 +560,13 @@ async fn mint_cap(
         .map_err(|e| CapError::InvalidInput(format!("operator_omni invalid: {e}")))?;
     let req_actor = normalize_hex32(&req.actor_omni)
         .map_err(|e| CapError::InvalidInput(format!("actor_omni invalid: {e}")))?;
-    // Who must hold the session? The two DELEGATED cross-actor ops — `CanonicalFetch`
-    // (#295 P1 §7a, the canonical READ) and `Append` (#339 P2, the inbox PUSH) — are
-    // minted by the DELEGATE with its OWN session (`session == actor`); the master's
-    // on-chain grant (`memory:<ns>` / `inbox:<ns>` respectively, checked below because
+    // Who must hold the session? The DELEGATED actor-session ops (see
+    // `op_requires_actor_session`) are minted by the ACTOR with its OWN session
+    // (`session == actor`); the master's on-chain grant (checked below because
     // operator != actor bypasses the master-self skip) is the authorization. A
-    // sandboxed delegate must never hold the operator session bearer. Every other op
-    // is operator-session-minted.
-    let required_session_omni = if matches!(op, CapOp::CanonicalFetch | CapOp::Append) {
+    // sandboxed delegate / paired device must never hold the operator session
+    // bearer. Every other op is operator-session-minted.
+    let required_session_omni = if op_requires_actor_session(op) {
         &req_actor
     } else {
         &req_omni
@@ -1133,6 +1152,31 @@ mod tests {
         assert_eq!(CapOp::Fetch.as_u8(), 1);
         assert_eq!(CapOp::Teardown.as_u8(), 2);
         assert_eq!(CapOp::Classify.as_u8(), 3);
+    }
+
+    #[test]
+    fn actor_session_ops_are_the_delegated_set() {
+        // #423: a paired DEVICE / sandbox delegate mints channel caps with its
+        // OWN child-omni session (it never holds the operator bearer) — the
+        // channel pair joins the #295/#339 delegated context-flow ops. Every
+        // storage/compute op stays operator-session-minted.
+        for op in [
+            CapOp::CanonicalFetch,
+            CapOp::Append,
+            CapOp::ChannelPublish,
+            CapOp::ChannelSubscribe,
+        ] {
+            assert!(
+                op_requires_actor_session(op),
+                "{op:?} must be actor-session"
+            );
+        }
+        for op in [CapOp::Store, CapOp::Fetch, CapOp::Teardown, CapOp::Classify] {
+            assert!(
+                !op_requires_actor_session(op),
+                "{op:?} must stay operator-session"
+            );
+        }
     }
 
     #[test]

@@ -116,12 +116,23 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
 
     let _ = overall_plugin_state; // captured implicitly through degraded/unready
 
+    // The accept/scope sponsor-submitter EOA (the bundler's handleOps
+    // beneficiary) — a PUBLIC address, surfaced so operators + the harness can
+    // discover and fund it without host access (#423: on the TEST stack the
+    // key is host-auto-generated, so nothing off-host knew the address to
+    // fund, and an unfunded submitter fails every handleOps broadcast with
+    // insufficient-funds). Null on hosts with no sponsor key provisioned.
+    let sponsor_signer = crate::handlers::accept::load_accept_config()
+        .map(|(cfg, _)| Value::String(format!("0x{}", hex::encode(cfg.broker_signer))))
+        .unwrap_or(Value::Null);
+
     if unready {
         let body = json!({
             "status": "unready",
             "degraded": false,
             "checks": checks,
             "ready": ready_names,
+            "sponsor_signer": sponsor_signer,
         });
         (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
     } else if degraded {
@@ -130,6 +141,7 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
             "degraded": true,
             "checks": checks,
             "ready": ready_names,
+            "sponsor_signer": sponsor_signer,
         });
         (StatusCode::OK, Json(body)).into_response()
     } else {
@@ -142,6 +154,7 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
             "degraded": false,
             "checks": [],
             "ready": ready_names,
+            "sponsor_signer": sponsor_signer,
         });
         (StatusCode::OK, Json(body)).into_response()
     }
