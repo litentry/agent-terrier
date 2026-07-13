@@ -139,25 +139,25 @@ Accepted residual (both clouds): `ListBucket` on the data buckets (key metadata)
 5. **Workers on VE keep layer 2 unchanged:** `AGENTKEYS_WORKER_REQUIRE_STS=1` + independent cap chain-verify — a compromised broker still can't drive the workers without passing chain checks.
 6. **Stage-3-style negative tests on VE** (cross-actor denial in the harness, mirroring today's live e2e) so the isolation is a regression gate, not a one-time proof. **CI half LANDED:** the `ve-stack-smoke` job in `e2e-ci.yml` (repo var `AGENTKEYS_VE_SMOKE=1`; workflow + harness are operator-internal, not in the OSS mirror) runs the zero-cred public-surface smoke (`e2e/ve-stack-smoke.sh`: DoH DNS co-location, TOS-hosted OIDC discovery+JWKS, TOS S3-compat wire, broker/gate edges) every run, plus `ve_sign_live` + `tos_live` when the `VOLCENGINE_*`/`TOS_TEST_BUCKET` secrets are set. `ve_sts_live` (the full mint→isolation e2e) deliberately stays operator-run — its issuer PRIVATE key must not become a CI secret. The remaining harness-level half (worker put/get cross-actor negatives) lands with follow-up 3 (workers on VE).
 
-## VE stack endpoints — the `agentterrier.ai` domain
+## VE stack endpoints — the `agentterrier.cn` domain (#445)
 
-**Convention:** the VE stack lives on `agentterrier.ai`, at parity with the AWS stack on `litentry.org`. The zone is registered + hosted on AWS Route53 (`Z10232242NM9I9WFJTLLC`; the ONE cross-cloud dependency — `setup-cloud-ve.sh` step 55 writes it under the AWS operator profile).
+**Convention (revised 2026-07-13, #439/#445):** the VE stack's canonical domain is **`agentterrier.cn`**, at parity with the AWS stack on `litentry.org`; `agentterrier.ai` belongs to the AWS stack (#443 re-federates the backend onto it). The VE stack borrowed `broker./gate.agentterrier.ai` until #445 **Phase A orphaned those records** (Route53 writes from VE tooling are now refused — `setup-cloud-ve.sh` step 55 guard). The `.cn` zone is hosted on **Volcano DNS** (not Route53) and its records **attach once 备案 clears** (#445 Phase B, which also lands the Volcano-DNS upsert tooling). Until then the stack has **no public FQDN** — probes are IP-direct (`VE_BROKER_PUBLIC_IP`), which was already the effective posture (China DPI SNI-resets cert-logged FQDNs).
 
 | Endpoint | AWS twin | Status |
 |---|---|---|
-| **`broker.agentterrier.ai`** → 115.190.149.132 | `broker.litentry.org` | ✅ **LIVE** (2026-07-02): Route53 A (step 55) + nginx vhost → `127.0.0.1:8091` + Let's Encrypt TLS (host step 6). Serves 502 until the broker service is enabled — deliberate. |
-| `signer.agentterrier.ai` | `signer.litentry.org` | later — when the signer service deploys on the VE host |
-| `cred.` / `memory.` / `config.agentterrier.ai` | same on litentry.org | later — with the workers-on-VE deploy (mirror `dns-upsert-workers.sh` as a step-55 extension) |
-| `audit.agentterrier.ai` | `audit.litentry.org` | later — with the audit worker, if it runs on VE |
-| ~~`email.agentterrier.ai`~~ | `email.litentry.org` | **never** — email stays AWS SES (hybrid decision) |
-| ~~`mcp.agentterrier.ai`~~ | `mcp.litentry.org` | deferred with #152 |
-| OIDC issuer | `broker.litentry.org` (self-hosted) | **no DNS needed** — TOS-hosted bucket issuer (above). Optional later: move the issuer to `broker.agentterrier.ai` for full AWS parity (needs provider re-registration; the broker binary already serves `/.well-known/*`). |
+| **`broker.agentterrier.cn`** → the VE EIP | `broker.litentry.org` | ⏳ **attaches post-备案** (#445 Phase B: Volcano-DNS A + host step 6 vhost/TLS re-run). The former `broker.agentterrier.ai` was LIVE 2026-07-02 → orphaned by #445 Phase A; the host still answers IP-direct on `:443` (502 until the broker service is enabled — deliberate). |
+| `signer.agentterrier.cn` | `signer.litentry.org` | later — when the signer service deploys on the VE host |
+| `cred.` / `memory.` / `config.agentterrier.cn` | same on litentry.org | later — with the workers-on-VE deploy |
+| `audit.agentterrier.cn` | `audit.litentry.org` | later — with the audit worker, if it runs on VE |
+| ~~`email.agentterrier.cn`~~ | `email.litentry.org` | **never** — email stays AWS SES (hybrid decision) |
+| ~~`mcp.agentterrier.cn`~~ | `mcp.litentry.org` | deferred with #152 |
+| OIDC issuer | `broker.litentry.org` (self-hosted) | **no DNS needed** — TOS-hosted bucket issuer (above), deliberately DNS-decoupled so the #445 orphan/attach does not touch federation. Optional later: move the issuer to `broker.agentterrier.cn` for full AWS parity (needs provider re-registration; the broker binary already serves `/.well-known/*`). |
 
 ## Stack tooling (issue [#373](https://github.com/litentry/agentKeys/issues/373) — LANDED)
 
 Stack selection gained the cloud axis ahead of the follow-ups below, with the VE stack rendered **degraded** until they land (the #283 chain-degraded pattern):
 
-- **Fleet console:** the `ve` stack is inventoried from `operator-workstation.ve.env` (board line = broker `healthz` + EIP; `c` picker entry `ve (heima · https://broker.agentterrier.ai)`), and the `d` menu gained a VE deploy job — `ssh-broker.sh ve` then `setup-broker-host-ve.sh` (no outer sudo; the script escalates itself).
+- **Fleet console:** the `ve` stack is inventoried from `operator-workstation.ve.env` (board line = broker `healthz` + EIP, probed IP-direct; `c` picker entry `ve (heima · https://broker.agentterrier.cn)` — the #445 target name, unresolvable until Phase B), and the `d` menu gained a VE deploy job — `ssh-broker.sh ve` then `setup-broker-host-ve.sh` (no outer sudo; the script escalates itself).
 - **SSH:** `bash scripts/utils/ssh-broker.sh ve` (suggested alias `ssh-agentterrier`) — always `.pem` + `broker-manager`; VE has no EC2 Instance Connect.
 - **Daemon/web:** the fleet injects the env-file-derived stack inventory as `AGENTKEYS_STACKS_JSON` → the daemon serves `GET /v1/stack/list` (per-stack broker `healthz` probe + which stack it runs) and reports `daemonBroker` on the chain endpoints; the web chain page renders the selector (active / degraded per stack).
 - **Browser isolation:** master-identity pointers are namespaced per **(chain, broker)** (`<key>:<chain>@<broker-host>`, one-shot migration from the #313 chain-only keys) — Heima-AWS and Heima-VE sessions/onboarding never cross. Negative tests: `apps/parent-control/lib/__tests__/identityStore.test.ts` (CI: e2e-ci rust-checks `npm test`).

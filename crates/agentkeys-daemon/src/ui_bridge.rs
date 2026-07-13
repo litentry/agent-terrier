@@ -4634,13 +4634,13 @@ mod stack_list_tests {
         let raw = r#"[
             {"name":"prod","chain":"heima","broker_url":"https://broker.litentry.org"},
             {"name":"base","chain":"base","broker_url":"https://broker-base.litentry.org"},
-            {"name":"ve","chain":"heima","broker_url":"https://broker.agentterrier.ai"}
+            {"name":"ve","chain":"heima","broker_url":"https://broker.agentterrier.cn"}
         ]"#;
         let stacks = parse_stacks_json(Some(raw));
         assert_eq!(stacks.len(), 3);
         assert_eq!(
             stacks[2],
-            entry("ve", "heima", "https://broker.agentterrier.ai")
+            entry("ve", "heima", "https://broker.agentterrier.cn")
         );
     }
 
@@ -4659,7 +4659,7 @@ mod stack_list_tests {
     #[test]
     fn same_chain_different_broker_is_not_active() {
         let aws = entry("prod", "heima", "https://broker.litentry.org");
-        let ve = entry("ve", "heima", "https://broker.agentterrier.ai");
+        let ve = entry("ve", "heima", "https://broker.agentterrier.cn");
         // daemon bound to the AWS broker:
         assert!(stack_is_active(
             &aws,
@@ -4675,22 +4675,22 @@ mod stack_list_tests {
         assert!(stack_is_active(
             &ve,
             "heima",
-            Some("https://broker.agentterrier.ai")
+            Some("https://broker.agentterrier.cn")
         ));
         assert!(!stack_is_active(
             &aws,
             "heima",
-            Some("https://broker.agentterrier.ai")
+            Some("https://broker.agentterrier.cn")
         ));
     }
 
     #[test]
     fn active_matching_normalizes_case_and_trailing_slash() {
-        let ve = entry("ve", "heima", "https://broker.agentterrier.ai");
+        let ve = entry("ve", "heima", "https://broker.agentterrier.cn");
         assert!(stack_is_active(
             &ve,
             "HEIMA",
-            Some("https://broker.agentterrier.ai/")
+            Some("https://broker.agentterrier.cn/")
         ));
         // a brokerless daemon matches no inventory stack
         assert!(!stack_is_active(&ve, "heima", None));
@@ -4698,7 +4698,7 @@ mod stack_list_tests {
         assert!(!stack_is_active(
             &ve,
             "base",
-            Some("https://broker.agentterrier.ai")
+            Some("https://broker.agentterrier.cn")
         ));
     }
 }
