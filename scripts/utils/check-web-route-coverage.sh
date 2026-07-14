@@ -45,9 +45,6 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/auth/logout	session-mutating (downgrades the seeded J1) — would break later suite-6 steps; needs an isolated-daemon test
 /v1/auth/relogin/start	#242 passkey re-login — browser WebAuthn assert; broker halves live-verified in #242; CDP virtual-authenticator planned
 /v1/auth/relogin/finish	same re-login ceremony pair
-/v1/workers/:id	per-worker detail read — same captured-id fixture as /v1/actors/:id
-/v1/actors/:id	per-actor detail read — add a suite-6 read once an actor id from /v1/actors is captured as a fixture
-/v1/actors/:id/caps	per-actor caps read — same captured-actor-id fixture
 /v1/actors/:id/scope	legacy scope update (panel uses /v1/scope/build+submit, covered) — remove route or test when panel migration completes
 /v1/actors/:id/scope/grant	same legacy scope surface
 /v1/actors/:id/payment-cap	payment caps UI not wired to chain yet (#97 payments pending)
@@ -85,10 +82,13 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/master/gateway/login/start	same gateway-admin forward — removed by a suite-6 step once the test env deploys the gateway with an admin token
 /v1/master/gateway/login/status	same gateway-admin forward (35 s server-held poll)
 /v1/master/gateway/login/verify	same gateway-admin forward
+/v1/master/gateway/login/disconnect	same gateway-admin forward — disconnect ceremony pair to login/verify; surfaced by the 2026-07-14 build_router()-scoped extraction fix, was previously invisible to this ratchet
 /v1/master/gateway/bind/invite	same gateway-admin forward — bind ceremony proven in ilink_admin_e2e
 /v1/master/gateway/bind/pending	same gateway-admin forward
 /v1/master/gateway/bind/approve	same gateway-admin forward
 /v1/master/gateway/contacts	same gateway-admin forward (worker route /v1/gateway/contacts also asserted by channel demo step 14)
+/v1/master/gateway/contacts/update	same gateway-admin forward — contact display-name/label edit; surfaced by the 2026-07-14 extraction fix
+/v1/master/gateway/contacts/revoke	same gateway-admin forward — contact revoke (D13-safe, no openid in response); surfaced by the 2026-07-14 extraction fix
 /v1/master/gateway/bind/reject	same gateway-admin forward — withdraw-invite ceremony proven headlessly by gateway_flow::bind_reject
 /v1/master/gateway/monitor	same gateway-admin forward — live message monitor; behavior proven by the crate's gateway_flow tests; live daemon-side coverage needs a deployed gateway + admin token (same as gateway/status)
 /v1/master/gateway/history	same gateway-admin forward — durable message history; append/read proven by gateway_flow::durable_history; same deployed-gateway limitation
@@ -99,8 +99,20 @@ read -r -d '' WAIVERS <<'EOF' || true
 EOF
 
 # ── 1. extract served routes ────────────────────────────────────────────────
-lit_routes="$(grep -oE '\.route\("(/[^"]+)"' "$UI" | sed -E 's/^\.route\("//; s/"$//')"
-const_names="$(grep -oE '\.route\(([A-Z][A-Z0-9_]*)' "$UI" | sed -E 's/^\.route\(//' | sort -u)"
+# Scoped to the `build_router()` fn body ONLY — the file also carries unit
+# tests that stand up their OWN `Router::new()...route(...)` to mock the
+# BROKER side of a proxy call (e.g. `/v1/auth/passkey/verify` mocking the
+# broker in relogin_finish_restores_the_session_from_a_verified_assertion);
+# scanning the whole file misattributes those as ui_bridge-served routes.
+# Within that scope, `.route(\n    "/path",\n    handler)` (rustfmt-wrapped,
+# long paths) is joined onto one line before matching — a plain single-line
+# grep silently dropped every multi-line registration (found 2026-07-14: 11
+# real routes, incl. the whole gateway login/bind ceremony, were invisible).
+ROUTER_FN="$(awk '/^pub fn build_router/,/^}/' "$UI")"
+[ -n "$ROUTER_FN" ] || { bad "cannot locate build_router() in $UI"; exit 2; }
+ROUTER_FN_JOINED="$(printf '%s' "$ROUTER_FN" | perl -0777 -pe 's/\.route\(\s*\n\s*/.route(/g')"
+lit_routes="$(printf '%s' "$ROUTER_FN_JOINED" | grep -oE '\.route\("(/[^"]+)"' | sed -E 's/^\.route\("//; s/"$//')"
+const_names="$(printf '%s' "$ROUTER_FN_JOINED" | grep -oE '\.route\(([A-Z][A-Z0-9_]*)' | sed -E 's/^\.route\(//' | sort -u)"
 const_routes=""
 for cn in $const_names; do
   v="$(grep -rhoE "pub const $cn: &str = \"[^\"]+\"" "$PROTO_DIR" "$UI" 2>/dev/null | head -1 | sed -E 's/.*= "//; s/"$//')"
