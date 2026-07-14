@@ -207,6 +207,115 @@ impl OpenVikingClient {
         }
         Ok(())
     }
+
+    /// The production ingest leg (#399): make sure every gate-authorized line
+    /// is present in OpenViking's ranking index BEFORE the rank call, tracked
+    /// by a manifest file in the sandbox filesystem so warm turns cost zero
+    /// writes. Content-hash URIs make the mirror idempotent regardless of
+    /// namespace order or churn.
+    ///
+    /// Rebuild-on-respawn IS this function: a fresh sandbox has no manifest and
+    /// an empty index, so the first ranked turn re-mirrors everything from the
+    /// gate-authorized canonical lines (the durable truth never lives here).
+    /// Best-effort by design — a failed write is counted, logged by the caller,
+    /// and retried on the next turn; ranking then falls back deterministically.
+    ///
+    /// Returns `(mirrored, failed)` — lines newly written (or already present
+    /// server-side) vs lines whose write errored.
+    pub async fn ensure_ingested(
+        &self,
+        namespace: &str,
+        lines: &[MemoryLine],
+        manifest: &std::path::Path,
+    ) -> (usize, usize) {
+        if lines.is_empty() {
+            return (0, 0);
+        }
+        let seen = read_manifest(manifest);
+        let mut mirrored = 0usize;
+        let mut failed = 0usize;
+        let mut new_entries: Vec<String> = Vec::new();
+        for line in lines {
+            let hash = line_hash(&line.text);
+            let key = format!("{namespace}\t{hash}");
+            if seen.contains(&key) {
+                continue;
+            }
+            let uri = format!(
+                "viking://user/{}/memories/{namespace}/mem_{hash}.md",
+                if self.user.is_empty() {
+                    "default"
+                } else {
+                    &self.user
+                }
+            );
+            match self.write_content(&uri, &line.text).await {
+                Ok(()) => {
+                    mirrored += 1;
+                    new_entries.push(key);
+                }
+                // mode:"create" on an already-present URI — the index HAS the
+                // line (e.g. manifest lost but index warm); record + move on.
+                Err(OpenVikingError::Http { body, .. })
+                    if body.to_ascii_lowercase().contains("exist") =>
+                {
+                    mirrored += 1;
+                    new_entries.push(key);
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        if !new_entries.is_empty() {
+            append_manifest(manifest, &new_entries);
+        }
+        (mirrored, failed)
+    }
+}
+
+/// Manifest path for [`OpenVikingClient::ensure_ingested`]:
+/// `AGENTKEYS_OV_INGEST_MANIFEST`, else `$HOME/.agentkeys/ov-ingested.txt`.
+/// Lives in the SANDBOX filesystem on purpose — respawn wipes it, and the next
+/// ranked turn rebuilds the index from canonical (#399 persistence decision).
+pub fn ingest_manifest_from_env() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("AGENTKEYS_OV_INGEST_MANIFEST") {
+        if !p.trim().is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::Path::new(&home)
+        .join(".agentkeys")
+        .join("ov-ingested.txt")
+}
+
+/// First 8 bytes of SHA-256 over the line text, hex — stable across turns and
+/// namespace reorderings, so the same line never mirrors twice.
+fn line_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn read_manifest(path: &std::path::Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(path)
+        .map(|s| s.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default()
+}
+
+fn append_manifest(path: &std::path::Path, entries: &[String]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        for e in entries {
+            let _ = writeln!(f, "{e}");
+        }
+    }
 }
 
 fn normalize(text: &str) -> String {
@@ -367,5 +476,107 @@ mod tests {
             .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "Allergic to peanuts.");
+    }
+
+    // ── #399 ingest leg ──────────────────────────────────────────────────────
+
+    type WriteLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Stub serving BOTH write (records URIs; `status` controls the reply) and
+    /// find, for the ingest tests.
+    async fn spawn_ingest_stub(write_status: u16, write_body: &'static str) -> (String, WriteLog) {
+        use axum::http::StatusCode;
+        let log: WriteLog = Default::default();
+        let log_c = log.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/content/write",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let log = log_c.clone();
+                    async move {
+                        log.lock()
+                            .unwrap()
+                            .push(body["uri"].as_str().unwrap_or_default().to_string());
+                        (
+                            StatusCode::from_u16(write_status).unwrap(),
+                            write_body.to_string(),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/search/find",
+                post(|| async { Json(serde_json::json!({ "result": {"results": []} })) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), log)
+    }
+
+    #[tokio::test]
+    async fn ingest_mirrors_once_then_manifest_skips() {
+        let (endpoint, log) = spawn_ingest_stub(200, "{}").await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+
+        let (mirrored, failed) = c.ensure_ingested("home", &lines(), &manifest).await;
+        assert_eq!((mirrored, failed), (2, 0));
+        let wrote = log.lock().unwrap().clone();
+        assert_eq!(wrote.len(), 2);
+        // content-hash URIs under the client's user + the namespace
+        assert!(wrote[0].starts_with("viking://user/default/memories/home/mem_"));
+        assert!(wrote[0].ends_with(".md"));
+
+        // second call: manifest short-circuits — ZERO new writes
+        let (mirrored2, failed2) = c.ensure_ingested("home", &lines(), &manifest).await;
+        assert_eq!((mirrored2, failed2), (0, 0));
+        assert_eq!(log.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ingest_treats_already_exists_as_mirrored() {
+        // index warm but manifest lost (e.g. hand-wiped): server says exists →
+        // counted mirrored + recorded, so the NEXT call skips the write.
+        let (endpoint, log) = spawn_ingest_stub(
+            409,
+            r#"{"status":"error","error":{"message":"uri already exists"}}"#,
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+
+        let (mirrored, failed) = c.ensure_ingested("home", &lines(), &manifest).await;
+        assert_eq!((mirrored, failed), (2, 0));
+        let (m2, f2) = c.ensure_ingested("home", &lines(), &manifest).await;
+        assert_eq!((m2, f2), (0, 0));
+        assert_eq!(log.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ingest_counts_failures_and_retries_next_turn() {
+        let (endpoint, log) = spawn_ingest_stub(500, "boom").await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+
+        let (mirrored, failed) = c.ensure_ingested("home", &lines(), &manifest).await;
+        assert_eq!((mirrored, failed), (0, 2));
+        // nothing recorded → the next turn retries every line
+        let (m2, f2) = c.ensure_ingested("home", &lines(), &manifest).await;
+        assert_eq!((m2, f2), (0, 2));
+        assert_eq!(log.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn line_hash_is_stable_and_short() {
+        let a = line_hash("Allergic to peanuts.");
+        assert_eq!(a.len(), 16);
+        assert_eq!(a, line_hash("Allergic to peanuts."));
+        assert_ne!(a, line_hash("Chengdu trip — Apr 12 to 16."));
     }
 }

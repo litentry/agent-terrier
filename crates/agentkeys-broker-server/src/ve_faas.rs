@@ -193,6 +193,14 @@ pub struct VeFaasClient {
     inference: agentkeys_inference_creds::Resolver,
     /// Optional web-search model forwarded to instances (`SEARCH_MODEL`).
     search_model: Option<String>,
+    /// Optional Ark EMBEDDING endpoint forwarded to instances
+    /// (`OPENVIKING_EMBED_MODEL` + `OPENVIKING_EMBED_DIMENSION`) — the baked
+    /// OpenViking engine renders them into ov.conf (start-openviking.sh) so a
+    /// spawned sandbox ranks memory SEMANTICALLY (#399). Absent = the engine
+    /// boots without an embedder and the hook stays on the lexical fallback
+    /// (loud warn in the sandbox log — never a failure).
+    openviking_embed_model: Option<String>,
+    openviking_embed_dimension: Option<String>,
     /// Spawns are serialized so two concurrent resolves for the same (or
     /// different) delegates can't race list→create into duplicates. Spawn is
     /// a rare event (pair / device boot); one lock is simpler than a
@@ -216,6 +224,8 @@ impl VeFaasClient {
     ///   VOLCENGINE_ACCESS_KEY / _SECRET_KEY  broker VE identity (required with the above)
     ///   VOLCENGINE_REGION                  default cn-beijing
     ///   SEARCH_MODEL                       optional, forwarded to instances
+    ///   OPENVIKING_EMBED_MODEL             optional Ark embedding endpoint id, forwarded (#399)
+    ///   OPENVIKING_EMBED_DIMENSION         optional, forwarded with the model (must match it)
     ///   AGENTKEYS_INFERENCE_CREDS_DIR      ark-family file dir (#338 loader)
     pub fn from_env() -> Result<Option<Self>> {
         let get = |k: &str| std::env::var(k).ok();
@@ -242,6 +252,12 @@ impl VeFaasClient {
             config,
             inference: agentkeys_inference_creds::Resolver::from_process(),
             search_model: std::env::var("SEARCH_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            openviking_embed_model: std::env::var("OPENVIKING_EMBED_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            openviking_embed_dimension: std::env::var("OPENVIKING_EMBED_DIMENSION")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             ensure_lock: tokio::sync::Mutex::new(()),
@@ -388,6 +404,14 @@ impl VeFaasClient {
         ];
         if let Some(m) = &self.search_model {
             envs.push(("SEARCH_MODEL".to_string(), m.clone()));
+        }
+        // #399 — semantic memory ranking: the baked OpenViking engine needs the
+        // Ark embedding endpoint; dimension only travels with a model.
+        if let Some(m) = &self.openviking_embed_model {
+            envs.push(("OPENVIKING_EMBED_MODEL".to_string(), m.clone()));
+            if let Some(d) = &self.openviking_embed_dimension {
+                envs.push(("OPENVIKING_EMBED_DIMENSION".to_string(), d.clone()));
+            }
         }
         Ok(envs)
     }
