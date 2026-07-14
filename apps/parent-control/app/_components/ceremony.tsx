@@ -604,14 +604,31 @@ export function OnboardingScreen({
     setBusy(true);
     setNote('');
     const r = await client.startEmailVerify(email.trim());
-    setBusy(false);
     if (r.ok) {
+      setBusy(false);
       setRequestId(r.data.requestId);
       setPhase('verify');
-    } else {
-      setEnrollMode('demo');
-      setPhase('ceremony');
+      return;
     }
+    // A failed email/start is NOT automatically "offline". The demo narration
+    // exists for a genuinely ABSENT backend; when the daemon is up, the
+    // failure is real (broker email_link unarmed, SES sender unverified, rate
+    // limit) and silently starting the ceremony would walk the operator past
+    // verification as if their email had been confirmed — the exact bug the
+    // VE stack shipped. Ask the daemon directly instead of inferring from the
+    // failed call: postJson reports an HTTP error and a dead socket with the
+    // same `unreachable` reason, so r.status cannot tell them apart.
+    const conn = await client.status();
+    setBusy(false);
+    if (conn.kind === 'connected') {
+      setNote(
+        `Couldn't send the verification email — ${r.status.detail ?? 'the broker rejected the request'}. ` +
+          `Your email is NOT verified, so onboarding can't continue. Fix the backend and try again.`,
+      );
+      return;
+    }
+    setEnrollMode('demo');
+    setPhase('ceremony');
   };
 
   // While in 'verify', poll the broker until the operator clicks the magic link.
