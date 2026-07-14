@@ -258,6 +258,11 @@ pub async fn memory_inject(
     } else {
         None
     };
+    // #399 — the production ingest leg's manifest (sandbox-local; respawn wipes
+    // it and the next ranked turn re-mirrors from canonical). Resolved once.
+    let ov_ingest_manifest = openviking
+        .as_ref()
+        .map(|_| agentkeys_memory_openviking::ingest_manifest_from_env());
     let query = if openviking.is_some() {
         read_turn_query()
     } else {
@@ -288,6 +293,25 @@ pub async fn memory_inject(
                     let selected = match (&openviking, &query) {
                         (Some(ov), Some(q)) => {
                             let lines = agentkeys_memory_engine::MemoryLine::from_blob(&text);
+                            // #399 self-healing ingest: mirror any gate-authorized
+                            // line the index doesn't hold yet, so a fresh/respawned
+                            // sandbox ranks semantically ON THIS turn (never blocks:
+                            // failures are logged + retried next turn, and the rank
+                            // below falls back deterministically).
+                            if let Some(manifest) = &ov_ingest_manifest {
+                                let (mirrored, failed) =
+                                    ov.ensure_ingested(ns, &lines, manifest).await;
+                                if mirrored > 0 || failed > 0 {
+                                    eprintln!(
+                                        "[agentkeys hook memory-inject] openviking ingest {ns}: {mirrored} line(s) mirrored{}",
+                                        if failed > 0 {
+                                            format!(", {failed} FAILED (retried next turn; ranking falls back)")
+                                        } else {
+                                            String::new()
+                                        }
+                                    );
+                                }
+                            }
                             match agentkeys_memory_openviking::rank_gate_bounded(
                                 ov, q, &lines, &budget,
                             )
