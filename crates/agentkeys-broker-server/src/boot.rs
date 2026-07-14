@@ -440,13 +440,14 @@ fn build_registry(
                     .ok()
                     .and_then(|s| s.parse::<i64>().ok())
                     .unwrap_or(30);
-                // Landing URL base derived from oidc_issuer host. Note:
-                // production deployments typically front the broker behind
-                // a reverse proxy; the operator can override via a future
-                // BROKER_EMAIL_LANDING_URL_BASE env var (V0.1-FOLLOWUPS).
-                let landing_base = format!(
-                    "{}/auth/email/landing",
-                    config.oidc_issuer.trim_end_matches('/')
+                // Landing URL base: BROKER_EMAIL_LANDING_URL_BASE when set,
+                // else oidc_issuer. The issuer default is only correct when
+                // the issuer IS the broker's public host (AWS stacks); on VE
+                // the issuer is the TOS-bucket JWKS URL, which serves no
+                // landing page, so the unit sets the base to the broker vhost.
+                let landing_base = email_landing_base(
+                    std::env::var(env::BROKER_EMAIL_LANDING_URL_BASE).ok(),
+                    &config.oidc_issuer,
                 );
                 // SES verify cache path.
                 let data_dir = std::env::var(env::BROKER_DATA_DIR)
@@ -752,6 +753,19 @@ fn build_registry(
     })
 }
 
+/// Magic-link landing URL: `<base>/auth/email/landing`, where base is the
+/// `BROKER_EMAIL_LANDING_URL_BASE` override when non-empty, else the OIDC
+/// issuer (correct only when the issuer IS the broker's public host — on VE
+/// the issuer is the TOS-bucket JWKS URL, which serves no landing page).
+/// Env value is injected by the caller so tests never mutate process env.
+#[cfg(feature = "auth-email-link")]
+fn email_landing_base(override_base: Option<String>, oidc_issuer: &str) -> String {
+    let base = override_base
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| oidc_issuer.to_string());
+    format!("{}/auth/email/landing", base.trim_end_matches('/'))
+}
+
 /// Extract host portion from a URL like `https://broker.example.com/path` →
 /// `broker.example.com`. Used for the SIWE `domain` field.
 fn url_host(url: &str) -> String {
@@ -785,6 +799,34 @@ mod tests {
             audit_anchors: "sqlite".into(),
             refuse_to_boot_strict: false,
         }
+    }
+
+    #[cfg(feature = "auth-email-link")]
+    #[test]
+    fn email_landing_base_defaults_to_oidc_issuer() {
+        assert_eq!(
+            email_landing_base(None, "https://broker.litentry.org/"),
+            "https://broker.litentry.org/auth/email/landing"
+        );
+        // Empty/whitespace override falls back too (systemd Environment= with
+        // an empty value must not produce a scheme-less landing URL).
+        assert_eq!(
+            email_landing_base(Some("  ".into()), "https://broker.litentry.org"),
+            "https://broker.litentry.org/auth/email/landing"
+        );
+    }
+
+    #[cfg(feature = "auth-email-link")]
+    #[test]
+    fn email_landing_base_override_wins_over_issuer() {
+        // The VE shape: issuer = TOS-bucket JWKS URL, landing = broker vhost.
+        assert_eq!(
+            email_landing_base(
+                Some("https://broker.agentterrier.cn/".into()),
+                "https://agentterrier-oidc-2127642244.tos-s3-cn-beijing.volces.com"
+            ),
+            "https://broker.agentterrier.cn/auth/email/landing"
+        );
     }
 
     #[test]
