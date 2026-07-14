@@ -22,8 +22,24 @@ pub struct RegistryHandle {
 }
 
 impl RegistryHandle {
+    /// Boot-time load. A MISSING file is the legitimate first-boot state (the
+    /// registry is master-authored and grows via `mutate`, which persists it) —
+    /// start empty and say so loudly. Any other read/parse failure stays a hard
+    /// error, and `reload` stays strict: a registry that existed and then
+    /// vanished at runtime is contact-list loss, never silently emptied.
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        let reg = read_file(path)?;
+        let reg = match read_file(path) {
+            Ok(reg) => reg,
+            Err(e) if is_not_found(&e) => {
+                tracing::warn!(
+                    path,
+                    "contact registry file absent — first boot, starting EMPTY \
+                     (created on the first master-approved bind)"
+                );
+                ContactRegistry::default()
+            }
+            Err(e) => return Err(e),
+        };
         Ok(RegistryHandle {
             path: path.to_string(),
             inner: Arc::new(RwLock::new(reg)),
@@ -65,6 +81,15 @@ fn read_file(path: &str) -> anyhow::Result<ContactRegistry> {
     let reg: ContactRegistry =
         serde_json::from_str(&raw).with_context(|| format!("parsing contact registry {path}"))?;
     Ok(reg)
+}
+
+/// True when the error chain bottoms out in io `NotFound`. `read_file` wraps
+/// the io error in `.with_context`, so walk the chain rather than downcasting
+/// only the head.
+fn is_not_found(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<std::io::Error>())
+        .any(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Atomic write (tmp + rename), `0600` — the registry holds openids (PII) and a
@@ -123,5 +148,60 @@ mod tests {
             );
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    // First boot: no registry file yet (nothing bound) — the gateway must come
+    // up EMPTY, not crash-loop (the live VE incident: nginx 502, restart
+    // counter in the thousands). The first master-approved mutate then creates
+    // the file, and a fresh load reads it back.
+    #[test]
+    fn load_missing_file_is_first_boot_empty() {
+        let path = std::env::temp_dir()
+            .join(format!("ak-reg-firstboot-{}.json", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        std::fs::remove_file(&path).ok();
+
+        let handle = RegistryHandle::load(&path).unwrap();
+        let snap = handle.snapshot();
+        assert!(snap.bound.is_empty() && snap.pending.is_empty() && snap.invites.is_empty());
+        assert!(!std::path::Path::new(&path).exists(), "load never writes");
+
+        handle
+            .mutate(|reg| {
+                reg.invites.push(BindInvite {
+                    bind_code: "AK-FIRST1".into(),
+                    contact_id: "c-first".into(),
+                    display_name: "first".into(),
+                    tier: ContactTier::Elder,
+                    reach: vec![],
+                });
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            RegistryHandle::load(&path)
+                .unwrap()
+                .snapshot()
+                .invites
+                .len(),
+            1
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    // The strict half of the contract: a registry that EXISTED and then
+    // vanished at runtime is contact-list loss — reload must fail loud, never
+    // silently empty the household's contacts.
+    #[test]
+    fn reload_missing_file_stays_a_hard_error() {
+        let path = std::env::temp_dir()
+            .join(format!("ak-reg-reload-{}.json", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        std::fs::write(&path, r#"{"bound":[],"pending":[]}"#).unwrap();
+        let handle = RegistryHandle::load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(handle.reload().is_err());
     }
 }
