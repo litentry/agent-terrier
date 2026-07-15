@@ -39,6 +39,13 @@ interface PendingMasterRegister {
 
 type EnrollOutcome =
   | { mode: 'fallback' }
+  // Bound on chain, but this browser holds no usable passkey for that omni.
+  // DISTINCT from 'fallback': the backend is healthy and there is nothing to
+  // retry — only an operator-driven reset unblocks it. It had to become its own
+  // variant because the caller mapped every non-'real' outcome to 'demo', so the
+  // one state that REQUIRES an action rendered as "demo · no daemon" (a lie —
+  // the daemon was up), narrated a fake ceremony, and never asked for Touch ID.
+  | { mode: 'needs-reset'; omni?: string; reason: string }
   | { mode: 'real'; register?: PendingMasterRegister; registerError?: string };
 
 async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<EnrollOutcome> {
@@ -86,21 +93,34 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
       });
       return { mode: 'real' }; // already onboarded; the bound-passkey pointer is intact
     }
+    // Bound on chain but no USABLE pointer (storage cleared / different browser /
+    // another identity's key): we can't safely re-enroll (first-master-only can't
+    // re-bind), so surface "reset master + re-onboard" rather than minting an
+    // unusable passkey. Returned as its OWN mode: as plain 'fallback' the caller
+    // collapsed it into 'demo' and narrated a fake ceremony instead.
     if (existingCred && !pointerMatches) {
       akLog('onboarding: passkey pointer belongs to a DIFFERENT identity — not reusing', {
         pointerOmni,
         sessionOmni,
       });
-    } else {
-      akLog('onboarding: master bound on chain but NO local passkey pointer — reset + re-onboard needed', {
+      return {
+        mode: 'needs-reset',
         omni: sessionOmni,
-      });
+        reason:
+          `this browser holds a passkey for a DIFFERENT identity (${pointerOmni ?? 'unknown'}), ` +
+          `so it cannot sign for this one`,
+      };
     }
-    // Bound on chain but no USABLE pointer (storage cleared / different browser /
-    // another identity's key): we can't safely re-enroll (first-master-only can't
-    // re-bind) — surface so the UI offers "reset master + re-onboard" rather than
-    // minting an unusable passkey.
-    return { mode: 'fallback' };
+    akLog('onboarding: master bound on chain but NO local passkey pointer — reset + re-onboard needed', {
+      omni: sessionOmni,
+    });
+    return {
+      mode: 'needs-reset',
+      omni: sessionOmni,
+      reason:
+        'this email already has a master bound on chain, but this browser holds no passkey for it ' +
+        '(storage cleared, or it was bound in another browser/profile)',
+    };
   }
 
   const begin = await client.enrollK11Begin({ userName: email, userDisplayName: email });
@@ -405,7 +425,12 @@ export function OnboardingScreen({
   // email → verify → ceremony (passkey) → setup (#207 1A: author the taxonomy)
   // → onComplete. `setup` is the last onboarding step before connecting agents.
   const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony' | 'setup'>('email');
-  const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending'>('pending');
+  // 'blocked' = the enroll cannot proceed and retrying will not help (a master is
+  // bound on chain that this browser has no passkey for). Distinct from 'demo',
+  // which means "no backend, narrate it" — conflating them told the operator
+  // "no daemon" while the daemon was healthy.
+  const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending' | 'blocked'>('pending');
+  const [blockedReason, setBlockedReason] = useState('');
   const [email, setEmail] = useState('');
   const [requestId, setRequestId] = useState('');
   const [omni, setOmni] = useState('');
@@ -667,6 +692,16 @@ export function OnboardingScreen({
         const outcome = await tryRealEnroll(client, email.trim());
         pendingRegister.current = outcome.mode === 'real' ? outcome.register ?? null : null;
         registerError.current = outcome.mode === 'real' ? outcome.registerError ?? null : null;
+        // A blocked enroll is NOT a demo. Mapping it to 'demo' rendered the chip
+        // "demo · no daemon" over a perfectly healthy daemon, narrated the whole
+        // ceremony without ever calling WebAuthn (so no Touch ID, with no reason
+        // given), and dropped the operator at a config error several steps later.
+        if (outcome.mode === 'needs-reset') {
+          setEnrollMode('blocked');
+          setBlockedReason(outcome.reason);
+          setOmni(outcome.omni ?? '');
+          throw new Error(`master already bound — ${outcome.reason}`);
+        }
         setEnrollMode(outcome.mode === 'real' ? 'real' : 'demo');
       },
     },
@@ -821,7 +856,25 @@ export function OnboardingScreen({
               Bringing up your trust core · {maskEmail(email, maskEm)}
               {enrollMode === 'real' && <span className="chip ok" style={{ marginLeft: 8 }}>K11 bound · real WebAuthn</span>}
               {enrollMode === 'demo' && <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
+              {enrollMode === 'blocked' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>blocked · reset required</span>}
             </div>
+            {/* The ceremony phase renders no `note` (that lives in the email phase),
+                so a blocked enroll had NO on-screen explanation at all: the run just
+                narrated to the end without a Touch ID prompt. */}
+            {enrollMode === 'blocked' && (
+              <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
+                <strong>Can&apos;t bind a passkey — {blockedReason}.</strong>
+                <br />
+                Touch ID is not requested because there is nothing safe to sign: the first-master
+                binding already exists on chain, and a new passkey could not replace it.
+                <br />
+                Fix it one of two ways — either sign in from the browser that holds the original
+                passkey, or <strong>reset the master</strong> (dashboard ▸ <em>reset master</em>, or
+                <span className="mono"> curl -X POST http://127.0.0.1:3214/v1/master/reset</span>),
+                which unbinds the on-chain <span className="mono">operatorMasterWallet</span> so a
+                fresh passkey can bind. Then re-onboard with the same email.
+              </div>
+            )}
             {omni && (
               <div className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)', marginBottom: 14, wordBreak: 'break-all' }}>
                 logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni {omni}

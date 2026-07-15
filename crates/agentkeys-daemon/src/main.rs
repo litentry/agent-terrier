@@ -1243,6 +1243,9 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
             omni,
             j1,
             wallet: String::new(),
+            // The seam supplies a real J1 (the harness's registered master), so
+            // this is a full session — the identity-only diagnostic never fires.
+            identity_only_reason: None,
         });
         info!("ui-bridge: SEEDED onboarding session (harness web-parity seam) — interactive onboarding bypassed");
     } else {
