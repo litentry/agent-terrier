@@ -45,6 +45,9 @@ hex = "0.4"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
 aws-sdk-sts = "1"
+# #440 — the ECS/Fargate delegate-sandbox driver (aws_ecs.rs), the AWS twin
+# of the veFaaS lifecycle behind the sandbox_backend seam.
+aws-sdk-ecs = "1"
 # Real SES sender for email-link auth. Optional, gated behind
 # auth-email-link — without the feature the broker has no SES sender at
 # all (StubEmailSender remains for tests). Pulled in by Pass 1 of

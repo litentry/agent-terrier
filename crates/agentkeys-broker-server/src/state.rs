@@ -65,11 +65,12 @@ pub struct AppState {
     /// OmniAccount. Recovery flow consults this to find which master
     /// should sign the recovery grant.
     pub identity_link_store: Arc<IdentityLinkStore>,
-    /// #377 broker-driven veFaaS sandbox lifecycle (one hermes-sandbox per
-    /// delegate device, spawned on pair/resolve, killed on unpair). `None`
-    /// when the host carries no sandbox config (`SANDBOX_FUNCTION_ID` unset —
-    /// the AWS broker), and every hook site is then a no-op.
-    pub ve_faas: Option<Arc<crate::ve_faas::VeFaasClient>>,
+    /// #377/#440 broker-driven sandbox lifecycle (one hermes-sandbox per
+    /// delegate device, spawned on pair/resolve, killed on unpair) behind the
+    /// per-cloud [`SandboxBackend`](crate::sandbox_backend::SandboxBackend)
+    /// seam (veFaaS on VE, ECS/Fargate on AWS). `None` when the host carries
+    /// no sandbox config, and every hook site is then a no-op.
+    pub sandbox: Option<Arc<crate::sandbox_backend::SandboxBackend>>,
     /// #427 spawn/archive ceremony context, build → submit (IN-MEMORY by
     /// design — the pending-spawn row carries the delegate K10 secret, which
     /// must never sit at rest; see `handlers::spawn`).

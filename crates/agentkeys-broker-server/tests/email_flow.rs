@@ -136,7 +136,7 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         agent_delegation_store: Arc::new(
             agentkeys_broker_server::storage::AgentDelegationStore::open_in_memory().unwrap(),
         ),
-        ve_faas: None,
+        sandbox: None,
         pending_ceremonies: Arc::new(
             agentkeys_broker_server::handlers::spawn::PendingCeremonyStore::new(),
         ),
