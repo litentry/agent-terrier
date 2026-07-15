@@ -180,7 +180,7 @@ choose_port(){
     { [ "$sel" -ge 1 ] && [ "$sel" -le "${#devs[@]}" ]; } || { log fail "port: out of range"; exit 1; }
     CHOSEN_PORT="${devs[$((sel-1))]}"; log ok "port: selected ${CHOSEN_PORT}"
   else
-    log fail "port: ${#devs[@]} devices found and no TTY to prompt — pass --port. Candidates:"; printf '  %s\n' "${devs[@]}" >&2; exit 1
+    log fail "port: ${#devs[@]} devices found and no TTY to prompt — pass --port. Candidates:"; printf '  %s\n' ${devs[@]+"${devs[@]}"} >&2; exit 1
   fi
 }
 
