@@ -88,6 +88,22 @@ fn boot_fail(
 /// listener. Returns the constructed `BootArtifacts` (plugin registry,
 /// keypairs, store handles) for `main` to wire into `AppState`.
 pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
+    // 0. Identity namespace (#464). Loud on purpose: a wrong client_id forks
+    //    every omni this stack ever derives, so it must be visible in every
+    //    boot log — never a silent knob. Non-default values get a second,
+    //    unmissable line.
+    tracing::info!(
+        client_id = %config.client_id,
+        "identity namespace: OmniAccount = SHA256(client_id || type || value)"
+    );
+    if config.client_id != crate::identity::DEFAULT_CLIENT_ID {
+        tracing::warn!(
+            client_id = %config.client_id,
+            "NON-DEFAULT identity namespace — this stack's omnis are sovereign \
+             (per-stack client_id, #464); changing this value later forks every identity"
+        );
+    }
+
     // 1. Validate OIDC issuer URL (https in non-dev mode). `dev_mode` was
     //    read once into BrokerConfig — never re-read from process env here
     //    (parallel tests inject it via the config struct).
@@ -798,6 +814,7 @@ mod tests {
             auth_methods: "wallet_sig".into(),
             audit_anchors: "sqlite".into(),
             refuse_to_boot_strict: false,
+            client_id: crate::identity::DEFAULT_CLIENT_ID.to_string(),
         }
     }
 

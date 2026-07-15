@@ -101,6 +101,15 @@ pub const BROKER_SESSION_JWT_TTL_SECONDS: &str = "BROKER_SESSION_JWT_TTL_SECONDS
 // Auth method selection
 // ---------------------------------------------------------------------------
 
+/// Optional. Per-stack identity namespace (#464): the `client_id` input to
+/// `OmniAccount = SHA256(client_id || identity_type || identity_value)`.
+/// Default `agentkeys` (the AWS stack — unchanged by omission); the VE stack
+/// sets `agentterrier`. A wrong value forks EVERY identity on the stack as
+/// surely as a wrong signer secret — the broker logs it at boot and pins the
+/// derivation with vector tests. Changing a live stack's value requires a
+/// migration.
+pub const AGENTKEYS_CLIENT_ID: &str = "AGENTKEYS_CLIENT_ID";
+
 /// Optional. Comma-separated list of enabled auth methods. Default `wallet_sig`.
 /// Supported names: `wallet_sig`, `email_link`, `oauth2_google`.
 pub const BROKER_AUTH_METHODS: &str = "BROKER_AUTH_METHODS";
@@ -304,6 +313,11 @@ pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
             Group::SessionJwt,
         ),
         // Auth method selection
+        (
+            AGENTKEYS_CLIENT_ID,
+            "Per-stack omni-derivation namespace (#464). Default agentkeys; VE: agentterrier.",
+            Group::Core,
+        ),
         (
             BROKER_AUTH_METHODS,
             "Comma list of enabled auth methods.",

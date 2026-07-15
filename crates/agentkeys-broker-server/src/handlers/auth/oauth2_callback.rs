@@ -29,7 +29,7 @@ use serde::Deserialize;
 
 use crate::env;
 use crate::error::BrokerError;
-use crate::identity::derive_omni_account;
+use crate::identity::derive_with_client_id;
 use crate::jwt::issue::mint_session_jwt;
 use crate::state::SharedState;
 
@@ -108,7 +108,11 @@ pub async fn oauth2_callback(
         };
 
         // 3. Mint session JWT bound to (omni_account, identity_type, sub).
-        let omni = derive_omni_account(outcome.identity_type.canonical(), &outcome.sub);
+        let omni = derive_with_client_id(
+            &state.config.client_id,
+            outcome.identity_type.canonical(),
+            &outcome.sub,
+        );
         let ttl_seconds = std::env::var(env::BROKER_SESSION_JWT_TTL_SECONDS)
             .ok()
             .and_then(|s| s.parse::<u64>().ok())

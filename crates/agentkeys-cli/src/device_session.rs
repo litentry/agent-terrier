@@ -18,7 +18,10 @@
 //! (`crates/agentkeys-broker-server/src/plugins/auth/wallet_sig.rs`) and the
 //! on-chain `registerAgentDevice` inputs in `scripts/operator/chain/heima-agent-create.sh`:
 //!   `device_key_hash = keccak256(address_bytes)`               (cast keccak 0x<addr>)
-//!   `actor_omni      = sha256("agentkeys"||"evm"||addr_lc)`     (broker derive_omni_account)
+//!   `actor_omni      = broker wallet/verify response `omni_account` (0x-prefixed
+//!                      here) — the broker derives it under ITS per-stack
+//!                      client_id (#464: agentkeys on AWS, agentterrier on VE),
+//!                      so clients never re-derive with a hardcoded namespace
 //!   `pop_payload     = keccak256(utf8("agentkeys-agent-pop:" || device_key_hash))`
 //!   `pop_sig         = EIP-191(pop_payload)`                    (cast wallet sign)
 //!   `session         = wallet_sig SIWE (EIP-191 over siwe_message) -> session JWT`
@@ -28,7 +31,6 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
 use serde_json::{json, Value};
-use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
 fn keccak256(bytes: &[u8]) -> [u8; 32] {
@@ -179,13 +181,6 @@ pub async fn device_session(
     let address = evm_address(&vk);
     let addr_lc = address.to_lowercase();
 
-    // actor_omni = sha256("agentkeys" || "evm" || addr_lc)
-    let mut sh = Sha256::new();
-    sh.update(b"agentkeys");
-    sh.update(b"evm");
-    sh.update(addr_lc.as_bytes());
-    let actor_omni = format!("0x{}", hex::encode(sh.finalize()));
-
     // device_key_hash = keccak256(address_bytes)
     let addr_bytes = hex::decode(&addr_lc[2..]).context("address hex")?;
     let device_key_hash = format!("0x{}", hex::encode(keccak256(&addr_bytes)));
@@ -226,6 +221,17 @@ pub async fn device_session(
         .or_else(|| verify.get("jwt"))
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("wallet/verify missing session JWT: {verify}"))?;
+
+    // actor_omni comes FROM the broker's verify response (#464): the broker is
+    // the single derivation authority — its client_id is a per-stack namespace
+    // (agentkeys on AWS, agentterrier on VE), so a local re-derivation with a
+    // hardcoded client_id would silently diverge on any non-default stack.
+    // 0x-prefixed to match the on-chain consumers of this JSON (#423).
+    let actor_omni = verify
+        .get("omni_account")
+        .and_then(Value::as_str)
+        .map(|o| format!("0x{}", o.trim_start_matches("0x")))
+        .ok_or_else(|| anyhow!("wallet/verify missing omni_account: {verify}"))?;
 
     Ok(serde_json::to_string(&json!({
         "agent_address": address,

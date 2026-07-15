@@ -13,7 +13,7 @@ use std::sync::Arc;
 use agentkeys_broker_server::audit::AuditLog;
 use agentkeys_broker_server::config::BrokerConfig;
 use agentkeys_broker_server::create_router;
-use agentkeys_broker_server::identity::derive_omni_account;
+use agentkeys_broker_server::identity::{derive_with_client_id, DEFAULT_CLIENT_ID};
 use agentkeys_broker_server::jwt::issue::mint_session_jwt;
 use agentkeys_broker_server::jwt::verify::verify_session_jwt;
 use agentkeys_broker_server::oidc::OidcKeypair;
@@ -53,6 +53,7 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         auth_methods: "wallet_sig".into(),
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
+        client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
     };
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -124,7 +125,7 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
 /// Mint a master J1 session bound to a fresh master omni; returns (bearer, master_omni).
 fn master_session(state: &AppState) -> (String, String) {
     let master_wallet = "0xabcdef0123456789abcdef0123456789abcdef01";
-    let master_omni = derive_omni_account("evm", master_wallet).to_string();
+    let master_omni = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", master_wallet).to_string();
     let token = mint_session_jwt(
         &state.session_keypair,
         TEST_ISSUER,
