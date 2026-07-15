@@ -7,4 +7,4 @@
 
 pub mod omni_account;
 
-pub use omni_account::{derive_omni_account, OmniAccount, AGENTKEYS_CLIENT_ID};
+pub use omni_account::{derive_with_client_id, OmniAccount, DEFAULT_CLIENT_ID, VE_CLIENT_ID};

@@ -36,6 +36,11 @@ pub struct BrokerConfig {
     /// `BROKER_REFUSE_TO_BOOT_STRICT=true` collapses Tier-2 reachability
     /// probes into Tier-1 hard boot fails.
     pub refuse_to_boot_strict: bool,
+    /// Per-stack identity namespace (#464): the `client_id` input to omni
+    /// derivation (`AGENTKEYS_CLIENT_ID` env). Default `agentkeys` (AWS,
+    /// unchanged by omission); the VE stack sets `agentterrier`. Logged at
+    /// boot — a wrong value forks every identity on the stack.
+    pub client_id: String,
 }
 
 impl BrokerConfig {
@@ -110,6 +115,7 @@ impl BrokerConfig {
         let audit_anchors =
             std::env::var(env::BROKER_AUDIT_ANCHORS).unwrap_or_else(|_| "sqlite".to_string());
         let refuse_to_boot_strict = bool_env(env::BROKER_REFUSE_TO_BOOT_STRICT);
+        let client_id = parse_client_id(std::env::var(env::AGENTKEYS_CLIENT_ID).ok())?;
 
         Ok(Self {
             data_role_arn,
@@ -125,8 +131,41 @@ impl BrokerConfig {
             auth_methods,
             audit_anchors,
             refuse_to_boot_strict,
+            client_id,
         })
     }
+}
+
+/// Validate the per-stack omni-derivation namespace (#464). Unset ⇒ the
+/// historical `agentkeys` (AWS unchanged by omission). Set ⇒ must be a
+/// non-empty single token: the value feeds a hash, so whitespace or an
+/// accidentally-quoted paste would silently fork every identity — refuse
+/// to boot instead.
+fn parse_client_id(raw: Option<String>) -> anyhow::Result<String> {
+    let value = match raw {
+        None => return Ok(crate::identity::DEFAULT_CLIENT_ID.to_string()),
+        Some(v) => v,
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "{} is set but empty — unset it for the default ({}) or set the stack's namespace explicitly",
+            env::AGENTKEYS_CLIENT_ID,
+            crate::identity::DEFAULT_CLIENT_ID,
+        );
+    }
+    if trimmed != value
+        || trimmed
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+    {
+        anyhow::bail!(
+            "{}={:?} contains whitespace/quotes — a malformed namespace forks every derived identity",
+            env::AGENTKEYS_CLIENT_ID,
+            value,
+        );
+    }
+    Ok(trimmed.to_string())
 }
 
 /// True iff the env var is set to exactly `"true"`.
@@ -170,4 +209,31 @@ fn default_audit_db_path() -> PathBuf {
         .join(".agentkeys")
         .join("broker")
         .join("audit.sqlite")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_client_id;
+
+    #[test]
+    fn client_id_defaults_when_unset() {
+        assert_eq!(parse_client_id(None).unwrap(), "agentkeys");
+    }
+
+    #[test]
+    fn client_id_accepts_stack_namespace() {
+        assert_eq!(
+            parse_client_id(Some("agentterrier".into())).unwrap(),
+            "agentterrier"
+        );
+    }
+
+    #[test]
+    fn client_id_refuses_empty_and_malformed() {
+        assert!(parse_client_id(Some("".into())).is_err());
+        assert!(parse_client_id(Some("  ".into())).is_err());
+        assert!(parse_client_id(Some("agent terrier".into())).is_err());
+        assert!(parse_client_id(Some("\"agentterrier\"".into())).is_err());
+        assert!(parse_client_id(Some(" agentterrier".into())).is_err());
+    }
 }

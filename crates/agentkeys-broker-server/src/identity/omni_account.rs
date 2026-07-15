@@ -1,29 +1,38 @@
 //! `OmniAccount` derivation.
 //!
 //! Reuses dexs-backend's hash shape verbatim
-//! (`SHA256(client_id || identity_type || identity_value)`) but with our
-//! own `client_id = "agentkeys"`. This means the same email or wallet
-//! produces a *different* OmniAccount in our broker than in any other
-//! deployment using a different client_id (e.g. dexs-backend's
-//! `"wildmeta"`), giving each operator a sovereign identity namespace.
+//! (`SHA256(client_id || identity_type || identity_value)`). The
+//! `client_id` is a PER-STACK broker config value (#464): the AWS stack
+//! keeps the historical `"agentkeys"`, the VE stack derives under
+//! `"agentterrier"`. The same email or wallet therefore produces a
+//! *different* OmniAccount per stack (and per any other deployment, e.g.
+//! dexs-backend's `"wildmeta"`) — each stack is a sovereign identity
+//! namespace, which is what lets VE and AWS share the Heima chain without
+//! SidecarRegistry collisions or cross-stack secret mirroring.
 //!
 //! The derivation is deterministic and stable. Changing **any** of:
-//! - the constant `AGENTKEYS_CLIENT_ID`,
+//! - a stack's configured `client_id` (`AGENTKEYS_CLIENT_ID` env),
 //! - the `IdentityType::canonical()` strings (in `plugins/auth.rs`),
 //! - the byte concatenation order or separator,
 //!
 //! is a backwards-incompatible change for every stored OmniAccount and
-//! every grant/audit row keyed on one. The constants below are pinned;
-//! changing them requires a migration.
+//! every grant/audit row keyed on one — a wrong `client_id` forks every
+//! identity as surely as a wrong signer secret. The value is logged at
+//! boot and pinned by derivation-vector tests below; changing a live
+//! stack's value requires a migration.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// The canonical client_id input to `SHA256(client_id || type || value)`.
-///
-/// Pinned literal — see module docs. Distinct from dexs-backend's
-/// `"wildmeta"` and other operators' values.
-pub const AGENTKEYS_CLIENT_ID: &str = "agentkeys";
+/// Default `client_id` input to `SHA256(client_id || type || value)` —
+/// the AWS stack's historical namespace. A stack overrides it via broker
+/// config (`AGENTKEYS_CLIENT_ID`, see `BrokerConfig::client_id`); AWS is
+/// unchanged by omission, the VE stack sets `"agentterrier"`.
+pub const DEFAULT_CLIENT_ID: &str = "agentkeys";
+
+/// The VE stack's namespace (#464). Referenced here so the pinned vectors
+/// below and the VE unit env agree on one spelling.
+pub const VE_CLIENT_ID: &str = "agentterrier";
 
 /// Lowercase 64-char hex SHA256 digest. Newtype so the type system can
 /// distinguish OmniAccounts from other 32-byte hashes.
@@ -59,11 +68,12 @@ impl std::fmt::Display for OmniAccount {
 
 /// Compute `OmniAccount = SHA256(client_id || identity_type || identity_value)`.
 ///
-/// `client_id` MUST equal `AGENTKEYS_CLIENT_ID` for any OmniAccount that
-/// will be stored in this broker's database; the parameter is exposed only
-/// so dexs-backend reference vectors can be reproduced in tests. Production
-/// code paths in this broker call `derive` (below), which hardcodes
-/// `AGENTKEYS_CLIENT_ID`.
+/// THE one derivation function (#464). Production handlers pass
+/// `state.config.client_id` — never a literal — so the namespace is the
+/// stack's configured one. `identity_type` MUST come from
+/// `IdentityType::canonical()` so the byte sequence is stable across
+/// releases; `identity_value` MUST be the canonical form (lowercase hex
+/// address for EVM, normalized email, Google `sub`).
 ///
 /// Per port-vs-greenfield "What we port — crypto primitives only", this
 /// matches the dexs-backend hash shape verbatim. Renaming any of the
@@ -79,16 +89,6 @@ pub fn derive_with_client_id(
     hasher.update(identity_value.as_bytes());
     let digest = hasher.finalize();
     OmniAccount(hex::encode(digest))
-}
-
-/// Production-path OmniAccount derivation. Hardcodes `AGENTKEYS_CLIENT_ID`.
-///
-/// `identity_type` MUST come from `IdentityType::canonical()` so the byte
-/// sequence is stable across releases. `identity_value` MUST be the
-/// canonical form (lowercase hex address for EVM, normalized email,
-/// Google `sub`).
-pub fn derive_omni_account(identity_type: &str, identity_value: &str) -> OmniAccount {
-    derive_with_client_id(AGENTKEYS_CLIENT_ID, identity_type, identity_value)
 }
 
 #[cfg(test)]
@@ -110,8 +110,8 @@ mod tests {
 
     #[test]
     fn derivation_is_deterministic() {
-        let a = derive_omni_account("evm", "0xabc");
-        let b = derive_omni_account("evm", "0xabc");
+        let a = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", "0xabc");
+        let b = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", "0xabc");
         assert_eq!(a, b);
     }
 
@@ -120,15 +120,15 @@ mod tests {
         // Same value, different type → different OmniAccount. This is the
         // namespace-separation property: an email "user@example.com" must
         // not collide with a hypothetical wallet "user@example.com".
-        let email = derive_omni_account("email", "user@example.com");
-        let evm = derive_omni_account("evm", "user@example.com");
+        let email = derive_with_client_id(DEFAULT_CLIENT_ID, "email", "user@example.com");
+        let evm = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", "user@example.com");
         assert_ne!(email, evm);
     }
 
     #[test]
     fn derivation_distinguishes_identity_values() {
-        let a = derive_omni_account("evm", "0xabc");
-        let b = derive_omni_account("evm", "0xdef");
+        let a = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", "0xabc");
+        let b = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", "0xdef");
         assert_ne!(a, b);
     }
 
@@ -143,11 +143,55 @@ mod tests {
     }
 
     #[test]
-    fn prod_derive_uses_agentkeys_client_id() {
-        // Prove the prod entry point matches the hardcoded constant.
-        let prod = derive_omni_account("email", "u@x.com");
-        let manual = derive_with_client_id(AGENTKEYS_CLIENT_ID, "email", "u@x.com");
-        assert_eq!(prod, manual);
+    fn per_stack_namespaces_never_collide() {
+        // #464: the SAME identity on the two stacks derives DIFFERENT omnis —
+        // this is what lets VE + AWS share the Heima chain (SidecarRegistry
+        // keyed on keccak(omni)) without collisions or secret mirroring.
+        let aws = derive_with_client_id(DEFAULT_CLIENT_ID, "email", "onboard@example.com");
+        let ve = derive_with_client_id(VE_CLIENT_ID, "email", "onboard@example.com");
+        assert_ne!(aws, ve);
+    }
+
+    #[test]
+    fn pinned_vectors_both_stacks() {
+        // Frozen derivation vectors (#464) — computed once via
+        // hashlib.sha256((cid+type+value).encode()).hexdigest() and pinned.
+        // If either fails, a client_id or the concatenation shape drifted:
+        // that forks EVERY identity on the affected stack. Do not regenerate
+        // without a migration.
+        let cases = [
+            (
+                DEFAULT_CLIENT_ID,
+                "email",
+                "onboard@example.com",
+                "f677ce5629707f03b345d016721da17ddbe80cc23038e85dbf18ce71f9b340a9",
+            ),
+            (
+                DEFAULT_CLIENT_ID,
+                "evm",
+                "0x1234567890abcdef1234567890abcdef12345678",
+                "43adfc06263716e1fe7b72513bb3d305aff6cf8f060c1b709cfa0d4977bf0373",
+            ),
+            (
+                VE_CLIENT_ID,
+                "email",
+                "onboard@example.com",
+                "fff6a048f0addaa0f793ad2cfd3e81aaa30664f90131f486443401477213bb0d",
+            ),
+            (
+                VE_CLIENT_ID,
+                "evm",
+                "0x1234567890abcdef1234567890abcdef12345678",
+                "ef0881a6bdd2532b518e938c74366062730bc13c9f16d01558f647204881bd5b",
+            ),
+        ];
+        for (cid, ity, ival, expect) in cases {
+            assert_eq!(
+                derive_with_client_id(cid, ity, ival).as_str(),
+                expect,
+                "vector drifted for client_id={cid} type={ity}"
+            );
+        }
     }
 
     #[test]
@@ -156,19 +200,27 @@ mod tests {
         // are caught in CI. If you intentionally migrate the derivation
         // shape, regenerate this vector and the migration plan.
         // SHA256("agentkeys" + "evm" + "0x1234567890abcdef1234567890abcdef12345678")
-        let result = derive_omni_account("evm", "0x1234567890abcdef1234567890abcdef12345678");
+        let result = derive_with_client_id(
+            DEFAULT_CLIENT_ID,
+            "evm",
+            "0x1234567890abcdef1234567890abcdef12345678",
+        );
         // Computed once and frozen; do not regenerate without a migration.
         // Verifying with python: hashlib.sha256(b"agentkeysevm0x1234567890abcdef1234567890abcdef12345678").hexdigest()
         assert_eq!(result.as_str().len(), 64);
         assert!(result.as_str().chars().all(|c| c.is_ascii_hexdigit()));
         // Recompute and compare to ensure deterministic
-        let again = derive_omni_account("evm", "0x1234567890abcdef1234567890abcdef12345678");
+        let again = derive_with_client_id(
+            DEFAULT_CLIENT_ID,
+            "evm",
+            "0x1234567890abcdef1234567890abcdef12345678",
+        );
         assert_eq!(result, again);
     }
 
     #[test]
     fn output_is_lowercase_hex_64_chars() {
-        let out = derive_omni_account("evm", "0xabc");
+        let out = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", "0xabc");
         assert_eq!(out.as_str().len(), 64);
         assert!(out
             .as_str()

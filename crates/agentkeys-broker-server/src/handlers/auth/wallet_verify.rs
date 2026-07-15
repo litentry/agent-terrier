@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::BrokerError;
-use crate::identity::derive_omni_account;
+use crate::identity::derive_with_client_id;
 use crate::jwt::issue::mint_session_jwt;
 use crate::plugins::auth::AuthResponse;
 use crate::plugins::wallet::{WalletAddress, WalletRole};
@@ -46,7 +46,11 @@ pub async fn wallet_verify(
 
     // Derive OmniAccount from the verified identity (canonical bytes
     // come from IdentityType::canonical(); see plan §3.5).
-    let omni = derive_omni_account(identity.identity_type.canonical(), &identity.identity_value);
+    let omni = derive_with_client_id(
+        &state.config.client_id,
+        identity.identity_type.canonical(),
+        &identity.identity_value,
+    );
 
     // Bind the wallet (idempotent in WalletStore — same role/parent
     // returns the existing row). For wallet-sig auth the binding role

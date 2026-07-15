@@ -109,6 +109,7 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         auth_methods: "wallet_sig".into(),
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
+        client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
     };
 
     let http = reqwest::Client::builder()

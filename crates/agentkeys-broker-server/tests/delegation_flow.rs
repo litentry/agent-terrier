@@ -14,7 +14,7 @@ use std::sync::Arc;
 use agentkeys_broker_server::audit::AuditLog;
 use agentkeys_broker_server::config::BrokerConfig;
 use agentkeys_broker_server::create_router;
-use agentkeys_broker_server::identity::derive_omni_account;
+use agentkeys_broker_server::identity::{derive_with_client_id, DEFAULT_CLIENT_ID};
 use agentkeys_broker_server::jwt::issue::mint_agent_session_jwt;
 use agentkeys_broker_server::oidc::OidcKeypair;
 use agentkeys_broker_server::state::AppState;
@@ -53,6 +53,7 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         auth_methods: "wallet_sig".into(),
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
+        client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
     };
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -133,10 +134,18 @@ fn fresh_key(name: &str) -> (TempDir, DeviceKey) {
 /// K10 address), as the sandbox would hold after resolving its session. Returns
 /// the bearer.
 fn agent_session(state: &AppState, device: &DeviceKey) -> String {
-    let operator_omni =
-        derive_omni_account("evm", "0xabcdef0123456789abcdef0123456789abcdef01").to_string();
-    let actor_omni =
-        derive_omni_account("evm", "0x1111111111111111111111111111111111111111").to_string();
+    let operator_omni = derive_with_client_id(
+        DEFAULT_CLIENT_ID,
+        "evm",
+        "0xabcdef0123456789abcdef0123456789abcdef01",
+    )
+    .to_string();
+    let actor_omni = derive_with_client_id(
+        DEFAULT_CLIENT_ID,
+        "evm",
+        "0x1111111111111111111111111111111111111111",
+    )
+    .to_string();
     mint_agent_session_jwt(
         &state.session_keypair,
         TEST_ISSUER,

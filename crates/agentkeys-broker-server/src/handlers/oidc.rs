@@ -284,7 +284,7 @@ pub(crate) fn build_oidc_jwt_claims(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::omni_account::derive_omni_account;
+    use crate::identity::omni_account::{derive_with_client_id, DEFAULT_CLIENT_ID};
 
     #[test]
     fn wallet_session_oidc_tags_unchanged_after_144() {
@@ -293,7 +293,7 @@ mod tests {
         // OIDC tag set is byte-identical to pre-#144.
         let wallet = "0xAbCdEf0123456789abcdef0123456789ABCDef00";
         let wallet_lc = wallet.to_lowercase();
-        let actor_omni = derive_omni_account("evm", &wallet_lc).to_string();
+        let actor_omni = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", &wallet_lc).to_string();
         let (claims, _n, _e) = build_oidc_jwt_claims("https://issuer", &actor_omni, wallet, 300);
         assert_eq!(claims["agentkeys_actor_omni"], actor_omni);
         assert_eq!(claims["agentkeys_user_wallet"], wallet_lc);
