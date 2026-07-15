@@ -128,7 +128,7 @@ echo "==> probing ${#routes[@]} ${CAP_ROUTE_PREFIX}* route(s) on https://$BROKER
 missing=0
 unreachable=0
 report=""
-for route in "${routes[@]}"; do
+for route in ${routes[@]+"${routes[@]}"}; do
   code="$(probe_route "https://$BROKER_HOST$route")"
   case "$code" in
     404)
