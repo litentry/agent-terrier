@@ -12,6 +12,11 @@ name = "agentkeys_cli"
 path = "src/lib.rs"
 
 [dependencies]
+# #441 speech plane — the delegate-side ASR/TTS probe (`agentkeys speech`).
+aws-config = "1"
+aws-sdk-polly = "1"
+aws-sdk-transcribestreaming = "1"
+futures-util = "0.3"
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
 agentkeys-memory-engine = { workspace = true }

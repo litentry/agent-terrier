@@ -91,6 +91,14 @@ pub enum CapOp {
     ChannelPublish,
     /// #406 channels — SUBSCRIBE (consume) from a channel feed. `as_u8` = 7.
     ChannelSubscribe,
+    /// #441 speech — USE the stack's speech plane (ASR/TTS) via the broker
+    /// STS relay. Like `Classify` this is a compute-gate op, NOT an S3 touch:
+    /// `/v1/cap/speech` mints it and `/v1/cap/speech-sts` redeems it for
+    /// short-TTL scoped AWS creds (Transcribe streaming + Polly only).
+    /// Storage workers reject it via `check_op`/`check_data_class`. `as_u8`
+    /// = 8 audits via the tier-1 audit worker, NOT the on-chain
+    /// `CredentialAudit.OP_*` path, so no chain-enum change is needed.
+    SpeechUse,
 }
 
 impl CapOp {
@@ -104,6 +112,7 @@ impl CapOp {
             CapOp::Append => 5,
             CapOp::ChannelPublish => 6,
             CapOp::ChannelSubscribe => 7,
+            CapOp::SpeechUse => 8,
         }
     }
 
@@ -120,6 +129,7 @@ impl CapOp {
             CapOp::Classify => "classify",
             CapOp::ChannelPublish => "channel_publish",
             CapOp::ChannelSubscribe => "channel_subscribe",
+            CapOp::SpeechUse => "speech_use",
         }
     }
 }
@@ -144,6 +154,11 @@ pub enum DataClass {
     /// config workers reject a Channel cap via `verify::check_data_class`, and
     /// the channel worker rejects every non-Channel cap.
     Channel,
+    /// #441 speech compute plane. NOT a storage class — no bucket, no worker;
+    /// the only redeemer is the broker's own `/v1/cap/speech-sts`. Storage
+    /// workers reject a Speech cap via `verify::check_data_class` like any
+    /// other class mismatch.
+    Speech,
 }
 
 impl DataClass {
@@ -156,6 +171,7 @@ impl DataClass {
             DataClass::Memory => "memory",
             DataClass::Config => "config",
             DataClass::Channel => "channel",
+            DataClass::Speech => "speech",
         }
     }
 }
@@ -453,6 +469,37 @@ pub async fn cap_channel_sub(
 /// carries `{ op: Classify, data_class }`; the classifier worker rejects a cap
 /// whose `data_class` doesn't match the surface being classified (a Memory-classify
 /// cap can't TAG a credential), and the storage workers reject `op: Classify`.
+/// The ONE on-chain service id the speech plane grants ride (#441). A single
+/// coarse grant today (provider stays behind broker config, not the grant) —
+/// splitting into `speech-asr`/`speech-tts` later is a new-service addition,
+/// not a rename.
+pub const SPEECH_SERVICE: &str = "speech";
+
+/// `POST /v1/cap/speech` request (#441). Like the storage endpoints (and
+/// unlike classify) the route statically fixes op + data_class + service —
+/// `service` is carried only so the K10 cap-PoP preimage shape matches every
+/// other mint body, and it MUST equal [`SPEECH_SERVICE`].
+#[derive(Debug, Deserialize)]
+pub struct CapSpeechRequest {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub service: String,
+    pub device_key_hash: String,
+    #[serde(default = "default_ttl_seconds")]
+    pub ttl_seconds: u64,
+    /// K10 cap-mint proof-of-possession (issue #76) — same as [`CapRequest`]; OPTIONAL.
+    #[serde(default)]
+    pub client_sig: Option<String>,
+    #[serde(default)]
+    pub client_nonce: Option<String>,
+    #[serde(default)]
+    pub client_ts: Option<u64>,
+    /// Device→sandbox delegation (issue #369) — passed through to the minted
+    /// cap-token; `/v1/cap/speech-sts` re-verifies it on redemption.
+    #[serde(default)]
+    pub delegation_path: Option<DelegationPath>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CapClassifyRequest {
     pub operator_omni: String,
@@ -500,6 +547,42 @@ pub async fn cap_classify(
         .map(Json)
 }
 
+/// `POST /v1/cap/speech` (#441) — mint a `SpeechUse`/`Speech` cap. The route
+/// statically fixes the SIGNED op + data_class AND the service (`"speech"` —
+/// the on-chain grant id), so a storage cap can never be replayed here and a
+/// speech cap can never touch a bucket. The DELEGATE mints with its own J1
+/// (`op_requires_actor_session`); `operator != actor` runs the on-chain
+/// `speech` scope check, master-self rides the #195 skip like every op.
+pub async fn cap_speech(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapSpeechRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    if req.service != SPEECH_SERVICE {
+        return Err(CapError::Forbidden(
+            format!(
+                "speech caps are minted for service {SPEECH_SERVICE:?} only (got {:?})",
+                req.service
+            ),
+            "cap_speech_service_fixed",
+        ));
+    }
+    let cap_req = CapRequest {
+        operator_omni: req.operator_omni,
+        actor_omni: req.actor_omni,
+        service: req.service,
+        device_key_hash: req.device_key_hash,
+        ttl_seconds: req.ttl_seconds,
+        client_sig: req.client_sig,
+        client_nonce: req.client_nonce,
+        client_ts: req.client_ts,
+        delegation_path: req.delegation_path,
+    };
+    mint_cap(state, headers, cap_req, CapOp::SpeechUse, DataClass::Speech)
+        .await
+        .map(Json)
+}
+
 // ─── cap construction ──────────────────────────────────────────────────
 
 /// Ops minted with the ACTOR's own session (`session == actor`) instead of the
@@ -518,7 +601,11 @@ pub async fn cap_classify(
 fn op_requires_actor_session(op: CapOp) -> bool {
     matches!(
         op,
-        CapOp::CanonicalFetch | CapOp::Append | CapOp::ChannelPublish | CapOp::ChannelSubscribe
+        CapOp::CanonicalFetch
+            | CapOp::Append
+            | CapOp::ChannelPublish
+            | CapOp::ChannelSubscribe
+            | CapOp::SpeechUse
     )
 }
 

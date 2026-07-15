@@ -105,6 +105,14 @@ pub fn create_router(state: SharedState) -> Router {
         // Classifier-service compute-gate cap (#178 §15.6, #207 items 2-3).
         // op=Classify; data_class comes from the request body (spans data classes).
         .route("/v1/cap/classify", post(handlers::cap::cap_classify))
+        // #441 speech plane: mint (op/class/service statically fixed) + the
+        // broker-side redeem — the SAME cap→STS relay shape as canonical-sts,
+        // pointed at the speech role instead of a bucket prefix.
+        .route("/v1/cap/speech", post(handlers::cap::cap_speech))
+        .route(
+            "/v1/cap/speech-sts",
+            post(handlers::speech_sts::mint_speech_sts),
+        )
         // Per-data-class CHANNEL caps (#406 channels phase 1). data_class=Channel;
         // the route fixes the DIRECTION — channel-pub mints ChannelPublish,
         // channel-sub mints ChannelSubscribe (distinct on-chain grants). The

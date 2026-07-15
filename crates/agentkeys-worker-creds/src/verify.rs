@@ -65,6 +65,13 @@ pub enum CapOp {
     ChannelPublish,
     /// #406 channels — SUBSCRIBE (consume) events from a channel feed.
     ChannelSubscribe,
+    /// #441 speech — compute-gate op for the broker's own speech STS relay
+    /// (`/v1/cap/speech-sts`). NO worker redeems it: every storage/compute
+    /// worker rejects a SpeechUse cap via `check_op` exactly like any other
+    /// foreign op. The variant exists so the mirror stays byte-for-byte with
+    /// the broker's enum (a Speech cap deserializes and is REJECTED, rather
+    /// than failing parse with an opaque 400).
+    SpeechUse,
 }
 
 impl CapOp {
@@ -80,6 +87,7 @@ impl CapOp {
             CapOp::Classify => "classify",
             CapOp::ChannelPublish => "channel_publish",
             CapOp::ChannelSubscribe => "channel_subscribe",
+            CapOp::SpeechUse => "speech_use",
         }
     }
 }
@@ -103,6 +111,10 @@ pub enum DataClass {
     /// A Channel cap presented to the cred/memory/config worker fails
     /// check_data_class; the channel worker rejects every non-Channel cap.
     Channel,
+    /// #441 speech compute plane — no bucket, no worker; redeemed only by the
+    /// broker's `/v1/cap/speech-sts`. Presented to ANY worker it fails
+    /// check_data_class like every other class mismatch.
+    Speech,
 }
 
 impl DataClass {
@@ -115,6 +127,7 @@ impl DataClass {
             DataClass::Memory => "memory",
             DataClass::Config => "config",
             DataClass::Channel => "channel",
+            DataClass::Speech => "speech",
         }
     }
 }

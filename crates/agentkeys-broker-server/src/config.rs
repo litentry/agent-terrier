@@ -11,6 +11,10 @@ pub struct BrokerConfig {
     /// `/v1/cap/canonical-sts` then returns a clear "not configured" error
     /// instead of failing boot (back-compat for brokers predating this).
     pub memory_role_arn: String,
+    /// #441 — the SPEECH IAM role `/v1/cap/speech-sts` AssumeRoles (inline
+    /// Transcribe/Polly-only session policy). Empty when `SPEECH_ROLE_ARN` is
+    /// unset; the endpoint then returns a clear "not configured" error.
+    pub speech_role_arn: String,
     pub audit_db_path: PathBuf,
     pub aws_region: String,
     pub session_duration_seconds: i32,
@@ -70,6 +74,8 @@ impl BrokerConfig {
         // #295 P1 §7a — optional. Empty disables /v1/cap/canonical-sts with a
         // clear error (not a boot failure), so brokers predating this keep booting.
         let memory_role_arn = std::env::var(env::MEMORY_ROLE_ARN).unwrap_or_default();
+        // #441 — optional, same posture as memory_role_arn.
+        let speech_role_arn = std::env::var(env::SPEECH_ROLE_ARN).unwrap_or_default();
 
         let audit_db_path = std::env::var(env::BROKER_AUDIT_DB_PATH)
             .ok()
@@ -120,6 +126,7 @@ impl BrokerConfig {
         Ok(Self {
             data_role_arn,
             memory_role_arn,
+            speech_role_arn,
             audit_db_path,
             aws_region,
             session_duration_seconds,
