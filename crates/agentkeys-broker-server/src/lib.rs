@@ -1,6 +1,7 @@
 pub mod accept_assertion;
 pub mod audit;
 pub mod auth;
+pub mod aws_ecs;
 pub mod boot;
 pub mod config;
 pub mod env;
@@ -12,6 +13,7 @@ pub mod jwt;
 pub mod metrics;
 pub mod oidc;
 pub mod plugins;
+pub mod sandbox_backend;
 pub mod sponsor;
 pub mod sponsored_accept;
 pub mod state;

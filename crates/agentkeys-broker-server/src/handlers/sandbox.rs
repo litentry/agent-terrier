@@ -25,15 +25,16 @@ use agentkeys_core::audit::{
 use agentkeys_core::erc4337::decode_execute_batch;
 use serde_json::json;
 
+use crate::sandbox_backend::SandboxBackend;
 use crate::state::SharedState;
-use crate::ve_faas::VeFaasClient;
 
 /// What a spawn hook hands back to its handler for the response body.
-/// `agent_url` is always the configured gateway (static config — the device
-/// can talk to it as soon as ANY instance is Ready); the rest reports this
-/// call's ensure outcome.
+/// `agent_url` is the device's runtime endpoint: the per-outcome URL when the
+/// backend hands one out (ECS per-task ENI, #440), else the backend's static
+/// gateway (veFaaS), else `null` (no URL exists — e.g. an ECS ensure failure,
+/// or a fresh task whose ENI hasn't attached; the device re-resolves).
 pub struct SandboxProvision {
-    pub agent_url: String,
+    pub agent_url: Option<String>,
     pub sandbox_id: Option<String>,
     pub status: Option<String>,
     pub error: Option<String>,
@@ -72,23 +73,23 @@ pub async fn ensure_for_delegate_with_envs(
     operator_omni: &str,
     extra_envs: &[(String, String)],
 ) -> Option<SandboxProvision> {
-    let client = state.ve_faas.as_ref()?;
-    let agent_url = client.agent_url().to_string();
-    match client
+    let backend = state.sandbox.as_ref()?;
+    match backend
         .ensure_for_delegate_with_envs(device_key_hash, actor_omni, extra_envs)
         .await
     {
         Ok(outcome) => {
             tracing::info!(
                 device_key_hash = %device_key_hash,
+                backend = %backend.kind(),
                 sandbox_id = %outcome.sandbox_id,
                 status = %outcome.status,
                 created = outcome.created,
-                "#377 delegate sandbox ensured"
+                "#377/#440 delegate sandbox ensured"
             );
             if outcome.created {
                 emit_spawn(
-                    client,
+                    backend,
                     device_key_hash,
                     &outcome.sandbox_id,
                     actor_omni,
@@ -97,7 +98,7 @@ pub async fn ensure_for_delegate_with_envs(
                 .await;
             }
             Some(SandboxProvision {
-                agent_url,
+                agent_url: outcome.agent_url.or_else(|| backend.static_agent_url()),
                 sandbox_id: Some(outcome.sandbox_id),
                 status: Some(outcome.status),
                 error: None,
@@ -108,11 +109,12 @@ pub async fn ensure_for_delegate_with_envs(
             // handler's main job) plus the exact spawn failure to report.
             tracing::warn!(
                 device_key_hash = %device_key_hash,
+                backend = %backend.kind(),
                 error = %e,
-                "#377 delegate sandbox ensure FAILED — device keeps its session; talk path may 500 no_ready_instance"
+                "#377/#440 delegate sandbox ensure FAILED — device keeps its session; talk path may 500 no_ready_instance"
             );
             Some(SandboxProvision {
-                agent_url,
+                agent_url: backend.static_agent_url(),
                 sandbox_id: None,
                 status: None,
                 error: Some(e.to_string()),
@@ -153,11 +155,11 @@ pub async fn teardown_for_confirmed_batch(
     session_omni: [u8; 32],
     call_data: &[u8],
 ) {
-    let Some(client) = state.ve_faas.as_ref() else {
+    let Some(backend) = state.sandbox.as_ref() else {
         return;
     };
     for device_key_hash in revoked_device_key_hashes(call_data) {
-        match client.kill_for_device(&device_key_hash).await {
+        match backend.kill_for_device(&device_key_hash).await {
             Ok(killed) if killed.is_empty() => {
                 tracing::info!(
                     device_key_hash = %device_key_hash,
@@ -202,7 +204,7 @@ pub async fn teardown_for_confirmed_batch(
 }
 
 async fn emit_spawn(
-    client: &VeFaasClient,
+    backend: &SandboxBackend,
     device_key_hash: &str,
     sandbox_id: &str,
     actor_omni: &str,
@@ -223,7 +225,9 @@ async fn emit_spawn(
         SandboxSpawnBody {
             device_key_hash: device_key_hash.to_string(),
             sandbox_id: sandbox_id.to_string(),
-            function_id: client.config.function_id.clone(),
+            // Wire name stays `function_id` (#203 discipline): the veFaaS
+            // application id, or `cluster/taskdef` on the ECS backend.
+            function_id: backend.runtime_ref(),
         },
         AuditResult::Success,
         None,
