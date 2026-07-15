@@ -1029,6 +1029,13 @@ pub struct OnboardingSession {
     /// for identity-only sessions (managed-wallet attestation skipped); those are
     /// not persisted, so the persistence path falls back to the omni.
     pub wallet: String,
+    /// WHY this session is identity-only (no EVM omni/J1), or `None` when the
+    /// SIWE→J1 attestation succeeded. Carried from the failure site so the
+    /// error surfaced at memory/config names the component that ACTUALLY broke.
+    /// Without it every downstream read said "master session is identity-only …
+    /// Fix the config worker", pointing at a healthy worker while the real
+    /// cause was an unreachable/unconfigured signer several steps earlier.
+    pub identity_only_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1569,25 +1576,50 @@ async fn auth_email_status(
                         omni: init.evm_omni,
                         j1: init.session.token.clone(),
                         wallet: init.session.wallet.0.clone(),
+                        identity_only_reason: None,
                     },
                     Err(e) => {
-                        tracing::warn!(
-                            "ui-bridge: SIWE->J1 attestation failed, holding identity-only: {e}"
+                        // Loud: this is not a cosmetic degrade. Memory + config
+                        // are unavailable for the whole session, and the reason
+                        // is carried so the eventual error names the SIGNER
+                        // rather than blaming a healthy worker.
+                        tracing::error!(
+                            signer = %signer,
+                            error = %e,
+                            "ui-bridge: SIWE->J1 attestation FAILED — holding an IDENTITY-ONLY \
+                             session: memory + config will be unavailable until the signer is \
+                             reachable and this email re-verifies"
                         );
                         OnboardingSession {
                             email,
                             omni: identity_omni,
                             j1: String::new(),
                             wallet: String::new(),
+                            identity_only_reason: Some(format!(
+                                "the managed-wallet attestation (SIWE→J1) against signer {signer} failed: {e}"
+                            )),
                         }
                     }
                 },
-                None => OnboardingSession {
-                    email,
-                    omni: identity_omni,
-                    j1: String::new(),
-                    wallet: String::new(),
-                },
+                None => {
+                    tracing::error!(
+                        "ui-bridge: no --signer-url configured — holding an IDENTITY-ONLY \
+                         session: memory + config will be unavailable. Point the daemon at \
+                         this STACK's signer (dev.sh reads SIGNER_HOST/VE_SIGNER_HOST from the \
+                         operator env file)"
+                    );
+                    OnboardingSession {
+                        email,
+                        omni: identity_omni,
+                        j1: String::new(),
+                        wallet: String::new(),
+                        identity_only_reason: Some(
+                            "the daemon has no --signer-url, so the managed-wallet attestation \
+                             (SIWE→J1) never ran"
+                                .to_string(),
+                        ),
+                    }
+                }
             };
             let omni = held.omni.clone();
             *state.onboarding_session.write().await = Some(held);
@@ -1836,6 +1868,9 @@ async fn relogin_finish(
         omni: coords.operator_omni.clone(),
         j1: verified.session_jwt,
         wallet: coords.wallet.clone(),
+        // A passkey re-login restores a FULL session — the broker just verified
+        // the J1 this session carries.
+        identity_only_reason: None,
     });
     // The on-chain binding never left — repopulate the local record so cap-mint
     // + onboarding-state see the registered master without a re-probe. The
@@ -2363,6 +2398,10 @@ pub async fn rehydrate_master_session(state: &UiBridgeState) {
             omni: record.operator_omni.clone(),
             j1: record.j1.clone(),
             wallet: record.wallet.clone(),
+            // Only sessions WITH a live J1 are persisted + rehydrated
+            // (persist_master_session skips identity-only), so a rehydrated
+            // session is by construction a full one.
+            identity_only_reason: None,
         });
         // The device is on chain (SidecarRegistry) under this omni — record it so
         // cap-mint resolves it directly and onboarding-state reports it registered.
@@ -7661,16 +7700,40 @@ async fn register_agent_device(
 /// (co-located dev case), then `<repo>/scripts/<name>` derived from it.
 fn resolve_repo_script(master_script: &str, name: &str) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(master_script);
-    [
-        p.parent().map(|d| d.join(name)),
-        p.parent()
-            .and_then(|d| d.parent())
-            .and_then(|d| d.parent())
-            .map(|repo| repo.join("scripts").join(name)),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|c| c.exists())
+    // A sibling of the register script wins — that is the harness/test override.
+    if let Some(sib) = p.parent().map(|d| d.join(name)) {
+        if sib.exists() {
+            return Some(sib);
+        }
+    }
+    // Then walk up for the CANONICAL home. The chain helpers live in
+    // scripts/operator/chain/, but this only ever tried <repo>/scripts/<name> —
+    // so it never found them and EVERY on-chain shell-out failed with
+    // "not found next to the register script" while the script sat in the repo
+    // the whole time. Live hit: `POST /v1/master/reset` cleared the LOCAL binding
+    // and left the on-chain operatorMasterWallet bound, so re-onboarding still
+    // died SIG_VALIDATION — a half-reset that reads like a chain bug. Same for
+    // heima-device-revoke.sh (2 call sites). Walk instead of hardcoding a depth,
+    // so moving either script again cannot silently re-break it.
+    let mut dir = p.parent();
+    for _ in 0..6 {
+        let Some(d) = dir else { break };
+        for rel in [
+            ["scripts", "operator", "chain"].as_slice(),
+            ["scripts"].as_slice(),
+        ] {
+            let mut c = d.to_path_buf();
+            for seg in rel {
+                c.push(seg);
+            }
+            c.push(name);
+            if c.exists() {
+                return Some(c);
+            }
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 /// Shell out to `heima-device-revoke.sh --agent <label>` to submit
@@ -7952,7 +8015,22 @@ async fn resolve_session_coords(state: &UiBridgeState) -> Result<SessionCoords, 
         }
     };
     if session.omni.is_empty() || session.j1.is_empty() {
-        return Err("real chain: master session is identity-only (no EVM omni/J1)".into());
+        // Name the component that ACTUALLY failed. The bare "identity-only"
+        // string sent operators at the config worker (the caller appends "Fix
+        // the config worker") while the real cause — an unreachable or
+        // unconfigured signer — happened several steps earlier, at email
+        // verify. The reason is carried on the session from that failure site.
+        return Err(match session.identity_only_reason.as_deref() {
+            Some(why) => format!(
+                "real chain: master session is identity-only (no EVM omni/J1) because {why}. \
+                 The config/memory workers are NOT the problem — fix the signer, then \
+                 re-verify your email to mint a full session."
+            ),
+            None => "real chain: master session is identity-only (no EVM omni/J1) — the \
+                 managed-wallet attestation (SIWE→J1) did not run. Check the daemon's \
+                 --signer-url, then re-verify your email."
+                .to_string(),
+        });
     }
     // The broker cap-mint input-validates that operator_omni/actor_omni start with
     // 0x, but the onboarding session stores the omni bare. Normalize via the ONE
@@ -10917,6 +10995,135 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 mod tests {
     use super::*;
 
+    /// The on-chain shell-outs must RESOLVE against the real repo layout. They
+    /// did not: the chain helpers live in scripts/operator/chain/ while the
+    /// lookup only tried <repo>/scripts/, so every reset/revoke failed with
+    /// "not found next to the register script" and `POST /v1/master/reset`
+    /// half-completed — local binding cleared, on-chain operatorMasterWallet
+    /// left bound, re-onboarding dying SIG_VALIDATION. Pinned against the actual
+    /// tree so moving a script re-breaks THIS instead of a live reset.
+    #[test]
+    fn resolve_repo_script_finds_the_real_chain_helpers() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("repo root")
+            .to_path_buf();
+        let register = repo.join("e2e/scripts/erc4337-register-master.sh");
+        assert!(register.exists(), "fixture moved: {}", register.display());
+        for name in ["heima-reset-master.sh", "heima-device-revoke.sh"] {
+            let found = resolve_repo_script(register.to_str().unwrap(), name)
+                .unwrap_or_else(|| panic!("{name} unresolvable — the on-chain shell-out is dead"));
+            assert!(found.exists(), "{name} resolved to a missing path");
+            assert!(
+                found.ends_with(format!("scripts/operator/chain/{name}")),
+                "{name} resolved to an unexpected home: {}",
+                found.display()
+            );
+        }
+        assert!(
+            resolve_repo_script(register.to_str().unwrap(), "definitely-not-a-script.sh").is_none(),
+            "a missing script must resolve to None, not a bogus path"
+        );
+    }
+
+    /// An identity-only session must name the SIGNER — the component that
+    /// actually failed — not the config/memory worker the caller blames.
+    /// Live VE incident: onboarding held identity-only because the stack had no
+    /// signer, and the operator was told "Fix the config worker" about a
+    /// perfectly healthy worker, three steps from the real cause.
+    #[tokio::test]
+    async fn identity_only_error_names_the_signer_not_the_worker() {
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            Some("https://broker.example".into()),
+            None, // signer_url — none, the VE case
+            84532,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "us-east-1".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "op@example.com".into(),
+            omni: "abc".into(),
+            j1: String::new(), // identity-only: attestation never ran
+            wallet: String::new(),
+            identity_only_reason: Some(
+                "the managed-wallet attestation (SIWE→J1) against signer \
+                 https://signer.agentterrier.cn failed: connection refused"
+                    .into(),
+            ),
+        });
+        // match, not unwrap_err(): SessionCoords holds the J1 bearer token, so it
+        // deliberately has no Debug impl to print it.
+        let err = match resolve_session_coords(&state).await {
+            Ok(_) => panic!("expected an identity-only rejection"),
+            Err(e) => e,
+        };
+        assert!(err.contains("signer"), "must name the signer: {err}");
+        assert!(
+            err.contains("connection refused"),
+            "must carry the underlying reason: {err}"
+        );
+        assert!(
+            err.contains("config/memory workers are NOT the problem"),
+            "must exonerate the worker the caller blames: {err}"
+        );
+    }
+
+    /// Without a carried reason the message still points at the signer rather
+    /// than dead-ending on the bare "identity-only" string.
+    #[tokio::test]
+    async fn identity_only_without_reason_still_points_at_the_signer() {
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            Some("https://broker.example".into()),
+            None,
+            84532,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "us-east-1".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "op@example.com".into(),
+            omni: "abc".into(),
+            j1: String::new(),
+            wallet: String::new(),
+            identity_only_reason: None,
+        });
+        // match, not unwrap_err(): SessionCoords holds the J1 bearer token, so it
+        // deliberately has no Debug impl to print it.
+        let err = match resolve_session_coords(&state).await {
+            Ok(_) => panic!("expected an identity-only rejection"),
+            Err(e) => e,
+        };
+        assert!(err.contains("--signer-url"), "must be actionable: {err}");
+    }
+
     #[test]
     fn derive_worker_url_reasons_the_gateway_per_stack() {
         // The four operator stacks — mirrors the env files' `weixin<suffix>.<zone>`
@@ -11398,6 +11605,7 @@ mod tests {
             omni: omni.clone(),
             j1: "eyJ.fake.jwt".into(),
             wallet: "0xWALLET".into(),
+            identity_only_reason: None,
         });
         let coords = resolve_session_coords(&state)
             .await
@@ -11453,6 +11661,7 @@ mod tests {
             omni: format!("0x{}", "22".repeat(32)),
             j1: "eyJ.live.jwt".into(),
             wallet: "0xW".into(),
+            identity_only_reason: None,
         });
         assert_eq!(onboarding_state(State(state)).await.0.session, "active");
     }
@@ -11588,6 +11797,7 @@ mod tests {
             omni: omni_a.clone(),
             j1: "eyJ.j1".into(),
             wallet: "0xA".into(),
+            identity_only_reason: None,
         });
         assert_eq!(
             onboarding_state(State(state.clone())).await.0.chain,
@@ -11599,6 +11809,7 @@ mod tests {
             omni: omni_b,
             j1: "eyJ.j1".into(),
             wallet: "0xB".into(),
+            identity_only_reason: None,
         });
         assert_eq!(onboarding_state(State(state.clone())).await.0.chain, "none");
     }
@@ -12095,6 +12306,7 @@ mod tests {
             omni: "0xabc123".into(),
             j1: String::new(),
             wallet: String::new(),
+            identity_only_reason: None,
         });
         let s = onboarding_state(State(state.clone())).await;
         assert_eq!(s.0.identity, "verified");
@@ -12815,6 +13027,7 @@ mod tests {
             omni: format!("0x{}", "77".repeat(32)),
             j1: "eyJ.fake.jwt".into(),
             wallet: "0xW".into(),
+            identity_only_reason: None,
         });
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: "0xdkh".into(),
@@ -13426,6 +13639,7 @@ mod tests {
             omni: format!("0x{}", "77".repeat(32)),
             j1: "eyJ.fake.jwt".into(),
             wallet: "0xW".into(),
+            identity_only_reason: None,
         });
         // Simulate "already synced": mark the in-memory map current as of the
         // latest fleet generation, so we can prove ack INVALIDATES it.
@@ -13585,6 +13799,7 @@ mod tests {
             omni: format!("0x{}", "77".repeat(32)),
             j1: "eyJ.fake.jwt".into(),
             wallet: "0xW".into(),
+            identity_only_reason: None,
         });
         // The accept proxy stashed the card's FINAL grant set + device flag.
         state.accept_grants_by_request.write().await.insert(
