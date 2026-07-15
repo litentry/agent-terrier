@@ -17,7 +17,7 @@ use crate::protocol::{
     InboxDeleteBody, InboxDeleteResp, InboxGetBody, InboxGetResp, InboxItem, InboxItemMeta,
     InboxListBody, InboxListResp, MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult,
     MemoryInboxAppendBody, MemoryInboxAppendResp, MemoryPutBody, MemoryPutInput, MemoryPutResp,
-    MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
+    MemoryPutResult, RevokeResult, SpeechStsBody, SpeechStsResult, ENVELOPE_VERSION,
 };
 
 /// A device→sandbox delegation the SANDBOX holds (issue #369 origination side).
@@ -327,6 +327,36 @@ impl BackendClient {
     /// with the vendor portal in M4). Returns a structured "local only" verdict
     /// so the demo + parent UI can render it. The wire format stays the same
     /// when the real endpoint lands.
+    /// `POST /v1/cap/speech-sts` (#441) — redeem a `SpeechUse` cap (minted via
+    /// [`Self::cap_mint`] with `CapMintOp::SpeechUse`, service `"speech"`) for
+    /// short-TTL AWS creds valid ONLY for Transcribe streaming + Polly
+    /// synthesis. The bearer is the ACTOR's own session (`agent_session_bearer`
+    /// when set — the sandbox/device path — else the operator session for
+    /// master-self use). No long-lived speech secret exists on this stack.
+    pub async fn speech_sts(
+        &self,
+        cap: CapToken,
+        session_bearer: &str,
+    ) -> Result<SpeechStsResult, BackendError> {
+        let url = format!("{}/v1/cap/speech-sts", self.broker()?);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(session_bearer)
+            .json(&SpeechStsBody { cap })
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        resp.json::<SpeechStsResult>()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))
+    }
+
     pub async fn cap_revoke(&self, cap_id: &str) -> Result<RevokeResult, BackendError> {
         Ok(RevokeResult {
             ok: true,

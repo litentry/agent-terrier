@@ -331,6 +331,7 @@ The cap carries a signed `data_class`; the broker mints **one endpoint per (data
 | `/v1/cap/memory-append` | `{op: Append, data_class: Memory}` (#339 absorption; distinct `inbox:<ns>` grant) |
 | `/v1/cap/classify` | `{op: Classify, data_class: <signed body field>}` (#207 — the one compute gate) |
 | `/v1/cap/channel-{pub,sub}` | `{op: ChannelPublish\|ChannelSubscribe, data_class: Channel}` (#406 — the route fixes the DIRECTION; pub cap ↛ `/poll`, sub cap ↛ `/publish`) |
+| `/v1/cap/speech` | `{op: SpeechUse, data_class: Speech, service: "speech"}` ([spec/aws-speech-relay.md](spec/aws-speech-relay.md), #441 — compute plane; the route fixes op+class+SERVICE; redeemed ONLY at `/v1/cap/speech-sts` for short-TTL Transcribe/Polly-only STS — no bucket, no worker; per-actor gate = the on-chain `speech` grant, since the speech APIs have no PrincipalTag-scopable resources) |
 
 Workers reject mismatched classes with 403 `cap_data_class_mismatch` — the cap-layer twin of the IAM cross-bucket gate. The channel worker additionally rejects a cross-DIRECTION cap (a `channel_publish` cap at `/v1/channel/poll`, or vice-versa) with 403 `cap_op_mismatch` (#406 D2 direction isolation).
 

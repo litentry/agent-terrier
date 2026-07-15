@@ -127,6 +127,13 @@ enum Commands {
     },
 
     #[command(
+        subcommand,
+        about = "Speech plane (#441): relay-minted ASR/TTS creds + live probe",
+        long_about = "The stack-\u{2461} speech plane. Every leg rides the standard cap\u{2192}STS relay: mint a SpeechUse cap at /v1/cap/speech (on-chain `speech` grant checked at mint), redeem at /v1/cap/speech-sts for short-TTL Transcribe+Polly-only AWS creds. No long-lived speech secret exists on this stack.\n\nExamples:\n  agentkeys speech creds --broker-url https://broker.example --session-bearer $J1 --operator-omni 0x.. --actor-omni 0x.. --device-key-hash 0x..\n  agentkeys speech probe --broker-url https://broker.example --session-bearer $J1 --operator-omni 0x.. --actor-omni 0x.. --device-key-hash 0x.."
+    )]
+    Speech(SpeechCommands),
+
+    #[command(
         about = "Store a credential for an agent+service",
         long_about = "Encrypt and store an API key for a given agent and service.\n\nOmit --agent to default to the session wallet. --agent accepts a 0x... wallet address, a linked alias, or a linked email.\n\nNote on the --agent FLAG (vs a positional): clap does not support an optional leading positional followed by required positionals — it either panics at parse time or consumes the first required arg as the agent. An --agent flag is the only disambiguation that works without a subcommand split.\n\nExamples:\n  agentkeys store openrouter sk-or-v1-abc123                (session wallet)\n  agentkeys store --agent my-bot openrouter sk-or-v1-abc123 (resolve alias)\n  agentkeys store --agent 0xAGENT anthropic sk-ant-abc123   (literal wallet)"
     )]
@@ -1629,6 +1636,62 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
     }
 }
 
+#[derive(Subcommand)]
+enum SpeechCommands {
+    /// Mint a SpeechUse cap and redeem it — print the scoped creds as JSON.
+    Creds {
+        #[arg(long, env = "AGENTKEYS_BROKER_URL", help = "Broker base URL")]
+        broker_url: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_SESSION_BEARER",
+            help = "The ACTOR's session JWT (sandbox J1, or the master session for master-self)"
+        )]
+        session_bearer: String,
+        #[arg(long, help = "Operator (master) omni, 0x+64hex")]
+        operator_omni: String,
+        #[arg(long, help = "Actor omni (== operator for master-self), 0x+64hex")]
+        actor_omni: String,
+        #[arg(long, help = "The actor's on-chain device key hash (keccak(K10 addr))")]
+        device_key_hash: String,
+        #[arg(long, default_value_t = 300, help = "Cap TTL (seconds)")]
+        ttl_seconds: u64,
+        #[arg(long, help = "K10 device key file — signs the cap-PoP (#76) when set")]
+        device_key_file: Option<String>,
+        #[arg(
+            long,
+            env = "AGENTKEYS_DELEGATION_FILE",
+            help = "Device-signed delegation file (#369 sandbox mode)"
+        )]
+        delegation_file: Option<String>,
+    },
+    /// One real TTS (Polly) + one real ASR (Transcribe streaming) call on relay creds.
+    Probe {
+        #[arg(long, env = "AGENTKEYS_BROKER_URL", help = "Broker base URL")]
+        broker_url: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_SESSION_BEARER",
+            help = "The ACTOR's session JWT"
+        )]
+        session_bearer: String,
+        #[arg(long, help = "Operator (master) omni, 0x+64hex")]
+        operator_omni: String,
+        #[arg(long, help = "Actor omni (== operator for master-self), 0x+64hex")]
+        actor_omni: String,
+        #[arg(long, help = "The actor's on-chain device key hash")]
+        device_key_hash: String,
+        #[arg(long, help = "K10 device key file — signs the cap-PoP (#76) when set")]
+        device_key_file: Option<String>,
+        #[arg(
+            long,
+            env = "AGENTKEYS_DELEGATION_FILE",
+            help = "Device-signed delegation file (#369 sandbox mode)"
+        )]
+        delegation_file: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -1949,6 +2012,50 @@ async fn main() {
             }
             MemoryAction::InboxReject { s3_key, daemon_url } => {
                 agentkeys_cli::inbox_curate::inbox_reject(daemon_url, s3_key).await
+            }
+        },
+        Commands::Speech(cmd) => match cmd {
+            SpeechCommands::Creds {
+                broker_url,
+                session_bearer,
+                operator_omni,
+                actor_omni,
+                device_key_hash,
+                ttl_seconds,
+                device_key_file,
+                delegation_file,
+            } => {
+                agentkeys_cli::speech::speech_creds_cmd(
+                    operator_omni,
+                    actor_omni,
+                    device_key_hash,
+                    session_bearer,
+                    broker_url,
+                    *ttl_seconds,
+                    device_key_file.as_deref(),
+                    delegation_file.as_deref(),
+                )
+                .await
+            }
+            SpeechCommands::Probe {
+                broker_url,
+                session_bearer,
+                operator_omni,
+                actor_omni,
+                device_key_hash,
+                device_key_file,
+                delegation_file,
+            } => {
+                agentkeys_cli::speech::speech_probe_cmd(
+                    operator_omni,
+                    actor_omni,
+                    device_key_hash,
+                    session_bearer,
+                    broker_url,
+                    device_key_file.as_deref(),
+                    delegation_file.as_deref(),
+                )
+                .await
             }
         },
         Commands::Agent { action } => match action {

@@ -42,6 +42,7 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
     let config = BrokerConfig {
         data_role_arn: "arn:aws:iam::000:role/test".into(),
         memory_role_arn: String::new(),
+        speech_role_arn: String::new(),
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,

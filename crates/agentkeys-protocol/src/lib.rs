@@ -75,6 +75,12 @@ pub enum CapMintOp {
     /// `op_str` is `"channel_subscribe"`. Distinct on-chain grant (`channel-sub:<id>`)
     /// from the publish grant — granting one never grants the other.
     ChannelSubscribe,
+    /// #441 speech — USE the stack's speech plane (ASR/TTS) through the broker
+    /// STS relay. Mints `CapOp::SpeechUse`/`DataClass::Speech` at
+    /// `/v1/cap/speech` (service statically `"speech"` — the on-chain grant
+    /// id); redeemed ONLY at the broker's `/v1/cap/speech-sts` for short-TTL
+    /// Transcribe/Polly-only AWS creds. No bucket, no worker.
+    SpeechUse,
 }
 
 impl CapMintOp {
@@ -90,6 +96,7 @@ impl CapMintOp {
             "config_fetch" => Some(Self::ConfigFetch),
             "channel_publish" => Some(Self::ChannelPublish),
             "channel_subscribe" => Some(Self::ChannelSubscribe),
+            "speech_use" => Some(Self::SpeechUse),
             _ => None,
         }
     }
@@ -106,6 +113,7 @@ impl CapMintOp {
             Self::ConfigFetch => "/v1/cap/config-fetch",
             Self::ChannelPublish => "/v1/cap/channel-pub",
             Self::ChannelSubscribe => "/v1/cap/channel-sub",
+            Self::SpeechUse => "/v1/cap/speech",
         }
     }
 
@@ -117,6 +125,7 @@ impl CapMintOp {
             }
             Self::ConfigStore | Self::ConfigFetch => "config",
             Self::ChannelPublish | Self::ChannelSubscribe => "channel",
+            Self::SpeechUse => "speech",
         }
     }
 
@@ -141,6 +150,9 @@ impl CapMintOp {
             // cap recover to DIFFERENT preimages even for the same channel.
             Self::ChannelPublish => "channel_publish",
             Self::ChannelSubscribe => "channel_subscribe",
+            // #441 — must match the broker's CapOp::SpeechUse and the worker
+            // mirror so the K10 cap-PoP preimage agrees byte-for-byte.
+            Self::SpeechUse => "speech_use",
         }
     }
 }
@@ -1145,6 +1157,30 @@ pub struct CanonicalStsResult {
     pub expiration: i64,
 }
 
+// ── #441 speech plane — cap→STS relay (epic #439 stack ②) ────────────────────
+
+/// Request body for the broker `POST /v1/cap/speech-sts`. The actor presents
+/// its broker-minted `SpeechUse` cap (and its OWN session JWT as the Bearer)
+/// and receives short-TTL creds valid ONLY for Transcribe streaming + Polly
+/// synthesis. No server-held speech token exists on this stack — the relay is
+/// the SAME cap→STS pattern as storage/channels (the epic's consistent-auth
+/// principle; the VE stack's #386 app-token custody is the documented gap).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechStsBody {
+    pub cap: CapToken,
+}
+
+/// Response from `/v1/cap/speech-sts`. `region` tells the client where to
+/// point the Transcribe/Polly SDKs (the broker's own AWS region).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechStsResult {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    pub expiration: i64,
+    pub region: String,
+}
+
 // ── #339 P2 — absorption inbox (master-hub "push" / curated merge) ────────────
 //
 // The mirror of P1's canonical READ, but for WRITE: a delegate proposes a
@@ -1996,6 +2032,7 @@ mod tests {
             ("config_fetch", "/v1/cap/config-fetch", "config"),
             ("channel_publish", "/v1/cap/channel-pub", "channel"),
             ("channel_subscribe", "/v1/cap/channel-sub", "channel"),
+            ("speech_use", "/v1/cap/speech", "speech"),
         ] {
             let op = CapMintOp::parse(s).unwrap();
             assert_eq!(op.broker_path(), path);
@@ -2011,6 +2048,7 @@ mod tests {
         // Publish and subscribe are DISTINCT signed ops (direction isolation).
         assert_eq!(CapMintOp::ChannelPublish.op_str(), "channel_publish");
         assert_eq!(CapMintOp::ChannelSubscribe.op_str(), "channel_subscribe");
+        assert_eq!(CapMintOp::SpeechUse.op_str(), "speech_use");
         assert_ne!(
             CapMintOp::ChannelPublish.op_str(),
             CapMintOp::ChannelSubscribe.op_str()

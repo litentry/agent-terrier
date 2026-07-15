@@ -52,6 +52,12 @@ pub const BROKER_DATA_ROLE_ARN: &str = "BROKER_DATA_ROLE_ARN";
 /// returns a clear "not configured" error rather than failing boot. Same value
 /// the worker host uses as `MEMORY_ROLE_ARN`.
 pub const MEMORY_ROLE_ARN: &str = "MEMORY_ROLE_ARN";
+/// Optional (#441). The SPEECH IAM role ARN the broker AssumeRoles (with an
+/// inline Transcribe/Polly-only session policy) at `/v1/cap/speech-sts` to
+/// issue short-TTL speech creds. When unset, that endpoint returns a clear
+/// "not configured" error rather than failing boot. Same posture as
+/// `MEMORY_ROLE_ARN`.
+pub const SPEECH_ROLE_ARN: &str = "SPEECH_ROLE_ARN";
 /// Optional. Path to the audit-log SQLite DB. Defaults to `~/.agentkeys/broker/audit.sqlite`.
 pub const BROKER_AUDIT_DB_PATH: &str = "BROKER_AUDIT_DB_PATH";
 /// Optional. AWS region used for STS calls. Defaults to `us-east-1`.
