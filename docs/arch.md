@@ -229,7 +229,7 @@ One worker per data class — independent IAM, deploy lifecycle, blast radius. C
 
 ### 15.3 audit-service
 
-Three tiers: **A** hosted relay (Merkle-batched root, shared relay wallet; the #281 tier-A anchors ride ungated `appendV2`) · **B** self-hosted relay · **C** direct-write per event (sovereign default). Choice independent of the §20 mode.
+Three tiers: **A** hosted relay (Merkle-batched root, shared relay wallet — designed in PR #281, **rejected 2026-07-16, never merged**: a shared relay writing every master's anchors trades away the §20 sovereign default, and 2s block time erodes the batching rationale; record in #489) · **B** self-hosted relay · **C** direct-write per event (sovereign default — the live posture: the audit worker Merkle-queues envelope hashes and flush returns the `appendRootV2` inputs the operator master signs, #229). Choice independent of the §20 mode.
 
 ### 15.3a Unified audit envelope — `AuditEnvelope v1`
 
@@ -480,7 +480,7 @@ Cap-mint requests MAY carry a K10 `client_sig` (domain-separated, request-bound)
 
 ### 22b.5 Audit chain anchoring — direct tx per entry (tier C)
 
-Open-append v1 `append` per event; tier-A Merkle batching landed via `appendRootV2` (#281) with the relay posture in §15.3.
+Open-append v1 `append` per event; Merkle batching landed via `appendRootV2` (#229/PR #261) — flush returns the root inputs and the operator master submits (sovereign, tier C). The autonomous tier-A relay (PR #281) was rejected unmerged — posture record in §15.3.
 
 ### 22b.6 Cross-references from code
 
