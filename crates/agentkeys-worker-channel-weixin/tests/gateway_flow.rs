@@ -50,6 +50,9 @@ fn config(registry_file: String) -> WeixinGatewayConfig {
         ilink_bootstrap_url: agentkeys_worker_channel_weixin::ilink::ILINK_BOOTSTRAP_BASE_URL
             .into(),
         bot_agent: "AgentKeys/test".into(),
+        telegram_bot_token: None,
+        telegram_api_base: agentkeys_worker_channel_weixin::telegram::TELEGRAM_API_BASE.into(),
+        telegram_state_file: "/dev/null".into(),
         registry_file,
         channel_worker_url: None,
         operator_omni: format!("0x{}", "ab".repeat(32)),

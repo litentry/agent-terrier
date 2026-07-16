@@ -19,10 +19,13 @@
 //! bind time is advisory (D10) — the registry only ever gains a contact through
 //! the master's confirm.
 
-//! Two interchangeable transports drive the same PEP (`AGENTKEYS_WEIXIN_TRANSPORT`):
-//! the 公众号 webhook (`oa` — production/compliance) and the Tencent iLink
-//! personal-bot long-poll (`ilink` — the first-experiment path; see [`ilink`]).
-//! Both converge on [`relay`], so policy never forks per transport.
+//! Three interchangeable transports drive the same PEP (`AGENTKEYS_WEIXIN_TRANSPORT`):
+//! the 公众号 webhook (`oa` — production/compliance), the Tencent iLink
+//! personal-bot long-poll (`ilink` — the first-experiment path; see [`ilink`]),
+//! and the Telegram Bot-API long-poll (`telegram` — stack ②'s no-备案 channel,
+//! #444; see [`telegram`]). All converge on [`relay`], so policy never forks
+//! per transport. (The crate keeps its historical `weixin` name — it IS the
+//! household channel gateway.)
 
 pub mod admin;
 pub mod config;
@@ -36,6 +39,8 @@ pub mod relay;
 pub mod router;
 pub mod signature;
 pub mod state;
+pub mod telegram;
+pub mod telegram_loop;
 
 pub use config::{WeixinGatewayConfig, WeixinTransport};
 pub use state::WeixinGatewayState;

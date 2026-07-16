@@ -1,12 +1,16 @@
-//! WeChat gateway worker binary — #407 (+ the iLink transport driver).
+//! Channel gateway worker binary — #407 WeChat (OA webhook / iLink) + #444
+//! Telegram. (Binary keeps its historical `weixin` name; ONE deployed unit =
+//! ONE transport, selected per stack: VE = ilink/oa, AWS = telegram.)
 //!
-//! Transport selection: AGENTKEYS_WEIXIN_TRANSPORT = `oa` (default) | `ilink`.
+//! Transport selection: AGENTKEYS_WEIXIN_TRANSPORT = `oa` (default) | `ilink` | `telegram`.
 //!
 //! Required env under `oa` (fail-fast):
 //!   AGENTKEYS_WEIXIN_TOKEN                  = the 公众号 callback verification token
 //!   AGENTKEYS_WEIXIN_APP_ID                 = the 公众号 AppID
 //! Required env under `ilink`:
 //!   AGENTKEYS_WEIXIN_ILINK_BOT_TOKEN[_FILE] = the bot token from the `--login` ceremony
+//! Required env under `telegram` (#444; absent = boots OFFLINE and idles):
+//!   AGENTKEYS_TELEGRAM_BOT_TOKEN[_FILE]     = the BotFather bot token (#384 custody)
 //! Always required:
 //!   AGENTKEYS_WEIXIN_CONTACT_REGISTRY_FILE  = master-authored contact registry JSON
 //!   AGENTKEYS_WEIXIN_OPERATOR_OMNI          = the household operator omni (0x+64hex)
@@ -14,6 +18,8 @@
 //!   AGENTKEYS_WEIXIN_APP_SECRET[_FILE]      = the OA SENDING credential (#384 custody)
 //!   AGENTKEYS_WEIXIN_ILINK_BASE_URL         = the bot's API host (login prints it)
 //!   AGENTKEYS_WEIXIN_ILINK_STATE_FILE       = iLink cursor/reply-token state file
+//!   AGENTKEYS_TELEGRAM_API_BASE             = Bot API base (default public; mock e2e overrides)
+//!   AGENTKEYS_TELEGRAM_STATE_FILE           = telegram offset/chat-id state file
 //!   AGENTKEYS_WEIXIN_BOT_AGENT              = UA-style self-id (default AgentKeys/<ver>)
 //!   AGENTKEYS_WORKER_CHANNEL_URL            = the channel worker to relay into (else decision-only)
 //!   AGENTKEYS_AUDIT_WORKER_URL              = durable audit sink for relay/bind rows
@@ -26,8 +32,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentkeys_worker_channel_weixin::{
-    handlers, ilink, ilink_login, ilink_loop, WeixinGatewayConfig, WeixinGatewayState,
-    WeixinTransport,
+    handlers, ilink, ilink_login, ilink_loop, telegram_loop, WeixinGatewayConfig,
+    WeixinGatewayState, WeixinTransport,
 };
 use clap::Parser;
 use tracing::info;
@@ -117,17 +123,21 @@ async fn main() -> anyhow::Result<()> {
     );
     let state = Arc::new(WeixinGatewayState::build(config)?);
 
-    // The iLink SUPERVISOR rides alongside the HTTP surface (healthz + the
-    // admin surface + the mock-driver callback stay up on both transports).
-    // With no token it idles; the parent-control login ceremony hot-starts it.
+    // The transport's inbound LOOP rides alongside the HTTP surface (healthz +
+    // the admin surface + the mock-driver routes stay up on every transport).
+    // iLink: a hot-swap SUPERVISOR (the parent-control login ceremony restarts
+    // it); telegram (#444): a static-token loop (no ceremony — BotFather mints
+    // once). With no token either idles OFFLINE.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let ilink_task = if state.config.transport == WeixinTransport::Ilink {
-        Some(tokio::spawn(ilink_loop::supervise(
+    let ilink_task = match state.config.transport {
+        WeixinTransport::Ilink => Some(tokio::spawn(ilink_loop::supervise(
             state.clone(),
             shutdown_rx,
-        )))
-    } else {
-        None
+        ))),
+        WeixinTransport::Telegram => {
+            Some(tokio::spawn(telegram_loop::run(state.clone(), shutdown_rx)))
+        }
+        WeixinTransport::Oa => None,
     };
 
     let app = handlers::build_router(state);

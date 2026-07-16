@@ -106,8 +106,14 @@ pub(crate) async fn admin_status(
         transport: match state.config.transport {
             WeixinTransport::Oa => "oa".to_string(),
             WeixinTransport::Ilink => "ilink".to_string(),
+            WeixinTransport::Telegram => "telegram".to_string(),
         },
-        online: state.ilink_online(),
+        // `online` = a receive credential is loaded for THIS transport (iLink's
+        // is hot-swappable at runtime; telegram's is boot-static, #444).
+        online: match state.config.transport {
+            WeixinTransport::Telegram => state.config.telegram_bot_token.is_some(),
+            _ => state.ilink_online(),
+        },
         bot_id: state.current_ilink_bot_id(),
         bound_contacts: reg.bound.len() as u32,
         open_invites,

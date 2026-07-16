@@ -35,17 +35,31 @@ pub struct RelayOutcome {
     pub claim_ack: Option<String>,
 }
 
-/// Run one inbound `(transport_id, text)` turn through L3 + audit. The caller
-/// owns transport authenticity (OA signature / iLink bearer session) BEFORE
-/// calling; this owns everything after.
+/// Run one inbound `(transport_id, text)` turn through L3 + audit for the
+/// `weixin` transport family (the OA webhook + iLink callers).
 pub async fn process_inbound(
     state: &WeixinGatewayState,
     transport_id: &str,
     raw_text: &str,
 ) -> RelayOutcome {
+    process_inbound_for(state, "weixin", transport_id, raw_text).await
+}
+
+/// Run one inbound `(transport, transport_id, text)` turn through L3 + audit.
+/// The caller owns transport authenticity (OA signature / iLink bearer session /
+/// the Telegram bot-token poll) BEFORE calling; this owns everything after.
+/// `transport` is the registry-facing identity namespace (`weixin` | `telegram`,
+/// #444) — contacts bind per (transport, transport_id), and the routed event's
+/// channel id carries it.
+pub async fn process_inbound_for(
+    state: &WeixinGatewayState,
+    transport: &str,
+    transport_id: &str,
+    raw_text: &str,
+) -> RelayOutcome {
     let (alias, remaining) = parse_alias(raw_text);
     let inbound = GatewayInbound {
-        transport: "weixin".to_string(),
+        transport: transport.to_string(),
         transport_id: transport_id.to_string(),
         text: remaining,
         alias,
@@ -79,7 +93,7 @@ pub async fn process_inbound(
         Some(ChannelEvent {
             event_id: String::new(), // the channel worker assigns the durable id
             channel_id: format!(
-                "weixin-{}",
+                "{transport}-{}",
                 decision.target_alias.clone().unwrap_or_default()
             ),
             direction: ChannelDirection::In,
@@ -150,6 +164,32 @@ pub fn reply_text_for(decision: &L3Decision) -> Option<String> {
             decision.operator_grade_deeplink.as_deref().unwrap_or("")
         )),
         other => Some(format!("⛔ 无法转达（{other}）。")),
+    }
+}
+
+/// The English twin of [`reply_text_for`] — the Telegram transport's replies
+/// (#444: stack ② is the global/EN stack). SAME decision → reply mapping,
+/// including the unknown-sender SILENT drop; only the language differs.
+pub fn reply_text_for_en(decision: &L3Decision) -> Option<String> {
+    if decision.allowed {
+        return Some(format!(
+            "✅ Passed along to {}",
+            decision.target_alias.as_deref().unwrap_or("your assistant")
+        ));
+    }
+    match decision.reason.as_str() {
+        "unknown_contact" => None,
+        "rate_limited" => Some("⏳ Too many messages — try again in a minute.".to_string()),
+        "no_alias" => Some(
+            "Address an assistant with /alias (e.g. `/chef what's for dinner`), or rephrase."
+                .to_string(),
+        ),
+        "out_of_reach" => Some("⛔ You don't have access to that assistant.".to_string()),
+        "operator_grade_requires_session" => Some(format!(
+            "That needs the parent-control console: {}",
+            decision.operator_grade_deeplink.as_deref().unwrap_or("")
+        )),
+        other => Some(format!("⛔ Could not pass that along ({other}).")),
     }
 }
 

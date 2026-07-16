@@ -171,6 +171,9 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
         // (the prod default is the fixed Tencent host).
         ilink_bootstrap_url: ilink_base.clone(),
         bot_agent: "AgentKeys/test".into(),
+        telegram_bot_token: None,
+        telegram_api_base: agentkeys_worker_channel_weixin::telegram::TELEGRAM_API_BASE.into(),
+        telegram_state_file: "/dev/null".into(),
         registry_file: registry_file.clone(),
         channel_worker_url: None,
         operator_omni: format!("0x{}", "ab".repeat(32)),
