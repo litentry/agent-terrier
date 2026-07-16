@@ -1,28 +1,74 @@
 //! Live **end-to-end VE credential mint** — `#[ignore]`d. The full runtime-port
 //! proof (docs/spec/ve-broker-runtime-port.md step 4): sign an ES256 OIDC JWT
-//! with the TOS-hosted issuer's private key → `VeStsClient` exchanges it at VE
-//! STS (`AssumeRoleWithOIDC`, per-actor inline session policy) → the minted
-//! temp creds do a REAL TOS put/get inside `bots/<actor>/…` AND are DENIED
-//! outside it (cross-actor isolation).
+//! with the issuer's private key → `VeStsClient` exchanges it at VE STS
+//! (`AssumeRoleWithOIDC`, per-actor inline session policy) → the minted temp
+//! creds do a REAL TOS put/get inside `bots/<actor>/…` AND are DENIED outside
+//! it (cross-actor isolation).
 //!
 //! Prereqs: `setup-cloud-ve.sh` steps 50-55 (buckets, issuer, provider, role).
 //!
-//! Run (from the repo root; sources the VE env + broker csv):
+//! Run — the #480 ceremony front door wires issuer + ProviderTrn + key (it also
+//! handles the PRE-FLIP shape, where the SECONDARY issuer is the one on trial):
+//! ```text
+//! bash scripts/operator/setup-oidc.sh --cloud ve verify
+//! ```
+//! or by hand (from the repo root):
 //! ```text
 //! set -a; . scripts/operator-workstation.ve.env; set +a
 //! AK=…; SK=…   # a VE identity allowed to call sts:AssumeRoleWithOIDC
 //! VOLCENGINE_ACCESS_KEY=$AK VOLCENGINE_SECRET_KEY=$SK \
-//! VE_OIDC_PRIVATE_KEY="$HOME/.agentkeys-ve/oidc/oidc-es256-private.pem" \
 //! cargo test -p agentkeys-broker-server --test ve_sts_live -- --ignored --nocapture
 //! ```
+//! The issuer key defaults to `$VE_OIDC_KEY_DIR/oidc-es256-private.pem` — the
+//! step-51 keygen path. It is deliberately NOT an env-file key (operator-run
+//! proof, never a CI secret); `VE_OIDC_PRIVATE_KEY=<pem path>` overrides.
+//!
+//! Proving a NEW issuer pre-flip by hand: `VE_OIDC_ISSUER` and
+//! `VE_OIDC_PROVIDER_TRN` move TOGETHER (issuer → the target URL, TRN → the
+//! SECONDARY provider's). Overriding only the issuer 400s every mint — VE
+//! validates the JWT's `iss` against the named provider's immutable IssuerURL.
 
 use agentkeys_broker_server::sts::StsClient;
 use agentkeys_broker_server::ve_sts::VeStsClient;
 use aws_sdk_s3::primitives::ByteStream;
 
 fn env(k: &str) -> String {
-    std::env::var(k)
-        .unwrap_or_else(|_| panic!("{k} must be set (source operator-workstation.ve.env)"))
+    env_or(k, "source scripts/operator-workstation.ve.env")
+}
+
+fn env_or(k: &str, how: &str) -> String {
+    std::env::var(k).unwrap_or_else(|_| panic!("{k} must be set — {how}"))
+}
+
+/// The issuer's private key is deliberately NOT an env-file key. Resolution:
+/// explicit `VE_OIDC_PRIVATE_KEY`, else the step-51 keygen path
+/// `${VE_OIDC_KEY_DIR}/oidc-es256-private.pem` (same leading-`~` expansion the
+/// shell side does — the env file carries the literal `~`).
+fn issuer_key_path() -> String {
+    if let Ok(p) = std::env::var("VE_OIDC_PRIVATE_KEY") {
+        return p;
+    }
+    let dir = env_or(
+        "VE_OIDC_KEY_DIR",
+        "set VE_OIDC_PRIVATE_KEY=<pem path>, or source \
+         scripts/operator-workstation.ve.env so VE_OIDC_KEY_DIR names the keygen \
+         dir (the key itself is deliberately NOT in the env file)",
+    );
+    let dir = match dir.strip_prefix('~') {
+        Some(rest) => format!(
+            "{}{rest}",
+            env_or("HOME", "needed to expand ~ in VE_OIDC_KEY_DIR")
+        ),
+        None => dir,
+    };
+    let path = format!("{dir}/oidc-es256-private.pem");
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "issuer private key not found at {path} — setup-cloud-ve.sh step 51 \
+         generates it on the machine that provisioned the stack; point \
+         VE_OIDC_PRIVATE_KEY at it if it lives elsewhere"
+    );
+    path
 }
 
 /// Load the issuer's ES256 key (SEC1 or PKCS#8 PEM) → jsonwebtoken EncodingKey.
@@ -75,7 +121,7 @@ async fn mint_then_tos_roundtrip_with_cross_actor_denial() {
     let provider_trn = env("VE_OIDC_PROVIDER_TRN");
     let bucket = env("VE_VAULT_BUCKET");
     let tos_endpoint = env("VE_TOS_S3_ENDPOINT");
-    let key_path = env("VE_OIDC_PRIVATE_KEY");
+    let key_path = issuer_key_path();
     let region = std::env::var("VOLCENGINE_REGION").unwrap_or_else(|_| "cn-beijing".into());
 
     // kid MUST match the published JWKS — fetch it from the live issuer so the
@@ -109,9 +155,12 @@ async fn mint_then_tos_roundtrip_with_cross_actor_denial() {
         .expect("sign OIDC JWT");
 
     // Mint via the SHIPPING client (per-actor session policy built inside).
+    let creds_hint =
+        "not an env-file key; export a VE AK/SK allowed to call sts:AssumeRoleWithOIDC \
+         (ve_load_admin_creds in lib/cloud-ve.sh loads ~/volc-<profile>.csv)";
     let sts = VeStsClient::new(
-        env("VOLCENGINE_ACCESS_KEY"),
-        env("VOLCENGINE_SECRET_KEY"),
+        env_or("VOLCENGINE_ACCESS_KEY", creds_hint),
+        env_or("VOLCENGINE_SECRET_KEY", creds_hint),
         region.clone(),
         agentkeys_broker_server::ve_sts::DEFAULT_STS_HOST,
         provider_trn,
