@@ -125,7 +125,7 @@ in the "Broker/worker request shapes have ONE owner" section above.
 
 ## Heima EVM compatibility level — keep `evm_version = "london"` in foundry.toml (but NOT because Heima is "London")
 
-> **Migration index:** every Heima-vs-Ethereum EVM divergence the repo works around (this `evm_version` pin, the `eth_estimateGas`-reverts-on-`handleOps` gas-limit pins, the mixHash-less-receipt on-chain re-verify posture, the `cast send --create` deploy path, the year-prefixed `chain_id`) is consolidated as a **gap → symptom → workaround → code site → what-changes-on-eth** inventory in [`docs/spec/heima-eth-gap.md`](docs/spec/heima-eth-gap.md), with a Heima→Ethereum migration checklist. This section stays the canonical home for the *capability proofs* below; the gap doc defers here for them.
+> **Migration index:** every Heima-vs-Ethereum EVM divergence the repo works around (this `evm_version` pin, the `eth_estimateGas`-reverts-on-`handleOps` gas-limit pins, the mixHash-less-receipt on-chain re-verify posture, the `cast send --create` deploy path, the year-prefixed `chain_id`) is consolidated as a **gap → symptom → workaround → code site → what-changes-on-eth** inventory in [`docs/heima-eth-gap.md`](docs/heima-eth-gap.md), with a Heima→Ethereum migration checklist. This section stays the canonical home for the *capability proofs* below; the gap doc defers here for them.
 
 **Two separate things — do not conflate them (the earlier revision of this section did):**
 
