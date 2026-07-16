@@ -9,7 +9,7 @@
 //! 3rd-party (Pimlico / Alchemy) drops in with zero broker code change.
 //!
 //! Why in-house instead of a stock bundler (see `scripts/operator/chain/erc4337-bundler.sh` +
-//! `docs/spec/heima-eth-gap.md`): Heima's Frontier RPC has no `debug` namespace
+//! `docs/heima-eth-gap.md`): Heima's Frontier RPC has no `debug` namespace
 //! (stock bundlers need `debug_traceCall` for ERC-7562 validation),
 //! `eth_estimateGas` REVERTS on `handleOps` (so the gas limit is pinned, not
 //! estimated), and receipts carry no `mixHash` (alloy/ethers parsers crash —

@@ -754,7 +754,7 @@ fn handle_ops_revert_message(reason: Option<&str>, tx_hash: &str) -> String {
         "AA91" => Some(
             "the EntryPoint's payout to the bundler beneficiary failed — on Heima this \
              usually means the EntryPoint's native balance fell near/below the \
-             Existential Deposit (docs/spec/heima-eth-gap.md gap 8); re-fund the \
+             Existential Deposit (docs/heima-eth-gap.md gap 8); re-fund the \
              EntryPoint deposits",
         ),
         _ => None,

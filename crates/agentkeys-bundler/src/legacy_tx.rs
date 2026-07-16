@@ -1,7 +1,7 @@
 //! Minimal legacy (pre-EIP-1559) transaction RLP encoding + EIP-155 signing.
 //!
 //! Heima accepts legacy txs and its `eth_estimateGas` reverts on `handleOps`
-//! (see `docs/spec/heima-eth-gap.md`), so the bundler signs a fixed-gas-limit
+//! (see `docs/heima-eth-gap.md`), so the bundler signs a fixed-gas-limit
 //! legacy tx and submits it via `eth_sendRawTransaction` — no alloy/ethers
 //! (their receipt/header parsers crash on Heima's mixHash-less responses).
 //! Hand-rolled RLP, golden-tested against the EIP-155 reference vector.
