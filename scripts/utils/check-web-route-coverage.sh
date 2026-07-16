@@ -53,7 +53,6 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/audit/stream	SSE — curl smoke would hang a step; needs a timeout-bounded SSE reader helper
 /v1/audit/:id/decode	needs a decodable on-chain audit row id fixture from a prior append
 /v1/anchor/status	tier-A anchor status (#109) — worker-dependent; add to suite-6 once audit worker guaranteed in test env
-/v1/master/memory/entry	single-entry read — list route covered; add ?ns=demo fixture read after suite-4 plant
 /v1/master/inbox	#297/#339 inbox — needs a planted inbox fixture (agent append) in the test env
 /v1/master/inbox/entry	same inbox fixture dependency
 /v1/master/inbox/accept	inbox mutation — same fixture dependency
