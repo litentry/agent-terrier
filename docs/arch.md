@@ -378,6 +378,37 @@ The chain is **notary / permission-registry / clock**: hash-anchored authority, 
 
 Stage-3 negative: suite-3 step 24 — a cross-actor (agent) `config-fetch` mint for `binding-manifest` / `gateway-contact-registry` → ServiceNotInScope (these docs are master-only; layers 3-4 ride the step-19 config proof).
 
+### 17.8 The OIDC issuer is the broker's own domain — one per cloud (#480)
+
+The trust anchor under isolation layer 3 (§17.5) is the cloud's OIDC provider, and its **issuer is the broker's own domain**, never object storage:
+
+| Cloud | Issuer | Provider |
+|---|---|---|
+| **AWS** | `https://${BROKER_HOST}` | IAM OIDC provider, per stack |
+| **VE** | `https://${VE_BROKER_HOST}` | VE IAM OIDC provider |
+
+The broker serves `/.well-known/openid-configuration` + `/.well-known/jwks.json` itself (unconditional routes; the discovery doc's `issuer` is `BROKER_OIDC_ISSUER`), so the issuer is self-hosted on both clouds — no bucket, no second publishing path.
+
+**Why not object storage** (the EKS-IRSA pattern, proposed as "DNS-independent, so it never moves again" — the reasoning is backwards). A bucket URL encodes *more* volatile things than a domain, and none of them are ours:
+
+```
+https://agentterrier-oidc-2127642244.tos-s3-cn-beijing.volces.com
+                            ^account       ^region  ^provider endpoint format
+```
+
+Account id, region, and the provider's endpoint naming — three moving parts owned by the cloud. A domain depends on exactly one thing: **we own it**. It is also portable across clouds and regions, which a bucket URL structurally is not. (The counter-argument that the domain "changed twice this epic" is survivorship reasoning: that churn was the migration *to* the settled brand, not away from it.)
+
+**The issuer URL is IMMUTABLE once a provider exists** — on BOTH clouds. AWS has no update-url API; VE's `UpdateOIDCProvider` takes only `Description` + `IssuanceLimitTime` (no `IssuerURL`). And the string is byte-frozen into three places at once: the provider identity, every federated role's trust policy, and the `iss` of every minted JWT. So **moving an issuer is a ceremony, never a rename** — four ordered phases, each of which must converge before the next:
+
+1. **dual** — stand up a SECOND provider; every federated role's trust carries both issuers.
+2. **flip** — the broker starts minting the new `iss`. Tokens already in flight keep validating against the old provider.
+3. **age out** — wait one OIDC-JWT TTL (`BROKER_OIDC_JWT_TTL_SECONDS`, default 300s, capped at 3600), after which no live token can still carry the old `iss`. This is *not* the 5h `BROKER_SESSION_JWT_TTL_SECONDS` — that is the broker's own session token and never reaches STS.
+4. **retire** — drop the old trust statements, then the provider (that order: a provider deleted while a role still names it leaves an unresolvable principal).
+
+A flip before step 1 is a flag day — every role that does not yet trust the new issuer rejects every AssumeRole the instant the broker re-mints. The operator tooling that drives these phases is deployment-side (not in this repo's public surface).
+
+Do not reintroduce bucket-hosted issuers, and do not add a per-stack issuer key: the issuer **follows `${BROKER_HOST}`** (#463 one-zone inference), so it is inferred, not a second literal.
+
 ## 18. Encryption envelope
 
 `KEK = HKDF-SHA256(salt="agentkeys.kek-salt.v2", ikm=K3_v[epoch], info="agentkeys.user.v1" || actor_omni)` (signer-derived over mTLS). Blob: `version(0x04) || k3_epoch || nonce(12) || ciphertext || tag(16)`, `AAD = "agentkeys.cred.aad.v2|" || actor_omni_hex || "|" || service` — misrouted/tampered blobs fail authentication; the epoch byte selects the K3 version. Config uses the v3 client-encrypted variant (#372, §22b.2). **K3 rotation = zero migration** (paths/tags/AAD all key on the stable `actor_omni`; §21).
