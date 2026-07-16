@@ -14,23 +14,32 @@ const DEFAULT_OPERATOR_GRADE_ALIASES: &str = "spend,usage,stats,cost,audit,billi
 /// (override with `AGENTKEYS_WEIXIN_ILINK_STATE_FILE`; the systemd unit's
 /// state dir is writable by the service user).
 const DEFAULT_ILINK_STATE_FILE: &str = "/var/lib/agentkeys/weixin-ilink-state.json";
+/// Where the Telegram loop persists its offset cursor + reply chat ids (#444;
+/// override with `AGENTKEYS_TELEGRAM_STATE_FILE`).
+const DEFAULT_TELEGRAM_STATE_FILE: &str = "/var/lib/agentkeys/telegram-state.json";
 /// Durable message-history log — the writable state dir (append-only, #419).
 const DEFAULT_HISTORY_FILE: &str = "/var/lib/agentkeys/weixin-history.jsonl";
 /// Durable control-action audit log — the writable state dir (#419).
 const DEFAULT_ACTIVITY_FILE: &str = "/var/lib/agentkeys/weixin-activity.jsonl";
 
-/// Which WeChat transport this gateway instance drives. ONE gateway process =
-/// ONE transport; the relay core (L3/registry/router/audit) is shared.
+/// Which chat transport this gateway instance drives. ONE gateway process =
+/// ONE transport; the relay core (L3/registry/router/audit) is shared. (The
+/// crate keeps its historical `weixin` name — it IS the household channel
+/// gateway; #444 added the non-WeChat transport below.)
 ///
 /// - [`Oa`]: the 公众号 webhook (verified Service Account) — the production /
 ///   compliance path. Needs the public callback vhost + the OA credentials.
 /// - [`Ilink`]: the Tencent iLink personal-bot long-poll (the openclaw-weixin
 ///   protocol) — the first-experiment path (decided 2026-07-09): QR-scan a
 ///   SPARE personal account, no public endpoint, no entity verification.
+/// - [`Telegram`]: the Bot-API long-poll (#444) — stack ②'s no-备案 chat
+///   transport. Zero inbound surface (no webhook/vhost); the BotFather token
+///   is the one custodied credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeixinTransport {
     Oa,
     Ilink,
+    Telegram,
 }
 
 impl WeixinTransport {
@@ -38,6 +47,7 @@ impl WeixinTransport {
         match self {
             WeixinTransport::Oa => "weixin-oa",
             WeixinTransport::Ilink => "weixin-ilink",
+            WeixinTransport::Telegram => "telegram",
         }
     }
 }
@@ -86,6 +96,16 @@ pub struct WeixinGatewayConfig {
     pub ilink_bootstrap_url: String,
     /// UA-style `bot_agent` self-identification (observability-only upstream).
     pub bot_agent: String,
+    /// The Telegram bot token from BotFather (#444) — BOTH the receive session
+    /// and the SENDING credential under `telegram` (#384 custody, same duty as
+    /// the OA app-secret / iLink token). Env or `0600` file; absent = the bot
+    /// boots OFFLINE and idles (fill the secrets file + restart the unit).
+    pub telegram_bot_token: Option<String>,
+    /// The Bot API base (`AGENTKEYS_TELEGRAM_API_BASE`, default the public
+    /// host) — overridable so the mock e2e can point the loop at a stub.
+    pub telegram_api_base: String,
+    /// The Telegram loop's durable state file (offset cursor + reply chat ids).
+    pub telegram_state_file: String,
     /// Path to the master-authored contact registry JSON (`policy`-class doc,
     /// §14.5). Gateway-READ only; the master writes it (parent-control / CLI).
     pub registry_file: String,
@@ -143,13 +163,15 @@ impl WeixinGatewayConfig {
         {
             "oa" | "official-account" | "" => WeixinTransport::Oa,
             "ilink" | "openclaw" | "openclaw-weixin" => WeixinTransport::Ilink,
+            "telegram" | "tg" => WeixinTransport::Telegram,
             other => bail!(
                 "AGENTKEYS_WEIXIN_TRANSPORT={other} is not a transport — use `oa` (公众号 \
-                 webhook, production) or `ilink` (personal-bot long-poll, experiment)"
+                 webhook, production), `ilink` (personal-bot long-poll, experiment) or \
+                 `telegram` (Bot-API long-poll, stack ② #444)"
             ),
         };
 
-        // OA credentials — REQUIRED under `oa`, ignored under `ilink`.
+        // OA credentials — REQUIRED under `oa`, ignored under the long-poll transports.
         let (weixin_token, weixin_app_id) = match transport {
             WeixinTransport::Oa => (
                 std::env::var("AGENTKEYS_WEIXIN_TOKEN").context(
@@ -158,7 +180,7 @@ impl WeixinGatewayConfig {
                 std::env::var("AGENTKEYS_WEIXIN_APP_ID")
                     .context("AGENTKEYS_WEIXIN_APP_ID must be set")?,
             ),
-            WeixinTransport::Ilink => (
+            WeixinTransport::Ilink | WeixinTransport::Telegram => (
                 std::env::var("AGENTKEYS_WEIXIN_TOKEN").unwrap_or_default(),
                 std::env::var("AGENTKEYS_WEIXIN_APP_ID").unwrap_or_default(),
             ),
@@ -218,10 +240,39 @@ impl WeixinGatewayConfig {
         let bot_agent = std::env::var("AGENTKEYS_WEIXIN_BOT_AGENT")
             .unwrap_or_else(|_| concat!("AgentKeys/", env!("CARGO_PKG_VERSION")).to_string());
 
+        // The Telegram bot token (#444, #384 custody — minted once via
+        // BotFather). Absent under `telegram` is NOT fatal (the #418 posture):
+        // the worker boots OFFLINE and idles until the operator fills the
+        // secrets file and restarts the unit — but it warns LOUDLY.
+        let telegram_bot_token = secret_from_env(
+            "AGENTKEYS_TELEGRAM_BOT_TOKEN",
+            "AGENTKEYS_TELEGRAM_BOT_TOKEN_FILE",
+        )?;
+        if transport == WeixinTransport::Telegram && telegram_bot_token.is_none() {
+            eprintln!(
+                "==> agentkeys-worker-channel-weixin: telegram transport with NO bot token — the \
+                 bot is OFFLINE until the operator sets AGENTKEYS_TELEGRAM_BOT_TOKEN in the \
+                 gateway secrets file (mint one via @BotFather) and restarts the unit. healthz \
+                 shows outbound_enabled=false."
+            );
+        }
+        let telegram_api_base = std::env::var("AGENTKEYS_TELEGRAM_API_BASE")
+            .ok()
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| crate::telegram::TELEGRAM_API_BASE.to_string());
+        let telegram_state_file = std::env::var("AGENTKEYS_TELEGRAM_STATE_FILE")
+            .unwrap_or_else(|_| DEFAULT_TELEGRAM_STATE_FILE.to_string());
+
         match transport {
             WeixinTransport::Ilink => eprintln!(
                 "==> agentkeys-worker-channel-weixin: iLink transport — bot token custodied \
                  (long-poll inbound + outbound send) — it is NEVER handed to a delegate (#384)."
+            ),
+            WeixinTransport::Telegram => eprintln!(
+                "==> agentkeys-worker-channel-weixin: telegram transport (#444) — bot token \
+                 custodied (long-poll inbound + outbound send) — it is NEVER handed to a \
+                 delegate (#384)."
             ),
             WeixinTransport::Oa if weixin_app_secret.is_some() => eprintln!(
                 "==> agentkeys-worker-channel-weixin: bot app-secret custodied (outbound send \
@@ -325,6 +376,9 @@ impl WeixinGatewayConfig {
             secrets_file,
             ilink_bootstrap_url,
             bot_agent,
+            telegram_bot_token,
+            telegram_api_base,
+            telegram_state_file,
             registry_file,
             channel_worker_url,
             operator_omni,
@@ -349,6 +403,7 @@ impl WeixinGatewayConfig {
         match self.transport {
             WeixinTransport::Oa => self.weixin_app_secret.is_some(),
             WeixinTransport::Ilink => self.ilink_bot_token.is_some(),
+            WeixinTransport::Telegram => self.telegram_bot_token.is_some(),
         }
     }
 }

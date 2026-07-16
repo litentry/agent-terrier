@@ -53,6 +53,9 @@ pub struct WeixinGatewayState {
     /// Millis of the iLink loop's last successful poll (0 = never / OA-only) —
     /// surfaced on `/healthz` so the fleet board can see a stale-token stall.
     ilink_last_ok_ms: AtomicU64,
+    /// Millis of the Telegram loop's last successful poll (#444; 0 = never /
+    /// other transports) — the same healthz stall signal for stack ②.
+    telegram_last_ok_ms: AtomicU64,
     /// The RUNTIME iLink identity — initialized from config, swapped by the
     /// admin login ceremony. The supervisor reads these on every (re)spawn.
     ilink_token: RwLock<Option<String>>,
@@ -84,6 +87,7 @@ impl WeixinGatewayState {
             http: reqwest::Client::new(),
             audit,
             ilink_last_ok_ms: AtomicU64::new(0),
+            telegram_last_ok_ms: AtomicU64::new(0),
             ilink_token,
             ilink_base_url,
             ilink_bot_id: RwLock::new(None),
@@ -260,6 +264,24 @@ impl WeixinGatewayState {
     /// `None` = never polled successfully (or the OA transport).
     pub fn ilink_last_ok_ms(&self) -> Option<u64> {
         match self.ilink_last_ok_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
+    /// Telegram twin of [`Self::mark_ilink_ok`] (#444) — the loop stamps each
+    /// successful poll so healthz can show a bad-token / conflict stall.
+    pub fn mark_telegram_ok(&self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.telegram_last_ok_ms.store(now, Ordering::Relaxed);
+    }
+
+    /// `None` = never polled successfully (or a non-telegram transport).
+    pub fn telegram_last_ok_ms(&self) -> Option<u64> {
+        match self.telegram_last_ok_ms.load(Ordering::Relaxed) {
             0 => None,
             ms => Some(ms),
         }

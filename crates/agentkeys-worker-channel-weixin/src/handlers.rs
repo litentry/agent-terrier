@@ -32,6 +32,10 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
             "/wechat/callback",
             get(callback_verify).post(callback_relay),
         )
+        // #444 — the telegram MOCK driver (TEST-ONLY, allow_unsigned-gated):
+        // the e2e's PEP-assertion surface for the long-poll transport, which
+        // has no real inbound endpoint to drive.
+        .route("/telegram/mock-inbound", post(telegram_mock_inbound))
         .route("/v1/gateway/history", get(history_denied))
         .route("/v1/gateway/contacts", get(list_contacts))
         // #418 — the operator admin surface (parent-control via the daemon
@@ -84,6 +88,10 @@ pub struct HealthBody {
     /// OA) — a stale-token stall shows up here without log access.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ilink_last_ok_ms: Option<u64>,
+    /// Telegram only (#444): millis of the last successful `getUpdates` —
+    /// the same stall signal (bad token / 409 conflict) for stack ②.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telegram_last_ok_ms: Option<u64>,
     pub version: &'static str,
 }
 
@@ -94,6 +102,7 @@ async fn healthz(State(state): State<SharedWeixinGatewayState>) -> Json<HealthBo
         bound_contacts: state.registry.snapshot().bound.len(),
         outbound_enabled: state.outbound_enabled(),
         ilink_last_ok_ms: state.ilink_last_ok_ms(),
+        telegram_last_ok_ms: state.telegram_last_ok_ms(),
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -237,6 +246,58 @@ async fn callback_relay(
     } else {
         (StatusCode::OK, "success").into_response()
     }
+}
+
+/// `POST /telegram/mock-inbound` (#444) — the mock e2e's PEP-assertion surface
+/// for the telegram transport. The REAL inbound is a long poll (nothing to
+/// POST at), so the regression gate drives the SAME relay core through this
+/// route instead: JSON `{from,text}` → `process_inbound_for("telegram")` →
+/// the decision + the EN reply the loop would have sent (`reply: null` proves
+/// the unknown-sender SILENT drop). TEST-ONLY: 403 unless the gateway runs
+/// with `AGENTKEYS_WEIXIN_ALLOW_UNSIGNED=1` (the same flag that unsigns the
+/// weixin mock callback — one test-posture switch, not two).
+async fn telegram_mock_inbound(
+    State(state): State<SharedWeixinGatewayState>,
+    body: String,
+) -> impl IntoResponse {
+    if !state.config.allow_unsigned {
+        return (
+            StatusCode::FORBIDDEN,
+            "mock driver disabled (prod posture — set AGENTKEYS_WEIXIN_ALLOW_UNSIGNED=1 on a \
+             TEST gateway only)",
+        )
+            .into_response();
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, "bad json").into_response();
+    };
+    let from = v
+        .get("from")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let text = v
+        .get("text")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let outcome = relay::process_inbound_for(&state, "telegram", &from, &text).await;
+    let reply = outcome
+        .claim_ack
+        .clone()
+        .or_else(|| relay::reply_text_for_en(&outcome.decision));
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": outcome.decision.allowed,
+            "decision": outcome.decision,
+            "contact_id": outcome.contact_id,
+            "tier": outcome.tier,
+            "routed_event": outcome.event,
+            "reply": reply,
+        })),
+    )
+        .into_response()
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
