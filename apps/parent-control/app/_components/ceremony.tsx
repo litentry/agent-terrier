@@ -52,6 +52,14 @@ type EnrollOutcome =
   // credentials.create, so NO passkey is created. Transient: retry once the
   // operator arms the broker's sponsor key (VE setup-broker-host step 5).
   | { mode: 'broker-not-ready'; reason: string }
+  // #501: the CHAIN could not be read (the #435 probe answered `error`). The
+  // daemon is healthy — only the chain is unreachable — so this must never
+  // render as "demo · no daemon" (a lie that narrated a fake-green ceremony to
+  // `setup` with no passkey and no master). Its own mode, its own panel, its
+  // own Retry: `fallback` conflated three unrelated things (no-WebAuthn and
+  // daemon-disconnected are BENIGN demos; a chain-probe error is a real
+  // failure that must stop).
+  | { mode: 'chain-unavailable'; reason: string }
   | { mode: 'real'; register?: PendingMasterRegister; registerError?: string };
 
 async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<EnrollOutcome> {
@@ -70,10 +78,16 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
   // browser must be detected BEFORE credentials.create mints a stranded key.
   const probe = await client.getRegisterState();
   if (probe.ok && probe.data.probe === 'error') {
-    akLog('onboarding: register probe FAILED — refusing to mint a passkey blind (fail-safe)', {
+    // Fail-safe: we cannot verify bound-ness, so we must NOT mint blind. But
+    // this is NOT a demo — the daemon answered, the CHAIN did not (#501). Stop
+    // loudly with the chain's own reason instead of narrating green.
+    akLog('onboarding: chain probe FAILED — refusing to mint a passkey blind (fail-safe)', {
       error: probe.data.probe_error,
     });
-    return { mode: 'fallback' }; // cannot verify bound-ness; retry, never auto-mint
+    return {
+      mode: 'chain-unavailable',
+      reason: probe.data.probe_error ?? 'the chain could not be read (RPC unreachable)',
+    };
   }
   // When the FRESH probe answered, it is authoritative — including bound=false.
   // The session-cached `chain` field is marked on rehydrate and used to claim
@@ -265,12 +279,15 @@ async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterR
   } catch (e) {
     // Touch ID cancelled/failed: nothing was signed, so nothing can land. The
     // passkey is enrolled + the account deployed, but the master is NOT bound —
-    // do NOT persist the pointer. The operator retries; surfaced via onboarding state.
+    // do NOT persist the pointer. #501: THROW rather than return — a bare
+    // return let the runner advance to "setup" as if onboarded, with no master.
     akLog('onboarding: register Touch ID threw — pointer NOT persisted', {
       error: (e as Error)?.message,
       account: reg.account,
     });
-    return;
+    throw new Error(
+      `the register was not signed (${(e as Error)?.message ?? 'Touch ID cancelled'}) — your master is NOT registered on chain`,
+    );
   }
 
   let settled = false;
@@ -368,6 +385,12 @@ async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterR
       detail: failDetail,
       account: reg.account,
     });
+    // #501: THROW. Returning normally here was the last silent path — the
+    // pointer was correctly withheld, but the ceremony sailed on to "setup"
+    // and the operator believed they had a master. The passkey minted in the
+    // previous step is now UNUSED (bound to nothing): say so, because the app
+    // cannot delete it (WebAuthn forbids a site deleting its own credential).
+    throw new Error(`the register did not land on chain — ${failDetail || 'no confirmation'}`);
   }
 }
 
@@ -384,9 +407,19 @@ export function CeremonyRunner({
   stepMs?: number;
 }) {
   const [done, setDone] = useState(0);
+  // #501: the TERMINAL failure state. Without it the runner had only `done`, so
+  // a throwing step was logged to the console and the bar advanced anyway —
+  // straight through onDone() to "Set up your categories" with NO master bound
+  // (the silent wrong onboarding: every later call 403s device_not_active and
+  // the natural next move is the destructive reset). Every `throw` in a step
+  // action was decorative until this existed.
+  const [failed, setFailed] = useState<{ index: number; error: string } | null>(null);
   const [txs, setTxs] = useState<Record<number, string>>({});
 
   useEffect(() => {
+    // Terminal: never advance, never onDone. onDone is precisely what fakes the
+    // "you're onboarded" landing, so a failed ceremony must never reach it.
+    if (failed) return;
     if (done >= steps.length) {
       const t = setTimeout(onDone, 700);
       return () => clearTimeout(t);
@@ -397,7 +430,15 @@ export function CeremonyRunner({
       // Real async work for this step (e.g. the §9 Stage-2 WebAuthn Touch ID)
       // runs WHILE the row shows "running"; the bar advances when it resolves.
       if (step.action) {
-        try { await step.action(); } catch (e) { akLog(`onboarding: step "${step.label}" failed`, { error: (e as Error)?.message }); }
+        try {
+          await step.action();
+        } catch (e) {
+          if (cancelled) return;
+          const error = (e as Error)?.message || 'step failed';
+          akLog(`onboarding: step "${step.label}" FAILED — ceremony STOPPED (not advancing)`, { error });
+          setFailed({ index: done, error });
+          return; // ← the whole point: no setDone, no onDone.
+        }
       }
       if (cancelled) return;
       if (step.onchain) {
@@ -407,7 +448,7 @@ export function CeremonyRunner({
     }, stepMs);
     return () => { cancelled = true; clearTimeout(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [done]);
+  }, [done, failed]);
 
   const pct = Math.round((done / steps.length) * 100);
 
@@ -415,10 +456,12 @@ export function CeremonyRunner({
     <div className="ceremony">
       <div className="ceremony-bar-wrap">
         <div className="ceremony-bar-track">
-          <div className="ceremony-bar-fill" style={{ width: `${pct}%`, background: accent }} />
+          <div className="ceremony-bar-fill" style={{ width: `${pct}%`, background: failed ? '#b00' : accent }} />
         </div>
         <div className="ceremony-bar-meta">
-          <span>{done >= steps.length ? 'complete' : 'working…'}</span>
+          <span style={failed ? { color: '#b00', fontWeight: 600 } : undefined}>
+            {failed ? 'stopped — nothing further was attempted' : done >= steps.length ? 'complete' : 'working…'}
+          </span>
           <span className="mono">
             {Math.min(done, steps.length)}/{steps.length} · {pct}%
           </span>
@@ -427,17 +470,26 @@ export function CeremonyRunner({
 
       <div className="ceremony-log">
         {steps.map((s, i) => {
-          const status = i < done ? 'done' : i === done ? 'running' : 'pending';
+          const isFailed = failed?.index === i;
+          const status = i < done ? 'done' : isFailed ? 'failed' : i === done ? 'running' : 'pending';
           return (
             <div key={i} className={`clog-row ${status}`}>
-              <span className="clog-mark">{status === 'done' ? '✓' : status === 'running' ? '▸' : '·'}</span>
+              <span className="clog-mark" style={isFailed ? { color: '#b00' } : undefined}>
+                {status === 'done' ? '✓' : status === 'failed' ? '✗' : status === 'running' ? '▸' : '·'}
+              </span>
               <div className="clog-body">
-                <div className="clog-label">
+                <div className="clog-label" style={isFailed ? { color: '#b00' } : undefined}>
                   {s.label}
                   {s.touchId && <span className="clog-touch">Touch ID · {s.touchId}</span>}
                   {s.onchain && <span className="clog-chain">on-chain</span>}
                 </div>
                 <div className="clog-sub">{s.sub}</div>
+                {isFailed && (
+                  <div style={{ fontSize: 12, color: '#b00', marginTop: 4, lineHeight: 1.5 }}>
+                    <strong>Failed — onboarding stopped here.</strong>{' '}
+                    <span className="mono" style={{ fontSize: 11 }}>{failed.error}</span>
+                  </div>
+                )}
                 {txs[i] && <div className="clog-tx mono">tx {txs[i].slice(0, 22)}… · on-chain · confirmed</div>}
               </div>
             </div>
@@ -465,7 +517,9 @@ export function OnboardingScreen({
   // bound on chain that this browser has no passkey for). Distinct from 'demo',
   // which means "no backend, narrate it" — conflating them told the operator
   // "no daemon" while the daemon was healthy.
-  const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending' | 'blocked' | 'broker-not-ready'>('pending');
+  const [enrollMode, setEnrollMode] = useState<
+    'real' | 'demo' | 'pending' | 'blocked' | 'broker-not-ready' | 'chain-unavailable' | 'register-failed'
+  >('pending');
   // Bumped to re-mount CeremonyRunner from step 0 on a broker-not-ready retry
   // (re-runs the preflight; mints a passkey only once the broker is ready).
   const [ceremonyRunKey, setCeremonyRunKey] = useState(0);
@@ -777,6 +831,14 @@ export function OnboardingScreen({
           setBlockedReason(outcome.reason);
           throw new Error(`broker not ready to register — ${outcome.reason}`);
         }
+        // #501: the chain is unreachable — the daemon is fine. NO passkey was
+        // minted (we refuse to mint blind), so nothing is stranded; stop and
+        // let the operator retry once the chain answers.
+        if (outcome.mode === 'chain-unavailable') {
+          setEnrollMode('chain-unavailable');
+          setBlockedReason(outcome.reason);
+          throw new Error(`chain unavailable — ${outcome.reason}`);
+        }
         setEnrollMode(outcome.mode === 'real' ? 'real' : 'demo');
       },
     },
@@ -802,7 +864,17 @@ export function OnboardingScreen({
         const reg = pendingRegister.current;
         if (!reg) return;
         pendingRegister.current = null;
-        await submitMasterRegister(client, reg);
+        try {
+          await submitMasterRegister(client, reg);
+        } catch (e) {
+          // #501: a LATE failure — the passkey already exists (minted a step
+          // ago) but the master is NOT bound. Distinct from the pre-mint stops:
+          // there IS a stranded credential to tell the operator about, and only
+          // they can delete it. Re-throw so the runner stops on this step.
+          setEnrollMode('register-failed');
+          setBlockedReason((e as Error)?.message ?? 'the register did not land on chain');
+          throw e;
+        }
       },
     },
   ];
@@ -933,6 +1005,8 @@ export function OnboardingScreen({
               {enrollMode === 'demo' && <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
               {enrollMode === 'blocked' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>blocked · sign in or reset</span>}
               {enrollMode === 'broker-not-ready' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>broker not ready · retry</span>}
+              {enrollMode === 'chain-unavailable' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>chain unreachable · retry</span>}
+              {enrollMode === 'register-failed' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>not registered · action needed</span>}
             </div>
             {/* The ceremony phase renders no `note` (that lives in the email phase),
                 so a blocked enroll had NO on-screen explanation at all: the run just
@@ -991,16 +1065,75 @@ export function OnboardingScreen({
                 (older builds minted one per attempt).
               </div>
             )}
+            {/* #501: the chain is unreachable — the daemon is FINE. Previously
+                this rendered "demo · no daemon" and narrated every step green
+                to setup. No passkey was minted (we refuse to mint blind), so
+                nothing is stranded; it is purely transient. */}
+            {enrollMode === 'chain-unavailable' && (
+              <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
+                <strong>Can&apos;t reach the chain — onboarding stopped.</strong>
+                <br />
+                <span className="mono" style={{ fontSize: 11 }}>{blockedReason}</span>
+                <br />
+                Your master binding lives on chain, so we can&apos;t tell whether you already have
+                one — and creating a passkey without knowing would strand it. <strong>Nothing was
+                created</strong> and your keychain is untouched. This is the chain or its RPC being
+                unreachable, <em>not</em> a problem with your daemon or this app. Retry once it
+                answers:
+                <div style={{ margin: '10px 0' }}>
+                  <button
+                    className="btn"
+                    style={{ padding: '8px 14px' }}
+                    onClick={() => { setEnrollMode('pending'); setBlockedReason(''); setCeremonyRunKey((k) => k + 1); }}
+                  >
+                    ↻ Retry
+                  </button>
+                </div>
+              </div>
+            )}
+            {/* #501: the LATE failure — the passkey EXISTS but the register did
+                not land, so there is a real stranded credential. The app cannot
+                delete it (WebAuthn forbids a site deleting its own credential),
+                so name it and hand the operator the one action only they can
+                take. Retrying mints ANOTHER passkey, so say that plainly. */}
+            {enrollMode === 'register-failed' && (
+              <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
+                <strong>Your master was NOT registered on chain.</strong>
+                <br />
+                <span className="mono" style={{ fontSize: 11 }}>{blockedReason}</span>
+                <br />
+                A passkey <strong>was</strong> created a step earlier, but the on-chain registration
+                didn&apos;t land — so that passkey is now <strong>unused</strong> and bound to
+                nothing. We deliberately did <em>not</em> save it as your master key (that would be
+                the wrong-passkey trap: every later approval would fail). You are{' '}
+                <strong>not onboarded</strong>; nothing on chain changed.
+                <br />
+                <br />
+                Common cause: the broker&apos;s bundler ran out of gas, so the transaction couldn&apos;t
+                be paid for — an operator tops it up. Once it&apos;s fixed you can retry, but note{' '}
+                <strong>a retry creates a new passkey</strong>: delete the unused{' '}
+                <em>AgentKeys master device</em> passkey in System Settings ▸ Passwords first, so
+                they don&apos;t pile up.
+                <div style={{ margin: '10px 0' }}>
+                  <button
+                    className="btn"
+                    style={{ padding: '8px 14px' }}
+                    onClick={() => { setEnrollMode('pending'); setBlockedReason(''); setCeremonyRunKey((k) => k + 1); }}
+                  >
+                    ↻ Retry (creates a new passkey)
+                  </button>
+                </div>
+              </div>
+            )}
             {omni && (
               <div className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)', marginBottom: 14, wordBreak: 'break-all' }}>
                 logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni {omni}
               </div>
             )}
             {/* The two-Touch-ID promise is only true on the real path — hide it
-                when the enroll is blocked or the broker can't register (no
-                Touch ID fires in either case), so the notice never contradicts
-                the state above it. */}
-            {enrollMode !== 'blocked' && enrollMode !== 'broker-not-ready' && (
+                in every stopped state (no further Touch ID will fire), so the
+                notice never contradicts the panel above it. */}
+            {!['blocked', 'broker-not-ready', 'chain-unavailable', 'register-failed'].includes(enrollMode) && (
               <div className="touchid-notice">
                 <strong>🔐 Touch ID is requested twice.</strong> Once to <strong>create</strong> your passkey, then once more to <strong>authorize</strong> its on-chain registration — both with the same passkey. The second prompt is expected, not a retry or an error.
               </div>

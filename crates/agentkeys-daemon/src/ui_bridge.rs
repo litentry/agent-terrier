@@ -1931,16 +1931,18 @@ async fn reset_target_omni(state: &SharedUiBridgeState) -> Option<String> {
         .map(|o| agentkeys_backend_client::normalize_omni_0x(&o))
 }
 
-/// Probe whether the configured broker can BUILD a sponsored master register
-/// (#278 D6) — i.e. whether a reset could be followed by a successful
-/// re-onboard. Sends a syntactically complete but deliberately-garbage
+/// Probe whether the configured broker can BUILD **and pay for** a sponsored
+/// master register (#278 D6) — the question behind both a safe reset and a
+/// safe onboarding. Sends a syntactically complete but deliberately-garbage
 /// `/v1/register/build` body under the live J1: the broker loads its accept
-/// config (sponsor key / paymaster / factory) BEFORE parsing the attestation,
-/// so a missing sponsored-register runtime answers 503 while a healthy one
-/// rejects the garbage body with 400 (or 409 on the already-registered
-/// skip-gate). Returns `Some(broker detail)` ONLY on a definite 503; network
-/// errors and every other status return `None` — an indeterminate probe must
-/// never block a reset.
+/// config (sponsor key / paymaster / factory) AND checks the bundler is ready
+/// to submit+pay (#501 — bundler `/healthz`, which reports `ready:false` when
+/// the submitter EOA is below the chain gas floor) BEFORE parsing the
+/// attestation, so a missing sponsored-register runtime OR an out-of-gas
+/// bundler answers 503 while a healthy one rejects the garbage body with 400
+/// (or 409 on the already-registered skip-gate). Returns `Some(broker detail)`
+/// ONLY on a definite 503; network errors and every other status return `None`
+/// — an indeterminate probe must never block a reset or an onboarding.
 ///
 /// Why this exists (2026-07-16 VE stranding): the app's "reset + re-onboard"
 /// remedy unbound the master on chain, then `/v1/register/build` 503'd at the

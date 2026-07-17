@@ -45,6 +45,19 @@ fn chain_id_from_chain_profile() -> Option<String> {
         .map(|p| p.chain_id.to_string())
 }
 
+/// The submitter EOA's gas floor (`funding.deploy_min_wei`) from the compiled
+/// chain profile — the SAME number the fleet WALLETS board reds the `bundler`
+/// row at (#294/#230), so "the board says red" and "the bundler refuses" can
+/// never disagree. `None` (no profile / no funding block) ⇒ the gas gate is
+/// simply not enforced; it never invents a floor.
+fn gas_floor_from_chain_profile() -> Option<String> {
+    let chain = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+    agentkeys_core::chain_profile::ChainProfile::load_builtin(&chain)
+        .ok()
+        .and_then(|p| p.funding)
+        .map(|f| f.deploy_min_wei)
+}
+
 fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20]> {
     hex::decode(hex_s.trim().trim_start_matches("0x"))
         .map_err(|e| anyhow!("{name}: {e}"))?
@@ -63,6 +76,12 @@ pub struct BundlerConfig {
     pub gas_limit: u128,
     /// Fixed gas price; `None` ⇒ read `eth_gasPrice` per submit (+25% headroom).
     pub gas_price: Option<u128>,
+    /// #501: the submitter's gas floor (`funding.deploy_min_wei` from the chain
+    /// profile). Below it `/healthz` reports `ready:false` so the broker can
+    /// refuse a register BEFORE the browser mints a passkey — an out-of-gas
+    /// submitter otherwise burned two Touch IDs and orphaned a credential.
+    /// `None` ⇒ not enforced (no profile funding block).
+    pub gas_floor_wei: Option<u128>,
 }
 
 /// Boot state. The two HOST-CONDITIONAL inputs — the EntryPoint address
@@ -105,6 +124,10 @@ pub struct BundlerBootValues {
     pub handleops_gas_limit: Option<String>,
     /// `AGENTKEYS_BUNDLER_GAS_PRICE` (optional, wei).
     pub gas_price: Option<String>,
+    /// #501: submitter gas floor (wei). `AGENTKEYS_BUNDLER_GAS_FLOOR_WEI`
+    /// override, else the compiled chain profile's `funding.deploy_min_wei`
+    /// (resolved in `from_process_env`). Absent ⇒ the gate is not enforced.
+    pub gas_floor_wei: Option<String>,
 }
 
 impl BundlerBootValues {
@@ -122,6 +145,9 @@ impl BundlerBootValues {
                 .ok(),
             handleops_gas_limit: std::env::var("AGENTKEYS_HANDLEOPS_GAS_LIMIT").ok(),
             gas_price: std::env::var("AGENTKEYS_BUNDLER_GAS_PRICE").ok(),
+            gas_floor_wei: std::env::var("AGENTKEYS_BUNDLER_GAS_FLOOR_WEI")
+                .ok()
+                .or_else(gas_floor_from_chain_profile),
         }
     }
 }
@@ -191,6 +217,14 @@ impl BundlerBoot {
             .and_then(|s| s.parse().ok())
             .unwrap_or(4_000_000);
         let gas_price = values.gas_price.and_then(|s| s.parse().ok());
+        // Unparseable ⇒ None (gate off), never a guessed floor: a wrong floor
+        // would either block a funded submitter or pass a broke one.
+        let gas_floor_wei = values
+            .gas_floor_wei
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse().ok());
         Ok(Self::Ready(Box::new(BundlerConfig {
             rpc_url,
             chain_id,
@@ -199,6 +233,7 @@ impl BundlerBoot {
             beneficiary,
             gas_limit,
             gas_price,
+            gas_floor_wei,
         })))
     }
 }
@@ -238,12 +273,90 @@ pub fn build_router(state: Arc<BundlerState>) -> Router {
         .with_state(state)
 }
 
+/// #501: can the submitter actually pay for a `handleOps` right now? The
+/// bundler is the ONE component that can answer — it holds the key, so it
+/// alone knows the address; the floor comes from the same chain profile the
+/// fleet board reds against. Fail-OPEN on an unreadable balance: an RPC blip
+/// must never block a funded stack, and a truly-down chain is already caught
+/// upstream by the #435 chain probe.
+enum GasVerdict {
+    /// Funded, or the gate is not enforced (no floor / balance unreadable).
+    Ok,
+    /// Definitively below the floor — refuse before anything irreversible.
+    Low { balance_wei: u128, floor_wei: u128 },
+}
+
+/// Format wei as a short decimal in native units (18 dp) for operator-facing
+/// text — `1500000000000000000` → `1.5`. Integer math only (no f64 rounding on
+/// a 30-digit balance).
+fn wei_to_units(wei: u128) -> String {
+    let whole = wei / 1_000_000_000_000_000_000u128;
+    let frac = wei % 1_000_000_000_000_000_000u128;
+    if frac == 0 {
+        return whole.to_string();
+    }
+    let s = format!("{frac:018}");
+    format!("{whole}.{}", s.trim_end_matches('0'))
+}
+
+async fn submitter_gas_verdict(state: &BundlerState, cfg: &BundlerConfig) -> GasVerdict {
+    let Some(floor_wei) = cfg.gas_floor_wei else {
+        return GasVerdict::Ok; // no floor configured — gate off
+    };
+    let addr = format!("0x{}", hex::encode(cfg.beneficiary));
+    // Bounded: /healthz is read by systemd + deploy probes, so it must never
+    // hang on a wedged RPC.
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        chain_rpc(state, cfg, "eth_getBalance", json!([addr, "latest"])),
+    )
+    .await;
+    let balance_wei = match probe {
+        Ok(Ok(Value::String(hex_bal))) => {
+            u128::from_str_radix(hex_bal.trim_start_matches("0x"), 16).ok()
+        }
+        _ => None,
+    };
+    match balance_wei {
+        Some(bal) if bal < floor_wei => GasVerdict::Low {
+            balance_wei: bal,
+            floor_wei,
+        },
+        _ => GasVerdict::Ok, // funded, or unreadable ⇒ fail-open
+    }
+}
+
+/// Operator-facing reason for a below-floor submitter — the exact string that
+/// reaches the browser panel via the broker's 503 and the daemon's preflight.
+fn out_of_gas_message(addr: &[u8; 20], balance_wei: u128, floor_wei: u128) -> String {
+    format!(
+        "bundler submitter 0x{} is OUT OF GAS: {} < {} (the chain's funding floor) — \
+         top it up from the deploy wallet; the fleet WALLETS board shows this row red",
+        hex::encode(addr),
+        wei_to_units(balance_wei),
+        wei_to_units(floor_wei),
+    )
+}
+
 /// 200 in BOTH boot states — a degraded bundler is a healthy process (the
 /// deploy probe + systemd must not flap); `ready:false` + `missing` tell the
-/// operator exactly what to provision.
+/// operator exactly what to provision. #501: a Ready bundler whose submitter
+/// cannot pay is ALSO `ready:false` (+ `reason`) — the broker gates the
+/// register on this, so an out-of-gas stack stops BEFORE the browser mints a
+/// passkey it could never register.
 async fn healthz(State(state): State<Arc<BundlerState>>) -> Json<Value> {
     match &state.boot {
-        BundlerBoot::Ready(_) => Json(json!({ "ok": true, "ready": true })),
+        BundlerBoot::Ready(cfg) => match submitter_gas_verdict(&state, cfg).await {
+            GasVerdict::Ok => Json(json!({ "ok": true, "ready": true })),
+            GasVerdict::Low {
+                balance_wei,
+                floor_wei,
+            } => Json(json!({
+                "ok": true,
+                "ready": false,
+                "reason": out_of_gas_message(&cfg.beneficiary, balance_wei, floor_wei),
+            })),
+        },
         BundlerBoot::Degraded { missing, .. } => {
             Json(json!({ "ok": true, "ready": false, "missing": missing }))
         }
@@ -547,6 +660,7 @@ mod tests {
             beneficiary: [0x77; 20],
             gas_limit: 4_000_000,
             gas_price: Some(40_000_000_000),
+            gas_floor_wei: None,
         };
         Arc::new(BundlerState::new(BundlerBoot::Ready(Box::new(cfg))))
     }
@@ -660,6 +774,7 @@ mod tests {
             beneficiary: [0x77; 20],
             gas_limit: 4_000_000,
             gas_price: Some(40_000_000_000),
+            gas_floor_wei: None,
         };
         let st = Arc::new(BundlerState::new(BundlerBoot::Ready(Box::new(cfg))));
         st.submitted.lock().await.insert(
@@ -730,6 +845,123 @@ mod tests {
         )
         .await;
         assert_eq!(resp.0["error"]["code"], -32601);
+    }
+
+    // #501 — the gas gate. Mock chain returns a fixed `eth_getBalance`; the
+    // healthz gate compares it to the config floor.
+    async fn spawn_mock_balance(balance_hex: &'static str) -> String {
+        use axum::routing::post;
+        async fn handle(
+            axum::extract::State(bal): axum::extract::State<&'static str>,
+            Json(req): Json<Value>,
+        ) -> Json<Value> {
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            match req.get("method").and_then(|m| m.as_str()).unwrap_or("") {
+                "eth_getBalance" => Json(json!({"jsonrpc":"2.0","id":id,"result":bal})),
+                m => Json(json!({"jsonrpc":"2.0","id":id,"error":{
+                    "code":-32601,"message":format!("unexpected {m}")}})),
+            }
+        }
+        let app = Router::new()
+            .route("/", post(handle))
+            .with_state(balance_hex);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/")
+    }
+
+    fn ready_state_with(rpc_url: String, gas_floor_wei: Option<u128>) -> Arc<BundlerState> {
+        let cfg = BundlerConfig {
+            rpc_url,
+            chain_id: 212_013,
+            entry_point: [0x66; 20],
+            signer: SigningKey::from_slice(&[0x46; 32]).unwrap(),
+            beneficiary: [0x77; 20],
+            gas_limit: 4_000_000,
+            gas_price: Some(40_000_000_000),
+            gas_floor_wei,
+        };
+        Arc::new(BundlerState::new(BundlerBoot::Ready(Box::new(cfg))))
+    }
+
+    #[test]
+    fn wei_to_units_formats_native_amounts() {
+        assert_eq!(wei_to_units(1_000_000_000_000_000_000), "1");
+        assert_eq!(wei_to_units(1_500_000_000_000_000_000), "1.5");
+        assert_eq!(wei_to_units(0), "0");
+        assert_eq!(wei_to_units(20_000_000_000_000_000), "0.02");
+    }
+
+    #[test]
+    fn gas_floor_from_profile_and_override_parse() {
+        let ep = format!("0x{}", "66".repeat(20));
+        let key = format!("0x{}", "46".repeat(32));
+        // Explicit override wins and parses.
+        let over = BundlerBootValues {
+            gas_floor_wei: Some("5000000000000000000".into()),
+            ..boot_values(Some("http://127.0.0.1:1"), Some(&ep), Some(&key))
+        };
+        match BundlerBoot::from_values(over).unwrap() {
+            BundlerBoot::Ready(c) => assert_eq!(c.gas_floor_wei, Some(5_000_000_000_000_000_000)),
+            _ => panic!("expected ready"),
+        }
+        // Unparseable ⇒ None (gate off), never a guessed floor.
+        let bad = BundlerBootValues {
+            gas_floor_wei: Some("not-a-number".into()),
+            ..boot_values(Some("http://127.0.0.1:1"), Some(&ep), Some(&key))
+        };
+        match BundlerBoot::from_values(bad).unwrap() {
+            BundlerBoot::Ready(c) => assert_eq!(c.gas_floor_wei, None),
+            _ => panic!("expected ready"),
+        }
+        // Absent ⇒ resolved from the compiled chain profile (Heima carries a
+        // funding.deploy_min_wei) — from_process_env's or_else path.
+        assert!(gas_floor_from_chain_profile().is_some());
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_not_ready_when_submitter_below_floor() {
+        // Balance 0.5 HEI, floor 1 HEI → not ready, with an out-of-gas reason.
+        let rpc = spawn_mock_balance("0x6f05b59d3b20000").await; // 0.5e18
+        let st = ready_state_with(rpc, Some(1_000_000_000_000_000_000));
+        let hz = healthz(State(st)).await;
+        assert_eq!(hz.0["ready"], false, "{}", hz.0);
+        let reason = hz.0["reason"].as_str().unwrap();
+        assert!(reason.contains("OUT OF GAS"), "{reason}");
+        assert!(reason.contains("0.5"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn healthz_ready_when_submitter_at_or_above_floor() {
+        let rpc = spawn_mock_balance("0x1bc16d674ec80000").await; // 2e18
+        let st = ready_state_with(rpc, Some(1_000_000_000_000_000_000));
+        let hz = healthz(State(st)).await;
+        assert_eq!(hz.0["ready"], true, "{}", hz.0);
+    }
+
+    #[tokio::test]
+    async fn healthz_fails_open_when_balance_unreadable() {
+        // Unreachable RPC + a floor set ⇒ MUST NOT block (fail-open): a health
+        // blip cannot take down a funded stack.
+        let st = ready_state_with(
+            "http://127.0.0.1:1/".into(),
+            Some(1_000_000_000_000_000_000),
+        );
+        let hz = healthz(State(st)).await;
+        assert_eq!(
+            hz.0["ready"], true,
+            "unreadable balance must fail open: {}",
+            hz.0
+        );
+    }
+
+    #[tokio::test]
+    async fn healthz_ready_when_no_floor_configured() {
+        // No floor ⇒ gate off, never probes the chain.
+        let st = ready_state_with("http://127.0.0.1:1/".into(), None);
+        let hz = healthz(State(st)).await;
+        assert_eq!(hz.0["ready"], true, "{}", hz.0);
     }
 
     #[tokio::test]

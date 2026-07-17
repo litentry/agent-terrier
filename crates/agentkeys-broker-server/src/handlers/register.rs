@@ -56,6 +56,51 @@ use crate::handlers::accept::{
 use crate::sponsored_accept::{assemble_register_userop, AcceptUserOpParams, BuildAcceptResponse};
 use crate::state::SharedState;
 
+/// #501 — is the bundler able to SUBMIT + PAY for a handleOps right now?
+/// Returns `Some(reason)` only on a DEFINITE not-ready (`ready:false` from the
+/// bundler's `/healthz` — missing signer/EntryPoint, or the submitter below the
+/// chain gas floor), else `None`. The bundler owns the answer (it holds the
+/// submitter key, so it alone knows the address + balance). Fail-OPEN: an unset
+/// URL or an unreachable/garbled health response returns `None` — a truly-down
+/// stack is already caught by the #435 chain probe, and a blip must never block
+/// a funded register. Read the bundler's own `reason`/`missing` string verbatim
+/// so the operator-facing text has ONE source (the bundler).
+async fn bundler_not_ready_reason(state: &SharedState) -> Option<String> {
+    let base = std::env::var("AGENTKEYS_BUNDLER_URL").ok()?;
+    let url = format!("{}/healthz", base.trim_end_matches('/'));
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        state.http.get(&url).send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    // ready == true (or the field absent on an old bundler) ⇒ not our concern.
+    if body.get("ready").and_then(serde_json::Value::as_bool) != Some(false) {
+        return None;
+    }
+    // Prefer the #501 gas `reason`; fall back to the degraded `missing` list.
+    if let Some(reason) = body.get("reason").and_then(serde_json::Value::as_str) {
+        return Some(reason.to_string());
+    }
+    let missing = body
+        .get("missing")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unconfigured".to_string());
+    Some(format!(
+        "the bundler is not ready ({missing}) — arm the submitter key / EntryPoint \
+         (setup-broker-host.sh) so it can submit + pay for handleOps"
+    ))
+}
+
 /// Broker-side mirror of `agentkeys_backend_client::protocol::BuildRegisterUserOpRequest`
 /// (the broker doesn't depend on that crate; the frozen key-set test there pins the
 /// shape). `POST /v1/register/build` body, J1_master-gated.
@@ -253,6 +298,20 @@ pub async fn register_build(
              (the #278 D6 one-op register has no unsponsored fallback; fund the VerifyingPaymaster \
              EntryPoint deposit for initCode+register)",
         ));
+    }
+
+    // 2b. #501 — the BUNDLER must be able to pay for handleOps, or the register
+    //     will fail AFTER the browser has already minted a passkey (2 Touch IDs,
+    //     an orphaned credential, no master). Gate HERE, before parse_register,
+    //     so the daemon's preflight probe (a garbage body that never parses)
+    //     hits it too → GET /v1/master/register/preflight reports register_ready
+    //     false with the bundler's own reason → onboarding stops before
+    //     credentials.create. Fail-open on an unreachable bundler: the #435
+    //     chain probe already covers a truly-down stack, and a health-check blip
+    //     must not block a funded one. 503 = the same status load_accept_config
+    //     failure uses, so the preflight's 503-vs-not check is unchanged.
+    if let Some(reason) = bundler_not_ready_reason(&state).await {
+        return Err(aerr(StatusCode::SERVICE_UNAVAILABLE, reason));
     }
 
     // 3. factory address (the omni-keyed account is counterfactually deployed by it).
