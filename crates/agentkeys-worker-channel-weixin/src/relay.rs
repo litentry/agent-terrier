@@ -203,7 +203,7 @@ async fn emit_relay_audit(
     let Some(audit) = state.audit.as_ref() else {
         return;
     };
-    let Some(op_omni) = decode_omni_32(&state.config.operator_omni) else {
+    let Some(op_omni) = decode_omni_32(&state.effective_operator_omni()) else {
         tracing::warn!("operator omni not 32-byte hex — skipping gateway audit");
         return;
     };

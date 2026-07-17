@@ -131,10 +131,23 @@ pub(crate) async fn admin_status(
 pub(crate) async fn login_start(
     State(state): State<SharedWeixinGatewayState>,
     headers: HeaderMap,
+    body: Option<Json<agentkeys_protocol::GatewayLoginStartRequest>>,
 ) -> impl IntoResponse {
     if let Err(resp) = admin_gate(&state, &headers) {
         return resp;
     }
+    // #502 (plan T9): the daemon proxy fills the connecting master's omni from
+    // the authenticated session — captured here, recorded on `connected`. A
+    // malformed value is dropped LOUDLY (the env-stamp path then still applies).
+    let session_omni = body.and_then(|Json(b)| b.operator_omni).filter(|omni| {
+        match crate::relay::decode_omni_32(omni) {
+            Some(_) => true,
+            None => {
+                warn!(omni = %omni, "login/start carried a NON-0x64hex operator omni — ignored");
+                false
+            }
+        }
+    });
     if state.config.transport != WeixinTransport::Ilink {
         return (
             StatusCode::CONFLICT,
@@ -160,6 +173,7 @@ pub(crate) async fn login_start(
                 qrcode_url: qr.qrcode_img_content.clone(),
                 base_url: bootstrap,
                 pending_verify: None,
+                operator_omni: session_omni,
             };
             let resp = GatewayLoginStartResponse {
                 ok: true,
@@ -339,6 +353,25 @@ pub(crate) async fn login_status(
                          检查 {} 的属主/权限",
                         state.config.secrets_file
                     ));
+                }
+            }
+
+            // #502 (plan T9): record the connecting master's omni — runtime
+            // (audit emits key on it immediately) + persisted into the same
+            // secrets file (restarts keep it). The env stamp becomes a legacy
+            // fallback; a differing armed value is overridden LOUDLY in
+            // `set_runtime_operator_omni`.
+            if let Some(omni) = login.operator_omni.clone() {
+                state.set_runtime_operator_omni(&omni);
+                match ilink_login::upsert_operator_omni(secrets_path, &omni) {
+                    Ok(_) => {
+                        info!(omni = %omni, "operator omni recorded at connect (session-sourced)")
+                    }
+                    Err(e) => warn!(
+                        error = %e,
+                        "connect-recorded operator omni NOT persisted — armed for THIS \
+                         process only (a restart falls back to the env stamp)"
+                    ),
                 }
             }
 
@@ -1107,7 +1140,7 @@ async fn emit_contact_bind_audit(
     let Some(audit) = state.audit.as_ref() else {
         return;
     };
-    let Some(op_omni) = crate::relay::decode_omni_32(&state.config.operator_omni) else {
+    let Some(op_omni) = crate::relay::decode_omni_32(&state.effective_operator_omni()) else {
         warn!("operator omni not 32-byte hex — skipping contact-bind audit");
         return;
     };

@@ -302,9 +302,11 @@ impl WeixinGatewayConfig {
         if crate::relay::decode_omni_32(&operator_omni).is_none() {
             eprintln!(
                 "==> ⚠️  agentkeys-worker-channel-weixin: AGENTKEYS_WEIXIN_OPERATOR_OMNI is not \
-                 0x+64-hex — ON-CHAIN CONTACT AUDIT UNARMED: bind/reject/revoke will NOT anchor \
-                 on chain. Set WEIXIN_OPERATOR_OMNI in the operator-workstation env file and \
-                 re-run setup-broker-host.sh (it stamps the gateway secrets file), #424 §3."
+                 0x+64-hex — ON-CHAIN CONTACT AUDIT UNARMED at boot: bind/reject/revoke will NOT \
+                 anchor on chain. It self-arms at the next parent-control 连接 ceremony (#502: \
+                 the session's omni is recorded at connect + persisted); the env stamp \
+                 (WEIXIN_OPERATOR_OMNI + setup-broker-host.sh, #424 §3) remains the manual/CLI \
+                 fallback."
             );
         }
 

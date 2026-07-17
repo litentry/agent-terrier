@@ -278,6 +278,55 @@ pub fn write_secrets_file(path: &Path, outcome: &LoginOutcome) -> anyhow::Result
     Ok(rebound)
 }
 
+/// #502 (plan T9): persist the CONNECT-recorded operator omni into the same
+/// secrets file, in place — replaces an existing `AGENTKEYS_WEIXIN_OPERATOR_OMNI=`
+/// line (placeholder or armed; the caller already warned loudly on an override)
+/// or appends one; every other line is preserved. Returns `true` when a real
+/// (non-placeholder, non-equal) prior value was replaced. Same `0600` +
+/// in-place-write posture as [`write_secrets_file`].
+pub fn upsert_operator_omni(path: &Path, omni: &str) -> anyhow::Result<bool> {
+    const KEY: &str = "AGENTKEYS_WEIXIN_OPERATOR_OMNI";
+    let existing = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            String::new()
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+
+    let mut seen = false;
+    let mut replaced_armed = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        let body = {
+            let t = line.trim_start();
+            t.strip_prefix("export ").unwrap_or(t)
+        };
+        if let Some(rest) = body.strip_prefix(KEY).filter(|r| r.starts_with('=')) {
+            let old = rest[1..].trim();
+            if !old.is_empty() && !old.starts_with("REPLACE_ME") && old != omni {
+                replaced_armed = true;
+            }
+            out_lines.push(format!("{KEY}={omni}"));
+            seen = true;
+            continue;
+        }
+        out_lines.push(line.to_string());
+    }
+    if !seen {
+        out_lines.push(format!("{KEY}={omni}"));
+    }
+    let mut content = out_lines.join("\n");
+    content.push('\n');
+    std::fs::write(path, &content).with_context(|| format!("writing {}", path.display()))?;
+    set_0600(path)?;
+    Ok(replaced_armed)
+}
+
 /// Blank the persisted iLink token (operator DISCONNECT) so a restart stays
 /// OFFLINE until the next login. In-place rewrite that keeps every non-managed
 /// line (admin token, operator omni, OA creds, comments) — only the managed
@@ -508,6 +557,46 @@ AGENTKEYS_WEIXIN_APP_ID=wxappid
         assert!(after2.contains("tok-B@im.bot:s"));
         assert!(!after2.contains("tok-A@im.bot:s"));
         assert!(after2.contains("AGENTKEYS_WEIXIN_OPERATOR_OMNI=0xabc"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn upsert_operator_omni_appends_replaces_and_preserves() {
+        let path = std::env::temp_dir().join(format!("ak-omni-upsert-{}.env", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let omni_a = format!("0x{}", "aa".repeat(32));
+        let omni_b = format!("0x{}", "bb".repeat(32));
+
+        // Fresh file → appended, not an armed replacement.
+        assert!(!super::upsert_operator_omni(&path, &omni_a).unwrap());
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert!(s.contains(&format!("AGENTKEYS_WEIXIN_OPERATOR_OMNI={omni_a}")));
+
+        // Placeholder + other lines: placeholder filled, everything else kept,
+        // still not an armed replacement.
+        std::fs::write(
+            &path,
+            "# comment stays\nAGENTKEYS_WEIXIN_ADMIN_TOKEN=tok\n\
+             export AGENTKEYS_WEIXIN_OPERATOR_OMNI=REPLACE_ME_operator_omni_0x64hex\n",
+        )
+        .unwrap();
+        assert!(!super::upsert_operator_omni(&path, &omni_a).unwrap());
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert!(s.contains("# comment stays"));
+        assert!(s.contains("AGENTKEYS_WEIXIN_ADMIN_TOKEN=tok"));
+        assert!(s.contains(&format!("AGENTKEYS_WEIXIN_OPERATOR_OMNI={omni_a}")));
+        assert!(!s.contains("REPLACE_ME_operator_omni"));
+
+        // A DIFFERENT armed value → replaced, reported as an armed replacement
+        // (the caller's loud-override warn pairs with this).
+        assert!(super::upsert_operator_omni(&path, &omni_b).unwrap());
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert!(s.contains(&format!("AGENTKEYS_WEIXIN_OPERATOR_OMNI={omni_b}")));
+        assert!(!s.contains(&omni_a));
+
+        // Same value again → idempotent, not an armed replacement.
+        assert!(!super::upsert_operator_omni(&path, &omni_b).unwrap());
 
         let _ = std::fs::remove_file(&path);
     }

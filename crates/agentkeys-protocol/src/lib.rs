@@ -776,6 +776,18 @@ pub struct GatewayStatusView {
     pub audit_on_chain: bool,
 }
 
+/// `POST /v1/gateway/admin/login/start` request (#502, plan T9 first step).
+/// `operator_omni` is filled SERVER-SIDE by the daemon from the master session
+/// — the browser sends an empty body and NEVER supplies it, so this shape is
+/// deliberately NOT ts-exported. The gateway records it at `connected` (the
+/// tenant identity arrives from the authenticated session, not an env stamp);
+/// absent (old daemon / CLI ceremony) keeps the env-stamp behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GatewayLoginStartRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_omni: Option<String>,
+}
+
 /// `POST /v1/gateway/admin/login/start` response — render `qrcode_url` as a QR
 /// in parent-control; the operator scans it with the SPARE personal-WeChat
 /// account (never a family member's daily account — that account BECOMES the bot).
