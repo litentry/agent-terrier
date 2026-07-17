@@ -2042,7 +2042,10 @@ async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_js
     // endpoint, and this step verifies the chain now reads `revoked` per agent.
     // A legacy EOA-master's agents are revoked here via the deployer script
     // (`heima-device-revoke.sh`, idempotent, agent-tier).
-    if let Err(e) = reconcile_actors_from_chain(&state).await {
+    // evict_disowned = false: the #260 teardown below must still SEE
+    // chain-revoked rows to report them (already_revoked + audit); the reset
+    // clears the whole map afterwards, so no ghost can survive this path.
+    if let Err(e) = reconcile_actors_from_chain(&state, false).await {
         fleet_failures.push(format!(
             "chain fleet reconstruction failed ({e}) — revoking only the locally-known agents; \
              re-run reset once the RPC is reachable"
@@ -3540,14 +3543,55 @@ async fn fetch_chain_fleet(
     Ok(fleet)
 }
 
+/// Evict every NON-master actor row whose device the canon has DISOWNED —
+/// hash in `revoked` (the chain fleet) or `archived` (the binding manifest).
+/// Pure over the map + pre-normalized hash sets so the ghost rules stay
+/// unit-testable; rows without a device hash or unknown to both sets are
+/// untouched (a claimed-but-unregistered pairing is PRE-canonical, not dead).
+/// Returns how many rows were removed.
+fn evict_disowned_actor_rows(
+    actors: &mut HashMap<String, ApiActor>,
+    revoked: &std::collections::HashSet<String>,
+    archived: &std::collections::HashSet<String>,
+) -> usize {
+    let norm = |o: &str| o.trim().trim_start_matches("0x").to_lowercase();
+    let evict: Vec<String> = actors
+        .iter()
+        .filter(|(_, a)| a.role != "master")
+        .filter(|(_, a)| {
+            a.device_key_hash
+                .as_deref()
+                .map(norm)
+                .is_some_and(|h| revoked.contains(&h) || archived.contains(&h))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &evict {
+        actors.remove(id);
+    }
+    evict.len()
+}
+
 /// Reconstruct + reconcile `state.actors` from the chain (#233). In-memory rows
 /// WIN (they carry the richer pairing-time labels/scopes); the chain adds what
 /// this process never witnessed: the master row (synthesized from the held
 /// coords; its on-chain P256Account address is backfilled into
 /// `registered_master.account` for the actor page) and any active agent device
-/// with no matching row. Revoked devices are excluded. Returns how many rows
-/// were added.
-async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usize, String> {
+/// with no matching row. Revoked devices are excluded, and — the other
+/// direction of the same convergence — rows the canon has since DISOWNED
+/// (revoked on chain / archived in the manifest) are EVICTED, so an archived
+/// delegate's card cannot outlive it until a daemon restart. Returns how many
+/// rows were added.
+///
+/// `evict_disowned` gates the downward leg: the lazy actors-read sync passes
+/// `true` (kill the ghost cards); the RESET flow passes `false` — its #260
+/// teardown must still SEE chain-revoked rows to report them as
+/// `already_revoked` skips (+ their audit rows) in the reset receipt, and it
+/// clears the whole map right after anyway.
+async fn reconcile_actors_from_chain(
+    state: &SharedUiBridgeState,
+    evict_disowned: bool,
+) -> Result<usize, String> {
     let Some(omni) = held_operator_omni(state).await else {
         return Ok(0); // nobody onboarded — nothing to reconstruct
     };
@@ -3699,6 +3743,41 @@ async fn reconcile_actors_from_chain(state: &SharedUiBridgeState) -> Result<usiz
             },
         );
         added += 1;
+    }
+
+    // Downward convergence (the archived-ghost fix): the canon can DISOWN a
+    // row this process still holds — archive/revoke land on-chain (and the
+    // manifest gains archived_at) while the in-memory map keeps the richer
+    // pairing-time row, so the dead card outlives the delegate until a daemon
+    // restart. The invalidation protocol already re-runs this reconcile after
+    // every fleet mutation (invalidate_fleet_sync); it just never converged
+    // DOWNWARD. A row the chain does not know stays — pre-canonical pairings
+    // must survive.
+    if evict_disowned {
+        let revoked_hashes: std::collections::HashSet<String> = fleet
+            .iter()
+            .filter(|d| d.revoked)
+            .map(|d| norm(&d.device_key_hash))
+            .collect();
+        let archived_hashes: std::collections::HashSet<String> = guard
+            .values()
+            .filter_map(|a| a.device_key_hash.as_deref())
+            .filter(|h| {
+                manifest
+                    .as_ref()
+                    .and_then(|m| m.entry_for("", h))
+                    .is_some_and(|e| e.archived_at.is_some())
+            })
+            .map(norm)
+            .collect();
+        let removed = evict_disowned_actor_rows(&mut guard, &revoked_hashes, &archived_hashes);
+        if removed > 0 {
+            tracing::info!(
+                target: "agentkeys.daemon.ui_bridge",
+                removed,
+                "#233 reconcile: evicted actor rows the chain/manifest disowned (revoked/archived)"
+            );
+        }
     }
     drop(guard);
 
@@ -3925,7 +4004,7 @@ async fn maybe_sync_fleet_from_chain(state: &SharedUiBridgeState) {
     if state.fleet_synced_gen.load(Ordering::Acquire) >= target {
         return;
     }
-    match reconcile_actors_from_chain(state).await {
+    match reconcile_actors_from_chain(state, true).await {
         Ok(added) => {
             // Advance ONLY to the observed generation. If an invalidation bumped
             // fleet_gen during the chain reads, fleet_synced_gen stays below it
@@ -10994,6 +11073,86 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The archived-ghost rules (#440 live find): reconcile must evict rows
+    /// the canon has disowned — chain-revoked or manifest-archived — while
+    /// NEVER touching the master row, rows without a device hash, or
+    /// pre-canonical rows the chain does not know (a claimed-but-unregistered
+    /// pairing). Before this, the eviction never existed: the archive
+    /// invalidated the fleet generation, reconcile re-ran, and the dead card
+    /// still outlived the delegate until a daemon restart (in-memory won
+    /// unconditionally).
+    #[test]
+    fn evict_disowned_rows_kills_ghosts_and_spares_master_and_precanonical() {
+        let mk = |id: &str, role: &str, hash: Option<&str>| ApiActor {
+            id: id.into(),
+            omni: format!("0x{id}"),
+            omni_hex: format!("0x{id}"),
+            label: id.into(),
+            role: role.into(),
+            parent: None,
+            derivation: String::new(),
+            device: String::new(),
+            device_pubkey: String::new(),
+            last_active: String::new(),
+            status: "ok".into(),
+            vendor: String::new(),
+            k11: false,
+            device_key_hash: hash.map(str::to_string),
+            scope: None,
+            scope_unknown_service_ids: None,
+            payment_cap: None,
+            time_window: None,
+            services: None,
+            account_address: None,
+            account_type: None,
+            preset_id: None,
+            memory_ns: None,
+        };
+        let mut actors = HashMap::new();
+        actors.insert("master".into(), mk("master", "master", Some("0xaa")));
+        actors.insert(
+            "ghost-revoked".into(),
+            mk("ghost-revoked", "agent", Some("0xBB")),
+        );
+        actors.insert(
+            "ghost-archived".into(),
+            mk("ghost-archived", "agent", Some("0xcc")),
+        );
+        actors.insert("live".into(), mk("live", "agent", Some("0xdd")));
+        actors.insert(
+            "pending-no-hash".into(),
+            mk("pending-no-hash", "agent", None),
+        );
+        actors.insert(
+            "pre-canonical".into(),
+            mk("pre-canonical", "agent", Some("0xee")),
+        );
+
+        let revoked = std::collections::HashSet::from(["bb".to_string()]);
+        let archived = std::collections::HashSet::from(["cc".to_string()]);
+        let removed = evict_disowned_actor_rows(&mut actors, &revoked, &archived);
+
+        assert_eq!(removed, 2, "exactly the revoked + archived ghosts go");
+        assert!(!actors.contains_key("ghost-revoked"));
+        assert!(!actors.contains_key("ghost-archived"));
+        assert!(actors.contains_key("master"), "master is never evicted");
+        assert!(actors.contains_key("live"));
+        assert!(actors.contains_key("pending-no-hash"));
+        assert!(
+            actors.contains_key("pre-canonical"),
+            "a hash the canon does not know is a pending pairing, not a ghost"
+        );
+
+        // Even a (nonsensical) canon claim against the master's hash is a no-op.
+        let master_claim = std::collections::HashSet::from(["aa".to_string()]);
+        let empty = std::collections::HashSet::new();
+        assert_eq!(
+            evict_disowned_actor_rows(&mut actors, &master_claim, &empty),
+            0
+        );
+        assert!(actors.contains_key("master"));
+    }
 
     /// The on-chain shell-outs must RESOLVE against the real repo layout. They
     /// did not: the chain helpers live in scripts/operator/chain/ while the

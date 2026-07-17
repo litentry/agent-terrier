@@ -265,8 +265,12 @@ impl EcsSandboxClient {
         let ark = self.inference.ark().map_err(|e| {
             anyhow!(
                 "cannot spawn a delegate sandbox: the ark inference family does not resolve \
-                 ({e}). Populate it with: AGENTKEYS_INFERENCE_CREDS_DIR=<dir> \
-                 bash scripts/operator/secrets/rotate-inference-cred.sh ark"
+                 ({e}). On the broker host, populate it AS ROOT with an explicit --dir and \
+                 hand the file to the service user (the service user cannot read the repo \
+                 checkout, and a root-owned file is unreadable to the loader): \
+                 sudo bash <repo>/scripts/operator/secrets/rotate-inference-cred.sh ark \
+                 --dir <svc-home>/.agentkeys/inference && sudo chown -R <svc-user>: \
+                 <svc-home>/.agentkeys"
             )
         })?;
         let mut envs = vec![

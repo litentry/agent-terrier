@@ -107,17 +107,21 @@ pub async fn ensure_for_delegate_with_envs(
         Err(e) => {
             // Surfaced, never swallowed: the device still gets its JWT (the
             // handler's main job) plus the exact spawn failure to report.
+            // `{:#}` prints the WHOLE anyhow chain — a bare Display shows only
+            // the top context ("ecs RunTask failed") and hides the AWS error
+            // underneath (the #440 missing-TagResource hunt).
+            let chain = format!("{e:#}");
             tracing::warn!(
                 device_key_hash = %device_key_hash,
                 backend = %backend.kind(),
-                error = %e,
+                error = %chain,
                 "#377/#440 delegate sandbox ensure FAILED — device keeps its session; talk path may 500 no_ready_instance"
             );
             Some(SandboxProvision {
                 agent_url: backend.static_agent_url(),
                 sandbox_id: None,
                 status: None,
-                error: Some(e.to_string()),
+                error: Some(chain),
             })
         }
     }
@@ -195,7 +199,7 @@ pub async fn teardown_for_confirmed_batch(
             Err(e) => {
                 tracing::warn!(
                     device_key_hash = %device_key_hash,
-                    error = %e,
+                    error = %format!("{e:#}"),
                     "#377 unpair teardown FAILED — instance dies at its veFaaS timeout; revoked binding blocks any respawn"
                 );
             }
