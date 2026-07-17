@@ -53,6 +53,15 @@ pub struct PersistedMasterSession {
     /// The verified operator email (shown after restore; never a credential).
     #[serde(default)]
     pub email: String,
+    /// The broker URL this session was minted against (#373 stack scoping).
+    /// Two side-by-side stacks (Heima-AWS / Heima-VE) share `~/.agentkeys`, and
+    /// under per-stack identity namespaces (#464) a foreign-stack record is a
+    /// DIFFERENT identity — rehydrating it poisons every broker call (the
+    /// 2026-07-16 incident: the AWS daemon rehydrated a VE-minted record and
+    /// every cap-mint 401'd `InvalidSignature`). Empty on legacy records,
+    /// which therefore match only a broker-less daemon.
+    #[serde(default)]
+    pub broker_url: String,
     /// The EVM `operator_omni` (master-self ⇒ operator == actor). Normalized
     /// `0x`-prefixed. `device_key_hash` is derivable from this alone.
     pub operator_omni: String,
@@ -143,11 +152,17 @@ impl MasterSessionStore {
         write_0600(&path, json.as_bytes())
     }
 
-    /// Load the most-recently-written master session under `~/.agentkeys/`. The
-    /// master plane is singular per machine, but `load_latest` scans every
-    /// `daemon-*/master-session.json` and returns the newest by `created_at_unix`
-    /// so a stale record from a prior wallet never shadows the current one.
-    pub fn load_latest(&self) -> Option<PersistedMasterSession> {
+    /// Load the most-recently-written master session for THIS stack. The master
+    /// plane is singular per (machine, stack) — not per machine: `load_latest`
+    /// scans every `daemon-*/master-session.json`, considers ONLY records whose
+    /// `broker_url` matches the daemon's (#373 — stacks share `~/.agentkeys`;
+    /// under #464 a foreign-stack record is a different identity), and returns
+    /// the newest by `created_at_unix` so a stale record from a prior wallet
+    /// never shadows the current one. Legacy records (no `broker_url`) match
+    /// only a broker-less daemon — one explicit sign-in re-persists them with
+    /// the stack stamp.
+    pub fn load_latest(&self, broker_url: &str) -> Option<PersistedMasterSession> {
+        let want = normalize_broker(broker_url);
         let mut newest: Option<PersistedMasterSession> = None;
         let rd = std::fs::read_dir(&self.base).ok()?;
         for entry in rd.flatten() {
@@ -163,6 +178,16 @@ impl MasterSessionStore {
             let Ok(parsed) = serde_json::from_str::<PersistedMasterSession>(&json) else {
                 continue;
             };
+            if normalize_broker(&parsed.broker_url) != want {
+                tracing::info!(
+                    target: "agentkeys.daemon.master_session",
+                    wallet = %parsed.wallet,
+                    record_broker = %parsed.broker_url,
+                    daemon_broker = %broker_url,
+                    "skipping persisted master session from another stack (#373 scoping — sign in on this stack once to persist it here)"
+                );
+                continue;
+            }
             if newest
                 .as_ref()
                 .map(|n| parsed.created_at_unix >= n.created_at_unix)
@@ -252,6 +277,12 @@ pub fn now_unix() -> u64 {
 /// signature — the daemon holds the J1 as an opaque bearer (the broker signs it);
 /// it only needs the expiry to decide valid-vs-re-auth at startup. Returns `None`
 /// when the token isn't a parseable JWT or has no numeric `exp`.
+/// Broker-URL equality for stack scoping: scheme/host casing and a trailing
+/// slash are cosmetic, never a different stack.
+fn normalize_broker(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_lowercase()
+}
+
 pub fn jwt_exp_unix(token: &str) -> Option<u64> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
@@ -271,11 +302,14 @@ pub fn j1_expiry_for(j1: &str, created_at_unix: u64) -> u64 {
 mod tests {
     use super::*;
 
+    const TEST_BROKER: &str = "https://broker.example";
+
     fn sample(wallet: &str, created: u64, exp: u64) -> PersistedMasterSession {
         PersistedMasterSession {
             schema: 1,
             wallet: wallet.to_string(),
             email: "sara@example.com".to_string(),
+            broker_url: TEST_BROKER.to_string(),
             operator_omni: format!("0x{}", "ab".repeat(32)),
             device_key_hash: format!("0x{}", "cd".repeat(32)),
             j1: "eyJ.fake.jwt".to_string(),
@@ -295,8 +329,47 @@ mod tests {
         let (store, _tmp) = temp_store();
         let s = sample("0xWALLET", 100, 9_999_999_999);
         store.save(&s).expect("save");
-        let loaded = store.load_latest().expect("load");
+        let loaded = store.load_latest(TEST_BROKER).expect("load");
         assert_eq!(loaded, s);
+    }
+
+    #[test]
+    fn load_latest_skips_records_from_another_stack() {
+        // #373 scoping: the NEWEST record belongs to another stack (a different
+        // broker) — it must never shadow this stack's own (older) record. This
+        // is the 2026-07-16 bleed: the AWS daemon rehydrated a newer VE-minted
+        // record and every broker call 401'd InvalidSignature.
+        let (store, _tmp) = temp_store();
+        store.save(&sample("0xMINE", 100, 5)).expect("save mine");
+        let mut foreign = sample("0xTHEIRS", 200, 5);
+        foreign.broker_url = "https://broker.other-stack.example".into();
+        store.save(&foreign).expect("save foreign");
+
+        let loaded = store.load_latest(TEST_BROKER).expect("load");
+        assert_eq!(loaded.wallet, "0xMINE", "foreign newest must be skipped");
+        // Trailing slash / casing are cosmetic, not a different stack.
+        assert!(store.load_latest("HTTPS://broker.example/").is_some());
+        // The other stack still finds its own record.
+        assert_eq!(
+            store
+                .load_latest("https://broker.other-stack.example")
+                .expect("foreign load")
+                .wallet,
+            "0xTHEIRS"
+        );
+    }
+
+    #[test]
+    fn legacy_records_match_only_a_brokerless_daemon() {
+        // Pre-#373 records carry no broker_url: a broker-configured daemon must
+        // skip them (one explicit sign-in re-persists with the stamp); only a
+        // broker-less (script-mode) daemon still rehydrates them.
+        let (store, _tmp) = temp_store();
+        let mut legacy = sample("0xLEGACY", 100, 5);
+        legacy.broker_url = String::new();
+        store.save(&legacy).expect("save legacy");
+        assert!(store.load_latest(TEST_BROKER).is_none());
+        assert_eq!(store.load_latest("").expect("load").wallet, "0xLEGACY");
     }
 
     #[test]
@@ -324,7 +397,7 @@ mod tests {
         let (store, _tmp) = temp_store();
         store.save(&sample("0xOLD", 100, 5)).expect("save old");
         store.save(&sample("0xNEW", 200, 5)).expect("save new");
-        let loaded = store.load_latest().expect("load");
+        let loaded = store.load_latest(TEST_BROKER).expect("load");
         assert_eq!(loaded.wallet, "0xNEW");
     }
 
@@ -334,7 +407,7 @@ mod tests {
         store.save(&sample("0xA", 1, 2)).expect("save a");
         store.save(&sample("0xB", 2, 3)).expect("save b");
         store.clear_all().expect("clear all");
-        assert!(store.load_latest().is_none());
+        assert!(store.load_latest(TEST_BROKER).is_none());
         // Second clear on an already-empty root is a no-op, not an error.
         store.clear_all().expect("clear all again");
     }
@@ -386,7 +459,7 @@ mod tests {
     #[test]
     fn load_latest_none_on_empty_root() {
         let (store, _tmp) = temp_store();
-        assert!(store.load_latest().is_none());
+        assert!(store.load_latest(TEST_BROKER).is_none());
     }
 
     #[test]

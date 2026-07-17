@@ -438,6 +438,13 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson<MasterResetResult>('/v1/master/reset', {});
   }
 
+  // Can the broker build a sponsored master register right now? Guards BOTH
+  // the reset (before the Touch-ID fleet revoke) and onboarding (before
+  // credentials.create) so neither strands nor orphans on a 503 broker.
+  async registerPreflight(): Promise<Result<import('./types').RegisterPreflight>> {
+    return this.getJson<import('./types').RegisterPreflight>('/v1/master/register/preflight');
+  }
+
   async enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>> {
     try {
       const resp = await fetch(`${this.baseUrl}/v1/k11/enroll/begin`, {

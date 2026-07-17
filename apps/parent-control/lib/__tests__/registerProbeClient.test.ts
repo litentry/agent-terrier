@@ -64,3 +64,37 @@ describe('DaemonBackend register probe (#435)', () => {
     expect(r.data.probe_error).toContain('rpc');
   });
 });
+
+// The sibling seam: "can the broker BUILD a sponsored register right now?".
+// ONE probe feeds TWO guards — the reset refusal (never unbind into an
+// un-re-registerable state) and the onboarding no-orphan gate (never mint a
+// passkey the broker cannot register). Pin the URL + the not-ready payload
+// both guards branch on.
+describe('DaemonBackend register-path preflight', () => {
+  const backend = () => new DaemonBackend('http://127.0.0.1:3114');
+
+  it('GETs /v1/master/register/preflight and returns the ready verdict', async () => {
+    const calls = mockFetch(() => ({ register_ready: true, path: 'broker' }));
+    const r = await backend().registerPreflight();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('http://127.0.0.1:3114/v1/master/register/preflight');
+    expect(calls[0].method).toBe('GET');
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.data.register_ready).toBe(true);
+    expect(r.data.path).toBe('broker');
+  });
+
+  it("carries a not-ready verdict + the broker's own detail through (what stops a reset and a passkey mint)", async () => {
+    mockFetch(() => ({
+      register_ready: false,
+      path: 'broker',
+      detail: 'env BROKER_SPONSOR_SIGNER_KEY not set',
+    }));
+    const r = await backend().registerPreflight();
+    if (!r.ok) throw new Error('expected ok');
+    // `=== false` is the exact shape both guards test — an absent/undefined
+    // field must never read as "not ready" and block a healthy stack.
+    expect(r.data.register_ready).toBe(false);
+    expect(r.data.detail).toContain('BROKER_SPONSOR_SIGNER_KEY');
+  });
+});

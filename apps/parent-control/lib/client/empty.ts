@@ -90,6 +90,10 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
+  async registerPreflight(): Promise<Result<import('./types').RegisterPreflight>> {
+    return disconnected();
+  }
+
   async listActors(): Promise<Result<Actor[]>> {
     return disconnected();
   }

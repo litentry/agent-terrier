@@ -355,12 +355,31 @@ export interface MasterResetFleet {
   agents_still_bound?: { id: string; label: string; device_key_hash?: string | null }[];
 }
 
+/** Result of `GET /v1/master/register/preflight` — can the broker BUILD a
+ *  sponsored master register right now? `register_ready: false` = its
+ *  sponsored-register runtime is down (503). Two guards read it: RESET (an
+ *  unbind that could never re-onboard would STRAND the identity — the
+ *  2026-07-16 VE incident) and ONBOARDING (minting a passkey the broker can't
+ *  register orphans it in the Secure Enclave and the 2nd Touch ID never fires
+ *  — the 2026-07-17 observation). */
+export interface RegisterPreflight {
+  register_ready: boolean;
+  /** Which path vouched: 'broker' (probed live), 'script' (no broker — the
+   *  legacy local register script), 'indeterminate' (no session to probe with). */
+  path?: string;
+  /** The broker's own error detail when register_ready is false. */
+  detail?: string;
+}
+
 /** Result of `POST /v1/master/reset` (#225 E7, fleet teardown #243, #260 guard). */
 export interface MasterResetResult {
   ok: boolean;
   /** #260: true when the reset aborted because account-master agents are still
    *  bound — run the one-Touch-ID fleet revoke, then reset again. */
   needs_fleet_revoke?: boolean;
+  /** 2026-07-16 guard: true when the reset was refused because the broker
+   *  cannot re-register a master (a reset would strand the identity). */
+  needs_register_path?: boolean;
   /** Operator guidance — adapts to whether the on-chain unbind landed. */
   note?: string;
   onchain?: MasterResetOnchain;
@@ -575,6 +594,7 @@ export interface AgentKeysClient {
   // whether the on-chain unbind landed; `note` carries the operator guidance. Cannot
   // delete the OS passkey (WebAuthn) — the operator does that manually.
   resetMaster(): Promise<Result<MasterResetResult>>;
+  registerPreflight(): Promise<Result<RegisterPreflight>>;
 
   // §2 — master memory (#201 Phase 4). The LIST resolves CATEGORIES from the
   // durable, master-only Config taxonomy (zero memory decryption, survives daemon

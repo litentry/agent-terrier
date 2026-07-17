@@ -1129,6 +1129,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         // minting a passkey (register-if-first / skip-if-bound):
         .route("/v1/master/register/state", get(master_register_state))
         .route("/v1/master/reset", post(master_reset))
+        .route(
+            "/v1/master/register/preflight",
+            get(master_register_preflight),
+        )
         .route("/v1/auth/email/start", post(auth_email_start))
         .route("/v1/auth/email/status", get(auth_email_status))
         .route("/v1/onboarding/state", get(onboarding_state))
@@ -1898,6 +1902,119 @@ async fn relogin_finish(
     })))
 }
 
+/// The omni a reset would act on — the registered master first (what's actually
+/// bound on chain), then the persisted coords, then the live onboarding session.
+/// Shared by `master_reset`, its register-path guard, and the preflight route.
+async fn reset_target_omni(state: &SharedUiBridgeState) -> Option<String> {
+    let from_registered = state
+        .registered_master
+        .read()
+        .await
+        .as_ref()
+        .map(|rm| rm.operator_omni.clone());
+    let from_session = state
+        .master_session
+        .read()
+        .await
+        .as_ref()
+        .map(|ms| ms.operator_omni.clone());
+    let from_onboarding = state
+        .onboarding_session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.omni.clone());
+    [from_registered, from_session, from_onboarding]
+        .into_iter()
+        .flatten()
+        .find(|o| !o.is_empty())
+        .map(|o| agentkeys_backend_client::normalize_omni_0x(&o))
+}
+
+/// Probe whether the configured broker can BUILD a sponsored master register
+/// (#278 D6) — i.e. whether a reset could be followed by a successful
+/// re-onboard. Sends a syntactically complete but deliberately-garbage
+/// `/v1/register/build` body under the live J1: the broker loads its accept
+/// config (sponsor key / paymaster / factory) BEFORE parsing the attestation,
+/// so a missing sponsored-register runtime answers 503 while a healthy one
+/// rejects the garbage body with 400 (or 409 on the already-registered
+/// skip-gate). Returns `Some(broker detail)` ONLY on a definite 503; network
+/// errors and every other status return `None` — an indeterminate probe must
+/// never block a reset.
+///
+/// Why this exists (2026-07-16 VE stranding): the app's "reset + re-onboard"
+/// remedy unbound the master on chain, then `/v1/register/build` 503'd at the
+/// VE broker (no BROKER_SPONSOR_SIGNER_KEY, no bundler) — leaving the identity
+/// with NO master on ANY stack and no way to re-bind from that stack.
+async fn broker_register_path_unavailable(
+    broker: &str,
+    j1: &str,
+    operator_omni: &str,
+) -> Option<String> {
+    let probe = serde_json::json!({
+        "operator_omni": operator_omni,
+        "owner_pubkey_x": "0".repeat(64),
+        "owner_pubkey_y": "0".repeat(64),
+        "rpid_hash": "0".repeat(64),
+        "roles": 7,
+    });
+    match broker_post_json(broker, "/v1/register/build", j1, &probe).await {
+        Ok((st, v)) if st == StatusCode::SERVICE_UNAVAILABLE => Some(
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("503 Service Unavailable")
+                .to_string(),
+        ),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                "reset preflight: register/build probe unreachable ({e}) — treating as indeterminate (reset allowed)"
+            );
+            None
+        }
+    }
+}
+
+/// `GET /v1/master/register/preflight` — can the broker BUILD a sponsored
+/// master register right now? Two callers, one question:
+///   - RESET asks BEFORE the Touch-ID fleet revoke, so a doomed reset (unbind
+///     that could never re-onboard) is refused before ANY on-chain mutation.
+///   - ONBOARDING asks BEFORE `navigator.credentials.create()`, so a passkey
+///     is never minted when the register would 503 anyway — otherwise every
+///     failed attempt orphans a fresh passkey in the Secure Enclave and the
+///     promised second Touch ID never fires (the 2026-07-17 VE observation).
+///
+/// `register_ready: false` carries the broker's own error detail. No broker
+/// configured (the legacy script register path) or no live J1/omni to probe
+/// with ⇒ ready — indeterminate never blocks.
+async fn master_register_preflight(
+    State(state): State<SharedUiBridgeState>,
+) -> Json<serde_json::Value> {
+    let Some(broker) = state.broker_url.clone() else {
+        return Json(serde_json::json!({ "register_ready": true, "path": "script" }));
+    };
+    let j1 = state
+        .onboarding_session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.j1.clone())
+        .filter(|j| !j.is_empty());
+    let omni = reset_target_omni(&state).await;
+    let (Some(j1), Some(omni)) = (j1, omni) else {
+        return Json(serde_json::json!({ "register_ready": true, "path": "indeterminate" }));
+    };
+    match broker_register_path_unavailable(&broker, &j1, &omni).await {
+        Some(detail) => Json(serde_json::json!({
+            "register_ready": false,
+            "path": "broker",
+            "detail": detail,
+        })),
+        None => Json(serde_json::json!({ "register_ready": true, "path": "broker" })),
+    }
+}
+
 /// `POST /v1/master/reset` (#225 E7, fleet teardown #243) — fully unbind the master
 /// so the operator can re-onboard with a FRESH passkey (used when the bound master
 /// passkey was deleted in the OS password manager, or got out of sync via a
@@ -1934,33 +2051,55 @@ async fn relogin_finish(
 /// passkey** (WebAuthn forbids a site from deleting a credential) — the UI must tell the
 /// operator to delete the master passkey in System Settings → Passwords.
 async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
-    // Capture the operator omni BEFORE clearing local state (the on-chain reset needs
-    // it). Prefer the registered-master omni (what's actually bound on chain), then the
-    // persisted session, then the live onboarding session. Each read guard is dropped at
-    // its statement end — none held across an await.
-    let from_registered = state
-        .registered_master
-        .read()
-        .await
-        .as_ref()
-        .map(|rm| rm.operator_omni.clone());
-    let from_session = state
-        .master_session
-        .read()
-        .await
-        .as_ref()
-        .map(|ms| ms.operator_omni.clone());
-    let from_onboarding = state
-        .onboarding_session
-        .read()
-        .await
-        .as_ref()
-        .map(|s| s.omni.clone());
-    let operator_omni = [from_registered, from_session, from_onboarding]
-        .into_iter()
-        .flatten()
-        .find(|o| !o.is_empty())
-        .map(|o| agentkeys_backend_client::normalize_omni_0x(&o));
+    // Capture the operator omni BEFORE clearing local state (the on-chain reset
+    // needs it) — registered master, then persisted coords, then live session.
+    let operator_omni = reset_target_omni(&state).await;
+
+    // GUARD (2026-07-16 VE stranding): a reset is only safe when the master can
+    // RE-register afterwards — `registerFirstMasterDevice` is first-master-only,
+    // so unbind-then-503 leaves the identity with no master on ANY stack. Refuse
+    // BEFORE any mutation when the broker's register path is definitely down.
+    // Indeterminate (no broker / no J1 / probe unreachable) never blocks; the
+    // documented emergency override skips the probe entirely.
+    let skip_preflight = std::env::var("AGENTKEYS_RESET_SKIP_REGISTER_PREFLIGHT")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+    if skip_preflight {
+        tracing::warn!(
+            target: "agentkeys.daemon.ui_bridge",
+            "reset: register-path preflight SKIPPED (AGENTKEYS_RESET_SKIP_REGISTER_PREFLIGHT=1)"
+        );
+    } else if let Some(broker) = state.broker_url.clone() {
+        let j1 = state
+            .onboarding_session
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.j1.clone())
+            .filter(|j| !j.is_empty());
+        if let (Some(j1), Some(omni)) = (j1, operator_omni.clone()) {
+            if let Some(detail) = broker_register_path_unavailable(&broker, &j1, &omni).await {
+                tracing::warn!(
+                    target: "agentkeys.daemon.ui_bridge",
+                    omni = %omni,
+                    "reset REFUSED — broker register path unavailable: {detail}"
+                );
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "needs_register_path": true,
+                    "note": format!(
+                        "reset refused — this broker cannot re-register a master right now ({detail}). \
+                         Unbinding now would strand this identity with NO master and no way to \
+                         re-onboard on this stack. Fix the broker's sponsored-register runtime \
+                         (BROKER_SPONSOR_SIGNER_KEY + PAYMASTER_ADDRESS + bundler — on VE: \
+                         setup-broker-host.sh --cloud ve steps 3–5), or run the reset from a stack \
+                         whose broker can re-register. Emergency override: start the daemon with \
+                         AGENTKEYS_RESET_SKIP_REGISTER_PREFLIGHT=1."
+                    ),
+                }));
+            }
+        }
+    }
 
     // (0) FLEET teardown (#243, #260) — BEFORE the master unbind so every
     // sub-step still has its authority: the pending-pairing declines ride the
@@ -2361,6 +2500,9 @@ async fn persist_master_session(state: &UiBridgeState) {
         schema: 1,
         wallet: session.wallet.clone(),
         email: session.email.clone(),
+        // #373 stack stamp: only THIS stack's daemon rehydrates this record —
+        // under #464 the same human is a DIFFERENT omni on every other stack.
+        broker_url: state.broker_url.clone().unwrap_or_default(),
         operator_omni: omni,
         device_key_hash,
         j1: session.j1.clone(),
@@ -2390,7 +2532,10 @@ pub async fn rehydrate_master_session(state: &UiBridgeState) {
     let Some(store) = state.master_session_store.as_ref() else {
         return;
     };
-    let Some(record) = store.load_latest() else {
+    // #373 stack scoping: only records minted against THIS daemon's broker are
+    // considered — a foreign-stack record is a different identity (#464) whose
+    // J1 the local broker would 401 `InvalidSignature` on every call.
+    let Some(record) = store.load_latest(state.broker_url.as_deref().unwrap_or("")) else {
         return;
     };
     let now = master_session::now_unix();
@@ -2406,21 +2551,62 @@ pub async fn rehydrate_master_session(state: &UiBridgeState) {
             // session is by construction a full one.
             identity_only_reason: None,
         });
-        // The device is on chain (SidecarRegistry) under this omni — record it so
-        // cap-mint resolves it directly and onboarding-state reports it registered.
-        mark_master_registered(
-            state,
-            RegisteredMaster {
-                device_key_hash: record.device_key_hash.clone(),
-                operator_omni: record.operator_omni.clone(),
-                tx_hash: None,
-                // The account address isn't persisted in the #220 session record;
-                // the #233 chain reconciliation backfills it from
-                // operatorMasterWallet on the first actor read after restart.
-                account: None,
-            },
-        )
-        .await;
+        // This used to mark the master registered ON FAITH ("the device is on
+        // chain under this omni") — false whenever the session was persisted
+        // BEFORE its master ever registered (the 2026-07-16 VE incident: a
+        // fresh sovereign omni rehydrated as `master-registered`, onboarding
+        // trusted the cached field over the fresh #435 probe, and the operator
+        // was pushed into a destructive reset for a binding that never
+        // existed). Verify on chain first, with #435 probe semantics: bound →
+        // mark (account backfilled, zero-prompt fast path); PROVEN unbound →
+        // do NOT mark (onboarding offers the real register instead);
+        // indeterminate (chain unconfigured / RPC error) → mark as before —
+        // never punish a legit master for a flaky boot-time read.
+        let rpc = state.chain_profile.rpc.http.clone();
+        let mark: Option<Option<String>> = match registry_address(state) {
+            Some(registry) if !rpc.is_empty() => {
+                match probe_operator_master_wallet(
+                    &rpc,
+                    &registry,
+                    &record.operator_omni.to_lowercase(),
+                )
+                .await
+                {
+                    Ok(Some(account)) => Some(Some(account)),
+                    Ok(None) => {
+                        tracing::warn!(
+                            target: "agentkeys.daemon.ui_bridge",
+                            omni = %record.operator_omni,
+                            "issue #220: rehydrated session's omni has NO on-chain master — NOT marking registered (fresh namespace, or reset elsewhere); onboarding will offer the register"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "agentkeys.daemon.ui_bridge",
+                            "issue #220: rehydrate chain probe failed ({e}) — marking registered from the persisted record (legacy posture)"
+                        );
+                        Some(None)
+                    }
+                }
+            }
+            _ => Some(None), // chain unconfigured (dev/no-infra) — legacy posture
+        };
+        if let Some(account) = mark {
+            mark_master_registered(
+                state,
+                RegisteredMaster {
+                    device_key_hash: record.device_key_hash.clone(),
+                    operator_omni: record.operator_omni.clone(),
+                    tx_hash: None,
+                    // `account` is chain-read when the probe answered; else None —
+                    // the #233 chain reconciliation backfills it from
+                    // operatorMasterWallet on the first actor read after restart.
+                    account,
+                },
+            )
+            .await;
+        }
         tracing::info!(
             target: "agentkeys.daemon.ui_bridge",
             wallet = %record.wallet,
@@ -7941,7 +8127,13 @@ async fn resolve_categories(state: &SharedUiBridgeState) -> Result<Vec<MemoryCat
                 // A configured-but-broken Config store is a HARD error (502), never
                 // masked behind in-memory data or an empty list (#201 finding-2):
                 // the operator must see + fix it. Real data or a loud failure.
-                Err(e) => Err(format!("config taxonomy unavailable: {e}")),
+                // Name the worker + broker pair: a cross-stack pairing (e.g. an
+                // ambient AWS config URL against the VE broker) is otherwise
+                // invisible in the surfaced error.
+                Err(e) => Err(format!(
+                    "config taxonomy unavailable (config worker {}, broker {}): {e}",
+                    ctx.config_url, ctx.broker
+                )),
             }
         }
         Ok(None) => Ok(fallback_categories(state).await), // Config not configured
@@ -11743,6 +11935,8 @@ mod tests {
             schema: 1,
             wallet: "0xMASTERWALLET".into(),
             email: "master@example.com".into(),
+            // Matches make_state_real's broker so the #373 scoping accepts it.
+            broker_url: "https://broker.example".into(),
             operator_omni: omni.to_string(),
             device_key_hash: agentkeys_core::device_crypto::device_key_hash_from_omni(omni)
                 .unwrap(),
@@ -11830,6 +12024,8 @@ mod tests {
         // A persisted record with a still-valid J1 → onboarding_session +
         // registered_master repopulate → identity verified, session active, chain
         // master-registered: the web pages work with ZERO prompts after a restart.
+        // The chain stub answers operatorMasterWallet non-zero (bound) — rehydrate
+        // now VERIFIES on chain before marking registered (2026-07-16 fix).
         let tmp = tempfile::tempdir().unwrap();
         let store = MasterSessionStore::new(tmp.path().join(".agentkeys"));
         let omni = format!("0x{}", "33".repeat(32));
@@ -11838,7 +12034,9 @@ mod tests {
             .save(&persisted_record(&omni, far_future))
             .expect("save");
 
-        let state = make_state_real(Some(store));
+        let addr = spawn_chain_stub().await;
+        let mut state = make_state_real(Some(store));
+        set_chain_rpc(&mut state, &format!("http://{addr}"));
         rehydrate_master_session(&state).await;
 
         let os = onboarding_state(State(state.clone())).await.0;
@@ -11859,6 +12057,33 @@ mod tests {
         // And cap-mint coordinates resolve cleanly (no --master-device-key-hash).
         let coords = resolve_session_coords(&state).await.expect("coords");
         assert_eq!(coords.device_key_hash, dkh);
+    }
+
+    #[tokio::test]
+    async fn rehydrate_does_not_mark_registered_when_chain_says_unbound() {
+        // The 2026-07-16 VE false positive: a persisted session whose omni was
+        // NEVER registered (fresh sovereign namespace, #464) must not rehydrate
+        // as `master-registered` — the onboarding ceremony would trust the
+        // cached field and push the operator into a destructive reset for a
+        // binding that never existed. Proven-unbound (empty chain stub) ⇒ the
+        // session itself restores, but chain stays "none".
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MasterSessionStore::new(tmp.path().join(".agentkeys"));
+        let omni = format!("0x{}", "66".repeat(32));
+        let far_future = master_session::now_unix() + 10_000;
+        store
+            .save(&persisted_record(&omni, far_future))
+            .expect("save");
+
+        let addr = spawn_empty_chain_stub().await;
+        let mut state = make_state_real(Some(store));
+        set_chain_rpc(&mut state, &format!("http://{addr}"));
+        rehydrate_master_session(&state).await;
+
+        let os = onboarding_state(State(state.clone())).await.0;
+        assert_eq!(os.session, "active", "the J1 itself still restores");
+        assert_eq!(os.chain, "none", "proven-unbound must NOT mark registered");
+        assert!(state.registered_master.read().await.is_none());
     }
 
     #[tokio::test]
@@ -11904,7 +12129,11 @@ mod tests {
         store
             .save(&persisted_record(&omni, far_future))
             .expect("save");
-        let state = make_state_real(Some(store));
+        // Local chain stub (answers unbound) — rehydrate's registered-probe must
+        // never reach a real RPC from a unit test.
+        let addr = spawn_empty_chain_stub().await;
+        let mut state = make_state_real(Some(store));
+        set_chain_rpc(&mut state, &format!("http://{addr}"));
         rehydrate_master_session(&state).await;
         assert_eq!(
             onboarding_state(State(state.clone())).await.0.session,
@@ -13237,6 +13466,83 @@ mod tests {
                 .any(|e| e.kind == "device.revoked" && e.detail.contains("fleet teardown")),
             "per-agent revocation audit row"
         );
+    }
+
+    #[tokio::test]
+    async fn master_reset_refuses_when_broker_register_path_is_down() {
+        // 2026-07-16 VE stranding guard: a broker whose /v1/register/build
+        // answers 503 (no sponsor key / no bundler) cannot re-register after an
+        // unbind — the reset must refuse BEFORE any mutation, fleet teardown
+        // included (the pending-bindings route here proves it is never hit).
+        let app = Router::new()
+            .route(
+                "/v1/register/build",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": "env BROKER_SPONSOR_SIGNER_KEY not set"
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/v1/agent/pending-bindings",
+                // The panic proves the guard refused BEFORE the fleet teardown;
+                // the unreachable tail anchors the handler's return type (the
+                // bare `!` trips the Rust-2024 never-type-fallback deny).
+                axum::routing::get(|| async {
+                    panic!("reset must refuse before the fleet teardown");
+                    #[allow(unreachable_code)]
+                    Json(serde_json::Value::Null)
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let state = build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            Some(format!("http://{addr}")),
+            None,
+            84532,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // sandbox_bridge_url
+            None, // sandbox_bridge_token
+            None, // audit_worker_url
+            "us-east-1".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "m@x".into(),
+            omni: format!("0x{}", "77".repeat(32)),
+            j1: "eyJ.fake.jwt".into(),
+            wallet: "0xW".into(),
+            identity_only_reason: None,
+        });
+
+        let resp = master_reset(State(state.clone())).await.0;
+        assert_eq!(
+            resp.get("ok").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "reset must refuse: {resp}"
+        );
+        assert_eq!(
+            resp.get("needs_register_path")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        // Nothing mutated — the session survives the refusal.
+        assert!(state.onboarding_session.read().await.is_some());
     }
 
     #[tokio::test]

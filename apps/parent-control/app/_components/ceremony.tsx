@@ -46,6 +46,12 @@ type EnrollOutcome =
   // one state that REQUIRES an action rendered as "demo · no daemon" (a lie —
   // the daemon was up), narrated a fake ceremony, and never asked for Touch ID.
   | { mode: 'needs-reset'; omni?: string; reason: string }
+  // The broker's sponsored-register path is down (503) — the register would
+  // fail AFTER we mint a passkey, orphaning it in the Secure Enclave and
+  // never reaching the 2nd Touch ID. Caught by a PREFLIGHT before
+  // credentials.create, so NO passkey is created. Transient: retry once the
+  // operator arms the broker's sponsor key (VE setup-broker-host step 5).
+  | { mode: 'broker-not-ready'; reason: string }
   | { mode: 'real'; register?: PendingMasterRegister; registerError?: string };
 
 async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<EnrollOutcome> {
@@ -69,8 +75,15 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
     });
     return { mode: 'fallback' }; // cannot verify bound-ness; retry, never auto-mint
   }
-  const boundOnChain =
-    (probe.ok && probe.data.bound) || (st.ok && st.data.chain === 'master-registered');
+  // When the FRESH probe answered, it is authoritative — including bound=false.
+  // The session-cached `chain` field is marked on rehydrate and used to claim
+  // `master-registered` for an omni that was never bound (the 2026-07-16 VE
+  // false positive that pushed an operator into a destructive reset); it is
+  // consulted only when the probe endpoint itself was unavailable (older
+  // daemon, transport error) — the probe:'error' case already bailed above.
+  const boundOnChain = probe.ok
+    ? probe.data.bound === true
+    : st.ok && st.data.chain === 'master-registered';
   if (boundOnChain) {
     // #242: the pointer must belong to THIS session's identity. A stored omni
     // from a different identity means the pointer's passkey is NOT the one bound
@@ -107,19 +120,42 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
         mode: 'needs-reset',
         omni: sessionOmni,
         reason:
-          `this browser holds a passkey for a DIFFERENT identity (${pointerOmni ?? 'unknown'}), ` +
+          `this browser holds a passkey pointer for a DIFFERENT identity (${pointerOmni ?? 'unknown'}), ` +
           `so it cannot sign for this one`,
       };
     }
-    akLog('onboarding: master bound on chain but NO local passkey pointer — reset + re-onboard needed', {
+    akLog('onboarding: master bound on chain but NO local passkey pointer — offer passkey sign-in (reset only as last resort)', {
       omni: sessionOmni,
     });
     return {
       mode: 'needs-reset',
       omni: sessionOmni,
       reason:
-        'this email already has a master bound on chain, but this browser holds no passkey for it ' +
-        '(storage cleared, or it was bound in another browser/profile)',
+        'this email already has a master bound on chain, but this browser profile holds no ' +
+        'passkey pointer for it (fresh profile, cleared storage, or a different stack of the same chain)',
+    };
+  }
+
+  // PREFLIGHT the broker's sponsored-register path BEFORE minting a passkey
+  // (2026-07-17 VE): `credentials.create()` always makes a NEW Secure-Enclave
+  // credential, but the register can only be BUILT after it (the build needs
+  // the passkey pubkey). So a broker that 503s /v1/register/build fails AFTER
+  // the passkey exists — orphaning it, and never reaching the 2nd Touch ID.
+  // Probing first means: broker down ⇒ no passkey minted, a clear reason, and
+  // a retry that works the instant the operator arms the sponsor key. Only a
+  // DEFINITE "not ready" blocks; indeterminate (no broker / probe error) falls
+  // through to the create as before, so the register-error backstop below still
+  // catches a broker that dies between the probe and the build.
+  const preflight = await client.registerPreflight();
+  if (preflight.ok && preflight.data.register_ready === false) {
+    akLog('onboarding: broker register path DOWN — not minting a passkey (would orphan)', {
+      detail: preflight.data.detail,
+    });
+    return {
+      mode: 'broker-not-ready',
+      reason:
+        preflight.data.detail ??
+        'the broker cannot register a master right now (its sponsored-register runtime is unavailable)',
     };
   }
 
@@ -429,7 +465,10 @@ export function OnboardingScreen({
   // bound on chain that this browser has no passkey for). Distinct from 'demo',
   // which means "no backend, narrate it" — conflating them told the operator
   // "no daemon" while the daemon was healthy.
-  const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending' | 'blocked'>('pending');
+  const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending' | 'blocked' | 'broker-not-ready'>('pending');
+  // Bumped to re-mount CeremonyRunner from step 0 on a broker-not-ready retry
+  // (re-runs the preflight; mints a passkey only once the broker is ready).
+  const [ceremonyRunKey, setCeremonyRunKey] = useState(0);
   const [blockedReason, setBlockedReason] = useState('');
   const [email, setEmail] = useState('');
   const [requestId, setRequestId] = useState('');
@@ -490,19 +529,47 @@ export function OnboardingScreen({
       return;
     }
     try {
+      // Pointer present ⇒ pin it (auto-select, no picker). Pointer ABSENT — the
+      // bound-on-chain-but-fresh-browser/-stack case that used to dead-end in
+      // "reset + re-onboard" — falls through to the DISCOVERABLE picker so the
+      // operator signs with the existing passkey instead of destroying the
+      // binding (reset unbinds on chain for EVERY stack sharing the chain).
+      const pointer = getMasterCredId() || null;
       akLog('relogin: signing broker challenge with the bound passkey', {
         account: start.data.account,
         omni: start.data.omni,
+        requestedCredentialId: pointer ?? '(none — discoverable picker)',
       });
-      const assertion = await getAssertionOverHash(start.data.challenge, [getMasterCredId()]);
-      const fin = await client.reloginFinish(start.data.challenge, assertion);
+      let assertion = await getAssertionOverHash(start.data.challenge, pointer ? [pointer] : undefined);
+      let fin = await client.reloginFinish(start.data.challenge, assertion);
+      if (!fin.ok && pointer && assertion.credential_id === pointer) {
+        // The stored pointer no longer matches the on-chain binding (stale after
+        // a re-onboard elsewhere). ONE retry with the full picker — the chain-
+        // verified finish below then heals the pointer.
+        akLog('relogin: pinned pointer rejected — retrying with the discoverable picker', {
+          detail: fin.status.detail,
+        });
+        const restart = await client.reloginStart();
+        if (restart.ok) {
+          assertion = await getAssertionOverHash(restart.data.challenge, undefined);
+          fin = await client.reloginFinish(restart.data.challenge, assertion);
+        }
+      }
       if (fin.ok) {
-        akLog('relogin: master session restored via passkey ✅', { omni: fin.data.omni });
+        // Backfill the stack-scoped pointer: the broker just CHAIN-verified this
+        // credential for this omni, so it IS the bound master passkey. Heals both
+        // the missing-pointer and the stale-pointer case without any reset.
+        setMasterCredId(assertion.credential_id);
+        setMasterOmni(fin.data.omni ?? start.data.omni);
+        akLog('relogin: master session restored via passkey ✅', {
+          omni: fin.data.omni,
+          signingCredentialId: assertion.credential_id,
+        });
         onComplete();
         return;
       }
       setNote(
-        `Passkey sign-in failed — ${fin.status.detail ?? 'rejected'}. Use email below; if your master passkey was deleted, reset the master and re-onboard.`,
+        `Passkey sign-in failed — ${fin.status.detail ?? 'rejected'}. Use email below; only if the master passkey is deleted from every device, reset the master and re-onboard.`,
       );
     } catch (e) {
       setNote(`Touch ID cancelled or failed — ${(e as Error)?.message ?? ''}. Use email below.`);
@@ -702,6 +769,14 @@ export function OnboardingScreen({
           setOmni(outcome.omni ?? '');
           throw new Error(`master already bound — ${outcome.reason}`);
         }
+        // Broker can't register yet — NO passkey was minted (the preflight
+        // caught it). Halt with a distinct state: not "already bound" (nothing
+        // is), just a broker not ready. Retry re-runs the whole ceremony.
+        if (outcome.mode === 'broker-not-ready') {
+          setEnrollMode('broker-not-ready');
+          setBlockedReason(outcome.reason);
+          throw new Error(`broker not ready to register — ${outcome.reason}`);
+        }
         setEnrollMode(outcome.mode === 'real' ? 'real' : 'demo');
       },
     },
@@ -856,7 +931,8 @@ export function OnboardingScreen({
               Bringing up your trust core · {maskEmail(email, maskEm)}
               {enrollMode === 'real' && <span className="chip ok" style={{ marginLeft: 8 }}>K11 bound · real WebAuthn</span>}
               {enrollMode === 'demo' && <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
-              {enrollMode === 'blocked' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>blocked · reset required</span>}
+              {enrollMode === 'blocked' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>blocked · sign in or reset</span>}
+              {enrollMode === 'broker-not-ready' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>broker not ready · retry</span>}
             </div>
             {/* The ceremony phase renders no `note` (that lives in the email phase),
                 so a blocked enroll had NO on-screen explanation at all: the run just
@@ -865,14 +941,54 @@ export function OnboardingScreen({
               <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
                 <strong>Can&apos;t bind a passkey — {blockedReason}.</strong>
                 <br />
-                Touch ID is not requested because there is nothing safe to sign: the first-master
-                binding already exists on chain, and a new passkey could not replace it.
+                A master is already bound on chain for this identity, so minting a NEW passkey has
+                nothing safe to sign. If the original passkey exists on <strong>this device</strong>{' '}
+                (enrolled in another browser profile, or on another stack of the same chain), sign
+                in with it — <strong>no reset needed</strong>, one Touch ID:
+                <div style={{ margin: '10px 0' }}>
+                  <button className="btn" style={{ padding: '8px 14px' }} onClick={doRelogin} disabled={reloginBusy}>
+                    {reloginBusy ? '▸ confirming with Touch ID…' : '🔐 Sign in with the existing passkey (Touch ID)'}
+                  </button>
+                </div>
+                {note && <div style={{ marginBottom: 8 }}>{note}</div>}
+                Reset the master ONLY if that passkey is gone from every device: dashboard ▸{' '}
+                <em>reset master</em> unbinds the on-chain{' '}
+                <span className="mono">operatorMasterWallet</span> for <strong>every stack and
+                browser on this chain</strong>, revokes the paired fleet, and requires a full
+                re-onboard. (A reset is refused while this broker cannot re-register, so it can
+                never strand you.)
+              </div>
+            )}
+            {/* Broker's sponsored-register runtime is down — NO passkey was
+                minted (the preflight caught it before credentials.create), so
+                the Secure Enclave stays clean and there is no orphan. Distinct
+                from 'blocked': nothing is bound; the broker just can't register
+                yet. Transient — Retry re-runs the whole ceremony (re-probes,
+                and mints only once the broker is ready). */}
+            {enrollMode === 'broker-not-ready' && (
+              <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
+                <strong>The broker can&apos;t register a master yet.</strong>
                 <br />
-                Fix it one of two ways — either sign in from the browser that holds the original
-                passkey, or <strong>reset the master</strong> (dashboard ▸ <em>reset master</em>, or
-                <span className="mono"> curl -X POST http://127.0.0.1:3214/v1/master/reset</span>),
-                which unbinds the on-chain <span className="mono">operatorMasterWallet</span> so a
-                fresh passkey can bind. Then re-onboard with the same email.
+                <span className="mono" style={{ fontSize: 11 }}>{blockedReason}</span>
+                <br />
+                No passkey was created — so nothing is stranded and your keychain stays clean. This
+                is expected on a stack whose broker hasn&apos;t had its sponsored-register runtime
+                armed yet (on Volcano Engine: the operator arms{' '}
+                <span className="mono">BROKER_SPONSOR_SIGNER_KEY</span> + the bundler, then re-runs{' '}
+                <span className="mono">setup-broker-host.sh --cloud ve --only-step 5</span>). Once
+                that&apos;s done, retry:
+                <div style={{ margin: '10px 0' }}>
+                  <button
+                    className="btn"
+                    style={{ padding: '8px 14px' }}
+                    onClick={() => { setEnrollMode('pending'); setBlockedReason(''); setCeremonyRunKey((k) => k + 1); }}
+                  >
+                    ↻ Retry
+                  </button>
+                </div>
+                If you already attempted onboarding a few times before this, delete any stray{' '}
+                <em>AgentKeys master device</em> passkeys created then in System Settings ▸ Passwords
+                (older builds minted one per attempt).
               </div>
             )}
             {omni && (
@@ -880,10 +996,16 @@ export function OnboardingScreen({
                 logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni {omni}
               </div>
             )}
-            <div className="touchid-notice">
-              <strong>🔐 Touch ID is requested twice.</strong> Once to <strong>create</strong> your passkey, then once more to <strong>authorize</strong> its on-chain registration — both with the same passkey. The second prompt is expected, not a retry or an error.
-            </div>
-            <CeremonyRunner steps={stages} onDone={() => setPhase('setup')} stepMs={760} />
+            {/* The two-Touch-ID promise is only true on the real path — hide it
+                when the enroll is blocked or the broker can't register (no
+                Touch ID fires in either case), so the notice never contradicts
+                the state above it. */}
+            {enrollMode !== 'blocked' && enrollMode !== 'broker-not-ready' && (
+              <div className="touchid-notice">
+                <strong>🔐 Touch ID is requested twice.</strong> Once to <strong>create</strong> your passkey, then once more to <strong>authorize</strong> its on-chain registration — both with the same passkey. The second prompt is expected, not a retry or an error.
+              </div>
+            )}
+            <CeremonyRunner key={ceremonyRunKey} steps={stages} onDone={() => setPhase('setup')} stepMs={760} />
           </div>
         )}
 

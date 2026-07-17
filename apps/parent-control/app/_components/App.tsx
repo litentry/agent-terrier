@@ -388,6 +388,22 @@ export function App() {
   // (WebAuthn) — the toast tells the operator to do that manually.
   const resetMaster = async () => {
     if (status.kind !== 'connected') { showToast('Connect a daemon first.'); return; }
+    // 2026-07-16 guard — NEVER start a reset the stack can't finish: the fleet
+    // revoke below mutates chain state and the unbind is first-master-final, so
+    // when the broker's sponsored-register runtime is down (the VE 503) refuse
+    // HERE, before any Touch ID. The daemon hard-refuses too (defense in depth);
+    // preflight failures other than a definite "not ready" never block.
+    const pre = await client.registerPreflight();
+    if (pre.ok && pre.data.register_ready === false) {
+      akLog('reset: refused — broker register path down', { detail: pre.data.detail });
+      showToast(
+        `Reset blocked — this broker can't re-register a master right now (${pre.data.detail ?? '503'}). ` +
+          'Unbinding would strand your identity with no way to re-onboard on this stack. ' +
+          'Fix the broker’s sponsored-register runtime, or reset from a stack whose broker can re-register.',
+        true,
+      );
+      return;
+    }
     // #260 — an account-master's agents can ONLY be revoked by the master
     // P256Account itself, and resetMaster clears operatorMasterWallet (after
     // which NOBODY can revoke them). So revoke the whole fleet FIRST: ONE

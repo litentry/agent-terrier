@@ -148,8 +148,12 @@ unbound, your agents stay connected, and you can simply retry. The confirm
 dialog states exactly how many agents and pending requests it will disconnect,
 and the result message spells out anything that could **not** be torn down
 remotely (e.g. the chain helper isn't configured) so a partially-disconnected
-fleet never reads as fully disconnected. After a reset, Touch ID sign-in is
-gone until you onboard again. (You no longer need the
+fleet never reads as fully disconnected. **A reset is refused when your broker
+cannot re-register a master right now** (its sponsored-register path answers
+503): unbinding is first-master-final, so completing the reset would strand
+your identity with no master anywhere and no way to re-onboard on that stack —
+fix the broker (or run the reset from a stack whose broker can re-register)
+and retry. After a reset, Touch ID sign-in is gone until you onboard again. (You no longer need the
 `--master-device-key-hash` developer flag for the normal web loop — the device
 is recovered from your account automatically.)
 
@@ -170,6 +174,39 @@ Your browser sign-in state (passkey pointer + onboarding flag) is kept
 own login screen instead of offering the other stack's identity, and **reset
 master wipes only the active stack's** pointers. Same chain, different broker
 ⇒ different session; nothing leaks across, in either direction.
+
+Deeper than the browser slot: your **identity itself is per stack**. Each
+broker derives your account (the *omni*) inside its own namespace
+(`client_id`, #464) — the same email or wallet is a **different omni** on
+Heima-AWS (`agentkeys`) than on Heima-VE (`agentterrier`), even though both
+stacks share the Heima chain. So opening a second stack for the first time is
+a **fresh onboarding with a fresh master** — the other stack's master is a
+different account and is never "already bound" there; each stack's master is
+registered (and reset) independently, with no collisions on the shared
+registry.
+
+If a stack's broker isn't ready to register a master yet (its sponsored-register
+service hasn't been set up — the normal state for a stack still being brought
+up), onboarding stops **before** creating a passkey and shows **"The broker
+can't register a master yet"** with a **Retry**. This is deliberate: a passkey
+can only be registered *after* it's created, so minting one against a broker
+that can't register would leave an unusable passkey in your keychain and the
+second Touch ID would never come. Because the check runs first, nothing is
+created and nothing is stranded — retry once the operator finishes bringing the
+broker up. (If you onboarded a few times on an older build before this, delete
+any stray *AgentKeys master device* passkeys in System Settings ▸ Passwords.)
+
+Within **one stack**, if the master is bound on chain but the browser holds no
+passkey pointer (new browser profile, cleared storage, second browser),
+onboarding offers **"Sign in with the existing passkey (Touch ID)"** — the
+picker lists your device's passkeys, your choice is verified against the
+on-chain master account, and the pointer is saved. One Touch ID, no reset. The
+same sign-in also self-heals a **stale** pointer (bound passkey changed by a
+re-onboard elsewhere): if the saved passkey is rejected, the app retries once
+with the full picker. **Reset master is the last resort** — only for a passkey
+that is gone from every device: it unbinds that stack's on-chain master for
+every browser (and is refused while the broker cannot re-register, so it can
+never strand you).
 
 ## Pairing an agent + granting its permissions (parent-control)
 
