@@ -41,6 +41,11 @@ pub struct AdminLogin {
     pub base_url: String,
     /// A pairing number the operator typed (carried on the next status poll).
     pub pending_verify: Option<String>,
+    /// #502 (plan T9): the connecting master's omni, filled server-side by the
+    /// daemon proxy from the authenticated session. Recorded on `connected` —
+    /// the tenant identity arrives from the session, never an env stamp.
+    /// `None` = old daemon / CLI ceremony → the env-stamp path stays.
+    pub operator_omni: Option<String>,
 }
 
 pub struct WeixinGatewayState {
@@ -56,6 +61,12 @@ pub struct WeixinGatewayState {
     /// Millis of the Telegram loop's last successful poll (#444; 0 = never /
     /// other transports) — the same healthz stall signal for stack ②.
     telegram_last_ok_ms: AtomicU64,
+    /// #502 (plan T9 first step): the operator omni recorded at CONNECT from
+    /// the authenticated master session — the runtime override of the legacy
+    /// `AGENTKEYS_WEIXIN_OPERATOR_OMNI` env stamp. `None` until a session-
+    /// carrying connect ceremony runs; every audit emit reads the EFFECTIVE
+    /// value ([`Self::effective_operator_omni`]).
+    runtime_operator_omni: RwLock<Option<String>>,
     /// The RUNTIME iLink identity — initialized from config, swapped by the
     /// admin login ceremony. The supervisor reads these on every (re)spawn.
     ilink_token: RwLock<Option<String>>,
@@ -88,6 +99,7 @@ impl WeixinGatewayState {
             audit,
             ilink_last_ok_ms: AtomicU64::new(0),
             telegram_last_ok_ms: AtomicU64::new(0),
+            runtime_operator_omni: RwLock::new(None),
             ilink_token,
             ilink_base_url,
             ilink_bot_id: RwLock::new(None),
@@ -214,10 +226,43 @@ impl WeixinGatewayState {
     }
 
     /// True when the TAMPER-PROOF on-chain audit is armed: the audit worker is
-    /// wired AND the operator omni decodes to 32-byte hex. Surfaced in the status
-    /// so a skipped anchor is LOUD, never silent (#419).
+    /// wired AND the EFFECTIVE operator omni decodes to 32-byte hex. Surfaced in
+    /// the status so a skipped anchor is LOUD, never silent (#419).
     pub fn audit_on_chain(&self) -> bool {
-        self.audit.is_some() && crate::relay::decode_omni_32(&self.config.operator_omni).is_some()
+        self.audit.is_some()
+            && crate::relay::decode_omni_32(&self.effective_operator_omni()).is_some()
+    }
+
+    /// #502 — the omni every audit row is keyed on: the CONNECT-recorded
+    /// session omni when one exists, else the legacy env stamp
+    /// (`AGENTKEYS_WEIXIN_OPERATOR_OMNI`, possibly empty/placeholder = unarmed).
+    pub fn effective_operator_omni(&self) -> String {
+        self.runtime_operator_omni
+            .read()
+            .expect("operator omni lock")
+            .clone()
+            .unwrap_or_else(|| self.config.operator_omni.clone())
+    }
+
+    /// Record the connecting master's omni (#502). The session value WINS —
+    /// a differing armed value is exactly the stale-stamp hazard class (#464:
+    /// an env omni baked from a retired namespace) — but never silently:
+    /// the override is WARN-logged naming both values.
+    pub fn set_runtime_operator_omni(&self, omni: &str) {
+        let prior = self.effective_operator_omni();
+        if crate::relay::decode_omni_32(&prior).is_some() && prior != omni {
+            warn!(
+                prior = %prior,
+                session = %omni,
+                "operator omni OVERRIDDEN at connect — the authenticated session's omni \
+                 replaces the previously armed value (stale env stamp?); audit rows now \
+                 key on the session omni"
+            );
+        }
+        *self
+            .runtime_operator_omni
+            .write()
+            .expect("operator omni lock") = Some(omni.to_string());
     }
 
     /// Read up to `limit` durable turns, newest first, strictly older than

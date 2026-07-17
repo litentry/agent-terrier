@@ -18,7 +18,14 @@ pairing-qr.png
 # personal settings.local.json). Never check these in.
 .claude/
 
-# Local developer secrets — template is checked in as .env.example.
+# Local developer secrets. PER-STACK, sourced by dev.sh right after the stack's
+# operator-workstation*.env (so it overrides any ambient ~/.zshenv value): the
+# sibling `<env file minus .env>.secrets.env`. Template:
+# scripts/operator-workstation.secrets.env.example.
+scripts/operator-workstation*.secrets.env
+# Legacy name — kept ignored so an old laptop copy can never be committed. It
+# was never sourced by anything (and its advertised .env.example never existed):
+# use the per-stack file above.
 agentkeys-secrets.env
 # WeChat gateway bot credentials from `--login-write` (the doc's laptop example
 # writes ./weixin-secrets.env at the repo root — never commit the bot token).

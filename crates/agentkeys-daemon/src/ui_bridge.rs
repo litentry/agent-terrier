@@ -7257,12 +7257,24 @@ async fn gateway_status_proxy(
 async fn gateway_login_start_proxy(
     State(state): State<SharedUiBridgeState>,
 ) -> axum::response::Response {
+    // #502 (plan T9): the daemon fills the connecting master's omni from the
+    // authenticated session, SERVER-SIDE — the browser sends an empty body and
+    // never supplies an identity. The gateway records it on `connected`, which
+    // retires the manual WEIXIN_OPERATOR_OMNI env-stamp ceremony.
+    let operator_omni = state
+        .onboarding_session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.omni.clone());
     forward_to_gateway(
         &state,
         reqwest::Method::POST,
         "/v1/gateway/admin/login/start",
         None,
-        Some(serde_json::json!({})),
+        Some(serde_json::json!(
+            agentkeys_backend_client::protocol::GatewayLoginStartRequest { operator_omni }
+        )),
     )
     .await
 }

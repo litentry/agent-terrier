@@ -221,7 +221,12 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     assert_eq!(st["transport"], "ilink");
 
     // ── login ceremony over HTTP ─────────────────────────────────────────────
+    // #502: the daemon proxy fills the connecting master's omni server-side —
+    // mirrored here. Recorded on `connected`, replacing the stale pre-stamped
+    // value (the #464 hazard class this exists to fix).
+    let session_omni = format!("0x{}", "cd".repeat(32));
     let start: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/login/start")))
+        .json(&serde_json::json!({ "operator_omni": session_omni }))
         .send()
         .await
         .unwrap()
@@ -262,7 +267,14 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     // other keys preserved) …
     let secrets = std::fs::read_to_string(&secrets_file).unwrap();
     assert!(secrets.contains(&format!("AGENTKEYS_WEIXIN_ILINK_BOT_TOKEN={MINTED_TOKEN}")));
-    assert!(secrets.contains("AGENTKEYS_WEIXIN_OPERATOR_OMNI=0xfeed"));
+    // #502: the CONNECT-recorded session omni REPLACED the stale pre-stamped
+    // `0xfeed` (loudly, in the log) and persisted — restarts keep the session
+    // truth, not the stale stamp.
+    assert!(
+        secrets.contains(&format!("AGENTKEYS_WEIXIN_OPERATOR_OMNI={session_omni}")),
+        "connect-recorded omni not persisted: {secrets}"
+    );
+    assert!(!secrets.contains("AGENTKEYS_WEIXIN_OPERATOR_OMNI=0xfeed"));
     assert!(!secrets.contains("REPLACE_ME"));
     // … and the supervisor HOT-STARTED the loop on the minted token.
     wait_until("loop polls with the minted token", || {
