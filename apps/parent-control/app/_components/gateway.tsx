@@ -18,7 +18,14 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Reac
 import { QRCodeSVG } from 'qrcode.react';
 
 import { PageHead, Panel, Modal, Dot } from './shared';
-import { gatewayClient, gatewayNotConfigured, gwlog, isTerminalLoginStatus } from '@/lib/gatewayClient';
+import {
+  gatewayClient,
+  gatewayDebugEnabled,
+  gatewayNotConfigured,
+  gwlog,
+  isTerminalLoginStatus,
+  setGatewayDebug,
+} from '@/lib/gatewayClient';
 import type { GatewayStatusView } from '@/lib/generated/GatewayStatusView';
 import type { GatewayPendingBindView } from '@/lib/generated/GatewayPendingBindView';
 import type { ContactSummary } from '@/lib/generated/ContactSummary';
@@ -338,6 +345,37 @@ function ActivityPanel({ auditOff }: { auditOff: boolean }) {
   );
 }
 
+// A persisted toggle for the gateway request/response console trace. OFF by
+// default — this page polls status/contacts/monitor on a timer, so the
+// `[gateway]` logs flood DevTools; flip it on only when diagnosing a
+// connect/bind issue. The preference lives in localStorage (survives reloads)
+// and gates gwlog() app-wide (see gatewayClient.ts).
+function GatewayDebugToggle() {
+  const [on, setOn] = useState(false);
+  // localStorage is client-only — read it after mount so SSR renders the
+  // default-off state and hydration doesn't mismatch.
+  useEffect(() => setOn(gatewayDebugEnabled()), []);
+  const toggle = () => {
+    const next = !on;
+    setGatewayDebug(next);
+    setOn(next);
+  };
+  return (
+    <button
+      className="btn sm"
+      onClick={toggle}
+      aria-pressed={on}
+      title={
+        on
+          ? 'Gateway request/response logs are ON — click to silence the console'
+          : 'Log every gateway request/response to the console (connect/bind diagnostics)'
+      }
+    >
+      {on ? '● debug logs' : '○ debug logs'}
+    </button>
+  );
+}
+
 // ── Contacts page (data-section="contacts", hue 330) — the family ──────────────
 export function ContactsPage({ deeplinkReach }: { deeplinkReach?: string[] }) {
   const { status, statusErr, notConfigured, refreshStatus } = useGatewayStatus(false);
@@ -380,7 +418,12 @@ export function ContactsPage({ deeplinkReach }: { deeplinkReach?: string[] }) {
         crumb="household / contacts"
         title="Contacts"
         desc="Connect the household WeChat bot, then invite family members — each a contact with a tier + reach (which agents they may talk to). Nothing binds without your approval, and no one’s WeChat identity is ever shown (D13)."
-        actions={<button className="btn sm" onClick={() => void refresh()}>↻ refresh</button>}
+        actions={
+          <>
+            <GatewayDebugToggle />
+            <button className="btn sm" onClick={() => void refresh()}>↻ refresh</button>
+          </>
+        }
       />
       <Toast toast={toast} />
       <SetupStepper
