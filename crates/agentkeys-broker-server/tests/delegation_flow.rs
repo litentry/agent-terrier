@@ -55,6 +55,7 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
         client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
+        sts_audience: "sts.amazonaws.com".into(),
     };
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))

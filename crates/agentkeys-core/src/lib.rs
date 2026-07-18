@@ -14,5 +14,7 @@ pub mod otp;
 pub mod payment;
 pub mod s3_backend;
 pub mod s3_endpoint;
+pub mod session_policy;
 pub mod session_store;
 pub mod signer_client;
+pub mod ve_sign;

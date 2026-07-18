@@ -85,10 +85,40 @@ async fn main() {
         None
     };
 
+    // #512 — sign-sts (intent-based STS mint) config. Signer-only concern:
+    // provider unset = the endpoint 503s; PARTIAL config = fatal boot
+    // (no-silent-fallback — a half-armed signer must never limp).
+    let sign_sts = if args.signer_only {
+        match agentkeys_mock_server::handlers::sign_sts::SignStsConfig::from_env() {
+            Ok(Some(cfg)) => {
+                eprintln!(
+                    "[mock-server] sign-sts ARMED (provider=ve, host={}, {} data classes, ttl ceiling {}s)",
+                    cfg.host,
+                    cfg.classes.len(),
+                    cfg.ttl_ceiling
+                );
+                Some(cfg)
+            }
+            Ok(None) => {
+                eprintln!(
+                    "[mock-server] sign-sts disabled (AGENTKEYS_SIGNER_STS_PROVIDER unset) — /dev/sign-sts will 503"
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!("[mock-server] FATAL: sign-sts config invalid: {e}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
+
     let state = Arc::new(
         AppState::new(conn)
             .with_dev_signer(dev_signer)
-            .with_broker_session_pubkey(broker_session_pubkey),
+            .with_broker_session_pubkey(broker_session_pubkey)
+            .with_sign_sts(sign_sts),
     );
 
     let bind_addr = if args.signer_only {

@@ -816,6 +816,7 @@ mod tests {
             audit_anchors: "sqlite".into(),
             refuse_to_boot_strict: false,
             client_id: crate::identity::DEFAULT_CLIENT_ID.to_string(),
+            sts_audience: "sts.amazonaws.com".into(),
         }
     }
 

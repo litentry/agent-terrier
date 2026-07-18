@@ -89,6 +89,10 @@ pub const BROKER_OIDC_ISSUER: &str = "BROKER_OIDC_ISSUER";
 pub const BROKER_OIDC_KEYPAIR_PATH: &str = "BROKER_OIDC_KEYPAIR_PATH";
 /// Optional. TTL in seconds of OIDC JWTs minted for STS. Range \[60, 3600\]. Default 300.
 pub const BROKER_OIDC_JWT_TTL_SECONDS: &str = "BROKER_OIDC_JWT_TTL_SECONDS";
+/// #510 — the `aud` claim stamped into broker-minted OIDC JWTs. Default
+/// `sts.amazonaws.com` (the historical hardcode); the VE provider registers
+/// its own audience (ve-broker-runtime-port follow-up 2).
+pub const BROKER_STS_AUDIENCE: &str = "BROKER_STS_AUDIENCE";
 
 // ---------------------------------------------------------------------------
 // Session JWT (NEW — broker-internal, separate from the OIDC issuer keypair)

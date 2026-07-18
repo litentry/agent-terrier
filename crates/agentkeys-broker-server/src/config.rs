@@ -45,6 +45,12 @@ pub struct BrokerConfig {
     /// unchanged by omission); the VE stack sets `agentterrier`. Logged at
     /// boot — a wrong value forks every identity on the stack.
     pub client_id: String,
+    /// #510 — the `aud` claim stamped into broker-minted OIDC JWTs
+    /// (`BROKER_STS_AUDIENCE`). AWS's provider registers
+    /// `sts.amazonaws.com` (the historical hardcode, kept as the default);
+    /// the VE provider registers its own audience (ve-broker-runtime-port
+    /// follow-up 2) — config, never a code constant.
+    pub sts_audience: String,
 }
 
 impl BrokerConfig {
@@ -122,6 +128,8 @@ impl BrokerConfig {
             std::env::var(env::BROKER_AUDIT_ANCHORS).unwrap_or_else(|_| "sqlite".to_string());
         let refuse_to_boot_strict = bool_env(env::BROKER_REFUSE_TO_BOOT_STRICT);
         let client_id = parse_client_id(std::env::var(env::AGENTKEYS_CLIENT_ID).ok())?;
+        let sts_audience = std::env::var(env::BROKER_STS_AUDIENCE)
+            .unwrap_or_else(|_| "sts.amazonaws.com".to_string());
 
         Ok(Self {
             data_role_arn,
@@ -139,6 +147,7 @@ impl BrokerConfig {
             audit_anchors,
             refuse_to_boot_strict,
             client_id,
+            sts_audience,
         })
     }
 }

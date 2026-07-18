@@ -48,20 +48,35 @@ struct SessionClaims {
 #[derive(Debug, Serialize, Deserialize)]
 struct AgentKeysClaims {
     omni_account: String,
+    /// Agent J1 only (#144): the master omni this child was HDKD-derived from.
+    #[serde(default)]
+    parent_omni: Option<String>,
+    /// Agent J1 only: the K10 device address whose pop_sig redeemed the link
+    /// code. #513's chain gate re-checks this binding on chain.
+    #[serde(default)]
+    device_pubkey: Option<String>,
 }
 
-/// Verify the bearer JWT and assert `claims.agentkeys.omni_account == body_omni`.
-/// Returns `Ok(())` on success.
-/// Returns `Err((StatusCode::UNAUTHORIZED, Json(...)))` on any failure.
-///
-/// Skipped entirely when `state.broker_session_pubkey` is `None`.
-fn verify_session_jwt(
+/// Claims the signer trusts after JWT verification (#512/#513): the actor, and
+/// — agent sessions only — the lineage fields the chain gate re-verifies.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedSession {
+    pub omni_account: String,
+    pub parent_omni: Option<String>,
+    pub device_pubkey: Option<String>,
+}
+
+/// Verify the bearer JWT (ES256 signature + expiry + `agentkeys:broker`
+/// audience) and return its verified `agentkeys` claims. `Ok(None)` = auth
+/// disabled (no broker pubkey loaded — legacy/test mode). #512's `sign-sts`
+/// reads the actor FROM these claims; the body-omni cross-check wrapper below
+/// keeps the historical `/dev/*` contract byte-identical.
+pub(crate) fn verify_session_jwt_claims(
     state: &SharedState,
     headers: &HeaderMap,
-    body_omni: &str,
-) -> Result<(), (StatusCode, Json<Value>)> {
+) -> Result<Option<VerifiedSession>, (StatusCode, Json<Value>)> {
     let Some(decoding_key) = state.broker_session_pubkey.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
 
     let token = extract_bearer(headers).ok_or_else(|| {
@@ -74,21 +89,14 @@ fn verify_session_jwt(
         )
     })?;
 
+    // The signer doesn't know the broker's issuer URL — validate sig + exp +
+    // audience only; the broker already validated iss when it minted the token.
     let mut validation = Validation::new(Algorithm::ES256);
-    // The signer doesn't know the broker's issuer URL — skip iss/aud validation
-    // here; the broker already validated those when it minted the token.
-    // We only verify signature + expiry + omni_account claim.
     validation.set_audience(&["agentkeys:broker"]);
-    validation.insecure_disable_signature_validation();
-    // Re-enable signature validation (override the above so we actually check it).
-    // Use the standard path: validate sig + exp only, leave iss/aud to the custom check above.
-    let mut validation2 = Validation::new(Algorithm::ES256);
-    validation2.set_audience(&["agentkeys:broker"]);
-    validation2.validate_exp = true;
-    // Don't require iss — we don't know the broker URL here.
-    validation2.set_required_spec_claims(&["exp", "aud"]);
+    validation.validate_exp = true;
+    validation.set_required_spec_claims(&["exp", "aud"]);
 
-    let token_data = decode::<SessionClaims>(token, decoding_key, &validation2).map_err(|e| {
+    let token_data = decode::<SessionClaims>(token, decoding_key, &validation).map_err(|e| {
         (
             StatusCode::UNAUTHORIZED,
             Json(json!({
@@ -98,17 +106,35 @@ fn verify_session_jwt(
         )
     })?;
 
-    if token_data.claims.agentkeys.omni_account != body_omni {
-        return Err((
+    let c = token_data.claims.agentkeys;
+    Ok(Some(VerifiedSession {
+        omni_account: c.omni_account,
+        parent_omni: c.parent_omni,
+        device_pubkey: c.device_pubkey,
+    }))
+}
+
+/// Verify the bearer JWT and assert `claims.agentkeys.omni_account == body_omni`.
+/// Returns `Ok(())` on success.
+/// Returns `Err((StatusCode::UNAUTHORIZED, Json(...)))` on any failure.
+///
+/// Skipped entirely when `state.broker_session_pubkey` is `None`.
+fn verify_session_jwt(
+    state: &SharedState,
+    headers: &HeaderMap,
+    body_omni: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    match verify_session_jwt_claims(state, headers)? {
+        None => Ok(()),
+        Some(sess) if sess.omni_account == body_omni => Ok(()),
+        Some(_) => Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({
                 "error":   "unauthorized",
                 "message": "JWT omni_account claim does not match request body",
             })),
-        ));
+        )),
     }
-
-    Ok(())
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Option<&str> {

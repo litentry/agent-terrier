@@ -165,28 +165,23 @@ pub(crate) fn actor_omni_from_jwt(token: &str) -> Result<String, String> {
 /// no `Version` field, matching the canonical shape of VE system policies).
 /// Scope: object I/O under `bots/<omni>/*` + prefix-conditioned ListBucket,
 /// per docs/spec/ve-broker-runtime-port.md "The isolation fork".
+///
+/// #512: delegates to the shared per-cloud renderer (`agentkeys_core::
+/// session_policy`) — ONE owner for the dialect, shared with the signer's
+/// `/dev/sign-sts`. The unit tests below pin byte-compatibility with the
+/// pre-#512 inline construction.
 pub(crate) fn ve_session_policy(buckets: &[String], actor_omni: &str) -> String {
-    let object_resources: Vec<String> = buckets
-        .iter()
-        .map(|b| format!("trn:tos:::{b}/bots/{actor_omni}/*"))
-        .collect();
-    let bucket_resources: Vec<String> = buckets.iter().map(|b| format!("trn:tos:::{b}")).collect();
-    serde_json::json!({
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Action": ["tos:GetObject", "tos:PutObject", "tos:DeleteObject"],
-                "Resource": object_resources,
-            },
-            {
-                "Effect": "Allow",
-                "Action": ["tos:ListBucket"],
-                "Resource": bucket_resources,
-                "Condition": { "StringLike": { "tos:prefix": format!("bots/{actor_omni}/*") } },
-            }
-        ]
-    })
-    .to_string()
+    use agentkeys_core::session_policy::{
+        render_session_policy, CloudDialect, ScopedAccessIntent, Verb,
+    };
+    render_session_policy(
+        CloudDialect::VeTos,
+        &ScopedAccessIntent {
+            actor_omni,
+            buckets,
+            verbs: &[Verb::Get, Verb::Put, Verb::Delete, Verb::List],
+        },
+    )
 }
 
 /// Parse the `AssumeRoleWithOIDC` response body into `AssumedCredentials`.
@@ -297,6 +292,32 @@ impl StsClient for VeStsClient {
         parse_assume_response(&text).map_err(BrokerError::StsError)
     }
 
+    /// #510 relay path on VE. The relays' inline `session_policy` is
+    /// s3:/arn: dialect; VE's engine speaks tos:/trn: and the per-actor
+    /// scope-down is already derived VE-SIDE (`ve_session_policy`), so an
+    /// AWS-dialect policy here is refused LOUDLY — silently dropping a
+    /// scope-down would widen access (no-silent-override policy). The
+    /// dialect-free intent form arrives with the #512 signer renderer.
+    async fn assume_role_scoped(
+        &self,
+        role: &str,
+        session_name: &str,
+        web_identity_token: &str,
+        duration_seconds: i32,
+        session_policy: Option<&str>,
+    ) -> BrokerResult<AssumedCredentials> {
+        if session_policy.is_some() {
+            return Err(BrokerError::StsError(
+                "VE STS: AWS-dialect inline session policy is not applicable — the \
+                 per-actor scope-down is rendered VE-side; intent-based scoping \
+                 lands with #512"
+                    .into(),
+            ));
+        }
+        self.assume_role_with_web_identity(role, session_name, web_identity_token, duration_seconds)
+            .await
+    }
+
     async fn caller_identity_ok(&self) -> BrokerResult<()> {
         let text = self
             .signed_call("GET", "GetCallerIdentity", String::new())
@@ -333,6 +354,29 @@ mod tests {
             seg(&serde_json::json!({"alg":"ES256","typ":"JWT"})),
             seg(&claims)
         )
+    }
+
+    #[tokio::test]
+    async fn assume_role_scoped_refuses_aws_dialect_session_policy() {
+        // #510: the relays' inline policies are s3:/arn: dialect — VE must
+        // refuse them LOUDLY (a silently dropped scope-down would widen
+        // access), pointing at the #512 intent-based renderer.
+        let client = VeStsClient::new(
+            "ak",
+            "sk",
+            "cn-beijing",
+            DEFAULT_STS_HOST,
+            "trn:iam::1:role/data",
+            vec!["agentterrier-vault".into()],
+        )
+        .expect("client with one bucket boots");
+        let err = client
+            .assume_role_scoped("trn:iam::1:role/data", "sess", "h.p.s", 900, Some("{}"))
+            .await
+            .expect_err("AWS-dialect policy must be refused");
+        let msg = format!("{err}");
+        assert!(msg.contains("#512"), "{msg}");
+        assert!(msg.contains("session policy"), "{msg}");
     }
 
     #[test]

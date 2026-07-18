@@ -18,6 +18,9 @@ pub struct AppState {
     /// When set (signer-only mode), every `/dev/*` request MUST carry a valid
     /// session JWT signed by the broker.
     pub broker_session_pubkey: Option<DecodingKey>,
+    /// #512 — sign-sts (intent-based STS mint) config. `None` = the
+    /// `/dev/sign-sts` endpoint 503s `sts_signing_not_configured`.
+    pub sign_sts: Option<crate::handlers::sign_sts::SignStsConfig>,
 }
 
 impl AppState {
@@ -31,6 +34,7 @@ impl AppState {
             shielding_public_key: verifying_key,
             dev_signer: None,
             broker_session_pubkey: None,
+            sign_sts: None,
         }
     }
 
@@ -46,6 +50,12 @@ impl AppState {
     /// When `None` (default), JWT verification is skipped (legacy/test mode).
     pub fn with_broker_session_pubkey(mut self, key: Option<DecodingKey>) -> Self {
         self.broker_session_pubkey = key;
+        self
+    }
+
+    /// Builder: arm the #512 sign-sts mint (or leave `None` → 503).
+    pub fn with_sign_sts(mut self, cfg: Option<crate::handlers::sign_sts::SignStsConfig>) -> Self {
+        self.sign_sts = cfg;
         self
     }
 }

@@ -444,17 +444,31 @@ pub struct OnChainDevice {
     pub revoked: bool,
 }
 
+/// Read one device entry from the registry (`getDevice(bytes32)`) — the
+/// field-level half of [`check_chain_device`], public for #513 so the SIGNER
+/// runs the SAME independent re-check at credential issuance (ADR rule 3,
+/// Variant B+) without constructing a `CapToken`. Returned fields are
+/// bare-lowercase hex (the `parse_device_entry` normalization).
+pub async fn get_chain_device(
+    http: &reqwest::Client,
+    rpc_url: &str,
+    registry: &str,
+    device_key_hash: &str,
+) -> Result<OnChainDevice, VerifyError> {
+    let selector = function_selector("getDevice(bytes32)");
+    let arg = pad32(device_key_hash)?;
+    let data = format!("0x{selector}{arg}");
+    let raw = eth_call(http, rpc_url, registry, &data).await?;
+    parse_device_entry(&raw)
+}
+
 pub async fn check_chain_device(
     http: &reqwest::Client,
     rpc_url: &str,
     registry: &str,
     token: &CapToken,
 ) -> Result<(), VerifyError> {
-    let selector = function_selector("getDevice(bytes32)");
-    let arg = pad32(&token.payload.device_key_hash)?;
-    let data = format!("0x{selector}{arg}");
-    let raw = eth_call(http, rpc_url, registry, &data).await?;
-    let device = parse_device_entry(&raw)?;
+    let device = get_chain_device(http, rpc_url, registry, &token.payload.device_key_hash).await?;
     if device.registered_at == 0 || device.revoked {
         return Err(VerifyError::DeviceInactive);
     }

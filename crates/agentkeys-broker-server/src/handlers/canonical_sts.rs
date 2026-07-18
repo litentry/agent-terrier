@@ -166,6 +166,7 @@ pub async fn mint_canonical_sts(
         &p.operator_omni,
         "", // no wallet — agent/operator omni tag is what STS reads
         state.config.oidc_jwt_ttl_seconds,
+        &state.config.sts_audience,
     );
     let oidc_jwt = state.oidc.sign_jwt(&claims)?;
 
@@ -202,22 +203,22 @@ pub async fn mint_canonical_sts(
 
     // 6. AssumeRole with the operator-tagged OIDC + the scoped policy. The delegate
     //    gets ONLY these narrow, read-only, single-object creds.
-    let creds = agentkeys_provisioner::assume_role_with_jwt(
-        &oidc_jwt,
-        &p.operator_omni,
-        memory_role_arn,
-        &state.config.aws_region,
-        900,
-        None,
-        Some(&policy),
-    )
-    .await
-    .map_err(|e| BrokerError::Internal(format!("canonical-sts AssumeRole: {e}")))?;
+    let creds = state
+        .sts
+        .assume_role_scoped(
+            memory_role_arn,
+            &p.operator_omni,
+            &oidc_jwt,
+            900,
+            Some(&policy),
+        )
+        .await
+        .map_err(|e| BrokerError::Internal(format!("canonical-sts AssumeRole: {e}")))?;
 
     Ok(Json(CanonicalStsResponse {
         access_key_id: creds.access_key_id,
         secret_access_key: creds.secret_access_key,
         session_token: creds.session_token,
-        expiration: creds.expiration,
+        expiration: creds.expiration_unix,
     }))
 }
