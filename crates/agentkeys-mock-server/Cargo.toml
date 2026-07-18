@@ -14,6 +14,9 @@ path = "src/lib.rs"
 [dependencies]
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+# #513 sign-sts chain gate: the SAME on-chain device view layer 2 uses.
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
 axum = { version = "0.7", features = ["json", "query"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { workspace = true }
@@ -38,9 +41,11 @@ http-body-util = "0.1"
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 jsonwebtoken = "9"
+# #512 sign-sts: the signer performs the AssumeRoleWithOIDC exchange itself.
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json", "blocking"] }
 tokio = { workspace = true }
 # Test-only: mint test JWTs against an in-test ES256 keypair so the JWT-auth
 # path (`--signer-only` mode) can be exercised hermetically.

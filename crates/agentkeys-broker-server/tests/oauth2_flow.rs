@@ -117,6 +117,7 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
         client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
+        sts_audience: "sts.amazonaws.com".into(),
     };
 
     let http = reqwest::Client::builder()

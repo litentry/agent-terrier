@@ -174,6 +174,7 @@ pub async fn mint_oidc_jwt(
         &actor_omni,
         &wallet,
         state.config.oidc_jwt_ttl_seconds,
+        &state.config.sts_audience,
     );
 
     let jwt = state.oidc.sign_jwt(&claims)?;
@@ -231,6 +232,7 @@ pub(crate) fn build_oidc_jwt_claims(
     actor_omni: &str,
     wallet: &str,
     ttl_seconds: u64,
+    sts_audience: &str,
 ) -> (serde_json::Value, i64, i64) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -261,7 +263,7 @@ pub(crate) fn build_oidc_jwt_claims(
     let claims = json!({
         "iss": issuer,
         "sub": format!("agentkeys:agent:{}", user_wallet),
-        "aud": "sts.amazonaws.com",
+        "aud": sts_audience,
         "iat": now,
         "exp": exp,
         "agentkeys_user_wallet": user_wallet,
@@ -294,7 +296,13 @@ mod tests {
         let wallet = "0xAbCdEf0123456789abcdef0123456789ABCDef00";
         let wallet_lc = wallet.to_lowercase();
         let actor_omni = derive_with_client_id(DEFAULT_CLIENT_ID, "evm", &wallet_lc).to_string();
-        let (claims, _n, _e) = build_oidc_jwt_claims("https://issuer", &actor_omni, wallet, 300);
+        let (claims, _n, _e) = build_oidc_jwt_claims(
+            "https://issuer",
+            &actor_omni,
+            wallet,
+            300,
+            "sts.amazonaws.com",
+        );
         assert_eq!(claims["agentkeys_actor_omni"], actor_omni);
         assert_eq!(claims["agentkeys_user_wallet"], wallet_lc);
         assert_eq!(claims["sub"], format!("agentkeys:agent:{wallet_lc}"));
@@ -312,7 +320,8 @@ mod tests {
         // config/memory read after a passkey re-login.
         let omni_0x = format!("0x{}", "AB".repeat(32));
         let bare = "ab".repeat(32);
-        let (claims, _n, _e) = build_oidc_jwt_claims("https://issuer", &omni_0x, "", 300);
+        let (claims, _n, _e) =
+            build_oidc_jwt_claims("https://issuer", &omni_0x, "", 300, "sts.amazonaws.com");
         assert_eq!(claims["agentkeys_actor_omni"], bare.as_str());
         let tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
         assert_eq!(tags["agentkeys_actor_omni"][0], bare.as_str());
@@ -327,11 +336,35 @@ mod tests {
         // omni (so STS scopes creds to bots/<child>/...), and the v1 user_wallet
         // tag falls back to the omni rather than being empty.
         let child = "a".repeat(64);
-        let (claims, _n, _e) = build_oidc_jwt_claims("https://issuer", &child, "", 300);
+        let (claims, _n, _e) =
+            build_oidc_jwt_claims("https://issuer", &child, "", 300, "sts.amazonaws.com");
         assert_eq!(claims["agentkeys_actor_omni"], child);
         assert_eq!(claims["agentkeys_user_wallet"], child);
         assert_eq!(claims["sub"], format!("agentkeys:agent:{child}"));
         let tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
         assert_eq!(tags["agentkeys_actor_omni"][0], child);
+    }
+
+    #[test]
+    fn aud_claim_is_config_driven_and_changes_nothing_else() {
+        // #510: the audience is BrokerConfig-driven (BROKER_STS_AUDIENCE) so
+        // the VE stack can register its own audience (port follow-up 2)
+        // without a code constant; the historical value stays the default.
+        let omni = "c".repeat(64);
+        let (aws, _n, _e) =
+            build_oidc_jwt_claims("https://issuer", &omni, "", 300, "sts.amazonaws.com");
+        assert_eq!(aws["aud"], "sts.amazonaws.com");
+        let (ve, _n, _e) =
+            build_oidc_jwt_claims("https://issuer", &omni, "", 300, "agentkeys-ve-sts");
+        assert_eq!(ve["aud"], "agentkeys-ve-sts");
+        // The audience changes NOTHING else in the claim set (timestamps
+        // zeroed — the two calls may straddle a second boundary).
+        let (mut a, mut v) = (aws, ve);
+        for c in [&mut a, &mut v] {
+            c["aud"] = serde_json::Value::Null;
+            c["iat"] = 0.into();
+            c["exp"] = 0.into();
+        }
+        assert_eq!(a, v);
     }
 }

@@ -1193,6 +1193,41 @@ pub struct SpeechStsResult {
     pub region: String,
 }
 
+// ── #512 signer sign-sts — intent-based credential mint (ADR
+//    docs/spec/stacks/ve-sts-signing-split.md) ─────────────────────────────────
+
+/// Request body for the SIGNER's `POST /dev/sign-sts` (NOT a broker endpoint —
+/// the signer-only listener serves it, bearer = the caller's session JWT).
+/// Intent-based: the caller names WHAT it wants (`data_class`, `verbs`,
+/// `ttl_seconds`) and proves WHO it is (the JWT; `omni_account` is the
+/// standard `/dev/*` cross-check field). The signer renders the session
+/// policy ITSELF from this intent — no caller-authored policy string exists,
+/// so the ADR's rule 2 (policy ⊆ actor prefix) holds by construction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignStsBody {
+    /// Bare/0x 64-hex actor omni — must match the session JWT's claim.
+    pub omni_account: String,
+    /// One of `vault` | `memory` | `config` | `channel` (speech is gate-held
+    /// on VE, #386). Selects the per-class role + bucket (#511).
+    pub data_class: String,
+    /// Subset of `get` | `put` | `delete` | `list` (case-insensitive).
+    pub verbs: Vec<String>,
+    /// Requested credential TTL; the signer enforces its ceiling (900s).
+    pub ttl_seconds: u64,
+    /// The broker-minted OIDC JWT the signer exchanges (`AssumeRoleWithOIDC`).
+    pub oidc_token: String,
+}
+
+/// Response from `/dev/sign-sts`: the scoped short-TTL credentials. Unix-epoch
+/// expiration (the VE RFC-3339 `Expiration` is normalized signer-side).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignStsResult {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    pub expiration_unix: i64,
+}
+
 // ── #339 P2 — absorption inbox (master-hub "push" / curated merge) ────────────
 //
 // The mirror of P1's canonical READ, but for WRITE: a delegate proposes a

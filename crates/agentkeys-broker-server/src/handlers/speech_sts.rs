@@ -166,6 +166,7 @@ pub async fn mint_speech_sts(
         &p.actor_omni,
         "",
         state.config.oidc_jwt_ttl_seconds,
+        &state.config.sts_audience,
     );
     let oidc_jwt = state.oidc.sign_jwt(&claims)?;
 
@@ -188,23 +189,23 @@ pub async fn mint_speech_sts(
     .to_string();
 
     // 6. AssumeRole → short-TTL, speech-only creds.
-    let creds = agentkeys_provisioner::assume_role_with_jwt(
-        &oidc_jwt,
-        &p.actor_omni,
-        speech_role_arn,
-        &state.config.aws_region,
-        900,
-        None,
-        Some(&policy),
-    )
-    .await
-    .map_err(|e| BrokerError::Internal(format!("speech-sts AssumeRole: {e}")))?;
+    let creds = state
+        .sts
+        .assume_role_scoped(
+            speech_role_arn,
+            &p.actor_omni,
+            &oidc_jwt,
+            900,
+            Some(&policy),
+        )
+        .await
+        .map_err(|e| BrokerError::Internal(format!("speech-sts AssumeRole: {e}")))?;
 
     Ok(Json(SpeechStsResult {
         access_key_id: creds.access_key_id,
         secret_access_key: creds.secret_access_key,
         session_token: creds.session_token,
-        expiration: creds.expiration,
+        expiration: creds.expiration_unix,
         region: state.config.aws_region.clone(),
     }))
 }

@@ -32,6 +32,24 @@ pub trait StsClient: Send + Sync {
         duration_seconds: i32,
     ) -> BrokerResult<AssumedCredentials>;
 
+    /// Federated mint with an optional inline session policy — the RELAY
+    /// path (#295 `canonical-sts`, #339 `inbox-sts`, #441 `speech-sts`),
+    /// unified behind the trait by #510 so `AGENTKEYS_STS_PROVIDER`
+    /// governs every credential the broker issues.
+    ///
+    /// The AWS impl deliberately delegates to the provisioner's ANONYMOUS
+    /// client (`assume_role_with_jwt`) — byte-identical to the direct
+    /// calls the relays made before #510, and never signed by ambient
+    /// host credentials (the SDK-default-chain client below is probe-only).
+    async fn assume_role_scoped(
+        &self,
+        role: &str,
+        session_name: &str,
+        web_identity_token: &str,
+        duration_seconds: i32,
+        session_policy: Option<&str>,
+    ) -> BrokerResult<AssumedCredentials>;
+
     /// `sts:GetCallerIdentity` — used by the optional startup probe to
     /// confirm the SDK has *some* credentials available (so misconfigured
     /// hosts fail fast instead of erroring on the first mint). Skip with
@@ -41,6 +59,10 @@ pub trait StsClient: Send + Sync {
 
 pub struct AwsStsClient {
     client: aws_sdk_sts::Client,
+    /// #510: `assume_role_scoped` delegates to the provisioner's anonymous
+    /// client, which takes the region explicitly (the SDK client above
+    /// carries one internally but does not expose it).
+    region: String,
 }
 
 impl AwsStsClient {
@@ -61,6 +83,7 @@ impl AwsStsClient {
             .await;
         Self {
             client: aws_sdk_sts::Client::new(&config),
+            region: region.to_string(),
         }
     }
 }
@@ -105,6 +128,33 @@ impl StsClient for AwsStsClient {
             secret_access_key: creds.secret_access_key,
             session_token: creds.session_token,
             expiration_unix: creds.expiration.secs(),
+        })
+    }
+
+    async fn assume_role_scoped(
+        &self,
+        role: &str,
+        session_name: &str,
+        web_identity_token: &str,
+        duration_seconds: i32,
+        session_policy: Option<&str>,
+    ) -> BrokerResult<AssumedCredentials> {
+        let creds = agentkeys_provisioner::assume_role_with_jwt(
+            web_identity_token,
+            session_name,
+            role,
+            &self.region,
+            duration_seconds,
+            None,
+            session_policy,
+        )
+        .await
+        .map_err(|e| BrokerError::StsError(format!("assume_role_scoped: {e}")))?;
+        Ok(AssumedCredentials {
+            access_key_id: creds.access_key_id,
+            secret_access_key: creds.secret_access_key,
+            session_token: creds.session_token,
+            expiration_unix: creds.expiration,
         })
     }
 
@@ -167,6 +217,17 @@ impl StsClient for StubStsClient {
         _session_name: &str,
         _web_identity_token: &str,
         _duration_seconds: i32,
+    ) -> BrokerResult<AssumedCredentials> {
+        (self.assume)()
+    }
+
+    async fn assume_role_scoped(
+        &self,
+        _role: &str,
+        _session_name: &str,
+        _web_identity_token: &str,
+        _duration_seconds: i32,
+        _session_policy: Option<&str>,
     ) -> BrokerResult<AssumedCredentials> {
         (self.assume)()
     }
