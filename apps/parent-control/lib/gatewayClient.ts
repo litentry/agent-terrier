@@ -25,19 +25,39 @@ function baseUrl(): string {
   return (process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
 }
 
-/** Front-end gateway tracing (#419 connect/login diagnostics). ON by default so
- *  the whole ceremony is inspectable in DevTools; silence at runtime WITHOUT a
- *  rebuild via `localStorage.gatewayDebug = '0'` (re-enable with any other value
- *  or `removeItem`). Every request + parsed response is logged — this is how you
- *  tell a fresh `wait → scaned → connected` from a re-scan that returns
- *  `already_bound` (the bot was already connected; the phone's authorize page is
- *  leftover and can be closed). */
-export function gwlog(...args: unknown[]): void {
+/** Front-end gateway tracing (#419 connect/login diagnostics). OFF by default —
+ *  the contacts/channels pages poll `status`/`contacts`/`monitor` on a timer, so
+ *  leaving it on floods DevTools (every request + response is logged). Turn it on
+ *  from the Contacts page's "debug logs" toggle (or `localStorage.gatewayDebug =
+ *  '1'` by hand); the preference persists across reloads and gates gwlog()
+ *  app-wide. Once on, this is how you tell a fresh `wait → scaned → connected`
+ *  from a re-scan that returns `already_bound` (the bot was already connected;
+ *  the phone's authorize page is leftover and can be closed). */
+const GATEWAY_DEBUG_KEY = 'gatewayDebug';
+
+/** Whether gateway request/response tracing is currently enabled (opt-in — the
+ *  key must be exactly `'1'`; unset / any other value / no localStorage = off). */
+export function gatewayDebugEnabled(): boolean {
   try {
-    if (globalThis.localStorage?.getItem('gatewayDebug') === '0') return;
+    return globalThis.localStorage?.getItem(GATEWAY_DEBUG_KEY) === '1';
   } catch {
-    /* no localStorage (SSR/no-DOM) — trace anyway */
+    return false; // no localStorage (SSR/no-DOM) — stay quiet
   }
+}
+
+/** Persist the gateway-trace preference (survives reloads). `false` removes the
+ *  key so the state reads back as the default-off. */
+export function setGatewayDebug(on: boolean): void {
+  try {
+    if (on) globalThis.localStorage?.setItem(GATEWAY_DEBUG_KEY, '1');
+    else globalThis.localStorage?.removeItem(GATEWAY_DEBUG_KEY);
+  } catch {
+    /* no localStorage — nothing to persist */
+  }
+}
+
+export function gwlog(...args: unknown[]): void {
+  if (!gatewayDebugEnabled()) return;
   // eslint-disable-next-line no-console
   console.info('%c[gateway]', 'color:#0a7;font-weight:600', ...args);
 }
