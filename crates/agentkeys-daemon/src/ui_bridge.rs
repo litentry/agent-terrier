@@ -173,6 +173,14 @@ pub struct UiBridgeState {
     /// *attests* the managed wallet it derives (no user wallet / MetaMask).
     /// `None` ⇒ email verify holds an identity-only session (no EVM J1 / actor omni).
     pub signer_url: Option<String>,
+    /// #514 — which credential plane mints data-class STS creds. `Some("ve")`
+    /// routes every data mint through the SIGNER's `/dev/sign-sts` (the signer
+    /// holds the AK/SK and independently validates — ADR
+    /// `docs/spec/stacks/ve-sts-signing-split.md`); `None`/anything else keeps
+    /// the AWS anonymous relay unchanged. Read ONCE at boot from
+    /// `AGENTKEYS_STS_PROVIDER` — the SAME env var the broker reads, never a
+    /// second source of truth (no-silent-override policy).
+    pub sts_provider: Option<String>,
     /// Chain id for the managed-wallet attestation (mirrors `--init-chain-id`).
     pub chain_id: u64,
     /// #418 — the WeChat gateway worker base URL (`AGENTKEYS_WORKER_WEIXIN_URL`).
@@ -1332,6 +1340,8 @@ pub fn build_state(
     rp_name: &str,
     broker_url: Option<String>,
     signer_url: Option<String>,
+    // #514 — `AGENTKEYS_STS_PROVIDER` ("ve" ⇒ mint through the signer).
+    sts_provider: Option<String>,
     chain_id: u64,
     memory_url: Option<String>,
     memory_role_arn: Option<String>,
@@ -1434,6 +1444,7 @@ pub fn build_state(
         pending_email: RwLock::new(HashMap::new()),
         onboarding_session: RwLock::new(None),
         signer_url,
+        sts_provider,
         chain_id,
         memory_url,
         memory_role_arn,
@@ -8396,6 +8407,8 @@ struct RealConfigCtx {
     /// config worker. `None` fails LOUD at store/fetch time — never a silent
     /// fallback to worker-side plaintext.
     signer_url: Option<String>,
+    /// #514 — `AGENTKEYS_STS_PROVIDER`; `Some("ve")` mints through the signer.
+    sts_provider: Option<String>,
 }
 
 /// Same `Ok(None)`/`Ok(Some)`/`Err` contract as `real_memory_ctx`, gated on
@@ -8419,7 +8432,97 @@ async fn real_config_ctx(state: &UiBridgeState) -> Result<Option<RealConfigCtx>,
         omni: c.omni,
         device_key_hash: c.device_key_hash,
         signer_url: state.signer_url.clone(),
+        sts_provider: state.sts_provider.clone(),
     }))
+}
+
+/// Data-plane credentials for one worker call. Only the three header fields
+/// the workers read — deliberately NOT `AwsTempCreds`, because the #514 VE
+/// path mints through the signer and never sees an AWS SDK type.
+struct DataCreds {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: String,
+}
+
+/// #514 — mint scoped, short-TTL data-plane credentials for one data class.
+///
+/// Two planes, ONE decision point (the ADR's "the platform is a resource
+/// provider, never the authorizer"):
+///   - **VE** (`sts_provider == "ve"`): broker mints the OIDC JWT, then the
+///     SIGNER's `/dev/sign-sts` validates the intent and performs the
+///     SigV4 `AssumeRoleWithOIDC` with its OWN AK/SK. The daemon names only
+///     the INTENT (`data_class` + `verbs`) — never a role, never a policy —
+///     so a compromised daemon cannot widen its own scope.
+///   - **AWS** (anything else): the anonymous relay, byte-identical to
+///     pre-#514 behaviour.
+///
+/// Fails LOUD when the VE plane is selected without a signer URL — never a
+/// silent fallback to the AWS relay, which would mint against the wrong cloud.
+async fn mint_data_creds(
+    ctx: &RealConfigCtx,
+    data_class: &str,
+    verbs: &[&str],
+) -> Result<DataCreds, String> {
+    let (broker, j1, omni) = (&ctx.broker, &ctx.j1, &ctx.omni);
+    if ctx.sts_provider.as_deref() != Some("ve") {
+        let c = agentkeys_provisioner::fetch_via_broker_default_ttl(
+            broker,
+            j1,
+            &ctx.role_arn,
+            &ctx.region,
+        )
+        .await
+        .map_err(|e| format!("STS relay ({data_class}): {e}"))?;
+        return Ok(DataCreds {
+            access_key_id: c.access_key_id,
+            secret_access_key: c.secret_access_key,
+            session_token: c.session_token,
+        });
+    }
+    let signer = ctx.signer_url.as_deref().ok_or_else(|| {
+        format!(
+            "AGENTKEYS_STS_PROVIDER=ve but no --signer-url / AGENTKEYS_SIGNER_URL — the VE \
+             data plane mints through the signer ({data_class}); refusing to fall back to the \
+             AWS relay"
+        )
+    })?;
+    // The broker still mints the OIDC JWT (it owns identity); the signer
+    // decides whether it becomes a credential (ADR: authorizer ≠ issuer).
+    let jwt = agentkeys_provisioner::fetch_oidc_jwt(broker, j1)
+        .await
+        .map_err(|e| format!("broker OIDC mint ({data_class}): {e}"))?;
+    let body = agentkeys_backend_client::protocol::SignStsBody {
+        omni_account: omni.to_string(),
+        data_class: data_class.to_string(),
+        verbs: verbs.iter().map(|v| v.to_string()).collect(),
+        ttl_seconds: 900,
+        oidc_token: jwt.jwt,
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{}/dev/sign-sts", signer.trim_end_matches('/')))
+        .header("Authorization", format!("Bearer {j1}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("signer sign-sts transport ({data_class}): {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        // Surface the signer's own error code verbatim — `grant_not_found`,
+        // `role_class_mismatch`, `ttl_too_long` and friends are the ADR's
+        // loud refusals and must never be flattened into a generic 502.
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("signer sign-sts {status} ({data_class}): {text}"));
+    }
+    let out: agentkeys_backend_client::protocol::SignStsResult = resp
+        .json()
+        .await
+        .map_err(|e| format!("signer sign-sts parse ({data_class}): {e}"))?;
+    Ok(DataCreds {
+        access_key_id: out.access_key_id,
+        secret_access_key: out.secret_access_key,
+        session_token: out.session_token,
+    })
 }
 
 /// Derive the per-(actor, service) config KEK via the signer (#372 item 2 —
@@ -8656,14 +8759,7 @@ async fn config_store_doc(
         service,
     )
     .await?;
-    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
-    )
-    .await
-    .map_err(|e| format!("STS relay (config): {e}"))?;
+    let creds = mint_data_creds(ctx, "config", &["get", "put"]).await?;
     // #372 item 2: CLIENT-side encrypt under the signer-derived per-actor KEK
     // (v3 envelope). The worker stores the envelope verbatim — plaintext never
     // reaches it, and neither the storage plane nor any worker env can decrypt.
@@ -8730,14 +8826,7 @@ async fn config_fetch_doc(
         service,
     )
     .await?;
-    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
-    )
-    .await
-    .map_err(|e| format!("STS relay (config): {e}"))?;
+    let creds = mint_data_creds(ctx, "config", &["get"]).await?;
     let resp = client
         .post(format!("{}/v1/config/get", ctx.config_url))
         .header("x-aws-access-key-id", creds.access_key_id)
@@ -11404,7 +11493,8 @@ mod tests {
             "http://localhost:3113",
             "AgentKeys Test",
             Some("https://broker.example".into()),
-            None, // signer_url — none, the VE case
+            None,
+            None, // sts_provider — #514 (AWS relay path) // signer_url — none, the VE case
             84532,
             None,
             None,
@@ -11458,6 +11548,7 @@ mod tests {
             "AgentKeys Test",
             Some("https://broker.example".into()),
             None,
+            None, // sts_provider — #514, AWS relay path in unit tests
             84532,
             None,
             None,
@@ -11872,6 +11963,7 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
+            None, // sts_provider — #514, AWS relay path in unit tests
             84532,
             None,
             None,
@@ -11901,6 +11993,7 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
+            None, // sts_provider — #514, AWS relay path in unit tests
             84532,
             None,
             None,
@@ -11927,6 +12020,7 @@ mod tests {
             "AgentKeys Test",
             Some("https://broker.example".into()),
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -12262,6 +12356,7 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -12600,6 +12695,7 @@ mod tests {
             "AgentKeys Test",
             Some("https://broker.example".into()),
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             Some("https://memory.example".into()),
             None,
@@ -12632,6 +12728,7 @@ mod tests {
             "AgentKeys Test",
             Some("https://broker.example".into()),
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             Some("https://memory.example".into()),
             Some("arn:aws:iam::1:role/memory".into()),
@@ -13408,6 +13505,7 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -13521,6 +13619,7 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -13853,6 +13952,7 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -13921,6 +14021,7 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -13997,6 +14098,7 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -14098,6 +14200,7 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -14258,6 +14361,7 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -14753,6 +14857,7 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -14981,6 +15086,7 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -15214,6 +15320,7 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
+            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,

@@ -215,6 +215,15 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_SIGNER_URL")]
     signer_url: Option<String>,
 
+    /// #514 — which credential plane mints data-class STS credentials.
+    /// `ve` routes every data mint through the SIGNER's `/dev/sign-sts` (the
+    /// signer holds the cloud AK/SK and independently validates the intent —
+    /// ADR `docs/spec/stacks/ve-sts-signing-split.md`). Unset/anything else
+    /// keeps the AWS anonymous relay. Same env var the broker reads, so the
+    /// two components can never disagree about which cloud they are on.
+    #[arg(long, env = "AGENTKEYS_STS_PROVIDER")]
+    sts_provider: Option<String>,
+
     /// SIWE chain_id for the signer-flow bootstrap. Default mirrors
     /// the broker's wallet_sig plug-in test vectors (Base Sepolia).
     #[arg(long, default_value_t = 84532)]
@@ -1199,6 +1208,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         &args.ui_bridge_rp_name,
         args.broker_url.clone(),
         args.signer_url.clone(),
+        args.sts_provider.clone(),
         args.init_chain_id,
         args.memory_url.clone(),
         args.memory_role_arn.clone(),
