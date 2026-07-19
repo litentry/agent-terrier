@@ -92,9 +92,6 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/master/gateway/monitor	same gateway-admin forward — live message monitor; behavior proven by the crate's gateway_flow tests; live daemon-side coverage needs a deployed gateway + admin token (same as gateway/status)
 /v1/master/gateway/history	same gateway-admin forward — durable message history; append/read proven by gateway_flow::durable_history; same deployed-gateway limitation
 /v1/master/gateway/activity	same gateway-admin forward — durable contact-audit trail; append/read proven by gateway_flow::durable_activity; same deployed-gateway limitation
-/v1/channels	#404 channel registry list — CRUD + in-use guard proven by ui_bridge unit tests (channel_registry_candidates_and_holders, channel_id_validation); a suite-6 GET needs the config worker provisioned in the test env (same dependency as /v1/master/config/*)
-/v1/channels/:id	#404 registry display-field update (id immutable) — same unit-test coverage + config-worker dependency
-/v1/channels/:id/delete	#404 registry delete (409 while grants hold the id) — same unit-test coverage + config-worker dependency
 EOF
 
 # ── 1. extract served routes ────────────────────────────────────────────────
