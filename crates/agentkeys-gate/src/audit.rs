@@ -7,7 +7,7 @@
 //! per-api-key attribution lives in the typed body.
 
 use agentkeys_backend_client::{AuditAppendInput, BackendClient};
-use agentkeys_core::audit::{AuditOpKind, GateTurnBody};
+use agentkeys_core::audit::{AuditOpKind, GateTurnBody, SpeechAsrBody, SpeechTtsBody};
 
 pub struct Auditor {
     client: BackendClient,
@@ -42,10 +42,45 @@ impl Auditor {
     pub async fn emit_turn(&self, user_omni: &str, body: GateTurnBody) -> Result<(), String> {
         let result = result_code(&body.outcome);
         let op_body = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+        self.emit(user_omni, AuditOpKind::GateTurn, op_body, result)
+            .await
+    }
+
+    /// #519 — one ASR transcription through the speech relay (op_kind 91).
+    pub async fn emit_speech_asr(
+        &self,
+        user_omni: &str,
+        body: SpeechAsrBody,
+    ) -> Result<(), String> {
+        let result = result_code(&body.outcome);
+        let op_body = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+        self.emit(user_omni, AuditOpKind::SpeechAsr, op_body, result)
+            .await
+    }
+
+    /// #519 — one TTS synthesis through the speech relay (op_kind 92).
+    pub async fn emit_speech_tts(
+        &self,
+        user_omni: &str,
+        body: SpeechTtsBody,
+    ) -> Result<(), String> {
+        let result = result_code(&body.outcome);
+        let op_body = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+        self.emit(user_omni, AuditOpKind::SpeechTts, op_body, result)
+            .await
+    }
+
+    async fn emit(
+        &self,
+        user_omni: &str,
+        op_kind: AuditOpKind,
+        op_body: serde_json::Value,
+        result: u8,
+    ) -> Result<(), String> {
         let input = AuditAppendInput {
             operator_omni: user_omni.to_string(),
             actor_omni: user_omni.to_string(),
-            op_kind: AuditOpKind::GateTurn as u8,
+            op_kind: op_kind as u8,
             op_body,
             result,
             intent_text: None,

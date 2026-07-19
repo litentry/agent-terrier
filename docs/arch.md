@@ -273,13 +273,15 @@ Worker: `POST /v1/audit/append` → hash; `GET /v1/audit/envelope/<hash>`. On-ch
 | `ConfigGet` | 81 | `{key, cap_hash}` | config-service (#201/#229) |
 | `ConfigTeardown` | 82 | `{actor_target}` | config-service (#201/#229) |
 | `GateTurn` | 90 | `{device_id, api_key_id, model, streamed, outcome, prompt/completion/total/cached/reasoning_tokens}` | `agentkeys-gate` (#384/#332) |
+| `SpeechAsr` | 91 | `{device_id, api_key_id, audio_bytes_in, transcript_chars, outcome, duration_ms}` | `agentkeys-gate` speech relay (#519 — the VE #386 gate-held app-token posture; sizes only, never transcript content) |
+| `SpeechTts` | 92 | `{device_id, api_key_id, chars_in, audio_bytes_out, voice, speech_rate, outcome, duration_ms}` | `agentkeys-gate` speech relay (#519) |
 | `ChannelPublish` | 100 | `{key, channel_id, event_id, payload_hash}` | channel-service (#406/#229) |
 | `ChannelSubscribe` | 101 | `{channel_id, cursor, event_count, cap_hash}` | channel-service (#406/#229) |
 | `ChannelTeardown` | 102 | `{channel_id, actor_target}` | channel-service (#406/#229) |
 | `GatewayRelay` | 103 | `{transport, contact_id, tier, target_alias, decision, message_hash}` | WeChat gateway (#407) — contact provenance, message text NEVER stored (D13) |
 | `ContactBind` | 104 | `{transport, contact_id, outcome, tier, reach_count}` | WeChat gateway (#407) — the master-confirmed bind write |
 
-Unclaimed bytes in each 10-block + `103-255` are reserved — the device family claimed `53`/`54` for the sandbox lifecycle per #377 and `55`/`56` for the delegate spawn/archive ceremonies per #427, so `57-59` is what remains free there; the channel family claimed `100-104` at §22e phases 1-2 (#406 channel 100-102 + #407 gateway 103-104), so `105-109` is what remains in that block. `GateTurn` attribution: envelope omnis both carry the OWNING USER; device/api-key are body-level rollup dimensions (`GET /v1/usage`).
+Unclaimed bytes in each 10-block + `105-255` are reserved — the device family claimed `53`/`54` for the sandbox lifecycle per #377 and `55`/`56` for the delegate spawn/archive ceremonies per #427, so `57-59` is what remains free there; the gate family claimed `91`/`92` for the speech relay per #519, so `93-99` is what remains there; the channel family claimed `100-104` at §22e phases 1-2 (#406 channel 100-102 + #407 gateway 103-104), so `105-109` is what remains in that block. `GateTurn`/`Speech*` attribution: envelope omnis both carry the OWNING USER; device/api-key are body-level rollup dimensions (`GET /v1/usage`).
 
 **Emit sites are live:** data-plane (#229 — cred/memory/config workers emit per store/fetch/teardown via the shared `AuditEmitter`; bodies carry hashes, never plaintext; `AGENTKEYS_WORKER_REQUIRE_AUDIT=1` = the fail-closed flip) and control-plane (#97 — the broker submit relay decodes the CONFIRMED `executeBatch` calldata → `DeviceAdd`/`ScopeGrant`/`ScopeRevoke`/`DeviceRevoke`; the CLI sign orchestrator emits 20/21). Receipts (`audit_envelope_hashes`) thread through to the UI; `/v1/audit/:id/decode` fetches the real envelope. Forward-compat invariants (open `u8` enum, stable envelope fields, version bumps only for envelope-level changes, generic fallback renderer, opaque body passthrough, op_kind-agnostic contract, this registry table, 3 tests per new kind): v2 §15.3a.
 

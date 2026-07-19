@@ -39,6 +39,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 futures-util = "0.3"
 tokio-stream = "0.1"
 bytes = "1"
+# #519 speech relay — inline-base64 audio on the wire + Doubao request ids.
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
 # #427 — admin-minted relay-key secrets (same OsRng agentkeys-core keygen uses).
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
 clap = { version = "4", features = ["derive", "env"] }

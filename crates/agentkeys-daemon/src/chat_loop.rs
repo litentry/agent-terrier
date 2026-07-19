@@ -37,6 +37,15 @@ pub struct ChatLoopConfig {
     pub device_key_hex: String,
     pub bridge_url: String,
     pub bridge_token: Option<String>,
+    /// #519 — the gate speech-relay base (`AGENTKEYS_GATE_SPEECH_URL`, injected
+    /// by the gate-provisioned spawn path together with the gk_ relay key).
+    /// `None` = voice turns are refused with a LOUD text reply — never routed
+    /// to a base that lacks the speech endpoints (direct-ark boots).
+    pub speech_url: Option<String>,
+    /// The gk_ relay key (`ARK_API_KEY` in a gate-provisioned sandbox) — the
+    /// ONLY credential the voice pipeline holds; speech app tokens stay on the
+    /// gate (#386).
+    pub speech_bearer: Option<String>,
 }
 
 impl ChatLoopConfig {
@@ -86,6 +95,12 @@ impl ChatLoopConfig {
             bridge_token: std::env::var("AGENTKEYS_BRIDGE_TOKEN")
                 .ok()
                 .filter(|t| !t.is_empty()),
+            speech_url: std::env::var("AGENTKEYS_GATE_SPEECH_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            speech_bearer: std::env::var("ARK_API_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         })
     }
 }
@@ -257,12 +272,72 @@ async fn run(cfg: ChatLoopConfig) {
         }
 
         // 3. Reply to inbound operator turns.
+        let publish_ctx = PublishCtx {
+            http: &http,
+            cfg: &cfg,
+            client: &client,
+            bearer: &bearer,
+            device_key: device_key.as_ref(),
+        };
         for event in &poll.events {
             if !matches!(
                 event.direction,
                 agentkeys_backend_client::protocol::ChannelDirection::In
             ) {
                 continue; // our own replies (direction: out) come back on the feed
+            }
+            // #519 — voice turn: a device published an `audio-clip`. Pipeline
+            // runs HERE (agent-side, in the sandbox) but every credentialed
+            // leg goes through the gate: ASR → bridge chat → TTS. The reply is
+            // published twice, correlated: a `text` event (the transcript-
+            // visible reply) and an `audio-clip` event (the spoken reply).
+            if matches!(
+                event.kind,
+                agentkeys_backend_client::protocol::ChannelEventKind::AudioClip
+            ) {
+                let Some(audio_b64) = event.body.as_deref() else {
+                    tracing::warn!(
+                        event = %event.event_id,
+                        "#519 chat loop: audio-clip with body_ref only — by-reference \
+                         audio is a follow-up; turn skipped"
+                    );
+                    continue;
+                };
+                match voice_turn(&http, &cfg, audio_b64).await {
+                    Ok(turn) => {
+                        if let Err(e) = publish_event(
+                            &publish_ctx,
+                            "text",
+                            base64_of(turn.reply_text.as_bytes()),
+                            &event.event_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, "#519 chat loop: voice text-reply publish failed");
+                        }
+                        if let Err(e) = publish_event(
+                            &publish_ctx,
+                            "audio-clip",
+                            turn.reply_audio_b64,
+                            &event.event_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, "#519 chat loop: voice audio-reply publish failed");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "#519 chat loop: voice turn failed");
+                        let _ = publish_event(
+                            &publish_ctx,
+                            "text",
+                            base64_of(format!("(voice error: {e})").as_bytes()),
+                            &event.event_id,
+                        )
+                        .await;
+                    }
+                }
+                continue;
             }
             let text = event
                 .body
@@ -283,13 +358,10 @@ async fn run(cfg: ChatLoopConfig) {
                     format!("(agent error: {e})")
                 }
             };
-            if let Err(e) = publish_reply(
-                &http,
-                &cfg,
-                &client,
-                &bearer,
-                &device_key,
-                &reply,
+            if let Err(e) = publish_event(
+                &publish_ctx,
+                "text",
+                base64_of(reply.as_bytes()),
                 &event.event_id,
             )
             .await
@@ -298,6 +370,113 @@ async fn run(cfg: ChatLoopConfig) {
             }
         }
     }
+}
+
+fn base64_of(bytes: &[u8]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    STANDARD.encode(bytes)
+}
+
+struct VoiceTurn {
+    reply_text: String,
+    reply_audio_b64: String,
+}
+
+/// Container sniffing from magic bytes — the audio-clip envelope carries no
+/// format field yet (typed audio params are the #519 protocol follow-up), and
+/// guessing wrong just makes the ASR reject loudly.
+fn sniff_audio_format(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        "wav"
+    } else if bytes.len() >= 3
+        && (&bytes[..3] == b"ID3" || (bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0))
+    {
+        "mp3"
+    } else if bytes.len() >= 4 && &bytes[..4] == b"OggS" {
+        "ogg"
+    } else {
+        "wav"
+    }
+}
+
+/// #519 — one voice turn: gate ASR → bridge chat → gate TTS. Refused loudly
+/// when the sandbox has no speech relay wiring (direct-ark boots) — the real
+/// Ark base has no speech endpoints and a gk_-less call would leak nothing but
+/// would fail confusingly deep; this failure names the actual gap instead.
+async fn voice_turn(
+    http: &reqwest::Client,
+    cfg: &ChatLoopConfig,
+    audio_b64: &str,
+) -> Result<VoiceTurn, String> {
+    let (Some(speech_url), Some(bearer)) = (&cfg.speech_url, &cfg.speech_bearer) else {
+        return Err(
+            "voice turns need the gate speech relay (AGENTKEYS_GATE_SPEECH_URL + gk_ key \
+             from a gate-provisioned spawn) — this sandbox has none"
+                .into(),
+        );
+    };
+    let decoded = {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        STANDARD
+            .decode(audio_b64)
+            .map_err(|e| format!("inbound audio is not valid base64: {e}"))?
+    };
+    let format = sniff_audio_format(&decoded);
+    let base = speech_url.trim_end_matches('/');
+
+    let resp = http
+        .post(format!("{base}/v1/audio/transcriptions"))
+        .timeout(Duration::from_secs(120))
+        .bearer_auth(bearer)
+        .json(&serde_json::json!({ "audio_b64": audio_b64, "format": format }))
+        .send()
+        .await
+        .map_err(|e| format!("gate asr send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("gate asr HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("gate asr parse: {e}"))?;
+    let transcript = v
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if transcript.trim().is_empty() {
+        return Err("gate asr returned an empty transcript".into());
+    }
+
+    let reply_text = bridge_chat(http, cfg, &transcript).await?;
+
+    let resp = http
+        .post(format!("{base}/v1/audio/speech"))
+        .timeout(Duration::from_secs(120))
+        .bearer_auth(bearer)
+        .json(&serde_json::json!({ "input": reply_text }))
+        .send()
+        .await
+        .map_err(|e| format!("gate tts send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("gate tts HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("gate tts parse: {e}"))?;
+    let reply_audio_b64 = v
+        .get("audio_b64")
+        .and_then(|a| a.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if reply_audio_b64.is_empty() {
+        return Err("gate tts returned no audio".into());
+    }
+    Ok(VoiceTurn {
+        reply_text,
+        reply_audio_b64,
+    })
 }
 
 async fn resolve_session(
@@ -353,42 +532,51 @@ async fn bridge_chat(
         .to_string())
 }
 
-async fn publish_reply(
-    http: &reqwest::Client,
-    cfg: &ChatLoopConfig,
-    client: &BackendClient,
-    bearer: &str,
-    device_key: &agentkeys_core::device_crypto::DeviceKey,
-    reply: &str,
+/// The per-poll invariants every publish shares — bundled so the reply
+/// helpers stay under clippy's argument ceiling instead of re-threading five
+/// context handles per call.
+struct PublishCtx<'a> {
+    http: &'a reqwest::Client,
+    cfg: &'a ChatLoopConfig,
+    client: &'a BackendClient,
+    bearer: &'a str,
+    device_key: &'a agentkeys_core::device_crypto::DeviceKey,
+}
+
+async fn publish_event(
+    ctx: &PublishCtx<'_>,
+    kind: &str,
+    body_b64: String,
     correlation: &str,
 ) -> Result<(), String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    let pub_cap = client
+    let pub_cap = ctx
+        .client
         .cap_mint(
             CapMintOp::ChannelPublish,
             CapMintRequest {
-                operator_omni: cfg.operator_omni.clone(),
-                actor_omni: cfg.actor_omni.clone(),
-                service: format!("channel-pub:{}", cfg.chat_channel_id),
-                device_key_hash: device_key.device_key_hash().unwrap_or_default(),
+                operator_omni: ctx.cfg.operator_omni.clone(),
+                actor_omni: ctx.cfg.actor_omni.clone(),
+                service: format!("channel-pub:{}", ctx.cfg.chat_channel_id),
+                device_key_hash: ctx.device_key.device_key_hash().unwrap_or_default(),
                 ttl_seconds: 300,
             },
-            bearer,
+            ctx.bearer,
         )
         .await
         .map_err(|e| format!("channel-pub mint: {e}"))?;
     // @backend-fixture: channel_publish_body — the protocol-shaped publish.
     let body = serde_json::json!({
         "cap": pub_cap,
-        "kind": "text",
+        "kind": kind,
         "direction": "out",
-        "body_b64": STANDARD.encode(reply.as_bytes()),
+        "body_b64": body_b64,
         "correlation": correlation,
     });
-    let resp = http
+    let resp = ctx
+        .http
         .post(format!(
             "{}/v1/channel/publish",
-            cfg.channel_worker_url.trim_end_matches('/')
+            ctx.cfg.channel_worker_url.trim_end_matches('/')
         ))
         .json(&body)
         .send()
@@ -419,5 +607,19 @@ mod tests {
         // vars are set, so the loop must be OFF (None) — the common daemon
         // boot outside a sandbox.
         assert!(ChatLoopConfig::from_env().is_none());
+    }
+
+    #[test]
+    fn audio_format_sniffing_covers_the_device_containers() {
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&[0, 0, 0, 0]);
+        wav.extend_from_slice(b"WAVE");
+        assert_eq!(sniff_audio_format(&wav), "wav");
+        assert_eq!(sniff_audio_format(b"ID3\x04rest"), "mp3");
+        assert_eq!(sniff_audio_format(&[0xFF, 0xFB, 0x90, 0x00]), "mp3");
+        assert_eq!(sniff_audio_format(b"OggSxxxx"), "ogg");
+        // Unknown bytes default to wav — the ASR then rejects loudly rather
+        // than the loop guessing silently.
+        assert_eq!(sniff_audio_format(b"\x00\x01\x02\x03"), "wav");
     }
 }

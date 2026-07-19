@@ -19,13 +19,17 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use tokio_stream::wrappers::ReceiverStream;
 
-use agentkeys_core::audit::GateTurnBody;
+use agentkeys_core::audit::{GateTurnBody, SpeechAsrBody, SpeechTtsBody};
+use base64::Engine;
 
 use crate::audit::Auditor;
 use crate::config::{GateConfig, RelayKey};
 use crate::error::{GateError, GateResult};
 use crate::meter::Meter;
 use crate::openai::{extract_usage, SseUsageScanner, UsageCounters};
+use crate::speech::{
+    SpeakRequest, SpeakResponse, SpeechClient, TranscribeRequest, TranscribeResponse,
+};
 use crate::upstream::UpstreamClient;
 
 pub struct Relay {
@@ -35,6 +39,8 @@ pub struct Relay {
     /// keys), seeded from `config.keys` and mutated only via the admin surface.
     pub keys: Arc<crate::keys::KeyStore>,
     upstream: UpstreamClient,
+    /// #519 — gate-held Doubao speech legs (each independently optional).
+    speech: SpeechClient,
     auditor: Option<Arc<Auditor>>,
 }
 
@@ -62,13 +68,166 @@ impl Relay {
             .clone()
             .map(|url| Arc::new(Auditor::new(url, config.aws_region.clone())));
         let keys = Arc::new(crate::keys::KeyStore::from_config(&config));
+        let speech = SpeechClient::new(config.speech_asr.clone(), config.speech_tts.clone());
         Self {
             config,
             meter: Arc::new(Meter::default()),
             keys,
             upstream,
+            speech,
             auditor,
         }
+    }
+
+    /// #519 — ASR through the relay. Attribution mirrors GateTurn (owning
+    /// user's omni on the envelope; device/api-key in the body). Token budgets
+    /// don't apply (audio has no token denomination) — usage is audited, and a
+    /// speech-denominated budget is a #519 follow-up.
+    pub async fn handle_transcribe(
+        &self,
+        caller: &RelayKey,
+        req: TranscribeRequest,
+    ) -> GateResult<TranscribeResponse> {
+        let format = req.format.as_deref().unwrap_or("wav").to_string();
+        let audio = base64::engine::general_purpose::STANDARD
+            .decode(req.audio_b64.as_bytes())
+            .map_err(|e| GateError::BadRequest(format!("audio_b64 is not valid base64: {e}")))?;
+        let audio_bytes_in = audio.len() as u64;
+        let started = std::time::Instant::now();
+        match self.speech.transcribe(audio, &format, &caller.key_id).await {
+            Ok(outcome) => {
+                let body = SpeechAsrBody {
+                    device_id: caller.device_id.clone(),
+                    api_key_id: caller.key_id.clone(),
+                    audio_bytes_in,
+                    transcript_chars: outcome.text.chars().count() as u64,
+                    outcome: "ok".into(),
+                    duration_ms: outcome.duration.as_millis() as u64,
+                };
+                let duration_ms = body.duration_ms;
+                self.audit_speech_asr(caller, body).await?;
+                Ok(TranscribeResponse {
+                    text: outcome.text,
+                    audio_bytes: audio_bytes_in,
+                    duration_ms,
+                })
+            }
+            Err(e @ GateError::NotConfigured(_)) => Err(e),
+            Err(e) => {
+                let body = SpeechAsrBody {
+                    device_id: caller.device_id.clone(),
+                    api_key_id: caller.key_id.clone(),
+                    audio_bytes_in,
+                    transcript_chars: 0,
+                    outcome: "upstream_error".into(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                };
+                if let Some(auditor) = &self.auditor {
+                    if let Err(a) = auditor.emit_speech_asr(&caller.user_omni, body).await {
+                        tracing::error!(user = %caller.user_omni, error = %a, "SpeechAsr audit append failed");
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// #519 — TTS through the relay; same posture as `handle_transcribe`.
+    pub async fn handle_speak(
+        &self,
+        caller: &RelayKey,
+        req: SpeakRequest,
+    ) -> GateResult<SpeakResponse> {
+        let format = req.format.as_deref().unwrap_or("mp3").to_string();
+        let sample_rate = req.sample_rate.unwrap_or(24000);
+        let speech_rate = req.speech_rate.unwrap_or(0);
+        let chars_in = req.input.chars().count() as u64;
+        let started = std::time::Instant::now();
+        match self
+            .speech
+            .synthesize(
+                &req.input,
+                req.voice.as_deref(),
+                speech_rate,
+                &format,
+                sample_rate,
+                &caller.key_id,
+            )
+            .await
+        {
+            Ok(outcome) => {
+                let body = SpeechTtsBody {
+                    device_id: caller.device_id.clone(),
+                    api_key_id: caller.key_id.clone(),
+                    chars_in,
+                    audio_bytes_out: outcome.audio.len() as u64,
+                    voice: outcome.voice.clone(),
+                    speech_rate: outcome.speech_rate,
+                    outcome: "ok".into(),
+                    duration_ms: outcome.duration.as_millis() as u64,
+                };
+                let duration_ms = body.duration_ms;
+                self.audit_speech_tts(caller, body).await?;
+                Ok(SpeakResponse {
+                    audio_b64: base64::engine::general_purpose::STANDARD.encode(&outcome.audio),
+                    format: outcome.format,
+                    audio_bytes: outcome.audio.len() as u64,
+                    voice: outcome.voice,
+                    speech_rate: outcome.speech_rate,
+                    duration_ms,
+                })
+            }
+            Err(e @ GateError::NotConfigured(_)) => Err(e),
+            Err(e) => {
+                let body = SpeechTtsBody {
+                    device_id: caller.device_id.clone(),
+                    api_key_id: caller.key_id.clone(),
+                    chars_in,
+                    audio_bytes_out: 0,
+                    voice: req.voice.clone().unwrap_or_default(),
+                    speech_rate,
+                    outcome: "upstream_error".into(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                };
+                if let Some(auditor) = &self.auditor {
+                    if let Err(a) = auditor.emit_speech_tts(&caller.user_omni, body).await {
+                        tracing::error!(user = %caller.user_omni, error = %a, "SpeechTts audit append failed");
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Ok-path speech audit: mirrors the chat turn's `require_audit` posture —
+    /// the relay work is done, but under require_audit an unrecordable call
+    /// fails (tamper-evident audit is the product).
+    async fn audit_speech_asr(&self, caller: &RelayKey, body: SpeechAsrBody) -> GateResult<()> {
+        if let Some(auditor) = &self.auditor {
+            if let Err(e) = auditor.emit_speech_asr(&caller.user_omni, body).await {
+                tracing::error!(user = %caller.user_omni, error = %e, "SpeechAsr audit append failed");
+                if self.config.require_audit {
+                    return Err(GateError::Audit(
+                        "transcription completed but could not be recorded (require_audit)".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn audit_speech_tts(&self, caller: &RelayKey, body: SpeechTtsBody) -> GateResult<()> {
+        if let Some(auditor) = &self.auditor {
+            if let Err(e) = auditor.emit_speech_tts(&caller.user_omni, body).await {
+                tracing::error!(user = %caller.user_omni, error = %e, "SpeechTts audit append failed");
+                if self.config.require_audit {
+                    return Err(GateError::Audit(
+                        "synthesis completed but could not be recorded (require_audit)".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn turn_body(

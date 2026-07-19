@@ -35,6 +35,15 @@ pub const DEFAULT_ARK_BASE: &str = "https://ark.cn-beijing.volces.com/api/v3";
 pub const DEFAULT_ASR_RESOURCE: &str = "volc.bigasr.auc";
 pub const DEFAULT_TTS_RESOURCE: &str = "volc.service_type.10029";
 pub const DEFAULT_TTS_VOICE: &str = "zh_female_meilinvyou_moon_bigtts";
+// Vendor-fixed Doubao speech endpoints — ONE home (this crate is the family
+// source of truth) so the probe and the gate speech relay (#519) can never
+// drift on where the speech APIs live.
+pub const DEFAULT_ASR_SUBMIT_URL: &str =
+    "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit";
+pub const DEFAULT_ASR_QUERY_URL: &str =
+    "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query";
+pub const DEFAULT_TTS_SSE_URL: &str =
+    "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {

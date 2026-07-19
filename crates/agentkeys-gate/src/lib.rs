@@ -27,4 +27,5 @@ pub mod meter;
 pub mod openai;
 pub mod relay;
 pub mod server;
+pub mod speech;
 pub mod upstream;

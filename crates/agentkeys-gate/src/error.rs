@@ -40,6 +40,11 @@ pub enum GateError {
     #[error("audit error: {0}")]
     Audit(String),
 
+    /// The requested relay leg is not configured on this gate (e.g. no
+    /// asr/tts inference family) — a legit, LOUD skip, never silent (#519).
+    #[error("not configured: {0}")]
+    NotConfigured(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -52,6 +57,7 @@ impl GateError {
             GateError::BadRequest(_) => 400,
             GateError::Budget(_) => 429,
             GateError::Upstream(_) => 502,
+            GateError::NotConfigured(_) => 503,
             GateError::Audit(_) | GateError::Internal(_) => 500,
         }
     }
@@ -64,6 +70,7 @@ impl GateError {
             GateError::BadRequest(_) => "invalid_request_error",
             GateError::Budget(_) => "insufficient_quota",
             GateError::Upstream(_) => "upstream_error",
+            GateError::NotConfigured(_) => "api_error",
             GateError::Audit(_) | GateError::Internal(_) => "api_error",
         }
     }

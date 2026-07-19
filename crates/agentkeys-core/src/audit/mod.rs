@@ -60,7 +60,7 @@ pub use bodies::{
     EmailSendBody, GateTurnBody, GatewayRelayBody, K10RotateBody, K3EpochAdvanceBody,
     MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody, PaymentDirectBody,
     PaymentEscrowRedeemBody, SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody,
-    ScopeRevokeBody, SignEip191Body, SignEip712Body,
+    ScopeRevokeBody, SignEip191Body, SignEip712Body, SpeechAsrBody, SpeechTtsBody,
 };
 pub use op_kind::AuditOpKind;
 
@@ -246,6 +246,8 @@ pub enum TypedAuditBody {
     ConfigGet(ConfigGetBody),
     ConfigTeardown(ConfigTeardownBody),
     GateTurn(GateTurnBody),
+    SpeechAsr(SpeechAsrBody),
+    SpeechTts(SpeechTtsBody),
     ChannelPublish(ChannelPublishBody),
     ChannelSubscribe(ChannelSubscribeBody),
     ChannelTeardown(ChannelTeardownBody),
@@ -302,6 +304,8 @@ impl TypedAuditBody {
                 Self::ConfigTeardown(serde_json::from_value(value).ok()?)
             }
             AuditOpKind::GateTurn => Self::GateTurn(serde_json::from_value(value).ok()?),
+            AuditOpKind::SpeechAsr => Self::SpeechAsr(serde_json::from_value(value).ok()?),
+            AuditOpKind::SpeechTts => Self::SpeechTts(serde_json::from_value(value).ok()?),
             AuditOpKind::ChannelPublish => {
                 Self::ChannelPublish(serde_json::from_value(value).ok()?)
             }
