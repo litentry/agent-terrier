@@ -23,6 +23,11 @@ pub fn router(relay: Arc<Relay>) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
+        // #519 — the speech relay legs (same gk_ auth; gate-held Doubao app
+        // tokens per #386). JSON→JSON with base64 audio — channel-ready, not
+        // an OpenAI-compatible surface. See `speech.rs`.
+        .route("/v1/audio/transcriptions", post(audio_transcriptions))
+        .route("/v1/audio/speech", post(audio_speech))
         // #427 — broker-driven per-delegate provisioning (admin bearer): spawn
         // mints a relay key, archive disables it. See `admin.rs`.
         .route("/v1/admin/keys", post(crate::admin::provision_key))
@@ -30,7 +35,48 @@ pub fn router(relay: Arc<Relay>) -> Router {
             "/v1/admin/keys/:key_id/disable",
             post(crate::admin::disable_key),
         )
+        // Inline-base64 audio clips overflow axum's ~2 MB default (a 60 s wav
+        // is ~1.9 MB before base64). 8 MB bounds a clip without inviting bulk.
+        .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024))
         .with_state(relay)
+}
+
+/// #519 — ASR leg: authenticate the gk_ relay key, then relay to Doubao.
+async fn audio_transcriptions(
+    State(relay): State<Arc<Relay>>,
+    headers: HeaderMap,
+    Json(req): Json<crate::speech::TranscribeRequest>,
+) -> Response {
+    let caller = match authenticate_live(&relay, &headers) {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
+    match relay.handle_transcribe(&caller, req).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => {
+            tracing::warn!(key = %caller.key_id, error = %e, "transcription failed");
+            error_response(e)
+        }
+    }
+}
+
+/// #519 — TTS leg.
+async fn audio_speech(
+    State(relay): State<Arc<Relay>>,
+    headers: HeaderMap,
+    Json(req): Json<crate::speech::SpeakRequest>,
+) -> Response {
+    let caller = match authenticate_live(&relay, &headers) {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
+    match relay.handle_speak(&caller, req).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => {
+            tracing::warn!(key = %caller.key_id, error = %e, "synthesis failed");
+            error_response(e)
+        }
+    }
 }
 
 async fn healthz() -> &'static str {

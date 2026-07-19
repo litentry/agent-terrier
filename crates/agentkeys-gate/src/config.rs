@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use agentkeys_inference_creds::Resolver;
+use agentkeys_inference_creds::{AsrCreds, Resolver, TtsCreds};
 use agentkeys_protocol::normalize_omni_0x;
 
 #[derive(Parser, Debug, Clone)]
@@ -154,6 +154,23 @@ pub struct GateConfig {
     pub audit_url: Option<String>,
     pub require_audit: bool,
     pub aws_region: String,
+    /// #519 speech relay — the gate-held Doubao app tokens (#386 posture),
+    /// resolved from the `asr`/`tts` inference families. `None` = that leg is
+    /// unconfigured on this gate (its endpoint refuses 503, loudly logged at
+    /// boot); a present-but-malformed family file fails boot instead.
+    pub speech_asr: Option<AsrCreds>,
+    pub speech_tts: Option<TtsCreds>,
+}
+
+/// Missing vars = the family is legitimately unconfigured (None). A family
+/// file that EXISTS but cannot be read/parsed is an operator error — loud,
+/// never a silent skip (the no-silent-fallback rule).
+fn optional_family<T>(r: Result<T, agentkeys_inference_creds::Error>) -> anyhow::Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(agentkeys_inference_creds::Error::Missing { .. }) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 impl GateConfig {
@@ -240,6 +257,8 @@ impl GateConfig {
             audit_url: cli.audit_url,
             require_audit: cli.require_audit,
             aws_region: cli.aws_region,
+            speech_asr: optional_family(ark.asr())?,
+            speech_tts: optional_family(ark.tts())?,
         })
     }
 
@@ -273,6 +292,8 @@ mod tests {
             audit_url: None,
             require_audit: false,
             aws_region: "us-east-1".into(),
+            speech_asr: None,
+            speech_tts: None,
         }
     }
 

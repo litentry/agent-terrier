@@ -46,6 +46,16 @@ async fn main() -> anyhow::Result<()> {
         default_budget = ?config.default_budget_tokens,
         "metered key-custody relay configured"
     );
+    // #519 speech relay arming — LOUD either way (a disarmed leg 503s).
+    match (&config.speech_asr, &config.speech_tts) {
+        (Some(_), Some(_)) => tracing::info!("speech relay ARMED (asr + tts families resolved)"),
+        (asr, tts) => tracing::warn!(
+            asr = asr.is_some(),
+            tts = tts.is_some(),
+            "speech relay partially/un-configured — missing legs will 503 \
+             (provision with rotate-inference-cred.sh asr|tts)"
+        ),
+    }
 
     let listen = config.listen;
     let relay = Arc::new(Relay::new(config));

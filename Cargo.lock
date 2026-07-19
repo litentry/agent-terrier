@@ -307,6 +307,7 @@ dependencies = [
  "agentkeys-protocol",
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "futures-util",
@@ -321,6 +322,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

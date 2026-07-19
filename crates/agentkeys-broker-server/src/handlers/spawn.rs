@@ -668,6 +668,11 @@ async fn finalize_spawn(
                 Ok(key) => {
                     gate_status = "provisioned".into();
                     extra_envs.push(("ARK_BASE_URL".into(), cfg.turn_url.clone()));
+                    // #519 — the chat loop's voice branch needs the speech
+                    // relay EXPLICITLY (same gate base): absent = voice turns
+                    // refuse loudly instead of dialing a base without the
+                    // /v1/audio/* endpoints.
+                    extra_envs.push(("AGENTKEYS_GATE_SPEECH_URL".into(), cfg.turn_url.clone()));
                     extra_envs.push(("ARK_API_KEY".into(), key.secret));
                 }
                 Err(e) => {

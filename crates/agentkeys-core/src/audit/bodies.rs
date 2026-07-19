@@ -336,6 +336,45 @@ pub struct GateTurnBody {
     pub reasoning_tokens: u64,
 }
 
+// #519 — the gate speech relay (the VE #386 gate-held app-token posture; the
+// AWS twin is the #441 cap→STS speech plane). Same attribution model as
+// GateTurn: envelope omnis carry the OWNING USER; device/api-key ride here.
+// Bodies carry SIZES and coordinates only — never transcript or audio content
+// (the D13 posture the gateway bodies follow).
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpeechAsrBody {
+    /// Device the transcription is attributed to (from the relay key record).
+    pub device_id: String,
+    /// Relay api-key id the caller authenticated with (never the secret).
+    pub api_key_id: String,
+    /// Bytes of audio submitted (decoded, not base64 length).
+    pub audio_bytes_in: u64,
+    /// Characters in the returned transcript (0 on failure).
+    pub transcript_chars: u64,
+    /// `"ok"` or `"upstream_error"`.
+    pub outcome: String,
+    /// Wall-clock submit→transcript latency.
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpeechTtsBody {
+    pub device_id: String,
+    pub api_key_id: String,
+    /// Characters synthesized.
+    pub chars_in: u64,
+    /// Bytes of audio produced (0 on failure).
+    pub audio_bytes_out: u64,
+    /// Voice (speaker id) the synthesis ran with.
+    pub voice: String,
+    /// Doubao `speech_rate` in [-50, 100].
+    pub speech_rate: i32,
+    /// `"ok"` or `"upstream_error"`.
+    pub outcome: String,
+    pub duration_ms: u64,
+}
+
 // ── 100..109 — channel family (#406 channels data class, audited per #229) ─
 //
 // Emitted by `agentkeys-worker-channel` once per publish/subscribe/teardown.

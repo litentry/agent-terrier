@@ -179,6 +179,8 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
         audit_url: Some(format!("http://{audit_addr}")),
         require_audit: false,
         aws_region: "us-east-1".into(),
+        speech_asr: None,
+        speech_tts: None,
     };
     let relay = Arc::new(Relay::new(config));
     let app = server::router(relay);
