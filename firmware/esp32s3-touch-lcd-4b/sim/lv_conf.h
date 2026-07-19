@@ -40,7 +40,20 @@
  * - LV_STDLIB_RTTHREAD:    RT-Thread implementation
  * - LV_STDLIB_CUSTOM:      Implement the functions externally
  */
-#define LV_USE_STDLIB_MALLOC    LV_STDLIB_BUILTIN
+// SIM ONLY — the system allocator, not LVGL's fixed pool.
+//
+// LVGL's builtin allocator is a FIXED arena (LV_MEM_SIZE below, 64 KB from the
+// template). That is right on the ESP32, where the budget is the point; on a
+// desktop/browser mirror it is an arbitrary ceiling — and when five 480x480
+// screens + fonts + the QR widget exhaust it, `lv_obj_create` SPINS rather
+// than failing, so the window stays black forever with no error. (Diagnosed by
+// sampling a hung mirror: main stuck in lv_obj_create with no syscall, in BOTH
+// the mock and real-net builds — i.e. the desktop mirror had never rendered.)
+//
+// The mirror's fidelity claim is about the SCREENS and (since #517) the net/
+// behaviour, never the heap budget — the firmware's own lv_conf keeps the real
+// arena. So the sim uses the host's malloc and simply never runs out.
+#define LV_USE_STDLIB_MALLOC    LV_STDLIB_CLIB
 
 /** Possible values
  * - LV_STDLIB_BUILTIN:     LVGL's built in implementation
@@ -470,7 +483,11 @@
 
     /** - 1: Print log with 'printf';
      *  - 0: User needs to register a callback with `lv_log_register_print_cb()`. */
-    #define LV_LOG_PRINTF 0
+    // SIM: LVGL's log goes to stdout. With LV_USE_LOG on but PRINTF off, every
+    // LVGL diagnostic (including the message that PRECEDES an assert halt) was
+    // written to nowhere — which is how a failed assert presented as a silent
+    // black window.
+    #define LV_LOG_PRINTF 1
 
     /** Set callback to print logs.
      *  E.g `my_print`. The prototype should be `void my_print(lv_log_level_t level, const char * buf)`.
@@ -510,8 +527,16 @@
 #define LV_USE_ASSERT_OBJ           0   /**< Check the object's type and existence (e.g. not deleted). (Slow) */
 
 /** Add a custom handler when assert happens e.g. to restart MCU. */
-#define LV_ASSERT_HANDLER_INCLUDE <stdint.h>
-#define LV_ASSERT_HANDLER while(1);     /**< Halt by default */
+#define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>
+// SIM: abort loudly instead of `while(1);`.
+//
+// On the device a spin-forever is defensible (a watchdog reboots it). On a
+// desktop it is the worst failure mode there is: no message, no exit code, no
+// crash report — just a black window and a busy core, indistinguishable from a
+// renderer bug. LVGL already LV_LOG_ERRORs the reason before calling this
+// handler (and LV_LOG_PRINTF above now sends that to stdout), so aborting here
+// turns a silent hang into a named failure + a core.
+#define LV_ASSERT_HANDLER abort();
 
 /*-------------
  * Debug
