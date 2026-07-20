@@ -169,6 +169,9 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         body_b64: Some("<base64-plaintext>".into()),
         body_ref: None,
         correlation: None,
+        // #522 audio params are optional + skip-serializing — absent here so
+        // the canonical fixture (and its frozen key set) stays byte-stable.
+        audio: None,
     };
     let channel_poll = ChannelPollBody {
         cap: json!("<cap-token>"),
