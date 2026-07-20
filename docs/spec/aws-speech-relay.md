@@ -75,3 +75,23 @@ tooling as every service). Splitting ASR/TTS into `speech-asr` / `speech-tts`
 later is a new-service addition, not a rename. The **provider** (Transcribe/
 Polly today) stays behind the broker role + inline policy — swapping providers
 is an IAM-policy + redeemer change, invisible to the cap surface.
+
+## Voices catalog custody (#527 — the VE gate leg)
+
+The VE speech relay's gate (`agentkeys-gate`) additionally serves
+`GET /v1/audio/voices` — the account's Doubao bigmodel speaker catalog, via the
+V4-signed `ListBigModelTTSTimbres` OpenAPI (`crates/agentkeys-gate/src/voices.rs`).
+That OpenAPI needs a Volcengine **IAM AK/SK** — the per-delegate speech *app
+tokens* the relay holds cannot sign it — so the catalog is the ONE place the
+gate holds an IAM credential.
+
+**Custody decision (recorded here + in `voices.rs`):** the AK/SK lives on the
+gate (`VOLCENGINE_ACCESS_KEY` / `VOLCENGINE_SECRET_KEY`), never in a sandbox or
+on a device — consistent with the #386 gate-held-key posture. It MUST be a
+sub-user/role scoped to `speech_saas_prod:ListBigModelTTSTimbres` (read-only, no
+synthesis, no account mutation), so a gate compromise leaks a list-voices key,
+not account control. The rejected alternative — a periodic operator-side
+`volcano-probe voices` snapshot shipped as config — is staler and adds an
+operator job; live-but-scoped won. Unconfigured ⇒ `GET /v1/audio/voices` returns
+503 `NotConfigured` (loud), and the device/fleet voice pickers keep their static
+real-id fallback (#524) until the credential is provisioned.

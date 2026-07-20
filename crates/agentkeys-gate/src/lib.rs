@@ -29,3 +29,4 @@ pub mod relay;
 pub mod server;
 pub mod speech;
 pub mod upstream;
+pub mod voices;
