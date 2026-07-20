@@ -6433,6 +6433,15 @@ pub struct ApiChatEvent {
 pub struct ChatSendRequest {
     pub channel_id: String,
     pub text: String,
+    /// #519/#522 — an optional reply voice (Doubao speaker id) + speech rate
+    /// (语速 [-50,100]) the operator picked in fleet's converse pane. When a
+    /// voice is set, the turn carries `ChannelAudioParams` so the delegate
+    /// speaks its reply. Absent = a plain text turn (backward-compatible; the
+    /// parent-control web app sends neither).
+    #[serde(default)]
+    pub voice: Option<String>,
+    #[serde(default)]
+    pub speech_rate: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6572,12 +6581,22 @@ async fn master_chat_send(
     };
     use base64::{engine::general_purpose::STANDARD, Engine};
     // @backend-fixture: channel_publish_body
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "cap": cap,
         "kind": "text",
         "direction": "in",
         "body_b64": STANDARD.encode(req.text.as_bytes()),
     });
+    // #519/#522 — a picked reply voice rides the turn as ChannelAudioParams
+    // (optional + skip-serializing, so a plain text turn is byte-identical to
+    // the canonical fixture). speech_rate alone is ignored — a voice is what
+    // opts the turn into a spoken reply.
+    if req.voice.as_deref().is_some_and(|v| !v.is_empty()) {
+        body["audio"] = serde_json::json!({
+            "voice": req.voice,
+            "speech_rate": req.speech_rate,
+        });
+    }
     match reqwest::Client::new()
         .post(format!("{worker}/v1/channel/publish"))
         .json(&body)

@@ -431,6 +431,33 @@ async fn run(cfg: ChatLoopConfig) {
             {
                 tracing::warn!(error = %e, "#430 chat loop: reply publish failed — the turn is LOST from the transcript");
             }
+            // #537 — the operator (fleet's converse pane) picked a reply voice:
+            // ALSO speak the reply as a correlated audio-clip (a device on the
+            // channel plays it). Best-effort — the text reply already landed, so
+            // a sandbox without the gate relay just logs + stays text-only.
+            if let Some(params) = event.audio.as_ref().filter(|a| a.voice.is_some()) {
+                match (&cfg.speech_url, &cfg.speech_bearer) {
+                    (Some(url), Some(bearer)) => {
+                        let base = url.trim_end_matches('/');
+                        match tts_synthesize(&http, base, bearer, &reply, Some(params)).await {
+                            Ok(audio) => {
+                                if let Err(e) =
+                                    publish_event(&publish_ctx, "audio-clip", audio, &event.event_id)
+                                        .await
+                                {
+                                    tracing::warn!(error = %e, "#537 chat loop: voiced text-reply publish failed");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "#537 chat loop: text-reply TTS failed — text-only")
+                            }
+                        }
+                    }
+                    _ => tracing::info!(
+                        "#537 chat loop: text turn asked for a reply voice but this sandbox has no gate relay — text only"
+                    ),
+                }
+            }
         }
     }
 }
@@ -516,21 +543,45 @@ async fn voice_turn(
     }
 
     let reply_text = bridge_chat(http, cfg, &transcript).await?;
+    let reply_audio_b64 = tts_synthesize(http, base, bearer, &reply_text, params).await?;
+    Ok(VoiceTurn {
+        reply_text,
+        reply_audio_b64,
+    })
+}
 
-    let mut tts_body = serde_json::json!({ "input": reply_text });
+/// #522 — synthesize `text` into a base64 audio clip via the gate TTS relay,
+/// honoring the declared reply voice + speech rate (语速). Shared by the
+/// audio-clip voice turn AND the #537 text turn that requested a spoken reply
+/// (fleet's converse pane picks a voice). `base` is the trimmed gate speech URL.
+fn tts_body_for(
+    text: &str,
+    params: Option<&agentkeys_backend_client::protocol::ChannelAudioParams>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({ "input": text });
     if let Some(p) = params {
         if let Some(v) = &p.voice {
-            tts_body["voice"] = serde_json::Value::String(v.clone());
+            body["voice"] = serde_json::Value::String(v.clone());
         }
         if let Some(r) = p.speech_rate {
-            tts_body["speech_rate"] = serde_json::Value::from(r);
+            body["speech_rate"] = serde_json::Value::from(r);
         }
     }
+    body
+}
+
+async fn tts_synthesize(
+    http: &reqwest::Client,
+    base: &str,
+    bearer: &str,
+    text: &str,
+    params: Option<&agentkeys_backend_client::protocol::ChannelAudioParams>,
+) -> Result<String, String> {
     let resp = http
         .post(format!("{base}/v1/audio/speech"))
         .timeout(Duration::from_secs(120))
         .bearer_auth(bearer)
-        .json(&tts_body)
+        .json(&tts_body_for(text, params))
         .send()
         .await
         .map_err(|e| format!("gate tts send: {e}"))?;
@@ -541,18 +592,15 @@ async fn voice_turn(
         .json()
         .await
         .map_err(|e| format!("gate tts parse: {e}"))?;
-    let reply_audio_b64 = v
+    let audio = v
         .get("audio_b64")
         .and_then(|a| a.as_str())
         .unwrap_or_default()
         .to_string();
-    if reply_audio_b64.is_empty() {
+    if audio.is_empty() {
         return Err("gate tts returned no audio".into());
     }
-    Ok(VoiceTurn {
-        reply_text,
-        reply_audio_b64,
-    })
+    Ok(audio)
 }
 
 /// #528 — the OpenAI-compatible vision request for one image (a JPEG data URI +
@@ -770,6 +818,27 @@ fn shellexpand_home(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #522/#537 — a declared reply voice + speech rate ride the gate TTS body;
+    // no params = the bare input (gate defaults). Same helper feeds both the
+    // audio-clip voice turn and the fleet-picked text turn.
+    #[test]
+    fn tts_body_honors_declared_voice_and_rate() {
+        use agentkeys_backend_client::protocol::ChannelAudioParams;
+        let bare = tts_body_for("hello", None);
+        assert_eq!(bare["input"], "hello");
+        assert!(bare.get("voice").is_none());
+        assert!(bare.get("speech_rate").is_none());
+        let params = ChannelAudioParams {
+            voice: Some("zh_female_meilinvyou_moon_bigtts".into()),
+            speech_rate: Some(20),
+            format: None,
+        };
+        let body = tts_body_for("你好", Some(&params));
+        assert_eq!(body["input"], "你好");
+        assert_eq!(body["voice"], "zh_female_meilinvyou_moon_bigtts");
+        assert_eq!(body["speech_rate"], 20);
+    }
 
     #[test]
     fn partial_env_is_none_and_loud_not_a_panic() {
