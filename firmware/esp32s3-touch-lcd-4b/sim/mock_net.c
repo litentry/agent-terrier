@@ -63,6 +63,12 @@ esp_err_t channel_client_send_audio(const uint8_t *wav, size_t wav_len, const ch
     return ESP_OK;
 }
 
+esp_err_t channel_client_request_tasks(void) {
+    // Mock a `doc` reply so the Tasks button shows something in the mirror.
+    app_state_append_message(ROLE_AGENT, "2 background task(s):\n• [1234] bash monitor-loop\n• [1240] hermes acp");
+    return ESP_OK;
+}
+
 void mock_net_seed(void) {
     // Boot into a connected, mid-conversation state so every screen is populated.
     app_state_set_conn(CONN_AGENT_OK);
