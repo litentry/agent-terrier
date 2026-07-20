@@ -13,6 +13,14 @@
 #define DEFAULT_AGENT_BEARER   "" // AGENTKEYS_BRIDGE_TOKEN; empty = bridge unauthenticated dev mode
 #define DEFAULT_BROKER_URL     "https://broker.example.invalid"
 
+// #523 — the CHANNEL plane a paired device converses on: the channel worker
+// (`channel.<zone>`) it publishes/polls against, and the `opchat-<label>`
+// channel id its grants cover (mirrors a spawned delegate's feed). Empty
+// CHAT_CHANNEL_ID = not channel-configured → the device uses the direct agent
+// bridge instead (an unpaired demo device).
+#define DEFAULT_CHANNEL_WORKER_URL "https://channel.example.invalid"
+#define DEFAULT_CHAT_CHANNEL_ID    ""
+
 #define DEFAULT_SPEAK_ON     true
 #define DEFAULT_SPEECH_SPEED 100 // percent of nominal rate, clamped 50..200
 #define DEFAULT_VOICE_ID     "default"
@@ -38,4 +46,10 @@
 #endif
 #ifndef BROKER_URL
 #define BROKER_URL DEFAULT_BROKER_URL
+#endif
+#ifndef CHANNEL_WORKER_URL
+#define CHANNEL_WORKER_URL DEFAULT_CHANNEL_WORKER_URL
+#endif
+#ifndef CHAT_CHANNEL_ID
+#define CHAT_CHANNEL_ID DEFAULT_CHAT_CHANNEL_ID
 #endif

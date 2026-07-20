@@ -81,11 +81,25 @@ Env: `AGENTKEYS_BROKER_URL` (pairing), `AGENTKEYS_AGENT_URL` + `AGENTKEYS_AGENT_
 (the agent bridge `/v1/chat` talks to), `AGENTKEYS_MOCK_DEVICE_DIR` (identity store).
 Build the UI-only mirror instead with `-DAGENTKEYS_REAL_NET=OFF`.
 
-### Talking to a spawned delegate
+### Talking to a spawned delegate (over the channel plane, #523)
 
 A spawn grants the delegate `channel-pub:opchat-<label>` + `channel-sub:opchat-<label>`. Pair
-this device, accept it in parent-control with the mirrored grants, and it converses over the
-real channel plane. The headless equivalent (no window, CI-runnable) is
+this device, accept it in parent-control with the **mirrored** grants, and — with
+`AGENTKEYS_CHAT_CHANNEL_ID=opchat-<label>` set — it converses over the **real channel plane**,
+not the direct bridge: the firmware's own `net/channel_client.c` resolves a session (J1) with
+the device K10, mints its OWN `channel-pub/sub` caps (the #76 cap-PoP signed on-device — the
+K10 never leaves), publishes each TALK turn to `/v1/channel/publish`, and long-polls
+`/v1/channel/poll` for the delegate's replies. Run it:
+
+```bash
+AGENTKEYS_BROKER_URL=https://broker.agentterrier.cn \
+AGENTKEYS_CHANNEL_WORKER_URL=https://channel.agentterrier.cn \  # optional — derived from broker.
+AGENTKEYS_CHAT_CHANNEL_ID=opchat-<delegate-label> \
+  ./build-pc/mirror
+```
+
+Unset `AGENTKEYS_CHAT_CHANNEL_ID` and the device stays on the direct `agent_client` bridge (an
+unpaired demo device). The headless equivalent (no window, CI-runnable) is
 `e2e/channel-e2e-demo.sh --from-step 17 --to-step 19` with `KD_SERVICES` pointed at the same
 channel.
 

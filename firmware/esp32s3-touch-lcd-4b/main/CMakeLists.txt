@@ -12,6 +12,7 @@ idf_component_register(
         "net/pairing.c"
         "net/wifi.c"
         "net/device_identity.c"
+        "net/channel_client.c"
     INCLUDE_DIRS "." "ui" "net"
     # `main` implicitly depends on every component, so the managed BSP (waveshare/
     # esp32_s3_touch_lcd_4b) + esp_lvgl_port + LVGL headers resolve without being listed here;

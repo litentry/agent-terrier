@@ -14,6 +14,7 @@
 #include "agent_client.h"
 #include "app_config.h"
 #include "app_state.h"
+#include "channel_client.h"
 #include "device_identity.h"
 #include "ui.h"
 #include "wifi.h"
@@ -95,7 +96,11 @@ void app_main(void)
 
     xTaskCreate(agent_health_task, "agent_health", 4096, NULL, 3, NULL);
 
-    // P3 adds ES8311 audio here: bsp_audio_init() + bsp_audio_codec_microphone_init() /
+    // #523 — start the channel conversation loop (no-op unless CHAT_CHANNEL_ID
+    // is configured; the loop waits for pairing to bind before minting caps).
+    channel_client_start();
+
+    // #524 adds ES8311 audio here: bsp_audio_init() + bsp_audio_codec_microphone_init() /
     // bsp_audio_codec_speaker_init() + bsp_audio_poweramp_enable(true), driving the TALK button.
     ESP_LOGI(TAG, "boot complete");
 }

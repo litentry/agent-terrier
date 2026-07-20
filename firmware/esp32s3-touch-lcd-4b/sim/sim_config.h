@@ -19,7 +19,11 @@
 const char *ak_sim_broker_url(void);
 const char *ak_sim_agent_url(void);
 const char *ak_sim_agent_bearer(void);
+const char *ak_sim_channel_worker_url(void); // #523
+const char *ak_sim_chat_channel_id(void);    // #523
 
-#define BROKER_URL     ak_sim_broker_url()
-#define AGENT_BASE_URL ak_sim_agent_url()
-#define AGENT_BEARER   ak_sim_agent_bearer()
+#define BROKER_URL         ak_sim_broker_url()
+#define AGENT_BASE_URL     ak_sim_agent_url()
+#define AGENT_BEARER       ak_sim_agent_bearer()
+#define CHANNEL_WORKER_URL ak_sim_channel_worker_url()
+#define CHAT_CHANNEL_ID    ak_sim_chat_channel_id()

@@ -11,6 +11,7 @@
 #ifdef AGENTKEYS_REAL_NET
 // #517 real-device mode: the firmware's OWN net/ layer, no fixtures.
 #include "agent_client.h"
+#include "channel_client.h"
 #include "device_identity.h"
 #include "esp_log.h"
 #include "nvs.h"
@@ -68,6 +69,10 @@ int main(void) {
     } else {
         pairing_start();
     }
+    // #523 — start the channel conversation loop. No-op unless the device is
+    // channel-configured (AGENTKEYS_CHAT_CHANNEL_ID set); the loop then waits
+    // for pairing to bind before minting caps.
+    channel_client_start();
 #else
     mock_net_seed();   // populate a sample conversation + pairing QR + connected status
 #endif
