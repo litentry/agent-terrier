@@ -41,6 +41,9 @@ pub struct Relay {
     upstream: UpstreamClient,
     /// #519 — gate-held Doubao speech legs (each independently optional).
     speech: SpeechClient,
+    /// #527 — the gate-held IAM credential for the voices catalog OpenAPI
+    /// (`None` = unconfigured; `GET /v1/audio/voices` then 503s). See voices.rs.
+    pub voices: Option<crate::voices::VoicesConfig>,
     auditor: Option<Arc<Auditor>>,
 }
 
@@ -69,12 +72,16 @@ impl Relay {
             .map(|url| Arc::new(Auditor::new(url, config.aws_region.clone())));
         let keys = Arc::new(crate::keys::KeyStore::from_config(&config));
         let speech = SpeechClient::new(config.speech_asr.clone(), config.speech_tts.clone());
+        // #527 — read the voices IAM credential once at boot (a gate-held key,
+        // never in a sandbox/device). Absent ⇒ the endpoint 503s.
+        let voices = crate::voices::VoicesConfig::from_env();
         Self {
             config,
             meter: Arc::new(Meter::default()),
             keys,
             upstream,
             speech,
+            voices,
             auditor,
         }
     }

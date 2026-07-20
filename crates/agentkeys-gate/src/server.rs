@@ -28,6 +28,9 @@ pub fn router(relay: Arc<Relay>) -> Router {
         // an OpenAI-compatible surface. See `speech.rs`.
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/audio/speech", post(audio_speech))
+        // #527 — the TTS voices catalog (gk_-authed; gate-held IAM per the
+        // custody decision in voices.rs). 503 when unconfigured.
+        .route("/v1/audio/voices", get(audio_voices))
         // #427 — broker-driven per-delegate provisioning (admin bearer): spawn
         // mints a relay key, archive disables it. See `admin.rs`.
         .route("/v1/admin/keys", post(crate::admin::provision_key))
@@ -74,6 +77,22 @@ async fn audio_speech(
         Ok(r) => Json(r).into_response(),
         Err(e) => {
             tracing::warn!(key = %caller.key_id, error = %e, "synthesis failed");
+            error_response(e)
+        }
+    }
+}
+
+/// #527 — the TTS voices catalog. gk_-authed (any live relay key); the gate
+/// V4-signs ListBigModelTTSTimbres with its held IAM credential. 503 when the
+/// IAM credential is unconfigured (never a silent empty list).
+async fn audio_voices(State(relay): State<Arc<Relay>>, headers: HeaderMap) -> Response {
+    if let Err(e) = authenticate_live(&relay, &headers) {
+        return error_response(e);
+    }
+    match crate::voices::fetch_voices(relay.voices.as_ref()).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "voices catalog failed");
             error_response(e)
         }
     }
