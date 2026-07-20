@@ -14,5 +14,11 @@ void agent_client_init(const char *base_url, const char *bearer);
 // A turn already in flight is ignored.
 void agent_client_send(const char *text);
 
+// True when a direct-agent base URL is configured (AGENTKEYS_AGENT_URL). The UI
+// uses this to distinguish "a direct-agent turn can be attempted" from an
+// unconfigured device — so an unpaired, no-agent device guides the operator to
+// pair instead of POSTing to an empty base (a cryptic "HTTP 0").
+bool agent_client_configured(void);
+
 // Liveness probe: GET {base}/healthz → true on HTTP 200 with ok:true. Blocking; call off-UI.
 bool agent_client_healthz(void);

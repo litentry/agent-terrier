@@ -12,7 +12,7 @@ import { useClient } from '@/lib/ClientProvider';
 import { AgentPanel } from './agent';
 import { ChatPanel } from './chat';
 import { Chip, Panel } from './shared';
-import type { Actor } from './types';
+import { agentChatChannelId, type Actor } from './types';
 
 type Tab = 'context' | 'chat' | 'feeds';
 
@@ -21,7 +21,6 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
   const [tab, setTab] = useState<Tab>('context');
   const [preset, setPreset] = useState<PresetSummary | null>(null);
 
-  const chatChannelId = `opchat-${actor.label}`;
   const services = actor.services ?? [];
   const subscribedChannels = useMemo(
     () =>
@@ -34,6 +33,11 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
       ),
     [services],
   );
+  // The chat channel comes from the agent's GRANT, never from its display label
+  // (see agentChatChannelId — a placeholder label like "agent 0x346391ed…" is not
+  // a legal channel id and made every poll/send 400 `invalid channel_id`).
+  const chatChannelId = useMemo(() => agentChatChannelId(actor), [actor]);
+
   const [feedChannel, setFeedChannel] = useState<string | null>(null);
 
   useEffect(() => {
@@ -122,12 +126,20 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
           <AgentPanel actor={actor} />
         </div>
       )}
-      {tab === 'chat' && (
-        <ChatPanel
-          channelId={chatChannelId}
-          emptyHint={`Direct chat with ${actor.label} — the transcript IS its durable opchat feed (operator-only, D13).`}
-        />
-      )}
+      {tab === 'chat' &&
+        (chatChannelId ? (
+          <ChatPanel
+            channelId={chatChannelId}
+            emptyHint={`Direct chat with ${actor.label} on ${chatChannelId} — the transcript IS its durable opchat feed (operator-only, D13).`}
+          />
+        ) : (
+          // Say why rather than sending a request that can only 400.
+          <div className="muted">
+            No chat channel for this agent — it holds no <code>channel-pub:&lt;id&gt;</code> or{' '}
+            <code>channel-sub:&lt;id&gt;</code> grant, and its label cannot form a valid channel id.
+            Grant it a channel from the permissions panel first.
+          </div>
+        ))}
       {tab === 'feeds' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {subscribedChannels.length === 0 ? (

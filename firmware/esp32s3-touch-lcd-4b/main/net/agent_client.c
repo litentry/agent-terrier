@@ -157,6 +157,11 @@ static void turn_task(void *arg)
     vTaskDelete(NULL);
 }
 
+bool agent_client_configured(void)
+{
+    return s_base[0] != '\0';
+}
+
 void agent_client_send(const char *text)
 {
     if (s_in_flight || !text || !text[0]) {

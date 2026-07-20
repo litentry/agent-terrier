@@ -795,6 +795,20 @@ pub struct ApiActor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub device_key_hash: Option<String>,
+    /// What this actor IS — `"device"` (channel endpoint, §14.10) or
+    /// `"delegate"` (sandbox-resident) — from the binding manifest, which
+    /// records it at accept/scope-commit time.
+    ///
+    /// `None` = genuinely unknown (no manifest entry — e.g. an actor rebuilt
+    /// from chain), NOT "delegate". The UI must not guess from the scope: it
+    /// used to infer device-ness from "all grants are channel grants", so
+    /// revoking a device's grants silently demoted it to a delegate and a real
+    /// device showed up under Delegates with its identity unrecognizable. An
+    /// actor's TYPE is a property of its binding, never of its current
+    /// permissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub scope: Option<HashMap<String, ApiScopeBits>>,
@@ -3857,6 +3871,9 @@ async fn reconcile_actors_from_chain(
                         omni_hex: omni.clone(),
                         label: master_email.clone().unwrap_or_else(|| "O_master".into()),
                         role: "master".into(),
+                        // device/delegate is an AGENT distinction; the master is
+                        // neither (its `role` already says what it is).
+                        kind: None,
                         parent: None,
                         derivation: "/".into(),
                         device: "passkey P256Account (restored from chain)".into(),
@@ -3930,6 +3947,11 @@ async fn reconcile_actors_from_chain(
                 },
                 k11: false,
                 device_key_hash: Some(d.device_key_hash.clone()),
+                // Only the manifest knows; absent entry = unknown, never a guess.
+                kind: entry
+                    .as_ref()
+                    .map(|e| e.kind.clone())
+                    .filter(|k| !k.is_empty()),
                 scope: None,
                 scope_unknown_service_ids: None,
                 payment_cap: None,
@@ -5777,6 +5799,16 @@ async fn ack_pairing(
                     } else {
                         "sandbox device (§10.2)".into()
                     },
+                    // Stated at accept, same source as the manifest entry above —
+                    // so the type never has to be guessed from the scope later.
+                    kind: Some(
+                        if was_device_accept {
+                            "device"
+                        } else {
+                            "delegate"
+                        }
+                        .to_string(),
+                    ),
                     device_pubkey: field("device_pubkey"),
                     last_active: "just paired".into(),
                     status: "ok".into(),
@@ -6455,15 +6487,34 @@ pub struct ChatPollRequest {
 
 /// The channel worker the daemon talks to — same env family as every worker
 /// URL (`AGENTKEYS_WORKER_CHANNEL_URL`, wired by dev.sh / the host env files).
-fn channel_worker_url() -> Result<String, String> {
-    std::env::var("AGENTKEYS_WORKER_CHANNEL_URL")
+/// The channel worker base URL for the caller's SELECTED stack.
+///
+/// Derived from the session broker (`channel.<zone>` via `derive_worker_url`,
+/// mirroring `weixin`) so the daemon never publishes to a hardcoded per-stack
+/// worker. `broker` MUST be the same `coords.broker` the channel cap is minted
+/// against — that is what stops the two from diverging: the bug was a cap minted
+/// by the VE broker presented to the AWS-test channel worker (a stale ambient
+/// `AGENTKEYS_WORKER_CHANNEL_URL`), refused 403 `broker_sig_invalid`.
+///
+/// An explicit `AGENTKEYS_WORKER_CHANNEL_URL` still overrides — but on a
+/// multi-stack daemon that single env var cannot be right for every stack, so
+/// derivation is the correct default. Unlike memory/config, channel publish is
+/// cap-only from the daemon (no client-side STS/role), so the URL is all it
+/// needs — nothing to keep paired with a per-stack role ARN.
+fn channel_worker_url(broker: &str) -> Result<String, String> {
+    if let Some(u) = std::env::var("AGENTKEYS_WORKER_CHANNEL_URL")
         .ok()
-        .filter(|u| !u.trim().is_empty())
         .map(|u| u.trim().trim_end_matches('/').to_string())
-        .ok_or_else(|| {
-            "AGENTKEYS_WORKER_CHANNEL_URL not set — the chat surface needs the channel worker"
-                .to_string()
-        })
+        .filter(|u| !u.is_empty())
+    {
+        return Ok(u);
+    }
+    derive_worker_url(broker, "channel").ok_or_else(|| {
+        format!(
+            "cannot derive the channel worker URL from broker '{broker}' \
+             (set AGENTKEYS_WORKER_CHANNEL_URL to override)"
+        )
+    })
 }
 
 /// Master-self channel cap (operator == actor — the session-authenticated
@@ -6553,17 +6604,9 @@ async fn master_chat_send(
         )
             .into_response();
     }
-    let worker = match channel_worker_url() {
-        Ok(u) => u,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response()
-        }
-    };
-    let (cap, _coords) = match master_channel_cap(
+    // Mint the cap FIRST so the worker URL derives from the SAME broker the cap
+    // was signed by — worker and cap can never drift onto different stacks.
+    let (cap, coords) = match master_channel_cap(
         &state,
         format!("channel-pub:{}", req.channel_id),
         agentkeys_backend_client::protocol::CapMintOp::ChannelPublish,
@@ -6574,6 +6617,16 @@ async fn master_chat_send(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    let worker = match channel_worker_url(&coords.broker) {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({ "error": e })),
             )
                 .into_response()
@@ -6638,17 +6691,9 @@ async fn master_chat_poll(
         )
             .into_response();
     }
-    let worker = match channel_worker_url() {
-        Ok(u) => u,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response()
-        }
-    };
-    let (cap, _coords) = match master_channel_cap(
+    // Cap first, then derive the worker from the cap's broker (see the send
+    // path) — the subscribe leg must hit the same stack it is authorized on.
+    let (cap, coords) = match master_channel_cap(
         &state,
         format!("channel-sub:{}", req.channel_id),
         agentkeys_backend_client::protocol::CapMintOp::ChannelSubscribe,
@@ -6659,6 +6704,16 @@ async fn master_chat_poll(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    let worker = match channel_worker_url(&coords.broker) {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({ "error": e })),
             )
                 .into_response()
@@ -7925,6 +7980,8 @@ async fn register_pairing(
         parent: Some("master".into()),
         derivation: format!("//{label}"),
         device: "sandbox device (§10.2)".into(),
+        // This path registers a SANDBOX delegate; stated, not inferred.
+        kind: Some("delegate".into()),
         device_pubkey: agent_address.clone(),
         last_active: "just paired".into(),
         status: "ok".into(),
@@ -11399,6 +11456,7 @@ mod tests {
     #[test]
     fn evict_disowned_rows_kills_ghosts_and_spares_master_and_precanonical() {
         let mk = |id: &str, role: &str, hash: Option<&str>| ApiActor {
+            kind: None,
             id: id.into(),
             omni: format!("0x{id}"),
             omni_hex: format!("0x{id}"),
@@ -11626,6 +11684,18 @@ mod tests {
                 "broker {broker}"
             );
         }
+        // The channel worker the fleet conversation publishes to derives the same
+        // way — critically, the VE .cn stack, whose broker signs the cap the
+        // worker must verify (the #519 403 broker_sig_invalid was this drifting).
+        assert_eq!(
+            derive_worker_url("https://broker.agentterrier.cn", "channel").as_deref(),
+            Some("https://channel.agentterrier.cn"),
+            "VE channel worker must reason from the .cn broker"
+        );
+        assert_eq!(
+            derive_worker_url("https://test-broker.litentry.org", "channel").as_deref(),
+            Some("https://channel-test.litentry.org")
+        );
         // The helper generalizes to any co-located worker.
         assert_eq!(
             derive_worker_url("https://broker.litentry.org", "memory").as_deref(),
@@ -11841,6 +11911,7 @@ mod tests {
 
         // Holders: one actor by NAME, one by on-chain HASH, one unrelated.
         let mk = |id: &str, label: &str| ApiActor {
+            kind: None,
             id: id.into(),
             omni: "0x1".into(),
             omni_hex: "0x1".into(),
@@ -13012,6 +13083,7 @@ mod tests {
 
     fn seed_actor(state: &SharedUiBridgeState) -> ApiActor {
         let actor = ApiActor {
+            kind: None,
             id: "agent-folotoy".into(),
             omni: "O_master//folotoy".into(),
             omni_hex: "0x7c2d…41a9".into(),
@@ -13047,6 +13119,7 @@ mod tests {
 
     async fn seed_actor_async(state: &SharedUiBridgeState) -> ApiActor {
         let actor = ApiActor {
+            kind: None,
             id: "agent-folotoy".into(),
             omni: "O_master//folotoy".into(),
             omni_hex: "0x7c2d…41a9".into(),
@@ -13093,6 +13166,7 @@ mod tests {
         actors.insert(
             "agent-1".into(),
             ApiActor {
+                kind: None,
                 id: "agent-1".into(),
                 role: "agent".into(),
                 omni: "x".into(),
@@ -13121,6 +13195,7 @@ mod tests {
         actors.insert(
             "master".into(),
             ApiActor {
+                kind: None,
                 id: "master".into(),
                 role: "master".into(),
                 omni: "O_master".into(),
@@ -14548,6 +14623,7 @@ mod tests {
             State(state.clone()),
             Json(DevSeedRequest {
                 actors: vec![ApiActor {
+                    kind: None,
                     id: "seed-1".into(),
                     omni: "x".into(),
                     omni_hex: "x".into(),

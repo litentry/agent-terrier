@@ -944,6 +944,7 @@ function apiToActor(a: ApiActor): Actor {
     scope: a.scope as Actor['scope'],
     scopeUnknownServiceIds: a.scope_unknown_service_ids,
     deviceKeyHash: a.device_key_hash ?? undefined,
+    kind: a.kind ?? undefined,
     paymentCap: a.payment_cap
       ? { perTx: a.payment_cap.per_tx, daily: a.payment_cap.daily, currency: a.payment_cap.currency }
       : undefined,
