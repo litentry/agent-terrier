@@ -49,6 +49,13 @@ pub fn err_404(msg: impl Into<String>, reason: &'static str) -> ApiError {
     err(StatusCode::NOT_FOUND, msg, reason)
 }
 
+/// 413 — an inline payload exceeded a worker's declared ceiling (#522: the
+/// channel worker's `channel_body_too_large`; the refusal message names the
+/// by-reference escape hatch).
+pub fn err_413(msg: impl Into<String>, reason: &'static str) -> ApiError {
+    err(StatusCode::PAYLOAD_TOO_LARGE, msg, reason)
+}
+
 pub fn err_500(msg: impl Into<String>, reason: &'static str) -> ApiError {
     err(StatusCode::INTERNAL_SERVER_ERROR, msg, reason)
 }

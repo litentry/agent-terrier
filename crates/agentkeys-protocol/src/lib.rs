@@ -432,6 +432,23 @@ pub enum ChannelEventKind {
     Doc,
 }
 
+/// #519/#522 — declared audio parameters riding an `audio-clip` turn. All
+/// optional + additive (absent = consumer defaults), producer-declared like
+/// `kind`: the device states which reply voice/rate it wants and what
+/// container its clip is in (replacing consumer magic-byte sniffing).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelAudioParams {
+    /// Doubao speaker id the REPLY should be synthesized with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// Doubao 语速 for the reply, [-50, 100] (consumer clamps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_rate: Option<i32>,
+    /// The PAYLOAD clip's own container (wav/mp3/ogg).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
 /// The one canonical channel event envelope (`docs/spec/agent-channel-decoupling.md`
 /// §4.1). This is the DECRYPTED shape the worker stores inside the standard
 /// envelope and hands back to authorized subscribers; `producer` is
@@ -459,6 +476,9 @@ pub struct ChannelEvent {
     /// Optional conversation/turn correlation id (a reply threads to a prompt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation: Option<String>,
+    /// #522 — audio params for `audio-clip` turns (voice/rate/format).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<ChannelAudioParams>,
 }
 
 /// Channel-worker `POST /v1/channel/publish` request body. The publish cap
@@ -480,6 +500,9 @@ pub struct ChannelPublishBody {
     pub body_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation: Option<String>,
+    /// #522 — producer-declared audio params, copied verbatim onto the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<ChannelAudioParams>,
 }
 
 fn channel_direction_in() -> ChannelDirection {
@@ -2292,6 +2315,7 @@ mod tests {
             body_ref: Some("bots/0xop/channel/cam-frontdoor/1.bin".into()),
             ts_millis: 1,
             correlation: None,
+            audio: None,
         };
         let json = serde_json::to_value(&actor).unwrap();
         assert_eq!(json["producer"]["actor"]["actor_omni"], "0xcam");
@@ -2315,6 +2339,44 @@ mod tests {
         // with agentkeys_worker_creds::verify::CapOp::Append.as_str() ("append").
         assert_eq!(CapMintOp::MemoryAppend.op_str(), "append");
         assert_eq!(CapMintOp::MemoryCanonicalGet.op_str(), "canonical_fetch");
+    }
+
+    #[test]
+    fn channel_audio_params_are_additive_and_backcompat() {
+        // #522: absent on the wire = None (every pre-#522 event/publish body
+        // still parses); None serializes to NOTHING (fixtures stay byte-stable).
+        let old_event: ChannelEvent = serde_json::from_value(serde_json::json!({
+            "event_id": "e3",
+            "channel_id": "opchat-cook",
+            "direction": "in",
+            "producer": {"actor": {"actor_omni": "0xdev"}},
+            "kind": "audio-clip",
+            "body": "AAAA",
+            "ts_millis": 3,
+        }))
+        .unwrap();
+        assert!(old_event.audio.is_none());
+        let json = serde_json::to_value(&old_event).unwrap();
+        assert!(json.get("audio").is_none(), "None must not serialize");
+        // Params round-trip, partial fields allowed.
+        let with: ChannelEvent = serde_json::from_value(serde_json::json!({
+            "event_id": "e4",
+            "channel_id": "opchat-cook",
+            "direction": "in",
+            "producer": {"actor": {"actor_omni": "0xdev"}},
+            "kind": "audio-clip",
+            "body": "AAAA",
+            "ts_millis": 4,
+            "audio": {"voice": "zh_female_meilinvyou_moon_bigtts", "speech_rate": 30},
+        }))
+        .unwrap();
+        let p = with.audio.as_ref().unwrap();
+        assert_eq!(p.voice.as_deref(), Some("zh_female_meilinvyou_moon_bigtts"));
+        assert_eq!(p.speech_rate, Some(30));
+        assert!(p.format.is_none());
+        let rt = serde_json::to_value(&with).unwrap();
+        assert_eq!(rt["audio"]["speech_rate"], 30);
+        assert!(rt["audio"].get("format").is_none());
     }
 
     #[test]

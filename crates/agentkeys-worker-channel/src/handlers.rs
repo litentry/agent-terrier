@@ -23,7 +23,7 @@ use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::{
-    err_400, err_403, err_500, err_502, s3_error_summary, ApiError,
+    err_400, err_403, err_413, err_500, err_502, s3_error_summary, ApiError,
 };
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
 
@@ -75,6 +75,10 @@ pub struct PublishRequest {
     pub body_ref: Option<String>,
     #[serde(default)]
     pub correlation: Option<String>,
+    /// #522 — producer-declared audio params (voice/rate/format), copied
+    /// verbatim onto the event like `kind`/`correlation`.
+    #[serde(default)]
+    pub audio: Option<agentkeys_protocol::ChannelAudioParams>,
 }
 
 fn direction_in() -> ChannelDirection {
@@ -195,9 +199,23 @@ async fn channel_publish_inner(
         }
         (Some(b64), None) => {
             // Validate it is real base64 up front (fail-loud, #284 posture).
-            STANDARD
+            let decoded = STANDARD
                 .decode(b64)
                 .map_err(|e| err_400(e.to_string(), "channel_body_b64_decode"))?;
+            // #522 — explicit inline ceiling (there was NO size validation at
+            // all before, only axum's implicit body limit). Larger payloads
+            // belong in body_ref; the refusal names the escape hatch.
+            let max = state.config.inline_max_bytes;
+            if decoded.len() > max {
+                return Err(err_413(
+                    format!(
+                        "inline body is {} bytes decoded (max {max}) — put large \
+                         payloads in the feed and pass body_ref instead",
+                        decoded.len()
+                    ),
+                    "channel_body_too_large",
+                ));
+            }
             (Some(b64.clone()), None)
         }
         (None, Some(r)) => (None, Some(r.clone())),
@@ -228,6 +246,7 @@ async fn channel_publish_inner(
         body_ref,
         ts_millis: now_millis,
         correlation: req.correlation.clone(),
+        audio: req.audio.clone(),
     };
     let plaintext =
         serde_json::to_vec(&event).map_err(|e| err_500(e.to_string(), "channel_event_encode"))?;

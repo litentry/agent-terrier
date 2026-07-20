@@ -303,7 +303,7 @@ async fn run(cfg: ChatLoopConfig) {
                     );
                     continue;
                 };
-                match voice_turn(&http, &cfg, audio_b64).await {
+                match voice_turn(&http, &cfg, audio_b64, event.audio.as_ref()).await {
                     Ok(turn) => {
                         if let Err(e) = publish_event(
                             &publish_ctx,
@@ -403,10 +403,13 @@ fn sniff_audio_format(bytes: &[u8]) -> &'static str {
 /// when the sandbox has no speech relay wiring (direct-ark boots) — the real
 /// Ark base has no speech endpoints and a gk_-less call would leak nothing but
 /// would fail confusingly deep; this failure names the actual gap instead.
+/// #522: the event's declared audio params drive the reply voice/rate and the
+/// clip's container; magic-byte sniffing stays the params-less fallback.
 async fn voice_turn(
     http: &reqwest::Client,
     cfg: &ChatLoopConfig,
     audio_b64: &str,
+    params: Option<&agentkeys_backend_client::protocol::ChannelAudioParams>,
 ) -> Result<VoiceTurn, String> {
     let (Some(speech_url), Some(bearer)) = (&cfg.speech_url, &cfg.speech_bearer) else {
         return Err(
@@ -421,7 +424,8 @@ async fn voice_turn(
             .decode(audio_b64)
             .map_err(|e| format!("inbound audio is not valid base64: {e}"))?
     };
-    let format = sniff_audio_format(&decoded);
+    let declared_format = params.and_then(|p| p.format.clone());
+    let format = declared_format.unwrap_or_else(|| sniff_audio_format(&decoded).to_string());
     let base = speech_url.trim_end_matches('/');
 
     let resp = http
@@ -450,11 +454,20 @@ async fn voice_turn(
 
     let reply_text = bridge_chat(http, cfg, &transcript).await?;
 
+    let mut tts_body = serde_json::json!({ "input": reply_text });
+    if let Some(p) = params {
+        if let Some(v) = &p.voice {
+            tts_body["voice"] = serde_json::Value::String(v.clone());
+        }
+        if let Some(r) = p.speech_rate {
+            tts_body["speech_rate"] = serde_json::Value::from(r);
+        }
+    }
     let resp = http
         .post(format!("{base}/v1/audio/speech"))
         .timeout(Duration::from_secs(120))
         .bearer_auth(bearer)
-        .json(&serde_json::json!({ "input": reply_text }))
+        .json(&tts_body)
         .send()
         .await
         .map_err(|e| format!("gate tts send: {e}"))?;

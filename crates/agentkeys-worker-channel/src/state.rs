@@ -12,6 +12,10 @@ use crate::wakeup::WakeupRegistry;
 /// Long-poll ceiling default when `AGENTKEYS_CHANNEL_MAX_POLL_SECONDS` is unset.
 /// Matches the F2 broker long-poll shape (§14 — hold ≤25 s).
 const DEFAULT_MAX_POLL_SECONDS: u64 = 25;
+/// #522 — inline `body_b64` ceiling (DECODED bytes). Voice clips ride inline
+/// (a 20 s wav ≈ 640 KB); anything bigger belongs in `body_ref`. Override:
+/// `AGENTKEYS_CHANNEL_INLINE_MAX_BYTES`.
+const DEFAULT_INLINE_MAX_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub struct ChannelWorkerConfig {
@@ -33,6 +37,10 @@ pub struct ChannelWorkerConfig {
     /// Long-poll ceiling: the max seconds a `/v1/channel/poll` request is held
     /// when no event is immediately available (§14.12 NRT).
     pub max_poll_seconds: u64,
+    /// #522 — max DECODED bytes an inline `body_b64` may carry; larger payloads
+    /// must ride `body_ref` (413 `channel_body_too_large` otherwise — there was
+    /// previously NO size validation at all, only axum's implicit ~2 MB).
+    pub inline_max_bytes: usize,
 }
 
 impl ChannelWorkerConfig {
@@ -67,6 +75,10 @@ impl ChannelWorkerConfig {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_MAX_POLL_SECONDS);
+        let inline_max_bytes = std::env::var("AGENTKEYS_CHANNEL_INLINE_MAX_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_INLINE_MAX_BYTES);
 
         Ok(ChannelWorkerConfig {
             channel_bucket,
@@ -79,6 +91,7 @@ impl ChannelWorkerConfig {
             chain_profile,
             kek_hex,
             max_poll_seconds,
+            inline_max_bytes,
         })
     }
 }
