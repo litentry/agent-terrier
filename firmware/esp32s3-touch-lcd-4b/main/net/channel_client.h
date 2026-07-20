@@ -36,6 +36,11 @@ esp_err_t channel_client_publish_turn(const char *kind, const char *body_b64, co
 // Convenience for a text turn (no audio params).
 esp_err_t channel_client_send_text(const char *text);
 
+// #525 — ask the delegate for its background-task list: publishes a
+// `command:jobs` event. The device holds no bridge credential; the sandbox
+// answers over the channel with a `doc` event that renders in the conversation.
+esp_err_t channel_client_request_tasks(void);
+
 // #524 — send a captured voice clip (a mono-16-bit WAV) as an `audio-clip`
 // turn: the client base64-encodes it and publishes with the reply `voice` +
 // `speech_rate` (#522 audio params; voice NULL / speech_rate INT32_MIN = omit).

@@ -120,6 +120,17 @@ static void talk_event_cb(lv_event_t *e)
     }
 }
 
+// #525 — request the delegate's background-task list over the channel.
+static void tasks_event_cb(lv_event_t *e)
+{
+    (void)e;
+    if (channel_client_ready()) {
+        channel_client_request_tasks();
+    } else {
+        app_state_append_message(ROLE_AGENT, "Tasks are available once paired to an agent.");
+    }
+}
+
 ui_screen_view_t ui_build_home(void)
 {
     lv_obj_t *scr = ui_make_screen();
@@ -154,6 +165,12 @@ ui_screen_view_t ui_build_home(void)
     lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     ui_add_nav_button(footer, "Pair", UI_SCREEN_PAIRING);
+    // #525 — Tasks: ask the delegate for its background-task list over the
+    // channel; the reply renders as a `doc` bubble in the conversation.
+    lv_obj_t *tasks = lv_button_create(footer);
+    lv_obj_set_style_bg_color(tasks, UI_COL_PANEL, 0);
+    lv_label_set_text(lv_label_create(tasks), LV_SYMBOL_LIST "  Tasks");
+    lv_obj_add_event_cb(tasks, tasks_event_cb, LV_EVENT_CLICKED, NULL);
     ui_add_nav_button(footer, LV_SYMBOL_SETTINGS "  Settings", UI_SCREEN_SETTINGS);
 
     ui_screen_view_t view = { .root = scr, .refresh = home_refresh };

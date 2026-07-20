@@ -339,6 +339,42 @@ async fn run(cfg: ChatLoopConfig) {
                 }
                 continue;
             }
+            // #525 — a device asked for the background-task list (kind=command,
+            // body "jobs"). The device holds no bridge credential, so the list
+            // rides the channel: answer from the bridge GET /v1/jobs as a `doc`
+            // event (correlated). Other commands are ignored (logged).
+            if matches!(
+                event.kind,
+                agentkeys_backend_client::protocol::ChannelEventKind::Command
+            ) {
+                let cmd = event
+                    .body
+                    .as_deref()
+                    .and_then(|b64| {
+                        use base64::{engine::general_purpose::STANDARD, Engine};
+                        STANDARD.decode(b64).ok()
+                    })
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_default();
+                if cmd.trim() == "jobs" {
+                    let doc = bridge_jobs(&http, &cfg)
+                        .await
+                        .unwrap_or_else(|e| format!("(jobs error: {e})"));
+                    if let Err(e) = publish_event(
+                        &publish_ctx,
+                        "doc",
+                        base64_of(doc.as_bytes()),
+                        &event.event_id,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "#525 chat loop: jobs doc publish failed");
+                    }
+                } else {
+                    tracing::info!(cmd = %cmd, "#525 chat loop: unknown command — ignored");
+                }
+                continue;
+            }
             let text = event
                 .body
                 .as_deref()
@@ -543,6 +579,39 @@ async fn bridge_chat(
         .and_then(|r| r.as_str())
         .unwrap_or("(no reply)")
         .to_string())
+}
+
+/// #525 — fetch the delegate's background-task list from the bridge
+/// (`GET /v1/jobs` → `[{pgid, pid, cmd, procs}]`) and render it as a compact,
+/// device-friendly text doc. The device never talks to the bridge itself —
+/// this is the sandbox-side answer to a `command:jobs` channel event.
+async fn bridge_jobs(http: &reqwest::Client, cfg: &ChatLoopConfig) -> Result<String, String> {
+    let mut req = http
+        .get(format!("{}/v1/jobs", cfg.bridge_url.trim_end_matches('/')))
+        .timeout(Duration::from_secs(30));
+    if let Some(token) = &cfg.bridge_token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.map_err(|e| format!("bridge send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("bridge HTTP {}", resp.status()));
+    }
+    let jobs: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .map_err(|e| format!("bridge parse: {e}"))?;
+    if jobs.is_empty() {
+        return Ok("No background tasks running.".to_string());
+    }
+    let mut out = format!("{} background task(s):\n", jobs.len());
+    for j in &jobs {
+        let pgid = j.get("pgid").and_then(|v| v.as_i64()).unwrap_or(0);
+        let cmd = j.get("cmd").and_then(|v| v.as_str()).unwrap_or("?");
+        // Truncate long command lines so a small device screen stays readable.
+        let cmd: String = cmd.chars().take(60).collect();
+        out.push_str(&format!("• [{pgid}] {cmd}\n"));
+    }
+    Ok(out)
 }
 
 /// The per-poll invariants every publish shares — bundled so the reply

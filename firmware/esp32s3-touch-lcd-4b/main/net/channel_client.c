@@ -449,6 +449,17 @@ esp_err_t channel_client_send_text(const char *text)
     return channel_client_publish_turn("text", b64, NULL, INT32_MIN);
 }
 
+esp_err_t channel_client_request_tasks(void)
+{
+    // command:jobs — the sandbox answers with a `doc` listing (rendered in the
+    // conversation via deliver_event). No local echo; the reply is the result.
+    char b64[12];
+    if (b64_encode((const uint8_t *)"jobs", 4, b64, sizeof(b64)) < 0) {
+        return ESP_ERR_NO_MEM;
+    }
+    return channel_client_publish_turn("command", b64, NULL, INT32_MIN);
+}
+
 esp_err_t channel_client_send_audio(const uint8_t *wav, size_t wav_len, const char *voice,
                                     int speech_rate)
 {
