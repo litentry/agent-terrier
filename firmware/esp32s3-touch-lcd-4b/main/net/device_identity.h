@@ -49,3 +49,19 @@ esp_err_t device_identity_save_binding(const char *master_omni, const char *chil
 // True if this device has a persisted pairing. When paired and master_out/cap are
 // given, writes the master (operator) omni into master_out ("" if absent).
 bool device_identity_paired(char *master_out, size_t cap);
+
+// The persisted operator (master) + agent (child/actor) omnis from the §10.2
+// claim, needed to mint channel caps (#523: operator_omni + actor_omni are
+// signed cap fields). Each writes "" when absent. NVS reads (no EC math).
+esp_err_t device_identity_operator_omni(char *out, size_t cap);
+esp_err_t device_identity_actor_omni(char *out, size_t cap);
+
+// Fresh EIP-191 **cap-mint proof-of-possession** (#76) over the K10, binding a
+// cap-mint request to this device: signs (operator, actor, service, op,
+// data_class, client_nonce, client_ts). This is what lets a paired device mint
+// its OWN channel-pub/sub caps (#408/#523) without the #369 sandbox delegation.
+// `out` cap >= DEVICE_ID_SIG_LEN. Runs on the crypto worker (RFC6979 ECDSA).
+esp_err_t device_identity_cap_pop_sig(const char *operator_omni, const char *actor_omni,
+                                      const char *service, const char *op, const char *data_class,
+                                      const char *client_nonce, uint64_t client_ts, char *out,
+                                      size_t cap);

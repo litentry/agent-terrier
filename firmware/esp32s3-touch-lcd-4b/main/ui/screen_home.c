@@ -1,6 +1,7 @@
 // Home / Conversation — mirrors the probe TUI conversation pane + header + hold-to-talk.
 #include "ui.h"
 #include "agent_client.h"
+#include "channel_client.h"
 
 #include "esp_log.h"
 
@@ -62,10 +63,18 @@ static void talk_event_cb(lv_event_t *e)
         lv_label_set_text(label, LV_SYMBOL_AUDIO "  Listening...");
     } else if (code == LV_EVENT_RELEASED) {
         lv_label_set_text(label, LV_SYMBOL_AUDIO "  TALK");
-        // P3 replaces this with: stop ES8311 mic capture -> ASR -> transcript. Until then a
-        // placeholder transcript drives the real /v1/chat turn so the end-to-end path is testable.
-        ESP_LOGI(TAG, "talk released -> send turn");
-        agent_client_send("Hello! Tell me something interesting in one sentence.");
+        // #524 replaces this with: stop ES8311 mic capture -> an audio-clip turn.
+        // Until then a placeholder transcript drives a real turn so the path is
+        // testable. A PAIRED + channel-configured device converses over the
+        // channel plane (#523); an unpaired demo device uses the direct bridge.
+        const char *msg = "Hello! Tell me something interesting in one sentence.";
+        if (channel_client_ready()) {
+            ESP_LOGI(TAG, "talk released -> channel turn");
+            channel_client_send_text(msg);
+        } else {
+            ESP_LOGI(TAG, "talk released -> bridge turn");
+            agent_client_send(msg);
+        }
     }
 }
 

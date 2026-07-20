@@ -257,3 +257,80 @@ bool device_identity_paired(char *master_out, size_t cap)
     nvs_close(h);
     return paired == 1;
 }
+
+// Read one persisted NVS string key into out ("" if absent). Pure NVS, no EC.
+static esp_err_t read_omni(const char *nvs_key, char *out, size_t cap)
+{
+    if (!out || !cap) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out[0] = '\0';
+    nvs_handle_t h;
+    esp_err_t e = nvs_open(NVS_NS, NVS_READONLY, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+    size_t len = cap;
+    esp_err_t g = nvs_get_str(h, nvs_key, out, &len);
+    nvs_close(h);
+    // A missing key is not an error (unpaired / pre-#523 binding) — "" stands in.
+    return (g == ESP_OK || g == ESP_ERR_NVS_NOT_FOUND) ? ESP_OK : g;
+}
+
+esp_err_t device_identity_operator_omni(char *out, size_t cap)
+{
+    return read_omni(NVS_KEY_MASTER, out, cap);
+}
+
+esp_err_t device_identity_actor_omni(char *out, size_t cap)
+{
+    return read_omni(NVS_KEY_CHILD, out, cap);
+}
+
+typedef struct {
+    const char *operator_omni;
+    const char *actor_omni;
+    const char *service;
+    const char *op;
+    const char *data_class;
+    const char *client_nonce;
+    uint64_t client_ts;
+    char *out;
+    size_t cap;
+} cap_pop_ctx_t;
+
+static esp_err_t cap_pop_run(void *ctx)
+{
+    cap_pop_ctx_t *c = (cap_pop_ctx_t *)ctx;
+    return ak_device_cap_pop_sig(s_priv, c->operator_omni, c->actor_omni, c->service, c->op,
+                                 c->data_class, c->client_nonce, c->client_ts, c->out,
+                                 c->cap) == AK_OK
+               ? ESP_OK
+               : ESP_FAIL;
+}
+
+esp_err_t device_identity_cap_pop_sig(const char *operator_omni, const char *actor_omni,
+                                      const char *service, const char *op, const char *data_class,
+                                      const char *client_nonce, uint64_t client_ts, char *out,
+                                      size_t cap)
+{
+    // Same RFC6979 ECDSA + crypto-worker path as pop_sig; the FFI derives
+    // device_key_hash from the K10 internally, so a device can only ever sign a
+    // cap-PoP under its own hash.
+    if (!s_have) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!operator_omni || !actor_omni || !service || !op || !data_class || !client_nonce || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    cap_pop_ctx_t ctx = {.operator_omni = operator_omni,
+                         .actor_omni = actor_omni,
+                         .service = service,
+                         .op = op,
+                         .data_class = data_class,
+                         .client_nonce = client_nonce,
+                         .client_ts = client_ts,
+                         .out = out,
+                         .cap = cap};
+    return run_on_crypto_task(cap_pop_run, &ctx);
+}

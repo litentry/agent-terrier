@@ -81,6 +81,7 @@ if(AGENTKEYS_REAL_NET)
     ${FW}/main/net/agent_client.c
     ${FW}/main/net/pairing.c
     ${FW}/main/net/device_identity.c
+    ${FW}/main/net/channel_client.c
     desktop_wifi.c                    # wifi.c's stand-in: a laptop is always online
     shims/nvs.c
     shims/esp_http_client.c

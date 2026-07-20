@@ -4,6 +4,7 @@
 // this mirror is for the pixels, layout, and touch UX of the real LVGL screens.
 #include "app_state.h"
 #include "agent_client.h"
+#include "channel_client.h"
 #include "pairing.h"
 #include "wifi.h"
 #include "mock_net.h"
@@ -38,6 +39,19 @@ void wifi_start(const char *ssid, const char *password) {
     (void)password;
     app_state_set_ip("192.168.0.194");
     app_state_set_conn(CONN_AGENT_OK);
+}
+
+// #523 — channel-client stubs for the browser/mock build (the real
+// net/channel_client.c is desktop-only: no sockets/pthreads/libcurl in WASM).
+// ready() is false, so the shared ui/ screens route TALK down the mocked
+// agent_client bridge path — pixels + UX still exercised, no real channel.
+bool channel_client_ready(void) {
+    return false;
+}
+
+esp_err_t channel_client_send_text(const char *text) {
+    agent_client_send(text);
+    return ESP_OK;
 }
 
 void mock_net_seed(void) {
