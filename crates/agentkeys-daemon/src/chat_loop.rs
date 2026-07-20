@@ -375,6 +375,33 @@ async fn run(cfg: ChatLoopConfig) {
                 }
                 continue;
             }
+            // #528 (Phase 2) — a device published an `image` (a photo/frame).
+            // ARK is OpenAI-compatible, so vision rides the EXISTING gate
+            // /v1/chat/completions with an `image_url` content part — no new
+            // gate surface. Reply is published as a correlated `text` event.
+            if matches!(
+                event.kind,
+                agentkeys_backend_client::protocol::ChannelEventKind::Image
+            ) {
+                let Some(image_b64) = event.body.as_deref() else {
+                    tracing::warn!(event = %event.event_id, "#528 chat loop: image with body_ref only — by-reference is a follow-up; skipped");
+                    continue;
+                };
+                let reply = vision_turn(&http, &cfg, image_b64)
+                    .await
+                    .unwrap_or_else(|e| format!("(vision error: {e})"));
+                if let Err(e) = publish_event(
+                    &publish_ctx,
+                    "text",
+                    base64_of(reply.as_bytes()),
+                    &event.event_id,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "#528 chat loop: vision reply publish failed");
+                }
+                continue;
+            }
             let text = event
                 .body
                 .as_deref()
@@ -526,6 +553,67 @@ async fn voice_turn(
         reply_text,
         reply_audio_b64,
     })
+}
+
+/// #528 — the OpenAI-compatible vision request for one image (a JPEG data URI +
+/// a describe prompt). Split out so the wire shape is unit-tested without a live
+/// call. ARK/Doubao accept the standard `image_url` content part.
+fn vision_request_body(image_b64: &str) -> serde_json::Value {
+    serde_json::json!({
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "image_url",
+                  "image_url": { "url": format!("data:image/jpeg;base64,{image_b64}") } },
+                { "type": "text",
+                  "text": "Describe what you see in this image in one or two sentences." }
+            ]
+        }],
+        "stream": false
+    })
+}
+
+/// #528 (Phase 2) — one vision turn: POST the image to the gate's
+/// OpenAI-compatible `/v1/chat/completions` (same base + gk_ key as the voice
+/// legs) and return the text description. ARK is OpenAI-compatible, so this
+/// needs no new gate surface. Refused loudly when the sandbox has no gate
+/// wiring (direct-ark boots), exactly like `voice_turn`.
+async fn vision_turn(
+    http: &reqwest::Client,
+    cfg: &ChatLoopConfig,
+    image_b64: &str,
+) -> Result<String, String> {
+    let (Some(gate_url), Some(bearer)) = (&cfg.speech_url, &cfg.speech_bearer) else {
+        return Err(
+            "vision turns need the gate (AGENTKEYS_GATE_SPEECH_URL + gk_ key from a \
+             gate-provisioned spawn) — this sandbox has none"
+                .into(),
+        );
+    };
+    let base = gate_url.trim_end_matches('/');
+    let resp = http
+        .post(format!("{base}/v1/chat/completions"))
+        .timeout(Duration::from_secs(120))
+        .bearer_auth(bearer)
+        .json(&vision_request_body(image_b64))
+        .send()
+        .await
+        .map_err(|e| format!("gate vision send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("gate vision HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("gate vision parse: {e}"))?;
+    let reply = v["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    if reply.trim().is_empty() {
+        return Err("gate vision returned an empty description".into());
+    }
+    Ok(reply)
 }
 
 async fn resolve_session(
@@ -689,6 +777,19 @@ mod tests {
         // vars are set, so the loop must be OFF (None) — the common daemon
         // boot outside a sandbox.
         assert!(ChatLoopConfig::from_env().is_none());
+    }
+
+    #[test]
+    fn vision_request_carries_an_image_url_data_uri_and_prompt() {
+        let body = vision_request_body("AAAA");
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "image_url");
+        assert_eq!(
+            content[0]["image_url"]["url"],
+            "data:image/jpeg;base64,AAAA"
+        );
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(body["stream"], false);
     }
 
     #[test]
