@@ -41,7 +41,7 @@ void wifi_start(const char *ssid, const char *password) {
     app_state_set_conn(CONN_AGENT_OK);
 }
 
-// #523 — channel-client stubs for the browser/mock build (the real
+// #523/#524 — channel-client stubs for the browser/mock build (the real
 // net/channel_client.c is desktop-only: no sockets/pthreads/libcurl in WASM).
 // ready() is false, so the shared ui/ screens route TALK down the mocked
 // agent_client bridge path — pixels + UX still exercised, no real channel.
@@ -54,11 +54,20 @@ esp_err_t channel_client_send_text(const char *text) {
     return ESP_OK;
 }
 
+esp_err_t channel_client_send_audio(const uint8_t *wav, size_t wav_len, const char *voice,
+                                    int speech_rate) {
+    (void)wav;
+    (void)wav_len;
+    (void)voice;
+    (void)speech_rate;
+    return ESP_OK;
+}
+
 void mock_net_seed(void) {
     // Boot into a connected, mid-conversation state so every screen is populated.
     app_state_set_conn(CONN_AGENT_OK);
     app_state_set_ip("192.168.0.194");
-    app_state_append_message(ROLE_AGENT, "Hi! Hold TALK to speak with me.");
+    app_state_append_message(ROLE_AGENT, "Hi! Tap TALK to speak with me.");
     app_state_append_message(ROLE_USER, "What's the weather?");
     app_state_append_message(ROLE_AGENT, "It's sunny and 24 degrees right now.");
 }

@@ -103,6 +103,20 @@ unpaired demo device). The headless equivalent (no window, CI-runnable) is
 `e2e/channel-e2e-demo.sh --from-step 17 --to-step 19` with `KD_SERVICES` pointed at the same
 channel.
 
+### Voice (#524)
+
+On the desktop mirror, **TALK is a click-to-toggle Listen button**: click once to start
+recording your Mac's mic (SDL2 capture), click again to send the clip as a channel
+`audio-clip` turn. The agent-side pipeline (gate ASR → LLM → gate TTS) runs in the sandbox
+(#519/#520), and the spoken reply plays back through your speakers while the text renders in the
+conversation. **Settings → Speech speed** has up/down buttons (mapped onto Doubao `speech_rate`
+[-50, 100]), and **Voice** picks the reply speaker — both ride the turn as #522 audio params.
+
+Voice needs BOTH a paired channel (ASR runs agent-side) AND real audio: without either — an
+unpaired device, or the browser/WASM build where mic capture is unavailable — TALK falls back to
+the placeholder text turn. macOS asks for microphone permission on first capture. The on-device
+ES8311 codec path is scaffolded (`main/net/audio_es8311.c`) and lands with hardware bring-up.
+
 ## CI
 
 [`.github/workflows/firmware-sim.yml`](../../../.github/workflows/firmware-sim.yml) runs

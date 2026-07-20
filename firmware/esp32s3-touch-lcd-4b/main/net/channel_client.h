@@ -36,6 +36,14 @@ esp_err_t channel_client_publish_turn(const char *kind, const char *body_b64, co
 // Convenience for a text turn (no audio params).
 esp_err_t channel_client_send_text(const char *text);
 
+// #524 — send a captured voice clip (a mono-16-bit WAV) as an `audio-clip`
+// turn: the client base64-encodes it and publishes with the reply `voice` +
+// `speech_rate` (#522 audio params; voice NULL / speech_rate INT32_MIN = omit).
+// Reflects a "voice message" user bubble locally. `wav`/`wav_len` are owned by
+// the caller (copied internally).
+esp_err_t channel_client_send_audio(const uint8_t *wav, size_t wav_len, const char *voice,
+                                    int speech_rate);
+
 // Start the background subscribe long-poll loop: resolves J1, mints a
 // `channel-sub` cap, long-polls `/v1/channel/poll`, and for each inbound
 // `direction:out` event appends it to app_state (text → a bubble; audio-clip →

@@ -1,6 +1,8 @@
 // Voice picker — scrollable list, select sets the active voice. Mirrors the TUI Voices mode.
-// The list here is a placeholder catalog (P1); the real per-agent voice catalog (Volcano TTS)
-// is fetched in P4.
+// #524: real Doubao bigmodel speaker ids (the fake `zh_female_warm`-style ids were placeholders
+// that the gate TTS would reject). The FIRST entry is the verified default; the rest use the
+// documented bigmodel naming. The authoritative, per-agent catalog is fetched live from the gate
+// `GET /v1/audio/voices` in #527 — this static list is the pre-catalog fallback.
 #include "ui.h"
 
 #include <stdint.h>
@@ -11,11 +13,11 @@ static const struct {
     const char *id;
     const char *label;
 } VOICES[] = {
-    { "default", "Default" },
-    { "zh_female_warm", "Warm - Chinese female" },
-    { "zh_male_calm", "Calm - Chinese male" },
-    { "en_female_bright", "Bright - English female" },
-    { "en_male_news", "Newsreader - English male" },
+    { "zh_female_meilinvyou_moon_bigtts", "魅力女友 · Chinese female" },
+    { "zh_male_yangguangqingnian_moon_bigtts", "阳光青年 · Chinese male" },
+    { "zh_female_tianmeixiaoyuan_moon_bigtts", "甜美小源 · Chinese female" },
+    { "zh_male_jingqiangkanye_moon_bigtts", "京腔侃爷 · Chinese male" },
+    { "en_female_anna_mars_bigtts", "Anna · English female" },
 };
 #define VOICE_COUNT (sizeof(VOICES) / sizeof(VOICES[0]))
 

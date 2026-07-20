@@ -1,6 +1,7 @@
 #include "channel_client.h"
 #include "app_config.h"
 #include "app_state.h"
+#include "audio_io.h"
 #include "device_identity.h"
 
 #include <stdint.h>
@@ -171,6 +172,59 @@ static int http_post(const char *url, const char *bearer, const char *req, char 
     return status;
 }
 
+// Streaming POST: write `nparts` body chunks (with ONE content-length = their
+// total) then read the JSON response. This publishes an arbitrarily large body
+// (an audio-clip's base64) WITHOUT a giant intermediate buffer — the small
+// JSON prefix/suffix bracket the payload part, which stays where it already
+// lives (the outbox item's heap string). No bearer (the cap is the auth).
+static int http_post_parts(const char *url, const char *const parts[], const size_t part_lens[],
+                           int nparts, char *out, size_t out_len)
+{
+    size_t total = 0;
+    for (int i = 0; i < nparts; i++) {
+        total += part_lens[i];
+    }
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 30000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 1536,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    if (esp_http_client_open(client, (int)total) != ESP_OK) {
+        esp_http_client_cleanup(client);
+        return -1;
+    }
+    for (int i = 0; i < nparts; i++) {
+        size_t off = 0;
+        while (off < part_lens[i]) {
+            int w = esp_http_client_write(client, parts[i] + off, (int)(part_lens[i] - off));
+            if (w < 0) {
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                return -1;
+            }
+            off += (size_t)w;
+        }
+    }
+    esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    size_t pos = 0;
+    while (pos < out_len - 1) {
+        int r = esp_http_client_read(client, out + pos, (int)(out_len - 1 - pos));
+        if (r <= 0) {
+            break;
+        }
+        pos += (size_t)r;
+    }
+    out[pos] = '\0';
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return status;
+}
+
 // ── session + caps ───────────────────────────────────────────────────────────
 // Resolve J1 with the device's K10 agent-PoP. is_device:true suppresses the
 // sandbox spawn (a channel-only device). Caches into s_session; returns success.
@@ -304,9 +358,12 @@ static bool ensure_cap(bool publish)
 }
 
 // ── publish ──────────────────────────────────────────────────────────────────
-// Publish ONE queued turn. Runs ONLY on the channel task, so it owns s_req/
-// s_resp + the pub cap exclusively (no cross-thread race). The cap is spliced
-// VERBATIM; direction "in" = a turn TO the agent.
+// Publish ONE queued turn. Runs ONLY on the channel task, so it owns s_resp +
+// the pub cap exclusively (no cross-thread race). The body is STREAMED as three
+// parts — the JSON prefix (splicing the cap VERBATIM), the base64 payload
+// (which stays in the outbox item's heap string), and the suffix — so an
+// audio-clip of any size publishes without a giant intermediate buffer.
+// Direction "in" = a turn TO the agent.
 static esp_err_t publish_now(const outbox_item_t *item)
 {
     if (!ensure_cap(true)) {
@@ -325,19 +382,23 @@ static esp_err_t publish_now(const outbox_item_t *item)
         }
         snprintf(audio, sizeof(audio), ",\"audio\":{%s}", parts);
     }
-    int n = snprintf(s_req, sizeof(s_req),
-                     "{\"cap\":%s,\"kind\":\"%s\",\"direction\":\"in\",\"body_b64\":\"%s\"%s}",
-                     s_pub_cap, item->kind, item->body_b64, audio);
-    if (n < 0 || (size_t)n >= sizeof(s_req)) {
-        // Text turns fit; a large audio-clip would overflow this bounded buffer
-        // — that needs the streaming publish path (#524), refused loudly here.
-        ESP_LOGE(TAG, "publish body too large for the inline buffer (%d) — audio needs streaming",
-                 n);
+    // Prefix carries the ~KB cap verbatim, so it is heap-sized to fit.
+    char *prefix = malloc(strlen(s_pub_cap) + 128);
+    if (!prefix) {
         return ESP_ERR_NO_MEM;
     }
+    int plen =
+        sprintf(prefix, "{\"cap\":%s,\"kind\":\"%s\",\"direction\":\"in\",\"body_b64\":\"",
+                s_pub_cap, item->kind);
+    char suffix[160];
+    int slen = snprintf(suffix, sizeof(suffix), "\"%s}", audio);
+
+    const char *parts[3] = {prefix, item->body_b64, suffix};
+    const size_t lens[3] = {(size_t)plen, strlen(item->body_b64), (size_t)slen};
     char url[APP_URL_MAXLEN + 40];
     snprintf(url, sizeof(url), "%s%s", CHANNEL_WORKER_URL, PUBLISH_PATH);
-    int status = http_post(url, NULL, s_req, s_resp, sizeof(s_resp));
+    int status = http_post_parts(url, parts, lens, 3, s_resp, sizeof(s_resp));
+    free(prefix);
     if (status == 401 || status == 403) {
         s_pub_cap[0] = '\0'; // cap rejected/expired → re-mint next time
     }
@@ -388,6 +449,29 @@ esp_err_t channel_client_send_text(const char *text)
     return channel_client_publish_turn("text", b64, NULL, INT32_MIN);
 }
 
+esp_err_t channel_client_send_audio(const uint8_t *wav, size_t wav_len, const char *voice,
+                                    int speech_rate)
+{
+    if (!wav || !wav_len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    // Base64 the clip on the heap (a few seconds of 16 kHz mono is ~100s of KB).
+    size_t cap = 4 * ((wav_len + 2) / 3) + 1;
+    char *b64 = malloc(cap);
+    if (!b64) {
+        return ESP_ERR_NO_MEM;
+    }
+    int n = b64_encode(wav, wav_len, b64, cap);
+    if (n < 0) {
+        free(b64);
+        return ESP_ERR_NO_MEM;
+    }
+    app_state_append_message(ROLE_USER, "(voice message)");
+    esp_err_t r = channel_client_publish_turn("audio-clip", b64, voice, speech_rate);
+    free(b64); // publish_turn copied it into the outbox item
+    return r;
+}
+
 // ── subscribe poll loop ──────────────────────────────────────────────────────
 // Deliver one inbound reply event to app_state. Only direction:"out" events are
 // surfaced (the agent's replies); the device's own "in" turns are skipped.
@@ -410,9 +494,20 @@ static void deliver_event(const cJSON *ev)
             text[dl] = '\0';
             app_state_append_message(ROLE_AGENT, text);
         }
+    } else if (strcmp(kind->valuestring, "audio-clip") == 0) {
+        // #524 — the spoken reply: decode the base64 WAV (heap; a clip is larger
+        // than the text buffer) and play it through the speaker. The matching
+        // text reply arrives as its own correlated `text` event (rendered above).
+        size_t b64len = strlen(body->valuestring);
+        uint8_t *wav = malloc(b64len); // decoded is smaller than the base64
+        if (wav) {
+            int dl = b64_decode(body->valuestring, wav, b64len);
+            if (dl > 0) {
+                audio_play_wav(wav, (size_t)dl);
+            }
+            free(wav);
+        }
     } else {
-        // audio-clip / image playback lands in #524/#528; log so the round-trip
-        // is visible until then.
         ESP_LOGI(TAG, "reply kind '%s' (%d b64 chars) — playback in a later slice",
                  kind->valuestring, (int)strlen(body->valuestring));
     }

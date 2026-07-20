@@ -95,6 +95,7 @@ endif()
 add_executable(mirror
   sim_main.c
   ${NET_SOURCES}
+  desktop_audio.c                    # #524 audio_io over SDL2 (WASM-guarded); screen_home links it in BOTH modes
   ${FW}/main/app_state.c
   ${FW}/main/ui/ui.c
   ${FW}/main/ui/screen_home.c

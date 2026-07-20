@@ -22,8 +22,9 @@
 #define DEFAULT_CHAT_CHANNEL_ID    ""
 
 #define DEFAULT_SPEAK_ON     true
-#define DEFAULT_SPEECH_SPEED 100 // percent of nominal rate, clamped 50..200
-#define DEFAULT_VOICE_ID     "default"
+#define DEFAULT_SPEECH_SPEED 100 // percent of nominal rate, clamped 50..200 (→ Doubao rate -50..100)
+// #524 — the verified default Doubao bigmodel speaker (matches the inference-creds default).
+#define DEFAULT_VOICE_ID     "zh_female_meilinvyou_moon_bigtts"
 
 #define APP_HTTP_RX_CHUNK 1024
 #define APP_URL_MAXLEN    192

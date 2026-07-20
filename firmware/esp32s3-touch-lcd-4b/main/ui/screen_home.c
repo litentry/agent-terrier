@@ -1,7 +1,12 @@
-// Home / Conversation — mirrors the probe TUI conversation pane + header + hold-to-talk.
+// Home / Conversation — mirrors the probe TUI conversation pane + header + the
+// click-to-toggle Listen button (#524).
 #include "ui.h"
 #include "agent_client.h"
+#include "audio_io.h"
 #include "channel_client.h"
+
+#include <stdint.h>
+#include <stdlib.h>
 
 #include "esp_log.h"
 
@@ -54,27 +59,64 @@ static void home_refresh(void)
     lv_obj_scroll_to_y(s_convo, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
+static bool s_listening;
+
+// The device's current TTS reply preferences (settings screen), passed with a
+// voice turn so the agent synthesizes the reply the way the user chose (#522).
+static int reply_speech_rate(void)
+{
+    // 50..200 % of nominal maps linearly onto Doubao speech_rate [-50, 100].
+    int rate = app_state_get_speed() - 100;
+    if (rate < -50) {
+        rate = -50;
+    } else if (rate > 100) {
+        rate = 100;
+    }
+    return rate;
+}
+
+// #524 — click-to-toggle Listen. Voice capture needs BOTH real audio AND the
+// channel (ASR runs agent-side): first click starts listening, second click
+// stops + sends the clip. Without audio (WASM/ESP32 stub) or a channel, one
+// click sends the placeholder transcript so the path stays testable.
 static void talk_event_cb(lv_event_t *e)
 {
-    lv_event_code_t code = lv_event_get_code(e);
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
     lv_obj_t *btn = lv_event_get_target(e);
     lv_obj_t *label = lv_obj_get_child(btn, 0);
-    if (code == LV_EVENT_PRESSED) {
-        lv_label_set_text(label, LV_SYMBOL_AUDIO "  Listening...");
-    } else if (code == LV_EVENT_RELEASED) {
-        lv_label_set_text(label, LV_SYMBOL_AUDIO "  TALK");
-        // #524 replaces this with: stop ES8311 mic capture -> an audio-clip turn.
-        // Until then a placeholder transcript drives a real turn so the path is
-        // testable. A PAIRED + channel-configured device converses over the
-        // channel plane (#523); an unpaired demo device uses the direct bridge.
-        const char *msg = "Hello! Tell me something interesting in one sentence.";
-        if (channel_client_ready()) {
-            ESP_LOGI(TAG, "talk released -> channel turn");
-            channel_client_send_text(msg);
+
+    if (audio_io_available() && channel_client_ready()) {
+        if (!s_listening) {
+            if (audio_capture_start() == ESP_OK) {
+                s_listening = true;
+                lv_label_set_text(label, LV_SYMBOL_AUDIO "  Listening… tap to send");
+                return;
+            }
         } else {
-            ESP_LOGI(TAG, "talk released -> bridge turn");
-            agent_client_send(msg);
+            s_listening = false;
+            lv_label_set_text(label, LV_SYMBOL_AUDIO "  TALK");
+            size_t len = 0;
+            uint8_t *wav = audio_capture_stop(&len);
+            if (wav && len) {
+                char voice[40];
+                app_state_get_voice(voice, sizeof(voice));
+                channel_client_send_audio(wav, len, voice, reply_speech_rate());
+            } else {
+                ESP_LOGW(TAG, "no audio captured (silent mic / permission?)");
+            }
+            free(wav);
+            return;
         }
+    }
+
+    // Fallback: a placeholder text turn (unpaired demo device or no audio).
+    const char *msg = "Hello! Tell me something interesting in one sentence.";
+    if (channel_client_ready()) {
+        channel_client_send_text(msg);
+    } else {
+        agent_client_send(msg);
     }
 }
 
@@ -101,7 +143,7 @@ ui_screen_view_t ui_build_home(void)
     lv_obj_set_style_text_font(talk_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(talk_label, lv_color_hex(0xFFFFFF), 0);
     lv_obj_center(talk_label);
-    lv_obj_add_event_cb(talk, talk_event_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(talk, talk_event_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *footer = lv_obj_create(scr);
     lv_obj_set_size(footer, lv_pct(100), LV_SIZE_CONTENT);

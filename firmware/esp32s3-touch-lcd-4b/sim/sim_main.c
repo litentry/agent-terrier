@@ -8,6 +8,7 @@
 #include "lvgl.h"
 #include "ui.h"
 #include "app_state.h"
+#include "audio_io.h" // #524 — SDL2 mic/speaker (WASM-guarded to unavailable)
 #ifdef AGENTKEYS_REAL_NET
 // #517 real-device mode: the firmware's OWN net/ layer, no fixtures.
 #include "agent_client.h"
@@ -44,6 +45,7 @@ int main(void) {
     lv_sdl_mouse_create();
 
     app_state_init();
+    audio_io_init(); // mic/speaker for the Listen button (no-op/unavailable on WASM)
 #ifdef AGENTKEYS_REAL_NET
     // Boot the REAL device: load-or-generate the K10 (persisted in ~/.agentkeys/
     // mock-device), report the host's IP, point the agent client at the broker,

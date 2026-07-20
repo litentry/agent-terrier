@@ -14,6 +14,7 @@
 #include "agent_client.h"
 #include "app_config.h"
 #include "app_state.h"
+#include "audio_io.h"
 #include "channel_client.h"
 #include "device_identity.h"
 #include "ui.h"
@@ -100,7 +101,10 @@ void app_main(void)
     // is configured; the loop waits for pairing to bind before minting caps).
     channel_client_start();
 
-    // #524 adds ES8311 audio here: bsp_audio_init() + bsp_audio_codec_microphone_init() /
-    // bsp_audio_codec_speaker_init() + bsp_audio_poweramp_enable(true), driving the TALK button.
+    // #524 — mic/speaker for the Listen button. The ES8311 codec path is
+    // scaffolded (audio_es8311.c) and reports unavailable until on-hardware
+    // bring-up; TALK then uses the text fallback, loudly (never a silent no-op).
+    audio_io_init();
+
     ESP_LOGI(TAG, "boot complete");
 }
