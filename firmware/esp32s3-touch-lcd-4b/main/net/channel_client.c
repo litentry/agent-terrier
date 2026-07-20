@@ -261,6 +261,27 @@ static bool resolve_session(void)
     return ok;
 }
 
+// Canonical omni for the wire: `0x` + 64 hex.
+//
+// §10.2's pairing poll returns BARE hex omnis, and device_identity persists
+// exactly what it was handed — but the broker's cap-mint validator requires the
+// 0x-prefixed form and rejects anything else with 400 invalid_input. So a
+// correctly-paired device could never mint a channel cap (and every publish then
+// failed 422, its `cap` field empty). Normalize at the send site, which owns the
+// wire contract, so a device paired BEFORE this fix mints without re-pairing.
+//
+// The #76 cap-PoP preimage canonicalizes the prefix + case (agentkeys-core
+// `cap_pop_payload`, which the device signs through via FFI), so the signature is
+// identical either way — this changes only the body.
+static void omni_canonical(const char *in, char *out, size_t cap)
+{
+    if (in[0] == '0' && (in[1] == 'x' || in[1] == 'X')) {
+        snprintf(out, cap, "%s", in);
+    } else {
+        snprintf(out, cap, "0x%s", in);
+    }
+}
+
 // Mint a channel cap. `service` = "channel-{pub,sub}:<id>", `op` =
 // "channel_{publish,subscribe}". The #76 cap-PoP signs (operator, actor,
 // service, op, data_class=channel, client_nonce, client_ts) — all echoed into
@@ -279,6 +300,11 @@ static bool mint_cap(const char *path, const char *service, const char *op, char
         ESP_LOGW(TAG, "cap mint: no bound omnis (unpaired?)");
         return false;
     }
+    // The persisted omnis may be bare hex (see omni_canonical) — the broker
+    // 400s that form. Sign + send the SAME canonical strings.
+    char op_omni[80], act_omni[80];
+    omni_canonical(operator_omni, op_omni, sizeof(op_omni));
+    omni_canonical(actor_omni, act_omni, sizeof(act_omni));
 
     // client_nonce = lowercase hex of 16 random bytes; client_ts = unix seconds.
     // NOTE (ESP32): the broker rejects a client_ts >60 s future / >300 s stale,
@@ -293,8 +319,8 @@ static bool mint_cap(const char *path, const char *service, const char *op, char
     uint64_t ts = (uint64_t)time(NULL);
 
     char sig[DEVICE_ID_SIG_LEN];
-    if (device_identity_cap_pop_sig(operator_omni, actor_omni, service, op, "channel", nonce, ts,
-                                    sig, sizeof(sig)) != ESP_OK) {
+    if (device_identity_cap_pop_sig(op_omni, act_omni, service, op, "channel", nonce, ts, sig,
+                                    sizeof(sig)) != ESP_OK) {
         ESP_LOGW(TAG, "cap-PoP sign failed");
         return false;
     }
@@ -305,7 +331,7 @@ static bool mint_cap(const char *path, const char *service, const char *op, char
              "{\"operator_omni\":\"%s\",\"actor_omni\":\"%s\",\"service\":\"%s\","
              "\"device_key_hash\":\"%s\",\"ttl_seconds\":%d,\"client_sig\":\"%s\","
              "\"client_nonce\":\"%s\",\"client_ts\":%llu}",
-             operator_omni, actor_omni, service, dkh, CAP_TTL_SECS, sig, nonce,
+             op_omni, act_omni, service, dkh, CAP_TTL_SECS, sig, nonce,
              (unsigned long long)ts);
     int status = http_post(url, s_session, s_req, dst, dst_len);
     if (status == 401) {
@@ -314,7 +340,12 @@ static bool mint_cap(const char *path, const char *service, const char *op, char
         return false;
     }
     if (status != 200) {
-        ESP_LOGW(TAG, "cap mint %s -> %d", service, status);
+        // Log the broker's `reason` too, not just the code: the difference
+        // between 400 invalid_input, 403 service_not_in_scope and 403
+        // device_not_active is the whole diagnosis, and a bare status forces a
+        // round trip through the broker source to guess which one it was.
+        ESP_LOGW(TAG, "cap mint %s -> %d %.*s", service, status, 160, dst);
+        dst[0] = '\0';
         return false;
     }
     // Sanity: the response must look like a CapToken (has "broker_sig"). Stored
@@ -403,7 +434,12 @@ static esp_err_t publish_now(const outbox_item_t *item)
         s_pub_cap[0] = '\0'; // cap rejected/expired → re-mint next time
     }
     if (status < 200 || status >= 300) {
-        ESP_LOGW(TAG, "publish -> %d", status);
+        // Include the worker's `reason` — a bare 502 is ambiguous between
+        // "s3_put" (the feed write failed) and "chain_rpc" (the cap re-verify
+        // could not reach the chain), which are different problems on different
+        // machines. The status alone costs a round trip through the worker
+        // source to guess which.
+        ESP_LOGW(TAG, "publish -> %d %.*s", status, 200, s_resp);
         return ESP_FAIL;
     }
     return ESP_OK;
@@ -564,6 +600,12 @@ static void channel_task(void *arg)
         snprintf(url, sizeof(url), "%s%s", CHANNEL_WORKER_URL, POLL_PATH);
         int status = http_post(url, NULL, s_req, s_resp, sizeof(s_resp));
         if (status == 401 || status == 403) {
+            // LOUD: a refused poll used to retry forever in total silence, so a
+            // device that could never receive a reply looked merely idle — the
+            // subscribe half of the conversation failing is invisible otherwise
+            // (the publish half at least warns).
+            ESP_LOGW(TAG, "poll %s -> %d %.*s — re-minting the sub cap", channel_id(), status, 160,
+                     s_resp);
             s_sub_cap[0] = '\0'; // re-mint (and maybe re-resolve) next round
             vTaskDelay(pdMS_TO_TICKS(backoff));
             continue;

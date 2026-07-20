@@ -115,8 +115,18 @@ static void talk_event_cb(lv_event_t *e)
     const char *msg = "Hello! Tell me something interesting in one sentence.";
     if (channel_client_ready()) {
         channel_client_send_text(msg);
-    } else {
+    } else if (agent_client_configured()) {
+        // A direct-agent base is set (AGENTKEYS_AGENT_URL) — the unpaired-demo path.
         agent_client_send(msg);
+    } else {
+        // No talk path: not channel-bound AND no direct agent. Guide the operator
+        // instead of POSTing to an empty base (the cryptic "HTTP 0"). The channel
+        // path needs pairing; without a direct agent, pairing is the only way.
+        app_state_append_message(ROLE_USER, msg);
+        app_state_append_message(
+            ROLE_AGENT,
+            "Not paired yet — tap Pair and claim me in parent-control, then I can "
+            "talk over the channel.");
     }
 }
 

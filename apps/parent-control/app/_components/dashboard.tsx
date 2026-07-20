@@ -8,7 +8,7 @@ import { AutoDistributePanel, PermissionList } from './permissions';
 import type { ProposedScope } from '@/lib/client/types';
 import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
 import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
-import { actorIsChannelEndpoint, isChannelService } from './types';
+import { actorIsChannelEndpoint, actorTypeIsUnknown, isChannelService } from './types';
 
 // ─── Actors list ─────────────────────────────────────────────────
 export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status: ConnectionStatus; onPick: (id: string) => void }) {
@@ -235,8 +235,24 @@ export function ActorDetail({
           )}
           <dt>derivation</dt><dd className="mono">{actor.derivation} <span className="muted">(hard / HDKD)</span></dd>
           <dt>device pubkey</dt><dd className="mono">{actor.devicePubkey} <span className="muted">· K10 secp256k1</span></dd>
+          {/* The device-key hash is how this actor is matched to the PHYSICAL
+              device that holds the K10 — it is what the device prints on boot
+              and what the fleet console shows as `identity`. Without it there is
+              no way to tell which paired actor a given device is. */}
+          <dt>device key hash</dt>
+          <dd className="mono">
+            {actor.deviceKeyHash
+              ? <>{actor.deviceKeyHash} <span className="muted">· K10 hash — matches the device&apos;s own `identity`</span></>
+              : <span className="muted">unknown</span>}
+          </dd>
           <dt>vendor</dt><dd>{actor.vendor}</dd>
-          <dt>device</dt><dd>{actor.device}</dd>
+          <dt>device</dt>
+          <dd>
+            {actor.device}
+            {actorTypeIsUnknown(actor) && (
+              <span className="muted"> · type unknown — no binding record (rebuilt from chain); grant its channels to record it</span>
+            )}
+          </dd>
           <dt>K11 user-presence</dt><dd>{actor.k11 ? 'enrolled (master device)' : <span className="muted">none · agents cannot hold K11</span>}</dd>
           <dt>last active</dt><dd>{actor.lastActive}</dd>
         </dl>

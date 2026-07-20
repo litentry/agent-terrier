@@ -38,6 +38,10 @@ export interface Actor {
   /** On-chain SidecarRegistry device key hash — the Touch-ID unpair's target
    *  (revokeAgentDevice must run as the master-account UserOp). */
   deviceKeyHash?: string;
+  /** What this actor IS, from its binding: 'device' | 'delegate'. Absent =
+   *  unknown (no binding-manifest entry, e.g. rebuilt from chain) — which is
+   *  NOT the same as 'delegate'. Never infer this from the scope. */
+  kind?: string;
   paymentCap?: { perTx: number; daily: number; currency: string };
   timeWindow?: { start: string; end: string; tz: string };
   services?: string[];
@@ -150,8 +154,49 @@ export const isChannelService = (svc: string): boolean => /^channel-(pub|sub):/i
  *  device (D6). Only decidable when the daemon knows the service NAMES (accepts
  *  done through this daemon session); after a daemon restart a chain-reconstructed
  *  device falls back to the pairing page's delegate grid with hash-only grants. */
-export const actorIsChannelEndpoint = (a: Actor): boolean =>
-  (a.services?.length ?? 0) > 0 && (a.services ?? []).every(isChannelService);
+export const actorIsChannelEndpoint = (a: Actor): boolean => {
+  // The BINDING decides what an actor is — not what it is currently allowed to
+  // do. This used to be scope-shape only ("every grant is a channel grant"),
+  // which meant revoking a device's grants left it with an empty scope and
+  // silently demoted it to a delegate: a real paired device then showed up
+  // under Delegates, unrecognizable, while an unrelated agent that happened to
+  // hold only channel grants was presented as the device.
+  if (a.kind === 'device') return true;
+  if (a.kind === 'delegate') return false;
+  // Unknown binding (rebuilt from chain, no manifest entry): fall back to the
+  // scope shape, which is only evidence when the scope is NON-EMPTY. An empty
+  // scope proves nothing, so it must not read as either type.
+  return (a.services?.length ?? 0) > 0 && (a.services ?? []).every(isChannelService);
+};
+
+/** True when we genuinely cannot tell a device from a delegate — no binding
+ *  record AND no scope to infer from. The UI should say so rather than pick. */
+export const actorTypeIsUnknown = (a: Actor): boolean =>
+  !a.kind && (a.services?.length ?? 0) === 0;
+
+/** Mirrors the daemon's `valid_channel_id`: 1..=48 of [a-z0-9-], no edge dash. */
+export const isValidChannelId = (id: string): boolean =>
+  /^[a-z0-9-]{1,48}$/.test(id) && !id.startsWith('-') && !id.endsWith('-');
+
+/** The channel an agent's chat tab talks on: the one it actually HOLDS A GRANT
+ *  for. `null` = it has none and its label cannot form a valid id.
+ *
+ *  This used to be `opchat-${label}`, which broke as soon as a label was a
+ *  placeholder like "agent 0x346391ed…" — spaces and "…" are not legal channel-id
+ *  characters, so every poll/send returned 400 `invalid channel_id`. A label is
+ *  display text and may be anything; the grant is the binding. The label is kept
+ *  only as a last-resort fallback, and only when it is actually valid. */
+export const agentChatChannelId = (a: Actor): string | null => {
+  const services = a.services ?? [];
+  const idsWithPrefix = (prefix: string) =>
+    services.filter((s) => s.startsWith(prefix)).map((s) => s.slice(prefix.length));
+  const fromLabel = `opchat-${a.label}`;
+  return (
+    idsWithPrefix('channel-pub:')[0] ??
+    idsWithPrefix('channel-sub:')[0] ??
+    (isValidChannelId(fromLabel) ? fromLabel : null)
+  );
+};
 
 export interface ContractInfo {
   name: string;

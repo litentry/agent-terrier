@@ -10,7 +10,21 @@ export type ApiActor = { id: string, omni: string, omni_hex: string, label: stri
  * the master-reset fleet teardown revoke by hash even when the per-label
  * `~/.agentkeys/agents/<label>.json` record never existed on this machine.
  */
-device_key_hash?: string, scope?: { [key in string]?: ApiScopeBits }, 
+device_key_hash?: string, 
+/**
+ * What this actor IS — `"device"` (channel endpoint, §14.10) or
+ * `"delegate"` (sandbox-resident) — from the binding manifest, which
+ * records it at accept/scope-commit time.
+ *
+ * `None` = genuinely unknown (no manifest entry — e.g. an actor rebuilt
+ * from chain), NOT "delegate". The UI must not guess from the scope: it
+ * used to infer device-ness from "all grants are channel grants", so
+ * revoking a device's grants silently demoted it to a delegate and a real
+ * device showed up under Delegates with its identity unrecognizable. An
+ * actor's TYPE is a property of its binding, never of its current
+ * permissions.
+ */
+kind?: string, scope?: { [key in string]?: ApiScopeBits }, 
 /**
  * #248: on-chain scope service ids (0x-hex keccak) that aren't a known
  * `memory:<ns>` — e.g. `cred:<service>` granted at accept. The panel's

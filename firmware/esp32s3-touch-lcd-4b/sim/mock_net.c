@@ -26,6 +26,12 @@ bool agent_client_healthz(void) {
     return true;
 }
 
+bool agent_client_configured(void) {
+    // The mock build always renders a canned agent reply, so TALK routes to the
+    // mocked agent_client_send (never the "pair me first" guidance).
+    return true;
+}
+
 void pairing_start(void) {
     // Render a realistic pairing QR (the canonical deep-link) + short code + #224 device-key hash.
     app_state_set_pairing(PAIR_UNBOUND,
