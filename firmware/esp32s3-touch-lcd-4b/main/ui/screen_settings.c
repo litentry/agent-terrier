@@ -4,6 +4,35 @@
 
 static lv_obj_t *s_bar;
 static lv_obj_t *s_speed_value;
+static lv_obj_t *s_speed_slider;
+
+#define SPEED_MIN  50
+#define SPEED_MAX  200
+#define SPEED_STEP 10
+
+// Push a new speed to app_state + reflect it on the slider + the %d%% label.
+static void apply_speed(int value)
+{
+    if (value < SPEED_MIN) {
+        value = SPEED_MIN;
+    } else if (value > SPEED_MAX) {
+        value = SPEED_MAX;
+    }
+    app_state_set_speed(value);
+    if (s_speed_slider) {
+        lv_slider_set_value(s_speed_slider, value, LV_ANIM_OFF);
+    }
+    if (s_speed_value) {
+        lv_label_set_text_fmt(s_speed_value, "%d%%", value);
+    }
+}
+
+// #524 — the up/down speed buttons (requirement 5). user_data = the signed step.
+static void speed_step_cb(lv_event_t *e)
+{
+    intptr_t step = (intptr_t)lv_event_get_user_data(e);
+    apply_speed(app_state_get_speed() + (int)step);
+}
 
 static lv_obj_t *make_panel(lv_obj_t *parent)
 {
@@ -82,13 +111,33 @@ ui_screen_view_t ui_build_settings(void)
     lv_obj_set_flex_align(speed_header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *speed_label = lv_label_create(speed_header);
     lv_label_set_text(speed_label, "Speech speed");
-    s_speed_value = lv_label_create(speed_header);
+    // The up/down control (#524, requirement 5): [−] value% [+] on the right.
+    lv_obj_t *stepper = lv_obj_create(speed_header);
+    lv_obj_set_height(stepper, LV_SIZE_CONTENT);
+    lv_obj_set_width(stepper, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(stepper, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(stepper, 0, 0);
+    lv_obj_set_style_pad_all(stepper, 0, 0);
+    lv_obj_set_style_pad_column(stepper, 10, 0);
+    lv_obj_remove_flag(stepper, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(stepper, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(stepper, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *down_btn = lv_button_create(stepper);
+    lv_obj_set_style_bg_color(down_btn, UI_COL_ACCENT, 0);
+    lv_label_set_text(lv_label_create(down_btn), LV_SYMBOL_MINUS);
+    lv_obj_add_event_cb(down_btn, speed_step_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(-SPEED_STEP));
+    s_speed_value = lv_label_create(stepper);
     lv_label_set_text_fmt(s_speed_value, "%d%%", app_state_get_speed());
-    lv_obj_t *speed_slider = lv_slider_create(speed_panel);
-    lv_obj_set_width(speed_slider, lv_pct(100));
-    lv_slider_set_range(speed_slider, 50, 200);
-    lv_slider_set_value(speed_slider, app_state_get_speed(), LV_ANIM_OFF);
-    lv_obj_add_event_cb(speed_slider, speed_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_t *up_btn = lv_button_create(stepper);
+    lv_obj_set_style_bg_color(up_btn, UI_COL_ACCENT, 0);
+    lv_label_set_text(lv_label_create(up_btn), LV_SYMBOL_PLUS);
+    lv_obj_add_event_cb(up_btn, speed_step_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(SPEED_STEP));
+
+    s_speed_slider = lv_slider_create(speed_panel);
+    lv_obj_set_width(s_speed_slider, lv_pct(100));
+    lv_slider_set_range(s_speed_slider, SPEED_MIN, SPEED_MAX);
+    lv_slider_set_value(s_speed_slider, app_state_get_speed(), LV_ANIM_OFF);
+    lv_obj_add_event_cb(s_speed_slider, speed_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *voice_btn = ui_add_nav_button(content, LV_SYMBOL_AUDIO "  Voice", UI_SCREEN_VOICES);
     lv_obj_set_width(voice_btn, lv_pct(92));
