@@ -35,6 +35,10 @@ export interface Actor {
    *  `memory:<ns>` (e.g. `cred:<service>` from the accept). The panel's
    *  set-replace commit echoes these back so a memory toggle can't wipe them. */
   scopeUnknownServiceIds?: string[];
+  /** #541: the subset of `scopeUnknownServiceIds` the daemon resolved to
+   *  channel grants. A CHANNEL commit must SUBTRACT these from what it echoes —
+   *  otherwise removing a channel silently re-adds it. See channelGrantCommit. */
+  scopeChannelServiceIds?: string[];
   /** On-chain SidecarRegistry device key hash — the Touch-ID unpair's target
    *  (revokeAgentDevice must run as the master-account UserOp). */
   deviceKeyHash?: string;
@@ -155,28 +159,70 @@ export const isChannelService = (svc: string): boolean => /^channel-(pub|sub):/i
  *  done through this daemon session); after a daemon restart a chain-reconstructed
  *  device falls back to the pairing page's delegate grid with hash-only grants. */
 export const actorIsChannelEndpoint = (a: Actor): boolean => {
-  // The BINDING decides what an actor is — not what it is currently allowed to
-  // do. This used to be scope-shape only ("every grant is a channel grant"),
-  // which meant revoking a device's grants left it with an empty scope and
-  // silently demoted it to a delegate: a real paired device then showed up
-  // under Delegates, unrecognizable, while an unrelated agent that happened to
-  // hold only channel grants was presented as the device.
-  if (a.kind === 'device') return true;
-  if (a.kind === 'delegate') return false;
-  // Unknown binding (rebuilt from chain, no manifest entry): fall back to the
-  // scope shape, which is only evidence when the scope is NON-EMPTY. An empty
-  // scope proves nothing, so it must not read as either type.
-  return (a.services?.length ?? 0) > 0 && (a.services ?? []).every(isChannelService);
+  // `kind` is the CHAIN's answer: the daemon reads SidecarRegistry's tier
+  // (TIER_AGENT=2 ⇒ delegate, TIER_DEVICE=3 ⇒ device) — see `tier_kind` in
+  // ui_bridge.rs. No heuristic here on purpose.
+  //
+  // There used to be a scope-shape fallback ("every grant is a channel grant
+  // ⇒ device"). It is DELETED because it is wrong in both directions: a
+  // delegate whose only grants are channel grants read as a device (the live
+  // VE case — a delegate and a device both showed as "device"), and a device
+  // stripped of its grants read as a delegate. Shape describes what an actor
+  // may currently do; it never describes what the actor IS.
+  return a.kind === 'device';
 };
 
-/** True when we genuinely cannot tell a device from a delegate — no binding
- *  record AND no scope to infer from. The UI should say so rather than pick. */
-export const actorTypeIsUnknown = (a: Actor): boolean =>
-  !a.kind && (a.services?.length ?? 0) === 0;
+/** True when neither the chain nor the manifest could say what this actor is —
+ *  a pre-#427 row (registry tier 0) with no binding-manifest entry either. The
+ *  UI says so rather than picking; there is deliberately nothing to infer from. */
+export const actorTypeIsUnknown = (a: Actor): boolean => !a.kind;
 
 /** Mirrors the daemon's `valid_channel_id`: 1..=48 of [a-z0-9-], no edge dash. */
 export const isValidChannelId = (id: string): boolean =>
   /^[a-z0-9-]{1,48}$/.test(id) && !id.startsWith('-') && !id.endsWith('-');
+
+/** The exact `setScope` inputs for changing an actor's CHANNEL grants (#541).
+ *
+ *  `setScope` is set-replace, so a commit must restate the WHOLE grant set:
+ *   • `services` — every grant we know by NAME: the actor's memory/inbox grants
+ *     (from the chain-mirrored scope), its other known non-channel names, and
+ *     the staged channel set.
+ *   • `preserve` — the raw on-chain hashes whose names we do NOT know (e.g.
+ *     `cred:<service>` from the accept) MINUS the channel hashes. Subtracting
+ *     them is the whole point: `scopeUnknownServiceIds` deliberately still
+ *     contains the channel grants (so a MEMORY commit can't wipe them), so
+ *     echoing it verbatim here would re-add the very channel just removed.
+ *
+ *  Memory grants live in `scope` (ScopeBits), not in `services`, so they must be
+ *  rebuilt from there — the same names the memory panel commits. */
+export const channelGrantCommit = (
+  a: Actor,
+  stagedChannelServices: string[],
+): { services: string[]; preserve: string[] } => {
+  const memoryNames = Object.entries(a.scope ?? {}).flatMap(([ns, bits]) => [
+    ...(bits?.read ? [`memory:${ns}`] : []),
+    ...(bits?.write ? [`inbox:${ns}`] : []),
+  ]);
+  const otherKnown = (a.services ?? []).filter((s) => !isChannelService(s));
+  const channelHashes = new Set(
+    (a.scopeChannelServiceIds ?? []).map((h) => h.toLowerCase()),
+  );
+  return {
+    services: Array.from(new Set([...memoryNames, ...otherKnown, ...stagedChannelServices])),
+    preserve: (a.scopeUnknownServiceIds ?? []).filter(
+      (h) => !channelHashes.has(h.toLowerCase()),
+    ),
+  };
+};
+
+/** Whether the actor holds ANY grant (pub or sub) on the given channel — i.e.
+ *  whether it can hear/reply there. The AUTHORITY (master session) can always
+ *  publish/subscribe on a master-owned channel (§22e ownership), so this is
+ *  about the DELEGATE side of a conversation, never a gate on the operator. */
+export const actorHoldsChannelGrant = (a: Actor, channelId: string): boolean =>
+  (a.services ?? []).some(
+    (s) => s === `channel-pub:${channelId}` || s === `channel-sub:${channelId}`,
+  );
 
 /** The channel an agent's chat tab talks on: the one it actually HOLDS A GRANT
  *  for. `null` = it has none and its label cannot form a valid id.

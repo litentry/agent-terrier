@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use agentkeys_core::audit::{AuditOpKind, AuditResult, ChannelPublishBody, ChannelSubscribeBody};
 use agentkeys_protocol::{ChannelDirection, ChannelEvent, ChannelEventKind, ChannelProducer};
 use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
-use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
+use agentkeys_worker_creds::aws_creds::{OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::{
     err_400, err_403, err_413, err_500, err_502, s3_error_summary, ApiError,
@@ -32,6 +32,35 @@ use crate::state::SharedChannelWorkerState;
 /// Process-local monotonic sequence — disambiguates two events published in the
 /// same millisecond so feed keys stay strictly ordered within a worker run.
 static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// #541 — resolve the S3 client for a request. Relayed `X-Aws-*` creds win
+/// (back-compat with callers that mint their own); otherwise the worker redeems
+/// the ALREADY-VERIFIED cap for owner-scoped creds at the broker's
+/// `/v1/cap/channel-sts`. There is deliberately NO ambient fallback: the EC2
+/// instance profile defeated §17.5 layers 3/4 on AWS, and VE (no ambient creds)
+/// proved the path was never real — a request that can't resolve creds fails
+/// LOUDLY here instead (arch §22e "cap-derived, never ambient").
+async fn storage_s3(
+    state: &SharedChannelWorkerState,
+    creds: Option<&StsCreds>,
+    cap: &CapToken,
+    owner: &str,
+    channel_id: &str,
+) -> Result<aws_sdk_s3::Client, ApiError> {
+    if let Some(relayed) = creds {
+        return Ok(relayed.build_s3_client(&state.config.region).await);
+    }
+    let Some(minter) = &state.sts_minter else {
+        return Err(err_500(
+            "no storage credentials for this request: no X-Aws-* relay headers, and the cap→STS \
+             minter is unconfigured (AGENTKEYS_BROKER_URL / AGENTKEYS_CHANNEL_STS_TOKEN — \
+             setup-broker-host.sh writes both). Ambient instance-profile access is retired (#541).",
+            "storage_creds_unconfigured",
+        ));
+    };
+    let minted = minter.creds_for(cap, owner, channel_id).await?;
+    Ok(minted.build_s3_client(&state.config.region).await)
+}
 
 pub fn build_router(state: SharedChannelWorkerState) -> Router {
     Router::new()
@@ -260,7 +289,7 @@ async fn channel_publish_inner(
         .map_err(|e| err_500(e.to_string(), "channel_envelope_encrypt"))?;
 
     let key = feed_key(&owner, channel_id, &event_id);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
+    let s3 = storage_s3(state, creds, &req.cap, &owner, channel_id).await?;
     s3.put_object()
         .bucket(&state.config.channel_bucket)
         .key(&key)
@@ -287,8 +316,15 @@ async fn channel_poll(
     // the list still wakes us (§14.12 race note in wakeup.rs).
     let waiter = state.wakeup.waiter(&channel_id);
 
-    let mut events =
-        channel_list_after(&state, creds.as_ref(), &owner, &channel_id, &req.after).await?;
+    let mut events = channel_list_after(
+        &state,
+        creds.as_ref(),
+        &req.cap,
+        &owner,
+        &channel_id,
+        &req.after,
+    )
+    .await?;
 
     // NRT long-poll: if nothing new and the caller wants to wait, hold the
     // request until a publish signals this channel (or the ceiling elapses),
@@ -296,8 +332,15 @@ async fn channel_poll(
     if events.is_empty() && req.wait_seconds > 0 {
         let wait = req.wait_seconds.min(state.config.max_poll_seconds);
         let _ = tokio::time::timeout(Duration::from_secs(wait), waiter.notified()).await;
-        events =
-            channel_list_after(&state, creds.as_ref(), &owner, &channel_id, &req.after).await?;
+        events = channel_list_after(
+            &state,
+            creds.as_ref(),
+            &req.cap,
+            &owner,
+            &channel_id,
+            &req.after,
+        )
+        .await?;
     }
 
     let cursor = events
@@ -335,12 +378,13 @@ async fn channel_poll(
 async fn channel_list_after(
     state: &SharedChannelWorkerState,
     creds: Option<&StsCreds>,
+    cap: &CapToken,
     owner: &str,
     channel_id: &str,
     after: &str,
 ) -> Result<Vec<ChannelEvent>, ApiError> {
     let prefix = feed_prefix(owner, channel_id);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
+    let s3 = storage_s3(state, creds, cap, owner, channel_id).await?;
     let mut list = s3
         .list_objects_v2()
         .bucket(&state.config.channel_bucket)
@@ -393,7 +437,8 @@ async fn channel_teardown(
     // D8 (#430): teardown sweeps the OPERATOR-owned feed prefix.
     let owner = normalize_omni(&req.cap.payload.operator_omni);
 
-    let outcome = channel_teardown_inner(&state, creds.as_ref(), &owner, &channel_id).await;
+    let outcome =
+        channel_teardown_inner(&state, creds.as_ref(), &req.cap, &owner, &channel_id).await;
     let audit_body = agentkeys_core::audit::ChannelTeardownBody {
         channel_id: channel_id.clone(),
         actor_target: req.cap.payload.actor_omni.clone(),
@@ -423,11 +468,12 @@ async fn channel_teardown(
 async fn channel_teardown_inner(
     state: &SharedChannelWorkerState,
     creds: Option<&StsCreds>,
+    cap: &CapToken,
     owner: &str,
     channel_id: &str,
 ) -> Result<usize, ApiError> {
     let prefix = feed_prefix(owner, channel_id);
-    let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
+    let s3 = storage_s3(state, creds, cap, owner, channel_id).await?;
     let list = s3
         .list_objects_v2()
         .bucket(&state.config.channel_bucket)

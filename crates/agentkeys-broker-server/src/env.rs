@@ -58,6 +58,18 @@ pub const MEMORY_ROLE_ARN: &str = "MEMORY_ROLE_ARN";
 /// "not configured" error rather than failing boot. Same posture as
 /// `MEMORY_ROLE_ARN`.
 pub const SPEECH_ROLE_ARN: &str = "SPEECH_ROLE_ARN";
+
+/// #541 — the per-data-class CHANNEL role `/v1/cap/channel-sts` AssumeRoles
+/// (AWS: `agentkeys-channel-role`, provisioned by `provision-channel-role.sh`;
+/// VE: the role trn the VE STS provider mints against). Empty = endpoint
+/// returns a clear "not configured" error; same posture as `MEMORY_ROLE_ARN`.
+pub const CHANNEL_ROLE_ARN: &str = "CHANNEL_ROLE_ARN";
+
+/// #541 — the host-minted shared bearer the CHANNEL WORKER presents to
+/// `/v1/cap/channel-sts`. Generated once by `setup-broker-host.sh` (same
+/// generate-once posture as the worker KEKs) and written to BOTH the broker
+/// unit env and the channel worker env; never in the repo env files.
+pub const AGENTKEYS_CHANNEL_STS_TOKEN: &str = "AGENTKEYS_CHANNEL_STS_TOKEN";
 /// Optional. Path to the audit-log SQLite DB. Defaults to `~/.agentkeys/broker/audit.sqlite`.
 pub const BROKER_AUDIT_DB_PATH: &str = "BROKER_AUDIT_DB_PATH";
 /// Optional. AWS region used for STS calls. Defaults to `us-east-1`.

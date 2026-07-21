@@ -44,6 +44,8 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         data_role_arn: STUB_ROLE_ARN.into(),
         memory_role_arn: String::new(),
         speech_role_arn: String::new(),
+        channel_role_arn: String::new(),
+        channel_sts_token: String::new(),
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,

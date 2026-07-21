@@ -19,6 +19,7 @@
 
 pub mod handlers;
 pub mod state;
+pub mod sts_mint;
 pub mod wakeup;
 
 pub use state::{ChannelWorkerConfig, ChannelWorkerState};

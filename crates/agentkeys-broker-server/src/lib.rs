@@ -116,6 +116,15 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/cap/speech-sts",
             post(handlers::speech_sts::mint_speech_sts),
         )
+        // #541 — WORKER-redeemed, cap-derived channel storage creds: the channel
+        // worker (authenticated by the host-minted shared bearer) exchanges the
+        // Channel cap it just verified for short-lived owner-scoped creds.
+        // Deliberately NOT client-redeemable — participants must never hold the
+        // owner's storage credential (see handlers/channel_sts.rs docs).
+        .route(
+            "/v1/cap/channel-sts",
+            post(handlers::channel_sts::mint_channel_sts),
+        )
         // Per-data-class CHANNEL caps (#406 channels phase 1). data_class=Channel;
         // the route fixes the DIRECTION — channel-pub mints ChannelPublish,
         // channel-sub mints ChannelSubscribe (distinct on-chain grants). The

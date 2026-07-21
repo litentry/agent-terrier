@@ -30,7 +30,20 @@ kind?: string, scope?: { [key in string]?: ApiScopeBits },
  * `memory:<ns>` — e.g. `cred:<service>` granted at accept. The panel's
  * set-replace commit echoes these back so a memory toggle can't wipe them.
  */
-scope_unknown_service_ids?: Array<string>, payment_cap?: ApiPaymentCap, time_window?: ApiTimeWindow, services?: Array<string>, 
+scope_unknown_service_ids?: Array<string>, 
+/**
+ * #541: the SUBSET of `scope_unknown_service_ids` this daemon resolved to
+ * `channel-pub:<id>`/`channel-sub:<id>` via the channel registry.
+ *
+ * Why it must be exposed separately: `scope_unknown_service_ids`
+ * deliberately keeps the channel hashes (a MEMORY commit has to echo them
+ * so it cannot wipe channels). But a CHANNEL commit needs the opposite —
+ * blind-echoing them would silently re-add the very grant the operator
+ * just removed. The channel editor computes `preserve = unknown − channel`
+ * and re-sends the channel NAMES it wants, so removal actually takes.
+ * Only the daemon can supply this: the hash→name direction needs keccak.
+ */
+scope_channel_service_ids?: Array<string>, payment_cap?: ApiPaymentCap, time_window?: ApiTimeWindow, services?: Array<string>, 
 /**
  * #225 E7 actor page: the actor's on-chain account. master → its passkey
  * P256Account when bound (absent when unbound); agent → its K10 device

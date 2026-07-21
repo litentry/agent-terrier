@@ -55,6 +55,15 @@ pub trait StsClient: Send + Sync {
     /// hosts fail fast instead of erroring on the first mint). Skip with
     /// `--skip-startup-check` when running creds-free.
     async fn caller_identity_ok(&self) -> BrokerResult<()>;
+
+    /// Whether this provider accepts an AWS-dialect inline session policy on
+    /// `assume_role_scoped`. AWS: yes. VE: no — it REFUSES `Some(policy)`
+    /// loudly (#510) because the per-actor scope-down is rendered VE-side
+    /// from the OIDC JWT's omni tag; callers that would narrow further must
+    /// pass `None` there and rely on the provider-side scope-down until the
+    /// #512 intent renderer lands. Handlers consult this instead of sniffing
+    /// the cloud (no second source of truth for the dialect).
+    fn supports_inline_session_policy(&self) -> bool;
 }
 
 pub struct AwsStsClient {
@@ -166,6 +175,10 @@ impl StsClient for AwsStsClient {
             .map_err(|e| BrokerError::StsError(format!("get_caller_identity: {}", e)))?;
         Ok(())
     }
+
+    fn supports_inline_session_policy(&self) -> bool {
+        true
+    }
 }
 
 /// Test-only stub. Each closure is invoked per call so tests can simulate
@@ -234,5 +247,9 @@ impl StsClient for StubStsClient {
 
     async fn caller_identity_ok(&self) -> BrokerResult<()> {
         (self.identity)()
+    }
+
+    fn supports_inline_session_policy(&self) -> bool {
+        true
     }
 }

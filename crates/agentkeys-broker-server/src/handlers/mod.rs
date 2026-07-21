@@ -5,6 +5,7 @@ pub mod auth;
 pub mod broker_status;
 pub mod canonical_sts;
 pub mod cap;
+pub mod channel_sts;
 pub mod grant;
 pub mod inbox_sts;
 pub mod metrics;

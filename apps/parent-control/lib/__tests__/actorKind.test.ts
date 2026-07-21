@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  actorHoldsChannelGrant,
   actorIsChannelEndpoint,
   actorTypeIsUnknown,
   agentChatChannelId,
+  channelGrantCommit,
   type Actor,
 } from '../../app/_components/types';
 
@@ -44,23 +46,27 @@ describe('actor type comes from the BINDING, not the current scope', () => {
     expect(actorIsChannelEndpoint(delegate)).toBe(false);
   });
 
-  it('still reads a device from scope shape when the binding is unknown', () => {
-    // Pre-manifest / chain-rebuilt actors have no `kind`; a non-empty
-    // channel-only scope is real evidence, so the fallback stays.
-    const inferred = actor({ services: ['channel-pub:opchat-test1'] });
-    expect(actorIsChannelEndpoint(inferred)).toBe(true);
-    expect(actorTypeIsUnknown(inferred)).toBe(false);
+  it('NEVER infers a device from the shape of its grants', () => {
+    // The deleted heuristic said "every grant is a channel grant ⇒ device".
+    // Live counter-example (VE stack): the DELEGATE `test1` held exactly
+    // channel-pub + channel-sub and nothing else, so it read as a device —
+    // while the real device sat next to it, also "device". The chain (tier 2
+    // vs 3) separates them; grant shape never can.
+    const delegateWithOnlyChannels = actor({
+      kind: 'delegate',
+      services: ['channel-pub:opchat-test1', 'channel-sub:opchat-test1'],
+    });
+    expect(actorIsChannelEndpoint(delegateWithOnlyChannels)).toBe(false);
+
+    // …and with no chain answer at all, shape still proves nothing.
+    const noKind = actor({ services: ['channel-pub:opchat-test1'] });
+    expect(actorIsChannelEndpoint(noKind)).toBe(false);
+    expect(actorTypeIsUnknown(noKind)).toBe(true);
   });
 
-  it('a mixed scope is a delegate, not a device', () => {
-    const mixed = actor({ services: ['channel-pub:opchat-test1', 'memory:test1'] });
-    expect(actorIsChannelEndpoint(mixed)).toBe(false);
-  });
-
-  it('reports UNKNOWN — never delegate — with no binding and no scope', () => {
-    // This is the exact state of a device rebuilt from chain whose grants were
-    // lost: we have no evidence either way, so the UI must say so instead of
-    // asserting a type.
+  it('reports UNKNOWN — never a guess — when neither chain nor manifest knows', () => {
+    // A pre-#427 registry row (tier 0) with no manifest entry. The UI must say
+    // "unknown" rather than assert a type.
     const blank = actor({ services: [] });
     expect(actorTypeIsUnknown(blank)).toBe(true);
     expect(actorIsChannelEndpoint(blank)).toBe(false);
@@ -95,5 +101,92 @@ describe("an agent's chat channel comes from its grant, not its label", () => {
   it('prefers the publish grant (chat writes) over the subscribe grant', () => {
     const a = actor({ label: 'x', services: ['channel-sub:feed-b', 'channel-pub:feed-a'] });
     expect(agentChatChannelId(a)).toBe('feed-a');
+  });
+});
+
+describe('the chat tab warns when the DELEGATE cannot hear a channel', () => {
+  // The authority (master session) can always pub/sub on a master-owned
+  // channel — ownership without participation (§22e). What the warning tracks
+  // is whether the DELEGATE holds a grant there, i.e. whether a reply is even
+  // possible. This is the exact live case: the DEVICE held opchat-test1 but
+  // the delegate held nothing, so chat looked "sent" with no reply forthcoming.
+  it('detects a grant in either direction, exact-match only', () => {
+    const a = actor({ services: ['channel-sub:opchat-test1', 'memory:test1'] });
+    expect(actorHoldsChannelGrant(a, 'opchat-test1')).toBe(true);
+    expect(actorHoldsChannelGrant(a, 'opchat-test')).toBe(false);
+    expect(actorHoldsChannelGrant(a, 'opchat-test12')).toBe(false);
+  });
+
+  it('reports no-grant for an empty scope (the debug-override case)', () => {
+    expect(actorHoldsChannelGrant(actor({ services: [] }), 'opchat-test1')).toBe(false);
+    expect(actorHoldsChannelGrant(actor({}), 'opchat-test1')).toBe(false);
+  });
+});
+
+describe('a channel-grant commit restates the whole set without collateral damage', () => {
+  // setScope is set-replace, so these inputs ARE the actor's resulting on-chain
+  // grants. Getting them wrong silently revokes real access, which is why the
+  // math is a pure function with its own tests rather than inline in the panel.
+  const CHAN_HASH = '0x88e9bf9e'; // keccak("channel-pub:opchat-test1"), abbreviated
+  const CRED_HASH = '0xe7b71835'; // some cred:<service> from the accept
+
+  it('drops the channel hashes from preserve so a REMOVAL is not undone', () => {
+    // The exact trap: scopeUnknownServiceIds deliberately still lists the
+    // channel hash (so a MEMORY commit can't wipe it). Echoing it here would
+    // re-add the grant the operator just removed.
+    const a = actor({
+      services: ['channel-pub:opchat-test1'],
+      scopeUnknownServiceIds: [CHAN_HASH, CRED_HASH],
+      scopeChannelServiceIds: [CHAN_HASH],
+    });
+    const { services, preserve } = channelGrantCommit(a, []);
+    expect(services).toEqual([]);
+    expect(preserve).toEqual([CRED_HASH]); // cred survives, channel does not
+  });
+
+  it('keeps memory + inbox grants, which live in scope and not in services', () => {
+    const a = actor({
+      services: ['channel-pub:opchat-test1'],
+      scope: {
+        family: { read: true, write: true },
+        work: { read: true, write: false },
+        personal: { read: false, write: false },
+      } as Actor['scope'],
+      scopeUnknownServiceIds: [CHAN_HASH],
+      scopeChannelServiceIds: [CHAN_HASH],
+    });
+    const { services } = channelGrantCommit(a, ['channel-sub:opchat-test1']);
+    expect(services).toContain('memory:family');
+    expect(services).toContain('inbox:family');
+    expect(services).toContain('memory:work');
+    expect(services).not.toContain('inbox:work'); // write=false
+    expect(services).not.toContain('memory:personal');
+    expect(services).toContain('channel-sub:opchat-test1');
+    expect(services).not.toContain('channel-pub:opchat-test1'); // replaced
+  });
+
+  it('is hash-case-insensitive and de-duplicates names', () => {
+    const a = actor({
+      services: ['channel-pub:opchat-test1', 'cred:openai'],
+      scopeUnknownServiceIds: ['0X88E9BF9E', CRED_HASH],
+      scopeChannelServiceIds: [CHAN_HASH],
+    });
+    const { services, preserve } = channelGrantCommit(a, [
+      'channel-pub:opchat-test1',
+      'channel-pub:opchat-test1',
+    ]);
+    expect(preserve).toEqual([CRED_HASH]);
+    expect(services.filter((s) => s === 'channel-pub:opchat-test1')).toHaveLength(1);
+    expect(services).toContain('cred:openai'); // known non-channel name kept
+  });
+
+  it('adds a first grant to an actor that has none', () => {
+    const a = actor({ services: [] });
+    const { services, preserve } = channelGrantCommit(a, [
+      'channel-pub:opchat-test1',
+      'channel-sub:opchat-test1',
+    ]);
+    expect(services).toEqual(['channel-pub:opchat-test1', 'channel-sub:opchat-test1']);
+    expect(preserve).toEqual([]);
   });
 });

@@ -8,7 +8,15 @@ import { AutoDistributePanel, PermissionList } from './permissions';
 import type { ProposedScope } from '@/lib/client/types';
 import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
 import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
-import { actorIsChannelEndpoint, actorTypeIsUnknown, isChannelService } from './types';
+import { actorIsChannelEndpoint, actorTypeIsUnknown, channelGrantCommit, isChannelService } from './types';
+import {
+  ChannelAttachSelector,
+  attachmentsToServices,
+  servicesToAttachments,
+  type ChannelAttachment,
+} from './devices';
+import type { ChannelDef } from '@/lib/client/types';
+import { useClient } from '@/lib/ClientProvider';
 
 // ─── Actors list ─────────────────────────────────────────────────
 export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status: ConnectionStatus; onPick: (id: string) => void }) {
@@ -96,6 +104,125 @@ export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status
 }
 
 // ─── Actor detail — uses the mobile PermissionList (no tables) ────
+/** #541 — grant / revoke an actor's CHANNEL access from its own page.
+ *
+ *  Previously this card was read-only and told you to go to the devices page —
+ *  which only lists DEVICES, so a delegate's channel grants were unreachable
+ *  from the UI entirely (you could see `channel-pub:…` on the actor page and
+ *  had nowhere to change it). Both kinds edit here now; devices keep their
+ *  devices-page editor too.
+ *
+ *  The commit is one on-chain setScope (Touch ID). `channelGrantCommit` builds
+ *  the full set-replace payload — critically it SUBTRACTS the channel hashes
+ *  from the preserved ids, so a removal is not silently undone. */
+function ChannelGrantsPanel({
+  actor,
+  onCommitScope,
+}: {
+  actor: Actor;
+  onCommitScope: (
+    a: Actor,
+    services: string[],
+    readOnly: boolean,
+    preserveOverride?: string[],
+  ) => Promise<boolean>;
+}) {
+  const api = useClient();
+  const isDevice = actorIsChannelEndpoint(actor);
+  const current = (actor.services ?? []).filter(isChannelService);
+  const [channels, setChannels] = useState<ChannelDef[]>([]);
+  const [rows, setRows] = useState<ChannelAttachment[]>(() => servicesToAttachments(current));
+  const [editing, setEditing] = useState(false);
+  const [committing, setCommitting] = useState(false);
+
+  // Re-sync when the chain mirror refreshes (a commit refetches the actors).
+  useEffect(() => {
+    setRows(servicesToAttachments(current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current.join('|')]);
+
+  useEffect(() => {
+    (async () => {
+      // Optional on the client seam (the mock client omits it) — a missing
+      // registry just means the selector offers no preset ids, never a crash.
+      const r = await api.listChannels?.();
+      if (r?.ok) setChannels(r.data.channels);
+    })();
+  }, [api]);
+
+  const staged = attachmentsToServices(rows);
+  const dirty =
+    staged.length !== current.length || staged.some((s) => !current.includes(s));
+
+  const commit = async () => {
+    setCommitting(true);
+    const { services, preserve } = channelGrantCommit(actor, staged);
+    // readOnly is a dead on-chain flag (isServiceInScope ignores it) — the
+    // memory panel passes true, the devices page false; neither is meaningful.
+    const ok = await onCommitScope(actor, services, true, preserve);
+    setCommitting(false);
+    if (ok) setEditing(false);
+  };
+
+  return (
+    <Panel title={`── channels · ${isDevice ? "this device's" : "this agent's"} grants`}>
+      <div className="muted" style={{ fontSize: 11, marginBottom: 10 }}>
+        {isDevice ? (
+          <>
+            A device is a conduit — it holds ONLY channel grants (D6), never memory, credentials,
+            or a persona.
+          </>
+        ) : (
+          <>
+            Channel grants are how this agent hears and answers: <code>channel-sub:&lt;id&gt;</code>{' '}
+            to receive, <code>channel-pub:&lt;id&gt;</code> to reply. Without both it cannot hold a
+            conversation on that channel.
+          </>
+        )}{' '}
+        Every change is one on-chain setScope (Touch ID) with an audit receipt.
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+        {current.map((s) => (
+          <span key={s} className="chip mono">{s}</span>
+        ))}
+        {current.length === 0 && (
+          <span className="muted" style={{ fontSize: 11.5 }}>
+            no channel grants — this actor cannot send or receive on any channel yet
+          </span>
+        )}
+      </div>
+      {editing ? (
+        <div style={{ display: 'grid', gap: 6 }}>
+          <ChannelAttachSelector rows={rows} onChange={setRows} channels={channels} />
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              className="btn primary"
+              style={{ flex: 1 }}
+              disabled={committing || !dirty}
+              onClick={() => void commit()}
+            >
+              {committing ? 'committing…' : `commit channels · Touch ID · ${staged.length}`}
+            </button>
+            <button
+              className="btn"
+              onClick={() => {
+                setEditing(false);
+                setRows(servicesToAttachments(current));
+              }}
+            >
+              discard
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button className="btn" onClick={() => setEditing(true)}>
+          {current.length === 0 ? 'grant a channel' : 'edit channels'}
+        </button>
+      )}
+    </Panel>
+  );
+}
+
 export function ActorDetail({
   actor,
   onBack,
@@ -114,8 +241,15 @@ export function ActorDetail({
   onBack: () => void;
   onUpdate: (id: string, patch: Partial<Actor>) => void;
   /** #248: commit the staged memory grant on chain — ONE setScope UserOp signed
-   *  by the master K11 (Touch ID). Resolves true on success (clears staging). */
-  onCommitScope: (a: Actor, services: string[], readOnly: boolean) => Promise<boolean>;
+   *  by the master K11 (Touch ID). Resolves true on success (clears staging).
+   *  #541: `preserveOverride` replaces the default echo set — the channel editor
+   *  needs it to DROP the channel hashes it is replacing (see channelGrantCommit). */
+  onCommitScope: (
+    a: Actor,
+    services: string[],
+    readOnly: boolean,
+    preserveOverride?: string[],
+  ) => Promise<boolean>;
   onRevoke: (a: Actor) => void;
   recentEvents: AuditEvent[];
   proposals: ProposedScope[] | null;
@@ -261,22 +395,7 @@ export function ActorDetail({
       {/* #404 D6 — a channel-endpoint DEVICE has no runtime: no persona, no
           memory scopes, no auto-distribution. Its page is binding + channel
           grants (managed on the devices page) + activity + revoke. */}
-      {isDevice && (
-        <Panel title="── channels · this device's grants">
-          <div className="muted" style={{ fontSize: 11, marginBottom: 10 }}>
-            A device is a conduit — it holds ONLY channel grants (D6), never memory, credentials, or a persona.
-            Edit its channels (add / remove / re-direction) on the <strong>devices</strong> page; every change is one on-chain setScope (Touch ID) with an audit receipt.
-          </div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {(actor.services ?? []).filter(isChannelService).map((s) => (
-              <span key={s} className="chip mono">{s}</span>
-            ))}
-            {(actor.services ?? []).filter(isChannelService).length === 0 && (
-              <span className="muted" style={{ fontSize: 11.5 }}>grants on chain — names return once the ids are in the channel registry</span>
-            )}
-          </div>
-        </Panel>
-      )}
+      {!isMaster && <ChannelGrantsPanel actor={actor} onCommitScope={onCommitScope} />}
 
       {/* #390 — the bound agent's persona editor + live context files. Sandbox
           DELEGATES only: a master has no SOUL.md (it is the hub, not a runtime)

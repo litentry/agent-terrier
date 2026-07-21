@@ -105,6 +105,8 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
         data_role_arn: "arn:aws:iam::000:role/test".into(),
         memory_role_arn: String::new(),
         speech_role_arn: String::new(),
+        channel_role_arn: String::new(),
+        channel_sts_token: String::new(),
         audit_db_path: tmp.path().join("audit.sqlite"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,

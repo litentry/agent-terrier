@@ -12,7 +12,12 @@ import { useClient } from '@/lib/ClientProvider';
 import { AgentPanel } from './agent';
 import { ChatPanel } from './chat';
 import { Chip, Panel } from './shared';
-import { agentChatChannelId, type Actor } from './types';
+import {
+  actorHoldsChannelGrant,
+  agentChatChannelId,
+  isValidChannelId,
+  type Actor,
+} from './types';
 
 type Tab = 'context' | 'chat' | 'feeds';
 
@@ -33,10 +38,16 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
       ),
     [services],
   );
-  // The chat channel comes from the agent's GRANT, never from its display label
-  // (see agentChatChannelId — a placeholder label like "agent 0x346391ed…" is not
-  // a legal channel id and made every poll/send 400 `invalid channel_id`).
+  // The DEFAULT chat channel comes from the agent's GRANT, never from its
+  // display label (see agentChatChannelId — a placeholder label like
+  // "agent 0x346391ed…" is not a legal channel id and made every poll/send 400
+  // `invalid channel_id`). The AUTHORITY can override it below: the master owns
+  // every channel (§22e ownership without participation), so the operator may
+  // pub/sub on any feed — the grant only decides whether the DELEGATE hears.
   const chatChannelId = useMemo(() => agentChatChannelId(actor), [actor]);
+  const [chatOverride, setChatOverride] = useState<string | null>(null);
+  const [chatDraftChannel, setChatDraftChannel] = useState('');
+  const activeChatChannel = chatOverride ?? chatChannelId;
 
   const [feedChannel, setFeedChannel] = useState<string | null>(null);
 
@@ -126,20 +137,70 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
           <AgentPanel actor={actor} />
         </div>
       )}
-      {tab === 'chat' &&
-        (chatChannelId ? (
-          <ChatPanel
-            channelId={chatChannelId}
-            emptyHint={`Direct chat with ${actor.label} on ${chatChannelId} — the transcript IS its durable opchat feed (operator-only, D13).`}
-          />
-        ) : (
-          // Say why rather than sending a request that can only 400.
-          <div className="muted">
-            No chat channel for this agent — it holds no <code>channel-pub:&lt;id&gt;</code> or{' '}
-            <code>channel-sub:&lt;id&gt;</code> grant, and its label cannot form a valid channel id.
-            Grant it a channel from the permissions panel first.
+      {tab === 'chat' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="muted" style={{ fontSize: 12 }}>
+              channel:{' '}
+              {activeChatChannel ? (
+                <>
+                  <code>{activeChatChannel}</code>{' '}
+                  {chatOverride
+                    ? '(manual)'
+                    : chatChannelId
+                      ? '(from grant)'
+                      : ''}
+                </>
+              ) : (
+                'none — this agent holds no channel grant; enter one to debug'
+              )}
+            </span>
+            <input
+              style={{ width: 180 }}
+              placeholder="opchat-…"
+              value={chatDraftChannel}
+              onChange={(e) => setChatDraftChannel(e.target.value.trim())}
+            />
+            <button
+              className="btn sm"
+              disabled={!isValidChannelId(chatDraftChannel)}
+              onClick={() => setChatOverride(chatDraftChannel)}
+            >
+              Use
+            </button>
+            {chatOverride && (
+              <button className="btn sm" onClick={() => setChatOverride(null)}>
+                Reset
+              </button>
+            )}
+            {chatDraftChannel !== '' && !isValidChannelId(chatDraftChannel) && (
+              <span className="muted" style={{ fontSize: 12 }}>
+                invalid id ([a-z0-9-], 1–48, no edge dash)
+              </span>
+            )}
           </div>
-        ))}
+          {activeChatChannel && !actorHoldsChannelGrant(actor, activeChatChannel) && (
+            <div className="muted" style={{ fontSize: 12 }}>
+              ⚠ {actor.label} holds no grant on <code>{activeChatChannel}</code> — it cannot hear
+              or reply there until you grant <code>channel-pub/sub:{activeChatChannel}</code>{' '}
+              (permissions panel · Touch ID). You can still publish/subscribe as the channel
+              owner to inspect the feed.
+            </div>
+          )}
+          {activeChatChannel ? (
+            <ChatPanel
+              key={activeChatChannel}
+              channelId={activeChatChannel}
+              emptyHint={`Direct chat with ${actor.label} on ${activeChatChannel} — the transcript IS its durable opchat feed (operator-only, D13).`}
+            />
+          ) : (
+            <div className="muted">
+              Enter a channel id above (e.g. <code>opchat-test1</code>) to open the authority
+              chat surface for this agent.
+            </div>
+          )}
+        </div>
+      )}
       {tab === 'feeds' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {subscribedChannels.length === 0 ? (
