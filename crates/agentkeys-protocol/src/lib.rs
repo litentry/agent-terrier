@@ -481,6 +481,22 @@ pub struct ChannelEvent {
     pub audio: Option<ChannelAudioParams>,
 }
 
+/// Broker `POST /v1/cap/channel-sts` response (#541) — short-lived, owner-scoped
+/// storage credentials the CHANNEL WORKER redeems from the cap it just verified.
+/// One definition shared by the broker (producer) and the channel worker
+/// (consumer) so the internal mint contract cannot drift (#203 discipline).
+/// Deliberately NOT the memory/config client-relay shape: a channel is a shared
+/// owner-owned feed, so the participant has nothing of its own to relay and must
+/// never hold the owner's storage credential — only the worker redeems these.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelStsCreds {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    /// Unix seconds the credentials expire; the worker caches until ~60 s before.
+    pub expiration: i64,
+}
+
 /// Channel-worker `POST /v1/channel/publish` request body. The publish cap
 /// (`service = channel-pub:<id>`, SIGNED) authorizes the write; the worker
 /// stamps `producer`/`event_id`/`ts_millis` and appends the envelope-encrypted

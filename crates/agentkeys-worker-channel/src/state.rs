@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
-use aws_sdk_s3::Client as S3Client;
 
+use crate::sts_mint::ChannelStsMinter;
 use crate::wakeup::WakeupRegistry;
 
 /// Long-poll ceiling default when `AGENTKEYS_CHANNEL_MAX_POLL_SECONDS` is unset.
@@ -130,8 +130,13 @@ fn profile_env(profile_uc: &str, base: &str) -> anyhow::Result<String> {
 
 pub struct ChannelWorkerState {
     pub config: ChannelWorkerConfig,
-    pub s3: S3Client,
     pub http: reqwest::Client,
+    /// #541 — the cap→STS minter (`/v1/cap/channel-sts`). `None` when the host
+    /// env lacks `AGENTKEYS_BROKER_URL`/`AGENTKEYS_CHANNEL_STS_TOKEN`; the
+    /// worker then serves header-relayed requests only and every other storage
+    /// touch fails LOUDLY. There is deliberately NO ambient S3 client in this
+    /// state anymore — the instance-profile path is retired, not deprecated.
+    pub sts_minter: Option<ChannelStsMinter>,
     /// Durable audit emitter (#229) — every publish/poll/teardown emits an
     /// `AuditEnvelope` to the audit-service worker after cap-verify.
     pub audit: agentkeys_worker_creds::audit::AuditEmitter,
@@ -143,16 +148,19 @@ pub type SharedChannelWorkerState = Arc<ChannelWorkerState>;
 
 impl ChannelWorkerState {
     pub async fn build(config: ChannelWorkerConfig) -> anyhow::Result<Self> {
-        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(config.region.clone()))
-            .load()
-            .await;
-        // Honors AGENTKEYS_TOS_ENDPOINT (VE TOS); plain AWS S3 when unset.
-        let s3 = agentkeys_core::s3_endpoint::s3_client(&sdk_config);
+        let http = reqwest::Client::new();
+        let sts_minter = ChannelStsMinter::from_env(http.clone());
+        if sts_minter.is_none() {
+            tracing::warn!(
+                "channel-sts minter DISABLED (AGENTKEYS_BROKER_URL / AGENTKEYS_CHANNEL_STS_TOKEN \
+                 unset): only requests relaying X-Aws-* creds can touch storage; everything else \
+                 fails loudly — ambient (instance-profile) access is retired (#541)"
+            );
+        }
         Ok(ChannelWorkerState {
             config,
-            s3,
-            http: reqwest::Client::new(),
+            http,
+            sts_minter,
             audit: agentkeys_worker_creds::audit::AuditEmitter::from_env(),
             wakeup: WakeupRegistry::new(),
         })

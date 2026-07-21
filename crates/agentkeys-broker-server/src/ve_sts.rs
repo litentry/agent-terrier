@@ -318,6 +318,12 @@ impl StsClient for VeStsClient {
             .await
     }
 
+    /// VE refuses AWS-dialect inline policies (`assume_role_scoped` above) —
+    /// the per-actor scope-down is rendered VE-side; see #510/#512.
+    fn supports_inline_session_policy(&self) -> bool {
+        false
+    }
+
     async fn caller_identity_ok(&self) -> BrokerResult<()> {
         let text = self
             .signed_call("GET", "GetCallerIdentity", String::new())

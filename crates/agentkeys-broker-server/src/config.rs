@@ -15,6 +15,14 @@ pub struct BrokerConfig {
     /// Transcribe/Polly-only session policy). Empty when `SPEECH_ROLE_ARN` is
     /// unset; the endpoint then returns a clear "not configured" error.
     pub speech_role_arn: String,
+    /// #541 — the per-data-class CHANNEL role `/v1/cap/channel-sts` AssumeRoles
+    /// (owner-scoped, channel-prefix inline policy on AWS; provider-side
+    /// scope-down on VE). Empty = clear "not configured" error, same posture
+    /// as `memory_role_arn`.
+    pub channel_role_arn: String,
+    /// #541 — the host-minted shared bearer authenticating the CHANNEL WORKER
+    /// to `/v1/cap/channel-sts`. Empty = the endpoint refuses (not configured).
+    pub channel_sts_token: String,
     pub audit_db_path: PathBuf,
     pub aws_region: String,
     pub session_duration_seconds: i32,
@@ -82,6 +90,10 @@ impl BrokerConfig {
         let memory_role_arn = std::env::var(env::MEMORY_ROLE_ARN).unwrap_or_default();
         // #441 — optional, same posture as memory_role_arn.
         let speech_role_arn = std::env::var(env::SPEECH_ROLE_ARN).unwrap_or_default();
+        // #541 — optional pair, same posture: unset disables /v1/cap/channel-sts
+        // with a clear error instead of failing boot.
+        let channel_role_arn = std::env::var(env::CHANNEL_ROLE_ARN).unwrap_or_default();
+        let channel_sts_token = std::env::var(env::AGENTKEYS_CHANNEL_STS_TOKEN).unwrap_or_default();
 
         let audit_db_path = std::env::var(env::BROKER_AUDIT_DB_PATH)
             .ok()
@@ -135,6 +147,8 @@ impl BrokerConfig {
             data_role_arn,
             memory_role_arn,
             speech_role_arn,
+            channel_role_arn,
+            channel_sts_token,
             audit_db_path,
             aws_region,
             session_duration_seconds,

@@ -27,6 +27,20 @@ export function ChatPanel({
   const cursorRef = useRef('');
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
+  // A publish and a reply are two INDEPENDENT halves: the send writes to the
+  // feed, a delegate has to be alive, subscribed, and willing to answer for
+  // anything to come back. When a message just sat there with a silent panel
+  // you could not tell which half failed. These few lines separate them; the
+  // poll ticks themselves are deliberately NOT logged (pure noise).
+  const [log, setLog] = useState<{ at: string; line: string }[]>([]);
+  const addLog = useCallback((line: string) => {
+    const at = new Date().toLocaleTimeString();
+    setLog((prev) => [...prev.slice(-11), { at, line }]);
+  }, []);
+  /** Unix ms of the last send still awaiting a reply (ref: the poll loop is a
+   *  long-lived closure and would capture stale state). */
+  const awaitingRef = useRef<number | null>(null);
+
   // The poll loop: first call drains history (wait 0), then long-polls.
   useEffect(() => {
     let stopped = false;
@@ -39,7 +53,9 @@ export function ChatPanel({
         const r = await api.chatPoll(channelId, cursorRef.current, first ? 0 : 25);
         if (stopped) return;
         if (!r.ok) {
-          setError(r.status?.detail ?? 'chat poll failed');
+          const detail = r.status?.detail ?? 'chat poll failed';
+          setError(detail);
+          addLog(`poll failed — ${detail}`);
           await new Promise((res) => setTimeout(res, 5000));
           continue;
         }
@@ -52,13 +68,27 @@ export function ChatPanel({
             const fresh = r.data.events.filter((e) => !seen.has(e.event_id));
             return fresh.length ? [...prev, ...fresh] : prev;
           });
+          if (awaitingRef.current && r.data.events.some((e) => e.direction === 'out')) {
+            const secs = ((Date.now() - awaitingRef.current) / 1000).toFixed(1);
+            awaitingRef.current = null;
+            addLog(`agent replied (${secs}s)`);
+          }
+        }
+        // Publish worked, polling works, still nothing back: the missing piece
+        // is a LISTENER, not the plumbing. Say so once rather than leaving the
+        // panel silent — this is the state a message sits in forever.
+        if (awaitingRef.current && Date.now() - awaitingRef.current > 30_000) {
+          awaitingRef.current = null;
+          addLog(
+            'no agent reply after 30s — the message IS in the feed; check a delegate is running and holds channel-sub on this channel',
+          );
         }
       }
     })();
     return () => {
       stopped = true;
     };
-  }, [api, channelId]);
+  }, [api, channelId, addLog]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -71,11 +101,15 @@ export function ChatPanel({
     const r = await api.chatSend(channelId, text);
     setSending(false);
     if (!r.ok) {
-      setError(r.status?.detail ?? 'send failed');
+      const detail = r.status?.detail ?? 'send failed';
+      setError(detail);
+      addLog(`send failed — ${detail}`);
       return;
     }
+    addLog(`sent → ${channelId} (event ${r.data.event_id.slice(0, 12)}…)`);
+    awaitingRef.current = Date.now();
     setDraft('');
-  }, [api, channelId, draft, sending]);
+  }, [api, channelId, draft, sending, addLog]);
 
   return (
     <div className="chat-panel" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -140,6 +174,32 @@ export function ChatPanel({
             {sending ? 'Sending…' : 'Send'}
           </button>
         </div>
+      )}
+      {!readOnly && log.length > 0 && (
+        <details open>
+          <summary className="muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
+            log · send + reply path
+          </summary>
+          <div
+            className="mono"
+            style={{
+              marginTop: 4,
+              padding: '6px 8px',
+              border: '1px solid var(--rule)',
+              borderRadius: 6,
+              fontSize: 11,
+              lineHeight: 1.5,
+              maxHeight: 120,
+              overflowY: 'auto',
+            }}
+          >
+            {log.map((l, i) => (
+              <div key={`${l.at}-${i}`}>
+                <span className="muted">{l.at}</span> {l.line}
+              </div>
+            ))}
+          </div>
+        </details>
       )}
     </div>
   );

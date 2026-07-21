@@ -818,6 +818,19 @@ pub struct ApiActor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub scope_unknown_service_ids: Option<Vec<String>>,
+    /// #541: the SUBSET of `scope_unknown_service_ids` this daemon resolved to
+    /// `channel-pub:<id>`/`channel-sub:<id>` via the channel registry.
+    ///
+    /// Why it must be exposed separately: `scope_unknown_service_ids`
+    /// deliberately keeps the channel hashes (a MEMORY commit has to echo them
+    /// so it cannot wipe channels). But a CHANNEL commit needs the opposite —
+    /// blind-echoing them would silently re-add the very grant the operator
+    /// just removed. The channel editor computes `preserve = unknown − channel`
+    /// and re-sends the channel NAMES it wants, so removal actually takes.
+    /// Only the daemon can supply this: the hash→name direction needs keccak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub scope_channel_service_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub payment_cap: Option<ApiPaymentCap>,
@@ -3489,9 +3502,37 @@ struct ChainDevice {
     device_key_hash: String,
     operator_omni: String,
     actor_omni: String,
-    /// `TIER_MASTER = 1`, `TIER_AGENT = 2` (SidecarRegistry constants).
+    /// SidecarRegistry constants (the #427 on-chain kind split):
+    /// `TIER_MASTER = 1` · `TIER_AGENT = 2` (a sandbox-resident DELEGATE) ·
+    /// `TIER_DEVICE = 3` (a channel-endpoint DEVICE). 0 = a pre-#427 row that
+    /// predates the split. This is the AUTHORITATIVE answer to "what is this
+    /// actor" — see `tier_kind`.
     tier: u8,
     revoked: bool,
+}
+
+/// SidecarRegistry `TIER_AGENT` — a sandbox-resident delegate.
+const TIER_AGENT: u8 = 2;
+/// SidecarRegistry `TIER_DEVICE` — a channel-endpoint device.
+const TIER_DEVICE: u8 = 3;
+
+/// The actor kind the CHAIN asserts, or `None` for a pre-#427 row (tier 0) that
+/// predates the on-chain split.
+///
+/// This is the source of truth for device-vs-delegate. The binding manifest is
+/// a CACHE (labels, presets, service names) and can be absent — when it was
+/// treated as the only source, a chain-restored row reported an unknown kind
+/// and the UI fell back to guessing from the SHAPE of the actor's grants
+/// ("holds only channel grants ⇒ device"). That guess mislabels a delegate
+/// whose only grants are channel grants, which is exactly what happened on the
+/// VE stack: a delegate (tier 2) and a device (tier 3) both rendered as
+/// "device" while the chain had said which was which all along.
+fn tier_kind(tier: u8) -> Option<&'static str> {
+    match tier {
+        TIER_AGENT => Some("delegate"),
+        TIER_DEVICE => Some("device"),
+        _ => None,
+    }
 }
 
 fn chain_word(raw: &[u8], i: usize) -> Result<[u8; 32], String> {
@@ -3885,6 +3926,7 @@ async fn reconcile_actors_from_chain(
                         device_key_hash: Some(d.device_key_hash.clone()),
                         scope: None,
                         scope_unknown_service_ids: None,
+                        scope_channel_service_ids: None,
                         payment_cap: None,
                         time_window: None,
                         services: None,
@@ -3917,7 +3959,13 @@ async fn reconcile_actors_from_chain(
             Some(e) => (format!("agent-{}", e.label), e.label.clone()),
             None => (format!("agent-0x{short}"), format!("agent 0x{short}…")),
         };
-        let is_device = entry.as_ref().is_some_and(|e| e.kind == "device");
+        // Chain first (tier), manifest only for pre-#427 rows the chain can't
+        // classify. Never the scope shape — see `tier_kind`.
+        let chain_kind = tier_kind(d.tier);
+        let is_device = match chain_kind {
+            Some(k) => k == "device",
+            None => entry.as_ref().is_some_and(|e| e.kind == "device"),
+        };
         let services = entry
             .as_ref()
             .map(|e| e.granted_service_names.clone())
@@ -3947,13 +3995,18 @@ async fn reconcile_actors_from_chain(
                 },
                 k11: false,
                 device_key_hash: Some(d.device_key_hash.clone()),
-                // Only the manifest knows; absent entry = unknown, never a guess.
-                kind: entry
-                    .as_ref()
-                    .map(|e| e.kind.clone())
-                    .filter(|k| !k.is_empty()),
+                // The CHAIN says what this actor IS (#427 tier). The manifest is
+                // a fallback for pre-#427 rows only; absent both = unknown,
+                // never a guess.
+                kind: chain_kind.map(str::to_string).or_else(|| {
+                    entry
+                        .as_ref()
+                        .map(|e| e.kind.clone())
+                        .filter(|k| !k.is_empty())
+                }),
                 scope: None,
                 scope_unknown_service_ids: None,
+                scope_channel_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services,
@@ -4030,8 +4083,27 @@ async fn reconcile_actors_from_chain(
             .filter(|a| a.role == "agent")
             .map(|a| (a.id.clone(), a.omni_hex.clone()))
             .collect();
-        for (id, actor_omni) in agent_rows {
-            match fetch_actor_scope_from_chain(&rpc, &scope_contract, &omni, &actor_omni).await {
+        // Fetch every agent's scope CONCURRENTLY. This used to `await` once per
+        // agent inside the loop, so an actors refresh cost N SERIAL chain
+        // round-trips — measured 20.6 s on the VE stack, which is what froze
+        // the fleet device page when it called this from a render path. Now the
+        // whole fleet costs one wall-clock round-trip. The mutation below still
+        // happens one row at a time under the write lock (unchanged).
+        let fetched =
+            futures_util::future::join_all(agent_rows.into_iter().map(|(id, actor_omni)| {
+                let rpc = rpc.clone();
+                let scope_contract = scope_contract.clone();
+                let omni = omni.clone();
+                async move {
+                    let scope =
+                        fetch_actor_scope_from_chain(&rpc, &scope_contract, &omni, &actor_omni)
+                            .await;
+                    (id, actor_omni, scope)
+                }
+            }))
+            .await;
+        for (id, actor_omni, scope_result) in fetched {
+            match scope_result {
                 Ok((scope, unknown_ids)) => {
                     // Registry match — names recovered from hashes. unknown_ids
                     // stays UNCHANGED (the #248 preserve semantics: a memory
@@ -4040,8 +4112,19 @@ async fn reconcile_actors_from_chain(
                         .iter()
                         .filter_map(|h| channel_candidates.get(&h.to_lowercase()).cloned())
                         .collect();
+                    // #541: the HASHES behind those names, so the channel editor
+                    // can subtract them from the preserve set (see the field doc
+                    // on `scope_channel_service_ids` — echoing them back would
+                    // undo a channel REMOVAL).
+                    let channel_ids: Vec<String> = unknown_ids
+                        .iter()
+                        .filter(|h| channel_candidates.contains_key(&h.to_lowercase()))
+                        .cloned()
+                        .collect();
                     if let Some(a) = state.actors.write().await.get_mut(&id) {
                         a.scope = scope;
+                        a.scope_channel_service_ids =
+                            (!channel_ids.is_empty()).then_some(channel_ids);
                         a.scope_unknown_service_ids =
                             (!unknown_ids.is_empty()).then_some(unknown_ids);
                         if !matched.is_empty() {
@@ -4873,6 +4956,33 @@ fn resolve_view_profile(
             }
             Ok(p)
         }
+    }
+}
+
+#[cfg(test)]
+mod actor_kind_tests {
+    use super::tier_kind;
+
+    #[test]
+    fn the_chain_tier_decides_device_vs_delegate() {
+        // The live VE stack, read from SidecarRegistry.getDevice:
+        //   0x346391ed… (dkh f85a3626…) tier 2 → delegate "test1"
+        //   0xcd9edf15… (dkh 61563208…) tier 3 → the mock device
+        // Both held ONLY channel grants, so the old scope-shape guess called
+        // both "device". The tier separates them without any heuristic.
+        assert_eq!(tier_kind(2), Some("delegate"));
+        assert_eq!(tier_kind(3), Some("device"));
+    }
+
+    #[test]
+    fn master_and_pre_split_rows_report_no_agent_kind() {
+        // TIER_MASTER is a role, not a device/delegate kind (the master's own
+        // `role` field says what it is), and tier 0 is a pre-#427 row the chain
+        // cannot classify — both must yield None so the caller falls back to
+        // the manifest rather than inventing a kind.
+        assert_eq!(tier_kind(1), None);
+        assert_eq!(tier_kind(0), None);
+        assert_eq!(tier_kind(9), None);
     }
 }
 
@@ -5827,6 +5937,7 @@ async fn ack_pairing(
                     }),
                     scope: None,
                     scope_unknown_service_ids: None,
+                    scope_channel_service_ids: None,
                     payment_cap: None,
                     time_window: None,
                     services: (!services.is_empty()).then_some(services),
@@ -7994,6 +8105,7 @@ async fn register_pairing(
         }),
         scope: None,
         scope_unknown_service_ids: None,
+        scope_channel_service_ids: None,
         payment_cap: None,
         time_window: None,
         services: None,
@@ -11473,6 +11585,7 @@ mod tests {
             device_key_hash: hash.map(str::to_string),
             scope: None,
             scope_unknown_service_ids: None,
+            scope_channel_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -11928,6 +12041,7 @@ mod tests {
             device_key_hash: None,
             scope: None,
             scope_unknown_service_ids: None,
+            scope_channel_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -13100,6 +13214,7 @@ mod tests {
             device_key_hash: None,
             scope: None,
             scope_unknown_service_ids: None,
+            scope_channel_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -13136,6 +13251,7 @@ mod tests {
             device_key_hash: None,
             scope: None,
             scope_unknown_service_ids: None,
+            scope_channel_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -13183,6 +13299,7 @@ mod tests {
                 device_key_hash: None,
                 scope: None,
                 scope_unknown_service_ids: None,
+                scope_channel_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services: None,
@@ -13212,6 +13329,7 @@ mod tests {
                 device_key_hash: None,
                 scope: None,
                 scope_unknown_service_ids: None,
+                scope_channel_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services: None,
@@ -14640,6 +14758,7 @@ mod tests {
                     device_key_hash: None,
                     scope: None,
                     scope_unknown_service_ids: None,
+                    scope_channel_service_ids: None,
                     payment_cap: None,
                     time_window: None,
                     services: None,

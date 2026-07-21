@@ -943,6 +943,7 @@ function apiToActor(a: ApiActor): Actor {
     accountType: a.account_type ?? undefined,
     scope: a.scope as Actor['scope'],
     scopeUnknownServiceIds: a.scope_unknown_service_ids,
+    scopeChannelServiceIds: a.scope_channel_service_ids,
     deviceKeyHash: a.device_key_hash ?? undefined,
     kind: a.kind ?? undefined,
     paymentCap: a.payment_cap
