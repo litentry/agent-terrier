@@ -30,8 +30,8 @@ use crate::oidc::OidcKeypair;
 use crate::plugins::audit::{AuditAnchor, AuditPolicy};
 use crate::plugins::PluginRegistry;
 use crate::storage::{
-    AgentDelegationStore, AuthNonceStore, GrantStore, IdentityLinkStore, PairingRequestStore,
-    WalletStore,
+    AgentDelegationStore, AuthNonceStore, IdentityLinkStore, PairingRequestStore,
+    SpawnContextStore, WalletStore,
 };
 
 /// Outcome of the synchronous Tier-1 boot phase.
@@ -42,7 +42,8 @@ pub struct BootArtifacts {
     pub audit_policy: AuditPolicy,
     pub wallet_store: Arc<WalletStore>,
     pub nonce_store: Arc<AuthNonceStore>,
-    pub grant_store: Arc<GrantStore>,
+    /// #546 durable delegate spawn-context store (re-create injection set).
+    pub spawn_context_store: Arc<SpawnContextStore>,
     pub identity_link_store: Arc<IdentityLinkStore>,
     /// §10.2 agent-initiated pairing-request + pending-binding store (issue #144,
     /// method A).
@@ -188,14 +189,16 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
             "wallets-db",
         )
     })?);
-    let grant_store = Arc::new(GrantStore::open(&grants_path(config)).map_err(|e| {
-        boot_fail(
-            env::BROKER_AUDIT_DB_PATH,
-            &config.audit_db_path.display().to_string(),
-            format!("GrantStore: {}", e),
-            "grants-db",
-        )
-    })?);
+    let spawn_context_store = Arc::new(
+        SpawnContextStore::open(&spawn_contexts_path(config)).map_err(|e| {
+            boot_fail(
+                env::BROKER_AUDIT_DB_PATH,
+                &config.audit_db_path.display().to_string(),
+                format!("SpawnContextStore: {}", e),
+                "spawn-contexts-db",
+            )
+        })?,
+    );
     let identity_link_store = Arc::new(
         IdentityLinkStore::open(&identity_links_path(config)).map_err(|e| {
             boot_fail(
@@ -262,7 +265,7 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
         audit_policy,
         wallet_store,
         nonce_store,
-        grant_store,
+        spawn_context_store,
         identity_link_store,
         pairing_request_store,
         agent_delegation_store,
@@ -324,12 +327,12 @@ fn wallets_path(config: &BrokerConfig) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("wallets.sqlite"))
 }
 
-fn grants_path(config: &BrokerConfig) -> std::path::PathBuf {
+fn spawn_contexts_path(config: &BrokerConfig) -> std::path::PathBuf {
     config
         .audit_db_path
         .parent()
-        .map(|p| p.join("grants.sqlite"))
-        .unwrap_or_else(|| std::path::PathBuf::from("grants.sqlite"))
+        .map(|p| p.join("spawn_contexts.sqlite"))
+        .unwrap_or_else(|| std::path::PathBuf::from("spawn_contexts.sqlite"))
 }
 
 fn identity_links_path(config: &BrokerConfig) -> std::path::PathBuf {

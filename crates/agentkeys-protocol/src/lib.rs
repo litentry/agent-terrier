@@ -2057,6 +2057,43 @@ pub fn service_channel_sub(channel_id: &str) -> String {
     format!("channel-sub:{channel_id}")
 }
 
+/// The delegate-sandbox env contract (#430/#546) — the variable names the
+/// broker's spawn paths inject and the sandbox-resident daemon's chat loop
+/// consumes. ONE definition (the #203 discipline applied to env names): the
+/// #546 chat-silent-sandbox bug was exactly this set drifting between the
+/// injector (only the #427 ceremony injected it) and the consumer (which
+/// requires the full set); both sides now compile against these constants.
+pub mod sandbox_env {
+    /// The broker base URL (`https://broker.<zone>`) — where the sandbox
+    /// resolves its `J1_agent` and mints caps. Also the root every worker URL
+    /// is DERIVED from (`derive_worker_url` — worker URLs are never a
+    /// pre-composed env).
+    pub const BROKER_URL: &str = "AGENTKEYS_BROKER_URL";
+    /// The delegate's duplex operator-chat feed id (`opchat-<label>`, #425 S4).
+    pub const CHAT_CHANNEL_ID: &str = "AGENTKEYS_CHAT_CHANNEL_ID";
+    /// The delegate's HDKD child omni (`0x` + 64 hex).
+    pub const ACTOR_OMNI: &str = "AGENTKEYS_ACTOR_OMNI";
+    /// The owning operator's omni (`0x` + 64 hex).
+    pub const OPERATOR_OMNI: &str = "AGENTKEYS_OPERATOR_OMNI";
+    /// The delegate's K10 secret (hex) — proves possession on resolve + signs
+    /// the #76 cap-mint PoP. Injected at create, never readable back.
+    pub const DEVICE_KEY_HEX: &str = "AGENTKEYS_DEVICE_KEY_HEX";
+    /// OPTIONAL override for the channel worker URL. Absent, the sandbox
+    /// DERIVES `channel.<zone>` from [`BROKER_URL`] (the `derive_worker_url`
+    /// convention) — never a required injection a spawn path could forget.
+    pub const CHANNEL_WORKER_URL: &str = "AGENTKEYS_CHANNEL_WORKER_URL";
+
+    /// The FULL set the chat loop requires (all-or-nothing: a partial set is a
+    /// loud warn on the consumer side, never a silent no-chat).
+    pub const CHAT_REQUIRED: [&str; 5] = [
+        BROKER_URL,
+        CHAT_CHANNEL_ID,
+        ACTOR_OMNI,
+        OPERATOR_OMNI,
+        DEVICE_KEY_HEX,
+    ];
+}
+
 /// Parse a leading `/alias ` deterministic-routing token from a gateway message
 /// (#407 §7.3 — `/alias` is the deterministic override; the advisory router is
 /// phase 5). Returns `(Some(alias), remaining_text)` for `"/chef 今晚吃什么"` →
@@ -2100,6 +2137,27 @@ pub fn normalize_omni_0x(omni: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_env_chat_set_is_pinned() {
+        // #546 — the injector (broker spawn paths) and the consumer (in-sandbox
+        // chat loop) both compile against these names; this pins the VALUES so
+        // a rename can never silently strand deployed sandboxes mid-fleet.
+        assert_eq!(
+            sandbox_env::CHAT_REQUIRED,
+            [
+                "AGENTKEYS_BROKER_URL",
+                "AGENTKEYS_CHAT_CHANNEL_ID",
+                "AGENTKEYS_ACTOR_OMNI",
+                "AGENTKEYS_OPERATOR_OMNI",
+                "AGENTKEYS_DEVICE_KEY_HEX",
+            ]
+        );
+        assert_eq!(
+            sandbox_env::CHANNEL_WORKER_URL,
+            "AGENTKEYS_CHANNEL_WORKER_URL"
+        );
+    }
 
     #[test]
     fn cap_mint_op_roundtrips_paths_and_classes() {

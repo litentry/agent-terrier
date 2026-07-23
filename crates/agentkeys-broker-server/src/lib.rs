@@ -255,16 +255,9 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/agent/pending-bindings/ack",
             post(handlers::agent::pending::ack_binding),
         )
-        // Phase B grant endpoints (US-026).
-        .route(
-            "/v1/grant/create",
-            post(handlers::grant::create::grant_create),
-        )
-        .route(
-            "/v1/grant/revoke",
-            post(handlers::grant::revoke::grant_revoke),
-        )
-        .route("/v1/grant/list", get(handlers::grant::list::grant_list))
+        // The Phase-B `/v1/grant/{create,list,revoke}` CRUD was REMOVED (#547):
+        // its mint-time enforcement died with mint_v2 (PR #96) and authorization
+        // has ONE source of truth — on-chain scope + cap-mint.
         // Phase B wallet endpoints (US-028).
         .route("/v1/wallet/link", post(handlers::wallet::link::wallet_link))
         .route(

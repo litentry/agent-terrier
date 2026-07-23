@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::BrokerError;
-use crate::handlers::grant::require_session_jwt;
+use crate::handlers::require_session_jwt;
 use crate::state::SharedState;
 
 #[derive(Debug, Deserialize)]

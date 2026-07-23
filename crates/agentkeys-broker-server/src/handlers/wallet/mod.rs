@@ -7,12 +7,14 @@
 //! - `GET /v1/wallet/links` — master lists their attached identities.
 //! - `POST /v1/wallet/recover/lookup` — non-authenticated lookup that
 //!   returns the master OmniAccount owning a given linked identity.
-//!   The actual recovery grant is then issued via the regular
-//!   `POST /v1/grant/create` flow by the original master.
+//!   The actual re-authorization is then the original master's on-chain
+//!   ceremony (§10.2 pairing claim / #427 spawn — K11-signed register +
+//!   scope; the former `/v1/grant/create` step was removed with the
+//!   unenforced GrantStore, #547).
 //!
 //! There is NO endpoint that takes a "fresh email auth" and rebinds the
 //! master wallet — that flow would let a phished email become wallet
-//! takeover. The master always signs the recovery grant.
+//! takeover. The master always signs the recovery authorization.
 
 pub mod link;
 pub mod links_list;

@@ -8,8 +8,8 @@ use crate::oidc::OidcKeypair;
 use crate::plugins::audit::AuditPolicy;
 use crate::plugins::PluginRegistry;
 use crate::storage::{
-    AgentDelegationStore, AuthNonceStore, GrantStore, IdentityLinkStore, PairingRequestStore,
-    WalletStore,
+    AgentDelegationStore, AuthNonceStore, IdentityLinkStore, PairingRequestStore,
+    SpawnContextStore, WalletStore,
 };
 use crate::sts::StsClient;
 
@@ -40,12 +40,14 @@ pub struct AppState {
     pub audit_policy: AuditPolicy,
     pub wallet_store: Arc<WalletStore>,
     pub nonce_store: Arc<AuthNonceStore>,
-    /// Capability grants (Phase B, US-025/026/027). Backs the
-    /// `/v1/grant/{create,list,revoke}` CRUD endpoints. The mint-time
-    /// `try_consume` enforcement point disappeared with mint_v2 in PR #96
-    /// (issue #72); grants are kept in-tree for master-managed audit and
-    /// potential future re-introduction at the JWT-mint site.
-    pub grant_store: Arc<GrantStore>,
+    /// #546 — durable delegate spawn context (label, `opchat-<label>` feed id,
+    /// K10) keyed by device_key_hash: written at ceremony confirm, read by
+    /// EVERY sandbox-create path so a re-created runtime is never chat-silent,
+    /// deleted on confirmed revoke. Registered exception E2 in arch.md §1a —
+    /// scope bound + revert path (#551) live there and in
+    /// `storage::spawn_contexts`. (The former `grant_store` slot — the
+    /// unenforced-since-mint_v2 `/v1/grant` SQLite CRUD — was removed, #547.)
+    pub spawn_context_store: Arc<SpawnContextStore>,
     /// §10.2 agent-initiated pairing requests + pending-binding records (issue
     /// #144, method A). `/v1/agent/pairing/request` opens an unbound request
     /// (capturing device_pubkey + pop_sig); `/v1/agent/pairing/claim` binds it to

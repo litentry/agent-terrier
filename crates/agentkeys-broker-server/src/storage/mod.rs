@@ -17,7 +17,6 @@ pub mod auth_nonces;
 pub mod email_rate_limits;
 #[cfg(feature = "auth-email-link")]
 pub mod email_tokens;
-pub mod grants;
 pub mod identity_links;
 // Issue #144 — §10.2 agent-initiated pairing requests + pending-binding records
 // (method A). Unconditional (the agent bootstrap is core, not feature-gated).
@@ -26,6 +25,8 @@ pub mod oauth_pending;
 pub mod pairing_requests;
 #[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
 pub mod rate_limit_mints;
+// Issue #546 — durable delegate spawn context (the re-create injection set).
+pub mod spawn_contexts;
 pub mod wallets;
 
 pub use agent_delegations::{
@@ -37,7 +38,6 @@ pub use auth_nonces::{AuthNonceStore, ConsumeOutcome};
 pub use email_rate_limits::{EmailRateLimitStore, RateLimitOutcome};
 #[cfg(feature = "auth-email-link")]
 pub use email_tokens::{EmailConsumeOutcome, EmailRequestStatus, EmailTokenStore};
-pub use grants::{Grant, GrantConsumeOutcome, GrantStore};
 pub use identity_links::{IdentityLink, IdentityLinkStore};
 #[cfg(feature = "auth-oauth2")]
 pub use oauth_pending::{OAuth2PendingConsume, OAuth2PendingStatus, OAuth2PendingStore};
@@ -46,4 +46,5 @@ pub use pairing_requests::{
 };
 #[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
 pub use rate_limit_mints::MintRateLimiter;
+pub use spawn_contexts::{SpawnContext, SpawnContextStore};
 pub use wallets::WalletStore;

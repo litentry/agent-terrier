@@ -23,7 +23,7 @@ use serde_json::json;
 
 use crate::error::BrokerError;
 use crate::handlers::agent::unix_now;
-use crate::handlers::grant::random_b64url;
+use crate::handlers::random_b64url;
 use crate::state::SharedState;
 use crate::storage::PAIRING_REQUEST_TTL_SECONDS;
 
