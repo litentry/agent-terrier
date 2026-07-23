@@ -2076,15 +2076,31 @@ pub mod sandbox_env {
     /// The owning operator's omni (`0x` + 64 hex).
     pub const OPERATOR_OMNI: &str = "AGENTKEYS_OPERATOR_OMNI";
     /// The delegate's K10 secret (hex) — proves possession on resolve + signs
-    /// the #76 cap-mint PoP. Injected at create, never readable back.
+    /// the #76 cap-mint PoP. LEGACY custody (pre-#552 spawns): injected at
+    /// create, never readable back. Signer-custodied spawns inject
+    /// [`SESSION_JWT`] instead and no key ever enters the env.
     pub const DEVICE_KEY_HEX: &str = "AGENTKEYS_DEVICE_KEY_HEX";
+    /// #552 — the broker-minted `J1_agent` injected at CREATE for a
+    /// signer-custodied delegate: the sandbox's bearer toward the signer's
+    /// device-domain endpoints until the first resolve rotates it. Exactly
+    /// one of this and [`DEVICE_KEY_HEX`] is injected per spawn.
+    pub const SESSION_JWT: &str = "AGENTKEYS_SESSION_JWT";
     /// OPTIONAL override for the channel worker URL. Absent, the sandbox
     /// DERIVES `channel.<zone>` from [`BROKER_URL`] (the `derive_worker_url`
     /// convention) — never a required injection a spawn path could forget.
     pub const CHANNEL_WORKER_URL: &str = "AGENTKEYS_CHANNEL_WORKER_URL";
+    /// OPTIONAL override for the signer URL (#552). Absent, the sandbox
+    /// DERIVES `signer.<zone>` from [`BROKER_URL`] — same convention.
+    pub const SIGNER_URL: &str = "AGENTKEYS_SIGNER_URL";
 
-    /// The FULL set the chat loop requires (all-or-nothing: a partial set is a
-    /// loud warn on the consumer side, never a silent no-chat).
+    /// The identity/link envs required in BOTH custody modes (#552).
+    pub const CHAT_COMMON: [&str; 4] = [BROKER_URL, CHAT_CHANNEL_ID, ACTOR_OMNI, OPERATOR_OMNI];
+    /// The per-mode credential — EXACTLY ONE present per spawn: the legacy
+    /// in-env K10, or the #552 session JWT (signer-custodied, no key in env).
+    pub const CHAT_CREDENTIAL_ANY: [&str; 2] = [DEVICE_KEY_HEX, SESSION_JWT];
+
+    /// The legacy-mode full set (#546; = [`CHAT_COMMON`] + [`DEVICE_KEY_HEX`]).
+    /// Kept for the pre-#552 injection paths and their pinned tests.
     pub const CHAT_REQUIRED: [&str; 5] = [
         BROKER_URL,
         CHAT_CHANNEL_ID,
@@ -2156,6 +2172,14 @@ mod tests {
         assert_eq!(
             sandbox_env::CHANNEL_WORKER_URL,
             "AGENTKEYS_CHANNEL_WORKER_URL"
+        );
+        // #552 — the signer-custody additions, equally pinned.
+        assert_eq!(sandbox_env::SESSION_JWT, "AGENTKEYS_SESSION_JWT");
+        assert_eq!(sandbox_env::SIGNER_URL, "AGENTKEYS_SIGNER_URL");
+        assert_eq!(sandbox_env::CHAT_COMMON, sandbox_env::CHAT_REQUIRED[..4]);
+        assert_eq!(
+            sandbox_env::CHAT_CREDENTIAL_ANY,
+            ["AGENTKEYS_DEVICE_KEY_HEX", "AGENTKEYS_SESSION_JWT"]
         );
     }
 

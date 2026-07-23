@@ -20,6 +20,17 @@ use crate::protocol::{
     MemoryPutResult, RevokeResult, SpeechStsBody, SpeechStsResult, ENVELOPE_VERSION,
 };
 
+/// #552 — everything the client needs to have a cap-PoP signed IN the signer
+/// instead of by a local key: the device-domain signer client, the ROTATING
+/// J1 bearer (an `RwLock` shared with the resolve loop, which refreshes it),
+/// and the signer-derived `device_key_hash` stamped into each cap request.
+#[derive(Clone)]
+pub struct RemoteCapPop {
+    pub signer: std::sync::Arc<agentkeys_core::signer_client::DeviceSignerClient>,
+    pub bearer: std::sync::Arc<tokio::sync::RwLock<String>>,
+    pub device_key_hash: String,
+}
+
 /// A device→sandbox delegation the SANDBOX holds (issue #369 origination side).
 /// When set on a [`BackendClient`], `cap_mint` signs the cap-PoP with the
 /// sandbox's OWN ephemeral [`device_key`](BackendClient::device_key) but stamps
@@ -79,6 +90,8 @@ pub struct BackendClient {
     /// because a cap without a valid K10 PoP is rejected by the broker + worker
     /// (that rejection is what makes a compromised broker unable to mint caps).
     pub device_key: Option<std::sync::Arc<agentkeys_core::device_crypto::DeviceKey>>,
+    /// #552 — signer-side cap-PoP signing (signer-custodied delegates).
+    pub remote_cap_pop: Option<RemoteCapPop>,
     /// A device→sandbox delegation (issue #369). When set, `device_key` is the
     /// sandbox's EPHEMERAL key (signs the cap-PoP) and this carries the device's
     /// bound `device_key_hash` + co-signature that the worker re-verifies. `None`
@@ -109,6 +122,7 @@ impl BackendClient {
             vault_role_arn,
             region,
             device_key: None,
+            remote_cap_pop: None,
             delegation: None,
         }
     }
@@ -122,6 +136,17 @@ impl BackendClient {
         device_key: std::sync::Arc<agentkeys_core::device_crypto::DeviceKey>,
     ) -> Self {
         self.device_key = Some(device_key);
+        self
+    }
+
+    /// #552 — run cap-mint with the PoP signed IN the signer (device HKDF
+    /// domain): for signer-custodied delegates no key exists in the sandbox,
+    /// so the client generates the nonce/ts pair and asks the signer to
+    /// recompute + sign the digest, authenticated by the ROTATING J1 in
+    /// `bearer` (refreshed by every resolve). Takes precedence over
+    /// [`Self::with_device_key`] when both are set.
+    pub fn with_remote_cap_pop(mut self, remote: RemoteCapPop) -> Self {
+        self.remote_cap_pop = Some(remote);
         self
     }
 
@@ -241,66 +266,102 @@ impl BackendClient {
         // check). When no K10 is configured (e.g. a master before its K10 is
         // registered), send NO PoP and the caller-supplied `device_key_hash`;
         // the worker accepts it unless AGENTKEYS_WORKER_REQUIRE_CAP_POP=1.
-        let body = match self.device_key.as_ref() {
-            Some(device_key) => {
-                let pop = device_key
-                    .cap_pop_now(
-                        &req.operator_omni,
-                        &req.actor_omni,
-                        &req.service,
-                        op.op_str(),
-                        op.data_class(),
-                    )
-                    .map_err(|e| BackendError::Transport(format!("cap-PoP sign: {e}")))?;
-                // In DELEGATED mode (#369) the cap-PoP is signed by the sandbox's
-                // ephemeral key, but the cap's `device_key_hash` is the on-chain-
-                // bound DEVICE's (the delegation proves the device authorized this
-                // ephemeral key); the worker takes the delegated verify branch. In
-                // direct mode (#76) it's the signer's OWN hash, no delegation_path.
-                let (device_key_hash, delegation_path) = match self.delegation.as_ref() {
-                    Some(d) => (
-                        d.device_key_hash.clone(),
-                        Some(DelegationPath {
-                            scope: d.scope.clone(),
-                            expires_at: d.expires_at,
-                            delegation_sig: d.delegation_sig.clone(),
-                        }),
-                    ),
-                    None => (
-                        device_key.device_key_hash().map_err(|e| {
-                            BackendError::Transport(format!("device_key_hash: {e}"))
-                        })?,
-                        None,
-                    ),
-                };
-                BrokerCapRequest {
-                    operator_omni: req.operator_omni,
-                    actor_omni: req.actor_omni,
-                    service: req.service,
-                    device_key_hash,
-                    // Caller-side `CapMintRequest` always carries an explicit ttl,
-                    // so the wire body always sends it (`Some`) — byte-identical
-                    // to before the on-wire field became `Option`. Only a direct
-                    // on-wire caller (the browser) may send `None` to take the
-                    // broker default.
-                    ttl_seconds: Some(req.ttl_seconds),
-                    client_sig: Some(pop.client_sig),
-                    client_nonce: Some(pop.client_nonce),
-                    client_ts: Some(pop.client_ts),
-                    delegation_path,
-                }
-            }
-            None => BrokerCapRequest {
+        let body = if let Some(remote) = self.remote_cap_pop.as_ref() {
+            // #552 signer custody: nonce/ts generated here (same generator as
+            // the local path), digest recomputed + signed signer-side. The
+            // cap's device_key_hash is the signer-derived key's — consistent
+            // with the worker's keccak(ecrecover)==device_key_hash check.
+            let (client_nonce, client_ts) = agentkeys_core::device_crypto::fresh_cap_pop_nonce_ts();
+            let bearer_jwt = remote.bearer.read().await.clone();
+            let sig = remote
+                .signer
+                .sign_cap_pop(
+                    &agentkeys_core::signer_client::DeviceCapPopFields {
+                        actor_omni: req.actor_omni.clone(),
+                        operator_omni: req.operator_omni.clone(),
+                        service: req.service.clone(),
+                        op: op.op_str().to_string(),
+                        data_class: op.data_class().to_string(),
+                        client_nonce: client_nonce.clone(),
+                        client_ts,
+                    },
+                    &bearer_jwt,
+                )
+                .await
+                .map_err(|e| BackendError::Transport(format!("signer cap-PoP (#552): {e}")))?;
+            BrokerCapRequest {
                 operator_omni: req.operator_omni,
                 actor_omni: req.actor_omni,
                 service: req.service,
-                device_key_hash: req.device_key_hash,
+                device_key_hash: remote.device_key_hash.clone(),
                 ttl_seconds: Some(req.ttl_seconds),
-                client_sig: None,
-                client_nonce: None,
-                client_ts: None,
+                client_sig: Some(sig),
+                client_nonce: Some(client_nonce),
+                client_ts: Some(client_ts),
                 delegation_path: None,
-            },
+            }
+        } else {
+            match self.device_key.as_ref() {
+                Some(device_key) => {
+                    let pop = device_key
+                        .cap_pop_now(
+                            &req.operator_omni,
+                            &req.actor_omni,
+                            &req.service,
+                            op.op_str(),
+                            op.data_class(),
+                        )
+                        .map_err(|e| BackendError::Transport(format!("cap-PoP sign: {e}")))?;
+                    // In DELEGATED mode (#369) the cap-PoP is signed by the sandbox's
+                    // ephemeral key, but the cap's `device_key_hash` is the on-chain-
+                    // bound DEVICE's (the delegation proves the device authorized this
+                    // ephemeral key); the worker takes the delegated verify branch. In
+                    // direct mode (#76) it's the signer's OWN hash, no delegation_path.
+                    let (device_key_hash, delegation_path) = match self.delegation.as_ref() {
+                        Some(d) => (
+                            d.device_key_hash.clone(),
+                            Some(DelegationPath {
+                                scope: d.scope.clone(),
+                                expires_at: d.expires_at,
+                                delegation_sig: d.delegation_sig.clone(),
+                            }),
+                        ),
+                        None => (
+                            device_key.device_key_hash().map_err(|e| {
+                                BackendError::Transport(format!("device_key_hash: {e}"))
+                            })?,
+                            None,
+                        ),
+                    };
+                    BrokerCapRequest {
+                        operator_omni: req.operator_omni,
+                        actor_omni: req.actor_omni,
+                        service: req.service,
+                        device_key_hash,
+                        // Caller-side `CapMintRequest` always carries an explicit ttl,
+                        // so the wire body always sends it (`Some`) — byte-identical
+                        // to before the on-wire field became `Option`. Only a direct
+                        // on-wire caller (the browser) may send `None` to take the
+                        // broker default.
+                        ttl_seconds: Some(req.ttl_seconds),
+                        client_sig: Some(pop.client_sig),
+                        client_nonce: Some(pop.client_nonce),
+                        client_ts: Some(pop.client_ts),
+                        delegation_path,
+                    }
+                }
+                None => BrokerCapRequest {
+                    operator_omni: req.operator_omni,
+                    actor_omni: req.actor_omni,
+                    service: req.service,
+                    device_key_hash: req.device_key_hash,
+                    ttl_seconds: Some(req.ttl_seconds),
+                    client_sig: None,
+                    client_nonce: None,
+                    client_ts: None,
+                    delegation_path: None,
+                },
+            }
         };
 
         let resp = self

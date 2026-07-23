@@ -343,6 +343,141 @@ fn map_error(status: u16, body: &serde_json::Value) -> SignerClientError {
     }
 }
 
+// ─── #552: device-domain client (delegate K10 custodied IN the signer) ──────
+
+/// Successful response from `/dev/derive-device` (#552): the delegate's
+/// derived K10 address, its `device_key_hash`, and a fresh `pop_sig` over the
+/// canonical agent-pop payload (computed signer-side).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedDevice {
+    pub address: String,
+    pub device_key_hash: String,
+    pub pop_sig: String,
+    pub key_version: u8,
+}
+
+/// The STRUCTURED cap-PoP fields for `/dev/sign-device-cap-pop` (#552). The
+/// signer recomputes `cap_pop_payload(...)` from these itself — a caller
+/// prehash is never accepted, so the device key can only ever sign the two
+/// domain-restricted payload shapes.
+#[derive(Debug, Clone)]
+pub struct DeviceCapPopFields {
+    pub actor_omni: String,
+    pub operator_omni: String,
+    pub service: String,
+    pub op: String,
+    pub data_class: String,
+    pub client_nonce: String,
+    pub client_ts: u64,
+}
+
+/// #552 — client for the DEVICE-domain signer endpoints. The bearer J1 is
+/// passed PER CALL (not stored): the sandbox's session rotates on every
+/// resolve, and the #427 spawn-build uses the master's request bearer.
+pub struct DeviceSignerClient {
+    base_url: String,
+    http: reqwest::Client,
+}
+
+impl DeviceSignerClient {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    async fn post_json(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        bearer: &str,
+    ) -> Result<serde_json::Value, SignerClientError> {
+        let url = format!("{}{path}", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {bearer}"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| SignerClientError::Transport(format!("POST {url}: {e}")))?;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| SignerClientError::Transport(format!("parse JSON: {e}")))?;
+        if status == 200 {
+            return Ok(body);
+        }
+        let code = body["error"].as_str().unwrap_or("");
+        let msg = body["message"].as_str().unwrap_or("").to_string();
+        match code {
+            // The device endpoints' own refusals, mapped onto the caller
+            // semantics the daemon already drives retries with.
+            "actor_not_authorized" => Err(SignerClientError::Unauthorized(msg)),
+            "signer_auth_not_configured" => Err(SignerClientError::SignerDisabled(msg)),
+            _ => Err(map_error(status, &body)),
+        }
+    }
+
+    fn require_str(body: &serde_json::Value, key: &str) -> Result<String, SignerClientError> {
+        body[key]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| SignerClientError::Unexpected {
+                status: 200,
+                error: None,
+                message: Some(format!("missing '{key}'")),
+            })
+    }
+
+    /// `POST /dev/derive-device`. `label` engages the master-parentage arm
+    /// (the #427 spawn-build path); `None` = the actor's own J1.
+    pub async fn derive_device(
+        &self,
+        actor_omni: &str,
+        label: Option<&str>,
+        bearer: &str,
+    ) -> Result<DerivedDevice, SignerClientError> {
+        let mut req = serde_json::json!({ "actor_omni": actor_omni });
+        if let Some(l) = label {
+            req["label"] = serde_json::json!(l);
+        }
+        let body = self.post_json("/dev/derive-device", req, bearer).await?;
+        Ok(DerivedDevice {
+            address: Self::require_str(&body, "address")?,
+            device_key_hash: Self::require_str(&body, "device_key_hash")?,
+            pop_sig: Self::require_str(&body, "pop_sig")?,
+            key_version: body["key_version"].as_u64().unwrap_or(0) as u8,
+        })
+    }
+
+    /// `POST /dev/sign-device-cap-pop` — returns the #76 PoP signature.
+    pub async fn sign_cap_pop(
+        &self,
+        f: &DeviceCapPopFields,
+        bearer: &str,
+    ) -> Result<String, SignerClientError> {
+        let body = self
+            .post_json(
+                "/dev/sign-device-cap-pop",
+                serde_json::json!({
+                    "actor_omni":    f.actor_omni,
+                    "operator_omni": f.operator_omni,
+                    "service":       f.service,
+                    "op":            f.op,
+                    "data_class":    f.data_class,
+                    "client_nonce":  f.client_nonce,
+                    "client_ts":     f.client_ts,
+                }),
+                bearer,
+            )
+            .await?;
+        Self::require_str(&body, "signature")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

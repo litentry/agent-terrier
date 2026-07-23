@@ -15,7 +15,7 @@ pub mod client;
 pub mod fixtures;
 pub use agentkeys_protocol as protocol;
 
-pub use client::{BackendClient, BackendError, Delegation};
+pub use client::{BackendClient, BackendError, Delegation, RemoteCapPop};
 pub use protocol::{
     normalize_omni_0x, service_memory, AuditAppendInput, AuditAppendResult, AuditAppendV2,
     AuditAppendV2Resp, BrokerCapRequest, CapMintOp, CapMintRequest, CapToken, ConfigGetBody,

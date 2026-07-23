@@ -35,6 +35,16 @@ pub fn create_signer_router(state: SharedState) -> Router {
         // #512 — intent-based STS mint (ADR docs/spec/stacks/
         // ve-sts-signing-split.md). Same JWT auth path as /dev/sign-message;
         // 503 until AGENTKEYS_SIGNER_STS_PROVIDER arms it.
+        // #552 — DELEGATE K10 device-domain endpoints (derive + cap-PoP).
+        // Fail-closed: refuse without a broker session pubkey.
+        .route(
+            "/dev/derive-device",
+            post(handlers::dev_device::derive_device),
+        )
+        .route(
+            "/dev/sign-device-cap-pop",
+            post(handlers::dev_device::sign_device_cap_pop),
+        )
         .route("/dev/sign-sts", post(handlers::sign_sts::sign_sts))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
@@ -127,6 +137,14 @@ pub fn create_router(state: SharedState) -> Router {
         .route(
             "/dev/sign-typed-data",
             post(handlers::dev_keys::sign_typed_data),
+        )
+        .route(
+            "/dev/derive-device",
+            post(handlers::dev_device::derive_device),
+        )
+        .route(
+            "/dev/sign-device-cap-pop",
+            post(handlers::dev_device::sign_device_cap_pop),
         )
         // `/healthz` (Kubernetes convention) — what the broker's Tier-2
         // reachability probe hits. Single endpoint, single name across the

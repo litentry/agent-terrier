@@ -90,6 +90,22 @@ pub fn ecrecover_eip191(message: &[u8], signature_hex: &str) -> Result<String> {
 /// registered on chain and the broker/worker would reject every cap it signs).
 /// This is the ONE place the cap-mint clients (MCP server, daemon ui-bridge)
 /// resolve the agent/master K10, so the path convention stays in sync.
+/// A fresh #76 cap-PoP `(client_nonce, client_ts)` pair — ONE generator for
+/// both the local-key path ([`DeviceKey::cap_pop_now`]) and the #552
+/// remote-signer path (the backend client generates the pair, the signer
+/// recomputes the digest from the structured fields and signs).
+pub fn fresh_cap_pop_nonce_ts() -> (String, u64) {
+    let mut nonce_bytes = [0u8; 16];
+    use rand_core::RngCore;
+    rand_core::OsRng.fill_bytes(&mut nonce_bytes);
+    let client_nonce = hex::encode(nonce_bytes);
+    let client_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    (client_nonce, client_ts)
+}
+
 pub fn load_device_key_from_env() -> Option<DeviceKey> {
     let path = std::env::var("AGENTKEYS_DEVICE_KEY_FILE")
         .unwrap_or_else(|_| "~/.agentkeys/agent-device.key".to_string());
@@ -300,14 +316,7 @@ impl DeviceKey {
         op: &str,
         data_class: &str,
     ) -> Result<CapPop> {
-        let mut nonce_bytes = [0u8; 16];
-        use rand_core::RngCore;
-        rand_core::OsRng.fill_bytes(&mut nonce_bytes);
-        let client_nonce = hex::encode(nonce_bytes);
-        let client_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let (client_nonce, client_ts) = fresh_cap_pop_nonce_ts();
         let client_sig = self.cap_pop_sig(
             operator_omni,
             actor_omni,

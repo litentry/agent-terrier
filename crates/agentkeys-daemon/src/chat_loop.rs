@@ -6,10 +6,13 @@
 //! local bridge (`POST /v1/chat`, persona-framed by #390), and publishes the
 //! reply as `direction: out` with `correlation` = the inbound `event_id`.
 //!
-//! Identity: the delegate's K10 (injected at spawn as
-//! `AGENTKEYS_DEVICE_KEY_HEX`, #427) proves possession to the broker's
-//! `/v1/agent/resolve` → a fresh `J1_agent` every boot (nothing at rest), and
-//! signs the #76 cap-mint PoP. Authority: the on-chain
+//! Identity — two custody modes (#552): LEGACY spawns inject the K10 itself
+//! (`AGENTKEYS_DEVICE_KEY_HEX`, #427); SIGNER-custodied spawns inject a
+//! broker-minted J1 (`AGENTKEYS_SESSION_JWT`) instead and every signature
+//! (resolve pop, #76 cap-mint PoP) is produced IN the signer's device
+//! domain — no key ever exists in this sandbox. Either way the credential
+//! proves possession to the broker's `/v1/agent/resolve` → a fresh
+//! `J1_agent` (rotated into the signer bearer). Authority: the on-chain
 //! `channel-pub/sub:opchat-<label>` grants from the spawn template — this
 //! loop can only ever reach its OWN chat feed (a cross-channel mint is
 //! refused at all four §17.5 layers).
@@ -34,7 +37,14 @@ pub struct ChatLoopConfig {
     pub chat_channel_id: String,
     pub actor_omni: String,
     pub operator_omni: String,
-    pub device_key_hex: String,
+    /// LEGACY custody: the in-env K10. Exactly one of this / `session_jwt`.
+    pub device_key_hex: Option<String>,
+    /// #552 signer custody: the broker-minted boot J1 (rotated by resolve);
+    /// the delegate's K10 lives in the SIGNER and never enters the sandbox.
+    pub session_jwt: Option<String>,
+    /// #552 — the signer base URL (env override else DERIVED `signer.<zone>`
+    /// from the broker host, the `derive_worker_url` convention).
+    pub signer_url: Option<String>,
     pub bridge_url: String,
     pub bridge_token: Option<String>,
     /// #519 — the gate speech-relay base (`AGENTKEYS_GATE_SPEECH_URL`, injected
@@ -58,32 +68,46 @@ impl ChatLoopConfig {
         // separately-injected env a spawn could forget. A remote sandbox already
         // holds its broker host, so it computes `channel.<zone>` itself;
         // AGENTKEYS_CHANNEL_WORKER_URL stays an OPTIONAL override.
-        // The names are the shared `sandbox_env` contract (#546) — the broker's
-        // spawn paths inject against the same constants, so the set can't drift.
-        let need = agentkeys_backend_client::protocol::sandbox_env::CHAT_REQUIRED;
-        let vals: Vec<Option<String>> = need
-            .iter()
-            .map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
-            .collect();
-        let present = vals.iter().filter(|v| v.is_some()).count();
+        // The names are the shared `sandbox_env` contract (#546/#552) — the
+        // broker's spawn paths inject against the same constants, so the set
+        // can't drift. Required: the 4 COMMON identity/link envs plus EXACTLY
+        // one credential — the legacy in-env K10 (pre-#552 spawns) or the
+        // #552 session JWT (signer custody, no key in the sandbox).
+        use agentkeys_backend_client::protocol::sandbox_env as env_names;
+        let read = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        let common: Vec<Option<String>> = env_names::CHAT_COMMON.iter().map(|k| read(k)).collect();
+        let device_key_hex = read(env_names::DEVICE_KEY_HEX);
+        let session_jwt = read(env_names::SESSION_JWT);
+        let present = common.iter().filter(|v| v.is_some()).count()
+            + usize::from(device_key_hex.is_some())
+            + usize::from(session_jwt.is_some());
         if present == 0 {
             return None;
         }
-        if present < need.len() {
-            let missing: Vec<&str> = need
-                .iter()
-                .zip(&vals)
-                .filter(|(_, v)| v.is_none())
-                .map(|(k, _)| *k)
-                .collect();
+        let mut missing: Vec<&str> = env_names::CHAT_COMMON
+            .iter()
+            .zip(&common)
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| *k)
+            .collect();
+        if device_key_hex.is_none() && session_jwt.is_none() {
+            missing.push("AGENTKEYS_DEVICE_KEY_HEX|AGENTKEYS_SESSION_JWT");
+        }
+        if !missing.is_empty() {
             tracing::warn!(
                 ?missing,
-                "#430 chat loop: PARTIAL chat env — the spawn finalize should inject all of \
-                 them together; chat loop NOT started"
+                "#430 chat loop: PARTIAL chat env — the spawn finalize should inject the \
+                 common set + exactly one credential together; chat loop NOT started"
             );
             return None;
         }
-        let mut it = vals.into_iter().map(|v| v.unwrap());
+        if device_key_hex.is_some() && session_jwt.is_some() {
+            tracing::warn!(
+                "#552 chat loop: BOTH AGENTKEYS_DEVICE_KEY_HEX and AGENTKEYS_SESSION_JWT \
+                 injected — preferring the local key (legacy custody); fix the spawn path"
+            );
+        }
+        let mut it = common.into_iter().map(|v| v.unwrap());
         let broker_url = it.next().unwrap();
         // env override → else derive `channel.<zone>` from the broker host.
         let channel_worker_url = match std::env::var(
@@ -104,13 +128,28 @@ impl ChatLoopConfig {
                 return None;
             }
         };
+        // #552 signer custody needs the signer URL: env override → else derive
+        // `signer.<zone>` from the broker host (same convention as channel).
+        let signer_url = read(env_names::SIGNER_URL)
+            .map(|u| u.trim_end_matches('/').to_string())
+            .or_else(|| crate::ui_bridge::derive_worker_url(&broker_url, "signer"));
+        if session_jwt.is_some() && device_key_hex.is_none() && signer_url.is_none() {
+            tracing::warn!(
+                %broker_url,
+                "#552 chat loop: signer custody but the signer URL cannot be derived from \
+                 the broker host (and no AGENTKEYS_SIGNER_URL override) — chat loop NOT started"
+            );
+            return None;
+        }
         Some(Self {
             broker_url,
             channel_worker_url,
             chat_channel_id: it.next().unwrap(),
             actor_omni: it.next().unwrap(),
             operator_omni: it.next().unwrap(),
-            device_key_hex: it.next().unwrap(),
+            device_key_hex,
+            session_jwt,
+            signer_url,
             bridge_url: std::env::var("AGENTKEYS_CHAT_BRIDGE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8090".into()),
             bridge_token: std::env::var("AGENTKEYS_BRIDGE_TOKEN")
@@ -150,25 +189,148 @@ struct PollResponse {
     cursor: String,
 }
 
-async fn run(cfg: ChatLoopConfig) {
-    // Materialize the injected K10 into the daemon's standard key file so the
-    // shared DeviceKey/BackendClient machinery (incl. the #76 cap PoP) applies
-    // unchanged. 0600, sandbox-local.
-    let key_file = std::env::var("AGENTKEYS_DEVICE_KEY_FILE")
-        .unwrap_or_else(|_| "~/.agentkeys/agent-device.key".to_string());
-    if let Err(e) = agentkeys_core::device_crypto::write_key_0600(
-        &shellexpand_home(&key_file),
-        &cfg.device_key_hex,
-    ) {
-        tracing::error!(error = %e, "#430 chat loop: cannot materialize the device key — chat disabled");
-        return;
+/// The delegate's signing credential — LEGACY in-sandbox K10, or the #552
+/// signer custody handle (the key never enters the sandbox; the ROTATING J1
+/// in `bearer` authenticates every signer call and is refreshed by resolve).
+enum DelegateCredential {
+    Local {
+        key: std::sync::Arc<agentkeys_core::device_crypto::DeviceKey>,
+    },
+    Signer {
+        client: std::sync::Arc<agentkeys_core::signer_client::DeviceSignerClient>,
+        bearer: std::sync::Arc<tokio::sync::RwLock<String>>,
+        actor_omni: String,
+        address: String,
+        device_key_hash: String,
+    },
+}
+
+impl DelegateCredential {
+    fn address(&self) -> String {
+        match self {
+            Self::Local { key } => key.address().to_string(),
+            Self::Signer { address, .. } => address.clone(),
+        }
     }
-    let device_key = match agentkeys_core::device_crypto::DeviceKey::load_or_generate(
-        &key_file, false,
-    ) {
-        Ok(k) => std::sync::Arc::new(k),
-        Err(e) => {
-            tracing::error!(error = %e, "#430 chat loop: device key load failed — chat disabled");
+
+    fn device_key_hash(&self) -> String {
+        match self {
+            Self::Local { key } => key.device_key_hash().unwrap_or_default(),
+            Self::Signer {
+                device_key_hash, ..
+            } => device_key_hash.clone(),
+        }
+    }
+
+    /// A fresh pop_sig for `/v1/agent/resolve`. Signer mode re-derives (which
+    /// also revalidates the bearer against the signer).
+    async fn pop_sig(&self) -> Result<String, String> {
+        match self {
+            Self::Local { key } => key.pop_sig().map_err(|e| format!("pop: {e}")),
+            Self::Signer {
+                client,
+                bearer,
+                actor_omni,
+                ..
+            } => {
+                let jwt = bearer.read().await.clone();
+                client
+                    .derive_device(actor_omni, None, &jwt)
+                    .await
+                    .map(|d| d.pop_sig)
+                    .map_err(|e| format!("signer pop (#552): {e}"))
+            }
+        }
+    }
+
+    /// Resolve handed back a fresh J1: signer mode rotates its bearer so
+    /// every subsequent signer call rides the newest session.
+    async fn on_new_session(&self, jwt: &str) {
+        if let Self::Signer { bearer, .. } = self {
+            *bearer.write().await = jwt.to_string();
+        }
+    }
+}
+
+async fn run(cfg: ChatLoopConfig) {
+    // Build the signing credential. LEGACY: materialize the injected K10 into
+    // the daemon's standard key file so the shared DeviceKey/BackendClient
+    // machinery (incl. the #76 cap PoP) applies unchanged (0600,
+    // sandbox-local). #552 SIGNER custody: no key exists anywhere in this
+    // sandbox — bootstrap by asking the signer for the derived address with
+    // the injected boot J1.
+    let credential = match (&cfg.device_key_hex, &cfg.session_jwt) {
+        (Some(key_hex), _) => {
+            let key_file = std::env::var("AGENTKEYS_DEVICE_KEY_FILE")
+                .unwrap_or_else(|_| "~/.agentkeys/agent-device.key".to_string());
+            if let Err(e) =
+                agentkeys_core::device_crypto::write_key_0600(&shellexpand_home(&key_file), key_hex)
+            {
+                tracing::error!(error = %e, "#430 chat loop: cannot materialize the device key — chat disabled");
+                return;
+            }
+            match agentkeys_core::device_crypto::DeviceKey::load_or_generate(&key_file, false) {
+                Ok(k) => DelegateCredential::Local {
+                    key: std::sync::Arc::new(k),
+                },
+                Err(e) => {
+                    tracing::error!(error = %e, "#430 chat loop: device key load failed — chat disabled");
+                    return;
+                }
+            }
+        }
+        (None, Some(boot_jwt)) => {
+            let Some(signer_url) = cfg.signer_url.clone() else {
+                tracing::error!(
+                    "#552 chat loop: signer custody without a signer URL — chat disabled"
+                );
+                return;
+            };
+            let client = std::sync::Arc::new(
+                agentkeys_core::signer_client::DeviceSignerClient::new(signer_url),
+            );
+            let bearer = std::sync::Arc::new(tokio::sync::RwLock::new(boot_jwt.clone()));
+            // Bootstrap derive (retried): learns address + dkh AND proves the
+            // boot J1 + signer path work before the loop starts. A boot J1
+            // past its TTL is unrecoverable from inside (no key to resolve
+            // with) — loud; the next sandbox re-create injects a fresh one.
+            let mut backoff = Duration::from_secs(2);
+            let derived = loop {
+                match client
+                    .derive_device(&cfg.actor_omni, None, &bearer.read().await)
+                    .await
+                {
+                    Ok(d) => break d,
+                    Err(agentkeys_core::signer_client::SignerClientError::Unauthorized(e)) => {
+                        tracing::error!(
+                            error = %e,
+                            "#552 chat loop: boot J1 REFUSED by the signer (expired?) — \
+                             unrecoverable without a key; a sandbox re-create injects a \
+                             fresh J1. Chat disabled."
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "#552 chat loop: signer bootstrap failed — retrying");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(120));
+                    }
+                }
+            };
+            tracing::info!(
+                address = %derived.address,
+                "#552 chat loop: signer custody active — no device key in this sandbox"
+            );
+            DelegateCredential::Signer {
+                client,
+                bearer,
+                actor_omni: cfg.actor_omni.clone(),
+                address: derived.address,
+                device_key_hash: derived.device_key_hash,
+            }
+        }
+        (None, None) => {
+            tracing::error!("#430 chat loop: no credential (key or session JWT) — chat disabled");
             return;
         }
     };
@@ -185,8 +347,9 @@ async fn run(cfg: ChatLoopConfig) {
     loop {
         // 1. A valid J1_agent (fresh per boot / re-resolved on expiry).
         if session.is_none() {
-            match resolve_session(&http, &cfg, &device_key).await {
+            match resolve_session(&http, &cfg, &credential).await {
                 Ok(jwt) => {
+                    credential.on_new_session(&jwt).await;
                     session = Some(jwt);
                     backoff = Duration::from_secs(2);
                 }
@@ -208,8 +371,20 @@ async fn run(cfg: ChatLoopConfig) {
             None,
             None,
             std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
-        )
-        .with_device_key(device_key.clone());
+        );
+        let client = match &credential {
+            DelegateCredential::Local { key } => client.with_device_key(key.clone()),
+            DelegateCredential::Signer {
+                client: signer,
+                bearer: jwt,
+                device_key_hash,
+                ..
+            } => client.with_remote_cap_pop(agentkeys_backend_client::RemoteCapPop {
+                signer: signer.clone(),
+                bearer: jwt.clone(),
+                device_key_hash: device_key_hash.clone(),
+            }),
+        };
 
         // 2. Subscribe cap + one long-poll round.
         let sub_cap = match client
@@ -219,7 +394,7 @@ async fn run(cfg: ChatLoopConfig) {
                     operator_omni: cfg.operator_omni.clone(),
                     actor_omni: cfg.actor_omni.clone(),
                     service: format!("channel-sub:{}", cfg.chat_channel_id),
-                    device_key_hash: device_key.device_key_hash().unwrap_or_default(),
+                    device_key_hash: credential.device_key_hash(),
                     ttl_seconds: 300,
                 },
                 &bearer,
@@ -293,12 +468,13 @@ async fn run(cfg: ChatLoopConfig) {
         }
 
         // 3. Reply to inbound operator turns.
+        let device_key_hash = credential.device_key_hash();
         let publish_ctx = PublishCtx {
             http: &http,
             cfg: &cfg,
             client: &client,
             bearer: &bearer,
-            device_key: device_key.as_ref(),
+            device_key_hash: &device_key_hash,
         };
         for event in &poll.events {
             if !matches!(
@@ -688,16 +864,16 @@ async fn vision_turn(
 async fn resolve_session(
     http: &reqwest::Client,
     cfg: &ChatLoopConfig,
-    device_key: &agentkeys_core::device_crypto::DeviceKey,
+    credential: &DelegateCredential,
 ) -> Result<String, String> {
-    let pop_sig = device_key.pop_sig().map_err(|e| format!("pop: {e}"))?;
+    let pop_sig = credential.pop_sig().await?;
     let resp = http
         .post(format!(
             "{}/v1/agent/resolve",
             cfg.broker_url.trim_end_matches('/')
         ))
         .json(&serde_json::json!({
-            "device_pubkey": device_key.address(),
+            "device_pubkey": credential.address(),
             "pop_sig": pop_sig,
         }))
         .send()
@@ -779,7 +955,7 @@ struct PublishCtx<'a> {
     cfg: &'a ChatLoopConfig,
     client: &'a BackendClient,
     bearer: &'a str,
-    device_key: &'a agentkeys_core::device_crypto::DeviceKey,
+    device_key_hash: &'a str,
 }
 
 async fn publish_event(
@@ -796,7 +972,7 @@ async fn publish_event(
                 operator_omni: ctx.cfg.operator_omni.clone(),
                 actor_omni: ctx.cfg.actor_omni.clone(),
                 service: format!("channel-pub:{}", ctx.cfg.chat_channel_id),
-                device_key_hash: ctx.device_key.device_key_hash().unwrap_or_default(),
+                device_key_hash: ctx.device_key_hash.to_string(),
                 ttl_seconds: 300,
             },
             ctx.bearer,

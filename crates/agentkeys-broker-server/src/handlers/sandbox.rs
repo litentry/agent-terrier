@@ -151,6 +151,7 @@ pub(crate) fn delegate_identity_envs(
     actor_omni: &str,
     operator_omni: &str,
     k10_secret_hex: Option<&str>,
+    session_jwt: Option<&str>,
     chat_channel_id: &str,
     broker_url: Option<&str>,
     channel_worker_override: Option<&str>,
@@ -163,6 +164,12 @@ pub(crate) fn delegate_identity_envs(
     ];
     if let Some(secret) = k10_secret_hex.filter(|s| !s.trim().is_empty()) {
         envs.push((env_names::DEVICE_KEY_HEX.to_string(), secret.to_string()));
+    }
+    // #552 signer custody: the broker-minted J1 is the sandbox's credential
+    // toward the signer's device-domain endpoints (rotated by resolve).
+    // Exactly one of DEVICE_KEY_HEX / SESSION_JWT rides per spawn.
+    if let Some(jwt) = session_jwt.filter(|j| !j.trim().is_empty()) {
+        envs.push((env_names::SESSION_JWT.to_string(), jwt.trim().to_string()));
     }
     if !chat_channel_id.is_empty() {
         envs.push((
@@ -180,6 +187,40 @@ pub(crate) fn delegate_identity_envs(
         ));
     }
     envs
+}
+
+/// #552 — mint the J1_agent a signer-custodied delegate sandbox boots with
+/// (and that every re-create refreshes): actor = the delegate, parent = the
+/// operator, `device_pubkey` = the signer-derived K10 address (what the
+/// signer's #513-style chain gate re-checks). Loud None on failure — the
+/// create then boots chat-silent with the consumer-side partial-env warn.
+pub(crate) fn mint_delegate_session_jwt(
+    state: &SharedState,
+    actor_omni: &str,
+    operator_omni: &str,
+    derivation_path: &str,
+    k10_address: &str,
+) -> Option<String> {
+    match crate::jwt::issue::mint_agent_session_jwt(
+        &state.session_keypair,
+        &state.config.oidc_issuer,
+        actor_omni,
+        operator_omni,
+        derivation_path,
+        k10_address,
+        crate::handlers::agent::session_jwt_ttl_seconds(),
+    ) {
+        Ok(jwt) => Some(jwt),
+        Err(e) => {
+            tracing::warn!(
+                actor_omni = %actor_omni,
+                error = ?e,
+                "#552 delegate J1 mint FAILED — the sandbox boots without a signer credential \
+                 (chat loop will warn partial-env, not start)"
+            );
+            None
+        }
+    }
 }
 
 /// The broker-host env sources for [`delegate_identity_envs`]: the broker's own
@@ -237,11 +278,26 @@ pub async fn ensure_for_delegate(
     let (base_envs, gate_label) = match &ctx {
         Some(c) => {
             let (issuer, worker_override) = chat_link_env_sources();
+            // Legacy rows carry the K10 secret; #552 signer-custodied rows
+            // carry only the derived address — mint a FRESH J1 per create so
+            // a re-created sandbox always boots with a live signer credential.
+            let session_jwt = if c.k10_secret_hex.is_empty() && !c.k10_address.is_empty() {
+                mint_delegate_session_jwt(
+                    state,
+                    actor_omni,
+                    operator_omni,
+                    "//respawned",
+                    &c.k10_address,
+                )
+            } else {
+                None
+            };
             (
                 delegate_identity_envs(
                     actor_omni,
                     operator_omni,
                     Some(&c.k10_secret_hex),
+                    session_jwt.as_deref(),
                     &c.chat_channel_id,
                     issuer.as_deref(),
                     worker_override.as_deref(),
@@ -564,6 +620,7 @@ mod tests {
             &format!("0x{}", "AB".repeat(32)),
             &"CD".repeat(32),
             Some("0xdead"),
+            None,
             "opchat-watchdog",
             Some("https://broker.example.cn"),
             None,
@@ -600,6 +657,7 @@ mod tests {
         let envs = delegate_identity_envs(
             &"ab".repeat(32),
             &"cd".repeat(32),
+            None,
             None,
             "",
             None,
