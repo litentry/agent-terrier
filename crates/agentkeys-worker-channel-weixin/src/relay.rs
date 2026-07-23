@@ -107,6 +107,9 @@ pub async fn process_inbound_for(
             ts_millis: now_secs.saturating_mul(1000),
             correlation: None,
             audio: None,
+            partial: None,
+            seq: None,
+            stream: None,
         })
     } else {
         None

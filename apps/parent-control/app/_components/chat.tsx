@@ -5,7 +5,7 @@
 // the delegate's in-sandbox loop replies `direction: out`; an NRT long-poll
 // keeps the transcript live (§14.12 — sub-second on the awake path).
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ApiChatEvent } from '@/lib/generated/ApiChatEvent';
 import { useClient } from '@/lib/ClientProvider';
 
@@ -90,9 +90,65 @@ export function ChatPanel({
     };
   }, [api, channelId, addLog]);
 
+  // #563 — streamed replies arrive as DELTA events (`partial`, ordered by
+  // `seq`) followed by one FINAL event carrying the full text (the pre-#563
+  // single-shot shape). Fold them into bubbles: deltas accumulate into ONE
+  // growing bubble keyed by correlation; the final replaces it, so a missed
+  // delta can never corrupt the transcript.
+  type Bubble = {
+    key: string;
+    direction: string;
+    text: string;
+    ts_millis: number;
+    streaming: boolean;
+  };
+  const bubbles = useMemo<Bubble[]>(() => {
+    const out: Bubble[] = [];
+    const open = new Map<string, number>();
+    for (const e of events) {
+      if (e.partial && e.correlation) {
+        const i = open.get(e.correlation);
+        if (i === undefined) {
+          open.set(e.correlation, out.length);
+          out.push({
+            key: `stream-${e.correlation}`,
+            direction: e.direction,
+            text: e.text,
+            ts_millis: e.ts_millis,
+            streaming: true,
+          });
+        } else {
+          out[i] = { ...out[i], text: out[i].text + e.text, ts_millis: e.ts_millis };
+        }
+        continue;
+      }
+      const i = e.correlation ? open.get(e.correlation) : undefined;
+      if (i !== undefined && e.direction === 'out') {
+        // The final reply replaces the accumulated deltas (self-healing).
+        out[i] = {
+          key: `stream-${e.correlation}`,
+          direction: e.direction,
+          text: e.text,
+          ts_millis: e.ts_millis,
+          streaming: false,
+        };
+        open.delete(e.correlation!);
+        continue;
+      }
+      out.push({
+        key: e.event_id,
+        direction: e.direction,
+        text: e.text,
+        ts_millis: e.ts_millis,
+        streaming: false,
+      });
+    }
+    return out;
+  }, [events]);
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [events.length]);
+  }, [bubbles]);
 
   const send = useCallback(async () => {
     const text = draft.trim();
@@ -132,27 +188,28 @@ export function ChatPanel({
           gap: 6,
         }}
       >
-        {events.length === 0 && (
+        {bubbles.length === 0 && (
           <div className="muted" style={{ fontSize: 13 }}>
             {emptyHint ?? 'No messages yet — say hello. The full history lives in this durable feed.'}
           </div>
         )}
-        {events.map((e) => (
+        {bubbles.map((b) => (
           <div
-            key={e.event_id}
+            key={b.key}
             style={{
-              alignSelf: e.direction === 'in' ? 'flex-end' : 'flex-start',
+              alignSelf: b.direction === 'in' ? 'flex-end' : 'flex-start',
               maxWidth: '82%',
               padding: '6px 10px',
               borderRadius: 10,
-              background: e.direction === 'in' ? 'var(--accent)' : 'var(--bg)',
+              background: b.direction === 'in' ? 'var(--accent)' : 'var(--bg)',
               border: '1px solid var(--rule)',
               whiteSpace: 'pre-wrap',
               fontSize: 14,
             }}
-            title={`${e.direction === 'in' ? 'you' : 'agent'} · ${new Date(e.ts_millis).toLocaleString()}`}
+            title={`${b.direction === 'in' ? 'you' : 'agent'} · ${new Date(b.ts_millis).toLocaleString()}`}
           >
-            {e.text}
+            {b.text}
+            {b.streaming && <span className="muted"> ▌</span>}
           </div>
         ))}
       </div>

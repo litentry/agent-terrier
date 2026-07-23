@@ -479,6 +479,24 @@ pub struct ChannelEvent {
     /// #522 — audio params for `audio-clip` turns (voice/rate/format).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<ChannelAudioParams>,
+    /// #563 — a STREAMED reply fragment: `true` on the incremental
+    /// `direction: out` DELTA events of one turn. The FINAL reply event omits
+    /// it and carries the FULL text — byte-identical to the pre-#563
+    /// single-shot shape — so an old consumer renders exactly what it always
+    /// did and a new consumer self-heals by replacing accumulated deltas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
+    /// #563 — delta order within one streamed reply (0-based per
+    /// `correlation`; consumers append in this order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u32>,
+    /// #563 — consumer hint on an INBOUND turn: "I render partials — stream
+    /// the reply". Absent = the delegate answers single-shot, which is every
+    /// pre-#563 consumer (web, fleet TUI, devices). Copied verbatim from the
+    /// publish body like `correlation`, so old workers that drop it degrade
+    /// to single-shot rather than fragment-spamming an old UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 /// Broker `POST /v1/cap/channel-sts` response (#541) — short-lived, owner-scoped
@@ -519,6 +537,15 @@ pub struct ChannelPublishBody {
     /// #522 — producer-declared audio params, copied verbatim onto the event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<ChannelAudioParams>,
+    /// #563 — reply-delta marker (see [`ChannelEvent::partial`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
+    /// #563 — delta order (see [`ChannelEvent::seq`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u32>,
+    /// #563 — inbound stream hint (see [`ChannelEvent::stream`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 fn channel_direction_in() -> ChannelDirection {
@@ -2414,6 +2441,9 @@ mod tests {
             ts_millis: 1,
             correlation: None,
             audio: None,
+            partial: None,
+            seq: None,
+            stream: None,
         };
         let json = serde_json::to_value(&actor).unwrap();
         assert_eq!(json["producer"]["actor"]["actor_omni"], "0xcam");

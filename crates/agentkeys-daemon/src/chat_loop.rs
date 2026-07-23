@@ -56,6 +56,10 @@ pub struct ChatLoopConfig {
     /// ONLY credential the voice pipeline holds; speech app tokens stay on the
     /// gate (#386).
     pub speech_bearer: Option<String>,
+    /// #563 — streamed-reply delta coalescing window (ms). Every flush is one
+    /// channel publish (an S3 object + an encrypt), so this trades feed churn
+    /// against perceived latency; 1000 ms ≈ a sentence per bubble update.
+    pub stream_flush_ms: u64,
 }
 
 impl ChatLoopConfig {
@@ -161,6 +165,11 @@ impl ChatLoopConfig {
             speech_bearer: std::env::var("ARK_API_KEY")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            stream_flush_ms: std::env::var("AGENTKEYS_CHAT_STREAM_FLUSH_MS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|&ms| (100..=10_000).contains(&ms))
+                .unwrap_or(1_000),
         })
     }
 }
@@ -343,6 +352,14 @@ async fn run(cfg: ChatLoopConfig) {
     let mut fast_forwarded = false;
     let mut session: Option<String> = None;
     let mut backoff = Duration::from_secs(2);
+    // #563 — cap reuse: caps carry a 300 s TTL yet were re-minted every poll
+    // round AND every publish, which under #552 remote-PoP custody meant one
+    // signer round-trip per delegate per ~26 s poll (and per reply event —
+    // streaming would multiply that). Reuse until the refresh margin; any
+    // worker refusal invalidates, so revocation/epoch rotation degrade to one
+    // extra mint, never a silent stale-cap loop.
+    let mut sub_caps = CapCache::default();
+    let pub_caps = tokio::sync::Mutex::new(CapCache::default());
 
     loop {
         // 1. A valid J1_agent (fresh per boot / re-resolved on expiry).
@@ -386,32 +403,35 @@ async fn run(cfg: ChatLoopConfig) {
             }),
         };
 
-        // 2. Subscribe cap + one long-poll round.
-        let sub_cap = match client
-            .cap_mint(
-                CapMintOp::ChannelSubscribe,
-                CapMintRequest {
-                    operator_omni: cfg.operator_omni.clone(),
-                    actor_omni: cfg.actor_omni.clone(),
-                    service: format!("channel-sub:{}", cfg.chat_channel_id),
-                    device_key_hash: credential.device_key_hash(),
-                    ttl_seconds: 300,
-                },
-                &bearer,
-            )
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let msg = e.to_string();
-                tracing::warn!(error = %msg, "#430 chat loop: channel-sub mint failed");
-                if msg.contains("401") || msg.contains("expired") {
-                    session = None; // re-resolve
+        // 2. Subscribe cap (cached, #563) + one long-poll round.
+        let sub_cap = match sub_caps.fresh() {
+            Some(c) => c,
+            None => match client
+                .cap_mint(
+                    CapMintOp::ChannelSubscribe,
+                    CapMintRequest {
+                        operator_omni: cfg.operator_omni.clone(),
+                        actor_omni: cfg.actor_omni.clone(),
+                        service: format!("channel-sub:{}", cfg.chat_channel_id),
+                        device_key_hash: credential.device_key_hash(),
+                        ttl_seconds: 300,
+                    },
+                    &bearer,
+                )
+                .await
+            {
+                Ok(c) => sub_caps.store(c),
+                Err(e) => {
+                    let msg = e.to_string();
+                    tracing::warn!(error = %msg, "#430 chat loop: channel-sub mint failed");
+                    if msg.contains("401") || msg.contains("expired") {
+                        session = None; // re-resolve
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(120));
+                    continue;
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(120));
-                continue;
-            }
+            },
         };
         // @backend-fixture: channel_poll_body — compiled from the protocol type
         // family (cap + after + wait_seconds), never a drifting hand-rolled shape.
@@ -439,6 +459,9 @@ async fn run(cfg: ChatLoopConfig) {
             },
             Ok(resp) => {
                 tracing::warn!(status = %resp.status(), "#430 chat loop: poll refused");
+                // The cached cap may be revoked / epoch-rotated — next round
+                // re-mints instead of replaying a refused token (#563).
+                sub_caps.invalidate();
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(120));
                 continue;
@@ -475,6 +498,7 @@ async fn run(cfg: ChatLoopConfig) {
             client: &client,
             bearer: &bearer,
             device_key_hash: &device_key_hash,
+            pub_caps: &pub_caps,
         };
         for event in &poll.events {
             if !matches!(
@@ -611,11 +635,25 @@ async fn run(cfg: ChatLoopConfig) {
             if text.trim().is_empty() {
                 continue;
             }
-            let reply = match bridge_chat(&http, &cfg, &text).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "#430 chat loop: bridge /v1/chat failed");
-                    format!("(agent error: {e})")
+            // #563 — stream ONLY when the inbound turn carries the consumer's
+            // explicit hint: a consumer that never sends it (old web app,
+            // fleet TUI, devices) gets today's single-shot reply, so partials
+            // can never fragment-spam a UI that doesn't merge them.
+            let reply = if event.stream == Some(true) {
+                match bridge_chat_stream(&http, &cfg, &text, &publish_ctx, &event.event_id).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "#563 chat loop: streamed bridge turn failed");
+                        format!("(agent error: {e})")
+                    }
+                }
+            } else {
+                match bridge_chat(&http, &cfg, &text).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "#430 chat loop: bridge /v1/chat failed");
+                        format!("(agent error: {e})")
+                    }
                 }
             };
             if let Err(e) = publish_event(
@@ -950,12 +988,124 @@ async fn bridge_jobs(http: &reqwest::Client, cfg: &ChatLoopConfig) -> Result<Str
 /// The per-poll invariants every publish shares — bundled so the reply
 /// helpers stay under clippy's argument ceiling instead of re-threading five
 /// context handles per call.
+/// #563 — one minted cap, reused until near-expiry (mint TTL 300 s, refresh
+/// margin 60 s). `fresh()` clones (a cap is a small serde_json::Value);
+/// `invalidate()` on any worker refusal so revocation / K3-epoch rotation
+/// costs one extra mint, never a stale-cap retry loop.
+#[derive(Default)]
+pub(crate) struct CapCache {
+    slot: Option<(
+        agentkeys_backend_client::protocol::CapToken,
+        std::time::Instant,
+    )>,
+}
+
+impl CapCache {
+    const TTL: Duration = Duration::from_secs(300);
+    const REFRESH_MARGIN: Duration = Duration::from_secs(60);
+
+    fn fresh(&self) -> Option<agentkeys_backend_client::protocol::CapToken> {
+        self.slot
+            .as_ref()
+            .filter(|(_, minted)| minted.elapsed() + Self::REFRESH_MARGIN < Self::TTL)
+            .map(|(cap, _)| cap.clone())
+    }
+
+    fn store(
+        &mut self,
+        cap: agentkeys_backend_client::protocol::CapToken,
+    ) -> agentkeys_backend_client::protocol::CapToken {
+        self.slot = Some((cap.clone(), std::time::Instant::now()));
+        cap
+    }
+
+    fn invalidate(&mut self) {
+        self.slot = None;
+    }
+}
+
+/// #563 — incremental SSE frame parser for the bridge's `/v1/chat` stream
+/// (`data: {json}\n\n` frames; the bridge emits `token` / `tool` /
+/// `tool_start` / `done` / `error` objects). Pure: feed chunks, get parsed
+/// frames — unit-testable with no sockets.
+#[derive(Default)]
+struct SseParser {
+    buf: String,
+}
+
+impl SseParser {
+    fn feed(&mut self, chunk: &str) -> Vec<serde_json::Value> {
+        self.buf.push_str(chunk);
+        let mut out = Vec::new();
+        while let Some(end) = self.buf.find("\n\n") {
+            let frame: String = self.buf.drain(..end + 2).collect();
+            for line in frame.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// #563 — token→delta coalescer. Every flush becomes one channel publish (an
+/// S3 object + an envelope encrypt), so raw per-token publishing is out of the
+/// question; this batches by wall-clock window (or a size backstop). Pure —
+/// the clock is an argument, so tests never sleep.
+struct DeltaCoalescer {
+    pending: String,
+    last_flush: std::time::Instant,
+    interval: Duration,
+}
+
+impl DeltaCoalescer {
+    const SIZE_BACKSTOP: usize = 2048;
+
+    fn new(interval: Duration, now: std::time::Instant) -> Self {
+        Self {
+            pending: String::new(),
+            last_flush: now,
+            interval,
+        }
+    }
+
+    /// Buffer `token`; `Some(delta)` when the window (or size backstop) says
+    /// it is time to publish.
+    fn push(&mut self, token: &str, now: std::time::Instant) -> Option<String> {
+        self.pending.push_str(token);
+        if self.pending.is_empty() {
+            return None;
+        }
+        if now.duration_since(self.last_flush) >= self.interval
+            || self.pending.len() >= Self::SIZE_BACKSTOP
+        {
+            self.last_flush = now;
+            return Some(std::mem::take(&mut self.pending));
+        }
+        None
+    }
+
+    fn drain(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.pending))
+        }
+    }
+}
+
 struct PublishCtx<'a> {
     http: &'a reqwest::Client,
     cfg: &'a ChatLoopConfig,
     client: &'a BackendClient,
     bearer: &'a str,
     device_key_hash: &'a str,
+    /// #563 — the publish-cap cache (async-shared: replies, voice legs and
+    /// streamed deltas all publish through one reused cap).
+    pub_caps: &'a tokio::sync::Mutex<CapCache>,
 }
 
 async fn publish_event(
@@ -964,29 +1114,65 @@ async fn publish_event(
     body_b64: String,
     correlation: &str,
 ) -> Result<(), String> {
-    let pub_cap = ctx
-        .client
-        .cap_mint(
-            CapMintOp::ChannelPublish,
-            CapMintRequest {
-                operator_omni: ctx.cfg.operator_omni.clone(),
-                actor_omni: ctx.cfg.actor_omni.clone(),
-                service: format!("channel-pub:{}", ctx.cfg.chat_channel_id),
-                device_key_hash: ctx.device_key_hash.to_string(),
-                ttl_seconds: 300,
-            },
-            ctx.bearer,
-        )
-        .await
-        .map_err(|e| format!("channel-pub mint: {e}"))?;
+    publish_with(ctx, kind, body_b64, correlation, None).await
+}
+
+/// #563 — one streamed-reply DELTA (`partial: true`, ordered by `seq`); the
+/// turn's FINAL event goes through [`publish_event`] and is byte-identical to
+/// the pre-#563 single-shot reply.
+async fn publish_delta(
+    ctx: &PublishCtx<'_>,
+    body_b64: String,
+    correlation: &str,
+    seq: u32,
+) -> Result<(), String> {
+    publish_with(ctx, "text", body_b64, correlation, Some(seq)).await
+}
+
+async fn publish_with(
+    ctx: &PublishCtx<'_>,
+    kind: &str,
+    body_b64: String,
+    correlation: &str,
+    partial_seq: Option<u32>,
+) -> Result<(), String> {
+    // #563 — reuse the publish cap until near-expiry; mint only on a miss.
+    let cached = ctx.pub_caps.lock().await.fresh();
+    let pub_cap = match cached {
+        Some(c) => c,
+        None => {
+            let minted = ctx
+                .client
+                .cap_mint(
+                    CapMintOp::ChannelPublish,
+                    CapMintRequest {
+                        operator_omni: ctx.cfg.operator_omni.clone(),
+                        actor_omni: ctx.cfg.actor_omni.clone(),
+                        service: format!("channel-pub:{}", ctx.cfg.chat_channel_id),
+                        device_key_hash: ctx.device_key_hash.to_string(),
+                        ttl_seconds: 300,
+                    },
+                    ctx.bearer,
+                )
+                .await
+                .map_err(|e| format!("channel-pub mint: {e}"))?;
+            ctx.pub_caps.lock().await.store(minted)
+        }
+    };
     // @backend-fixture: channel_publish_body — the protocol-shaped publish.
-    let body = serde_json::json!({
+    // The #563 delta markers are OPTIONAL additive keys (absent on the final
+    // reply, so the canonical fixture shape is untouched).
+    let mut body = serde_json::json!({
         "cap": pub_cap,
         "kind": kind,
         "direction": "out",
         "body_b64": body_b64,
         "correlation": correlation,
     });
+    if let Some(seq) = partial_seq {
+        body["partial"] = serde_json::json!(true);
+        body["seq"] = serde_json::json!(seq);
+    }
     let resp = ctx
         .http
         .post(format!(
@@ -998,9 +1184,106 @@ async fn publish_event(
         .await
         .map_err(|e| format!("publish send: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("publish HTTP {}", resp.status()));
+        let status = resp.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            // Revoked / rotated — drop the cached cap so the next publish
+            // re-mints instead of replaying a refused token (#563).
+            ctx.pub_caps.lock().await.invalidate();
+        }
+        return Err(format!("publish HTTP {status}"));
     }
     Ok(())
+}
+
+/// #563 — one STREAMED bridge turn: consumes the bridge's `/v1/chat` SSE
+/// (`token`/`tool*`/`done`/`error` frames), publishes coalesced DELTAS as it
+/// goes, and returns the FULL reply text for the final publish (+ TTS reuse).
+/// Delta-publish failures degrade loudly to single-shot (the final event
+/// always carries the whole reply, so a lost delta never loses content).
+async fn bridge_chat_stream(
+    http: &reqwest::Client,
+    cfg: &ChatLoopConfig,
+    text: &str,
+    ctx: &PublishCtx<'_>,
+    correlation: &str,
+) -> Result<String, String> {
+    let mut req = http
+        .post(format!("{}/v1/chat", cfg.bridge_url.trim_end_matches('/')))
+        .timeout(Duration::from_secs(300))
+        .json(&serde_json::json!({ "text": text, "stream": true }));
+    if let Some(token) = &cfg.bridge_token {
+        req = req.bearer_auth(token);
+    }
+    let mut resp = req.send().await.map_err(|e| format!("bridge send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("bridge HTTP {}", resp.status()));
+    }
+    let mut parser = SseParser::default();
+    let mut coalescer = DeltaCoalescer::new(
+        Duration::from_millis(cfg.stream_flush_ms),
+        std::time::Instant::now(),
+    );
+    let mut full = String::new();
+    let mut seq: u32 = 0;
+    let mut deltas_dead = false;
+    let mut done = false;
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("bridge stream read: {e}"))?
+    {
+        for frame in parser.feed(&String::from_utf8_lossy(&chunk)) {
+            match frame.get("type").and_then(|t| t.as_str()) {
+                Some("token") => {
+                    let t = frame.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    full.push_str(t);
+                    if deltas_dead {
+                        continue;
+                    }
+                    if let Some(delta) = coalescer.push(t, std::time::Instant::now()) {
+                        if let Err(e) =
+                            publish_delta(ctx, base64_of(delta.as_bytes()), correlation, seq).await
+                        {
+                            // Loud downgrade, not a lost turn: stop streaming
+                            // deltas and let the final single-shot carry it all.
+                            tracing::warn!(error = %e, "#563 chat loop: delta publish failed — downgrading this turn to single-shot");
+                            deltas_dead = true;
+                        } else {
+                            seq += 1;
+                        }
+                    }
+                }
+                Some("done") => {
+                    done = true;
+                }
+                Some("error") => {
+                    let msg = frame
+                        .get("error")
+                        .or_else(|| frame.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("stream error");
+                    return Err(msg.to_string());
+                }
+                // tool_start / tool frames: progress noise for the transcript —
+                // the deltas themselves are the progress signal here.
+                _ => {}
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    if !done {
+        return Err("bridge stream ended without a done frame".into());
+    }
+    if !deltas_dead {
+        if let Some(rest) = coalescer.drain() {
+            if let Err(e) = publish_delta(ctx, base64_of(rest.as_bytes()), correlation, seq).await {
+                tracing::warn!(error = %e, "#563 chat loop: tail delta publish failed — final event still carries the full reply");
+            }
+        }
+    }
+    Ok(full)
 }
 
 fn shellexpand_home(p: &str) -> String {
@@ -1015,6 +1298,58 @@ fn shellexpand_home(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #563: the SSE frame parser is pure — split boundaries anywhere ──────
+    #[test]
+    fn sse_parser_reassembles_frames_across_arbitrary_chunk_splits() {
+        let mut p = SseParser::default();
+        // A frame split mid-JSON, plus two frames in one chunk.
+        assert!(p.feed("data: {\"type\":\"tok").is_empty());
+        let got = p.feed("en\",\"text\":\"He\"}\n\ndata: {\"type\":\"token\",\"text\":\"llo\"}\n\ndata: {\"type\":\"done\"}\n\n");
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0]["text"], "He");
+        assert_eq!(got[1]["text"], "llo");
+        assert_eq!(got[2]["type"], "done");
+        // Trailing partial stays buffered.
+        assert!(p.feed("data: {\"type\":\"token\"").is_empty());
+    }
+
+    // ── #563: the coalescer flushes on the window or the size backstop ──────
+    #[test]
+    fn delta_coalescer_batches_by_window_and_size() {
+        use std::time::{Duration as D, Instant};
+        let t0 = Instant::now();
+        let mut c = DeltaCoalescer::new(D::from_millis(1000), t0);
+        // Inside the window: buffered, no flush.
+        assert!(c.push("Hel", t0 + D::from_millis(100)).is_none());
+        assert!(c.push("lo ", t0 + D::from_millis(500)).is_none());
+        // Window elapsed → one delta carrying everything buffered so far.
+        assert_eq!(
+            c.push("world", t0 + D::from_millis(1100)).as_deref(),
+            Some("Hello world")
+        );
+        // Size backstop fires even inside the window.
+        let big = "x".repeat(DeltaCoalescer::SIZE_BACKSTOP);
+        assert_eq!(
+            c.push(&big, t0 + D::from_millis(1200)).as_deref(),
+            Some(big.as_str())
+        );
+        // drain() hands back the tail exactly once.
+        assert!(c.push("tail", t0 + D::from_millis(1300)).is_none());
+        assert_eq!(c.drain().as_deref(), Some("tail"));
+        assert!(c.drain().is_none());
+    }
+
+    // ── #563: cap reuse honors the refresh margin + invalidation ────────────
+    #[test]
+    fn cap_cache_reuses_until_margin_and_invalidates() {
+        let mut cache = CapCache::default();
+        assert!(cache.fresh().is_none());
+        let cap = cache.store(serde_json::json!({"sig": "abc"}));
+        assert_eq!(cache.fresh(), Some(cap));
+        cache.invalidate();
+        assert!(cache.fresh().is_none());
+    }
 
     // #522/#537 — a declared reply voice + speech rate ride the gate TTS body;
     // no params = the bare input (gate defaults). Same helper feeds both the
