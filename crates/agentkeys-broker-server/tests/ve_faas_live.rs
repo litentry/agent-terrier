@@ -17,7 +17,7 @@
 //! cargo test -p agentkeys-broker-server --test ve_faas_live -- --ignored --nocapture
 //! ```
 
-use agentkeys_broker_server::ve_faas::{VeFaasClient, LABEL_DEVICE_KEY_HASH};
+use agentkeys_broker_server::ve_faas::{label_value, VeFaasClient, LABEL_DEVICE_KEY_HASH};
 
 #[tokio::test]
 #[ignore = "live VE call — needs VOLCENGINE_ACCESS_KEY/_SECRET_KEY + SANDBOX_FUNCTION_ID (+ ark family)"]
@@ -34,6 +34,9 @@ async fn sandbox_lifecycle_spawn_is_idempotent_and_teardown_kills() {
         .as_secs();
     let device_key_hash = format!("0x{:064x}", nonce);
     let actor_omni = format!("0x{:064x}", nonce + 1);
+    // #543 — veFaaS stores/filters the TRUNCATED label value (values <64 chars);
+    // the full 66-char hash never appears in Metadata.
+    let dkh_label = label_value(&device_key_hash);
 
     // 1. Spawn: first ensure must CREATE.
     let first = client
@@ -45,13 +48,13 @@ async fn sandbox_lifecycle_spawn_is_idempotent_and_teardown_kills() {
 
     // 2. Quota key: the fresh instance is findable by its Metadata label.
     let labeled = client
-        .list_instances(Some(&[(LABEL_DEVICE_KEY_HASH, &device_key_hash)]))
+        .list_instances(Some(&[(LABEL_DEVICE_KEY_HASH, dkh_label.as_str())]))
         .await
         .expect("list by label");
     assert!(
         labeled.iter().any(|i| i.id == first.sandbox_id
             && i.metadata.get(LABEL_DEVICE_KEY_HASH).map(String::as_str)
-                == Some(device_key_hash.as_str())),
+                == Some(dkh_label.as_str())),
         "Metadata labels NOT visible on ListSandboxes rows — the per-delegate \
          quota invariant is unenforceable; rows: {labeled:?}",
         labeled = labeled
@@ -70,14 +73,14 @@ async fn sandbox_lifecycle_spawn_is_idempotent_and_teardown_kills() {
     assert!(!second.created, "second ensure must reuse, not duplicate");
     assert_eq!(second.sandbox_id, first.sandbox_id);
     let live_for_label = client
-        .list_instances(Some(&[(LABEL_DEVICE_KEY_HASH, &device_key_hash)]))
+        .list_instances(Some(&[(LABEL_DEVICE_KEY_HASH, dkh_label.as_str())]))
         .await
         .expect("re-list")
         .into_iter()
         .filter(|i| {
             i.is_live()
                 && i.metadata.get(LABEL_DEVICE_KEY_HASH).map(String::as_str)
-                    == Some(device_key_hash.as_str())
+                    == Some(dkh_label.as_str())
         })
         .count();
     assert_eq!(
@@ -100,13 +103,13 @@ async fn sandbox_lifecycle_spawn_is_idempotent_and_teardown_kills() {
     // 5. After teardown no live labeled instance remains (Terminating counts
     //    as dead for the quota scan, so a re-ensure would create afresh).
     let after = client
-        .list_instances(Some(&[(LABEL_DEVICE_KEY_HASH, &device_key_hash)]))
+        .list_instances(Some(&[(LABEL_DEVICE_KEY_HASH, dkh_label.as_str())]))
         .await
         .expect("post-kill list");
     assert!(
         !after.iter().any(|i| i.is_live()
             && i.metadata.get(LABEL_DEVICE_KEY_HASH).map(String::as_str)
-                == Some(device_key_hash.as_str())),
+                == Some(dkh_label.as_str())),
         "instance still live after KillSandbox: {after:?}",
         after = after
             .iter()

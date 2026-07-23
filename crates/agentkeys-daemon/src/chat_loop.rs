@@ -52,9 +52,14 @@ impl ChatLoopConfig {
     /// Env-gated: all of the chat vars present ⇒ `Some`. A PARTIAL set is a
     /// loud warn (a mis-wired spawn should not silently mean "no chat").
     pub fn from_env() -> Option<Self> {
+        // The channel worker URL is NOT in this required set — it is DERIVED from
+        // the broker's domain + the worker name (the `derive_worker_url`
+        // convention shared with the daemon's own `channel_worker_url`), never a
+        // separately-injected env a spawn could forget. A remote sandbox already
+        // holds its broker host, so it computes `channel.<zone>` itself;
+        // AGENTKEYS_CHANNEL_WORKER_URL stays an OPTIONAL override.
         let need = [
             "AGENTKEYS_BROKER_URL",
-            "AGENTKEYS_CHANNEL_WORKER_URL",
             "AGENTKEYS_CHAT_CHANNEL_ID",
             "AGENTKEYS_ACTOR_OMNI",
             "AGENTKEYS_OPERATOR_OMNI",
@@ -83,9 +88,27 @@ impl ChatLoopConfig {
             return None;
         }
         let mut it = vals.into_iter().map(|v| v.unwrap());
+        let broker_url = it.next().unwrap();
+        // env override → else derive `channel.<zone>` from the broker host.
+        let channel_worker_url = match std::env::var("AGENTKEYS_CHANNEL_WORKER_URL")
+            .ok()
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty())
+            .or_else(|| crate::ui_bridge::derive_worker_url(&broker_url, "channel"))
+        {
+            Some(u) => u,
+            None => {
+                tracing::warn!(
+                    %broker_url,
+                    "#430 chat loop: cannot derive the channel worker URL from the broker \
+                     host (and no AGENTKEYS_CHANNEL_WORKER_URL override) — chat loop NOT started"
+                );
+                return None;
+            }
+        };
         Some(Self {
-            broker_url: it.next().unwrap(),
-            channel_worker_url: it.next().unwrap(),
+            broker_url,
+            channel_worker_url,
             chat_channel_id: it.next().unwrap(),
             actor_omni: it.next().unwrap(),
             operator_omni: it.next().unwrap(),

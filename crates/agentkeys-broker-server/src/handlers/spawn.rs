@@ -636,62 +636,21 @@ async fn finalize_spawn(
         }
     };
 
-    // 1. Gate provisioning (epic decision 6): the usage plane. Unset env =
-    //    documented skip (direct-ark posture); set-but-failing = LOUD.
-    let mut gate_status = "not-configured".to_string();
-    let mut gate_error: Option<String> = None;
-    let mut extra_envs: Vec<(String, String)> = Vec::new();
-    match crate::gate_admin::load_gate_admin_config() {
-        None => {
-            tracing::info!(
-                device_key_hash = %device_key_hash,
-                "#427 spawn: skip gate provisioning (AGENTKEYS_GATE_ADMIN_URL unset) — \
-                 sandbox keeps the direct ark-key injection"
-            );
-        }
-        Some(Err(e)) => {
-            tracing::error!(error = %e, "#427 spawn: gate admin MISCONFIGURED");
-            gate_status = "misconfigured".into();
-            gate_error = Some(e);
-        }
-        Some(Ok(cfg)) => {
-            match crate::gate_admin::provision_delegate(
-                &state.http,
-                &cfg,
-                &format!("0x{}", hex::encode(session_omni)),
-                actor_omni,
-                device_key_hash,
-                &label,
-            )
-            .await
-            {
-                Ok(key) => {
-                    gate_status = "provisioned".into();
-                    extra_envs.push(("ARK_BASE_URL".into(), cfg.turn_url.clone()));
-                    // #519 — the chat loop's voice branch needs the speech
-                    // relay EXPLICITLY (same gate base): absent = voice turns
-                    // refuse loudly instead of dialing a base without the
-                    // /v1/audio/* endpoints.
-                    extra_envs.push(("AGENTKEYS_GATE_SPEECH_URL".into(), cfg.turn_url.clone()));
-                    extra_envs.push(("ARK_API_KEY".into(), key.secret));
-                }
-                Err(e) => {
-                    // The delegate stays usable on the direct-ark path so the
-                    // just-authorized ceremony isn't bricked, but this is a
-                    // metering bypass until re-provisioned — surfaced, never
-                    // silent.
-                    tracing::error!(
-                        device_key_hash = %device_key_hash,
-                        error = %e,
-                        "#427 spawn: gate provisioning FAILED — delegate boots on the \
-                         direct ark path, UNMETERED until re-provisioned"
-                    );
-                    gate_status = "failed".into();
-                    gate_error = Some(e);
-                }
-            }
-        }
-    }
+    // 1. Gate provisioning (epic decision 6): the usage plane. EAGER here — the
+    //    ceremony always CREATES (a fresh delegate has no live instance) and must
+    //    record the status for the audit anchor + the #543 runtime field. Same
+    //    single-owner helper the resolve/poll cold-create path calls lazily.
+    let gate = crate::handlers::sandbox::provision_delegate_envs(
+        &state.http,
+        &format!("0x{}", hex::encode(session_omni)),
+        actor_omni,
+        device_key_hash,
+        &label,
+    )
+    .await;
+    let gate_status = gate.status;
+    let gate_error = gate.error;
+    let mut extra_envs: Vec<(String, String)> = gate.envs;
 
     // 2. Sandbox spawn (#377 lifecycle) with the delegate identity + LLM envs.
     if let Some(secret) = &k10_secret {
@@ -728,6 +687,9 @@ async fn finalize_spawn(
         actor_omni,
         &format!("0x{}", hex::encode(session_omni)),
         &extra_envs,
+        // The gate key is already in extra_envs (eager, above) — nothing extra to
+        // mint at create time; the ceremony always creates so the no-op fires.
+        crate::sandbox_backend::no_create_envs(),
     )
     .await;
     let sandbox_json = sandbox
