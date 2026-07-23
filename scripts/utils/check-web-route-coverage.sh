@@ -52,7 +52,6 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/actors/:id/caps/revoke	cap revoke — MCP-level covered (agentkeys_cap_revoke); web path needs a live cap fixture
 /v1/audit/stream	SSE — curl smoke would hang a step; needs a timeout-bounded SSE reader helper
 /v1/audit/:id/decode	needs a decodable on-chain audit row id fixture from a prior append
-/v1/anchor/status	tier-A anchor status (#109) — worker-dependent; add to suite-6 once audit worker guaranteed in test env
 /v1/master/inbox	#297/#339 inbox — needs a planted inbox fixture (agent append) in the test env
 /v1/master/inbox/entry	same inbox fixture dependency
 /v1/master/inbox/accept	inbox mutation — same fixture dependency
@@ -68,8 +67,6 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/scope/submit	needs a signed UserOp (gas); build half covered (suite-6 step 7); headless submit = sign userOpHash with the software passkey — planned
 /v1/revoke/build	revoke build proxy — needs a revocable throwaway device fixture
 /v1/revoke/submit	same throwaway-device fixture + signed UserOp
-/v1/presets	#428 broker preset-catalog GET proxy (static compiled-in content) — broker-side unit tests pin the catalog; retire with a suite-6 step reading the catalog through the daemon
-/v1/presets/:id	#428 preset bundle GET proxy — same broker-side unit coverage; the vitest client test pins the URL shape
 /v1/agent/spawn/build	#427 spawn build proxy — allowance pre-check + broker K10 gen; needs the 0.5 registry live in the test env; ceremony proven headlessly by `agentkeys agent spawn` (CLI twin) + suite-1 step-12 allowance positive/negative
 /v1/agent/spawn/submit	same 0.5-registry dependency + signed UserOp (gas) — the broker relay/finalize path is unit-tested; retire with a suite-6 headless-spawn step post-redeploy
 /v1/agent/archive/build	#427 archive build proxy — needs a spawned throwaway delegate fixture (pair with the spawn waiver)
