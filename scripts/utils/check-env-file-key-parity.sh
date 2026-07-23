@@ -58,6 +58,9 @@ NON_AWS_ENV_FILES=(
   # data-plane keys are a different set by design. Remove only if VE is
   # migrated onto AWS-style *_BUCKET / *_ROLE_ARN naming.
   "scripts/operator-workstation.ve.env"
+  # The VE TEST stack (CI broker on Volcano Engine — the ve.env twin with
+  # -test names). Same different-cloud seam, same removal condition.
+  "scripts/operator-workstation.ve-test.env"
 )
 
 # Data-plane keys legitimately absent from some AWS stack. Empty — every AWS
