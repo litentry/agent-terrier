@@ -12,4 +12,13 @@ direction: string, text: string,
 /**
  * The cap-signed producer (worker-stamped provenance, §4.1).
  */
-producer_omni: string, ts_millis: number, correlation?: string, };
+producer_omni: string, ts_millis: number, correlation?: string, 
+/**
+ * #563 — `true` on a streamed-reply DELTA; the final reply omits it.
+ * The web panel merges deltas by `correlation` and replaces on final.
+ */
+partial?: boolean, 
+/**
+ * #563 — delta order within one streamed reply (0-based).
+ */
+seq?: number, };

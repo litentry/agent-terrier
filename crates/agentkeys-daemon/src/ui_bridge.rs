@@ -6641,6 +6641,15 @@ pub struct ApiChatEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub correlation: Option<String>,
+    /// #563 — `true` on a streamed-reply DELTA; the final reply omits it.
+    /// The web panel merges deltas by `correlation` and replaces on final.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub partial: Option<bool>,
+    /// #563 — delta order within one streamed reply (0-based).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub seq: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6656,6 +6665,13 @@ pub struct ChatSendRequest {
     pub voice: Option<String>,
     #[serde(default)]
     pub speech_rate: Option<i32>,
+    /// #563 — "I render partials: stream the reply." Forwarded onto the
+    /// published turn as the `stream` hint; a delegate that predates #563
+    /// ignores it and answers single-shot. Absent (every pre-#563 caller,
+    /// incl. the fleet TUI) = today's behavior, so partial events can never
+    /// reach a UI that does not merge them.
+    #[serde(default)]
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6766,6 +6782,8 @@ fn chat_event_from_value(v: &serde_json::Value) -> ApiChatEvent {
             .get("correlation")
             .and_then(|s| s.as_str())
             .map(str::to_string),
+        partial: v.get("partial").and_then(|b| b.as_bool()),
+        seq: v.get("seq").and_then(|n| n.as_u64()).map(|n| n as u32),
     }
 }
 
@@ -6831,6 +6849,11 @@ async fn master_chat_send(
             "voice": req.voice,
             "speech_rate": req.speech_rate,
         });
+    }
+    // #563 — the stream hint rides the turn (optional + absent-by-default, so
+    // a plain send stays byte-identical to the canonical fixture).
+    if req.stream == Some(true) {
+        body["stream"] = serde_json::json!(true);
     }
     match reqwest::Client::new()
         .post(format!("{worker}/v1/channel/publish"))

@@ -108,6 +108,15 @@ pub struct PublishRequest {
     /// verbatim onto the event like `kind`/`correlation`.
     #[serde(default)]
     pub audio: Option<agentkeys_protocol::ChannelAudioParams>,
+    /// #563 — streamed-reply markers + the inbound stream hint, copied
+    /// verbatim onto the event like `correlation`. Producer-declared framing,
+    /// never verified content — the worker stays a relay.
+    #[serde(default)]
+    pub partial: Option<bool>,
+    #[serde(default)]
+    pub seq: Option<u32>,
+    #[serde(default)]
+    pub stream: Option<bool>,
 }
 
 fn direction_in() -> ChannelDirection {
@@ -276,6 +285,9 @@ async fn channel_publish_inner(
         ts_millis: now_millis,
         correlation: req.correlation.clone(),
         audio: req.audio.clone(),
+        partial: req.partial,
+        seq: req.seq,
+        stream: req.stream,
     };
     let plaintext =
         serde_json::to_vec(&event).map_err(|e| err_500(e.to_string(), "channel_event_encode"))?;

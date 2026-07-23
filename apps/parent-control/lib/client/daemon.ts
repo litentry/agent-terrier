@@ -361,7 +361,10 @@ export class DaemonBackend implements AgentKeysClient {
   }
 
   async chatSend(channelId: string, text: string): Promise<Result<{ event_id: string }>> {
-    return this.postJson('/v1/master/agent/chat/send', { channel_id: channelId, text });
+    // #563 — this UI merges streamed deltas (chat.tsx), so it opts the turn
+    // into streaming; consumers without the merge simply omit the hint and
+    // the delegate answers single-shot.
+    return this.postJson('/v1/master/agent/chat/send', { channel_id: channelId, text, stream: true });
   }
 
   async chatPoll(

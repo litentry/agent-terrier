@@ -172,6 +172,11 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         // #522 audio params are optional + skip-serializing — absent here so
         // the canonical fixture (and its frozen key set) stays byte-stable.
         audio: None,
+        // #563 stream markers: same optional + skip-serializing posture — the
+        // canonical single-shot publish is byte-identical to pre-#563.
+        partial: None,
+        seq: None,
+        stream: None,
     };
     let channel_poll = ChannelPollBody {
         cap: json!("<cap-token>"),
