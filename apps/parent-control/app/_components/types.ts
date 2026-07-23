@@ -53,6 +53,11 @@ export interface Actor {
   presetId?: string;
   /** #429 — the delegate's memory:<ns> namespace name (manifest layer). */
   memoryNs?: string;
+  /** #543 — the delegate's spawn-ceremony runtime/metering outcome (manifest
+   *  layer). gateStatus 'provisioned' = the metered per-delegate relay-key
+   *  path; anything else = LLM turns are unmetered (opt-in stacks) or refused
+   *  (fail-closed). spawnError set = the sandbox never spawned (silent chat). */
+  runtimeStatus?: { gateStatus: string; gateError?: string; spawnError?: string };
   justPaired?: boolean;
 }
 

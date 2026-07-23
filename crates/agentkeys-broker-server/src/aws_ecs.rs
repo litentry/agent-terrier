@@ -80,6 +80,11 @@ pub struct EcsSandboxConfig {
     /// (`AGENTKEYS_SANDBOX_ECS_MAX_TASKS`, default 20) — the spawn-storm
     /// backstop, parity with the VE `max_instances`.
     pub max_tasks: usize,
+    /// #543 fail-closed: `AGENTKEYS_ALLOW_DIRECT_ARK=1` opts this stack into
+    /// injecting the SHARED host ark key into non-gate-provisioned sandboxes
+    /// (UNMETERED). Default false — such creates are refused. The AWS stack
+    /// sets it at converge until its gate deploy lands (#384 deferred half).
+    pub allow_direct_ark: bool,
     /// Optional region override (`AGENTKEYS_SANDBOX_ECS_REGION`); default =
     /// the SDK default chain (the broker EC2's region).
     pub region: Option<String>,
@@ -135,6 +140,8 @@ impl EcsSandboxConfig {
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
                 .unwrap_or(true),
             max_tasks: parse_u32("AGENTKEYS_SANDBOX_ECS_MAX_TASKS", 20)? as usize,
+            allow_direct_ark: non_empty("AGENTKEYS_ALLOW_DIRECT_ARK")
+                .is_some_and(|v| v.trim() == "1"),
             region: non_empty("AGENTKEYS_SANDBOX_ECS_REGION"),
         }))
     }
@@ -295,6 +302,7 @@ impl EcsSandboxClient {
             AssignPublicIp, AwsVpcConfiguration, ContainerOverride, KeyValuePair, LaunchType,
             NetworkConfiguration, Tag, TaskOverride,
         };
+        crate::sandbox_backend::direct_ark_guard(extra_envs, self.config.allow_direct_ark)?;
         let mut merged = self.instance_envs()?;
         for (k, v) in extra_envs {
             match merged.iter_mut().find(|(mk, _)| mk == k) {
@@ -374,7 +382,8 @@ impl EcsSandboxClient {
         &self,
         device_key_hash: &str,
         actor_omni: &str,
-        extra_envs: &[(String, String)],
+        base_envs: &[(String, String)],
+        on_create: crate::sandbox_backend::CreateEnvProvider,
     ) -> Result<crate::sandbox_backend::EnsureOutcome> {
         let _guard = self.ensure_lock.lock().await;
 
@@ -398,8 +407,12 @@ impl EcsSandboxClient {
             );
         }
 
+        // CREATE branch — mint the metered gate key now (#543): on_create fires
+        // only here, never on reuse, so a live task's relay key is never rotated.
+        let created_envs = on_create().await;
+        let merged: Vec<(String, String)> = base_envs.iter().cloned().chain(created_envs).collect();
         let view = self
-            .run_for_delegate(device_key_hash, actor_omni, extra_envs)
+            .run_for_delegate(device_key_hash, actor_omni, &merged)
             .await?;
         Ok(crate::sandbox_backend::EnsureOutcome {
             agent_url: view.private_ip.as_deref().map(|ip| self.agent_url_for(ip)),

@@ -202,6 +202,26 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
+    // #543 — precache CR_IMAGE in veFaaS so CreateSandbox doesn't 404
+    // `ResourceNotFound` (image not in the pre-cache list) on a freshly-pushed
+    // image. Fire-and-forget: veFaaS precache is async (returns a ticket; the
+    // console shows "Preheated"), so it never blocks boot. VE-only — from_env()
+    // is None off the VE stack; a re-pushed image is re-warmed on every restart.
+    if let Ok(Some(vefaas)) = agentkeys_broker_server::ve_faas::VeFaasClient::from_env() {
+        tokio::spawn(async move {
+            match vefaas.precache_image().await {
+                Ok(ticket) if ticket.is_empty() => {}
+                Ok(ticket) => {
+                    tracing::info!(ticket = %ticket, "veFaaS CR_IMAGE precache submitted (#543)")
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "veFaaS CR_IMAGE precache failed — CreateSandbox may 404 until the image is precached (console 镜像预热)"
+                ),
+            }
+        });
+    }
+
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(5))

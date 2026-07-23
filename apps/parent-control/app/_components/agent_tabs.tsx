@@ -26,6 +26,7 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
   const [tab, setTab] = useState<Tab>('context');
   const [preset, setPreset] = useState<PresetSummary | null>(null);
 
+  const rt = actor.runtimeStatus;
   const services = actor.services ?? [];
   const subscribedChannels = useMemo(
     () =>
@@ -85,6 +86,43 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
         </span>
       }
     >
+      {/* #543 — the spawn ceremony's runtime/metering outcome, on EVERY tab:
+          a spawn-failed delegate's chat is silent and an unmetered one bills
+          nothing, and neither should require broker logs to notice. */}
+      {rt && (rt.spawnError || rt.gateStatus !== 'provisioned') ? (
+        <div
+          style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}
+        >
+          {rt.spawnError ? (
+            <>
+              <Chip kind="bad">runtime spawn failed</Chip>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {/* The gate error is the CAUSE whenever provisioning failed: the
+                    spawn error only reports the fail-closed refusal downstream,
+                    and showing it alone sent an operator to re-check wiring that
+                    was already correct (#543 live). Cause first, effect second. */}
+                {rt.gateError ? (
+                  <>
+                    <strong>gate {rt.gateStatus}:</strong> {rt.gateError} — so the spawn was
+                    refused rather than run unmetered.{' '}
+                  </>
+                ) : null}
+                {rt.spawnError} — no sandbox is serving this agent (its chat stays silent);
+                archive + respawn after fixing the cause.
+              </span>
+            </>
+          ) : (
+            <>
+              <Chip kind="warn">UNMETERED</Chip>
+              <span className="muted" style={{ fontSize: 12 }}>
+                gate {rt.gateStatus}
+                {rt.gateError ? ` — ${rt.gateError}` : ''}; this agent&apos;s LLM turns bypass
+                the metering gate until re-provisioned.
+              </span>
+            </>
+          )}
+        </div>
+      ) : null}
       {tab === 'context' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div>
@@ -108,8 +146,14 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
                   Spawned from preset <code>{actor.presetId}</code> ·{' '}
                 </>
               ) : null}
-              LLM usage is metered at the gate per turn (provisioned at spawn); live usage
-              numbers surface here once the gate is wired on this stack.
+              {rt?.gateStatus === 'provisioned' ? (
+                <>LLM metered at the gate — per-delegate relay key, provisioned at spawn.</>
+              ) : (
+                <>
+                  LLM usage is metered at the gate per turn (provisioned at spawn); live usage
+                  numbers surface here once the gate is wired on this stack.
+                </>
+              )}
             </div>
           </div>
           {preset &&

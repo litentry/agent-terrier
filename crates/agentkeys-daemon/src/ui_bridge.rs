@@ -527,6 +527,11 @@ pub struct BindingManifestEntry {
     /// #427/#425 O4 — the operator's keep-vs-delete choice at archive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources_kept: Option<bool>,
+    /// #543 — the spawn ceremony's runtime/metering outcome, persisted so the
+    /// #233 reconcile can answer "is this delegate metered / why is its chat
+    /// silent" after a daemon restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<ApiRuntimeStatus>,
 }
 
 /// The durable manifest doc (config-class, master-only). Small: one entry per
@@ -609,6 +614,9 @@ impl BindingManifest {
                 }
                 if entry.resources_kept.is_none() {
                     entry.resources_kept = existing.resources_kept;
+                }
+                if entry.runtime.is_none() {
+                    entry.runtime = existing.runtime.clone();
                 }
                 *existing = entry;
             }
@@ -862,6 +870,32 @@ pub struct ApiActor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub memory_ns: Option<String>,
+    /// #543 — the delegate's spawn-ceremony runtime/metering outcome (manifest
+    /// layer). Absent for devices/masters/pre-#543 spawns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime: Option<ApiRuntimeStatus>,
+}
+
+/// #543 — a delegate's spawn-ceremony runtime/metering outcome, persisted in
+/// the binding manifest and surfaced as `ApiActor.runtime`. Answers, without
+/// broker logs: did the sandbox spawn, and is its LLM path gate-metered?
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiRuntimeStatus {
+    /// Gate provisioning outcome: `provisioned` (metered per-delegate relay-key
+    /// path) | `not-configured` | `misconfigured` | `failed`. Anything but
+    /// `provisioned` means the delegate's LLM turns are UNMETERED (opt-in
+    /// stacks) or refused (#543 fail-closed).
+    pub gate_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gate_error: Option<String>,
+    /// The spawn ceremony's sandbox-ensure error (absent = the runtime spawned
+    /// clean) — the "why is this delegate's chat silent" answer (#541 gap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub spawn_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
@@ -1334,7 +1368,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 /// - `test-broker.<zone>`   → `"-test"`   (#265 slot 1 — grandfathered `test-` prefix)
 /// - `broker-test-2.<zone>` → `"-test-2"` (test-fleet slot N)
 /// - `broker-base.<zone>`   → `"-base"`   (#282 Base stack)
-fn derive_worker_url(broker_url: &str, worker: &str) -> Option<String> {
+pub(crate) fn derive_worker_url(broker_url: &str, worker: &str) -> Option<String> {
     let host = broker_url
         .rsplit("://")
         .next()
@@ -3907,6 +3941,7 @@ async fn reconcile_actors_from_chain(
                 guard.insert(
                     "master".into(),
                     ApiActor {
+                        runtime: None,
                         id: "master".into(),
                         omni: omni.clone(),
                         omni_hex: omni.clone(),
@@ -3943,7 +3978,23 @@ async fn reconcile_actors_from_chain(
         if known_omnis.contains(&norm(&d.actor_omni))
             || known_hashes.contains(&norm(&d.device_key_hash))
         {
-            continue; // the live pairing row is richer — in-memory wins
+            // The live pairing row is richer — in-memory wins, EXCEPT the #543
+            // runtime outcome, which only the manifest carries durably.
+            if let Some(rt) = manifest
+                .as_ref()
+                .and_then(|m| m.entry_for(&d.actor_omni, &d.device_key_hash))
+                .and_then(|e| e.runtime.clone())
+            {
+                for a in guard.values_mut().filter(|a| {
+                    norm(&a.omni_hex) == norm(&d.actor_omni)
+                        || a.device_key_hash.as_deref().map(norm) == Some(norm(&d.device_key_hash))
+                }) {
+                    if a.runtime.is_none() {
+                        a.runtime = Some(rt.clone());
+                    }
+                }
+            }
+            continue;
         }
         // #424 §1 — hydrate the restored row from the binding manifest: real
         // label, device-vs-delegate kind, granted service NAMES. Without an
@@ -4012,6 +4063,7 @@ async fn reconcile_actors_from_chain(
                 services,
                 preset_id: entry.as_ref().and_then(|e| e.preset_id.clone()),
                 memory_ns: entry.as_ref().and_then(|e| e.memory_ns.clone()),
+                runtime: entry.as_ref().and_then(|e| e.runtime.clone()),
                 account_address: None,
                 account_type: None,
             },
@@ -5879,6 +5931,7 @@ async fn ack_pairing(
                 // (the chain row alone can never recover them). Best-effort:
                 // a store failure warns loudly, never blocks the ack.
                 let manifest_entry = BindingManifestEntry {
+                    runtime: None,
                     actor_omni: omni_hex.clone(),
                     device_key_hash: device_key_hash.clone(),
                     label: label.clone(),
@@ -5897,6 +5950,7 @@ async fn ack_pairing(
                     resources_kept: None,
                 };
                 let agent_actor = ApiActor {
+                    runtime: None,
                     id: format!("agent-{label}"),
                     omni: omni_hex.clone(),
                     omni_hex,
@@ -6279,6 +6333,22 @@ async fn spawn_submit_proxy(
                     l
                 }
             };
+            // #543 — persist the ceremony's gate/sandbox outcome so the fleet
+            // reconcile can surface "unmetered / spawn failed" after restarts.
+            let runtime = spawned
+                .pointer("/gate/status")
+                .and_then(|v| v.as_str())
+                .map(|gs| ApiRuntimeStatus {
+                    gate_status: gs.to_string(),
+                    gate_error: spawned
+                        .pointer("/gate/error")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    spawn_error: spawned
+                        .pointer("/sandbox/error")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                });
             upsert_binding_manifest_entry(
                 &state,
                 BindingManifestEntry {
@@ -6292,6 +6362,7 @@ async fn spawn_submit_proxy(
                     memory_ns: Some(sfield(ctx, "memory_ns")),
                     archived_at: None,
                     resources_kept: None,
+                    runtime,
                 },
             )
             .await;
@@ -7180,6 +7251,7 @@ async fn scope_submit_proxy(
             upsert_binding_manifest_entry(
                 &state,
                 BindingManifestEntry {
+                    runtime: None,
                     actor_omni,
                     device_key_hash: String::new(), // kept from the existing entry
                     label: String::new(),           // kept from the existing entry
@@ -8083,6 +8155,7 @@ async fn register_pairing(
         format!("0x{actor_omni}")
     };
     let agent_actor = ApiActor {
+        runtime: None,
         id: format!("agent-{label}"),
         omni: omni_hex.clone(),
         omni_hex,
@@ -11568,6 +11641,7 @@ mod tests {
     #[test]
     fn evict_disowned_rows_kills_ghosts_and_spares_master_and_precanonical() {
         let mk = |id: &str, role: &str, hash: Option<&str>| ApiActor {
+            runtime: None,
             kind: None,
             id: id.into(),
             omni: format!("0x{id}"),
@@ -12024,6 +12098,7 @@ mod tests {
 
         // Holders: one actor by NAME, one by on-chain HASH, one unrelated.
         let mk = |id: &str, label: &str| ApiActor {
+            runtime: None,
             kind: None,
             id: id.into(),
             omni: "0x1".into(),
@@ -13197,6 +13272,7 @@ mod tests {
 
     fn seed_actor(state: &SharedUiBridgeState) -> ApiActor {
         let actor = ApiActor {
+            runtime: None,
             kind: None,
             id: "agent-folotoy".into(),
             omni: "O_master//folotoy".into(),
@@ -13234,6 +13310,7 @@ mod tests {
 
     async fn seed_actor_async(state: &SharedUiBridgeState) -> ApiActor {
         let actor = ApiActor {
+            runtime: None,
             kind: None,
             id: "agent-folotoy".into(),
             omni: "O_master//folotoy".into(),
@@ -13282,6 +13359,7 @@ mod tests {
         actors.insert(
             "agent-1".into(),
             ApiActor {
+                runtime: None,
                 kind: None,
                 id: "agent-1".into(),
                 role: "agent".into(),
@@ -13312,6 +13390,7 @@ mod tests {
         actors.insert(
             "master".into(),
             ApiActor {
+                runtime: None,
                 kind: None,
                 id: "master".into(),
                 role: "master".into(),
@@ -14741,6 +14820,7 @@ mod tests {
             State(state.clone()),
             Json(DevSeedRequest {
                 actors: vec![ApiActor {
+                    runtime: None,
                     kind: None,
                     id: "seed-1".into(),
                     omni: "x".into(),

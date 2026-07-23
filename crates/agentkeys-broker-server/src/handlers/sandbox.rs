@@ -51,31 +51,149 @@ impl SandboxProvision {
     }
 }
 
+/// The gate-provisioning outcome for a delegate CREATE — the SINGLE owner of the
+/// "call the gate → build the sandbox's LLM envs" policy (#543). Both the #427
+/// spawn ceremony (eager, it always creates + must record the status) and the
+/// resolve/poll cold-create path (lazy, via the [`SandboxBackend`] create-only
+/// callback) call [`provision_delegate_envs`], so the two never drift (#203).
+///
+/// `envs` carries the per-delegate `gk_` relay key as `ARK_API_KEY` plus the
+/// gate turn base — the presence of `ARK_API_KEY` is exactly what the fail-
+/// closed [`crate::sandbox_backend::direct_ark_guard`] checks, so an empty
+/// `envs` (not-configured / misconfigured / failed) fails closed on VE.
+pub struct GateProvision {
+    pub envs: Vec<(String, String)>,
+    /// `provisioned` | `not-configured` | `misconfigured` | `failed`.
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// Provision a per-delegate gate relay key and return the sandbox LLM envs +
+/// status. Pure policy, no side effects beyond the gate call; the caller
+/// decides eager (ceremony) vs lazy-on-create (resolve/poll).
+///
+/// `operator_omni_0x` MUST be the canonical `0x`+lowercase-hex operator omni so
+/// the gate aggregates a delegate's budget under the SAME user across the
+/// ceremony spawn and any later cold respawn (a case mismatch would fork the
+/// rollup). `label` is cosmetic (gate rollup keys on `device_key_hash`); the
+/// resolve path passes `""` since the readable label lives daemon-side.
+pub async fn provision_delegate_envs(
+    http: &reqwest::Client,
+    operator_omni_0x: &str,
+    actor_omni: &str,
+    device_key_hash: &str,
+    label: &str,
+) -> GateProvision {
+    match crate::gate_admin::load_gate_admin_config() {
+        None => GateProvision {
+            envs: Vec::new(),
+            status: "not-configured".into(),
+            error: None,
+        },
+        Some(Err(e)) => {
+            tracing::error!(error = %e, "gate admin MISCONFIGURED");
+            GateProvision {
+                envs: Vec::new(),
+                status: "misconfigured".into(),
+                error: Some(e),
+            }
+        }
+        Some(Ok(cfg)) => match crate::gate_admin::provision_delegate(
+            http,
+            &cfg,
+            operator_omni_0x,
+            actor_omni,
+            device_key_hash,
+            label,
+        )
+        .await
+        {
+            Ok(key) => GateProvision {
+                envs: vec![
+                    ("ARK_BASE_URL".into(), cfg.turn_url.clone()),
+                    // #519 — the chat loop's voice branch needs the speech relay
+                    // base EXPLICITLY (same gate base) or voice turns refuse.
+                    ("AGENTKEYS_GATE_SPEECH_URL".into(), cfg.turn_url.clone()),
+                    ("ARK_API_KEY".into(), key.secret),
+                ],
+                status: "provisioned".into(),
+                error: None,
+            },
+            Err(e) => {
+                tracing::error!(
+                    device_key_hash = %device_key_hash,
+                    error = %e,
+                    "gate provisioning FAILED — the sandbox create fails closed unless \
+                     AGENTKEYS_ALLOW_DIRECT_ARK=1 (#543)"
+                );
+                GateProvision {
+                    envs: Vec::new(),
+                    status: "failed".into(),
+                    error: Some(e),
+                }
+            }
+        },
+    }
+}
+
 /// Ensure the delegate's sandbox exists (spawning it if needed) + emit the
 /// `SandboxSpawn` envelope on an actual create. `None` = lifecycle disabled
 /// on this host (no sandbox config) — callers return `agent_url: null` and
 /// the device falls back to its compiled `AGENT_BASE_URL` (#367 semantics).
+///
+/// This is the resolve/poll re-spawn path (a delegate whose runtime must be
+/// (re)created — legacy create-on-pair, or a future wake-on-event cold start).
+/// #543: a create here is now METERED — the gate relay key is minted ON CREATE
+/// via [`provision_delegate_envs`], so a respawn never boots on the direct-ark
+/// path (it fails closed on VE if the gate can't provision). Lazy by design: a
+/// REUSED live instance never triggers a provision, so its relay key is never
+/// rotated out from under it (the #543 correctness point).
 pub async fn ensure_for_delegate(
     state: &SharedState,
     device_key_hash: &str,
     actor_omni: &str,
     operator_omni: &str,
 ) -> Option<SandboxProvision> {
-    ensure_for_delegate_with_envs(state, device_key_hash, actor_omni, operator_omni, &[]).await
+    // Owned captures so the create-time closure is `'static`. The gate user_omni
+    // is canonicalized to `0x`+lowercase-hex so a cold respawn aggregates under
+    // the SAME operator budget the #427 ceremony spawn used (§15.3a).
+    let http = state.http.clone();
+    let op = format!("0x{}", crate::handlers::accept::norm_omni(operator_omni));
+    let actor = actor_omni.to_string();
+    let dkh = device_key_hash.to_string();
+    let on_create: crate::sandbox_backend::CreateEnvProvider = Box::new(move || {
+        Box::pin(async move {
+            provision_delegate_envs(&http, &op, &actor, &dkh, "")
+                .await
+                .envs
+        })
+    });
+    ensure_for_delegate_with_envs(
+        state,
+        device_key_hash,
+        actor_omni,
+        operator_omni,
+        &[],
+        on_create,
+    )
+    .await
 }
 
 /// #427 spawn-ceremony variant: the same ensure with the delegate identity +
-/// gate-relay envs threaded into a freshly created instance.
+/// (eagerly-provisioned) gate-relay envs in `base_envs`; `on_create` yields any
+/// create-only envs (the ceremony passes [`crate::sandbox_backend::no_create_envs`]
+/// since it provisions eagerly, resolve/poll pass the lazy gate provider).
 pub async fn ensure_for_delegate_with_envs(
     state: &SharedState,
     device_key_hash: &str,
     actor_omni: &str,
     operator_omni: &str,
-    extra_envs: &[(String, String)],
+    base_envs: &[(String, String)],
+    on_create: crate::sandbox_backend::CreateEnvProvider,
 ) -> Option<SandboxProvision> {
     let backend = state.sandbox.as_ref()?;
     match backend
-        .ensure_for_delegate_with_envs(device_key_hash, actor_omni, extra_envs)
+        .ensure_for_delegate_with_envs(device_key_hash, actor_omni, base_envs, on_create)
         .await
     {
         Ok(outcome) => {

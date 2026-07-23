@@ -56,6 +56,32 @@ pub const LABEL_ACTOR_OMNI: &str = "agentkeys_actor_omni";
 pub const LABEL_MANAGED_BY: &str = "agentkeys_managed_by";
 pub const MANAGED_BY_VALUE: &str = "broker";
 
+/// veFaaS caps each Metadata VALUE at **<64 chars** (`CreateSandbox` →
+/// `InvalidParameter: metadata value length must be less than 64`), but a
+/// `device_key_hash` / `actor_omni` is a `0x`+64-hex, 66-char string. The label
+/// value is therefore the `0x`-stripped, lowercased hash truncated to
+/// [`LABEL_VALUE_HEX`] — a deterministic transform applied IDENTICALLY on write
+/// ([`delegate_labels`]), the client-side match ([`SandboxInstance::labeled_for`]),
+/// and the server-side [`VeFaasClient::list_instances`] filter, so the
+/// per-delegate quota key stays consistent. 48 hex = 192 bits: collision-
+/// negligible for the handful of delegates one operator runs. The FULL hash
+/// still lives in the `DelegateSpawn` audit anchor + the #424 binding manifest;
+/// this label is only the internal veFaaS quota key. (#543)
+pub const LABEL_VALUE_HEX: usize = 48;
+
+/// Normalize a hash to its veFaaS Metadata label value — see [`LABEL_VALUE_HEX`].
+/// Idempotent: an already-normalized value maps to itself, so `labeled_for` can
+/// safely apply it to BOTH the stored value and the lookup key.
+pub fn label_value(hash: &str) -> String {
+    hash.trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .chars()
+        .take(LABEL_VALUE_HEX)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 /// Instance statuses that count as "the delegate already has a sandbox" —
 /// reuse, never duplicate. `Paused` is veFaaS hibernation (wakes on traffic).
 const LIVE_STATUSES: &[&str] = &["ready", "running", "starting", "paused"];
@@ -85,10 +111,22 @@ pub struct VeFaasConfig {
     /// re-extends by, so an ACTIVE device's sandbox never expires while an
     /// abandoned one dies within this window.
     pub timeout_minutes: u32,
+    /// Per-request HTTP timeout for `CreateSandbox` in seconds
+    /// (`AGENTKEYS_VEFAAS_CREATE_TIMEOUT_SECS`, default 180; bounds 15..=600).
+    /// SEPARATE from `timeout_minutes` (the sandbox LIFETIME): provisioning an
+    /// instance from a large preheated image routinely exceeds the 15s default
+    /// client timeout (#543 "operation timed out" on a 17 GB hermes-sandbox spawn),
+    /// so this ONE call gets a generous ceiling while the quick lifecycle calls
+    /// keep the short default.
+    pub create_timeout_secs: u32,
     /// Refuse to create past this many instances under the application
     /// (`AGENTKEYS_VEFAAS_MAX_INSTANCES`, default 20) — bounds the blast
     /// radius if label matching ever breaks (see module docs).
     pub max_instances: usize,
+    /// #543 fail-closed: `AGENTKEYS_ALLOW_DIRECT_ARK=1` opts this stack into
+    /// injecting the SHARED host ark key into non-gate-provisioned sandboxes
+    /// (UNMETERED). Default false — such creates are refused.
+    pub allow_direct_ark: bool,
     pub host: String,
     pub region: String,
 }
@@ -124,6 +162,12 @@ impl VeFaasConfig {
         if !(3..=1440).contains(&timeout_minutes) {
             bail!("AGENTKEYS_VEFAAS_TIMEOUT_MINUTES must be 3..=1440 (veFaaS bound), got {timeout_minutes}");
         }
+        let create_timeout_secs = parse_u32("AGENTKEYS_VEFAAS_CREATE_TIMEOUT_SECS", 180)?;
+        if !(15..=600).contains(&create_timeout_secs) {
+            bail!(
+                "AGENTKEYS_VEFAAS_CREATE_TIMEOUT_SECS must be 15..=600, got {create_timeout_secs}"
+            );
+        }
         Ok(Some(Self {
             function_id,
             gateway_url,
@@ -132,7 +176,10 @@ impl VeFaasConfig {
             command: non_empty("AGENTKEYS_VEFAAS_COMMAND")
                 .unwrap_or_else(|| "/opt/gem/run.sh".to_string()),
             timeout_minutes,
+            create_timeout_secs,
             max_instances: parse_u32("AGENTKEYS_VEFAAS_MAX_INSTANCES", 20)? as usize,
+            allow_direct_ark: non_empty("AGENTKEYS_ALLOW_DIRECT_ARK")
+                .is_some_and(|v| v.trim() == "1"),
             host: non_empty("AGENTKEYS_VEFAAS_HOST")
                 .unwrap_or_else(|| DEFAULT_VEFAAS_HOST.to_string()),
             region: non_empty("VOLCENGINE_REGION").unwrap_or_else(|| "cn-beijing".to_string()),
@@ -157,9 +204,13 @@ impl SandboxInstance {
     }
 
     fn labeled_for(&self, device_key_hash: &str) -> bool {
+        // Normalize BOTH sides (#543): the stored value is the truncated label,
+        // the lookup key is the full hash — `label_value` is idempotent, so this
+        // matches whether the stored value was written truncated (production) or
+        // raw (unit fixtures).
         self.metadata
             .get(LABEL_DEVICE_KEY_HASH)
-            .is_some_and(|v| v.eq_ignore_ascii_case(device_key_hash))
+            .is_some_and(|v| label_value(v) == label_value(device_key_hash))
             && self
                 .metadata
                 .get(LABEL_MANAGED_BY)
@@ -269,6 +320,29 @@ impl VeFaasClient {
         &self.config.gateway_url
     }
 
+    /// `PrecacheSandboxImages` — warm the veFaaS image cache for our `CR_IMAGE`
+    /// so `CreateSandbox` doesn't 404 `ResourceNotFound` ("Sandbox image not found
+    /// in pre cache sandbox image list") on a freshly-pushed image. Precaches the
+    /// configured image; a no-op (empty `Ok`) when `CR_IMAGE` is unset (spawns then
+    /// use the app's console-configured image). veFaaS precache is ASYNC — this
+    /// returns the ticket id; poll `GetSandboxImagePrecacheTicket` / watch the
+    /// console 镜像预热 for "Preheated". `Region` is a required parameter (#543).
+    pub async fn precache_image(&self) -> Result<String> {
+        if self.config.image.trim().is_empty() {
+            return Ok(String::new());
+        }
+        let body = serde_json::json!({
+            "Images": [self.config.image],
+            "Region": self.config.region,
+        });
+        let v = self.vefaas_call("PrecacheSandboxImages", body).await?;
+        Ok(v["Result"]["TicketId"]
+            .as_str()
+            .or_else(|| v["TicketId"].as_str())
+            .unwrap_or("")
+            .to_string())
+    }
+
     /// V4-sign + POST one veFaaS action; surfaces the VE `{Code, Message}`
     /// error pair on failure (any HTTP status).
     async fn vefaas_call(
@@ -294,14 +368,24 @@ impl VeFaasClient {
             x_date: &x_date,
         });
         let url = format!("https://{}/?{}", self.config.host, query);
-        let resp = self
+        let mut req = self
             .http
             .post(&url)
             .header("Content-Type", &signed.content_type)
             .header("X-Date", &signed.x_date)
             .header("X-Content-Sha256", &signed.x_content_sha256)
             .header("Authorization", &signed.authorization)
-            .body(body_str)
+            .body(body_str);
+        // CreateSandbox provisions an instance from the (large, preheated) image and
+        // routinely takes longer than the default 15s client timeout — the #543
+        // "operation timed out" on a 17 GB spawn. Give this ONE call a generous,
+        // env-tunable per-request ceiling; the quick lifecycle calls keep the default.
+        if action == "CreateSandbox" {
+            req = req.timeout(std::time::Duration::from_secs(
+                self.config.create_timeout_secs as u64,
+            ));
+        }
+        let resp = req
             .send()
             .await
             .with_context(|| format!("vefaas {action} request failed"))?;
@@ -324,9 +408,9 @@ impl VeFaasClient {
     /// `ListSandboxes` under the configured application. `label_filter` is
     /// ALSO passed server-side (service.md §1 documents a `Metadata` filter);
     /// callers still match client-side on the rows' labels.
-    pub async fn list_instances(
+    pub async fn list_instances<V: AsRef<str>>(
         &self,
-        label_filter: Option<&[(&str, &str)]>,
+        label_filter: Option<&[(&str, V)]>,
     ) -> Result<Vec<SandboxInstance>> {
         let mut body = serde_json::json!({
             "FunctionId": self.config.function_id,
@@ -426,6 +510,7 @@ impl VeFaasClient {
         actor_omni: &str,
         extra_envs: &[(String, String)],
     ) -> Result<String> {
+        crate::sandbox_backend::direct_ark_guard(extra_envs, self.config.allow_direct_ark)?;
         let mut body = serde_json::json!({
             "FunctionId": self.config.function_id,
             "Timeout": self.config.timeout_minutes,
@@ -466,8 +551,13 @@ impl VeFaasClient {
         device_key_hash: &str,
         actor_omni: &str,
     ) -> Result<EnsureOutcome> {
-        self.ensure_for_delegate_with_envs(device_key_hash, actor_omni, &[])
-            .await
+        self.ensure_for_delegate_with_envs(
+            device_key_hash,
+            actor_omni,
+            &[],
+            crate::sandbox_backend::no_create_envs(),
+        )
+        .await
     }
 
     /// #427 spawn-ceremony variant: same idempotent ensure, with extra envs
@@ -480,11 +570,12 @@ impl VeFaasClient {
         &self,
         device_key_hash: &str,
         actor_omni: &str,
-        extra_envs: &[(String, String)],
+        base_envs: &[(String, String)],
+        on_create: crate::sandbox_backend::CreateEnvProvider,
     ) -> Result<EnsureOutcome> {
         let _guard = self.ensure_lock.lock().await;
 
-        let all = self.list_instances(None).await?;
+        let all = self.list_instances::<&str>(None).await?;
         if let Some(mine) = pick_live_for_device(&all, device_key_hash) {
             // Keep an ACTIVE delegate's runtime alive; an extend failure is a
             // WARN, not a spawn failure — the instance still lives until its
@@ -509,8 +600,14 @@ impl VeFaasClient {
             );
         }
 
+        // CREATE branch — NOW mint the metered gate key (#543): on_create fires
+        // only here, never on the reuse path above, so a live delegate's relay
+        // key is never rotated out from under it. base_envs (identity + the
+        // ceremony's eager gate envs) then the create-time gate envs.
+        let created_envs = on_create().await;
+        let merged: Vec<(String, String)> = base_envs.iter().cloned().chain(created_envs).collect();
         let id = self
-            .create_for_delegate(device_key_hash, actor_omni, extra_envs)
+            .create_for_delegate(device_key_hash, actor_omni, &merged)
             .await?;
 
         // Quota-invariant self-check: the fresh instance must be findable by
@@ -550,7 +647,10 @@ impl VeFaasClient {
     /// runtime — a valid no-op, e.g. a device revoked before ever resolving).
     pub async fn kill_for_device(&self, device_key_hash: &str) -> Result<Vec<String>> {
         let all = self
-            .list_instances(Some(&[(LABEL_DEVICE_KEY_HASH, device_key_hash)]))
+            .list_instances(Some(&[(
+                LABEL_DEVICE_KEY_HASH,
+                label_value(device_key_hash),
+            )]))
             .await?;
         let mut killed = Vec::new();
         for inst in all
@@ -567,21 +667,22 @@ impl VeFaasClient {
 }
 
 /// The labels stamped on a delegate's instance.
-fn delegate_labels<'a>(
-    device_key_hash: &'a str,
-    actor_omni: &'a str,
-) -> [(&'static str, &'a str); 3] {
+fn delegate_labels(device_key_hash: &str, actor_omni: &str) -> [(&'static str, String); 3] {
+    // #543 — values are truncated to the veFaaS <64-char metadata limit.
     [
-        (LABEL_DEVICE_KEY_HASH, device_key_hash),
-        (LABEL_ACTOR_OMNI, actor_omni),
-        (LABEL_MANAGED_BY, MANAGED_BY_VALUE),
+        (LABEL_DEVICE_KEY_HASH, label_value(device_key_hash)),
+        (LABEL_ACTOR_OMNI, label_value(actor_omni)),
+        (LABEL_MANAGED_BY, MANAGED_BY_VALUE.to_string()),
     ]
 }
 
-fn label_map(labels: &[(&str, &str)]) -> serde_json::Value {
+fn label_map<V: AsRef<str>>(labels: &[(&str, V)]) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     for (k, v) in labels {
-        m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+        m.insert(
+            k.to_string(),
+            serde_json::Value::String(v.as_ref().to_string()),
+        );
     }
     serde_json::Value::Object(m)
 }
@@ -776,9 +877,42 @@ mod tests {
 
     #[test]
     fn label_map_builds_string_object() {
+        // #543 — values are 0x-stripped + truncated (short inputs pass through
+        // unchanged aside from the 0x strip).
         let m = label_map(&delegate_labels("0x11", "0xaa"));
-        assert_eq!(m[LABEL_DEVICE_KEY_HASH], "0x11");
-        assert_eq!(m[LABEL_ACTOR_OMNI], "0xaa");
+        assert_eq!(m[LABEL_DEVICE_KEY_HASH], "11");
+        assert_eq!(m[LABEL_ACTOR_OMNI], "aa");
         assert_eq!(m[LABEL_MANAGED_BY], MANAGED_BY_VALUE);
+    }
+
+    #[test]
+    fn label_values_fit_the_vefaas_64_char_limit() {
+        // The regression this fixes: a real device_key_hash / actor_omni is a
+        // 0x+64-hex, 66-char string — veFaaS rejects a Metadata VALUE ≥ 64.
+        let full_hash = format!("0x{}", "a".repeat(64)); // 66 chars
+        for (_, v) in delegate_labels(&full_hash, &full_hash) {
+            assert!(
+                v.len() < 64,
+                "label value {v:?} is {} chars (must be <64)",
+                v.len()
+            );
+        }
+        // …and the truncated value still round-trips through the client match.
+        let inst = SandboxInstance {
+            id: "sb-x".into(),
+            status: "Ready".into(),
+            expire_at: String::new(),
+            metadata: [
+                (LABEL_DEVICE_KEY_HASH.to_string(), label_value(&full_hash)),
+                (LABEL_MANAGED_BY.to_string(), MANAGED_BY_VALUE.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert!(
+            inst.labeled_for(&full_hash),
+            "truncated label must still match the full hash"
+        );
+        assert!(!inst.labeled_for(&format!("0x{}", "b".repeat(64))));
     }
 }

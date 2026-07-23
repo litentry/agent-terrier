@@ -953,6 +953,13 @@ function apiToActor(a: ApiActor): Actor {
     services: a.services,
     presetId: a.preset_id ?? undefined,
     memoryNs: a.memory_ns ?? undefined,
+    runtimeStatus: a.runtime
+      ? {
+          gateStatus: a.runtime.gate_status,
+          gateError: a.runtime.gate_error ?? undefined,
+          spawnError: a.runtime.spawn_error ?? undefined,
+        }
+      : undefined,
   };
 }
 

@@ -15,6 +15,31 @@ use anyhow::{bail, Result};
 use crate::aws_ecs::{EcsSandboxClient, EcsSandboxConfig};
 use crate::ve_faas::VeFaasClient;
 
+/// #543 fail-closed direct-ark guard, shared by both drivers: a create whose
+/// `extra_envs` carry no gate-provisioned `ARK_API_KEY` would inject the
+/// SHARED host vendor key into the sandbox — the LLM-plane twin of the #541
+/// ambient-storage-credential prohibition — and is refused unless the operator
+/// explicitly opted the stack in with `AGENTKEYS_ALLOW_DIRECT_ARK=1`.
+/// Gate-provisioned spawns (the #427 ceremony path, per-delegate `gk_` relay
+/// key) always pass.
+pub(crate) fn direct_ark_guard(
+    extra_envs: &[(String, String)],
+    allow_direct_ark: bool,
+) -> Result<()> {
+    let gate_provisioned = extra_envs.iter().any(|(k, _)| k == "ARK_API_KEY");
+    if gate_provisioned || allow_direct_ark {
+        return Ok(());
+    }
+    bail!(
+        "refusing to inject the shared host ark key into a delegate sandbox: this spawn \
+         carries no gate-minted relay key and AGENTKEYS_ALLOW_DIRECT_ARK=1 is not set (#543 \
+         fail-closed default). Either the broker→gate admin surface is unwired \
+         (AGENTKEYS_GATE_ADMIN_URL/_TOKEN/_TURN_URL — setup-broker-host step 5) or \
+         provisioning FAILED — the ceremony's gate status/error says which; fix that rather \
+         than opting this stack into UNMETERED direct-ark injection."
+    )
+}
+
 /// The shared ensure outcome. `agent_url` is PER-OUTCOME because the two
 /// clouds differ: veFaaS fronts every instance behind ONE static gateway
 /// (`None` here — callers fall back to [`SandboxBackend::static_agent_url`]),
@@ -27,6 +52,27 @@ pub struct EnsureOutcome {
     pub created: bool,
     pub status: String,
     pub agent_url: Option<String>,
+}
+
+/// A CREATE-only extra-env provider (#543): the backend invokes it — inside the
+/// spawn lock, on the CREATE branch ONLY, never on reuse — to obtain envs merged
+/// into the fresh instance. resolve/poll pass the gate-provisioning closure so a
+/// delegate cold-respawn comes back METERED; because it fires only on create, a
+/// REUSED live sandbox never has its relay key rotated out from under it. Owned
+/// captures (no borrows) keep it `'static`; boxed so the enum dispatch stays a
+/// single concrete signature (no generic ripple through both drivers).
+pub type CreateEnvProvider = Box<
+    dyn FnOnce()
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<(String, String)>> + Send>>
+        + Send,
+>;
+
+/// The no-op provider: nothing extra beyond `base_envs` on create. The #427
+/// ceremony uses it — it provisions the gate key EAGERLY (it always creates and
+/// must record the status) and passes the result in `base_envs`, so its create
+/// callback has nothing left to do.
+pub fn no_create_envs() -> CreateEnvProvider {
+    Box::new(|| Box::pin(async { Vec::new() }))
 }
 
 /// The per-cloud delegate-sandbox driver behind one interface.
@@ -81,19 +127,26 @@ impl SandboxBackend {
         }
     }
 
-    /// Idempotent per-delegate ensure (reuse-or-create; quota ≤ 1 live
-    /// runtime per delegate; `extra_envs` merged over the driver's base env
-    /// on a CREATE).
+    /// Idempotent per-delegate ensure (reuse-or-create; quota ≤ 1 live runtime
+    /// per delegate). `base_envs` are merged over the driver's base env on a
+    /// CREATE; `on_create` yields ADDITIONAL envs computed only when a create
+    /// actually happens (#543 — the metered gate key, never minted on reuse).
     pub async fn ensure_for_delegate_with_envs(
         &self,
         device_key_hash: &str,
         actor_omni: &str,
-        extra_envs: &[(String, String)],
+        base_envs: &[(String, String)],
+        on_create: CreateEnvProvider,
     ) -> Result<EnsureOutcome> {
         match self {
             Self::VeFaas(c) => {
                 let o = c
-                    .ensure_for_delegate_with_envs(device_key_hash, actor_omni, extra_envs)
+                    .ensure_for_delegate_with_envs(
+                        device_key_hash,
+                        actor_omni,
+                        base_envs,
+                        on_create,
+                    )
                     .await?;
                 Ok(EnsureOutcome {
                     sandbox_id: o.sandbox_id,
@@ -103,7 +156,7 @@ impl SandboxBackend {
                 })
             }
             Self::AwsEcs(c) => {
-                c.ensure_for_delegate_with_envs(device_key_hash, actor_omni, extra_envs)
+                c.ensure_for_delegate_with_envs(device_key_hash, actor_omni, base_envs, on_create)
                     .await
             }
         }
@@ -137,5 +190,54 @@ mod tests {
         };
         assert!(o.agent_url.is_none());
         assert!(o.created);
+    }
+
+    fn envs(keys: &[&str]) -> Vec<(String, String)> {
+        keys.iter().map(|k| (k.to_string(), "v".into())).collect()
+    }
+
+    #[test]
+    fn direct_ark_guard_passes_gate_provisioned_spawns_regardless_of_opt_in() {
+        let gate = envs(&["ARK_API_KEY", "ARK_BASE_URL", "AGENTKEYS_DEVICE_KEY_HEX"]);
+        assert!(direct_ark_guard(&gate, false).is_ok());
+        assert!(direct_ark_guard(&gate, true).is_ok());
+    }
+
+    #[test]
+    fn direct_ark_guard_refuses_unprovisioned_spawns_without_opt_in() {
+        // The resolve/poll ensure paths (empty extra_envs) and a
+        // provision-failed ceremony (identity envs only) both fail closed.
+        for e in [envs(&[]), envs(&["AGENTKEYS_DEVICE_KEY_HEX"])] {
+            let err = direct_ark_guard(&e, false).unwrap_err().to_string();
+            assert!(err.contains("AGENTKEYS_ALLOW_DIRECT_ARK"), "{err}");
+            assert!(err.contains("AGENTKEYS_GATE_ADMIN_URL"), "{err}");
+        }
+    }
+
+    #[test]
+    fn direct_ark_guard_allows_unprovisioned_spawns_under_explicit_opt_in() {
+        assert!(direct_ark_guard(&envs(&["AGENTKEYS_DEVICE_KEY_HEX"]), true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn no_create_envs_yields_nothing() {
+        // The ceremony's create callback contract: it provisions the gate key
+        // EAGERLY (into base_envs) and leaves the create callback a no-op.
+        assert!(no_create_envs()().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metered_create_provider_passes_the_guard_empty_fails_closed() {
+        // Models the #543 resolve/poll cold-create contract at the seam the
+        // backend uses: on CREATE it awaits the provider and the guard runs on
+        // the result. A provider that mints the gate relay key → METERED (guard
+        // passes); a provider that returns empty (gate not-configured / failed)
+        // → fail-closed (guard refuses) — never a silent direct-ark boot.
+        let metered: CreateEnvProvider =
+            Box::new(|| Box::pin(async { vec![("ARK_API_KEY".into(), "gk_probe".into())] }));
+        assert!(direct_ark_guard(&metered().await, false).is_ok());
+
+        let failed: CreateEnvProvider = Box::new(|| Box::pin(async { Vec::new() }));
+        assert!(direct_ark_guard(&failed().await, false).is_err());
     }
 }
