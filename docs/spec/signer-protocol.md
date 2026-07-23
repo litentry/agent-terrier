@@ -207,6 +207,92 @@ their domain does not include it, etc.).
 | 503 | `signer_disabled`      | Same as `/dev/derive-address` |
 | 500 | `internal`             | Unexpected — bug |
 
+### `POST /dev/derive-device` (#552)
+
+Delegate-K10 derivation, DEVICE domain (`agentkeys-k10-device` info suffix —
+a DIFFERENT key from the same actor's wallet; domain separation is pinned by
+`device_domain_tests`). The signer custodies every delegate key with ZERO
+stored state: the key is re-derived per call and never persisted.
+
+**Auth (fail-closed, unlike the legacy `/dev/*` routes):** a broker session
+JWT is REQUIRED — no pubkey loaded ⇒ 503 `signer_auth_not_configured`, never
+a skip. Two arms:
+
+* **actor arm** — `jwt.agentkeys.omni_account == actor_omni` (the sandbox's
+  own rotating J1);
+* **master arm** — the bearer is the actor's HDKD PARENT and the request
+  carries `label` such that `child_omni_hex(jwt_omni, label) == actor_omni`
+  (the #427 spawn-build path: the master IS the authority over its children).
+
+#### Request
+
+```json
+{ "actor_omni": "<64 hex>", "label": "cook" }
+```
+
+`label` is optional; it is only consulted for the master arm.
+
+#### Response — 200 OK
+
+```json
+{
+  "address":         "0x<40 hex>",
+  "device_key_hash": "0x<64 hex>",
+  "pop_sig":         "0x<130 hex>",
+  "key_version":     1
+}
+```
+
+`pop_sig` is a fresh EIP-191 signature over the canonical agent-pop payload
+(`keccak256("agentkeys-agent-pop:" || device_key_hash)`) — computed
+SIGNER-SIDE; this route never signs caller-supplied bytes.
+
+#### Errors
+
+| HTTP | `error` | Meaning |
+|---|---|---|
+| 401 | `unauthorized` | bearer missing / invalid / expired |
+| 403 | `actor_not_authorized` | bearer is neither the actor nor (with `label`) its parent |
+| 503 | `signer_auth_not_configured` | no broker session pubkey loaded (fail-closed) |
+| 503 | `signer_disabled` | master secret unset |
+
+### `POST /dev/sign-device-cap-pop` (#552)
+
+The #76 cap-mint proof-of-possession under the delegate's device key.
+**Actor arm ONLY** (the sandbox's own J1). The caller sends the STRUCTURED
+fields and the signer recomputes `cap_pop_payload(...)` itself — a
+caller-supplied prehash is never accepted (the same rule as
+`/dev/sign-typed-data`), so a device key can only ever sign the two
+domain-restricted payload shapes.
+
+#### Request
+
+```json
+{
+  "actor_omni":    "<64 hex>",
+  "operator_omni": "<64 hex>",
+  "service":       "channel-sub:opchat-cook",
+  "op":            "channel_subscribe",
+  "data_class":    "channel",
+  "client_nonce":  "<32 hex>",
+  "client_ts":     1760000000
+}
+```
+
+#### Response — 200 OK
+
+```json
+{
+  "signature":       "0x<130 hex>",
+  "address":         "0x<40 hex>",
+  "device_key_hash": "0x<64 hex>",
+  "key_version":     1
+}
+```
+
+Errors mirror `/dev/derive-device` (no master arm: a parent-authorized 403
+is expected when a master bearer is presented here).
+
 ## Error envelope
 
 All non-2xx responses share the shape:

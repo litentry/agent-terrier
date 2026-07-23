@@ -20,10 +20,13 @@
 //! for the LIFETIME OF THE BINDING (deleted on revoke). The scope bound,
 //! rationale, diagram (`docs/assets/spawn-context-custody-tradeoff.svg`) and
 //! revert path live in that registry — do not re-justify or widen the store
-//! here. Near-term hardening is #551 (wrap the secret with a signer-derived
-//! KEK so broker-disk exfiltration alone yields ciphertext); the endgame is
-//! in-sandbox keygen (arch.md §10.2), which deletes the secret column and
-//! re-homes the readable half to the Config data class. The row is
+//! here. The interim #551 KEK wrap was SKIPPED (owner decision 2026-07-23);
+//! **#552 LANDED**: on a stack flipped to `AGENTKEYS_DELEGATE_KEYS=signer`
+//! every NEW spawn is signer-custodied — the row stores the K10 ADDRESS only
+//! (`k10_secret_hex = ""`; re-creates mint a fresh J1 instead of injecting a
+//! key). The secret column now serves ONLY pre-flip legacy delegates and
+//! empties as they archive+respawn; re-homing the readable half to the
+//! Config data class (full D2) is the recorded tail. The row is
 //! provisioning data, never authority: it deliberately carries NO omnis (the
 //! ensure path injects chain-read identity per D1), and a forged row cannot
 //! widen scope — every cap-mint is still chain-verified at the worker.
@@ -47,7 +50,11 @@ pub struct SpawnContext {
     pub label: String,
     /// The duplex operator-chat feed id (`opchat-<label>`, #425 S4).
     pub chat_channel_id: String,
-    /// The delegate K10 secret (hex) — §1a E2; plaintext until #551 wraps it.
+    /// The delegate K10 EVM address (#552) — under signer custody it is all a
+    /// re-create needs (the J1 `device_pubkey` claim); no secret exists.
+    pub k10_address: String,
+    /// The delegate K10 secret (hex) — LEGACY rows only (§1a E2 plaintext,
+    /// pre-#552 spawns); EMPTY for signer-custodied delegates.
     pub k10_secret_hex: String,
     pub created_at: i64,
 }
@@ -104,11 +111,24 @@ impl SpawnContextStore {
                     device_key_hash TEXT PRIMARY KEY,
                     label           TEXT NOT NULL,
                     chat_channel_id TEXT NOT NULL,
+                    k10_address     TEXT NOT NULL DEFAULT '',
                     k10_secret_hex  TEXT NOT NULL,
                     created_at      INTEGER NOT NULL
                  );",
             )
-            .map_err(|e| BrokerError::Internal(format!("init spawn-contexts schema: {e}")))
+            .map_err(|e| BrokerError::Internal(format!("init spawn-contexts schema: {e}")))?;
+        // #552 migration for pre-existing #546 DBs: add the address column.
+        // "duplicate column name" = already migrated (or fresh) — a no-op.
+        match self.lock()?.execute(
+            "ALTER TABLE spawn_contexts ADD COLUMN k10_address TEXT NOT NULL DEFAULT ''",
+            [],
+        ) {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+            Err(e) => Err(BrokerError::Internal(format!(
+                "migrate spawn-contexts (k10_address): {e}"
+            ))),
+        }
     }
 
     /// Insert-or-replace the delegate's context. A respawn after archive mints
@@ -118,12 +138,13 @@ impl SpawnContextStore {
         self.lock()?
             .execute(
                 "INSERT OR REPLACE INTO spawn_contexts
-                 (device_key_hash, label, chat_channel_id, k10_secret_hex, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     norm(&ctx.device_key_hash),
                     ctx.label,
                     ctx.chat_channel_id,
+                    ctx.k10_address,
                     ctx.k10_secret_hex,
                     ctx.created_at,
                 ],
@@ -135,7 +156,8 @@ impl SpawnContextStore {
     pub fn get(&self, device_key_hash: &str) -> BrokerResult<Option<SpawnContext>> {
         self.lock()?
             .query_row(
-                "SELECT device_key_hash, label, chat_channel_id, k10_secret_hex, created_at
+                "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
+                        created_at
                  FROM spawn_contexts WHERE device_key_hash = ?1",
                 params![norm(device_key_hash)],
                 |row| {
@@ -143,8 +165,9 @@ impl SpawnContextStore {
                         device_key_hash: row.get(0)?,
                         label: row.get(1)?,
                         chat_channel_id: row.get(2)?,
-                        k10_secret_hex: row.get(3)?,
-                        created_at: row.get(4)?,
+                        k10_address: row.get(3)?,
+                        k10_secret_hex: row.get(4)?,
+                        created_at: row.get(5)?,
                     })
                 },
             )
@@ -176,9 +199,48 @@ mod tests {
             device_key_hash: dkh.to_string(),
             label: "watchdog".into(),
             chat_channel_id: "opchat-watchdog".into(),
+            k10_address: "0xabcd".into(),
             k10_secret_hex: "0xdead".into(),
             created_at: 1_700_000_000,
         }
+    }
+
+    /// #552 — a pre-#546-schema DB (no k10_address column) migrates in place
+    /// on open; legacy rows read back with an empty address.
+    #[test]
+    fn open_migrates_a_pre_552_schema_in_place() {
+        let path = std::env::temp_dir().join(format!(
+            "agentkeys-spawn-ctx-migrate-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE spawn_contexts (
+                    device_key_hash TEXT PRIMARY KEY,
+                    label           TEXT NOT NULL,
+                    chat_channel_id TEXT NOT NULL,
+                    k10_secret_hex  TEXT NOT NULL,
+                    created_at      INTEGER NOT NULL
+                 );
+                 INSERT INTO spawn_contexts VALUES ('aa', 'w', 'opchat-w', '0xdead', 1);",
+            )
+            .unwrap();
+        }
+        let store = SpawnContextStore::open(&path).unwrap();
+        let legacy = store.get("aa").unwrap().expect("legacy row");
+        assert_eq!(legacy.k10_secret_hex, "0xdead");
+        assert_eq!(legacy.k10_address, "");
+        // Re-open (second migration run) is a no-op, and new-shape rows work.
+        drop(store);
+        let store = SpawnContextStore::open(&path).unwrap();
+        store.upsert(&ctx(&"bb".repeat(32))).unwrap();
+        assert_eq!(
+            store.get(&"bb".repeat(32)).unwrap().unwrap().k10_address,
+            "0xabcd"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -43,6 +43,16 @@ const HKDF_SALT: &[u8] = b"agentkeys-signer-v0";
 /// bump.
 const HKDF_INFO_SUFFIX: &[u8] = b"agentkeys-evm-wallet";
 
+/// #552 — the DELEGATE K10 derivation domain. A delegate's device key is
+/// DERIVED from its `actor_omni` under this distinct info suffix, so the
+/// signer custodies delegate keys with ZERO stored state and the K10 is a
+/// DIFFERENT key from the same actor's K4 wallet (`HKDF_INFO_SUFFIX`) — a
+/// device-key compromise can never sign wallet ops and vice-versa. Pinned:
+/// changing it re-keys every signer-custodied delegate (their on-chain
+/// `device_key_hash` bindings would orphan); never change without a
+/// `KEY_VERSION` bump + a re-registration ceremony plan.
+const DEVICE_HKDF_INFO_SUFFIX: &[u8] = b"agentkeys-k10-device";
+
 /// Current key-derivation version. Future master-secret rotation bumps this
 /// byte; producing a different address from the same omni_account while
 /// keeping the wire shape identical. Reserved range:
@@ -156,16 +166,27 @@ impl DevKeyService {
     /// extend the HKDF output with an additional byte and try again, up to
     /// `MAX_HKDF_RETRIES` times. In practice this never fires.
     fn derive_signing_key(&self, omni_bytes: &[u8; 32]) -> Result<SigningKey, SignerError> {
+        self.derive_signing_key_in_domain(HKDF_INFO_SUFFIX, omni_bytes)
+    }
+
+    /// Domain-parameterized derivation core: the wallet (`HKDF_INFO_SUFFIX`)
+    /// and delegate-K10 (`DEVICE_HKDF_INFO_SUFFIX`, #552) domains share the
+    /// retry loop but can never collide (distinct info strings).
+    fn derive_signing_key_in_domain(
+        &self,
+        info_suffix: &[u8],
+        omni_bytes: &[u8; 32],
+    ) -> Result<SigningKey, SignerError> {
         const MAX_HKDF_RETRIES: u8 = 16;
 
         let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), &self.master_secret);
 
         for retry in 0..MAX_HKDF_RETRIES {
-            // Build info: [KEY_VERSION] || "agentkeys-evm-wallet" || omni_bytes ||
+            // Build info: [KEY_VERSION] || info_suffix || omni_bytes ||
             //             optional retry counter (only when retry > 0)
-            let mut info = Vec::with_capacity(1 + HKDF_INFO_SUFFIX.len() + 32 + 1);
+            let mut info = Vec::with_capacity(1 + info_suffix.len() + 32 + 1);
             info.push(KEY_VERSION);
-            info.extend_from_slice(HKDF_INFO_SUFFIX);
+            info.extend_from_slice(info_suffix);
             info.extend_from_slice(omni_bytes);
             if retry > 0 {
                 info.push(retry);
@@ -206,28 +227,28 @@ impl DevKeyService {
     ) -> Result<(String, String), SignerError> {
         let omni_bytes = parse_omni_account(omni_account)?;
         let sk = self.derive_signing_key(&omni_bytes)?;
-        let address = address_for_signing_key(&sk);
+        eip191_sign_with(&sk, message_bytes)
+    }
 
-        // EIP-191: keccak256("\x19Ethereum Signed Message:\n" || len || message).
-        let prefix = format!("\x19Ethereum Signed Message:\n{}", message_bytes.len());
-        let mut hasher = Keccak256::new();
-        hasher.update(prefix.as_bytes());
-        hasher.update(message_bytes);
-        let digest = hasher.finalize();
+    /// #552 — derive the DELEGATE K10 EVM address for an `actor_omni`
+    /// (device domain — a DIFFERENT key from the same actor's K4 wallet).
+    pub fn derive_device_address(&self, actor_omni: &str) -> Result<String, SignerError> {
+        let omni_bytes = parse_omni_account(actor_omni)?;
+        let sk = self.derive_signing_key_in_domain(DEVICE_HKDF_INFO_SUFFIX, &omni_bytes)?;
+        Ok(address_for_signing_key(&sk))
+    }
 
-        // Sign and recover the recovery id. k256's
-        // `sign_prehash_recoverable` returns a low-s normalized signature
-        // and a recovery id in {0, 1}.
-        let (sig, recovery_id) = sk
-            .sign_prehash_recoverable(&digest)
-            .map_err(|e| SignerError::Internal(format!("signing failed: {e}")))?;
-
-        let mut sig_bytes = sig.to_bytes().to_vec();
-        sig_bytes.push(recovery_id.to_byte());
-        debug_assert_eq!(sig_bytes.len(), 65, "EIP-191 signature must be 65 bytes");
-
-        let signature_hex = format!("0x{}", hex::encode(&sig_bytes));
-        Ok((signature_hex, address))
+    /// #552 — sign `message_bytes` under EIP-191 with the DELEGATE K10
+    /// derived from `actor_omni`. Same signature semantics as
+    /// [`Self::sign_eip191`], device derivation domain.
+    pub fn sign_device_eip191(
+        &self,
+        actor_omni: &str,
+        message_bytes: &[u8],
+    ) -> Result<(String, String), SignerError> {
+        let omni_bytes = parse_omni_account(actor_omni)?;
+        let sk = self.derive_signing_key_in_domain(DEVICE_HKDF_INFO_SUFFIX, &omni_bytes)?;
+        eip191_sign_with(&sk, message_bytes)
     }
 
     /// **DEV ONLY.** EIP-712 typed-data sign (issue #82). Returns the
@@ -285,6 +306,34 @@ pub struct Eip712SignResult {
 /// Parse an `omni_account` from the wire format (64 lowercase hex chars,
 /// no `0x` prefix per `signer-protocol.md`) into its raw 32 bytes. Tolerates
 /// uppercase hex but rejects any other deviation.
+/// EIP-191 sign `message_bytes` with `sk`:
+/// keccak256("\x19Ethereum Signed Message:\n" || len || message), canonical
+/// 65-byte `r || s || v` (`v ∈ {0, 1}`) as 0x-hex, plus the signer address.
+/// ONE implementation for both the wallet and device (#552) domains.
+fn eip191_sign_with(
+    sk: &SigningKey,
+    message_bytes: &[u8],
+) -> Result<(String, String), SignerError> {
+    let address = address_for_signing_key(sk);
+    let prefix = format!("\x19Ethereum Signed Message:\n{}", message_bytes.len());
+    let mut hasher = Keccak256::new();
+    hasher.update(prefix.as_bytes());
+    hasher.update(message_bytes);
+    let digest = hasher.finalize();
+
+    // k256's `sign_prehash_recoverable` returns a low-s normalized signature
+    // and a recovery id in {0, 1}.
+    let (sig, recovery_id) = sk
+        .sign_prehash_recoverable(&digest)
+        .map_err(|e| SignerError::Internal(format!("signing failed: {e}")))?;
+
+    let mut sig_bytes = sig.to_bytes().to_vec();
+    sig_bytes.push(recovery_id.to_byte());
+    debug_assert_eq!(sig_bytes.len(), 65, "EIP-191 signature must be 65 bytes");
+
+    Ok((format!("0x{}", hex::encode(&sig_bytes)), address))
+}
+
 fn parse_omni_account(omni_account: &str) -> Result<[u8; 32], SignerError> {
     if omni_account.len() != 64 {
         return Err(SignerError::InvalidOmniAccount(format!(
@@ -599,5 +648,49 @@ mod tests {
         };
         let err = s.sign_eip712(&fixed_omni(), td).unwrap_err();
         assert!(matches!(err, SignerError::InvalidTypedData(_)));
+    }
+}
+
+#[cfg(test)]
+mod device_domain_tests {
+    use super::*;
+    use agentkeys_core::device_crypto::{agent_pop_payload, device_key_hash, ecrecover_eip191};
+
+    fn signer() -> DevKeyService {
+        DevKeyService::from_master_secret([0x42; 32])
+    }
+
+    #[test]
+    fn device_domain_is_separated_from_the_wallet_domain() {
+        // #552 — the SAME actor_omni yields DIFFERENT keys in the two
+        // domains: a delegate K10 compromise can never sign wallet ops.
+        let omni = "ab".repeat(32);
+        let wallet = signer().derive_address(&omni).unwrap();
+        let device = signer().derive_device_address(&omni).unwrap();
+        assert_ne!(wallet, device);
+        // Deterministic: same omni → same device address, every time.
+        assert_eq!(device, signer().derive_device_address(&omni).unwrap());
+        // Distinct omnis → distinct device keys.
+        assert_ne!(
+            device,
+            signer().derive_device_address(&"cd".repeat(32)).unwrap()
+        );
+    }
+
+    #[test]
+    fn device_pop_sig_recovers_to_the_derived_address() {
+        // End-to-end shape the #427 spawn-build consumes: the pop over the
+        // canonical agent-pop payload must ecrecover to the derived address
+        // (what `parse_register_and_grant` + the chain contract verify).
+        let omni = "ab".repeat(32);
+        let s = signer();
+        let address = s.derive_device_address(&omni).unwrap();
+        let dkh = device_key_hash(&address).unwrap();
+        let (sig, sig_addr) = s
+            .sign_device_eip191(&omni, &agent_pop_payload(&dkh))
+            .unwrap();
+        assert_eq!(sig_addr, address);
+        let recovered = ecrecover_eip191(&agent_pop_payload(&dkh), &sig).unwrap();
+        assert_eq!(recovered.to_lowercase(), address.to_lowercase());
     }
 }

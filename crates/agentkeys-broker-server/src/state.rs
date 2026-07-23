@@ -44,7 +44,7 @@ pub struct AppState {
     /// K10) keyed by device_key_hash: written at ceremony confirm, read by
     /// EVERY sandbox-create path so a re-created runtime is never chat-silent,
     /// deleted on confirmed revoke. Registered exception E2 in arch.md §1a —
-    /// scope bound + revert path (#551) live there and in
+    /// scope bound + revert path (#552) live there and in
     /// `storage::spawn_contexts`. (The former `grant_store` slot — the
     /// unenforced-since-mint_v2 `/v1/grant` SQLite CRUD — was removed, #547.)
     pub spawn_context_store: Arc<SpawnContextStore>,
