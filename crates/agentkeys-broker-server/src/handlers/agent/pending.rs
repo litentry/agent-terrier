@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::error::BrokerError;
 use crate::handlers::agent::unix_now;
-use crate::handlers::grant::require_session_jwt;
+use crate::handlers::require_session_jwt;
 use crate::state::SharedState;
 
 pub async fn pending_bindings(

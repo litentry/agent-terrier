@@ -32,7 +32,7 @@ use agentkeys_broker_server::{
     },
     state::{AppState, Tier2State},
     storage::{
-        AuthNonceStore, EmailRateLimitStore, EmailTokenStore, GrantStore, IdentityLinkStore,
+        AuthNonceStore, EmailRateLimitStore, EmailTokenStore, IdentityLinkStore, SpawnContextStore,
         WalletStore,
     },
     sts::{AssumedCredentials, StsClient, StubStsClient},
@@ -133,7 +133,7 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         audit_policy: AuditPolicy::SqlitePrimary,
         wallet_store,
         nonce_store,
-        grant_store: Arc::new(GrantStore::open_in_memory().unwrap()),
+        spawn_context_store: Arc::new(SpawnContextStore::open_in_memory().unwrap()),
         identity_link_store: Arc::new(IdentityLinkStore::open_in_memory().unwrap()),
         pairing_request_store: Arc::new(
             agentkeys_broker_server::storage::PairingRequestStore::open_in_memory().unwrap(),

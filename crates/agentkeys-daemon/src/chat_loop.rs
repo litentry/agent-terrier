@@ -58,13 +58,9 @@ impl ChatLoopConfig {
         // separately-injected env a spawn could forget. A remote sandbox already
         // holds its broker host, so it computes `channel.<zone>` itself;
         // AGENTKEYS_CHANNEL_WORKER_URL stays an OPTIONAL override.
-        let need = [
-            "AGENTKEYS_BROKER_URL",
-            "AGENTKEYS_CHAT_CHANNEL_ID",
-            "AGENTKEYS_ACTOR_OMNI",
-            "AGENTKEYS_OPERATOR_OMNI",
-            "AGENTKEYS_DEVICE_KEY_HEX",
-        ];
+        // The names are the shared `sandbox_env` contract (#546) — the broker's
+        // spawn paths inject against the same constants, so the set can't drift.
+        let need = agentkeys_backend_client::protocol::sandbox_env::CHAT_REQUIRED;
         let vals: Vec<Option<String>> = need
             .iter()
             .map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
@@ -90,11 +86,13 @@ impl ChatLoopConfig {
         let mut it = vals.into_iter().map(|v| v.unwrap());
         let broker_url = it.next().unwrap();
         // env override → else derive `channel.<zone>` from the broker host.
-        let channel_worker_url = match std::env::var("AGENTKEYS_CHANNEL_WORKER_URL")
-            .ok()
-            .map(|u| u.trim().trim_end_matches('/').to_string())
-            .filter(|u| !u.is_empty())
-            .or_else(|| crate::ui_bridge::derive_worker_url(&broker_url, "channel"))
+        let channel_worker_url = match std::env::var(
+            agentkeys_backend_client::protocol::sandbox_env::CHANNEL_WORKER_URL,
+        )
+        .ok()
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .or_else(|| crate::ui_bridge::derive_worker_url(&broker_url, "channel"))
         {
             Some(u) => u,
             None => {

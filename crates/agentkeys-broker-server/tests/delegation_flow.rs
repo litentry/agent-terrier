@@ -94,8 +94,8 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         audit_policy: agentkeys_broker_server::plugins::audit::AuditPolicy::SqlitePrimary,
         wallet_store,
         nonce_store,
-        grant_store: Arc::new(
-            agentkeys_broker_server::storage::GrantStore::open_in_memory().unwrap(),
+        spawn_context_store: Arc::new(
+            agentkeys_broker_server::storage::SpawnContextStore::open_in_memory().unwrap(),
         ),
         identity_link_store: Arc::new(
             agentkeys_broker_server::storage::IdentityLinkStore::open_in_memory().unwrap(),

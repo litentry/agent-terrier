@@ -2,13 +2,16 @@
 //!
 //! Unauthenticated lookup that returns the master OmniAccount owning a
 //! given linked identity. Used by the recovery flow to discover which
-//! master should be solicited to issue a recovery grant on a NEW
-//! daemon address.
+//! master should be solicited to re-authorize a NEW actor binding.
 //!
-//! The recovery flow then proceeds via the regular `/v1/grant/create`
-//! endpoint signed by the original master — this ensures recovery
+//! The recovery flow then proceeds through the master's on-chain
+//! authorization ceremony (§10.2 pairing claim / the #427 spawn — the
+//! master's K11 signs the sponsored register + scope batch): recovery
 //! always requires master consent, defending against
 //! phished-email-becomes-wallet-takeover (Codex P0 #4 from earlier).
+//! (The former "`/v1/grant/create` signed by the master" step referred
+//! to the unenforced-since-mint_v2 GrantStore, removed in #547 —
+//! authorization's single source of truth is on-chain scope.)
 //!
 //! Lookup is unauthenticated because:
 //! 1. The OmniAccount is a SHA256 hash — knowing it does not enable
@@ -49,7 +52,7 @@ pub async fn wallet_recover_lookup(
             Json(json!({
                 "linked":       true,
                 "omni_account": omni_account,
-                "next_step":    "Have the master OmniAccount sign POST /v1/grant/create for your new daemon address.",
+                "next_step":    "Have the master claim a §10.2 pairing request for your new actor — authorization is the master's on-chain register + scope ceremony.",
             })),
         )),
         None => Ok((

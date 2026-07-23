@@ -24,7 +24,7 @@ use serde_json::json;
 
 use crate::error::{BrokerError, BrokerResult};
 use crate::handlers::agent::unix_now;
-use crate::handlers::grant::{random_b64url, require_session_jwt};
+use crate::handlers::{random_b64url, require_session_jwt};
 use crate::state::SharedState;
 use crate::storage::{DelegationPoll, DelegationSign, SignTarget, DELEGATION_REQUEST_TTL_SECONDS};
 

@@ -76,7 +76,8 @@ pub struct GateProvision {
 /// the gate aggregates a delegate's budget under the SAME user across the
 /// ceremony spawn and any later cold respawn (a case mismatch would fork the
 /// rollup). `label` is cosmetic (gate rollup keys on `device_key_hash`); the
-/// resolve path passes `""` since the readable label lives daemon-side.
+/// resolve path passes the durable spawn-context label when one exists (#546),
+/// else `""`.
 pub async fn provision_delegate_envs(
     http: &reqwest::Client,
     operator_omni_0x: &str,
@@ -136,6 +137,67 @@ pub async fn provision_delegate_envs(
     }
 }
 
+/// The delegate identity + chat-link env set for a sandbox CREATE — the ONE
+/// owner (#546) of this assembly, injected identically by the #427 ceremony
+/// (values from the pending row) and the resolve/poll re-create path (values
+/// from the durable [`SpawnContext`](crate::storage::SpawnContext) row). Pure:
+/// the two env-var sources ride in as arguments ([`chat_link_env_sources`]
+/// reads them at the call sites) so tests never touch process env.
+///
+/// Omnis are canonicalized to `0x`+lowercase-hex; the channel worker URL is an
+/// OPTIONAL override — absent, the sandbox DERIVES `channel.<zone>` from the
+/// broker URL (worker URLs are derived, never a required pre-composed env).
+pub(crate) fn delegate_identity_envs(
+    actor_omni: &str,
+    operator_omni: &str,
+    k10_secret_hex: Option<&str>,
+    chat_channel_id: &str,
+    broker_url: Option<&str>,
+    channel_worker_override: Option<&str>,
+) -> Vec<(String, String)> {
+    use agentkeys_protocol::sandbox_env as env_names;
+    let norm0x = |o: &str| format!("0x{}", crate::handlers::accept::norm_omni(o));
+    let mut envs = vec![
+        (env_names::ACTOR_OMNI.to_string(), norm0x(actor_omni)),
+        (env_names::OPERATOR_OMNI.to_string(), norm0x(operator_omni)),
+    ];
+    if let Some(secret) = k10_secret_hex.filter(|s| !s.trim().is_empty()) {
+        envs.push((env_names::DEVICE_KEY_HEX.to_string(), secret.to_string()));
+    }
+    if !chat_channel_id.is_empty() {
+        envs.push((
+            env_names::CHAT_CHANNEL_ID.to_string(),
+            chat_channel_id.to_string(),
+        ));
+    }
+    if let Some(url) = broker_url.filter(|u| !u.trim().is_empty()) {
+        envs.push((env_names::BROKER_URL.to_string(), url.trim().to_string()));
+    }
+    if let Some(url) = channel_worker_override.filter(|u| !u.trim().is_empty()) {
+        envs.push((
+            env_names::CHANNEL_WORKER_URL.to_string(),
+            url.trim().to_string(),
+        ));
+    }
+    envs
+}
+
+/// The broker-host env sources for [`delegate_identity_envs`]: the broker's own
+/// public URL (`BROKER_OIDC_ISSUER` — what the sandbox resolves against and
+/// derives worker URLs from) and the OPTIONAL channel-worker override.
+pub(crate) fn chat_link_env_sources() -> (Option<String>, Option<String>) {
+    let read = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    (
+        read("BROKER_OIDC_ISSUER"),
+        read("AGENTKEYS_WORKER_CHANNEL_URL"),
+    )
+}
+
 /// Ensure the delegate's sandbox exists (spawning it if needed) + emit the
 /// `SandboxSpawn` envelope on an actual create. `None` = lifecycle disabled
 /// on this host (no sandbox config) — callers return `agent_url: null` and
@@ -148,12 +210,47 @@ pub async fn provision_delegate_envs(
 /// path (it fails closed on VE if the gate can't provision). Lazy by design: a
 /// REUSED live instance never triggers a provision, so its relay key is never
 /// rotated out from under it (the #543 correctness point).
+///
+/// #546: a create here injects the SAME identity + chat env set the ceremony
+/// injects, reconstructed from the durable spawn-context row — a re-created
+/// sandbox (veFaaS expiry, backend desync, wake cold-start) comes back with
+/// its chat loop, not chat-silent. A delegate without a row (device-era
+/// binding, §10.2-paired agent whose K10 never touched the broker, pre-#546
+/// spawn) keeps today's env-less create.
 pub async fn ensure_for_delegate(
     state: &SharedState,
     device_key_hash: &str,
     actor_omni: &str,
     operator_omni: &str,
 ) -> Option<SandboxProvision> {
+    let ctx = match state.spawn_context_store.get(device_key_hash) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                device_key_hash = %device_key_hash,
+                error = %e,
+                "#546 spawn-context read FAILED — a create on this ensure will be chat-silent"
+            );
+            None
+        }
+    };
+    let (base_envs, gate_label) = match &ctx {
+        Some(c) => {
+            let (issuer, worker_override) = chat_link_env_sources();
+            (
+                delegate_identity_envs(
+                    actor_omni,
+                    operator_omni,
+                    Some(&c.k10_secret_hex),
+                    &c.chat_channel_id,
+                    issuer.as_deref(),
+                    worker_override.as_deref(),
+                ),
+                c.label.clone(),
+            )
+        }
+        None => (Vec::new(), String::new()),
+    };
     // Owned captures so the create-time closure is `'static`. The gate user_omni
     // is canonicalized to `0x`+lowercase-hex so a cold respawn aggregates under
     // the SAME operator budget the #427 ceremony spawn used (§15.3a).
@@ -163,7 +260,7 @@ pub async fn ensure_for_delegate(
     let dkh = device_key_hash.to_string();
     let on_create: crate::sandbox_backend::CreateEnvProvider = Box::new(move || {
         Box::pin(async move {
-            provision_delegate_envs(&http, &op, &actor, &dkh, "")
+            provision_delegate_envs(&http, &op, &actor, &dkh, &gate_label)
                 .await
                 .envs
         })
@@ -173,7 +270,7 @@ pub async fn ensure_for_delegate(
         device_key_hash,
         actor_omni,
         operator_omni,
-        &[],
+        &base_envs,
         on_create,
     )
     .await
@@ -277,10 +374,28 @@ pub async fn teardown_for_confirmed_batch(
     session_omni: [u8; 32],
     call_data: &[u8],
 ) {
+    let revoked = revoked_device_key_hashes(call_data);
+    // #546 — the durable spawn context dies WITH the binding (bounds the
+    // K10-at-rest window), on every host — even one without sandbox config.
+    for device_key_hash in &revoked {
+        match state.spawn_context_store.delete(device_key_hash) {
+            Ok(true) => tracing::info!(
+                device_key_hash = %device_key_hash,
+                "#546 spawn context deleted for the revoked binding"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                device_key_hash = %device_key_hash,
+                error = %e,
+                "#546 spawn-context delete FAILED for a revoked binding — stale row (and its \
+                 K10 secret) remains; delete it manually from spawn_contexts.sqlite"
+            ),
+        }
+    }
     let Some(backend) = state.sandbox.as_ref() else {
         return;
     };
-    for device_key_hash in revoked_device_key_hashes(call_data) {
+    for device_key_hash in revoked {
         match backend.kill_for_device(&device_key_hash).await {
             Ok(killed) if killed.is_empty() => {
                 tracing::info!(
@@ -438,5 +553,67 @@ mod tests {
         assert_eq!(omni32(&"cd".repeat(32)), Some([0xcd; 32]));
         assert_eq!(omni32("0x1234"), None);
         assert_eq!(omni32("not-hex"), None);
+    }
+
+    /// #546 — the full assembly (a ceremony spawn or a spawn-context re-create)
+    /// carries EVERY env the chat loop requires, so a re-created sandbox can
+    /// never come up chat-silent for want of injection.
+    #[test]
+    fn delegate_identity_envs_full_set_covers_the_chat_contract() {
+        let envs = delegate_identity_envs(
+            &format!("0x{}", "AB".repeat(32)),
+            &"CD".repeat(32),
+            Some("0xdead"),
+            "opchat-watchdog",
+            Some("https://broker.example.cn"),
+            None,
+        );
+        let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
+        for required in agentkeys_protocol::sandbox_env::CHAT_REQUIRED {
+            assert!(keys.contains(&required), "missing {required}: {keys:?}");
+        }
+        let get = |k: &str| {
+            envs.iter()
+                .find(|(ek, _)| ek == k)
+                .map(|(_, v)| v.as_str())
+                .unwrap()
+        };
+        // Omnis canonicalized 0x+lowercase; URLs trimmed; no override key when
+        // the channel worker URL is derived (never a required injection).
+        assert_eq!(
+            get("AGENTKEYS_ACTOR_OMNI"),
+            format!("0x{}", "ab".repeat(32))
+        );
+        assert_eq!(
+            get("AGENTKEYS_OPERATOR_OMNI"),
+            format!("0x{}", "cd".repeat(32))
+        );
+        assert_eq!(get("AGENTKEYS_CHAT_CHANNEL_ID"), "opchat-watchdog");
+        assert_eq!(get("AGENTKEYS_BROKER_URL"), "https://broker.example.cn");
+        assert!(!keys.contains(&"AGENTKEYS_CHANNEL_WORKER_URL"));
+    }
+
+    /// A context-less assembly (no K10 / channel / broker URL) injects only the
+    /// omnis — never a partial chat set masquerading as configured.
+    #[test]
+    fn delegate_identity_envs_omits_absent_pieces() {
+        let envs = delegate_identity_envs(
+            &"ab".repeat(32),
+            &"cd".repeat(32),
+            None,
+            "",
+            None,
+            Some("https://channel.example.cn/"),
+        );
+        let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.contains(&"AGENTKEYS_DEVICE_KEY_HEX"));
+        assert!(!keys.contains(&"AGENTKEYS_CHAT_CHANNEL_ID"));
+        assert!(!keys.contains(&"AGENTKEYS_BROKER_URL"));
+        assert_eq!(
+            envs.iter()
+                .find(|(k, _)| k == "AGENTKEYS_CHANNEL_WORKER_URL")
+                .map(|(_, v)| v.as_str()),
+            Some("https://channel.example.cn/")
+        );
     }
 }

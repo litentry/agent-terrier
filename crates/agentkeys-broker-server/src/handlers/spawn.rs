@@ -636,6 +636,38 @@ async fn finalize_spawn(
         }
     };
 
+    // 0. #546 — persist the ceremony context DURABLY (device_key_hash →
+    //    label/chat_channel_id/omnis/K10) BEFORE any create: the resolve/poll
+    //    ensure path re-injects this exact set whenever the runtime is
+    //    re-created (veFaaS expiry, backend desync, wake cold-start), so a
+    //    re-created sandbox is never chat-silent. The row dies with the
+    //    binding (deleted on confirmed revoke — custody note in
+    //    `storage::spawn_contexts`). Best-effort + loud: a write failure
+    //    costs future re-create chat, never the spawn itself.
+    if let Some(r) = &row {
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let persist = state
+            .spawn_context_store
+            .upsert(&crate::storage::SpawnContext {
+                device_key_hash: device_key_hash.to_string(),
+                label: r.label.clone(),
+                chat_channel_id: r.chat_channel_id.clone(),
+                k10_secret_hex: r.k10_secret_hex.clone(),
+                created_at,
+            });
+        if let Err(e) = persist {
+            tracing::warn!(
+                device_key_hash = %device_key_hash,
+                error = %e,
+                "#546 spawn-context persist FAILED — a future re-create of this delegate's \
+                 sandbox will come up chat-silent"
+            );
+        }
+    }
+
     // 1. Gate provisioning (epic decision 6): the usage plane. EAGER here — the
     //    ceremony always CREATES (a fresh delegate has no live instance) and must
     //    record the status for the audit anchor + the #543 runtime field. Same
@@ -653,34 +685,21 @@ async fn finalize_spawn(
     let mut extra_envs: Vec<(String, String)> = gate.envs;
 
     // 2. Sandbox spawn (#377 lifecycle) with the delegate identity + LLM envs.
-    if let Some(secret) = &k10_secret {
-        extra_envs.push(("AGENTKEYS_DEVICE_KEY_HEX".into(), secret.clone()));
-    }
-    extra_envs.push(("AGENTKEYS_ACTOR_OMNI".into(), actor_omni.to_string()));
-    extra_envs.push((
-        "AGENTKEYS_OPERATOR_OMNI".into(),
-        format!("0x{}", hex::encode(session_omni)),
+    //    #430 — the in-sandbox chat loop's contract: its duplex feed id + where
+    //    to resolve/mint (broker) and poll/publish (channel worker; DERIVED
+    //    from the broker URL, override optional). The sandbox-resident daemon
+    //    starts the loop only when the FULL set is present (partial = loud
+    //    warn there, never silent). ONE owner (#546): the same assembly the
+    //    resolve/poll re-create path injects from the durable spawn context.
+    let (issuer, worker_override) = crate::handlers::sandbox::chat_link_env_sources();
+    extra_envs.extend(crate::handlers::sandbox::delegate_identity_envs(
+        actor_omni,
+        &format!("0x{}", hex::encode(session_omni)),
+        k10_secret.as_deref(),
+        &chat_channel_id,
+        issuer.as_deref(),
+        worker_override.as_deref(),
     ));
-    // #430 — the in-sandbox chat loop's contract: its duplex feed id + where
-    // to resolve/mint (broker) and poll/publish (channel worker). The
-    // sandbox-resident daemon starts the loop only when the FULL set is
-    // present (partial = loud warn there, never silent).
-    if !chat_channel_id.is_empty() {
-        extra_envs.push(("AGENTKEYS_CHAT_CHANNEL_ID".into(), chat_channel_id.clone()));
-    }
-    if let Ok(issuer) = std::env::var("BROKER_OIDC_ISSUER") {
-        if !issuer.trim().is_empty() {
-            extra_envs.push(("AGENTKEYS_BROKER_URL".into(), issuer.trim().to_string()));
-        }
-    }
-    if let Ok(worker) = std::env::var("AGENTKEYS_WORKER_CHANNEL_URL") {
-        if !worker.trim().is_empty() {
-            extra_envs.push((
-                "AGENTKEYS_CHANNEL_WORKER_URL".into(),
-                worker.trim().to_string(),
-            ));
-        }
-    }
     let sandbox = crate::handlers::sandbox::ensure_for_delegate_with_envs(
         state,
         device_key_hash,

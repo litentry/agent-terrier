@@ -25,7 +25,7 @@ use serde_json::json;
 
 use crate::error::BrokerError;
 use crate::handlers::agent::unix_now;
-use crate::handlers::grant::require_session_jwt;
+use crate::handlers::require_session_jwt;
 use crate::state::SharedState;
 use crate::storage::PairingClaim;
 

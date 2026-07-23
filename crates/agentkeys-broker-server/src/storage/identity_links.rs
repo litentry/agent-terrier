@@ -3,12 +3,13 @@
 //! Per plan §3.5.5 + §Phase B: a master OmniAccount can attach
 //! additional verified identities (email, oauth2_google, second EVM
 //! wallet, etc.). These additional identities are NOT direct mint
-//! authority — that's the role of the grant store. They support the
-//! recovery flow: if the original master wallet is lost, an authenticated
-//! caller via a linked identity can request a recovery grant on a NEW
-//! daemon address, but the recovery grant itself is signed by an
-//! existing master via /v1/grant/create. There is NO email-only
-//! takeover path (Codex P0 #4 from earlier session).
+//! authority — authorization's single source of truth is on-chain scope
+//! (the SQLite grant store they once pointed at was removed in #547).
+//! They support the recovery flow: if the original master wallet is
+//! lost, an authenticated caller via a linked identity can discover
+//! which master must re-authorize a NEW actor binding — but that
+//! authorization is always the master's own on-chain ceremony. There is
+//! NO email-only takeover path (Codex P0 #4 from earlier session).
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};

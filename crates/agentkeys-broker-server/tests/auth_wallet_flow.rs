@@ -25,7 +25,7 @@ use agentkeys_broker_server::{
     plugins::wallet::keystore::ClientSideKeystoreProvisioner,
     plugins::PluginRegistry,
     state::{AppState, Tier2State},
-    storage::{AuthNonceStore, GrantStore, IdentityLinkStore, WalletStore},
+    storage::{AuthNonceStore, IdentityLinkStore, SpawnContextStore, WalletStore},
     sts::{AssumedCredentials, StsClient, StubStsClient},
 };
 use k256::ecdsa::SigningKey;
@@ -116,7 +116,7 @@ async fn spawn_broker_with_wallet_sig() -> (String, Arc<AppState>) {
         audit_policy: AuditPolicy::SqlitePrimary,
         wallet_store,
         nonce_store,
-        grant_store: Arc::new(GrantStore::open_in_memory().unwrap()),
+        spawn_context_store: Arc::new(SpawnContextStore::open_in_memory().unwrap()),
         identity_link_store: Arc::new(IdentityLinkStore::open_in_memory().unwrap()),
         pairing_request_store: Arc::new(
             agentkeys_broker_server::storage::PairingRequestStore::open_in_memory().unwrap(),
