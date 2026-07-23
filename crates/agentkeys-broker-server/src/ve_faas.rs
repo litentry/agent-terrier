@@ -327,15 +327,44 @@ impl VeFaasClient {
     /// use the app's console-configured image). veFaaS precache is ASYNC — this
     /// returns the ticket id; poll `GetSandboxImagePrecacheTicket` / watch the
     /// console 镜像预热 for "Preheated". `Region` is a required parameter (#543).
+    ///
+    /// The image list field is **`ImageUrls`**, not `Images` — corrected against
+    /// the live API 2026-07-23. The wrong name had been in place since #543 but
+    /// was INVISIBLE: the call 403'd on a missing `vefaas:PrecacheSandboxImages`
+    /// grant, so it never reached parameter validation. The moment the IAM grant
+    /// landed the API answered `400 MissingParameter.ImageUrls`. Two stacked
+    /// faults, the outer one masking the inner — hence no silent fallbacks here:
+    /// every precache failure is surfaced with the VE `{Code, Message}` pair.
     pub async fn precache_image(&self) -> Result<String> {
         if self.config.image.trim().is_empty() {
             return Ok(String::new());
         }
         let body = serde_json::json!({
-            "Images": [self.config.image],
+            "ImageUrls": [self.config.image],
             "Region": self.config.region,
         });
-        let v = self.vefaas_call("PrecacheSandboxImages", body).await?;
+        // "already exists" is the IDEMPOTENT case, not a failure: veFaaS 400s when
+        // the image URL is already registered in the precache list, which is the
+        // normal state on every boot after the first. Treating it as an error made
+        // a healthy broker log a scary WARN at every start (and buried the two REAL
+        // faults underneath it — the missing IAM grant and the wrong field name).
+        // NOTE for the operator: "already exists" says the URL is registered, NOT
+        // that it holds the latest bits. A re-push to the SAME tag does not
+        // re-register; refresh it (console 镜像预热: 移除 then re-add) when the tag
+        // has moved, or the sandbox keeps booting the previously cached content.
+        let v = match self.vefaas_call("PrecacheSandboxImages", body).await {
+            Ok(v) => v,
+            Err(e) if e.to_string().contains("already exists") => {
+                tracing::info!(
+                    image = %self.config.image,
+                    "veFaaS precache: image URL already registered (idempotent no-op). If the \
+                     tag was re-pushed since it was registered, refresh it in the console \
+                     (镜像预热 → 移除 → re-add) — a same-tag re-push does NOT re-cache."
+                );
+                return Ok(String::new());
+            }
+            Err(e) => return Err(e),
+        };
         Ok(v["Result"]["TicketId"]
             .as_str()
             .or_else(|| v["TicketId"].as_str())
