@@ -48,8 +48,16 @@ fi
 SHELL_BUILTINS='HOME PATH USER LOGNAME PWD OLDPWD SHELL TERM LANG LC_ALL TMPDIR HOSTNAME EDITOR VISUAL SUDO_USER SUDO_UID SUDO_GID DISPLAY XDG_RUNTIME_DIR BASH BASH_SOURCE BASH_VERSION FUNCNAME LINENO RANDOM SECONDS PPID PS1 PS2 IFS REPLY OPTARG OPTIND HISTFILE'
 
 # Keys the operator env files provide (every deploy script `set -a`-sources one).
+# Gitignored glob matches (the dev.sh scripts/operator-workstation*.secrets.env
+# local siblings) are excluded: CI's fresh checkout has none, so counting their
+# keys locally would accept a heredoc name CI then rejects (local-green/CI-red
+# — the inverse of the check-env-file-key-parity.sh 2026-07-23 skew).
 ENV_FILE_KEYS=$(
-  cat scripts/operator-workstation*.env 2>/dev/null \
+  for f in scripts/operator-workstation*.env; do
+    [ -f "$f" ] || continue
+    git check-ignore -q "$f" 2>/dev/null && continue
+    cat "$f"
+  done \
     | grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' \
     | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//' \
     | sort -u | tr '\n' ' '

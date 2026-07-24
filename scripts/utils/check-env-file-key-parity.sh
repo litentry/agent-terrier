@@ -39,6 +39,15 @@
 # TOS, not S3; VE STS, not IAM ARNs), so its data-plane keys are legitimately
 # named differently. Excluded from check 1 with this reason, NOT silently.
 #
+# GITIGNORED LOCAL FILES (skip, loudly): the on-disk globs also match the
+# per-stack dev.sh secrets siblings (scripts/operator-workstation*.secrets.env,
+# gitignored — bearer secrets a broker mints for itself, zero data-plane keys),
+# which made the gate red on an operator laptop while CI (fresh checkout, no
+# secrets files) stayed green (2026-07-23 skew). Scope rule: a file that
+# `git check-ignore` says is ignored is a LOCAL file, not a stack env — skipped
+# with a reason so a laptop run and CI compare the SAME universe. .gitignore
+# stays the single source of truth for "local-only"; no second pattern list.
+#
 # ALLOWLIST_KEYS: data-plane keys that legitimately live in only some AWS
 # stacks. Empty today; add with a reason + removal condition if ever needed.
 #
@@ -75,6 +84,12 @@ is_excluded() {
   done
   return 1
 }
+
+# Gitignored glob matches (the dev.sh *.secrets.env siblings) are local-only —
+# CI's fresh checkout never has them, so comparing them skews local vs CI.
+# Outside a git checkout (or without git), check-ignore exits non-zero and
+# nothing is skipped — degrades to comparing everything on disk.
+is_gitignored() { git check-ignore -q "$1" 2>/dev/null; }
 
 # All variable names (LHS of `KEY=`) in an env file, sorted-unique. Missing
 # file → empty (the OSS mirror strips operator-workstation.env; see the
@@ -118,6 +133,10 @@ ref_data=$(data_keys "$PROD" | filter_allowlist)
 for f in scripts/operator-workstation*.env; do
   [ -e "$f" ] || continue
   [ "$f" = "$PROD" ] && continue
+  if is_gitignored "$f"; then
+    echo "    skip  $f (gitignored local file — dev.sh secrets, not a stack env)"
+    continue
+  fi
   if is_excluded "$f"; then
     echo "    skip  $f (non-AWS cloud — different storage/addressing seam)"
     continue
@@ -134,6 +153,10 @@ if [ -f "$SLOT1" ]; then
   slot_seen=0
   for f in scripts/operator-workstation.test-*.env; do
     [ -e "$f" ] || continue
+    if is_gitignored "$f"; then
+      echo "    skip  $f (gitignored local file — dev.sh secrets, not a slot env)"
+      continue
+    fi
     slot_seen=1
     cur_all=$(all_keys "$f")
     if diff_keys "test-slot $f" "$SLOT1" "$ref_all" "$cur_all"; then
