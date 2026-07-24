@@ -10,8 +10,6 @@ members = [
     "crates/agentkeys-mock-server",
     "crates/agentkeys-cli",
     "crates/agentkeys-daemon",
-    "crates/agentkeys-mcp",
-    "crates/agentkeys-mcp-server",
     "crates/agentkeys-provisioner",
     "crates/agentkeys-backend-client",
     "crates/agentkeys-protocol",

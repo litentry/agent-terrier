@@ -39,13 +39,13 @@ check_file() {
 check_file scripts/operator-workstation.ve.env \
   VE_CN_ZONE '^VE_[A-Z_]*_HOST=' 'VE_*_HOST'
 
-# AWS stacks: BROKER_HOST is the one literal; signer/mcp/worker hosts derive.
+# AWS stacks: BROKER_HOST is the one literal; signer/worker hosts derive.
 for env_file in scripts/operator-workstation.env \
                 scripts/operator-workstation.test.env \
                 scripts/operator-workstation.test-2.env \
                 scripts/operator-workstation.base.env; do
   check_file "$env_file" \
-    BROKER_HOST '^(SIGNER_HOST|MCP_HOST|WORKER_[A-Z]+_HOST)=' 'derived hosts'
+    BROKER_HOST '^(SIGNER_HOST|WORKER_[A-Z]+_HOST)=' 'derived hosts'
 done
 
 if [[ "$fail" -ne 0 ]]; then

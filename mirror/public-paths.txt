@@ -76,14 +76,13 @@ glob:scripts/utils/lint-*.sh
 #     contributors get the same local gate + the dev-setup.md links resolve. ───
 .githooks/
 
-# ─── Public CI workflows (build / test / wasm / contracts-sync / wiki / mcp /
+# ─── Public CI workflows (build / test / wasm / contracts-sync / wiki /
 #     LLM review). e2e-ci.yml + pm-auto-archive are PRIVATE (deploy
 #     orchestration + secrets + pm) — PRIVATE override in the gate. ─────────────
 .github/workflows/contracts-sync.yml
 .github/workflows/coverage.yml
 .github/workflows/wiki-lint.yml
 .github/workflows/publish-wiki.yml
-.github/workflows/mcp-server.yml
 .github/workflows/claude.yml
 .github/workflows/mirror-boundary.yml
 

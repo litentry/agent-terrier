@@ -237,7 +237,6 @@ dependencies = [
  "agentkeys-catalog",
  "agentkeys-cli",
  "agentkeys-core",
- "agentkeys-mcp",
  "agentkeys-mock-server",
  "agentkeys-provisioner",
  "agentkeys-types",
@@ -331,51 +330,6 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "agentkeys-mcp"
-version = "0.1.0"
-dependencies = [
- "agentkeys-core",
- "agentkeys-provisioner",
- "agentkeys-types",
- "anyhow",
- "async-trait",
- "axum",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "agentkeys-mcp-server"
-version = "0.1.0"
-dependencies = [
- "agentkeys-backend-client",
- "agentkeys-core",
- "agentkeys-types",
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "clap",
- "futures-util",
- "hex",
- "http-body-util",
- "reqwest",
- "rustls 0.23.37",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "tower 0.4.13",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

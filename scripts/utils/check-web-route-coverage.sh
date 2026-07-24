@@ -49,7 +49,7 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/actors/:id/scope/grant	same legacy scope surface
 /v1/actors/:id/payment-cap	payment caps UI not wired to chain yet (#97 payments pending)
 /v1/actors/:id/revoke	master-gated revoke (gas) — covered at CLI level by heima-device-revoke.sh; web submit needs signed UserOp e2e
-/v1/actors/:id/caps/revoke	cap revoke — MCP-level covered (agentkeys_cap_revoke); web path needs a live cap fixture
+/v1/actors/:id/caps/revoke	cap revoke — broker cap.rs unit-tests the revoked-deny; web path needs a live cap fixture (former MCP-tool coverage retired, #560)
 /v1/audit/stream	SSE — curl smoke would hang a step; needs a timeout-bounded SSE reader helper
 /v1/audit/:id/decode	needs a decodable on-chain audit row id fixture from a prior append
 /v1/master/inbox	#297/#339 inbox — needs a planted inbox fixture (agent append) in the test env

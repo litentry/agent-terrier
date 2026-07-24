@@ -33,7 +33,6 @@ crates/
   agentkeys-core/            CredentialBackend trait, RPC client, crypto
   agentkeys-cli/             master CLI binary
   agentkeys-daemon/          sandbox daemon binary
-  agentkeys-mcp/             MCP adapter
   agentkeys-provisioner/     provisioner orchestrator
   agentkeys-mock-server/     v0-only mock backend (axum + SQLite)
 provisioner-scripts/         TypeScript + Playwright scrapers (npm)
@@ -58,7 +57,7 @@ cargo test -p agentkeys-types
 cargo test -p agentkeys-core
 cargo test -p agentkeys-mock-server
 cargo test -p agentkeys-cli
-cargo test -p agentkeys-daemon -p agentkeys-mcp
+cargo test -p agentkeys-daemon
 cargo test -p agentkeys-provisioner
 ```
 

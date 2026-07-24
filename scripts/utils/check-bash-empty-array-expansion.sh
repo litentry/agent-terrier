@@ -16,8 +16,8 @@
 # NORMAL (non-dry-run) path — the only one an operator actually runs — was the
 # broken one. `setup-heima.sh` step 14 carried the same shape.
 #
-# THE FIX — the `${arr[@]+"${arr[@]}"}` idiom (already proven in this repo at
-# setup-broker-host.sh's MCP_ARGS): expand only if the array is set, so an
+# THE FIX — the `${arr[@]+"${arr[@]}"}` idiom (proven throughout this repo,
+# e.g. suite.sh's PASS array): expand only if the array is set, so an
 # empty array expands to zero words instead of erroring. Note it is
 # deliberately NOT wrapped in outer quotes; the inner quotes preserve
 # word-splitting semantics per element.

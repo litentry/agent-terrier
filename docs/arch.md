@@ -61,7 +61,6 @@ Visual map: [`assets/component-architecture.svg`](assets/component-architecture.
 | `agentkeys-gate` | operator host | metered key-custody LLM-egress relay (#384) — custody + metering, never control |
 | Chain | Heima (default) / Base / any EVM | the four contracts (§16) |
 | Provisioner + TS scrapers | sandbox subprocess | per-service API-key signup/mint (Class B) |
-| `agentkeys-mcp-server` | next to any LLM host | MCP tools over stdio/HTTP/WS; backend = `agentkeys-backend-client` |
 | `agentkeys-protocol` / `agentkeys-backend-client` | shared crates | ONE owner of wire types (wasm-safe) / native client (#203/#215) |
 | Front-ends: `apps/parent-control`, web-core (wasm) | browser | master surfaces; generated types via ts-rs |
 | Firmware `esp32s3-touch-lcd-4b` | device | keyed machine: on-device K10 keygen + signing (#348/#367) |
@@ -133,7 +132,7 @@ Pinned to disambiguate the same value showing up under different labels across c
 | `credential_envelope` | Wire format of one stored credential (`0x04 \|\| epoch \|\| nonce \|\| ct \|\| tag`, §18) at `s3://$VAULT_BUCKET/bots/<operator>/credentials/<service>.enc` — **single-vault, master-sovereign** (store = master-self only, hard-gated broker+worker; fetch = master-self or delegated #216/#286 under the on-chain `cred:<service>` grant). | `envelope`, `<service>.enc` |
 | `vault/memory/config/channel/audit/email/payment_audit bucket` | One S3 bucket per data class (§17); per-actor prefix `bots/<actor_omni_hex>/` (config per-operator, master-only; channel per-actor feeds, #406). | `$VAULT_BUCKET` … |
 | `agentterrier.ai` / `agentterrier.cn` | **The per-CLOUD domain** (#443): `.ai` serves EVERY AWS stack (backend + mail, us-east-1), `.cn` serves EVERY VE stack. One domain per cloud — never per environment. `litentry.org` is the retiring incumbent, not a peer. | `$ZONE` (AWS env files), `$VE_CN_ZONE` (VE) |
-| `AGENTKEYS_WORKER_<svc>_URL` | Canonical env family for worker base URLs (`AGENTKEYS_BROKER_URL` stays bare). | legacy bare `AGENTKEYS_MEMORY_URL` (retired; MCP fallback only) |
+| `AGENTKEYS_WORKER_<svc>_URL` | Canonical env family for worker base URLs (`AGENTKEYS_BROKER_URL` stays bare). | legacy bare `AGENTKEYS_MEMORY_URL` (retired) |
 | `policy` / `scope` / `namespace` / `category` / `service` | **Distinct pipeline stages, NOT synonyms:** policy (NL intent, off-chain) → COMPILE → scope (on-chain `(operator, actor, serviceHash)` grant) over categories → service (the signed cap string; memory `service = memory:<ns>`). Full table: [`wiki/policy-scope-namespace.md`](wiki/policy-scope-namespace.md). | "tag" = classifier category (≠ AWS PrincipalTag) |
 
 The most common confusion: **`actor_omni` ≠ `current_master_wallet`** — the first is the immutable anchor (L1), the second the rotation-volatile chain identity (L2). Everything keys off `actor_omni`.
@@ -524,9 +523,9 @@ Search `arch.md §22b` for the shortcut sites (k11.rs, worker `state.rs` files, 
 
 ## 22c. AgentKeys app surface — CLI + web UI + daemon as one distribution
 
-**One binary, three surfaces** (#134): CLI (`agentkeys <cmd>`), daemon (`agentkeys daemon` — the always-running trust core), web UI (`agentkeys web` / hosted parent-control), MCP server (subcommand or standalone). All share the daemon (§12); the MCP server's backend variant (Daemon/Http) decides where tool calls resolve.
+**One binary, three surfaces** (#134): CLI (`agentkeys <cmd>`), daemon (`agentkeys daemon` — the always-running trust core), web UI (`agentkeys web` / hosted parent-control). All share the daemon (§12). (The fourth surface — the MCP server — was retired with the MCP crates, #560; agent runtimes integrate via the delegation/chat-loop path, §22e.)
 
-- **22c.2 Backend wiring — four AI-runtime shapes:** hosted LLM (vendor cloud; broker mediates) · local LLM (Claude Code-class; co-located daemon, in-process cap-mint) · task agent (sandboxed VM; the daemon is the security boundary) · chat agent (our hosted management surface). Same MCP server + backend trait.
+- **22c.2 Backend wiring — four AI-runtime shapes:** hosted LLM (vendor cloud; broker mediates) · local LLM (Claude Code-class; co-located daemon, in-process cap-mint) · task agent (sandboxed VM; the daemon is the security boundary) · chat agent (our hosted management surface). Same backend trait across all four.
 - **22c.3 Multi-device master:** add-master QR flow (existing K11 signs over the new device), replace-master via §11 quorum, 90-day K10 rotation. **Phone-first master plane:** one portable `agentkeys-core` behind `lib/client` — wasm (web), native lib (mobile), daemon (desktop); event-driven + biometric-gated, broker is the only always-on piece. **The master is an ERC-4337 P-256 account** (#171) — no client custodies secp256k1. **Restart resumability (#220):** persisted master-session coords; valid J1 = zero prompts, expired = one passkey re-auth, never full re-onboarding.
 - **22c.4 Vendor device pairing:** the v2 text described binding a vendor device to an actor via a vendor token. **Superseded in design by §22e:** a device binds via §10.2 to its OWN actor and its claim attaches **channel grants (≥1)** — it is a channel endpoint, never a delegate root; vendor-cloud stacks integrate as certified stacks (§22d.3). v2 §22c.4 preserved for the vendor-token JWT mechanics.
 - **22c.5:** the daemon does NOT become the agent runtime (no inference, no untrusted code, no model hosting); the web UI is not a trust plane (compromise leaks a TTL'd UI JWT, never keys).
@@ -566,7 +565,6 @@ crates/  agentkeys-{types,core}            shared types · the library (Credenti
          agentkeys-worker-{creds,memory,config,audit,email,payment,classify}   per-class workers (§15)
          agentkeys-gate                    metered LLM-egress relay (#384)
          agentkeys-cli · agentkeys-daemon  the binary + sidecar
-         agentkeys-mcp{,-server}           legacy adapter lib · standalone MCP server (stdio/HTTP/WS; http backend only)
          agentkeys-memory-engine{,-openviking}  engine seam + reference adapter
          agentkeys-catalog                 shared category catalog (+PolicyIntent, #322)
          agentkeys-device-core             device FFI (K10 keygen/sign for firmware)

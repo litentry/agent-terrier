@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::init_flow;
 use agentkeys_core::mock_client::MockHttpClient;
 use agentkeys_core::session_store;
@@ -28,7 +27,7 @@ struct Args {
     /// v2 stage-1 cap-token proxy mode (arch.md §6 + §15.1). When set,
     /// the daemon ignores all other args and serves the localhost cap
     /// proxy on a Unix socket (`--proxy-listen`) instead of running
-    /// the legacy pairing/recover/MCP flows. `--proxy-broker-url` and
+    /// the legacy pairing/recover flows. `--proxy-broker-url` and
     /// `--proxy-session-jwt` provide the upstream broker auth.
     #[arg(long)]
     proxy: bool,
@@ -137,7 +136,7 @@ struct Args {
     proxy_session_jwt: Option<String>,
 
     // backend is required for all non-proxy modes (pairing, recover,
-    // MCP stdio, etc.). Proxy mode bypasses it via run_proxy_mode + the
+    // init, etc.). Proxy mode bypasses it via run_proxy_mode + the
     // explicit `args.proxy` early-return in main(). Marking it Optional
     // so `agentkeys-daemon --proxy ...` doesn't fail clap parsing when
     // AGENTKEYS_BACKEND is unset; the non-proxy branches still .expect
@@ -159,9 +158,6 @@ struct Args {
         help = "Recovery method: passkey or email (skips master approval)"
     )]
     method: Option<String>,
-
-    #[arg(long)]
-    stdio: bool,
 
     #[arg(
         long,
@@ -312,7 +308,7 @@ struct Args {
     /// stdout. The agent DISPLAYS `pairing_code` (QR / screen) for its owner to
     /// claim (the Matter/HomeKit model); `request_id` is the secret retrieval
     /// ticket for `--retrieve-pairing`. One-shot: requests and exits. Requires
-    /// `--broker-url`. (The MCP/proxy surface runs as a separate process per §22c.)
+    /// `--broker-url`. (The proxy surface runs as a separate process per §22c.)
     #[arg(long, conflicts_with_all = ["init_email", "init_oauth2_google", "recover", "retrieve_pairing"])]
     request_pairing: bool,
 
@@ -394,7 +390,7 @@ async fn main() -> anyhow::Result<()> {
     let backend_url = args.backend.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "--backend (or AGENTKEYS_BACKEND env) required for non-proxy modes \
-             (pair, recover, MCP stdio, init). For cap-token proxy mode pass --proxy."
+             (pair, recover, init). For cap-token proxy mode pass --proxy."
         )
     })?;
     let backend = Arc::new(MockHttpClient::new(&backend_url));
@@ -594,19 +590,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("daemon ready, session wallet={}", agent_id.0);
 
-    // 3. Serve MCP
-    if args.stdio {
-        let dyn_backend: Arc<dyn CredentialBackend> = backend;
-        agentkeys_mcp::server::run_stdio_with_broker(
-            dyn_backend,
-            sess,
-            agent_id,
-            args.broker_url.clone(),
-        )
-        .await?;
-    } else {
-        info!("no --stdio flag; daemon exiting (Unix socket mode not yet implemented)");
-    }
+    // 3. One-shot bootstrap complete. (The former `--stdio` MCP serve mode was
+    // retired with the MCP crates, #560 — the long-running modes are --ui-bridge
+    // and --proxy, which early-return above.)
+    let _ = (&sess, &agent_id);
+    info!("bootstrap complete; daemon exiting (long-running modes: --ui-bridge / --proxy)");
 
     Ok(())
 }
@@ -1040,8 +1028,8 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
     session_store::save_session(&sess, &sid).context("save pairing session")?;
 
     // Finding 2 (adversarial review): keep the bearer IN the sandbox. Write the
-    // session JWT to an owner-only (0600) file that the in-sandbox MCP server reads
-    // directly via --agent-session-bearer-file, and DO NOT print it on stdout — the
+    // session JWT to an owner-only (0600) file that in-sandbox consumers read
+    // directly, and DO NOT print it on stdout — the
     // master captures stdout and would otherwise expose the bearer in its shell +
     // the sandbox process list (`ps`). Only PUBLIC binding fields leave the box.
     let session_file = {

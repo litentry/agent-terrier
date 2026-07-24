@@ -384,9 +384,8 @@ pub async fn memory_put(
 }
 
 /// Extract the `content` field of an `agentkeys.memory.get` result. The
-/// MCP tool layer already base64-decodes the worker's `plaintext_b64`
-/// into a UTF-8 `content` string (see
-/// `agentkeys-mcp-server/src/tools/memory.rs::get`), so the hook reads it
+/// (retired, #560) MCP tool layer base64-decoded the worker's
+/// `plaintext_b64` into a UTF-8 `content` string, so the hook reads it
 /// directly. Pure helper, unit-tested.
 pub fn extract_memory_content(result: &Value) -> Option<String> {
     result

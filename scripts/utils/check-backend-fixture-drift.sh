@@ -3,7 +3,7 @@
 # drift gate.
 #
 # The broker/worker request shapes have ONE owner: the `agentkeys-backend-client`
-# crate + `agentkeys-types`. Rust callers (MCP `HttpBackend`, daemon `ui_bridge`)
+# crate + `agentkeys-types`. Rust callers (the CLI, daemon `ui_bridge`)
 # share those serde types, so a Rust-side drift is a COMPILE error. But the
 # harness still hand-rolls a few cap-mint / worker bodies with `jq -n '{...}'`
 # (real-path probes + negative/HTTP-assertion tests). This gate makes a drifted

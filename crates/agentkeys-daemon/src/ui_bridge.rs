@@ -8551,8 +8551,8 @@ async fn get_master_memory_entry_inner(
 //
 // When the daemon has --memory-url + --memory-role-arn + --master-device-key-hash
 // AND a master onboarding session, the master plants its OWN memory under its
-// actor_omni (operator == actor == O_master) via the same chain the MCP
-// http_backend + suite-5-wire-real use. Otherwise plant falls back to the
+// actor_omni (operator == actor == O_master) via the same cap-mint → STS →
+// worker chain the agent path uses. Otherwise plant falls back to the
 // in-memory store. Per-actor by construction (cap-mint binds device.actor_omni
 // == req.actor_omni); see docs/plan/web-flow/w3-real-memory.md §1.
 

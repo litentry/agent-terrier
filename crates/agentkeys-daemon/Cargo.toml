@@ -11,7 +11,6 @@ path = "src/main.rs"
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
 agentkeys-cli = { path = "../agentkeys-cli" } # K11 webauthn helpers (companion mode)
-agentkeys-mcp = { path = "../agentkeys-mcp" }
 # W3 real-memory + #201 config: the ONE shared broker/worker client (issue #203)
 # — cap-mint (incl. the config-store/fetch endpoints) + the worker body types, so
 # the daemon's cap-mint + worker bodies can't drift from the agent path.
