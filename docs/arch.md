@@ -248,7 +248,7 @@ One worker per data class — independent IAM, deploy lifecycle, blast radius. C
 
 ### 15.1 credentials-service
 
-`fetch-cred` / `store-cred` / `teardown-actor` on `$VAULT_BUCKET`; KEK via signer mTLS; **single-vault, master-sovereign** (§5 `credential_envelope`): store = master-self only (hard-gated broker+worker); fetch = master-self or **delegated** (#216/#286) under the on-chain `cred:<service>` grant, S3 read under caller-relayed operator-tagged STS. OIDC federation: callers pass their STS via `X-Aws-*` headers so IAM PrincipalTag fires at AWS (with `AGENTKEYS_WORKER_REQUIRE_STS=1` header-less → 401).
+`fetch-cred` / `store-cred` / `teardown-actor` on `$VAULT_BUCKET`; KEK via signer mTLS; **single-vault, master-sovereign** (§5 `credential_envelope`): store = master-self only (hard-gated broker+worker); fetch = master-self or **delegated** (#216/#286) under the on-chain `cred:<service>` grant, S3 read under caller-relayed operator-tagged STS. OIDC federation: callers pass their STS via `X-Aws-*` headers so IAM PrincipalTag fires at AWS (with `AGENTKEYS_WORKER_REQUIRE_STS=1` header-less → 401). **Envelope contract is dual-mode** (the #372 config recipe applied to cred): legacy `plaintext_b64` (worker-side stage-1 K3 encrypt; what delegated fetch decrypts today) or a client-encrypted **v3 `envelope_b64`** the worker stores/returns VERBATIM — it holds no opening key. The daemon's master plane stores v3 on the VE posture (`AGENTKEYS_STS_PROVIDER=ve`, mint via signer `/dev/sign-sts` `data_class="vault"`); v3 blobs are master-readable only until the #91 delegated KEK-release lands.
 
 ### 15.2 memory-service
 

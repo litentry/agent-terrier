@@ -8729,6 +8729,48 @@ struct DataCreds {
     session_token: String,
 }
 
+/// The per-plane coordinates [`mint_data_creds`] needs — one borrowed view so
+/// the CONFIG plane and the CRED plane share the SAME #514 decision point
+/// (AWS relay vs signer `/dev/sign-sts`) instead of growing a second relay
+/// path per data class.
+struct DataPlaneMint<'a> {
+    broker: &'a str,
+    j1: &'a str,
+    omni: &'a str,
+    role_arn: &'a str,
+    region: &'a str,
+    signer_url: Option<&'a str>,
+    sts_provider: Option<&'a str>,
+}
+
+impl RealConfigCtx {
+    fn mint_coords(&self) -> DataPlaneMint<'_> {
+        DataPlaneMint {
+            broker: &self.broker,
+            j1: &self.j1,
+            omni: &self.omni,
+            role_arn: &self.role_arn,
+            region: &self.region,
+            signer_url: self.signer_url.as_deref(),
+            sts_provider: self.sts_provider.as_deref(),
+        }
+    }
+}
+
+impl RealCredCtx {
+    fn mint_coords(&self) -> DataPlaneMint<'_> {
+        DataPlaneMint {
+            broker: &self.broker,
+            j1: &self.j1,
+            omni: &self.omni,
+            role_arn: &self.role_arn,
+            region: &self.region,
+            signer_url: self.signer_url.as_deref(),
+            sts_provider: self.sts_provider.as_deref(),
+        }
+    }
+}
+
 /// #514 — mint scoped, short-TTL data-plane credentials for one data class.
 ///
 /// Two planes, ONE decision point (the ADR's "the platform is a resource
@@ -8744,27 +8786,23 @@ struct DataCreds {
 /// Fails LOUD when the VE plane is selected without a signer URL — never a
 /// silent fallback to the AWS relay, which would mint against the wrong cloud.
 async fn mint_data_creds(
-    ctx: &RealConfigCtx,
+    dp: &DataPlaneMint<'_>,
     data_class: &str,
     verbs: &[&str],
 ) -> Result<DataCreds, String> {
-    let (broker, j1, omni) = (&ctx.broker, &ctx.j1, &ctx.omni);
-    if ctx.sts_provider.as_deref() != Some("ve") {
-        let c = agentkeys_provisioner::fetch_via_broker_default_ttl(
-            broker,
-            j1,
-            &ctx.role_arn,
-            &ctx.region,
-        )
-        .await
-        .map_err(|e| format!("STS relay ({data_class}): {e}"))?;
+    let (broker, j1, omni) = (dp.broker, dp.j1, dp.omni);
+    if dp.sts_provider != Some("ve") {
+        let c =
+            agentkeys_provisioner::fetch_via_broker_default_ttl(broker, j1, dp.role_arn, dp.region)
+                .await
+                .map_err(|e| format!("STS relay ({data_class}): {e}"))?;
         return Ok(DataCreds {
             access_key_id: c.access_key_id,
             secret_access_key: c.secret_access_key,
             session_token: c.session_token,
         });
     }
-    let signer = ctx.signer_url.as_deref().ok_or_else(|| {
+    let signer = dp.signer_url.ok_or_else(|| {
         format!(
             "AGENTKEYS_STS_PROVIDER=ve but no --signer-url / AGENTKEYS_SIGNER_URL — the VE \
              data plane mints through the signer ({data_class}); refusing to fall back to the \
@@ -8815,15 +8853,38 @@ async fn mint_data_creds(
 /// listener requires a broker-session bearer, issue #74). Fails loud when the
 /// signer is unconfigured — config confidentiality now DEPENDS on it.
 async fn derive_config_kek(ctx: &RealConfigCtx, service: &str) -> Result<[u8; 32], String> {
-    let signer_url = ctx.signer_url.as_deref().ok_or(
-        "config v3: --signer-url / AGENTKEYS_SIGNER_URL missing — the taxonomy is \
-         client-encrypted under the signer-derived per-actor KEK (#372); configure the signer",
-    )?;
-    let omni_no0x = ctx.omni.trim_start_matches("0x").to_lowercase();
+    derive_actor_kek(
+        ctx.signer_url.as_deref(),
+        &ctx.j1,
+        &ctx.omni,
+        service,
+        "config",
+    )
+    .await
+}
+
+/// The shared #372 derivation both v3 planes (config + cred) call — ONE
+/// construction, so the KEK a plane encrypts under can never drift from the
+/// one it decrypts under. `plane` only labels errors.
+async fn derive_actor_kek(
+    signer_url: Option<&str>,
+    j1: &str,
+    omni: &str,
+    service: &str,
+    plane: &'static str,
+) -> Result<[u8; 32], String> {
+    let signer_url = signer_url.ok_or_else(|| {
+        format!(
+            "{plane} v3: --signer-url / AGENTKEYS_SIGNER_URL missing — the payload is \
+             client-encrypted under the signer-derived per-actor KEK (#372); configure the signer"
+        )
+    })?;
+    let omni_no0x = omni.trim_start_matches("0x").to_lowercase();
     let signer = agentkeys_core::signer_client::HttpSignerClient::new(signer_url)
-        .with_session_jwt(ctx.j1.clone());
+        .with_session_jwt(j1.to_string());
     // Identity segment = the 0x-prefixed lowercase actor omni — the same
-    // identity the S3 key + v3 AAD bind (config is master-self: actor == operator).
+    // identity the S3 key + v3 AAD bind (both planes are master-self:
+    // actor == operator).
     agentkeys_core::kek::derive_kek_via_signer(
         &signer,
         &omni_no0x,
@@ -8831,7 +8892,7 @@ async fn derive_config_kek(ctx: &RealConfigCtx, service: &str) -> Result<[u8; 32
         service,
     )
     .await
-    .map_err(|e| format!("config KEK derivation via signer: {e}"))
+    .map_err(|e| format!("{plane} KEK derivation via signer: {e}"))
 }
 
 /// Mint a master-self cap for the given broker route (`memory-put` /
@@ -9043,7 +9104,7 @@ async fn config_store_doc(
         service,
     )
     .await?;
-    let creds = mint_data_creds(ctx, "config", &["get", "put"]).await?;
+    let creds = mint_data_creds(&ctx.mint_coords(), "config", &["get", "put"]).await?;
     // #372 item 2: CLIENT-side encrypt under the signer-derived per-actor KEK
     // (v3 envelope). The worker stores the envelope verbatim — plaintext never
     // reaches it, and neither the storage plane nor any worker env can decrypt.
@@ -9110,7 +9171,7 @@ async fn config_fetch_doc(
         service,
     )
     .await?;
-    let creds = mint_data_creds(ctx, "config", &["get"]).await?;
+    let creds = mint_data_creds(&ctx.mint_coords(), "config", &["get"]).await?;
     let resp = client
         .post(format!("{}/v1/config/get", ctx.config_url))
         .header("x-aws-access-key-id", creds.access_key_id)
@@ -11373,6 +11434,13 @@ struct RealCredCtx {
     j1: String,
     omni: String,
     device_key_hash: String,
+    /// Signer base URL — required on the VE posture for BOTH the #514 STS
+    /// mint and the #372 client-side v3 KEK derivation.
+    signer_url: Option<String>,
+    /// #514 — `AGENTKEYS_STS_PROVIDER`; `Some("ve")` mints through the signer
+    /// AND flips the store to client-encrypted v3 envelopes (nothing reaches
+    /// the worker in plaintext on VE).
+    sts_provider: Option<String>,
 }
 
 /// Resolve the cred-worker context from env (`AGENTKEYS_WORKER_CRED_URL` +
@@ -11398,6 +11466,8 @@ async fn real_cred_ctx(state: &UiBridgeState) -> Result<Option<RealCredCtx>, Str
         j1: c.j1,
         omni: c.omni,
         device_key_hash: c.device_key_hash,
+        signer_url: state.signer_url.clone(),
+        sts_provider: state.sts_provider.clone(),
     }))
 }
 
@@ -11449,14 +11519,12 @@ async fn list_master_credentials_inner(
     )
     .await
     .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred cap-mint: {e}")))?;
-    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
-    )
-    .await
-    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay (cred): {e}")))?;
+    // #514: the SAME provider-aware decision point the config plane uses —
+    // AWS relay, or the signer's /dev/sign-sts on the VE posture ("vault" is
+    // the signer's per-class binding for the cred plane, #511).
+    let creds = mint_data_creds(&ctx.mint_coords(), "vault", &["get", "list"])
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
     let resp = client
         .post(format!("{}/v1/cred/list", ctx.cred_url))
         .header("x-aws-access-key-id", creds.access_key_id)
@@ -11581,24 +11649,55 @@ async fn store_master_credential_inner(
     )
     .await
     .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred cap-mint: {e}")))?;
-    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
-    )
-    .await
-    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay (cred): {e}")))?;
+    // #514: the SAME provider-aware decision point the config plane uses.
+    let creds = mint_data_creds(&ctx.mint_coords(), "vault", &["get", "put"])
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    // Envelope mode follows the SAME posture line (#514): on VE nothing may
+    // reach the worker in plaintext (that gap is WHY dev.sh gated this plane),
+    // so the secret is client-encrypted v3 under the signer-derived KEK (the
+    // #372 config recipe — worker stores it verbatim, holds no opening key).
+    // Elsewhere (AWS) the legacy worker-side stage-1 K3 mode stays: it is what
+    // keeps the delegated agent cred-fetch flow working until the #91
+    // KEK-release lands (a v3 blob is master-readable only — the signer binds
+    // sign-message to the session omni, so agents cannot derive the KEK).
+    let body = if ctx.sts_provider.as_deref() == Some("ve") {
+        let kek = derive_actor_kek(
+            ctx.signer_url.as_deref(),
+            &ctx.j1,
+            &ctx.omni,
+            service,
+            "cred",
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+        let aad = agentkeys_core::envelope_v3::aad_v3(&ctx.omni, service);
+        let envelope = agentkeys_core::envelope_v3::encrypt_v3(&kek, secret.as_bytes(), &aad)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cred v3 encrypt: {e}"),
+                )
+            })?;
+        agentkeys_backend_client::CredStoreBody {
+            cap,
+            plaintext_b64: None,
+            envelope_b64: Some(STANDARD.encode(&envelope)),
+        }
+    } else {
+        agentkeys_backend_client::CredStoreBody {
+            cap,
+            plaintext_b64: Some(STANDARD.encode(secret.as_bytes())),
+            envelope_b64: None,
+        }
+    };
     let resp = client
         .post(format!("{}/v1/cred/store", ctx.cred_url))
         .header("x-aws-access-key-id", creds.access_key_id)
         .header("x-aws-secret-access-key", creds.secret_access_key)
         .header("x-aws-session-token", creds.session_token)
         // Crate-owned body shape (#204) — a drifted field is a compile error.
-        .json(&agentkeys_backend_client::CredStoreBody {
-            cap,
-            plaintext_b64: STANDARD.encode(secret.as_bytes()),
-        })
+        .json(&body)
         .send()
         .await
         .map_err(|e| {

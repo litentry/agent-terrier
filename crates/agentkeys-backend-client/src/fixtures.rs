@@ -21,8 +21,8 @@ use crate::protocol::{
     AcceptAssertion, AuditAppendV2, BrokerCapRequest, BuildAcceptUserOpRequest,
     BuildArchiveUserOpRequest, BuildRegisterUserOpRequest, BuildRevokeUserOpRequest,
     BuildScopeUserOpRequest, BuildSpawnUserOpRequest, ChannelEventKind, ChannelPollBody,
-    ChannelPublishBody, ConfigGetBody, ConfigPutBody, MemoryGetBody, MemoryPutBody,
-    SubmitAcceptUserOpRequest, WireUserOp, ENVELOPE_VERSION,
+    ChannelPublishBody, ConfigGetBody, ConfigPutBody, CredFetchBody, CredStoreBody, MemoryGetBody,
+    MemoryPutBody, SubmitAcceptUserOpRequest, WireUserOp, ENVELOPE_VERSION,
 };
 
 /// One canonical fixture: the on-disk file stem + the sample body.
@@ -70,6 +70,24 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         envelope_b64: Some("<base64-v3-envelope>".into()),
     };
     let config_get = ConfigGetBody {
+        cap: json!("<cap-token>"),
+    };
+    // Cred store carries TWO canonical shapes (unlike config, where legacy is
+    // deprecated): legacy plaintext_b64 (worker-side stage-1 K3 encrypt — what
+    // keeps the delegated agent-fetch flow working until the #91 KEK-release)
+    // and the v3 client-encrypted envelope (the VE posture; worker stores it
+    // verbatim). Exactly one key is ever set, so each mode is its own fixture.
+    let cred_store = CredStoreBody {
+        cap: json!("<cap-token>"),
+        plaintext_b64: Some("<base64-plaintext>".into()),
+        envelope_b64: None,
+    };
+    let cred_store_v3 = CredStoreBody {
+        cap: json!("<cap-token>"),
+        plaintext_b64: None,
+        envelope_b64: Some("<base64-v3-envelope>".into()),
+    };
+    let cred_fetch = CredFetchBody {
         cap: json!("<cap-token>"),
     };
     let audit = AuditAppendV2 {
@@ -201,6 +219,18 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
             body: serde_json::to_value(&config_put).expect("config_put serializes"),
         },
         Fixture {
+            name: "cred_store_body",
+            body: serde_json::to_value(&cred_store).expect("cred_store serializes"),
+        },
+        Fixture {
+            name: "cred_store_body_v3",
+            body: serde_json::to_value(&cred_store_v3).expect("cred_store_v3 serializes"),
+        },
+        Fixture {
+            name: "cred_fetch_body",
+            body: serde_json::to_value(&cred_fetch).expect("cred_fetch serializes"),
+        },
+        Fixture {
             name: "config_get_body",
             body: serde_json::to_value(&config_get).expect("config_get serializes"),
         },
@@ -315,6 +345,23 @@ mod tests {
     #[test]
     fn config_get_body_keys_frozen() {
         assert_eq!(keys_of("config_get_body"), vec!["cap"]);
+    }
+
+    #[test]
+    fn cred_store_body_keys_frozen() {
+        // Legacy mode — the shape suite-3's hand-rolled store bodies mirror.
+        assert_eq!(keys_of("cred_store_body"), vec!["cap", "plaintext_b64"]);
+    }
+
+    #[test]
+    fn cred_store_body_v3_keys_frozen() {
+        // v3 mode — client-encrypted envelope, stored verbatim by the worker.
+        assert_eq!(keys_of("cred_store_body_v3"), vec!["cap", "envelope_b64"]);
+    }
+
+    #[test]
+    fn cred_fetch_body_keys_frozen() {
+        assert_eq!(keys_of("cred_fetch_body"), vec!["cap"]);
     }
 
     #[test]

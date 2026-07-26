@@ -118,10 +118,19 @@ async fn healthz(State(state): State<SharedWorkerState>) -> Json<HealthBody> {
     })
 }
 
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` (the #372 config recipe
+/// applied to cred): `envelope_b64` is a CLIENT-encrypted v3 envelope stored
+/// VERBATIM (the worker holds no key that opens it — nothing reaches this
+/// process in plaintext); `plaintext_b64` is the legacy mode (worker-side
+/// static stage-1 K3 encrypt) that keeps the delegated agent-fetch flow
+/// working until the #91 KEK-release lands.
 #[derive(Debug, Deserialize)]
 pub struct StoreRequest {
     pub cap: CapToken,
-    pub plaintext_b64: String,
+    #[serde(default)]
+    pub plaintext_b64: Option<String>,
+    #[serde(default)]
+    pub envelope_b64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,10 +150,18 @@ pub struct FetchRequest {
     pub cap: CapToken,
 }
 
+/// EXACTLY ONE of `plaintext_b64` / `envelope_b64` is set: legacy v2 blobs
+/// come back worker-decrypted; v3 blobs come back as the raw envelope for
+/// CLIENT-side decrypt under the signer-derived KEK (#372 recipe — this
+/// worker cannot open them). `skip_serializing_if` keeps the legacy JSON
+/// byte-identical for pre-dual-mode readers.
 #[derive(Debug, Serialize)]
 pub struct FetchResponse {
     pub ok: bool,
-    pub plaintext_b64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
     /// Durable-audit receipt (#229) — see [`StoreResponse::audit_envelope_hash`].
     pub audit_envelope_hash: Option<String>,
 }
@@ -215,19 +232,7 @@ async fn cred_store_inner(
     creds: Option<&crate::aws_creds::StsCreds>,
     req: &StoreRequest,
 ) -> Result<(String, Vec<u8>), ApiError> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let plaintext = STANDARD
-        .decode(&req.plaintext_b64)
-        .map_err(|e| err_400(e.to_string(), "plaintext_b64_decode"))?;
-
-    let aad = envelope::aad(
-        &req.cap.payload.operator_omni,
-        &req.cap.payload.actor_omni,
-        &req.cap.payload.service,
-        req.cap.payload.k3_epoch,
-    );
-    let env_bytes = envelope::encrypt(&state.config.kek_hex_stage1, &plaintext, &aad)
-        .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?;
+    let env_bytes = resolve_store_bytes(req, &state.config.kek_hex_stage1)?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
@@ -239,6 +244,58 @@ async fn cred_store_inner(
         .await
         .map_err(|e| err_502(e.to_string(), "s3_put"))?;
     Ok((key, env_bytes))
+}
+
+/// The bytes cred_store S3-PUTs, resolved from the request's mode — EXACTLY
+/// ONE of `envelope_b64` / `plaintext_b64` (the config worker's #372
+/// validation, mirrored). Pure (no S3) so the mode matrix is unit-testable.
+fn resolve_store_bytes(req: &StoreRequest, kek_hex_stage1: &str) -> Result<Vec<u8>, ApiError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    match (&req.envelope_b64, &req.plaintext_b64) {
+        (Some(_), Some(_)) => Err(err_400(
+            "exactly one of envelope_b64 / plaintext_b64 (both given)",
+            "store_mode_ambiguous",
+        )),
+        (None, None) => Err(err_400(
+            "exactly one of envelope_b64 / plaintext_b64 (neither given)",
+            "store_mode_missing",
+        )),
+        (Some(env_b64), None) => {
+            // v3: CLIENT-encrypted under the signer-derived KEK — version-sniff,
+            // then store VERBATIM. This worker holds no key that opens it.
+            let bytes = STANDARD
+                .decode(env_b64)
+                .map_err(|e| err_400(e.to_string(), "envelope_b64_decode"))?;
+            match envelope::version(&bytes) {
+                Some(envelope::ENVELOPE_VERSION_V3) => Ok(bytes),
+                Some(v) => Err(err_400(
+                    format!("envelope_b64 must be a v3 envelope (got version 0x{v:02x})"),
+                    "envelope_not_v3",
+                )),
+                None => Err(err_400(
+                    format!(
+                        "envelope_b64 too short to be an envelope ({} bytes)",
+                        bytes.len()
+                    ),
+                    "envelope_truncated",
+                )),
+            }
+        }
+        (None, Some(pt_b64)) => {
+            // Legacy: worker-side static stage-1 K3 encrypt (v2 envelope).
+            let plaintext = STANDARD
+                .decode(pt_b64)
+                .map_err(|e| err_400(e.to_string(), "plaintext_b64_decode"))?;
+            let aad = envelope::aad(
+                &req.cap.payload.operator_omni,
+                &req.cap.payload.actor_omni,
+                &req.cap.payload.service,
+                req.cap.payload.k3_epoch,
+            );
+            envelope::encrypt(kek_hex_stage1, &plaintext, &aad)
+                .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))
+        }
+    }
 }
 
 async fn cred_fetch(
@@ -265,22 +322,36 @@ async fn cred_fetch(
         .audit
         .emit(&req.cap, AuditOpKind::CredFetch, audit_body, audit_result)
         .await;
-    let plaintext = outcome?;
+    let fetched = outcome?;
     let audit_envelope_hash = audited?;
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let (plaintext_b64, envelope_b64) = match fetched {
+        CredFetched::Plaintext(pt) => (Some(STANDARD.encode(&pt)), None),
+        CredFetched::V3Envelope(env) => (None, Some(STANDARD.encode(&env))),
+    };
     Ok(Json(FetchResponse {
         ok: true,
-        plaintext_b64: STANDARD.encode(&plaintext),
+        plaintext_b64,
+        envelope_b64,
         audit_envelope_hash,
     }))
+}
+
+/// What `cred_fetch_inner` hands back (the config worker's `ConfigFetched`
+/// mirrored): legacy v2 blobs are worker-decrypted (static stage-1 KEK); v3
+/// blobs are returned as the raw envelope for CLIENT-side decrypt under the
+/// signer-derived KEK (#372 recipe — this worker holds no key that opens them).
+enum CredFetched {
+    Plaintext(Vec<u8>),
+    V3Envelope(Vec<u8>),
 }
 
 async fn cred_fetch_inner(
     state: &SharedWorkerState,
     creds: Option<&crate::aws_creds::StsCreds>,
     req: &FetchRequest,
-) -> Result<Vec<u8>, ApiError> {
+) -> Result<CredFetched, ApiError> {
     // Single-vault (docs/plan/single-vault-credentials.md): every credential
     // lives in the OPERATOR's vault, so a fetch reads exactly ONE prefix —
     // bots/<operator>/credentials/. A master-self cap (operator == actor) is
@@ -327,6 +398,12 @@ async fn cred_fetch_inner(
         .map_err(|e| err_502(e.to_string(), "s3_body"))?
         .into_bytes();
 
+    // Version sniff: v3 blobs pass through VERBATIM (client-side decrypt under
+    // the signer-derived KEK — the static worker KEK cannot open them, and
+    // trying would fail loudly as an AAD/version mismatch anyway).
+    if envelope::version(&body) == Some(envelope::ENVELOPE_VERSION_V3) {
+        return Ok(CredFetched::V3Envelope(body.to_vec()));
+    }
     let aad = envelope::aad(
         &req.cap.payload.operator_omni,
         owner,
@@ -334,6 +411,7 @@ async fn cred_fetch_inner(
         req.cap.payload.k3_epoch,
     );
     envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
+        .map(CredFetched::Plaintext)
         .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
 }
 
@@ -545,6 +623,113 @@ mod tests {
     #[test]
     fn s3_prefix_matches_arch_md_15_1() {
         assert_eq!(s3_prefix("0xABCDEF"), "bots/abcdef/credentials/");
+    }
+
+    fn store_req(envelope_b64: Option<String>, plaintext_b64: Option<String>) -> StoreRequest {
+        StoreRequest {
+            cap: CapToken {
+                payload: payload("0xmaster", "0xmaster"),
+                broker_sig: "sig".to_string(),
+                client_sig: None,
+                client_nonce: None,
+                client_ts: None,
+                delegation_path: None,
+            },
+            plaintext_b64,
+            envelope_b64,
+        }
+    }
+
+    const TEST_KEK_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+    /// The e2e worker-GENERATION probe (suite-3 step 11) keys on this: a
+    /// CURRENT worker must DESERIALIZE a store body carrying neither mode, so
+    /// the request reaches the mode gate and answers 400 `store_mode_missing`;
+    /// a pre-dual-mode worker refuses the same body at the serde layer (422,
+    /// `plaintext_b64` required). If `plaintext_b64` ever becomes required
+    /// again, that probe would silently misreport every current worker as
+    /// "predates dual-mode" — so pin the optionality here.
+    #[test]
+    fn store_request_deserializes_with_neither_mode() {
+        let req = store_req(None, None);
+        let json = serde_json::json!({ "cap": req.cap });
+        let parsed: StoreRequest =
+            serde_json::from_value(json).expect("a neither-mode body must deserialize (not 422)");
+        assert!(parsed.plaintext_b64.is_none());
+        assert!(parsed.envelope_b64.is_none());
+        // …and it is the MODE GATE that rejects it, with the reason the probe reads.
+        let err = resolve_store_bytes(&parsed, TEST_KEK_HEX).unwrap_err();
+        assert_eq!(err.1 .0.reason, "store_mode_missing");
+    }
+
+    #[test]
+    fn store_rejects_both_modes_given() {
+        let req = store_req(Some("aa".into()), Some("bb".into()));
+        let err = resolve_store_bytes(&req, TEST_KEK_HEX).unwrap_err();
+        assert_eq!(err.1 .0.reason, "store_mode_ambiguous");
+    }
+
+    #[test]
+    fn store_rejects_neither_mode_given() {
+        let req = store_req(None, None);
+        let err = resolve_store_bytes(&req, TEST_KEK_HEX).unwrap_err();
+        assert_eq!(err.1 .0.reason, "store_mode_missing");
+    }
+
+    #[test]
+    fn store_v3_envelope_is_stored_verbatim() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        // A client-encrypted v3 envelope must land in S3 byte-identical —
+        // the worker never re-wraps (it holds no key that opens it).
+        let kek = [7u8; 32];
+        let aad = envelope::aad_v3("0xmaster", "openrouter");
+        let env = envelope::encrypt_v3(&kek, b"sk-secret", &aad).unwrap();
+        let req = store_req(Some(STANDARD.encode(&env)), None);
+        let stored = resolve_store_bytes(&req, TEST_KEK_HEX).unwrap();
+        assert_eq!(stored, env, "v3 envelope must be stored verbatim");
+        assert_eq!(
+            envelope::version(&stored),
+            Some(envelope::ENVELOPE_VERSION_V3)
+        );
+    }
+
+    #[test]
+    fn store_rejects_non_v3_envelope_version() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let kek = [7u8; 32];
+        let aad = envelope::aad_v3("0xmaster", "openrouter");
+        let mut env = envelope::encrypt_v3(&kek, b"sk-secret", &aad).unwrap();
+        env[0] = 0x02; // masquerade as a v2 blob — the worker-side format
+        let req = store_req(Some(STANDARD.encode(&env)), None);
+        let err = resolve_store_bytes(&req, TEST_KEK_HEX).unwrap_err();
+        assert_eq!(err.1 .0.reason, "envelope_not_v3");
+    }
+
+    #[test]
+    fn store_rejects_truncated_envelope() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let req = store_req(Some(STANDARD.encode([0x03, 0x00])), None);
+        let err = resolve_store_bytes(&req, TEST_KEK_HEX).unwrap_err();
+        assert_eq!(err.1 .0.reason, "envelope_truncated");
+    }
+
+    #[test]
+    fn store_plaintext_keeps_the_legacy_v2_path() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let req = store_req(None, Some(STANDARD.encode(b"sk-secret")));
+        let stored = resolve_store_bytes(&req, TEST_KEK_HEX).unwrap();
+        let aad = envelope::aad(
+            &req.cap.payload.operator_omni,
+            &req.cap.payload.actor_omni,
+            &req.cap.payload.service,
+            req.cap.payload.k3_epoch,
+        );
+        let pt = envelope::decrypt(TEST_KEK_HEX, &stored, &aad).unwrap();
+        assert_eq!(pt, b"sk-secret", "legacy mode must stay worker-decryptable");
+        assert_ne!(
+            envelope::version(&stored),
+            Some(envelope::ENVELOPE_VERSION_V3)
+        );
     }
 
     #[test]

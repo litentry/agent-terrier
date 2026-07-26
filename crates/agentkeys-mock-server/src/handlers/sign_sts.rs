@@ -698,6 +698,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_class_mints_for_the_cred_plane() {
+        // The daemon's cred plane (list + store) mints with data_class="vault"
+        // — the #511 per-class binding this endpoint resolves for it. Pin that
+        // the class is accepted end-to-end (the un-gated VE cred plane's mint).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub = axum::Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                Json(serde_json::json!({
+                    "Result": { "Credentials": {
+                        "AccessKeyId": "AKLTvault",
+                        "SecretAccessKey": "sk-vault",
+                        "SessionToken": "tok-vault",
+                        "Expiration": 1_789_000_000,
+                    }}
+                }))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
+
+        let mut b = valid_body();
+        b["data_class"] = serde_json::json!("vault");
+        b["verbs"] = serde_json::json!(["get", "put", "list"]);
+        let (status, v) = post(state_with(Some(config(Some(format!("http://{addr}"))))), b).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["access_key_id"], "AKLTvault", "{v}");
+    }
+
+    #[tokio::test]
     async fn happy_path_mints_against_a_stub_and_normalizes_expiry() {
         // Local VE-STS stub: any POST → canned success (stubs don't verify
         // SigV4 — the signature itself is pinned by core's ve_sign tests +

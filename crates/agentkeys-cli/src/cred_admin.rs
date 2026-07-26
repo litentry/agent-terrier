@@ -64,8 +64,25 @@ pub async fn cred_fetch(
         .cred_fetch(CredFetchInput { cap })
         .await
         .with_context(|| format!("cred worker fetch for service `{service}`"))?;
+    // Dual-mode response (the #372 recipe applied to cred): a v3 blob comes
+    // back as envelope_b64 — client-encrypted under the STORING master's
+    // signer-derived KEK, which this caller cannot derive (the signer binds
+    // sign-message to the session omni). Fail LOUD, never hand ciphertext up
+    // as if it were the secret.
+    let pt_b64 = match (result.plaintext_b64, result.envelope_b64) {
+        (Some(pt), _) => pt,
+        (None, Some(_)) => anyhow::bail!(
+            "credential `{service}` is a v3 client-encrypted envelope — only the vaulting \
+             master's session can derive its KEK; delegated decrypt lands with the #91 \
+             KEK-release follow-up"
+        ),
+        (None, None) => anyhow::bail!(
+            "cred fetch for `{service}` returned neither plaintext_b64 nor envelope_b64 — \
+             worker/client version mismatch"
+        ),
+    };
     let bytes = STANDARD
-        .decode(&result.plaintext_b64)
+        .decode(&pt_b64)
         .context("decode cred plaintext_b64")?;
     String::from_utf8(bytes).context("cred plaintext is not valid UTF-8")
 }

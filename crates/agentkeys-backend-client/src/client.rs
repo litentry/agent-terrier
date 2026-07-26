@@ -734,6 +734,7 @@ impl BackendClient {
         Ok(CredFetchResult {
             ok: parsed.ok,
             plaintext_b64: parsed.plaintext_b64,
+            envelope_b64: parsed.envelope_b64,
         })
     }
 
@@ -745,9 +746,12 @@ impl BackendClient {
     /// (the worker encrypts with the K3 KEK).
     pub async fn cred_store(&self, input: CredStoreInput) -> Result<CredStoreResult, BackendError> {
         let url = format!("{}/v1/cred/store", self.cred()?);
+        // The high-level input is the legacy plaintext mode (CLI master store);
+        // v3 envelope stores build `CredStoreBody` directly (daemon ui_bridge).
         let mut req = self.client.post(&url).json(&CredStoreBody {
             cap: input.cap,
-            plaintext_b64: input.plaintext_b64,
+            plaintext_b64: Some(input.plaintext_b64),
+            envelope_b64: None,
         });
         if let Some(headers) = self.sts_headers(self.vault_role_arn.as_ref()).await? {
             for (k, v) in headers {

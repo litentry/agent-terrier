@@ -1124,10 +1124,17 @@ pub struct CredFetchBody {
     pub cap: CapToken,
 }
 
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` is set (the #372 config
+/// recipe applied to cred): v3 blobs come back as the raw envelope for
+/// CLIENT-side decrypt under the signer-derived KEK (the worker holds no key
+/// that opens them); legacy v2 blobs come back worker-decrypted.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CredFetchResp {
     pub ok: bool,
-    pub plaintext_b64: String,
+    #[serde(default)]
+    pub plaintext_b64: Option<String>,
+    #[serde(default)]
+    pub envelope_b64: Option<String>,
     /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
     /// emitted for this op (`null`/absent on pre-#229 workers or when the
     /// emit failed in best-effort mode).
@@ -1137,12 +1144,17 @@ pub struct CredFetchResp {
 
 /// Cred-worker `/v1/cred/store` request body. Mirrors
 /// `agentkeys_worker_creds::handlers::StoreRequest` — the signed cap (the
-/// credential `service` rides INSIDE the cap payload) plus the base64 plaintext.
-/// The worker encrypts (K3 KEK) + S3-PUTs `bots/<actor>/credentials/<service>.enc`.
+/// credential `service` rides INSIDE the cap payload) plus EXACTLY ONE of:
+/// `plaintext_b64` (legacy — the worker encrypts under its static stage-1 K3
+/// KEK) or `envelope_b64` (a client-encrypted v3 envelope the worker stores
+/// VERBATIM, #372-recipe — nothing reaches the worker in plaintext).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredStoreBody {
     pub cap: CapToken,
-    pub plaintext_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1496,10 +1508,17 @@ pub struct CredFetchInput {
     pub cap: CapToken,
 }
 
+/// EXACTLY ONE of `plaintext_b64` / `envelope_b64` is set (mirrors
+/// [`CredFetchResp`]): `envelope_b64` = a v3 blob for client-side decrypt
+/// under the signer-derived KEK; consumers that need plaintext MUST fail
+/// loud on it until the #91 delegated KEK-release lands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredFetchResult {
     pub ok: bool,
-    pub plaintext_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
