@@ -15,6 +15,10 @@ agentkeys-cli = { path = "../agentkeys-cli" } # K11 webauthn helpers (companion 
 # — cap-mint (incl. the config-store/fetch endpoints) + the worker body types, so
 # the daemon's cap-mint + worker bodies can't drift from the agent path.
 agentkeys-backend-client = { workspace = true }
+# #566 — the distribution mirror: gate-authorized canonical lines → the
+# in-sandbox OpenViking engine Hermes consumes natively (memory_mirror.rs).
+agentkeys-memory-engine = { workspace = true }
+agentkeys-memory-openviking = { workspace = true }
 # The shared STS relay primitive (mint-oidc-jwt -> AssumeRoleWithWebIdentity). The
 # per-namespace memory + config plant paths (#201) mint creds once and reuse them
 # across the worker POSTs, so they call this directly rather than through the

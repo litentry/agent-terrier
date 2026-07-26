@@ -14,6 +14,7 @@ mod chat_loop;
 mod companion;
 mod hardening;
 mod master_session;
+mod memory_mirror;
 mod pairing;
 mod persona;
 mod presets;
@@ -40,6 +41,15 @@ struct Args {
     /// enrollment. Independent of `--proxy` and `--master-companion`.
     #[arg(long)]
     ui_bridge: bool,
+
+    /// #566 one-shot distribution-mirror pass (e2e + operator debugging).
+    /// Reads the SAME env contract as the in-sandbox mirror — the chat env set
+    /// plus `OPENVIKING_*` / `AGENTKEYS_MEMORY_*` — runs exactly one
+    /// probe-and-reconcile pass over the candidate namespaces, prints a JSON
+    /// report to stdout, and exits 0. Per-namespace failures are IN the
+    /// report; only a missing env contract, credential, or session is fatal.
+    #[arg(long)]
+    memory_mirror_once: bool,
 
     /// Bind address for ui-bridge mode. Default 127.0.0.1:3114.
     #[arg(
@@ -346,6 +356,36 @@ struct Args {
     device_key_file: Option<String>,
 }
 
+/// #566 `--memory-mirror-once` — see the Args doc. One pass, JSON report on
+/// stdout, exit 0 unless the env contract / credential / session bootstrap
+/// itself fails.
+async fn run_memory_mirror_once() -> anyhow::Result<()> {
+    let cfg = chat_loop::ChatLoopConfig::from_env().ok_or_else(|| {
+        anyhow::anyhow!(
+            "memory-mirror-once: incomplete chat env contract (broker/channel/actor/operator \
+             + one credential) — see the warning above for the missing keys"
+        )
+    })?;
+    let mirror_cfg = memory_mirror::MirrorConfig::from_chat_env(cfg)
+        .ok_or_else(|| anyhow::anyhow!("memory-mirror-once: mirror disabled by env (see log)"))?;
+    let credential = chat_loop::build_credential(&mirror_cfg.chat)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("memory-mirror-once: credential bootstrap failed"))?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(40))
+        .build()?;
+    let bearer = chat_loop::resolve_session(&http, &mirror_cfg.chat, &credential)
+        .await
+        .map_err(|e| anyhow::anyhow!("memory-mirror-once: delegate resolve failed: {e}"))?;
+    credential.on_new_session(&bearer).await;
+    let outcomes = memory_mirror::mirror_once(&mirror_cfg, &credential, &bearer).await;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&memory_mirror::report_json(&outcomes))?
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -368,6 +408,10 @@ async fn main() -> anyhow::Result<()> {
 
     if args.ui_bridge {
         return run_ui_bridge_mode(args).await;
+    }
+
+    if args.memory_mirror_once {
+        return run_memory_mirror_once().await;
     }
 
     // Issue #144 §10.2 (method A) one-shot pairing. Two synchronous steps mirror

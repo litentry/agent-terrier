@@ -156,8 +156,6 @@ version = "0.1.0"
 dependencies = [
  "agentkeys-backend-client",
  "agentkeys-core",
- "agentkeys-memory-engine",
- "agentkeys-memory-openviking",
  "agentkeys-mock-server",
  "agentkeys-provisioner",
  "agentkeys-types",
@@ -237,6 +235,8 @@ dependencies = [
  "agentkeys-catalog",
  "agentkeys-cli",
  "agentkeys-core",
+ "agentkeys-memory-engine",
+ "agentkeys-memory-openviking",
  "agentkeys-mock-server",
  "agentkeys-provisioner",
  "agentkeys-types",
@@ -349,6 +349,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

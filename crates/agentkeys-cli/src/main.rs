@@ -303,95 +303,8 @@ enum Commands {
     },
 
     #[command(
-        about = "Wire a Task Host runtime with AgentKeys IAM-guarantee hooks",
-        long_about = "Provision a Task Host (Phase 1.a: Hermes) so AgentKeys hooks fire on its tool-call lifecycle — turning the MCP tools into IAM guarantees the LLM cannot bypass. Idempotent: re-runs are no-ops modulo drift; --check-only reports drift without writing.\n\nWrites hook scripts to ~/.<runtime>/agent-hooks/, appends a managed `hooks:` block to the runtime config, and pre-approves first-use consent.\n\nExamples:\n  agentkeys wire hermes\n  agentkeys wire hermes --check-only\n  agentkeys wire hermes --actor-omni 0x<64hex> --namespaces travel,personal"
-    )]
-    Wire {
-        /// Task Host runtime to wire. Phase 1.a ships `hermes`.
-        runtime: String,
-
-        /// Report drift without writing (nightly drift check / dry run).
-        #[arg(long)]
-        check_only: bool,
-
-        /// Actor omni the hooks act for. Defaults to the in-memory demo actor.
-        #[arg(
-            long,
-            env = "AGENTKEYS_ACTOR_OMNI",
-            default_value = "0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7"
-        )]
-        actor_omni: String,
-
-        /// Operator omni for audit-row attribution. Defaults to demo operator.
-        #[arg(
-            long,
-            env = "AGENTKEYS_OPERATOR_OMNI",
-            default_value = "0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8"
-        )]
-        operator_omni: String,
-
-        /// Comma-separated memory namespaces the pre_llm_call hook injects.
-        #[arg(long, default_value = "travel")]
-        namespaces: String,
-
-        /// Scope the pre_tool_call permission gate checks.
-        #[arg(long, default_value = "payment.spend")]
-        payment_scope: String,
-
-        /// AgentKeys MCP server URL the hooks call.
-        #[arg(
-            long,
-            env = "AGENTKEYS_MCP_URL",
-            default_value = "http://localhost:8088/mcp"
-        )]
-        mcp_url: String,
-
-        /// Vendor bearer token for the MCP server.
-        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN", default_value = "demo-tok")]
-        vendor_token: String,
-
-        /// Operator/agent session JWT baked into the hook scripts (forwarded
-        /// to the broker cap-mint via the MCP server, arch.md §22b.4). Leave
-        /// empty for the in-memory backend. JWTs expire — re-run wire to refresh.
-        #[arg(long, env = "AGENTKEYS_SESSION_BEARER", default_value = "")]
-        session_bearer: String,
-
-        /// Memory engine baked into the pre_llm_call hook. `openviking` (default —
-        /// semantic ranking behind the gate; the hermes-sandbox image bakes the
-        /// server on :1933, and the hook falls back to `lexical` then `passthrough`
-        /// when the server is absent/unreachable, so it is NEVER load-bearing),
-        /// `lexical` (deterministic query-aware selection, no models to deploy), or
-        /// `passthrough` (inject the whole namespace unranked). Plan §6a / arch.md §22.
-        #[arg(long, env = "AGENTKEYS_MEMORY_ENGINE", default_value = "openviking")]
-        memory_engine: String,
-
-        /// Cap how many memory lines the engine injects (omit = unbounded).
-        #[arg(long, env = "AGENTKEYS_MEMORY_MAX_LINES")]
-        memory_max_lines: Option<u32>,
-
-        /// OpenViking server URL, baked into the hook as OPENVIKING_ENDPOINT
-        /// when --memory-engine openviking (plan §6a). e.g. http://127.0.0.1:1933
-        #[arg(long, env = "OPENVIKING_ENDPOINT")]
-        openviking_endpoint: Option<String>,
-
-        /// Optional OpenViking API key, baked as OPENVIKING_API_KEY when
-        /// --memory-engine openviking.
-        #[arg(long, env = "OPENVIKING_API_KEY")]
-        openviking_api_key: Option<String>,
-    },
-
-    #[command(
-        about = "Runtime lifecycle hook helpers (called BY wire-generated scripts)",
-        long_about = "These subcommands are invoked by the hook scripts `agentkeys wire` drops into a Task Host. Each reads the host's JSON hook payload from stdin, calls an AgentKeys MCP tool, and writes the host's expected JSON decision to stdout. You normally never run these by hand.\n\n  check         — PreToolUse permission gate (fails CLOSED)\n  audit         — PostToolUse audit append (never blocks)\n  memory-inject — pre_llm_call context injection (never blocks)"
-    )]
-    Hook {
-        #[command(subcommand)]
-        action: HookAction,
-    },
-
-    #[command(
-        about = "Memory namespace helpers (e.g. SEED a namespace in the real worker)",
-        long_about = "Direct memory operations against the AgentKeys MCP server. `put` writes an entry — used to SEED a namespace (e.g. the demo travel fixture) in the REAL memory worker; in-memory mode auto-seeds the fixture, so this is only needed for the real backend. Identity (actor / operator / device_key_hash) defaults from the MCP server's configured defaults."
+        about = "Memory namespace helpers (canonical read + absorption inbox)",
+        long_about = "Memory operations against the gated backend (cap-mint → memory worker). `canonical-get` reads a namespace under the delegate's own session; the `inbox-*` verbs drive the absorption flow (delegate proposes, master curates). Canonical WRITES are master-side (the parent-control plant flow); in-sandbox distribution is the daemon's #566 memory mirror — there is no direct `put`."
     )]
     Memory {
         #[command(subcommand)]
@@ -918,85 +831,12 @@ enum InboxAction {
     },
 }
 
-/// Hook helper subcommands. Invoked by wire-generated scripts; read the
-/// host JSON payload from stdin, call an MCP tool, write the host decision
-/// JSON to stdout. Common connection flags fall back to env then demo
-/// defaults: --mcp-url (AGENTKEYS_MCP_URL), --vendor-token
-/// (AGENTKEYS_MCP_VENDOR_TOKEN), --actor (AGENTKEYS_ACTOR_OMNI),
-/// --operator (AGENTKEYS_OPERATOR_OMNI).
-#[derive(Subcommand)]
-enum HookAction {
-    #[command(about = "PreToolUse permission gate (fails CLOSED if MCP unreachable)")]
-    Check {
-        /// Scope to check (e.g. payment.spend).
-        #[arg(long)]
-        scope: String,
-        #[arg(long, env = "AGENTKEYS_MCP_URL")]
-        mcp_url: Option<String>,
-        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
-        vendor_token: Option<String>,
-        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
-        actor: Option<String>,
-        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
-        operator: Option<String>,
-    },
-
-    #[command(about = "PostToolUse audit append (never blocks)")]
-    Audit {
-        #[arg(long, env = "AGENTKEYS_MCP_URL")]
-        mcp_url: Option<String>,
-        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
-        vendor_token: Option<String>,
-        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
-        actor: Option<String>,
-        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
-        operator: Option<String>,
-    },
-
-    #[command(
-        name = "memory-inject",
-        about = "pre_llm_call context injection from memory namespaces (never blocks)"
-    )]
-    MemoryInject {
-        /// Comma-separated memory namespaces to inject.
-        #[arg(long, default_value = "travel")]
-        namespaces: String,
-        #[arg(long, env = "AGENTKEYS_MCP_URL")]
-        mcp_url: Option<String>,
-        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
-        vendor_token: Option<String>,
-        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
-        actor: Option<String>,
-        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
-        operator: Option<String>,
-    },
-}
-
 #[derive(Subcommand)]
 enum MemoryAction {
-    /// Write a memory entry — SEED a namespace (e.g. the demo travel fixture).
-    /// Reaches the real memory worker in --real mode (in-memory auto-seeds).
-    #[command(about = "Write/seed a memory namespace entry via agentkeys.memory.put")]
-    Put {
-        /// Namespace to write (e.g. `travel`).
-        #[arg(long)]
-        namespace: String,
-        /// Plaintext content to store.
-        #[arg(long)]
-        content: String,
-        #[arg(long, env = "AGENTKEYS_MCP_URL")]
-        mcp_url: Option<String>,
-        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
-        vendor_token: Option<String>,
-        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
-        actor: Option<String>,
-        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
-        operator: Option<String>,
-    },
     /// #295 P1 — delegate-side READ of the MASTER's CANONICAL memory namespace
     /// (the master-hub distribution channel). Gated by the actor's on-chain
-    /// `memory:<ns>` scope grant; prints the decrypted plaintext. Unlike `put`
-    /// (which routes through the MCP server), this is the delegated-fetch path —
+    /// `memory:<ns>` scope grant; prints the decrypted plaintext. This is the
+    /// delegated-fetch path the #566 daemon memory mirror also rides —
     /// §7a (A'): the delegate sends ONLY its OWN session + the cap to the memory
     /// worker and gets back plaintext, NEVER S3 creds. The WORKER fetches the
     /// exact-object scoped STS server-side, so the delegate can't bypass the
@@ -1837,104 +1677,7 @@ async fn main() {
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
         Commands::K11 { action } => cmd_k11(action).await,
-        Commands::Wire {
-            runtime,
-            check_only,
-            actor_omni,
-            operator_omni,
-            namespaces,
-            payment_scope,
-            mcp_url,
-            vendor_token,
-            session_bearer,
-            memory_engine,
-            memory_max_lines,
-            openviking_endpoint,
-            openviking_api_key,
-        } => agentkeys_cli::wire::cmd_wire(
-            runtime,
-            agentkeys_cli::wire::WireRequest {
-                actor: actor_omni.clone(),
-                operator: operator_omni.clone(),
-                namespaces: namespaces.clone(),
-                payment_scope: payment_scope.clone(),
-                mcp_url: mcp_url.clone(),
-                vendor_token: vendor_token.clone(),
-                session_bearer: session_bearer.clone(),
-                memory_engine: memory_engine.clone(),
-                memory_max_lines: *memory_max_lines,
-                memory_engine_endpoint: openviking_endpoint.clone(),
-                memory_engine_api_key: openviking_api_key.clone(),
-                check_only: *check_only,
-            },
-        ),
-        Commands::Hook { action } => match action {
-            HookAction::Check {
-                scope,
-                mcp_url,
-                vendor_token,
-                actor,
-                operator,
-            } => {
-                agentkeys_cli::hook::check(
-                    scope,
-                    mcp_url.clone(),
-                    vendor_token.clone(),
-                    actor.clone(),
-                    operator.clone(),
-                )
-                .await
-            }
-            HookAction::Audit {
-                mcp_url,
-                vendor_token,
-                actor,
-                operator,
-            } => {
-                agentkeys_cli::hook::audit(
-                    mcp_url.clone(),
-                    vendor_token.clone(),
-                    actor.clone(),
-                    operator.clone(),
-                )
-                .await
-            }
-            HookAction::MemoryInject {
-                namespaces,
-                mcp_url,
-                vendor_token,
-                actor,
-                operator,
-            } => {
-                agentkeys_cli::hook::memory_inject(
-                    namespaces,
-                    mcp_url.clone(),
-                    vendor_token.clone(),
-                    actor.clone(),
-                    operator.clone(),
-                )
-                .await
-            }
-        },
         Commands::Memory { action } => match action {
-            MemoryAction::Put {
-                namespace,
-                content,
-                mcp_url,
-                vendor_token,
-                actor,
-                operator,
-            } => {
-                agentkeys_cli::hook::memory_put(
-                    namespace,
-                    content,
-                    mcp_url.clone(),
-                    vendor_token.clone(),
-                    actor.clone(),
-                    operator.clone(),
-                )
-                .await
-            }
             MemoryAction::CanonicalGet {
                 namespace,
                 operator_omni,

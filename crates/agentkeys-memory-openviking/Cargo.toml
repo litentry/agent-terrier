@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 sha2 = "0.10"
+tracing = "0.1" # non-fatal manifest I/O failures must be visible, never silent
 
 [dev-dependencies]
 axum = { version = "0.7", features = ["json"] }

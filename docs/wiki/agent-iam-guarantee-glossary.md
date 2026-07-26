@@ -20,6 +20,8 @@ Anchored in [`agent-iam-strategy.md`](../../docs/agent-iam-strategy.md) §3.1 (b
 
 Both are non-LLM gates in the execution path; each is primary for its deployment shape. (The generic OpenAI-compatible proxy that an earlier revision kept as a *fallback* for unmanaged hooks-less hosts was **dropped 2026-06-19** — agent-first direction; see §4.)
 
+> **Delivery status (2026-07-24, #560/#566):** the hooks ROW below is the seam *design*; its first shipped delivery (`agentkeys wire` + the `agentkeys hook` MCP clients) was retired with the MCP server. Memory delivery moved to Hermes' native OpenViking provider with a gate-bounded, daemon-mirrored corpus (see [memory-providers-and-agents](./memory-providers-and-agents.md)); a revived check/audit hook delivery would ride the co-located daemon (re-scoped [#133](https://github.com/litentry/agentKeys/issues/133)). The certified-stack endpoint row is live (the gate).
+
 | Seam | Mechanism | Where it sits | Strategy-doc fit |
 |---|---|---|---|
 | **Hooks** — primary for hook-capable Task Hosts ([#133](https://github.com/litentry/agentKeys/issues/133)) | Task Host fires `PreToolUse` / `PostToolUse` / `SessionEnd` hooks that execute AgentKeys MCP tool calls synchronously around tool use | Inside the Task Host runtime, between LLM tool-call emission and execution | Stays cleanly on §2.1 Authority Host side; lifecycle-event-scoped, not in the path of every byte |

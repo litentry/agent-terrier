@@ -19,8 +19,6 @@ aws-sdk-transcribestreaming = "1"
 futures-util = "0.3"
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
-agentkeys-memory-engine = { workspace = true }
-agentkeys-memory-openviking = { workspace = true }
 agentkeys-provisioner = { path = "../agentkeys-provisioner" }
 agentkeys-backend-client = { workspace = true } # #216 cred-fetch primitive (agent vaulted-key)
 clap = { version = "4", features = ["derive", "env"] }

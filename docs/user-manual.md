@@ -2,51 +2,50 @@
 
 The single home for **user-facing behaviors and instructions** — the things an
 operator or end user needs to know about how AgentKeys touches their machine.
-(Developers: see [`arch.md`](arch.md). Running the wire demo end to end: see
-the internal wire operator runbook (`operator-docs/`, not in the OSS mirror).)
+(Developers: see [`arch.md`](arch.md).)
 
 > Convention: every user-aware instruction or caveat lives here. If a change
 > alters something a user would notice, document it in this file.
 
-## `agentkeys wire` takes over your runtime's hooks
+## Your agent's long-term memory: OpenViking, bounded by your grants (#566)
 
-`agentkeys wire <runtime>` installs the AgentKeys IAM hooks — the permission
-gate, audit append, and memory injection — into your Task Host's config so the
-LLM **cannot bypass** them. That guarantee depends on AgentKeys owning the hook
-configuration, so:
+Inside every AgentKeys sandbox, the Hermes agent uses **OpenViking as its
+native memory provider** (`memory.provider: openviking` — the agent's own
+`viking_search` / `viking_remember` tools). What the agent can *recall* from
+your family's shared memory is bounded by **your grants**, not by the agent's
+choices:
 
-> **`agentkeys wire` takes full ownership of the runtime's hooks block. If you
-> already have your own hooks there, wire REPLACES them with its managed block.**
+- The AgentKeys **daemon mirror** is the only writer of shared (canonical)
+  memory into the engine, and it can only mirror namespaces the memory worker
+  authorizes — a namespace you never granted (or later revoked) answers 403 at
+  the worker and never enters the agent's index. Revoking a grant removes the
+  mirrored content at the next mirror pass, and always by the sandbox's next
+  respawn.
+- The agent's own `viking_remember` notes are its private working memory. They
+  live only inside its sandbox and are proposed back to you through the
+  **inbox** flow (you approve each item) — never written into shared memory
+  directly.
+- The memory engine is **never load-bearing**: if it is down or not enabled,
+  the agent falls back to its built-in memory and chat keeps working.
 
-For Hermes that is the top-level `hooks:` key in `~/.hermes/config.yaml`. A YAML
-config allows only one `hooks:` key, so AgentKeys cannot coexist with a separate
-hand-authored hooks block — it replaces it.
+Operators: enabling semantic search requires an explicit embedding
+configuration — see the OpenViking operator runbook (`operator-docs/`, not in
+the OSS mirror).
 
-What this means for you:
+### Historical: removing a leftover `agentkeys wire` hooks block
 
-- **Fresh runtime** (no hooks yet): wire appends its managed block; nothing of
-  yours is touched.
-- **You had your own hooks**: wire removes them and installs its block. Back them
-  up first if you still need them.
-- **Re-running wire**: only the managed block (between the sentinels below) is
-  refreshed; your other config keys (`model:`, `terminal:`, …) are preserved.
+Older releases shipped `agentkeys wire <runtime>`, which wrote a managed
+`hooks:` block into `~/.hermes/config.yaml` (delimited by
+`# >>> agentkeys wire … >>>` / `# <<< agentkeys wire <<<` sentinel comments)
+plus hook scripts under `~/.hermes/agent-hooks/`. That surface was retired with
+the MCP server (#560/#566) — the hooks now point at a server that no longer
+exists, and because the permission hook **failed closed**, a leftover block
+blocks every tool call in that runtime. If you ever ran wire, clean up by
+hand (there was never a working `--unwire`):
 
-The managed block is delimited so you can see exactly what AgentKeys owns:
-
-```
-# >>> agentkeys wire (managed block — do not edit; re-run `agentkeys wire`) >>>
-hooks:
-  ...
-hooks_auto_accept: true
-# <<< agentkeys wire <<<
-```
-
-Remove it any time with `agentkeys wire <runtime> --unwire`.
-
-> Some hosts re-serialize their config and drop comments — e.g.
-> `hermes config set model.default …` strips the sentinel comment lines while
-> keeping the hooks data. `agentkeys wire` detects a de-sentineled block and
-> re-wraps it on the next run, so re-running wire is always safe.
+1. delete the sentinel-delimited `hooks:` block (and `hooks_auto_accept: true`)
+   from `~/.hermes/config.yaml`, and
+2. `rm -rf ~/.hermes/agent-hooks/`.
 
 ## Onboarding asks for Touch ID twice (parent-control)
 

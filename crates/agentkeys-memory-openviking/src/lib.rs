@@ -1,31 +1,47 @@
-//! OpenViking engine adapter — plan `docs/plan/agentkeys-memory-design.md` §6a.
+//! OpenViking engine adapter — plan `docs/plan/agentkeys-memory-design.md` §6a,
+//! integration shape `docs/plan/issue-566-openviking-native-memory-provider.md`.
 //!
-//! OpenViking (`volcengine/OpenViking`) is a self-hosted context database. In
-//! AgentKeys' Model-B integration it is the pluggable RANKING engine *behind*
-//! our gate: AgentKeys still STORES (K3-encrypted S3) + GATES (cap / scope /
-//! namespace / audit) + DELIVERS (the `pre_llm_call` hook). OpenViking only
-//! reorders. The HTTP contract below is taken verbatim from the Hermes
-//! `plugins/memory/openviking` client — not guessed:
+//! OpenViking (`volcengine/OpenViking`) is a self-hosted context database. Since
+//! #566 it is Hermes' FIRST-CLASS native memory provider (`memory.provider:
+//! openviking` — the agent reads/writes it directly via `viking_search` /
+//! `viking_remember`), and AgentKeys' gate bound moved to INGEST-time: this
+//! crate's consumer is the daemon's distribution mirror, which may only write
+//! what `canonical-get` returned (the memory worker enforces per-namespace
+//! authorization on every fetch). AgentKeys still STORES (K3-encrypted S3) +
+//! GATES (cap / scope / namespace / audit); the engine holds a sandbox-local,
+//! rebuilt-on-respawn index of the authorized slice plus the agent's own
+//! working memory.
+//!
+//! This crate is now WRITE-SIDE ONLY — the mirror's half of the contract,
+//! verified against a live `openviking-server` 0.4.11:
 //!
 //!   base    http://127.0.0.1:1933  (OPENVIKING_ENDPOINT)
-//!   headers X-OpenViking-Agent / -Account / -User, plus X-API-Key +
+//!   headers X-OpenViking-Actor-Peer / -Account / -User, plus X-API-Key +
 //!           `Authorization: Bearer <key>` when OPENVIKING_API_KEY is set
-//!   GET  /health                       -> 200 when up
-//!   POST /api/v1/search/find {query, top_k}
-//!        -> {result:{results:[{score, content|text, uri}]}}
-//!   POST /api/v1/content/write {uri, content, mode:"create"}
+//!   GET    /health                        -> 200 when up
+//!   POST   /api/v1/content/write {uri, content, mode:"create"}
+//!   DELETE /api/v1/fs?uri=<viking://…>    -> remove one mirrored file
 //!   error envelope: HTTP >= 400, or {status:"error", error:{code,message}}
 //!
-//! SAFETY — the gate bounds visibility: [`rank_gate_bounded`] only ever returns
-//! lines that were in the gate-authorized input set. OpenViking can change the
-//! ORDER but can never WIDEN what is injectable; a compromised/over-broad
-//! OpenViking cannot leak content the gate did not authorize. On any error or
-//! empty result it returns `None`, so the caller falls back to a deterministic
-//! engine (recency) — OpenViking is never load-bearing for availability.
+//! The QUERY side is deliberately absent. Reading is the AGENT's job through
+//! its native provider (`viking_search`/`viking_read`), so the pre-#566
+//! `search_find` + `rank_gate_bounded` pair had zero consumers once the wire
+//! hook was retired — AND it parsed `{result:{results:[…]}}`, a shape the real
+//! server never emits (0.4.11 answers `{result:{memories:[…],resources:[…]}}`
+//! with URIs + scores, no verbatim content). Its unit tests passed only because
+//! the stub echoed the crate's own invented shape. Rather than ship a broken,
+//! unused API, it is removed; a future ranking client (#183's config-driven
+//! adapter) should be written against the measured shape and proven end-to-end
+//! by `e2e/suite-7-memory-mirror.sh`.
+//!
+//! SAFETY — the gate bounds visibility at INGEST:
+//! [`OpenVikingClient::reconcile_ingested`] only ever writes gate-authorized
+//! lines and delete-throughs lines the gate no longer returns (revocation
+//! self-heals; a fresh sandbox rebuilds from canonical). OpenViking can rank
+//! but can never WIDEN visibility, and it is never load-bearing — engine down
+//! ⇒ Hermes falls back to its built-in memory; the mirror retries next pass.
 
-use serde::Deserialize;
-
-use agentkeys_memory_engine::{MemoryLine, SelectionBudget};
+use agentkeys_memory_engine::MemoryLine;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1933";
 
@@ -47,36 +63,6 @@ pub enum OpenVikingError {
     Http { status: u16, body: String },
     #[error("openviking parse: {0}")]
     Parse(String),
-}
-
-#[derive(Debug, Deserialize)]
-struct FindEnvelope {
-    #[serde(default)]
-    result: Option<FindResult>,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FindResult {
-    #[serde(default)]
-    results: Vec<FindHit>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FindHit {
-    #[serde(default)]
-    score: f64,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-impl FindHit {
-    fn body(&self) -> Option<&str> {
-        self.content.as_deref().or(self.text.as_deref())
-    }
 }
 
 impl OpenVikingClient {
@@ -113,7 +99,12 @@ impl OpenVikingClient {
     }
 
     fn with_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let mut req = req.header("X-OpenViking-Agent", &self.agent);
+        // `Actor-Peer` is the header the server's trusted mode reads (and what
+        // the Hermes plugin sends); the legacy `Agent` spelling rides along for
+        // older servers that logged it.
+        let mut req = req
+            .header("X-OpenViking-Actor-Peer", &self.agent)
+            .header("X-OpenViking-Agent", &self.agent);
         if !self.account.is_empty() {
             req = req.header("X-OpenViking-Account", &self.account);
         }
@@ -135,51 +126,6 @@ impl OpenVikingClient {
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
-    }
-
-    /// `POST /api/v1/search/find` — semantic ranking. Returns `(score, text)`
-    /// hits in OpenViking's ranked order.
-    pub async fn search_find(
-        &self,
-        query: &str,
-        top_k: usize,
-    ) -> Result<Vec<(f64, String)>, OpenVikingError> {
-        let url = format!("{}/api/v1/search/find", self.endpoint);
-        let resp = self
-            .with_headers(
-                self.http
-                    .post(&url)
-                    .json(&serde_json::json!({ "query": query, "top_k": top_k })),
-            )
-            .send()
-            .await
-            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
-        if !status.is_success() {
-            return Err(OpenVikingError::Http {
-                status: status.as_u16(),
-                body,
-            });
-        }
-        let envelope: FindEnvelope =
-            serde_json::from_str(&body).map_err(|e| OpenVikingError::Parse(e.to_string()))?;
-        if envelope.status.as_deref() == Some("error") {
-            return Err(OpenVikingError::Http {
-                status: status.as_u16(),
-                body,
-            });
-        }
-        Ok(envelope
-            .result
-            .map(|r| r.results)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|hit| hit.body().map(|b| (hit.score, b.to_string())))
-            .collect())
     }
 
     /// `POST /api/v1/content/write` — mirror one gate-authorized line into
@@ -206,6 +152,41 @@ impl OpenVikingClient {
             });
         }
         Ok(())
+    }
+
+    /// `DELETE /api/v1/fs?uri=<viking://…>` — remove one mirrored file from the
+    /// index (the delete-through half of [`Self::reconcile_ingested`]). A 404
+    /// counts as deleted (the goal state — absent — already holds).
+    pub async fn delete_content(&self, uri: &str) -> Result<(), OpenVikingError> {
+        let url = format!("{}/api/v1/fs", self.endpoint);
+        let resp = self
+            .with_headers(self.http.delete(&url).query(&[("uri", uri)]))
+            .send()
+            .await
+            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
+        let status = resp.status();
+        if status.is_success() || status.as_u16() == 404 {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(OpenVikingError::Http {
+            status: status.as_u16(),
+            body,
+        })
+    }
+
+    /// The mirror URI for one gate-authorized line — the ONE composition site
+    /// (ensure/reconcile/delete and the e2e all derive from here). Content-hash
+    /// names make the mirror idempotent regardless of namespace order or churn.
+    pub fn memory_uri(&self, namespace: &str, hash: &str) -> String {
+        format!(
+            "viking://user/{}/memories/{namespace}/mem_{hash}.md",
+            if self.user.is_empty() {
+                "default"
+            } else {
+                &self.user
+            }
+        )
     }
 
     /// The production ingest leg (#399): make sure every gate-authorized line
@@ -241,14 +222,7 @@ impl OpenVikingClient {
             if seen.contains(&key) {
                 continue;
             }
-            let uri = format!(
-                "viking://user/{}/memories/{namespace}/mem_{hash}.md",
-                if self.user.is_empty() {
-                    "default"
-                } else {
-                    &self.user
-                }
-            );
+            let uri = self.memory_uri(namespace, &hash);
             match self.write_content(&uri, &line.text).await {
                 Ok(()) => {
                     mirrored += 1;
@@ -269,6 +243,82 @@ impl OpenVikingClient {
             append_manifest(manifest, &new_entries);
         }
         (mirrored, failed)
+    }
+
+    /// The #566 distribution-mirror pass for ONE namespace: converge the index
+    /// on exactly the gate-authorized `lines`.
+    ///
+    /// - additions ride [`Self::ensure_ingested`] (manifest-tracked, idempotent);
+    /// - manifest entries of this namespace whose line no longer appears in
+    ///   `lines` are DELETE-THROUGHed (`DELETE /api/v1/fs`) and dropped from the
+    ///   manifest — so a line the master removed, or a namespace whose grant was
+    ///   revoked (`lines = []`), leaves the index at the next pass, not only at
+    ///   respawn. A failed delete stays in the manifest and retries next pass.
+    ///
+    /// Best-effort like everything here: the durable truth never lives in the
+    /// engine, and a fresh sandbox rebuilds from canonical.
+    pub async fn reconcile_ingested(
+        &self,
+        namespace: &str,
+        lines: &[MemoryLine],
+        manifest: &std::path::Path,
+    ) -> ReconcileStats {
+        let current: std::collections::HashSet<String> =
+            lines.iter().map(|l| line_hash(&l.text)).collect();
+        let ns_prefix = format!("{namespace}\t");
+        let stale: Vec<String> = read_manifest(manifest)
+            .into_iter()
+            .filter(|key| {
+                key.strip_prefix(&ns_prefix)
+                    .is_some_and(|hash| !current.contains(hash))
+            })
+            .collect();
+        let mut deleted = 0usize;
+        let mut delete_failed = 0usize;
+        let mut dropped: Vec<String> = Vec::new();
+        for key in &stale {
+            let hash = key.strip_prefix(&ns_prefix).unwrap_or_default();
+            match self.delete_content(&self.memory_uri(namespace, hash)).await {
+                Ok(()) => {
+                    deleted += 1;
+                    dropped.push(key.clone());
+                }
+                Err(_) => delete_failed += 1,
+            }
+        }
+        let (mirrored, write_failed) = self.ensure_ingested(namespace, lines, manifest).await;
+        if !dropped.is_empty() {
+            let keep: Vec<String> = read_manifest(manifest)
+                .into_iter()
+                .filter(|k| !dropped.contains(k))
+                .collect();
+            rewrite_manifest(manifest, &keep);
+        }
+        ReconcileStats {
+            mirrored,
+            write_failed,
+            deleted,
+            delete_failed,
+        }
+    }
+}
+
+/// Outcome of one [`OpenVikingClient::reconcile_ingested`] pass.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReconcileStats {
+    /// Lines newly written (or confirmed present) this pass.
+    pub mirrored: usize,
+    /// Lines whose write errored (retried next pass).
+    pub write_failed: usize,
+    /// Stale mirrored lines removed from the index.
+    pub deleted: usize,
+    /// Stale lines whose delete errored (kept in the manifest, retried).
+    pub delete_failed: usize,
+}
+
+impl ReconcileStats {
+    pub fn is_noop(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -313,77 +363,33 @@ fn append_manifest(path: &std::path::Path, entries: &[String]) {
         .open(path)
     {
         for e in entries {
-            let _ = writeln!(f, "{e}");
-        }
-    }
-}
-
-fn normalize(text: &str) -> String {
-    text.trim().to_lowercase()
-}
-
-/// Rank gate-authorized `lines` via OpenViking, bounded by the gate.
-///
-/// Returns `Some(reordered subset of `lines`)` on success, or `None` on any
-/// error / empty / no-match so the caller falls back to a deterministic engine.
-/// A hit maps to a line when their normalized text is equal or one contains the
-/// other (OpenViking may return a tiered abstract rather than the verbatim
-/// line). Only `lines` entries are ever returned — never a raw OpenViking hit.
-pub async fn rank_gate_bounded(
-    client: &OpenVikingClient,
-    query: &str,
-    lines: &[MemoryLine],
-    budget: &SelectionBudget,
-) -> Option<Vec<MemoryLine>> {
-    if lines.is_empty() {
-        return None;
-    }
-    let top_k = budget.max_lines.unwrap_or(lines.len()).max(1);
-    let hits = client.search_find(query, top_k).await.ok()?;
-    if hits.is_empty() {
-        return None;
-    }
-    let mut out: Vec<MemoryLine> = Vec::new();
-    let mut taken = std::collections::HashSet::new();
-    for (_score, hit_text) in hits {
-        let hit_norm = normalize(&hit_text);
-        if let Some(line) = lines.iter().find(|l| {
-            let line_norm = normalize(&l.text);
-            line_norm == hit_norm || hit_norm.contains(&line_norm) || line_norm.contains(&hit_norm)
-        }) {
-            if taken.insert(line.seq) {
-                out.push(line.clone());
+            if let Err(err) = writeln!(f, "{e}") {
+                tracing::warn!(error = %err, path = ?path, "openviking manifest append failed — the next pass re-mirrors this line");
             }
         }
     }
-    if out.is_empty() {
-        return None;
+}
+
+fn rewrite_manifest(path: &std::path::Path, entries: &[String]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    if let Some(max) = budget.max_lines {
-        out.truncate(max);
+    let mut body = entries.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
     }
-    Some(out)
+    if let Err(err) = std::fs::write(path, &body) {
+        // Non-fatal: the entries were already deleted server-side, so the next
+        // pass re-issues deletes that 404 (counted as done). Surfacing the I/O
+        // error is what matters — a silent failure looks like a stuck mirror.
+        tracing::warn!(error = %err, path = ?path, "openviking manifest rewrite failed — stale entries retried next pass");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::State, routing::post, Json, Router};
-
-    async fn spawn_stub(response: serde_json::Value) -> String {
-        let app = Router::new()
-            .route(
-                "/api/v1/search/find",
-                post(|State(body): State<serde_json::Value>| async move { Json(body) }),
-            )
-            .with_state(response);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
-    }
+    use axum::{routing::post, Json, Router};
 
     fn client(endpoint: String) -> OpenVikingClient {
         OpenVikingClient::new(
@@ -406,76 +412,6 @@ mod tests {
                 seq: 1,
             },
         ]
-    }
-
-    #[tokio::test]
-    async fn search_find_parses_score_ordered_hits() {
-        let endpoint = spawn_stub(serde_json::json!({
-            "result": {"results": [
-                {"score": 0.9, "content": "Allergic to peanuts."},
-                {"score": 0.7, "text": "Chengdu trip — Apr 12 to 16."}
-            ]}
-        }))
-        .await;
-        let hits = client(endpoint).search_find("peanut", 5).await.unwrap();
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].1, "Allergic to peanuts.");
-    }
-
-    #[tokio::test]
-    async fn rank_is_gate_bounded_and_reordered() {
-        // OpenViking ranks peanuts top, then chengdu, AND returns an
-        // unauthorized line that is NOT in the gate set — it must be dropped.
-        let endpoint = spawn_stub(serde_json::json!({
-            "result": {"results": [
-                {"score": 0.9, "content": "Allergic to peanuts."},
-                {"score": 0.8, "content": "SECRET not in the authorized set"},
-                {"score": 0.7, "content": "Chengdu trip — Apr 12 to 16."}
-            ]}
-        }))
-        .await;
-        let budget = SelectionBudget {
-            max_lines: Some(5),
-            max_bytes: None,
-        };
-        let out = rank_gate_bounded(&client(endpoint), "peanut", &lines(), &budget)
-            .await
-            .unwrap();
-        let texts: Vec<&str> = out.iter().map(|l| l.text.as_str()).collect();
-        // gate-bound: only the two authorized lines, in OpenViking's order
-        assert_eq!(
-            texts,
-            vec!["Allergic to peanuts.", "Chengdu trip — Apr 12 to 16."]
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_results_falls_back_to_none() {
-        let endpoint = spawn_stub(serde_json::json!({ "result": {"results": []} })).await;
-        let budget = SelectionBudget::default();
-        assert!(rank_gate_bounded(&client(endpoint), "q", &lines(), &budget)
-            .await
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn budget_caps_results() {
-        let endpoint = spawn_stub(serde_json::json!({
-            "result": {"results": [
-                {"score": 0.9, "content": "Allergic to peanuts."},
-                {"score": 0.7, "content": "Chengdu trip — Apr 12 to 16."}
-            ]}
-        }))
-        .await;
-        let budget = SelectionBudget {
-            max_lines: Some(1),
-            max_bytes: None,
-        };
-        let out = rank_gate_bounded(&client(endpoint), "q", &lines(), &budget)
-            .await
-            .unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].text, "Allergic to peanuts.");
     }
 
     // ── #399 ingest leg ──────────────────────────────────────────────────────
@@ -570,6 +506,114 @@ mod tests {
         let (m2, f2) = c.ensure_ingested("home", &lines(), &manifest).await;
         assert_eq!((m2, f2), (0, 2));
         assert_eq!(log.lock().unwrap().len(), 4);
+    }
+
+    /// Stub for the #566 reconcile tests: records writes AND `DELETE
+    /// /api/v1/fs?uri=…` (the delete-through half); `delete_status` controls
+    /// the delete reply.
+    async fn spawn_reconcile_stub(delete_status: u16) -> (String, WriteLog, WriteLog) {
+        use axum::extract::Query;
+        use axum::http::StatusCode;
+        let writes: WriteLog = Default::default();
+        let deletes: WriteLog = Default::default();
+        let (w, d) = (writes.clone(), deletes.clone());
+        let app = Router::new()
+            .route(
+                "/api/v1/content/write",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let w = w.clone();
+                    async move {
+                        w.lock()
+                            .unwrap()
+                            .push(body["uri"].as_str().unwrap_or_default().to_string());
+                        (StatusCode::OK, "{}".to_string())
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/fs",
+                axum::routing::delete(
+                    move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let d = d.clone();
+                        async move {
+                            d.lock()
+                                .unwrap()
+                                .push(q.get("uri").cloned().unwrap_or_default());
+                            (
+                                StatusCode::from_u16(delete_status).unwrap(),
+                                "{}".to_string(),
+                            )
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), writes, deletes)
+    }
+
+    #[tokio::test]
+    async fn reconcile_adds_new_and_delete_throughs_stale() {
+        let (endpoint, writes, deletes) = spawn_reconcile_stub(200).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+
+        let s1 = c.reconcile_ingested("home", &lines(), &manifest).await;
+        assert_eq!((s1.mirrored, s1.deleted), (2, 0));
+
+        // Line 0 dropped from canonical; a new line appears → 1 write + 1 delete
+        let next = vec![
+            lines()[1].clone(),
+            MemoryLine {
+                text: "Prefers window seats.".into(),
+                seq: 1,
+            },
+        ];
+        let s2 = c.reconcile_ingested("home", &next, &manifest).await;
+        assert_eq!((s2.mirrored, s2.deleted, s2.delete_failed), (1, 1, 0));
+        let deleted = deletes.lock().unwrap().clone();
+        assert_eq!(deleted.len(), 1);
+        assert!(deleted[0].starts_with("viking://user/default/memories/home/mem_"));
+        assert_eq!(writes.lock().unwrap().len(), 3);
+
+        // Converged: a third pass is a full no-op.
+        let s3 = c.reconcile_ingested("home", &next, &manifest).await;
+        assert!(s3.is_noop());
+    }
+
+    #[tokio::test]
+    async fn reconcile_empty_is_revocation_delete_through() {
+        let (endpoint, _writes, deletes) = spawn_reconcile_stub(200).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+
+        c.reconcile_ingested("home", &lines(), &manifest).await;
+        // Grant revoked → the worker 403s → the mirror reconciles onto EMPTY.
+        let s = c.reconcile_ingested("home", &[], &manifest).await;
+        assert_eq!((s.deleted, s.mirrored), (2, 0));
+        assert_eq!(deletes.lock().unwrap().len(), 2);
+        // Manifest drained → a re-grant re-mirrors from scratch.
+        assert!(read_manifest(&manifest).is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_failed_delete_stays_in_manifest_for_retry() {
+        let (endpoint, _writes, deletes) = spawn_reconcile_stub(500).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+
+        c.reconcile_ingested("home", &lines(), &manifest).await;
+        let s = c.reconcile_ingested("home", &[], &manifest).await;
+        assert_eq!((s.deleted, s.delete_failed), (0, 2));
+        assert_eq!(deletes.lock().unwrap().len(), 2);
+        // Entries survive the failed delete → the NEXT pass retries them.
+        assert_eq!(read_manifest(&manifest).len(), 2);
     }
 
     #[test]

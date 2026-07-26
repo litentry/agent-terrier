@@ -30,7 +30,9 @@ use serde::Deserialize;
 
 /// Everything the loop needs, from the sandbox env (injected by the broker's
 /// spawn finalize, #427/#430). `None` = not a chat-configured sandbox — the
-/// daemon runs exactly as before.
+/// daemon runs exactly as before. Cloned by the #566 memory mirror, which
+/// rides the same env contract + credential but keeps its own session.
+#[derive(Clone)]
 pub struct ChatLoopConfig {
     pub broker_url: String,
     pub channel_worker_url: String,
@@ -201,7 +203,8 @@ struct PollResponse {
 /// The delegate's signing credential — LEGACY in-sandbox K10, or the #552
 /// signer custody handle (the key never enters the sandbox; the ROTATING J1
 /// in `bearer` authenticates every signer call and is refreshed by resolve).
-enum DelegateCredential {
+/// `pub(crate)`: shared with the #566 memory mirror via an `Arc`.
+pub(crate) enum DelegateCredential {
     Local {
         key: std::sync::Arc<agentkeys_core::device_crypto::DeviceKey>,
     },
@@ -222,7 +225,25 @@ impl DelegateCredential {
         }
     }
 
-    fn device_key_hash(&self) -> String {
+    /// Attach this credential's cap-PoP signing to a [`BackendClient`] — the
+    /// ONE mapping from custody mode to client config (chat loop + mirror).
+    pub(crate) fn configure_client(&self, client: BackendClient) -> BackendClient {
+        match self {
+            Self::Local { key } => client.with_device_key(key.clone()),
+            Self::Signer {
+                client: signer,
+                bearer,
+                device_key_hash,
+                ..
+            } => client.with_remote_cap_pop(agentkeys_backend_client::RemoteCapPop {
+                signer: signer.clone(),
+                bearer: bearer.clone(),
+                device_key_hash: device_key_hash.clone(),
+            }),
+        }
+    }
+
+    pub(crate) fn device_key_hash(&self) -> String {
         match self {
             Self::Local { key } => key.device_key_hash().unwrap_or_default(),
             Self::Signer {
@@ -254,20 +275,21 @@ impl DelegateCredential {
 
     /// Resolve handed back a fresh J1: signer mode rotates its bearer so
     /// every subsequent signer call rides the newest session.
-    async fn on_new_session(&self, jwt: &str) {
+    pub(crate) async fn on_new_session(&self, jwt: &str) {
         if let Self::Signer { bearer, .. } = self {
             *bearer.write().await = jwt.to_string();
         }
     }
 }
 
-async fn run(cfg: ChatLoopConfig) {
-    // Build the signing credential. LEGACY: materialize the injected K10 into
-    // the daemon's standard key file so the shared DeviceKey/BackendClient
-    // machinery (incl. the #76 cap PoP) applies unchanged (0600,
-    // sandbox-local). #552 SIGNER custody: no key exists anywhere in this
-    // sandbox — bootstrap by asking the signer for the derived address with
-    // the injected boot J1.
+/// Build the signing credential. LEGACY: materialize the injected K10 into
+/// the daemon's standard key file so the shared DeviceKey/BackendClient
+/// machinery (incl. the #76 cap PoP) applies unchanged (0600,
+/// sandbox-local). #552 SIGNER custody: no key exists anywhere in this
+/// sandbox — bootstrap by asking the signer for the derived address with
+/// the injected boot J1. `None` = unrecoverable (already logged loudly).
+/// Shared by the chat loop and the #566 `--memory-mirror-once` flag.
+pub(crate) async fn build_credential(cfg: &ChatLoopConfig) -> Option<DelegateCredential> {
     let credential = match (&cfg.device_key_hex, &cfg.session_jwt) {
         (Some(key_hex), _) => {
             let key_file = std::env::var("AGENTKEYS_DEVICE_KEY_FILE")
@@ -276,7 +298,7 @@ async fn run(cfg: ChatLoopConfig) {
                 agentkeys_core::device_crypto::write_key_0600(&shellexpand_home(&key_file), key_hex)
             {
                 tracing::error!(error = %e, "#430 chat loop: cannot materialize the device key — chat disabled");
-                return;
+                return None;
             }
             match agentkeys_core::device_crypto::DeviceKey::load_or_generate(&key_file, false) {
                 Ok(k) => DelegateCredential::Local {
@@ -284,7 +306,7 @@ async fn run(cfg: ChatLoopConfig) {
                 },
                 Err(e) => {
                     tracing::error!(error = %e, "#430 chat loop: device key load failed — chat disabled");
-                    return;
+                    return None;
                 }
             }
         }
@@ -293,7 +315,7 @@ async fn run(cfg: ChatLoopConfig) {
                 tracing::error!(
                     "#552 chat loop: signer custody without a signer URL — chat disabled"
                 );
-                return;
+                return None;
             };
             let client = std::sync::Arc::new(
                 agentkeys_core::signer_client::DeviceSignerClient::new(signer_url),
@@ -317,7 +339,7 @@ async fn run(cfg: ChatLoopConfig) {
                              unrecoverable without a key; a sandbox re-create injects a \
                              fresh J1. Chat disabled."
                         );
-                        return;
+                        return None;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "#552 chat loop: signer bootstrap failed — retrying");
@@ -340,9 +362,22 @@ async fn run(cfg: ChatLoopConfig) {
         }
         (None, None) => {
             tracing::error!("#430 chat loop: no credential (key or session JWT) — chat disabled");
-            return;
+            return None;
         }
     };
+    Some(credential)
+}
+
+async fn run(cfg: ChatLoopConfig) {
+    let Some(credential) = build_credential(&cfg).await else {
+        return;
+    };
+    let credential = std::sync::Arc::new(credential);
+    // #566 — the distribution mirror shares the credential but keeps its own
+    // session + cadence, so neither loop can stall the other.
+    if let Some(mirror_cfg) = crate::memory_mirror::MirrorConfig::from_chat_env(cfg.clone()) {
+        crate::memory_mirror::spawn(mirror_cfg, credential.clone());
+    }
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(40))
         .build()
@@ -389,19 +424,7 @@ async fn run(cfg: ChatLoopConfig) {
             None,
             std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
         );
-        let client = match &credential {
-            DelegateCredential::Local { key } => client.with_device_key(key.clone()),
-            DelegateCredential::Signer {
-                client: signer,
-                bearer: jwt,
-                device_key_hash,
-                ..
-            } => client.with_remote_cap_pop(agentkeys_backend_client::RemoteCapPop {
-                signer: signer.clone(),
-                bearer: jwt.clone(),
-                device_key_hash: device_key_hash.clone(),
-            }),
-        };
+        let client = credential.configure_client(client);
 
         // 2. Subscribe cap (cached, #563) + one long-poll round.
         let sub_cap = match sub_caps.fresh() {
@@ -899,7 +922,7 @@ async fn vision_turn(
     Ok(reply)
 }
 
-async fn resolve_session(
+pub(crate) async fn resolve_session(
     http: &reqwest::Client,
     cfg: &ChatLoopConfig,
     credential: &DelegateCredential,
