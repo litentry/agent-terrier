@@ -13,6 +13,10 @@
 //! | `DescribeSandbox`   | status probe (live test / diagnostics)           |
 //! | `SetSandboxTimeout` | extend an active delegate's instance on resolve  |
 //! | `KillSandbox`       | teardown on unpair                               |
+//! | `PrecacheSandboxImages` | register `CR_IMAGE` in the veFaaS pre-cache (boot + refresh) |
+//! | `ListSandboxImages` | find the pre-cache entry for `CR_IMAGE` (#568)   |
+//! | `DeleteSandboxImage` | the 移除 half of [`VeFaasClient::refresh_precache`] (#568) |
+//! | `GetSandboxImagePrecacheTicket` | best-effort ticket peek during refresh (#568) |
 //!
 //! ## Per-delegate quota invariant
 //!
@@ -85,6 +89,21 @@ pub fn label_value(hash: &str) -> String {
 /// Instance statuses that count as "the delegate already has a sandbox" —
 /// reuse, never duplicate. `Paused` is veFaaS hibernation (wakes on traffic).
 const LIVE_STATUSES: &[&str] = &["ready", "running", "starting", "paused"];
+
+/// How long [`VeFaasClient::refresh_precache`] waits for a deleted pre-cache
+/// registration to actually VANISH from `ListSandboxImages` before declaring
+/// the delete silently failed (#568 — deletion is not synchronous, and a 200
+/// does not prove it happened).
+const DELETE_GONE_SECS: u64 = 60;
+
+/// How often [`VeFaasClient::refresh_precache`] polls `ListSandboxImages` while
+/// a preheat is running.
+const POLL_INTERVAL_SECS: u64 = 10;
+
+/// How often an in-flight preheat logs progress. A real preheat of the ~18 GB
+/// hermes image takes ~30 MINUTES (measured 2026-07-26: submitted 17:29 UTC,
+/// `success` at 17:58), so logging every poll produced ~180 identical lines.
+const PROGRESS_LOG_SECS: u64 = 120;
 
 /// Sandbox-lifecycle config, read ONCE at boot (never re-read env later —
 /// tests inject via [`VeFaasConfig::from_lookup`], the #258 posture).
@@ -216,6 +235,22 @@ impl SandboxInstance {
                 .get(LABEL_MANAGED_BY)
                 .is_some_and(|v| v == MANAGED_BY_VALUE)
     }
+}
+
+/// One pre-cache registration row from `ListSandboxImages` (#568) — the
+/// console 沙箱镜像 table. Field names are the live wire spelling (probed
+/// 2026-07-24); see [`VeFaasClient::list_sandbox_images`] for the contract.
+#[derive(Debug, Clone)]
+pub struct SandboxImage {
+    /// veFaaS-minted registration id (console 镜像ID, e.g. `gqgjhemfmf`) —
+    /// the `DeleteSandboxImage` handle. NOT a CR artifact id.
+    pub image_id: String,
+    /// The registered TAG ref (veFaaS cannot register digests).
+    pub image_url: String,
+    /// `"success"` = console 已预热; failures carry a reason.
+    pub precache_status: String,
+    pub precache_status_reason: String,
+    pub update_time: String,
 }
 
 /// Outcome of [`VeFaasClient::ensure_for_delegate`].
@@ -350,16 +385,21 @@ impl VeFaasClient {
         // faults underneath it — the missing IAM grant and the wrong field name).
         // NOTE for the operator: "already exists" says the URL is registered, NOT
         // that it holds the latest bits. A re-push to the SAME tag does not
-        // re-register; refresh it (console 镜像预热: 移除 then re-add) when the tag
-        // has moved, or the sandbox keeps booting the previously cached content.
+        // re-register; refresh it after every push — [`Self::refresh_precache`]
+        // (the `agentkeys-broker-server precache-refresh` verb, run by
+        // setup-image.sh post-push) — or the sandbox keeps booting the
+        // previously cached content. The List response exposes NO digest
+        // (probed 2026-07-24), so staleness is NOT detectable from the API:
+        // the boot precache cannot self-heal a moved tag, only register an
+        // absent one. Refresh is therefore an explicit post-push step.
         let v = match self.vefaas_call("PrecacheSandboxImages", body).await {
             Ok(v) => v,
             Err(e) if e.to_string().contains("already exists") => {
                 tracing::info!(
                     image = %self.config.image,
                     "veFaaS precache: image URL already registered (idempotent no-op). If the \
-                     tag was re-pushed since it was registered, refresh it in the console \
-                     (镜像预热 → 移除 → re-add) — a same-tag re-push does NOT re-cache."
+                     tag was re-pushed since it was registered, run `agentkeys-broker-server \
+                     precache-refresh` (#568) — a same-tag re-push does NOT re-cache."
                 );
                 return Ok(String::new());
             }
@@ -370,6 +410,381 @@ impl VeFaasClient {
             .or_else(|| v["TicketId"].as_str())
             .unwrap_or("")
             .to_string())
+    }
+
+    /// `ListSandboxImages` — the account's PRE-CACHE registrations (what the
+    /// console 沙箱镜像 page shows), NOT the CR catalog. Shapes confirmed live
+    /// 2026-07-24 (broker identity, after the #568 IAM grant):
+    ///
+    /// Request: `ImageType` is REQUIRED and LOWERCASE — `"private"` (our CR
+    /// images) or `"public"` (the vefaas-public catalog); an empty value 400s
+    /// `InvalidParameter: sandbox image type is empty`, a capitalized one 400s
+    /// `… type is invalid`. Optional `PageSize`/`PageNumber`/`Filters[{Key,Values[]}]`.
+    /// One page of 100 always suffices: the account pre-cache cap is 20 images.
+    ///
+    /// Response: `Result.Images[] { ImageGroup, ImageId, ImageUrl,
+    /// PrecacheStatus, PrecacheStatusReason, UpdateTime, Description? }` +
+    /// `Result.TotalCount`. `PrecacheStatus == "success"` is the console's
+    /// 已预热. There is NO digest/content field — which is why a same-tag
+    /// re-push is undetectable and [`Self::refresh_precache`] must delete +
+    /// re-add unconditionally.
+    pub async fn list_sandbox_images(&self) -> Result<Vec<SandboxImage>> {
+        let v = self
+            .vefaas_call(
+                "ListSandboxImages",
+                serde_json::json!({ "ImageType": "private", "PageSize": 100 }),
+            )
+            .await?;
+        Ok(parse_sandbox_images(&v))
+    }
+
+    /// `DeleteSandboxImage { ImageId, Region }` — remove one pre-cache
+    /// registration (the console 移除). Only the REGISTRATION: the CR content
+    /// is untouched and running sandboxes keep the image they froze at spawn.
+    ///
+    /// The failure mode never touches HTTP status (probed live 2026-07-24):
+    /// the call answers HTTP 200 with `Result.Status` = `"success"` OR
+    /// `"failed"`. **In-use pin**: while any LIVE sandbox instance runs this
+    /// image, `Result: { Status: "failed", RelatedSandboxApplications:
+    /// [<app>] }` — and nothing is deleted. (`DescribeSandbox.ImageInfo.Id`
+    /// carries the registration id an instance was spawned from — that
+    /// reference is the pin; the app's own configured image is NOT involved,
+    /// verified against an app configured with the stock AIO image.) Parsed
+    /// here into a real error naming the archive remediation. `Region` rides
+    /// the body like `PrecacheSandboxImages` requires (harmless if optional
+    /// here), and [`Self::refresh_precache`] additionally verifies the entry
+    /// actually disappears — a bare 200 proves nothing.
+    pub async fn delete_sandbox_image(&self, image_id: &str) -> Result<()> {
+        let v = self
+            .vefaas_call(
+                "DeleteSandboxImage",
+                serde_json::json!({ "ImageId": image_id, "Region": self.config.region }),
+            )
+            .await?;
+        tracing::info!(image_id = %image_id, response = %v, "DeleteSandboxImage");
+        if v["Result"]["Status"].as_str().unwrap_or_default() == "failed" {
+            let apps: Vec<String> = v["Result"]["RelatedSandboxApplications"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            bail!(
+                "DeleteSandboxImage {image_id} refused: Result.Status=failed — the registration \
+                 is IN USE by live sandbox instance(s) under application(s) {apps:?}. veFaaS \
+                 only frees a registration once no live instance runs it: ARCHIVE the \
+                 delegate(s) (parent-control, Touch ID) so their sandboxes are killed, then \
+                 re-run the refresh."
+            );
+        }
+        Ok(())
+    }
+
+    /// The live instances currently RUNNING `image` (their spawn-time
+    /// `ImageInfo.SourceImageUrl` matches) — the exact set that pins the
+    /// pre-cache registration against deletion. Used by
+    /// [`Self::refresh_precache`] to fail BEFORE the delete with a precise
+    /// who-to-archive list instead of after it with a bare app id.
+    pub async fn instances_running_image(&self, image: &str) -> Result<Vec<SandboxInstance>> {
+        let mut pinned = Vec::new();
+        for inst in self.list_instances::<&str>(None).await? {
+            if !inst.is_live() {
+                continue;
+            }
+            match self.describe_image_source(&inst.id).await {
+                Ok(Some(src)) if src.trim() == image.trim() => pinned.push(inst),
+                Ok(_) => {}
+                // A describe hiccup must not hide a pinner — the delete's own
+                // Status=failed parse + the GONE gate still backstop this.
+                Err(e) => {
+                    tracing::warn!(sandbox_id = %inst.id, error = %e, "DescribeSandbox failed while scanning for image pinners")
+                }
+            }
+        }
+        Ok(pinned)
+    }
+
+    /// `DescribeSandbox` → `Result.ImageInfo.SourceImageUrl` — the CR ref the
+    /// instance was spawned from (`ImageInfo.Image` is veFaaS's INTERNAL
+    /// synced copy, re-tagged by registration id: `…/vefaas-sync-image/
+    /// <acct>:<registration-id>` — the "precached copy" made concrete).
+    /// `None` when the instance runs the app's default image (no ImageInfo).
+    async fn describe_image_source(&self, sandbox_id: &str) -> Result<Option<String>> {
+        let v = self
+            .vefaas_call(
+                "DescribeSandbox",
+                serde_json::json!({
+                    "FunctionId": self.config.function_id,
+                    "SandboxId": sandbox_id,
+                }),
+            )
+            .await?;
+        Ok(v["Result"]["ImageInfo"]["SourceImageUrl"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from))
+    }
+
+    /// `GetSandboxImagePrecacheTicket { TicketId }` — the async-precache
+    /// ticket minted by `PrecacheSandboxImages`. Returns the raw JSON: the
+    /// refresh flow treats it as best-effort diagnostics only and polls
+    /// [`Self::list_sandbox_images`]' `PrecacheStatus` as the ground truth
+    /// (the ticket's field grammar is thinner than the entry row's).
+    pub async fn get_precache_ticket(&self, ticket_id: &str) -> Result<serde_json::Value> {
+        self.vefaas_call(
+            "GetSandboxImagePrecacheTicket",
+            serde_json::json!({ "TicketId": ticket_id }),
+        )
+        .await
+    }
+
+    /// #568 — the post-push precache REFRESH: List → Delete the entry for
+    /// `CR_IMAGE` → **verify it is GONE** → Precache → poll until the fresh
+    /// registration reports `PrecacheStatus success` (已预热) or `poll_timeout`
+    /// elapses.
+    ///
+    /// Exists because veFaaS spawns the PRE-CACHED copy of a tag, not what the
+    /// registry serves: a same-tag re-push is invisible, `PrecacheSandboxImages`
+    /// answers `already exists` without re-pulling, and the API exposes no
+    /// digest to compare — so the ONLY way to make a pushed tag live is
+    /// delete + re-add (preheat is tag-only and always pulls current content;
+    /// proven in the 2026-07-23 silent-chat incident, automated here).
+    ///
+    /// The GONE gate is load-bearing, not paranoia (first live run,
+    /// 2026-07-24): `DeleteSandboxImage` can answer 200 while the entry
+    /// SURVIVES (a body-`Region` miss deletes nothing, and deletion may lag).
+    /// Without the gate that run "succeeded" end-to-end — delete 200, re-add
+    /// `already exists`, poll saw the OLD entry's `success` with its
+    /// UNCHANGED UpdateTime — a false green over exactly the staleness this
+    /// verb exists to kill. Hence: the delete must be OBSERVED (entry absent
+    /// from List) before the re-add, and `already exists` after observed
+    /// absence is a hard error, never a shrug. Loud on every failure; a
+    /// mid-poll transient List error is retried until the deadline, never
+    /// treated as success.
+    pub async fn refresh_precache(&self, poll_timeout: std::time::Duration) -> Result<String> {
+        let image = self.config.image.trim();
+        if image.is_empty() {
+            bail!(
+                "CR_IMAGE is unset — nothing to refresh (spawns use the sandbox application's \
+                 console-configured image; set CR_IMAGE in the env family first)"
+            );
+        }
+
+        let rows = self.list_sandbox_images().await.context(
+            "ListSandboxImages failed — cannot see the current pre-cache registrations \
+             (is vefaas:ListSandboxImages granted to this identity? #568 policy)",
+        )?;
+        if let Some(row) = find_sandbox_image(&rows, image) {
+            // RESUME, never RESTART (#568 follow-up, 2026-07-26). An entry that
+            // is still non-terminal (`caching`) was registered by an EARLIER
+            // refresh — i.e. after the push — so it is already pulling the
+            // CURRENT tag content. Deleting it would throw that progress away
+            // and restart a ~30-minute preheat, which is precisely what the old
+            // timeout message told the operator to do. Resuming is what makes a
+            // timed-out run safely re-runnable.
+            //
+            // Edge case, stated so it is not a surprise: if you pushed NEW bits
+            // WHILE a preheat was already in flight, this waits on the older
+            // in-flight pull — let it finish, then run precache-refresh again to
+            // cycle onto the new content (that second run sees `success` and
+            // takes the delete + re-add path below).
+            if precache_terminal(&row.precache_status).is_none() {
+                tracing::info!(
+                    image_id = %row.image_id, status = %row.precache_status,
+                    updated = %row.update_time,
+                    "precache already IN FLIGHT for this URL — resuming the wait (no delete/re-add, \
+                     so an earlier run's progress is kept)"
+                );
+                return self.poll_until_preheated(image, poll_timeout).await;
+            }
+            // Pinner pre-flight: veFaaS refuses to free a registration while
+            // any LIVE instance runs it (Delete answers 200/Status=failed).
+            // Name the exact instances so the operator knows WHO to archive —
+            // archiving delegates is the ceremony's designed human step
+            // (Touch ID, parent-control), it just has to happen BEFORE the
+            // refresh, not after. TOCTOU between this check and the delete is
+            // covered by the delete's own Status=failed parse + the GONE gate.
+            let pinners = self.instances_running_image(image).await?;
+            if !pinners.is_empty() {
+                let who: Vec<String> = pinners
+                    .iter()
+                    .map(|i| {
+                        format!(
+                            "{} (delegate {}, expires {})",
+                            i.id,
+                            i.metadata
+                                .get(LABEL_DEVICE_KEY_HASH)
+                                .map(String::as_str)
+                                .unwrap_or("?"),
+                            i.expire_at
+                        )
+                    })
+                    .collect();
+                bail!(
+                    "precache refresh BLOCKED — {} live sandbox instance(s) still run {image}, \
+                     and veFaaS refuses to free a pinned registration: {}. ARCHIVE the \
+                     delegate(s) in parent-control (Touch ID — the ceremony's designed human \
+                     step, it just comes BEFORE the refresh), then re-run: \
+                     bash scripts/operator/setup-image.sh --push-only  (the build + push are \
+                     already done; --push-only re-pushes cheap layers and re-runs this refresh).",
+                    pinners.len(),
+                    who.join("; ")
+                );
+            }
+            tracing::info!(
+                image_id = %row.image_id, status = %row.precache_status,
+                updated = %row.update_time,
+                "precache refresh: deleting the existing registration (移除)"
+            );
+            self.delete_sandbox_image(&row.image_id)
+                .await
+                .with_context(|| format!("DeleteSandboxImage {} ({image})", row.image_id))?;
+
+            // GONE gate — a 200 from Delete proves nothing (see the method
+            // docs). Poll until the entry vanishes from List; if it survives
+            // the window, the delete silently failed and re-adding would
+            // `already exists` over the stale content.
+            let gone_deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(DELETE_GONE_SECS);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                match self.list_sandbox_images().await {
+                    Ok(rows) => {
+                        if find_sandbox_image(&rows, image).is_none() {
+                            tracing::info!("registration removed (observed absent) — re-adding");
+                            break;
+                        }
+                        tracing::info!("registration still listed after delete — waiting…");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ListSandboxImages poll failed — retrying")
+                    }
+                }
+                if std::time::Instant::now() >= gone_deadline {
+                    bail!(
+                        "DeleteSandboxImage answered 200 but the registration for {image} is \
+                         STILL LISTED after {DELETE_GONE_SECS}s — the delete silently failed \
+                         (this is the false-green trap the first live run hit; the pre-cache \
+                         still serves the PREVIOUS content). Nothing was harmed, but the \
+                         refresh did NOT happen — investigate DeleteSandboxImage's params \
+                         (body Region?) before trusting this stack's image cycle."
+                    );
+                }
+            }
+        } else {
+            tracing::info!(
+                image = %image,
+                "precache refresh: no existing registration for this URL — fresh registration"
+            );
+        }
+
+        let ticket = self
+            .precache_image()
+            .await
+            .context("PrecacheSandboxImages (the re-add half) failed — the entry was deleted; re-run this refresh (or restart the broker: boot re-registers) so spawns don't 404 ResourceNotFound")?;
+        if ticket.is_empty() {
+            // precache_image maps `already exists` to Ok("") — but the GONE
+            // gate above OBSERVED the registration absent, so an
+            // `already exists` here means veFaaS resurrected/never-freed the
+            // old entry and the re-pull did NOT happen. False green — refuse.
+            bail!(
+                "PrecacheSandboxImages answered `already exists` AFTER the registration was \
+                 observed absent — veFaaS did not accept a fresh registration for {image}, so \
+                 the cached content was NOT refreshed. Re-run precache-refresh; if it \
+                 persists, check the entry in the console (沙箱镜像) and the CR instance."
+            );
+        }
+        tracing::info!(ticket = %ticket, "precache re-add submitted — polling until Preheated (已预热)");
+        // Best-effort shape capture + early diagnostics; never load-bearing.
+        match self.get_precache_ticket(&ticket).await {
+            Ok(v) => {
+                tracing::info!(ticket = %ticket, response = %v, "GetSandboxImagePrecacheTicket")
+            }
+            Err(e) => {
+                tracing::warn!(ticket = %ticket, error = %e, "GetSandboxImagePrecacheTicket failed (non-fatal — the List poll is the ground truth)")
+            }
+        }
+
+        self.poll_until_preheated(image, poll_timeout).await
+    }
+
+    /// Poll `ListSandboxImages` until the registration for `image` reaches a
+    /// terminal `PrecacheStatus` — shared by the fresh delete+re-add path and
+    /// the resume path, so both report identically.
+    ///
+    /// `ListSandboxImages` is the ground truth (the ticket's grammar is
+    /// thinner), and a transient List error is retried rather than treated as
+    /// failure — only the deadline exits loud.
+    async fn poll_until_preheated(
+        &self,
+        image: &str,
+        poll_timeout: std::time::Duration,
+    ) -> Result<String> {
+        let started = std::time::Instant::now();
+        let deadline = started + poll_timeout;
+        let mut last_status = String::from("(entry not observed yet)");
+        let mut last_log: Option<std::time::Instant> = None;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+            match self.list_sandbox_images().await {
+                Ok(rows) => {
+                    if let Some(row) = find_sandbox_image(&rows, image) {
+                        last_status = row.precache_status.clone();
+                        match precache_terminal(&row.precache_status) {
+                            Some(true) => {
+                                tracing::info!(
+                                    image_id = %row.image_id, updated = %row.update_time,
+                                    elapsed_s = started.elapsed().as_secs(),
+                                    "precache COMPLETE — registration preheated (已预热)"
+                                );
+                                return Ok(row.image_id.clone());
+                            }
+                            Some(false) => bail!(
+                                "precache FAILED — veFaaS reports PrecacheStatus={} \
+                                 reason={:?} for {image}. Fix the cause (CR instance running? \
+                                 image pullable?) and re-run precache-refresh.",
+                                row.precache_status,
+                                row.precache_status_reason
+                            ),
+                            None => {
+                                if last_log.is_none_or(|t| {
+                                    t.elapsed() >= std::time::Duration::from_secs(PROGRESS_LOG_SECS)
+                                }) {
+                                    tracing::info!(
+                                        status = %row.precache_status,
+                                        elapsed_s = started.elapsed().as_secs(),
+                                        timeout_s = poll_timeout.as_secs(),
+                                        "precache in flight… (a full image preheat runs ~30 min)"
+                                    );
+                                    last_log = Some(std::time::Instant::now());
+                                }
+                            }
+                        }
+                    } else {
+                        last_status = "(entry not listed yet)".to_string();
+                        tracing::info!("precache entry not listed yet…");
+                    }
+                }
+                // Transient List failures must not abort a long preheat wait —
+                // keep polling until the deadline; the deadline is the loud exit.
+                Err(e) => tracing::warn!(error = %e, "ListSandboxImages poll failed — retrying"),
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!(
+                    "precache refresh TIMED OUT after {}s — last observed PrecacheStatus: \
+                     {last_status}. A full preheat of this image is SLOW: ~30 min measured \
+                     (2026-07-26). NOTHING IS BROKEN AND NOTHING WAS LOST — the push succeeded \
+                     and the entry keeps preheating server-side. Just re-run precache-refresh: \
+                     it RESUMES the wait on an in-flight entry (it will NOT delete/restart a \
+                     preheat that is still caching). Raise --timeout-secs to wait longer in one \
+                     go; watch it meanwhile in the console (沙箱镜像) or with \
+                     `ve vefaas ListSandboxImages --ImageType private`.",
+                    poll_timeout.as_secs()
+                );
+            }
+        }
     }
 
     /// V4-sign + POST one veFaaS action; surfaces the VE `{Code, Message}`
@@ -764,6 +1179,47 @@ fn pick_live_for_device<'a>(
         .find(|i| i.is_live() && i.labeled_for(device_key_hash))
 }
 
+/// Parse `Result.Images[]` rows (#568) — the live shape pinned in
+/// [`VeFaasClient::list_sandbox_images`]'s docs.
+fn parse_sandbox_images(v: &serde_json::Value) -> Vec<SandboxImage> {
+    let Some(list) = v["Result"]["Images"].as_array() else {
+        return Vec::new();
+    };
+    let s = |x: &serde_json::Value| x.as_str().unwrap_or_default().to_string();
+    list.iter()
+        .map(|r| SandboxImage {
+            image_id: s(&r["ImageId"]),
+            image_url: s(&r["ImageUrl"]),
+            precache_status: s(&r["PrecacheStatus"]),
+            precache_status_reason: s(&r["PrecacheStatusReason"]),
+            update_time: s(&r["UpdateTime"]),
+        })
+        .collect()
+}
+
+/// The registration row for `image` (exact TAG-ref match — veFaaS registers
+/// the URL verbatim, so no normalization beyond trim).
+fn find_sandbox_image<'a>(rows: &'a [SandboxImage], image: &str) -> Option<&'a SandboxImage> {
+    let want = image.trim();
+    rows.iter().find(|r| r.image_url.trim() == want)
+}
+
+/// Classify a `PrecacheStatus`: `Some(true)` = preheated (console 已预热),
+/// `Some(false)` = terminally failed, `None` = still in flight. Only
+/// `"success"` was observed live for the happy path; the aliases keep a
+/// vocabulary drift from stalling the poll, and anything unrecognized keeps
+/// polling until the deadline (loud timeout, never silent success).
+fn precache_terminal(status: &str) -> Option<bool> {
+    let s = status.trim().to_ascii_lowercase();
+    if ["success", "succeeded", "preheated"].contains(&s.as_str()) {
+        Some(true)
+    } else if s.contains("fail") || s.contains("error") || s == "canceled" || s == "cancelled" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,6 +1368,60 @@ mod tests {
         assert_eq!(m[LABEL_DEVICE_KEY_HASH], "11");
         assert_eq!(m[LABEL_ACTOR_OMNI], "aa");
         assert_eq!(m[LABEL_MANAGED_BY], MANAGED_BY_VALUE);
+    }
+
+    #[test]
+    fn parse_sandbox_images_reads_the_probed_live_shape() {
+        // The EXACT response observed live 2026-07-24 (ListSandboxImages,
+        // ImageType=private, broker identity) — the #568 contract pin.
+        let v = serde_json::json!({
+            "ResponseMetadata": { "Action": "ListSandboxImages", "Region": "cn-beijing" },
+            "Result": { "Images": [ {
+                "ImageGroup": "",
+                "ImageId": "gqgjhemfmf",
+                "ImageUrl": "agent-terrier-1-cn-beijing.cr.volces.com/agentkeys/hermes-sandbox:latest",
+                "PrecacheStatus": "success",
+                "PrecacheStatusReason": "",
+                "UpdateTime": "2026-07-23 12:13:50.112 +0000 UTC"
+            } ], "TotalCount": 1 }
+        });
+        let rows = parse_sandbox_images(&v);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].image_id, "gqgjhemfmf");
+        assert!(rows[0].image_url.ends_with("hermes-sandbox:latest"));
+        assert_eq!(rows[0].precache_status, "success");
+        assert!(parse_sandbox_images(&serde_json::json!({"Result": {}})).is_empty());
+    }
+
+    #[test]
+    fn find_sandbox_image_matches_exact_tag_ref() {
+        let rows = vec![SandboxImage {
+            image_id: "id1".into(),
+            image_url: "cr.example/ns/repo:latest".into(),
+            precache_status: "success".into(),
+            precache_status_reason: String::new(),
+            update_time: String::new(),
+        }];
+        assert!(find_sandbox_image(&rows, " cr.example/ns/repo:latest ").is_some());
+        assert!(find_sandbox_image(&rows, "cr.example/ns/repo:other").is_none());
+        // A digest ref never matches a tag registration — veFaaS cannot hold one.
+        assert!(find_sandbox_image(&rows, "cr.example/ns/repo@sha256:abcd").is_none());
+    }
+
+    #[test]
+    fn precache_terminal_classifies_status_vocabulary() {
+        assert_eq!(precache_terminal("success"), Some(true));
+        assert_eq!(precache_terminal("SUCCESS"), Some(true));
+        assert_eq!(precache_terminal("failed"), Some(false));
+        assert_eq!(precache_terminal("PullError"), Some(false));
+        // Unknown / in-flight vocab keeps polling — timeout is the loud exit.
+        // `caching` is the REAL observed in-flight value (live 2026-07-26); it
+        // must classify as in-flight both to keep polling AND so the resume
+        // path in refresh_precache waits on it instead of deleting it.
+        assert_eq!(precache_terminal("caching"), None);
+        assert_eq!(precache_terminal(""), None);
+        assert_eq!(precache_terminal("running"), None);
+        assert_eq!(precache_terminal("pending"), None);
     }
 
     #[test]

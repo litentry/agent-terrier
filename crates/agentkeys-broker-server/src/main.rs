@@ -61,6 +61,25 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+
+    /// #568 — one-shot refresh of the veFaaS pre-cache entry for CR_IMAGE
+    /// (List → Delete → Precache → poll until Preheated/已预热). Run after
+    /// every image push: veFaaS spawns the PRE-CACHED copy of a tag, so a
+    /// same-tag re-push is invisible until this runs (the 2026-07-23
+    /// silent-chat trap). Reads the SAME env family as the broker unit
+    /// (setup-image.sh reconstructs it from the rendered unit); needs the
+    /// #568 vefaas image actions on the broker VE identity. Exits 0 only
+    /// once the entry reports Preheated.
+    PrecacheRefresh {
+        /// Max seconds to wait for the entry to reach Preheated. Default 1h:
+        /// a real preheat of the hermes image took ~30 MINUTES (measured
+        /// 2026-07-26 — submitted 17:29 UTC, `success` 17:58), so the old
+        /// 600 s default timed out on a perfectly healthy preheat. Exceeding
+        /// this is not fatal — a re-run RESUMES the wait rather than
+        /// restarting the preheat.
+        #[arg(long, default_value_t = 3600)]
+        timeout_secs: u64,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -81,8 +100,12 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    if let Some(Command::Keygen { purpose, out }) = args.command {
-        return run_keygen(purpose, out);
+    match args.command {
+        Some(Command::Keygen { purpose, out }) => return run_keygen(purpose, out),
+        Some(Command::PrecacheRefresh { timeout_secs }) => {
+            return run_precache_refresh(timeout_secs).await
+        }
+        None => {}
     }
 
     let config = BrokerConfig::from_env()?;
@@ -206,7 +229,10 @@ async fn main() -> anyhow::Result<()> {
     // `ResourceNotFound` (image not in the pre-cache list) on a freshly-pushed
     // image. Fire-and-forget: veFaaS precache is async (returns a ticket; the
     // console shows "Preheated"), so it never blocks boot. VE-only — from_env()
-    // is None off the VE stack; a re-pushed image is re-warmed on every restart.
+    // is None off the VE stack. REGISTRATION only (#568): an already-registered
+    // tag answers `already exists` and is NOT re-pulled, so this self-heals an
+    // ABSENT entry but never refreshes a re-pushed one — that is the
+    // `precache-refresh` verb's job (setup-image.sh runs it after every push).
     if let Ok(Some(vefaas)) = agentkeys_broker_server::ve_faas::VeFaasClient::from_env() {
         tokio::spawn(async move {
             match vefaas.precache_image().await {
@@ -398,6 +424,31 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("shutdown signal received; draining in-flight requests");
+}
+
+/// #568 — the `precache-refresh` verb body. Deliberately does NOT load
+/// BrokerConfig (no chain profile, no keypairs): the whole job is the veFaaS
+/// image pre-cache, so it needs exactly the VeFaasClient env family and
+/// nothing else — runnable on the broker host while the unit keeps serving.
+async fn run_precache_refresh(timeout_secs: u64) -> anyhow::Result<()> {
+    let client = agentkeys_broker_server::ve_faas::VeFaasClient::from_env()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "precache-refresh needs the VE sandbox env family (SANDBOX_FUNCTION_ID + \
+             SANDBOX_GATEWAY_URL + VOLCENGINE_ACCESS_KEY/_SECRET_KEY + CR_IMAGE) — run it \
+             under the broker unit's env (setup-image.sh reconstructs it from the rendered \
+             unit's Environment=/EnvironmentFile= lines). Not a VE sandbox stack? There is \
+             nothing to refresh."
+        )
+    })?;
+    let image = client.config.image.clone();
+    let image_id = client
+        .refresh_precache(std::time::Duration::from_secs(timeout_secs))
+        .await?;
+    // stdout is the operator/script contract (tracing goes to stderr).
+    println!(
+        "precache-refresh OK — {image} re-registered (ImageId {image_id}) and Preheated (已预热)"
+    );
+    Ok(())
 }
 
 fn run_keygen(purpose: KeygenPurpose, out: PathBuf) -> anyhow::Result<()> {

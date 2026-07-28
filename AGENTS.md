@@ -55,6 +55,52 @@ Use `jj` (Jujutsu) for all version control. Never use raw `git` commands.
 ## Diagnosis-before-edit policy
 Before changing any file in response to a reported failure, **reproduce the failure locally** and isolate the layer (shell quoting, client tooling, doc command, broker code, network). If the cause is local (shell, copy-paste, env var), respond with the one-line fix and let the user run it — do NOT edit code or docs. Only edit when the cause is in the repo. Keep the response concise: failing command, root cause, fix command — nothing else.
 
+## Evidence policy — never invent a fact; measure it, cite it, or label it a guess
+
+**Every claim about how an external system behaves must carry its source.** External =
+a cloud provider's quotas/limits/rate-limits/pricing, an API's semantics, an error
+string's meaning, a vendor's retry or reset window, another team's code. For each such
+claim, exactly one of these must be true, and it must be VISIBLE in the sentence:
+
+1. **Measured** — you ran something; give the command and the output that produced it.
+2. **Cited** — a URL or doc reference (`https://www.volcengine.com/docs/6420/78488`).
+3. **Labeled a hypothesis** — say "hypothesis / unverified / I have not confirmed this".
+
+A plausible mechanism you reasoned your way to is a **hypothesis**, not a fact, no matter
+how well it fits the evidence. State it as one. "I think X because Y, unverified" is
+always acceptable; X asserted flatly is not.
+
+**Why this is a hard rule (real incident, #568).** A CR push kept failing
+`request frequency is too high`. The claim shipped to the operator was that a quota
+"rolls over in hours / next day", with a recommendation to wait and retry. There was no
+such document. VE's [使用限制](https://www.volcengine.com/docs/6420/78488) publishes **no
+push rate limit at all**, and when the quotas were finally measured the account was at
+**2 % of storage, 1 % of repos, 1 % of tags** — nothing was exhausted. The invented
+number sent the operator into two wasted retry cycles instead of the real remedy (a
+support ticket or a tier upgrade), and it was only caught because they asked "where does
+this come from?". **The cost of an invented fact is not being wrong; it is that everyone
+downstream plans around it.**
+
+Practical rules that follow:
+
+- **Numbers need sources.** "50 Mbps", "500 GiB", "resets hourly", "supports N" — cite or
+  measure. Never round-trip a number you inferred from behavior into a stated limit.
+- **Before blaming a quota, MEASURE the quota.** The usage was one API call away
+  (`ve cr ListTags … | jq '[.Result.Items[].Size]|add'`) and would have killed the theory
+  in one step.
+- **"It should work if you wait" is a claim.** It needs a documented window, or it is a
+  guess and must say so.
+- **When a claim turns out wrong, correct it EVERYWHERE it was written** — code comments,
+  runbooks, `AGENTS*.md`, skills, issue bodies — not just in the reply where it was
+  caught. A retracted claim that survives in a comment will be believed again.
+- **Absence of documentation is itself a finding** — "VE documents no push rate limit; this
+  is undocumented server-side behavior" is a useful, honest statement. "The limit is N"
+  when you never found N is not.
+
+This binds every agent working in this repo, and is called out for **Opus 5** in
+particular: fluent, confident prose makes an invented mechanism read exactly like a
+measured one, so the burden is on the writing to mark which it is.
+
 ## No-silent-override policy
 **Don't silently override. Whenever you reach for an override, stop and ask whether you've ignored the real reason.** An "override" — an env-var override, a fallback default, a shim, a post-resolve mutation, a "just set it here too" — that masks a root cause is a bug-in-waiting: it papers over a divergence (one component reading a different source, a value not propagating, a missing wiring) instead of fixing it where it lives.
 
