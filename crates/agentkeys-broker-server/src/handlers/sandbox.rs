@@ -147,6 +147,7 @@ pub async fn provision_delegate_envs(
 /// Omnis are canonicalized to `0x`+lowercase-hex; the channel worker URL is an
 /// OPTIONAL override — absent, the sandbox DERIVES `channel.<zone>` from the
 /// broker URL (worker URLs are derived, never a required pre-composed env).
+#[allow(clippy::too_many_arguments)] // the ONE env-assembly owner — a param per env source
 pub(crate) fn delegate_identity_envs(
     actor_omni: &str,
     operator_omni: &str,
@@ -155,6 +156,7 @@ pub(crate) fn delegate_identity_envs(
     chat_channel_id: &str,
     broker_url: Option<&str>,
     channel_worker_override: Option<&str>,
+    mgmt_token: Option<&str>,
 ) -> Vec<(String, String)> {
     use agentkeys_protocol::sandbox_env as env_names;
     let norm0x = |o: &str| format!("0x{}", crate::handlers::accept::norm_omni(o));
@@ -162,6 +164,12 @@ pub(crate) fn delegate_identity_envs(
         (env_names::ACTOR_OMNI.to_string(), norm0x(actor_omni)),
         (env_names::OPERATOR_OMNI.to_string(), norm0x(operator_omni)),
     ];
+    // #577 — the sandbox-management bearer: enables the in-sandbox daemon's
+    // session export/import surface for the one-click image update. Derived,
+    // never stored (see `sandbox_mgmt_token`).
+    if let Some(token) = mgmt_token.filter(|t| !t.trim().is_empty()) {
+        envs.push((env_names::MGMT_TOKEN.to_string(), token.to_string()));
+    }
     if let Some(secret) = k10_secret_hex.filter(|s| !s.trim().is_empty()) {
         envs.push((env_names::DEVICE_KEY_HEX.to_string(), secret.to_string()));
     }
@@ -187,6 +195,33 @@ pub(crate) fn delegate_identity_envs(
         ));
     }
     envs
+}
+
+/// #577 — the per-delegate sandbox-management bearer: DERIVED from the
+/// broker's session signing key + the delegate's `device_key_hash`, so the
+/// broker can re-compute it at any later update call and NOTHING new sits at
+/// rest (D2). Injected as `AGENTKEYS_SANDBOX_MGMT_TOKEN` at every create; the
+/// in-sandbox daemon string-compares it as the bearer gating its session
+/// export/import surface. keccak256 is a sponge — no length-extension issue
+/// with the `secret || payload` shape. Rotating the broker session keypair
+/// orphans PRE-rotation instances' tokens (their export then 401s and the
+/// update proceeds without a session hand-off, surfaced — never fatal).
+pub(crate) fn sandbox_mgmt_token(
+    session_keypair: &crate::jwt::session::SessionKeypair,
+    device_key_hash: &str,
+) -> String {
+    let norm = device_key_hash
+        .trim()
+        .trim_start_matches("0x")
+        .to_lowercase();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(session_keypair.private_key_pem.as_bytes());
+    buf.extend_from_slice(b"agentkeys-sandbox-mgmt-v1:");
+    buf.extend_from_slice(norm.as_bytes());
+    format!(
+        "smt1_{}",
+        hex::encode(agentkeys_core::device_crypto::keccak256(&buf))
+    )
 }
 
 /// #552 — mint the J1_agent a signer-custodied delegate sandbox boots with
@@ -301,6 +336,7 @@ pub async fn ensure_for_delegate(
                     &c.chat_channel_id,
                     issuer.as_deref(),
                     worker_override.as_deref(),
+                    Some(&sandbox_mgmt_token(&state.session_keypair, device_key_hash)),
                 ),
                 c.label.clone(),
             )
@@ -531,8 +567,11 @@ async fn emit_spawn(
 
 /// Same best-effort posture + worker URL resolution as
 /// [`audit_emit`](crate::handlers::audit_emit): the lifecycle event already
-/// happened, so an append failure WARNs and never fails the caller.
-async fn append_best_effort(env: Result<AuditEnvelope, agentkeys_core::audit::AuditError>) {
+/// happened, so an append failure WARNs and never fails the caller. Shared
+/// with the #577 update handler (its teardown emit mirrors the unpair one).
+pub(crate) async fn append_best_effort(
+    env: Result<AuditEnvelope, agentkeys_core::audit::AuditError>,
+) {
     let env = match env {
         Ok(e) => e,
         Err(e) => {
@@ -624,6 +663,7 @@ mod tests {
             "opchat-watchdog",
             Some("https://broker.example.cn"),
             None,
+            Some("smt1_feed"),
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         for required in agentkeys_protocol::sandbox_env::CHAT_REQUIRED {
@@ -648,6 +688,36 @@ mod tests {
         assert_eq!(get("AGENTKEYS_CHAT_CHANNEL_ID"), "opchat-watchdog");
         assert_eq!(get("AGENTKEYS_BROKER_URL"), "https://broker.example.cn");
         assert!(!keys.contains(&"AGENTKEYS_CHANNEL_WORKER_URL"));
+        // #577 — the management bearer rides every armed create.
+        assert_eq!(get("AGENTKEYS_SANDBOX_MGMT_TOKEN"), "smt1_feed");
+    }
+
+    /// #577 — the mgmt token is a pure derivation: stable per (key, delegate)
+    /// so the broker can re-compute it at update time, `0x`/case-insensitive
+    /// on the hash, distinct across delegates, never stored.
+    #[test]
+    fn sandbox_mgmt_token_is_deterministic_normalized_and_per_delegate() {
+        let dir =
+            std::env::temp_dir().join(format!("agentkeys-mgmt-token-test-{}", std::process::id()));
+        let kp = crate::jwt::session::SessionKeypair::generate_and_persist(
+            &dir.join("session-keypair.json"),
+        )
+        .unwrap();
+        let a = sandbox_mgmt_token(&kp, &format!("0x{}", "AB".repeat(32)));
+        let b = sandbox_mgmt_token(&kp, &"ab".repeat(32));
+        assert_eq!(a, b, "0x-prefix and case must not fork the token");
+        assert!(a.starts_with("smt1_"), "{a}");
+        assert_ne!(a, sandbox_mgmt_token(&kp, &"cd".repeat(32)));
+        let kp2 = crate::jwt::session::SessionKeypair::generate_and_persist(
+            &dir.join("session-keypair-2.json"),
+        )
+        .unwrap();
+        assert_ne!(
+            a,
+            sandbox_mgmt_token(&kp2, &"ab".repeat(32)),
+            "a different broker key must derive a different token"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A context-less assembly (no K10 / channel / broker URL) injects only the
@@ -662,11 +732,13 @@ mod tests {
             "",
             None,
             Some("https://channel.example.cn/"),
+            None,
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         assert!(!keys.contains(&"AGENTKEYS_DEVICE_KEY_HEX"));
         assert!(!keys.contains(&"AGENTKEYS_CHAT_CHANNEL_ID"));
         assert!(!keys.contains(&"AGENTKEYS_BROKER_URL"));
+        assert!(!keys.contains(&"AGENTKEYS_SANDBOX_MGMT_TOKEN"));
         assert_eq!(
             envs.iter()
                 .find(|(k, _)| k == "AGENTKEYS_CHANNEL_WORKER_URL")

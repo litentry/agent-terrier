@@ -1400,7 +1400,7 @@ export function App() {
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
         )}
         {page === 'delegates' && (
-          <DelegatesPage requests={pairingRequests.filter((r) => !r.isDevice)} actors={actors.filter((a) => !actorIsChannelEndpoint(a))} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} onNewAgent={() => setSpawnOpen(true)} onArchive={(a) => setArchiveActor(a)} deviceRequestCount={pairingRequests.filter((r) => r.isDevice).length} onGoDevices={() => go('devices')} />
+          <DelegatesPage requests={pairingRequests.filter((r) => !r.isDevice)} actors={actors.filter((a) => !actorIsChannelEndpoint(a))} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onUnpair={handleRevokeDevice} onNewAgent={() => setSpawnOpen(true)} onArchive={(a) => setArchiveActor(a)} deviceRequestCount={pairingRequests.filter((r) => r.isDevice).length} onGoDevices={() => go('devices')} showToast={showToast} />
         )}
         {page === 'devices' && (
           <DevicesPage

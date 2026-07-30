@@ -32,6 +32,8 @@ import type {
   SubmitResult,
 } from './types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
+import type { ApiAgentUpdateResult } from '@/lib/generated/ApiAgentUpdateResult';
+import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditResponse';
 import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
@@ -346,6 +348,17 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async archiveSubmit(_body: unknown): Promise<Result<SubmitAcceptUserOpResponse>> {
+    return disconnected();
+  }
+
+  async agentUpdate(_input: {
+    deviceKeyHash: string;
+    force?: boolean;
+  }): Promise<Result<ApiAgentUpdateResult>> {
+    return disconnected();
+  }
+
+  async agentImageStatus(_deviceKeyHashes: string[]): Promise<Result<ApiImageStatus>> {
     return disconnected();
   }
 

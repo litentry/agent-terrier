@@ -1,4 +1,6 @@
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
+import type { ApiAgentUpdateResult } from '@/lib/generated/ApiAgentUpdateResult';
+import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditResponse';
 import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
@@ -745,6 +747,17 @@ export interface AgentKeysClient {
     memoryNs?: string;
   }): Promise<Result<BuildArchiveUserOpResponse>>;
   archiveSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse>>;
+  /** #577 — one-click in-place image update (kill + re-create on the durable
+   *  spawn context; same identity/channel; no chain write, no Touch ID) with a
+   *  best-effort Hermes-home hand-off. Slow (a sandbox create takes tens of
+   *  seconds) — show busy UI. */
+  agentUpdate(input: {
+    deviceKeyHash: string;
+    force?: boolean;
+  }): Promise<Result<ApiAgentUpdateResult>>;
+  /** #577 — which delegates run OLDER image bits than the current pre-cache
+   *  registration (the "Update available" badge source). */
+  agentImageStatus(deviceKeyHashes: string[]): Promise<Result<ApiImageStatus>>;
   /** Kept namespaces of archived delegates, inheritable by AT MOST one live
    *  delegate (#429 bookkeeping — served from the #424 manifest). */
   inheritableNamespaces(): Promise<Result<InheritableNamespace[]>>;

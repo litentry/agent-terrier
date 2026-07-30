@@ -424,6 +424,18 @@ impl EcsSandboxClient {
         })
     }
 
+    /// #577 — the delegate's LIVE tasks (the `kill_for_device` match without
+    /// the stop): what an in-place update reports before teardown.
+    pub async fn live_for_device(&self, device_key_hash: &str) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .list_managed_tasks()
+            .await?
+            .iter()
+            .filter(|t| t.labeled_for(device_key_hash) && t.is_live())
+            .map(|t| (t.arn.clone(), t.status.clone()))
+            .collect())
+    }
+
     /// Teardown on unpair: stop every live broker-managed task tagged for the
     /// device. Returns the stopped ARNs (empty = valid no-op).
     pub async fn kill_for_device(&self, device_key_hash: &str) -> Result<Vec<String>> {

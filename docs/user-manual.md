@@ -253,6 +253,32 @@ each paired actor's name, delegate-vs-device kind and granted service names in
 your encrypted config store, so devices stay on the devices page with their
 channel chips intact across app and broker restarts (#424).
 
+## Updating an agent to a new runtime image (parent-control, #577)
+
+When a new agent runtime image ships, the Delegates page shows an
+**"update available"** chip on each agent still running the old one, plus an
+**"update N stale agents"** button when several are behind. One click on
+**"⟳ update runtime"** (no Touch ID — nothing changes on chain) replaces the
+agent's sandbox in place:
+
+- **Kept:** its identity, permissions, chat channel, persona (SOUL.md), skills
+  docs, and everything in its canonical memory + config (those live in the
+  workers and never leave them).
+- **Restarts:** the conversation it was holding in its head. The live session
+  is in-memory in the runtime, so the updated agent greets you fresh — the
+  same thing that already happens when a sandbox reaches its normal lifetime.
+- **Guarded:** if the agent has background jobs running, the update refuses
+  and tells you — click **"update anyway"** only if losing their output is
+  acceptable.
+
+The button also works as a plain "respawn now" for an agent whose sandbox has
+expired. **Archive** remains the separate, Touch-ID-gated action for actually
+retiring an agent — updating never archives.
+
+Updating an agent that was spawned before this feature still works; the app
+just notes that its old runtime couldn't hand its on-disk files over
+("session export unavailable") — that heals from the next update onward.
+
 ## Editing your agent's persona + config files (parent-control, #390)
 
 A bound agent's actor page carries an **agent** panel showing the files that

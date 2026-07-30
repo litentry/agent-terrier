@@ -79,6 +79,19 @@ enum Command {
         /// restarting the preheat.
         #[arg(long, default_value_t = 3600)]
         timeout_secs: u64,
+
+        /// #577 — KILL the live sandbox instances that pin the registration
+        /// before deleting it, instead of bailing with the who-to-archive
+        /// list. Kill-only: the on-chain bindings stay ACTIVE, so once the
+        /// preheat completes each delegate comes back on the NEW image via
+        /// one parent-control "update runtime" click (same identity, grants,
+        /// channel — no archive ceremony). The killed instances' in-RAM
+        /// conversations die with them (they would under archive too); their
+        /// on-disk Hermes home is NOT handed off on this path — the
+        /// registration must be free for the ~30-min preheat, longer than a
+        /// snapshot may sit in broker RAM (D2).
+        #[arg(long, default_value_t = false)]
+        kill_pinners: bool,
     },
 }
 
@@ -102,9 +115,10 @@ async fn main() -> anyhow::Result<()> {
 
     match args.command {
         Some(Command::Keygen { purpose, out }) => return run_keygen(purpose, out),
-        Some(Command::PrecacheRefresh { timeout_secs }) => {
-            return run_precache_refresh(timeout_secs).await
-        }
+        Some(Command::PrecacheRefresh {
+            timeout_secs,
+            kill_pinners,
+        }) => return run_precache_refresh(timeout_secs, kill_pinners).await,
         None => {}
     }
 
@@ -430,7 +444,7 @@ async fn shutdown_signal() {
 /// BrokerConfig (no chain profile, no keypairs): the whole job is the veFaaS
 /// image pre-cache, so it needs exactly the VeFaasClient env family and
 /// nothing else — runnable on the broker host while the unit keeps serving.
-async fn run_precache_refresh(timeout_secs: u64) -> anyhow::Result<()> {
+async fn run_precache_refresh(timeout_secs: u64, kill_pinners: bool) -> anyhow::Result<()> {
     let client = agentkeys_broker_server::ve_faas::VeFaasClient::from_env()?.ok_or_else(|| {
         anyhow::anyhow!(
             "precache-refresh needs the VE sandbox env family (SANDBOX_FUNCTION_ID + \
@@ -442,7 +456,7 @@ async fn run_precache_refresh(timeout_secs: u64) -> anyhow::Result<()> {
     })?;
     let image = client.config.image.clone();
     let image_id = client
-        .refresh_precache(std::time::Duration::from_secs(timeout_secs))
+        .refresh_precache(std::time::Duration::from_secs(timeout_secs), kill_pinners)
         .await?;
     // stdout is the operator/script contract (tracing goes to stderr).
     println!(

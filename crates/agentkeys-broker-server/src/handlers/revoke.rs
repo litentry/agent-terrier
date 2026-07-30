@@ -87,11 +87,14 @@ pub fn parse_revoke(req: &BuildRevokeRequest) -> Result<([u8; 32], Vec<[u8; 32]>
 }
 
 /// The `getDevice` words the fleet filter reads (of the 11-word `DeviceEntry`):
-/// operatorOmni (w0), tier (w6), registeredAt (w8, 0 ⇒ never registered),
-/// revoked (w10).
+/// operatorOmni (w0), actorOmni (w1), tier (w6), registeredAt (w8, 0 ⇒ never
+/// registered), revoked (w10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceProbe {
     pub operator_omni: [u8; 32],
+    /// The binding's HDKD actor omni (#577 — the update path re-labels the
+    /// re-created sandbox with the CHAIN-read actor, per D1).
+    pub actor_omni: [u8; 32],
     pub tier: u8,
     pub registered: bool,
     pub revoked: bool,
@@ -111,6 +114,7 @@ pub fn parse_device_probe(raw: &str) -> Result<DeviceProbe, String> {
     };
     Ok(DeviceProbe {
         operator_omni: word(0)?,
+        actor_omni: word(1)?,
         tier: word(6)?[31],
         registered: word(8)? != [0u8; 32],
         revoked: word(10)?[31] != 0,
@@ -352,6 +356,7 @@ mod tests {
     fn probe(operator: u8, tier: u8, registered: bool, revoked: bool) -> DeviceProbe {
         DeviceProbe {
             operator_omni: [operator; 32],
+            actor_omni: [0u8; 32],
             tier,
             registered,
             revoked,
@@ -428,12 +433,14 @@ mod tests {
         // k11PubX, k11PubY, tier, roles, registeredAt, lastSignCount, revoked.
         let mut words = vec!["0".repeat(64); 11];
         words[0] = "22".repeat(32); // operatorOmni
+        words[1] = "33".repeat(32); // actorOmni (#577 — the update re-label source)
         words[6] = format!("{:0>64}", 2); // tier = TIER_AGENT
         words[8] = format!("{:0>64}", 9); // registeredAt
         words[10] = format!("{:0>64}", 1); // revoked
         let raw = format!("0x{}", words.join(""));
         let p = parse_device_probe(&raw).unwrap();
         assert_eq!(p.operator_omni, [0x22; 32]);
+        assert_eq!(p.actor_omni, [0x33; 32]);
         assert_eq!(p.tier, 2);
         assert!(p.registered);
         assert!(p.revoked);

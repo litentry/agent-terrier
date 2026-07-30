@@ -809,6 +809,12 @@ async fn finalize_spawn(
         &chat_channel_id,
         issuer.as_deref(),
         worker_override.as_deref(),
+        // #577 — arm the sandbox-management surface from the first boot so a
+        // later one-click update can hand the Hermes home off.
+        Some(&crate::handlers::sandbox::sandbox_mgmt_token(
+            &state.session_keypair,
+            device_key_hash,
+        )),
     ));
     let sandbox = crate::handlers::sandbox::ensure_for_delegate_with_envs(
         state,

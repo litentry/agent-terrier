@@ -61,6 +61,8 @@ import type { ApiPersonaEditResponse } from '@/lib/generated/ApiPersonaEditRespo
 import type { ApiPersonaState } from '@/lib/generated/ApiPersonaState';
 import type { ApiChatEvent } from '@/lib/generated/ApiChatEvent';
 import type { ApiRegisterState } from '@/lib/generated/ApiRegisterState';
+import type { ApiAgentUpdateResult } from '@/lib/generated/ApiAgentUpdateResult';
+import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
 import type { BuildArchiveUserOpResponse } from '@/lib/generated/BuildArchiveUserOpResponse';
 import type { BuildSpawnUserOpResponse } from '@/lib/generated/BuildSpawnUserOpResponse';
 import type { PresetCatalogResponse } from '@/lib/generated/PresetCatalogResponse';
@@ -358,6 +360,27 @@ export class DaemonBackend implements AgentKeysClient {
 
   async archiveSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse>> {
     return this.postJson<SubmitAcceptUserOpResponse>('/v1/agent/archive/submit', body);
+  }
+
+  // #577 — one-click in-place image update: kill + re-create on the durable
+  // spawn context (same identity/channel/derivation; no chain write, no Touch
+  // ID) with a best-effort Hermes-home hand-off. Slow by nature (a sandbox
+  // create on the preheated image runs tens of seconds) — callers show busy UI.
+  async agentUpdate(input: {
+    deviceKeyHash: string;
+    force?: boolean;
+  }): Promise<Result<ApiAgentUpdateResult>> {
+    const body: Record<string, unknown> = { device_key_hash: input.deviceKeyHash };
+    if (input.force) body.force = true;
+    return this.postJson<ApiAgentUpdateResult>('/v1/agent/update', body);
+  }
+
+  // #577 — which of these delegates run OLDER image bits than the current
+  // pre-cache registration (the "Update available" signal).
+  async agentImageStatus(deviceKeyHashes: string[]): Promise<Result<ApiImageStatus>> {
+    return this.postJson<ApiImageStatus>('/v1/agent/image-status', {
+      device_key_hashes: deviceKeyHashes,
+    });
   }
 
   async chatSend(channelId: string, text: string): Promise<Result<{ event_id: string }>> {

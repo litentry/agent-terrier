@@ -75,6 +75,14 @@ pub fn no_create_envs() -> CreateEnvProvider {
     Box::new(|| Box::pin(async { Vec::new() }))
 }
 
+/// One live runtime row for the #577 update/status paths — id + coarse
+/// status, cloud-agnostic (veFaaS SandboxId / ECS task ARN).
+#[derive(Debug, Clone)]
+pub struct LiveRuntime {
+    pub id: String,
+    pub status: String,
+}
+
 /// The per-cloud delegate-sandbox driver behind one interface.
 pub enum SandboxBackend {
     VeFaas(VeFaasClient),
@@ -168,6 +176,91 @@ impl SandboxBackend {
         match self {
             Self::VeFaas(c) => c.kill_for_device(device_key_hash).await,
             Self::AwsEcs(c) => c.kill_for_device(device_key_hash).await,
+        }
+    }
+
+    /// #577 — the delegate's LIVE runtimes (the same match `kill_for_device`
+    /// kills, without the kill): what an in-place update snapshots + reports
+    /// before tearing down. Normally 0 or 1 (the ensure quota invariant).
+    pub async fn live_for_device(&self, device_key_hash: &str) -> Result<Vec<LiveRuntime>> {
+        match self {
+            Self::VeFaas(c) => Ok(c
+                .live_instances_for_device(device_key_hash)
+                .await?
+                .into_iter()
+                .map(|i| LiveRuntime {
+                    id: i.id,
+                    status: i.status,
+                })
+                .collect()),
+            Self::AwsEcs(c) => Ok(c
+                .live_for_device(device_key_hash)
+                .await?
+                .into_iter()
+                .map(|(id, status)| LiveRuntime { id, status })
+                .collect()),
+        }
+    }
+
+    /// #577 — the configured CR tag ref this backend spawns from, when it has
+    /// one (`CR_IMAGE` on veFaaS; ECS pins its image in the task definition).
+    pub fn current_image_tag(&self) -> Option<String> {
+        match self {
+            Self::VeFaas(c) => Some(c.config.image.trim().to_string()).filter(|i| !i.is_empty()),
+            Self::AwsEcs(_) => None,
+        }
+    }
+
+    /// #577 — the current pre-cache registration for this broker's `CR_IMAGE`
+    /// (what a create issued now would freeze). `Ok(None)` = no comparable
+    /// registry on this backend (ECS pulls the tag at task start, so a
+    /// re-created task always runs current bits) or `CR_IMAGE` unset.
+    pub async fn current_image_registration(&self) -> Result<Option<crate::ve_faas::SandboxImage>> {
+        match self {
+            Self::VeFaas(c) => c.current_image_registration().await,
+            Self::AwsEcs(_) => Ok(None),
+        }
+    }
+
+    /// #577 — the image identity one live runtime FROZE at spawn. `Ok(None)` =
+    /// unknowable on this backend (ECS) or the instance runs the app default.
+    pub async fn booted_image_info(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Option<crate::ve_faas::InstanceImageInfo>> {
+        match self {
+            Self::VeFaas(c) => c.describe_image_info(sandbox_id).await,
+            Self::AwsEcs(_) => Ok(None),
+        }
+    }
+
+    /// #577 — where the broker reaches ONE instance's management surface (the
+    /// hermes bridge's `/v1/sandbox/mgmt/*` routes on
+    /// [`agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT`] — the bridge,
+    /// not the daemon, owns `$HERMES_HOME`): a base URL + the headers that pin
+    /// the request to THAT instance. veFaaS fronts every instance behind the
+    /// shared gateway with per-request routing headers (the measured
+    /// `x-faas-instance-name`/`x-faas-proxy-port` contract — AGENTS.ops
+    /// verification recipe). `None` = no broker-reachable management path on
+    /// this backend (ECS today: the per-task ENI is not guaranteed
+    /// broker-routable) — the update proceeds WITHOUT a session hand-off and
+    /// says so.
+    pub fn instance_mgmt_endpoint(
+        &self,
+        sandbox_id: &str,
+    ) -> Option<(String, Vec<(String, String)>)> {
+        match self {
+            Self::VeFaas(c) => Some((
+                c.agent_url().to_string(),
+                vec![
+                    ("x-faas-instance-name".into(), sandbox_id.to_string()),
+                    (
+                        "x-faas-proxy-port".into(),
+                        agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT.to_string(),
+                    ),
+                ],
+            )),
+            Self::AwsEcs(_) => None,
         }
     }
 }

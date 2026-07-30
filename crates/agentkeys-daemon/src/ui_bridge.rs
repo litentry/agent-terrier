@@ -1282,6 +1282,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/agent/spawn/submit", post(spawn_submit_proxy))
         .route("/v1/agent/archive/build", post(archive_build_proxy))
         .route("/v1/agent/archive/submit", post(archive_submit_proxy))
+        // #577 — one-click in-place image update + fleet staleness (no chain
+        // write, no Touch ID; the broker chain-verifies ownership per hash).
+        .route("/v1/agent/update", post(agent_update_proxy))
+        .route("/v1/agent/image-status", post(agent_image_status_proxy))
         // #429 — O2 inheritance bookkeeping (kept namespaces of archived
         // delegates, at most one live inheritor by construction):
         .route(
@@ -6531,6 +6535,232 @@ async fn mark_binding_archived(
             "binding manifest archive-mark persist FAILED — {e}"
         ),
     }
+}
+
+// ─── #577 — one-click delegate image update + staleness, parent-control face ─
+
+/// `POST /v1/agent/update` body from the web app.
+#[derive(Debug, Deserialize)]
+pub struct DaemonAgentUpdateRequest {
+    pub device_key_hash: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// One delegate's update outcome, typed for the generated TS contract (#215
+/// B2 — the frontend never hand-declares a wire interface).
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiAgentUpdateResult {
+    pub device_key_hash: String,
+    pub old_sandbox_ids: Vec<String>,
+    pub sandbox_id: Option<String>,
+    pub sandbox_status: Option<String>,
+    pub sandbox_error: Option<String>,
+    /// Whether the Hermes-home hand-off landed in the replacement.
+    pub session_migrated: bool,
+    /// Always-present human-readable hand-off outcome (what migrated, or why
+    /// nothing could — pre-#577 image, unsupported backend, oversized home).
+    pub session_detail: String,
+}
+
+/// `POST /v1/agent/image-status` body from the web app.
+#[derive(Debug, Deserialize)]
+pub struct DaemonImageStatusRequest {
+    pub device_key_hashes: Vec<String>,
+}
+
+/// The fleet image-staleness answer (#577): which delegates run older bits
+/// than the current pre-cache registration.
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiImageStatus {
+    pub image: Option<String>,
+    pub current_registration_id: Option<String>,
+    pub precache_status: Option<String>,
+    pub delegates: Vec<ApiDelegateImageStatus>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiDelegateImageStatus {
+    pub device_key_hash: String,
+    pub sandbox_id: Option<String>,
+    pub sandbox_status: Option<String>,
+    pub booted_registration_id: Option<String>,
+    /// `true` = stale, `false` = current, `null` = unknowable (no live
+    /// instance / app-default image / no registration to compare).
+    pub stale: Option<bool>,
+    pub error: Option<String>,
+}
+
+/// `POST /v1/agent/update` — forward to the broker's #577 in-place update
+/// (kill + re-create on the durable spawn context; NO chain write, NO Touch
+/// ID). On success, refresh the manifest row's runtime verdict so a healed
+/// spawn drops its "runtime spawn failed" badge without waiting for the next
+/// ceremony.
+async fn agent_update_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<DaemonAgentUpdateRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let body = serde_json::json!({
+        "operator_omni": operator_omni,
+        "device_key_hash": req.device_key_hash,
+        "force": req.force,
+    });
+    let (resp, parsed) = forward_to_broker_value(&broker, "/v1/agent/update", &j1, &body).await;
+    if !resp.status().is_success() {
+        return resp;
+    }
+    let Some(v) = parsed else { return resp };
+    let s = |p: &str| {
+        v.pointer(p)
+            .and_then(|x| x.as_str())
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+    };
+    let mapped = ApiAgentUpdateResult {
+        device_key_hash: v
+            .get("device_key_hash")
+            .and_then(|x| x.as_str())
+            .unwrap_or(&req.device_key_hash)
+            .to_string(),
+        old_sandbox_ids: v
+            .get("old_sandbox_ids")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        sandbox_id: s("/sandbox/sandbox_id"),
+        sandbox_status: s("/sandbox/status"),
+        sandbox_error: s("/sandbox/error"),
+        session_migrated: v
+            .pointer("/session/migrated")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+        session_detail: s("/session/detail").unwrap_or_default(),
+    };
+    refresh_binding_runtime_after_update(
+        &state,
+        &req.device_key_hash,
+        mapped.sandbox_error.clone(),
+    )
+    .await;
+    Json(mapped).into_response()
+}
+
+/// Patch the manifest row's `runtime.spawn_error` after an in-place update:
+/// the re-created sandbox's verdict REPLACES the spawn-era one (a clean update
+/// clears a stale "spawn failed"; a failed one surfaces it). Gate fields stay
+/// — the update re-provisions the SAME per-delegate relay key lazily, so the
+/// spawn-era gate outcome remains the metering record.
+async fn refresh_binding_runtime_after_update(
+    state: &UiBridgeState,
+    device_key_hash: &str,
+    sandbox_error: Option<String>,
+) {
+    let mut manifest = match ensure_binding_manifest(state).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                target: "agentkeys.daemon.ui_bridge",
+                device_key_hash = %device_key_hash,
+                "binding manifest LOAD failed after update — {e}; the runtime badge may be stale"
+            );
+            return;
+        }
+    };
+    let Some(entry) = manifest.entry_for("", device_key_hash).cloned() else {
+        return;
+    };
+    let mut updated = entry;
+    let mut runtime = updated.runtime.clone().unwrap_or(ApiRuntimeStatus {
+        gate_status: "provisioned".into(),
+        gate_error: None,
+        spawn_error: None,
+    });
+    runtime.spawn_error = sandbox_error;
+    updated.runtime = Some(runtime);
+    updated.updated_at = now_unix();
+    manifest.upsert(updated);
+    if let Err(e) = persist_binding_manifest(state, manifest).await {
+        tracing::warn!(
+            target: "agentkeys.daemon.ui_bridge",
+            device_key_hash = %device_key_hash,
+            "binding manifest runtime refresh persist FAILED — {e}"
+        );
+    }
+}
+
+/// `POST /v1/agent/image-status` — forward the staleness query for the
+/// delegates this daemon can see; the broker chain-verifies each hash.
+async fn agent_image_status_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<DaemonImageStatusRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let body = serde_json::json!({
+        "operator_omni": operator_omni,
+        "device_key_hashes": req.device_key_hashes,
+    });
+    let (resp, parsed) =
+        forward_to_broker_value(&broker, "/v1/agent/image-status", &j1, &body).await;
+    if !resp.status().is_success() {
+        return resp;
+    }
+    let Some(v) = parsed else { return resp };
+    let top = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+    };
+    let mapped = ApiImageStatus {
+        image: top("image"),
+        current_registration_id: top("current_registration_id"),
+        precache_status: top("precache_status"),
+        delegates: v
+            .get("delegates")
+            .and_then(|d| d.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| {
+                        let rs = |k: &str| {
+                            r.get(k)
+                                .and_then(|x| x.as_str())
+                                .filter(|x| !x.is_empty())
+                                .map(str::to_string)
+                        };
+                        ApiDelegateImageStatus {
+                            device_key_hash: rs("device_key_hash").unwrap_or_default(),
+                            sandbox_id: rs("sandbox_id"),
+                            sandbox_status: rs("sandbox_status"),
+                            booted_registration_id: rs("booted_registration_id"),
+                            stale: r.get("stale").and_then(|x| x.as_bool()),
+                            error: rs("error"),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    Json(mapped).into_response()
 }
 
 /// #429 — `GET /v1/agent/inheritable-namespaces`: the kept namespaces of

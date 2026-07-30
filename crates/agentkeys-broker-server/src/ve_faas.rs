@@ -253,6 +253,41 @@ pub struct SandboxImage {
     pub update_time: String,
 }
 
+/// One instance's spawn-frozen image identity (#577): `DescribeSandbox.
+/// ImageInfo` — the pre-cache REGISTRATION id the instance froze (`Id`, the
+/// same handle `DeleteSandboxImage` pins on, probed live 2026-07-24) plus the
+/// CR tag it was spawned from (`SourceImageUrl`). Because a precache refresh
+/// (#568) mints a NEW registration id for the same tag, `frozen id ≠ current
+/// registration id` is exactly "this instance runs older bits than the
+/// pre-cache serves" — the staleness signal the API's digest-less List cannot
+/// give any other way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceImageInfo {
+    /// The pre-cache registration id frozen at spawn (`ImageInfo.Id`).
+    pub registration_id: String,
+    /// The CR tag ref the instance was spawned from (`ImageInfo.SourceImageUrl`).
+    pub source_image_url: String,
+}
+
+/// Pure #577 staleness verdict: does a live instance run OLDER bits than the
+/// current pre-cache registration for the broker's `CR_IMAGE`?
+///
+/// `None` = unknowable (the instance runs the app's console-default image, or
+/// there is no current registration to compare against) — surfaced as
+/// "unknown", never guessed. `Some(true)` when the frozen registration id
+/// differs from the current one (a refresh re-registered the tag since this
+/// instance spawned) OR the tag ref itself changed (`CR_IMAGE` moved).
+pub fn image_stale(
+    booted: Option<&InstanceImageInfo>,
+    current: Option<&SandboxImage>,
+) -> Option<bool> {
+    let (booted, current) = (booted?, current?);
+    if booted.source_image_url.trim() != current.image_url.trim() {
+        return Some(true);
+    }
+    Some(booted.registration_id.trim() != current.image_id.trim())
+}
+
 /// Outcome of [`VeFaasClient::ensure_for_delegate`].
 #[derive(Debug, Clone)]
 pub struct EnsureOutcome {
@@ -512,6 +547,17 @@ impl VeFaasClient {
     /// <acct>:<registration-id>` — the "precached copy" made concrete).
     /// `None` when the instance runs the app's default image (no ImageInfo).
     async fn describe_image_source(&self, sandbox_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .describe_image_info(sandbox_id)
+            .await?
+            .map(|i| i.source_image_url))
+    }
+
+    /// `DescribeSandbox` → the instance's frozen `ImageInfo` (#577): the
+    /// pre-cache registration id (`Id` — the pin `DeleteSandboxImage` reports)
+    /// together with the source tag ref. `None` when the instance runs the
+    /// app's console-default image (no ImageInfo on the response).
+    pub async fn describe_image_info(&self, sandbox_id: &str) -> Result<Option<InstanceImageInfo>> {
         let v = self
             .vefaas_call(
                 "DescribeSandbox",
@@ -521,10 +567,47 @@ impl VeFaasClient {
                 }),
             )
             .await?;
-        Ok(v["Result"]["ImageInfo"]["SourceImageUrl"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(String::from))
+        let info = &v["Result"]["ImageInfo"];
+        let source = info["SourceImageUrl"].as_str().unwrap_or_default();
+        if source.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(InstanceImageInfo {
+            registration_id: info["Id"].as_str().unwrap_or_default().to_string(),
+            source_image_url: source.to_string(),
+        }))
+    }
+
+    /// The current pre-cache registration row for this broker's `CR_IMAGE`
+    /// (#577 staleness anchor): what a CREATE issued right now would freeze.
+    /// `Ok(None)` when `CR_IMAGE` is unset (spawns use the app default) or the
+    /// tag has no registration yet.
+    pub async fn current_image_registration(&self) -> Result<Option<SandboxImage>> {
+        let image = self.config.image.trim();
+        if image.is_empty() {
+            return Ok(None);
+        }
+        let rows = self.list_sandbox_images().await?;
+        Ok(find_sandbox_image(&rows, image).cloned())
+    }
+
+    /// The delegate's LIVE labeled instances (#577) — the same match
+    /// `kill_for_device` kills, without the kill: what an update snapshots
+    /// before tearing down. Normally 0 or 1 (the ensure quota invariant).
+    pub async fn live_instances_for_device(
+        &self,
+        device_key_hash: &str,
+    ) -> Result<Vec<SandboxInstance>> {
+        let all = self
+            .list_instances(Some(&[(
+                LABEL_DEVICE_KEY_HASH,
+                label_value(device_key_hash),
+            )]))
+            .await?;
+        Ok(all
+            .into_iter()
+            .filter(|i| i.labeled_for(device_key_hash) && i.is_live())
+            .collect())
     }
 
     /// `GetSandboxImagePrecacheTicket { TicketId }` — the async-precache
@@ -563,7 +646,11 @@ impl VeFaasClient {
     /// absence is a hard error, never a shrug. Loud on every failure; a
     /// mid-poll transient List error is retried until the deadline, never
     /// treated as success.
-    pub async fn refresh_precache(&self, poll_timeout: std::time::Duration) -> Result<String> {
+    pub async fn refresh_precache(
+        &self,
+        poll_timeout: std::time::Duration,
+        kill_pinners: bool,
+    ) -> Result<String> {
         let image = self.config.image.trim();
         if image.is_empty() {
             bail!(
@@ -622,16 +709,55 @@ impl VeFaasClient {
                         )
                     })
                     .collect();
-                bail!(
-                    "precache refresh BLOCKED — {} live sandbox instance(s) still run {image}, \
-                     and veFaaS refuses to free a pinned registration: {}. ARCHIVE the \
-                     delegate(s) in parent-control (Touch ID — the ceremony's designed human \
-                     step, it just comes BEFORE the refresh), then re-run: \
-                     bash scripts/operator/setup-image.sh --push-only  (the build + push are \
-                     already done; --push-only re-pushes cheap layers and re-runs this refresh).",
-                    pinners.len(),
-                    who.join("; ")
-                );
+                if !kill_pinners {
+                    bail!(
+                        "precache refresh BLOCKED — {} live sandbox instance(s) still run {image}, \
+                         and veFaaS refuses to free a pinned registration: {}. Two remedies (#577): \
+                         (a) re-run with --kill-pinners — kill-ONLY, the on-chain bindings stay \
+                         active, and once the preheat completes each delegate comes back on the \
+                         NEW image via one parent-control 'update runtime' click (no archive \
+                         ceremony); or (b) archive the delegate(s) in parent-control (Touch ID) \
+                         if you actually want them GONE. Then re-run: \
+                         bash scripts/operator/setup-image.sh --push-only  (the build + push are \
+                         already done; --push-only re-pushes cheap layers and re-runs this refresh).",
+                        pinners.len(),
+                        who.join("; ")
+                    );
+                }
+                // #577 --kill-pinners: kill-only unpin (bindings stay active;
+                // delegates return on the fresh image via the update click).
+                for p in &pinners {
+                    tracing::info!(sandbox_id = %p.id, "killing pinning instance (--kill-pinners)");
+                    self.kill(&p.id)
+                        .await
+                        .with_context(|| format!("KillSandbox {} (--kill-pinners)", p.id))?;
+                }
+                // The pin releases asynchronously with the instance teardown —
+                // wait until the scan shows no live runner before the delete
+                // (its own Status=failed parse + the GONE gate still backstop).
+                let unpin_deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(DELETE_GONE_SECS);
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    match self.instances_running_image(image).await {
+                        Ok(still) if still.is_empty() => break,
+                        Ok(still) => tracing::info!(
+                            remaining = still.len(),
+                            "waiting for killed instance(s) to release the registration pin…"
+                        ),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "pin re-scan failed — retrying")
+                        }
+                    }
+                    if std::time::Instant::now() >= unpin_deadline {
+                        bail!(
+                            "killed {} pinning instance(s) but live runners of {image} are still \
+                             listed after {DELETE_GONE_SECS}s — not proceeding to the delete \
+                             (it would 200/Status=failed). Re-run precache-refresh.",
+                            pinners.len()
+                        );
+                    }
+                }
             }
             tracing::info!(
                 image_id = %row.image_id, status = %row.precache_status,
@@ -1422,6 +1548,44 @@ mod tests {
         assert_eq!(precache_terminal(""), None);
         assert_eq!(precache_terminal("running"), None);
         assert_eq!(precache_terminal("pending"), None);
+    }
+
+    #[test]
+    fn image_stale_compares_registration_ids_and_tag_refs() {
+        let reg = |id: &str, url: &str| SandboxImage {
+            image_id: id.into(),
+            image_url: url.into(),
+            precache_status: "success".into(),
+            precache_status_reason: String::new(),
+            update_time: String::new(),
+        };
+        let booted = |id: &str, url: &str| InstanceImageInfo {
+            registration_id: id.into(),
+            source_image_url: url.into(),
+        };
+        let url = "cr.example/ns/repo:latest";
+        // Same registration → current bits.
+        assert_eq!(
+            image_stale(Some(&booted("reg1", url)), Some(&reg("reg1", url))),
+            Some(false)
+        );
+        // A refresh minted a NEW registration for the same tag → stale.
+        assert_eq!(
+            image_stale(Some(&booted("reg1", url)), Some(&reg("reg2", url))),
+            Some(true)
+        );
+        // The tag ref itself moved (CR_IMAGE changed) → stale regardless of id.
+        assert_eq!(
+            image_stale(
+                Some(&booted("reg1", url)),
+                Some(&reg("reg1", "cr.example/ns/repo:v2"))
+            ),
+            Some(true)
+        );
+        // Unknowable sides stay unknown — never guessed.
+        assert_eq!(image_stale(None, Some(&reg("reg1", url))), None);
+        assert_eq!(image_stale(Some(&booted("reg1", url)), None), None);
+        assert_eq!(image_stale(None, None), None);
     }
 
     #[test]

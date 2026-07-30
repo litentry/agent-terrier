@@ -71,6 +71,8 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/agent/spawn/submit	same 0.5-registry dependency + signed UserOp (gas) — the broker relay/finalize path is unit-tested; retire with a suite-6 headless-spawn step post-redeploy
 /v1/agent/archive/build	#427 archive build proxy — needs a spawned throwaway delegate fixture (pair with the spawn waiver)
 /v1/agent/archive/submit	same throwaway-delegate fixture + signed UserOp; manifest archive-mark covered by the daemon unit layer
+/v1/agent/update	#577 in-place image update — needs a live sandbox backend (veFaaS) + a spawned delegate on the VE test stack; broker halves unit-tested (chain-probe/ownership, staleness, mgmt-token derivation, jobs-guard parse) + the bridge export/import round-trip is python-tested; retire with a suite-6 spawn→update step once the test env spawns delegates
+/v1/agent/image-status	#577 staleness read — same live-backend dependency; the frozen-vs-current registration verdict is pinned by ve_faas::image_stale unit tests; retire together with the /v1/agent/update step
 /v1/agent/inheritable-namespaces	#429 O2 bookkeeping read (manifest-derived) — daemon unit layer covers the filter; retire with a suite-6 archive→inherit step
 /v1/master/agent/chat/send	#430 operator chat publish (master-self channel cap → worker) — needs the redeployed D8 channel worker + a spawned delegate in the test env; retire with a suite-6 duplex step
 /v1/master/agent/chat/poll	#430 transcript read/long-poll — same redeployed-worker + delegate fixture; the channel-e2e step-3 harness is the pattern

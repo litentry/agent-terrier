@@ -1,6 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useClient } from '@/lib/ClientProvider';
+import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
 import { Dot, PageHead } from './shared';
 import { PermissionView } from './permissions';
 import type { Actor, PairingRequest } from './types';
@@ -81,6 +83,7 @@ export function DelegatesPage({
   onArchive,
   deviceRequestCount = 0,
   onGoDevices,
+  showToast,
 }: {
   /** Pending SANDBOX-DELEGATE claims only — device claims (isDevice) are routed
    *  to the devices page by App (the #404 decoupling: this page pairs agents
@@ -104,11 +107,112 @@ export function DelegatesPage({
   /** #408 — device claims currently pending (shown as a redirect banner here). */
   deviceRequestCount?: number;
   onGoDevices?: () => void;
+  /** #577 — update-outcome toasts (falls back to console when absent). */
+  showToast?: (msg: string, sticky?: boolean) => void;
 }) {
+  const client = useClient();
   const [view, setView] = useState<'devices' | 'permissions'>('devices');
   const [claimCode, setClaimCode] = useState('');
   const [claimLabel, setClaimLabel] = useState('');
   const pairedAgents = actors.filter((a) => a.role === 'agent');
+
+  // #577 — image staleness + the one-click update. `stale === true` renders
+  // the "update available" chip; the update button itself is always offered
+  // (it doubles as "respawn now" for an expired/dead sandbox).
+  const [imageStatus, setImageStatus] = useState<ApiImageStatus | null>(null);
+  const [updating, setUpdating] = useState<Set<string>>(new Set());
+  const [forceArmed, setForceArmed] = useState<Set<string>>(new Set());
+  const toast = showToast ?? ((msg: string) => console.log('[delegates]', msg));
+  const updatableHashes = pairedAgents
+    .filter((a) => a.status !== 'bad' && a.deviceKeyHash)
+    .map((a) => a.deviceKeyHash as string);
+  const updatableKey = updatableHashes.join(',');
+
+  const refreshImageStatus = useCallback(async () => {
+    const hashes = updatableKey ? updatableKey.split(',') : [];
+    if (hashes.length === 0) {
+      setImageStatus(null);
+      return;
+    }
+    const r = await client.agentImageStatus(hashes);
+    // An older daemon/broker without #577 just hides the staleness surface —
+    // the page stays fully usable.
+    setImageStatus(r.ok ? r.data : null);
+  }, [client, updatableKey]);
+
+  useEffect(() => {
+    refreshImageStatus();
+  }, [refreshImageStatus]);
+
+  const staleFor = (dkh: string | undefined): boolean | null => {
+    if (!dkh || !imageStatus) return null;
+    const row = imageStatus.delegates.find(
+      (d) => d.device_key_hash.toLowerCase().replace(/^0x/, '') === dkh.toLowerCase().replace(/^0x/, ''),
+    );
+    return row ? row.stale : null;
+  };
+
+  const updateOne = useCallback(
+    async (a: Actor) => {
+      const dkh = a.deviceKeyHash;
+      if (!dkh || updating.has(dkh)) return;
+      setUpdating((prev) => new Set(prev).add(dkh));
+      try {
+        const r = await client.agentUpdate({ deviceKeyHash: dkh, force: forceArmed.has(dkh) });
+        if (r.ok) {
+          setForceArmed((prev) => {
+            const next = new Set(prev);
+            next.delete(dkh);
+            return next;
+          });
+          const d = r.data;
+          toast(
+            d.sandbox_error
+              ? `${a.label}: update FAILED to re-create the runtime — ${d.sandbox_error}`
+              : `${a.label} updated${d.sandbox_id ? ` (sandbox ${d.sandbox_id})` : ''} — ${d.session_detail}`,
+            !!d.sandbox_error,
+          );
+        } else {
+          const detail = r.status?.detail ?? 'update failed';
+          if (detail.includes('jobs_running')) {
+            // Arm force for THIS delegate: the next click updates anyway.
+            setForceArmed((prev) => new Set(prev).add(dkh));
+            toast(
+              `${a.label} has background jobs running — updating now would kill them. ` +
+                'Click again to update anyway.',
+              true,
+            );
+          } else {
+            toast(`${a.label} update failed — ${detail}`, true);
+          }
+        }
+      } finally {
+        setUpdating((prev) => {
+          const next = new Set(prev);
+          next.delete(dkh);
+          return next;
+        });
+        refreshImageStatus();
+      }
+    },
+    [client, forceArmed, refreshImageStatus, toast, updating],
+  );
+
+  const staleAgents = pairedAgents.filter((a) => staleFor(a.deviceKeyHash) === true);
+  const [updatingAll, setUpdatingAll] = useState(false);
+  const updateAllStale = useCallback(async () => {
+    setUpdatingAll(true);
+    try {
+      // Sequential on purpose: creates are serialized broker-side anyway (the
+      // ensure lock), and one toast per delegate keeps outcomes attributable.
+      for (const a of staleAgents) {
+        // eslint-disable-next-line no-await-in-loop
+        await updateOne(a);
+      }
+    } finally {
+      setUpdatingAll(false);
+    }
+  }, [staleAgents, updateOne]);
 
   const submitClaim = () => {
     if (claimCode.trim() && claimLabel.trim()) {
@@ -125,6 +229,18 @@ export function DelegatesPage({
         desc="Pair AGENTS (sandbox delegates) here: an agent shows a one-time pairing code; you claim it (J1_master-gated), review the identity + requested scope, then approve with one Touch ID — registerAgentDevice + the scope grant in one block. Physical AI devices (camera, display, console) are channel endpoints — pair those on the devices page instead."
         actions={
           <>
+            {staleAgents.length > 0 && (
+              <button
+                className="btn primary"
+                disabled={updatingAll}
+                onClick={updateAllStale}
+                title="Kill + re-create each stale delegate's sandbox on the current image — same identity, grants and chat channel; no archive, no Touch ID."
+              >
+                {updatingAll
+                  ? 'updating…'
+                  : `⟳ update ${staleAgents.length} stale agent${staleAgents.length > 1 ? 's' : ''}`}
+              </button>
+            )}
             {onNewAgent && (
               <button className="btn primary" onClick={onNewAgent}>
                 ＋ New agent
@@ -201,6 +317,13 @@ export function DelegatesPage({
                 <Dot status={a.status} pulse={a.lastActive.endsWith('m ago')} />
                 <span style={{ fontWeight: 600 }}>{a.label.replace(' (revoked)', '')}</span>
                 {a.justPaired && <span className="chip ok" style={{ marginLeft: 'auto' }}>new</span>}
+                {/* #577 — running older image bits than the current precache
+                    registration; one click below brings it current. */}
+                {staleFor(a.deviceKeyHash) === true && (
+                  <span className="chip warn" style={{ marginLeft: a.justPaired ? 0 : 'auto' }}>
+                    update available
+                  </span>
+                )}
               </div>
               <dl className="device-kvs">
                 <dt>actor</dt><dd className="mono">{a.omni}</dd>
@@ -227,6 +350,24 @@ export function DelegatesPage({
               {a.status !== 'bad' && onArchive && a.deviceKeyHash && (
                 <button className="btn sm" onClick={() => onArchive(a)}>
                   archive · slot returns
+                </button>
+              )}
+              {/* #577 — the in-place runtime update: kill + re-create on the
+                  current image, SAME identity/grants/channel, best-effort
+                  Hermes-home hand-off. No archive ceremony, no Touch ID. Also
+                  the "respawn now" affordance for an expired sandbox. */}
+              {a.status !== 'bad' && a.deviceKeyHash && (
+                <button
+                  className={`btn sm ${staleFor(a.deviceKeyHash) === true ? 'primary' : ''}`}
+                  disabled={updating.has(a.deviceKeyHash)}
+                  onClick={() => updateOne(a)}
+                  title="Re-create this agent's sandbox on the current image. Identity, grants, channel and persona are preserved; the live conversation restarts."
+                >
+                  {updating.has(a.deviceKeyHash)
+                    ? 'updating… (may take a minute)'
+                    : forceArmed.has(a.deviceKeyHash)
+                      ? '⟳ update anyway (kills running jobs)'
+                      : '⟳ update runtime'}
                 </button>
               )}
             </div>

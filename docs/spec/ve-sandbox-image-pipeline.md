@@ -10,7 +10,7 @@
 bash scripts/operator/build-image-hybrid.sh
 ```
 
-That is the whole cycle for a normal code change — also the fleet console's **"build+push+preheat VE sandbox image · HYBRID"** item. It ends with the new image *preheated in veFaaS*, not merely pushed to a registry. The only remaining manual steps are the two authority ops (archive + respawn, Touch ID), which are deliberately human.
+That is the whole cycle for a normal code change — also the fleet console's **"build+push+preheat VE sandbox image · HYBRID"** item. It ends with the new image *preheated in veFaaS*, not merely pushed to a registry. Bringing live delegates onto the new image is then **one parent-control "update runtime" click per delegate (#577, Phase 4 below)** — an in-place kill + re-create with the same identity, grants and chat channel. No archive ceremony: archive remains only for actually *removing* a delegate.
 
 ## Why the work is split across two machines
 
@@ -89,7 +89,17 @@ Two consequences worth stating plainly, because both contradict things this doc 
 
 **A preheat takes ~30 minutes and a timeout is not a failure.** The verb waits up to 1 h by default; if it does time out the push already succeeded and the entry keeps preheating server-side. Re-running is safe and cheap: `refresh_precache()` **resumes** an in-flight (`caching`) entry instead of deleting it, so a retry never restarts the clock. Only a `success` entry takes the delete + re-add path.
 
-**If a delegate is live it pins the registration** — the refresh stops and names the exact instance, delegate hash, and expiry. Archive it in parent-control (Touch ID), then re-run.
+**If a delegate is live it pins the registration** — the refresh stops and names the exact instance, delegate hash, and expiry. Two remedies (#577): re-run with **`--kill-pinners`** (`VE_REFRESH_KILL_PINNERS=1` through `setup-image.sh`) — a kill-ONLY unpin: the on-chain bindings stay active and each delegate returns on the new image via the update click once the preheat completes — or archive the delegate (Touch ID) if you actually want it gone. Instances also expire on their own within the veFaaS lifetime (default 1440 min), so an overnight cycle usually finds the registration unpinned.
+
+## Phase 4 — bringing delegates onto the new image (#577)
+
+A sandbox **freezes its image at spawn**, so a completed preheat changes only what *future* creates boot. The user-facing half is the #577 update surface:
+
+- **Staleness is visible, not shell-probed.** An instance freezes the pre-cache **registration id** it spawned from (`DescribeSandbox.ImageInfo.Id`) while the refresh mints a NEW registration id for the same tag — `frozen ≠ current` is exactly "running old bits". `POST /v1/agent/image-status` (J1_master; proxied by the daemon for parent-control) reports it per delegate; the Delegates page renders an **"update available"** chip and an **"update N stale agents"** batch button.
+- **`POST /v1/agent/update`** (J1_master, chain-verified ownership, TIER_AGENT only) performs the in-place cycle: job-guard + Hermes-home export from the old instance → `KillSandbox` → re-create through the SAME #546 spawn-context ensure path a veFaaS-expiry re-create uses (fresh #552 J1, lazily re-provisioned metered gate key) → import + agent re-source in the replacement. No chain write, no Touch ID, no slot movement; audit emits `SandboxTeardown(reason="update")` + the usual `SandboxSpawn`.
+- **What the hand-off preserves — and what it cannot.** The bridge's bearer-gated `/v1/sandbox/mgmt/*` surface (armed per delegate via the broker-derived `AGENTKEYS_SANDBOX_MGMT_TOKEN`) exports **on-disk `$HERMES_HOME` state** (SOUL.md, skills, backups — the image-owned `config*.yaml` chain is excluded both ways). The live **conversation is the hermes bridge's in-RAM ACP session** ("the session IS the memory") and restarts with the instance — exactly as it already does at every veFaaS expiry. Making transcripts durable is a Hermes-persistence follow-up, not something the relay can conjure.
+- **Background jobs (#340) refuse the update** (409 `jobs_running`) unless forced — their output stream dies with the instance; the UI turns the button into "update anyway".
+- A **pre-#577 instance** has no mgmt surface: the update still lands, with `session_migrated:false` and the reason surfaced; the capability heals once the new image runs.
 
 ## Entry points
 
@@ -98,8 +108,8 @@ Two consequences worth stating plainly, because both contradict things this doc 
 | `scripts/operator/build-image-hybrid.sh` | **the normal path** — laptop-driven, ends preheated |
 | `scripts/operator/seed-base-images.sh` | rare — only on a Hermes/openviking bump |
 | `scripts/operator/setup-image.sh --from-binary` | the broker-side half the hybrid invokes (run directly if the binary is already staged) |
-| `scripts/operator/setup-image.sh --push-only` | re-push + refresh with no rebuild — the usual "archive, then re-run" follow-up |
-| `agentkeys-broker-server precache-refresh [--timeout-secs N]` | refresh alone, on the broker, under the unit's env |
+| `scripts/operator/setup-image.sh --push-only` | re-push + refresh with no rebuild — the usual "unpin, then re-run" follow-up (`VE_REFRESH_KILL_PINNERS=1` opts into the kill-only unpin) |
+| `agentkeys-broker-server precache-refresh [--timeout-secs N] [--kill-pinners]` | refresh alone, on the broker, under the unit's env |
 | `docker/hermes-sandbox/build-push-ve.sh` | **laptop fallback** — broker unreachable, or building outside CN. Split halves `--build-only` / `--push-only` exist here for a throttled push (docker push resumes, so each retry makes progress); they are script flags rather than fleet menu rows, because the hybrid retired the problem they solved. |
 
 ## Verifying a spawn really runs the new bits

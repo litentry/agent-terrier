@@ -2138,6 +2138,21 @@ pub mod sandbox_env {
     /// OPTIONAL override for the signer URL (#552). Absent, the sandbox
     /// DERIVES `signer.<zone>` from [`BROKER_URL`] — same convention.
     pub const SIGNER_URL: &str = "AGENTKEYS_SIGNER_URL";
+    /// #577 — the per-delegate sandbox-management bearer, injected at CREATE.
+    /// Presence enables the in-sandbox daemon's session export/import surface
+    /// (the one-click image-update hand-off); the broker re-derives the same
+    /// value at call time (keyed on its session keypair + the delegate's
+    /// `device_key_hash`), so nothing new sits at rest. NOT a chat-contract
+    /// env — a sandbox without it simply cannot migrate its Hermes sessions.
+    pub const MGMT_TOKEN: &str = "AGENTKEYS_SANDBOX_MGMT_TOKEN";
+
+    /// The in-sandbox hermes bridge port — where the #577 management surface
+    /// (session export/import, job status) lives, reached through the veFaaS
+    /// gateway with `x-faas-proxy-port`. The bridge, not the daemon, hosts it
+    /// because the bridge runs as root and OWNS `$HERMES_HOME` (`/root/.hermes`,
+    /// unreadable by the daemon's `gem` user). ONE owner: the image's
+    /// supervisord unit pins `PORT="8090"` on `hermes_bridge.py`.
+    pub const SANDBOX_BRIDGE_PORT: u16 = 8090;
 
     /// The identity/link envs required in BOTH custody modes (#552).
     pub const CHAT_COMMON: [&str; 4] = [BROKER_URL, CHAT_CHANNEL_ID, ACTOR_OMNI, OPERATOR_OMNI];

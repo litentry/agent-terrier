@@ -170,6 +170,14 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/agent/archive/submit",
             post(handlers::accept::accept_submit),
         )
+        // #577 — the ONE-CLICK in-place image update (kill + re-create on the
+        // durable spawn context; NO chain write, NO Touch ID, NO archive) and
+        // the staleness surface that makes "running old bits" visible.
+        .route("/v1/agent/update", post(handlers::update::agent_update))
+        .route(
+            "/v1/agent/image-status",
+            post(handlers::update::agent_image_status),
+        )
         // #278 D6 — the ONE sponsored master-register UserOp (initCode +
         // executeBatch([registerFirstMasterDevice])). submit reuses the accept
         // relay verbatim, exactly as scope/revoke do.
