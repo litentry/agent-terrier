@@ -42,6 +42,19 @@ function scopeOptions(
 // that a card is a STALE / duplicate request to refuse rather than approve (the
 // two-duplicate-cards incident this issue fixes). `expiresAt` of 0 means the broker
 // row predates the field → "expiry unknown" rather than a bogus countdown.
+// #577 follow-up — render the sandbox's veFaaS lease deadline compactly:
+// relative when parseable ("expires in 3h"), verbatim otherwise, empty when
+// the backend has no expiry (ECS).
+function sandboxExpiryLabel(expireAt: string | null | undefined): string {
+  if (!expireAt) return '';
+  const t = Date.parse(expireAt);
+  if (Number.isNaN(t)) return ` · expires ${expireAt}`;
+  const mins = Math.round((t - Date.now()) / 60000);
+  if (mins <= 0) return ' · expired';
+  if (mins < 60) return ` · expires in ${mins}m`;
+  return ` · expires in ${Math.round(mins / 60)}h`;
+}
+
 export function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
@@ -144,13 +157,18 @@ export function DelegatesPage({
     refreshImageStatus();
   }, [refreshImageStatus]);
 
-  const staleFor = (dkh: string | undefined): boolean | null => {
+  const imageRowFor = (dkh: string | undefined) => {
     if (!dkh || !imageStatus) return null;
-    const row = imageStatus.delegates.find(
-      (d) => d.device_key_hash.toLowerCase().replace(/^0x/, '') === dkh.toLowerCase().replace(/^0x/, ''),
+    return (
+      imageStatus.delegates.find(
+        (d) =>
+          d.device_key_hash.toLowerCase().replace(/^0x/, '') ===
+          dkh.toLowerCase().replace(/^0x/, ''),
+      ) ?? null
     );
-    return row ? row.stale : null;
   };
+  const staleFor = (dkh: string | undefined): boolean | null =>
+    imageRowFor(dkh)?.stale ?? null;
 
   const updateOne = useCallback(
     async (a: Actor) => {
@@ -337,6 +355,47 @@ export function DelegatesPage({
                     .join(' · ') || 'none'}
                 </dd>
                 <dt>active</dt><dd className="muted">{a.lastActive}</dd>
+                {/* #577 follow-up — the LIVE runtime identity (bridge-reported
+                    Hermes engine + version, the bump ground truth) and the
+                    sandbox instance behind this delegate. Absent rows render
+                    nothing: a dead sandbox or an older daemon hides them. */}
+                {(() => {
+                  const rt = imageRowFor(a.deviceKeyHash);
+                  if (!rt) return null;
+                  return (
+                    <>
+                      {(rt.agent_engine || rt.agent_version) && (
+                        <>
+                          <dt>runtime</dt>
+                          <dd title={rt.model ? `LLM endpoint: ${rt.model}` : undefined}>
+                            {rt.agent_engine ?? 'agent'}
+                            {rt.agent_version ? ` ${rt.agent_version}` : ''}
+                            {rt.stale === false ? ' · current image' : ''}
+                          </dd>
+                        </>
+                      )}
+                      {rt.sandbox_id && (
+                        <>
+                          <dt>sandbox</dt>
+                          <dd
+                            className="mono"
+                            title={`${rt.sandbox_id}${
+                              rt.booted_registration_id
+                                ? ` · image registration ${rt.booted_registration_id}`
+                                : ''
+                            }`}
+                          >
+                            {rt.sandbox_id.length > 14
+                              ? `${rt.sandbox_id.slice(0, 14)}…`
+                              : rt.sandbox_id}
+                            {rt.sandbox_status ? ` · ${rt.sandbox_status}` : ''}
+                            {sandboxExpiryLabel(rt.expire_at)}
+                          </dd>
+                        </>
+                      )}
+                    </>
+                  );
+                })()}
               </dl>
               {a.status !== 'bad' && onUnpair && (
                 <button

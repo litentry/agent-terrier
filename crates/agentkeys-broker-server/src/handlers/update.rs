@@ -117,11 +117,25 @@ pub struct DelegateImageStatus {
     pub sandbox_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox_status: Option<String>,
+    /// The instance's veFaaS lease deadline, verbatim (absent on backends
+    /// without one — ECS tasks have no expiry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expire_at: Option<String>,
     /// The registration id this instance froze at spawn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub booted_registration_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub booted_image_url: Option<String>,
+    /// The LIVE agent identity the instance's bridge `/healthz` reports —
+    /// what is actually RUNNING, not what the image tag claims. `agent_engine`
+    /// is the ACP agent name (`hermes-agent`), `agent_version` its version
+    /// (the #483 bump cadence's ground truth), `model` the LLM endpoint id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_engine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// `true` = running older bits than the current registration; `null` =
     /// unknowable (no live instance / default image / no registration).
     pub stale: Option<bool>,
@@ -243,6 +257,61 @@ async fn mgmt_request(
 fn parse_jobs_running(status_body: &[u8]) -> Option<u64> {
     let v: serde_json::Value = serde_json::from_slice(status_body).ok()?;
     v.get("jobs").and_then(|j| j.as_u64())
+}
+
+/// The live agent identity one instance's bridge `/healthz` reports —
+/// deliberately the RUNNING truth (the ACP handshake's agent name/version),
+/// not the image tag's claim.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AgentHealth {
+    engine: Option<String>,
+    version: Option<String>,
+    model: Option<String>,
+}
+
+/// Parse the bridge `/healthz` body. The bridge answers 200 when the ACP
+/// agent is alive and 503 while it (re)starts — BOTH carry the same body
+/// shape, so the caller parses regardless of status. Placeholder values the
+/// bridge uses before the handshake (`"?"`) normalize to `None`.
+fn parse_agent_health(body: &[u8]) -> AgentHealth {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return AgentHealth::default();
+    };
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "?" && *s != "(unset)")
+            .map(str::to_string)
+    };
+    AgentHealth {
+        engine: field("engine"),
+        version: field("version"),
+        model: field("model"),
+    }
+}
+
+/// GET one instance's bridge `/healthz` through the gateway routing headers.
+/// Unauthenticated by design (veFaaS health-checks it), short-fused, and
+/// best-effort: any transport failure yields empty fields, never an error —
+/// a stale/booting instance's row still renders.
+async fn fetch_agent_health(
+    http: &reqwest::Client,
+    base: &str,
+    headers: &[(String, String)],
+) -> AgentHealth {
+    let url = format!("{}/healthz", base.trim_end_matches('/'));
+    let mut req = http.get(&url).timeout(std::time::Duration::from_secs(8));
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    match req.send().await {
+        Ok(resp) => match resp.bytes().await {
+            Ok(bytes) => parse_agent_health(&bytes),
+            Err(_) => AgentHealth::default(),
+        },
+        Err(_) => AgentHealth::default(),
+    }
 }
 
 // ─── POST /v1/agent/update ───────────────────────────────────────────────────
@@ -523,8 +592,12 @@ pub async fn agent_image_status(
                     device_key_hash: dkh.clone(),
                     sandbox_id: None,
                     sandbox_status: None,
+                    expire_at: None,
                     booted_registration_id: None,
                     booted_image_url: None,
+                    agent_engine: None,
+                    agent_version: None,
+                    model: None,
                     stale: None,
                     error: None,
                 })
@@ -545,8 +618,12 @@ pub async fn agent_image_status(
             device_key_hash: dkh.clone(),
             sandbox_id: None,
             sandbox_status: None,
+            expire_at: None,
             booted_registration_id: None,
             booted_image_url: None,
+            agent_engine: None,
+            agent_version: None,
+            model: None,
             stale: None,
             error: None,
         };
@@ -562,6 +639,7 @@ pub async fn agent_image_status(
                 if let Some(first) = live.first() {
                     row.sandbox_id = Some(first.id.clone());
                     row.sandbox_status = Some(first.status.clone());
+                    row.expire_at = Some(first.expire_at.clone()).filter(|s| !s.trim().is_empty());
                     match backend.booted_image_info(&first.id).await {
                         Ok(booted) => {
                             row.stale =
@@ -572,6 +650,14 @@ pub async fn agent_image_status(
                             }
                         }
                         Err(e) => row.error = Some(format!("describe: {e:#}")),
+                    }
+                    // The live agent identity, straight from the instance's
+                    // bridge healthz — best-effort, never fails the row.
+                    if let Some((base, route_headers)) = backend.instance_mgmt_endpoint(&first.id) {
+                        let health = fetch_agent_health(&state.http, &base, &route_headers).await;
+                        row.agent_engine = health.engine;
+                        row.agent_version = health.version;
+                        row.model = health.model;
                     }
                 }
             }
@@ -594,6 +680,27 @@ pub async fn agent_image_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_agent_health_reads_the_bridge_healthz_shape() {
+        // The live shape (hermes_bridge.py /healthz — same body on 200 and
+        // the 503-while-restarting case, which is why status is ignored).
+        let h = parse_agent_health(
+            br#"{"ok":true,"engine":"hermes-agent","version":"0.19.0","model":"ep-2025-x"}"#,
+        );
+        assert_eq!(h.engine.as_deref(), Some("hermes-agent"));
+        assert_eq!(h.version.as_deref(), Some("0.19.0"));
+        assert_eq!(h.model.as_deref(), Some("ep-2025-x"));
+        // Pre-handshake placeholders ("?" / "(unset)") normalize to None —
+        // never rendered as a version.
+        let h = parse_agent_health(
+            br#"{"ok":false,"engine":"hermes-agent","version":"?","model":"(unset)"}"#,
+        );
+        assert_eq!(h.engine.as_deref(), Some("hermes-agent"));
+        assert_eq!(h.version, None);
+        assert_eq!(h.model, None);
+        assert_eq!(parse_agent_health(b"not json"), AgentHealth::default());
+    }
 
     #[test]
     fn parse_jobs_running_reads_the_mgmt_status_shape() {

@@ -6587,7 +6587,16 @@ pub struct ApiDelegateImageStatus {
     pub device_key_hash: String,
     pub sandbox_id: Option<String>,
     pub sandbox_status: Option<String>,
+    /// The instance's veFaaS lease deadline, verbatim (`null` on backends
+    /// without one).
+    pub expire_at: Option<String>,
     pub booted_registration_id: Option<String>,
+    /// The LIVE agent identity the instance's bridge reports (#577 follow-up):
+    /// ACP agent name (`hermes-agent`), its running version (the Hermes-bump
+    /// ground truth), and the LLM endpoint id.
+    pub agent_engine: Option<String>,
+    pub agent_version: Option<String>,
+    pub model: Option<String>,
     /// `true` = stale, `false` = current, `null` = unknowable (no live
     /// instance / app-default image / no registration to compare).
     pub stale: Option<bool>,
@@ -6751,7 +6760,11 @@ async fn agent_image_status_proxy(
                             device_key_hash: rs("device_key_hash").unwrap_or_default(),
                             sandbox_id: rs("sandbox_id"),
                             sandbox_status: rs("sandbox_status"),
+                            expire_at: rs("expire_at"),
                             booted_registration_id: rs("booted_registration_id"),
+                            agent_engine: rs("agent_engine"),
+                            agent_version: rs("agent_version"),
+                            model: rs("model"),
                             stale: r.get("stale").and_then(|x| x.as_bool()),
                             error: rs("error"),
                         }

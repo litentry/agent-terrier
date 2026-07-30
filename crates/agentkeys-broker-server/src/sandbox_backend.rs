@@ -76,11 +76,14 @@ pub fn no_create_envs() -> CreateEnvProvider {
 }
 
 /// One live runtime row for the #577 update/status paths — id + coarse
-/// status, cloud-agnostic (veFaaS SandboxId / ECS task ARN).
+/// status, cloud-agnostic (veFaaS SandboxId / ECS task ARN). `expire_at` is
+/// the veFaaS lease deadline verbatim; empty on backends without one (ECS
+/// tasks have no expiry).
 #[derive(Debug, Clone)]
 pub struct LiveRuntime {
     pub id: String,
     pub status: String,
+    pub expire_at: String,
 }
 
 /// The per-cloud delegate-sandbox driver behind one interface.
@@ -191,13 +194,18 @@ impl SandboxBackend {
                 .map(|i| LiveRuntime {
                     id: i.id,
                     status: i.status,
+                    expire_at: i.expire_at,
                 })
                 .collect()),
             Self::AwsEcs(c) => Ok(c
                 .live_for_device(device_key_hash)
                 .await?
                 .into_iter()
-                .map(|(id, status)| LiveRuntime { id, status })
+                .map(|(id, status)| LiveRuntime {
+                    id,
+                    status,
+                    expire_at: String::new(),
+                })
                 .collect()),
         }
     }

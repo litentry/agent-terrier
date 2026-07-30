@@ -275,6 +275,12 @@ The button also works as a plain "respawn now" for an agent whose sandbox has
 expired. **Archive** remains the separate, Touch-ID-gated action for actually
 retiring an agent — updating never archives.
 
+Each agent's card also shows what is actually running: a **runtime** row with
+the live engine + version its sandbox reports (e.g. `hermes-agent 0.19.0` —
+hover for the LLM endpoint), and a **sandbox** row with the instance id,
+status, and when its lease expires. These reflect the RUNNING instance, not
+what was last shipped — so after an update you can see the new version took.
+
 Updating an agent that was spawned before this feature still works; the app
 just notes that its old runtime couldn't hand its on-disk files over
 ("session export unavailable") — that heals from the next update onward.
