@@ -22,14 +22,16 @@ choices:
   mirrored content at the next mirror pass, and always by the sandbox's next
   respawn.
 - The agent's own `viking_remember` notes are its private working memory. They
-  live only inside its sandbox and are proposed back to you through the
-  **inbox** flow (you approve each item) — never written into shared memory
-  directly.
+  live only inside its sandbox; when the agent judges a learning durable it can
+  **propose** it to you through the **inbox** flow (its `propose-to-owner`
+  tool — you approve each item, and proposals are rate-limited) — never
+  written into shared memory directly.
 - The memory engine is **never load-bearing**: if it is down or not enabled,
   the agent falls back to its built-in memory and chat keeps working.
 
-Operators: enabling semantic search requires an explicit embedding
-configuration — see the OpenViking operator runbook (`operator-docs/`, not in
+Operators: enabling semantic search requires an explicit embedding model
+(the embed key/base default through the metered gate relay on gate-provisioned
+stacks) — see the OpenViking operator runbook (`operator-docs/`, not in
 the OSS mirror).
 
 ### Historical: removing a leftover `agentkeys wire` hooks block

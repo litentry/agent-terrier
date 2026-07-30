@@ -18,6 +18,7 @@ mod memory_mirror;
 mod pairing;
 mod persona;
 mod presets;
+mod propose;
 mod proxy;
 mod session;
 mod ui_bridge;
@@ -50,6 +51,29 @@ struct Args {
     /// report; only a missing env contract, credential, or session is fatal.
     #[arg(long)]
     memory_mirror_once: bool,
+
+    /// #573 absorption bridge — propose ONE learning to the owner's inbox.
+    /// Reads the proposal TEXT from stdin and the same chat env contract as
+    /// `--memory-mirror-once`; signs as the delegate, cap-mints against the
+    /// on-chain `inbox:<ns>` grant, and prints a JSON receipt. The in-sandbox
+    /// `propose-to-owner` wrapper is the agent-facing tool over this verb.
+    #[arg(long)]
+    propose_once: bool,
+
+    /// Namespace for `--propose-once` (default: the first entry of
+    /// `AGENTKEYS_MEMORY_NAMESPACES`). The push needs the delegate's on-chain
+    /// `inbox:<ns>` grant — DISTINCT from the `memory:<ns>` read grant.
+    #[arg(long)]
+    propose_ns: Option<String>,
+
+    /// Inbox key for `--propose-once` (default: `proposal-<unix-seconds>`).
+    #[arg(long)]
+    propose_key: Option<String>,
+
+    /// Context kind for `--propose-once`: knowledge|skill (persona is never
+    /// inbox-adoptable and is refused with the reason).
+    #[arg(long, default_value = "knowledge")]
+    propose_kind: String,
 
     /// Bind address for ui-bridge mode. Default 127.0.0.1:3114.
     #[arg(
@@ -386,6 +410,54 @@ async fn run_memory_mirror_once() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #573 `--propose-once` — see the Args doc. Reads the proposal text from
+/// stdin, pushes it through the shared inbox-append core as the delegate,
+/// prints the JSON receipt, exit 0. Any refusal (empty/oversized text, rate
+/// limit, missing `inbox:<ns>` grant → cap-mint 403) is a fatal error with
+/// the reason on stderr — the agent reads it and can tell the owner.
+async fn run_propose_once(args: Args) -> anyhow::Result<()> {
+    let cfg = chat_loop::ChatLoopConfig::from_env().ok_or_else(|| {
+        anyhow::anyhow!(
+            "propose-once: incomplete chat env contract (broker/channel/actor/operator \
+             + one credential) — see the warning above for the missing keys"
+        )
+    })?;
+    let propose_cfg = propose::ProposeConfig::from_chat_env(cfg)
+        .ok_or_else(|| anyhow::anyhow!("propose-once: bridge disabled by env (see log)"))?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+        .context("propose-once: reading the proposal text from stdin")?;
+    let credential = chat_loop::build_credential(&propose_cfg.chat)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("propose-once: credential bootstrap failed"))?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(40))
+        .build()?;
+    let bearer = chat_loop::resolve_session(&http, &propose_cfg.chat, &credential)
+        .await
+        .map_err(|e| anyhow::anyhow!("propose-once: delegate resolve failed: {e}"))?;
+    credential.on_new_session(&bearer).await;
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let receipt = propose::propose_once(
+        &propose_cfg,
+        &credential,
+        &bearer,
+        propose::ProposalInput {
+            namespace: args.propose_ns,
+            key: args.propose_key,
+            kind: args.propose_kind,
+            text,
+        },
+        now_unix,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -412,6 +484,10 @@ async fn main() -> anyhow::Result<()> {
 
     if args.memory_mirror_once {
         return run_memory_mirror_once().await;
+    }
+
+    if args.propose_once {
+        return run_propose_once(args).await;
     }
 
     // Issue #144 §10.2 (method A) one-shot pairing. Two synchronous steps mirror

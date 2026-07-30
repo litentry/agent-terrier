@@ -34,6 +34,19 @@ impl UpstreamClient {
             .map_err(|e| GateError::Upstream(format!("upstream transport: {e}")))
     }
 
+    /// POST the embeddings body (#572). Same custody as chat: the vendor key
+    /// is attached here, never held by the caller (the in-sandbox OpenViking
+    /// engine sends its `gk_` relay key to the gate instead).
+    pub async fn embeddings(&self, body: &Value) -> GateResult<reqwest::Response> {
+        self.client
+            .post(format!("{}/embeddings", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| GateError::Upstream(format!("upstream transport: {e}")))
+    }
+
     /// GET /models passthrough (OpenAI clients often list models at boot).
     pub async fn models(&self) -> GateResult<reqwest::Response> {
         self.client

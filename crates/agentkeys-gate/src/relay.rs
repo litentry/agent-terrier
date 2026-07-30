@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use tokio_stream::wrappers::ReceiverStream;
 
-use agentkeys_core::audit::{GateTurnBody, SpeechAsrBody, SpeechTtsBody};
+use agentkeys_core::audit::{GateEmbedBody, GateTurnBody, SpeechAsrBody, SpeechTtsBody};
 use base64::Engine;
 
 use crate::audit::Auditor;
@@ -266,6 +266,190 @@ impl Relay {
                 tracing::error!(user = %user_omni, error = %e, "GateTurn audit append failed");
             }
         }
+    }
+
+    fn embed_body(
+        caller: &RelayKey,
+        model: &str,
+        outcome: &str,
+        input_count: u64,
+        usage: &UsageCounters,
+    ) -> GateEmbedBody {
+        GateEmbedBody {
+            device_id: caller.device_id.clone(),
+            api_key_id: caller.key_id.clone(),
+            model: model.to_string(),
+            outcome: outcome.to_string(),
+            input_count,
+            prompt_tokens: usage.prompt_tokens,
+            total_tokens: usage.total_tokens,
+        }
+    }
+
+    /// Best-effort GateEmbed audit for paths that cannot retro-fail the call.
+    async fn audit_embed_best_effort(&self, user_omni: &str, body: GateEmbedBody) {
+        if let Some(auditor) = &self.auditor {
+            if let Err(e) = auditor.emit_embed(user_omni, body).await {
+                tracing::error!(user = %user_omni, error = %e, "GateEmbed audit append failed");
+            }
+        }
+    }
+
+    /// #572 — the embeddings relay: the in-sandbox OpenViking engine's metered
+    /// embedding egress. Same custody + budget gates + triage as `handle_chat`;
+    /// embeddings never stream, so the flow is the non-streamed leg only.
+    ///
+    /// The chat `model_override` is deliberately NOT applied: it names the CHAT
+    /// Ark endpoint id, and an embeddings call runs against a different
+    /// (embedding-family) endpoint the caller names in its own body.
+    pub async fn handle_embeddings(&self, caller: &RelayKey, raw: &[u8]) -> GateResult<TurnOutput> {
+        let body: Value = serde_json::from_slice(raw)
+            .map_err(|e| GateError::BadRequest(format!("invalid embeddings body: {e}")))?;
+        if !body.is_object() {
+            return Err(GateError::BadRequest(
+                "embeddings body must be a JSON object".into(),
+            ));
+        }
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let input_count = match body.get("input") {
+            Some(Value::String(_)) => 1,
+            Some(Value::Array(a)) => a.len() as u64,
+            _ => 0,
+        };
+
+        // The same two deterministic budget gates as chat — embed tokens burn
+        // the SAME per-user / per-delegate budgets, checked before any egress.
+        if let Some(budget) = self.config.budget_for(&caller.user_omni) {
+            let used = self.meter.used_total(&caller.user_omni);
+            if used >= budget {
+                let row = Self::embed_body(
+                    caller,
+                    &model,
+                    "denied:budget_exceeded",
+                    input_count,
+                    &UsageCounters::default(),
+                );
+                self.audit_embed_best_effort(&caller.user_omni, row).await;
+                return Err(GateError::Budget(format!(
+                    "user token budget exhausted ({used}/{budget})"
+                )));
+            }
+        }
+        if let Some(key_budget) = self.keys.budget_for_key(&caller.key_id) {
+            let key_used = self
+                .meter
+                .used_total_for_key(&caller.user_omni, &caller.key_id);
+            if key_used >= key_budget {
+                let row = Self::embed_body(
+                    caller,
+                    &model,
+                    "denied:budget_exceeded",
+                    input_count,
+                    &UsageCounters::default(),
+                );
+                self.audit_embed_best_effort(&caller.user_omni, row).await;
+                return Err(GateError::Budget(format!(
+                    "delegate token budget exhausted ({key_used}/{key_budget} for key {})",
+                    caller.key_id
+                )));
+            }
+        }
+
+        let resp = match self.upstream.embeddings(&body).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(key = %caller.key_id, error = %e, "upstream unreachable");
+                let row = Self::embed_body(
+                    caller,
+                    &model,
+                    "upstream_error",
+                    input_count,
+                    &UsageCounters::default(),
+                );
+                self.audit_embed_best_effort(&caller.user_omni, row).await;
+                return Err(e);
+            }
+        };
+
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/json")
+            .to_string();
+
+        if !status.is_success() {
+            let code = status.as_u16();
+            let upstream_body = resp.bytes().await.unwrap_or_default();
+            let row = Self::embed_body(
+                caller,
+                &model,
+                "upstream_error",
+                input_count,
+                &UsageCounters::default(),
+            );
+            self.audit_embed_best_effort(&caller.user_omni, row).await;
+            if (400..500).contains(&code) {
+                tracing::warn!(key = %caller.key_id, status = code, "upstream 4xx forwarded");
+                return Ok(TurnOutput::Full {
+                    status: code,
+                    content_type,
+                    body: upstream_body.to_vec(),
+                });
+            }
+            tracing::error!(
+                key = %caller.key_id,
+                status = code,
+                body = %String::from_utf8_lossy(&upstream_body),
+                "upstream 5xx — full body operator-logged, safe envelope returned"
+            );
+            return Err(GateError::Upstream(format!(
+                "upstream returned HTTP {code}"
+            )));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| GateError::Upstream(format!("reading upstream body: {e}")))?;
+        let parsed: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| GateError::Upstream(format!("unparseable upstream response: {e}")))?;
+        let usage = extract_usage(&parsed).unwrap_or_else(|| {
+            tracing::warn!(key = %caller.key_id, "upstream 2xx carried no usage object");
+            UsageCounters::default()
+        });
+
+        // Tokens are burned regardless of audit outcome — record first.
+        self.meter.record_embed(
+            &caller.user_omni,
+            &caller.device_id,
+            &caller.key_id,
+            &caller.label,
+            &usage,
+        );
+        let row = Self::embed_body(caller, &model, "ok", input_count, &usage);
+        if let Some(auditor) = &self.auditor {
+            if let Err(e) = auditor.emit_embed(&caller.user_omni, row).await {
+                tracing::error!(user = %caller.user_omni, error = %e, "GateEmbed audit append failed");
+                if self.config.require_audit {
+                    return Err(GateError::Audit(
+                        "embeddings call completed but could not be recorded (require_audit)"
+                            .into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(TurnOutput::Full {
+            status: 200,
+            content_type,
+            body: bytes.to_vec(),
+        })
     }
 
     pub async fn handle_chat(&self, caller: &RelayKey, raw: &[u8]) -> GateResult<TurnOutput> {

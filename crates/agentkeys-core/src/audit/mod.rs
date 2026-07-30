@@ -57,10 +57,10 @@ pub use bodies::{
     ChannelPublishBody, ChannelSubscribeBody, ChannelTeardownBody, ConfigGetBody, ConfigPutBody,
     ConfigTeardownBody, ContactBindBody, CredFetchBody, CredStoreBody, CredTeardownBody,
     DelegateArchiveBody, DelegateSpawnBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody,
-    EmailSendBody, GateTurnBody, GatewayRelayBody, K10RotateBody, K3EpochAdvanceBody,
-    MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody, PaymentDirectBody,
-    PaymentEscrowRedeemBody, SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody,
-    ScopeRevokeBody, SignEip191Body, SignEip712Body, SpeechAsrBody, SpeechTtsBody,
+    EmailSendBody, GateEmbedBody, GateTurnBody, GatewayRelayBody, K10RotateBody,
+    K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody,
+    PaymentDirectBody, PaymentEscrowRedeemBody, SandboxSpawnBody, SandboxTeardownBody,
+    ScopeGrantBody, ScopeRevokeBody, SignEip191Body, SignEip712Body, SpeechAsrBody, SpeechTtsBody,
 };
 pub use op_kind::AuditOpKind;
 
@@ -248,6 +248,7 @@ pub enum TypedAuditBody {
     GateTurn(GateTurnBody),
     SpeechAsr(SpeechAsrBody),
     SpeechTts(SpeechTtsBody),
+    GateEmbed(GateEmbedBody),
     ChannelPublish(ChannelPublishBody),
     ChannelSubscribe(ChannelSubscribeBody),
     ChannelTeardown(ChannelTeardownBody),
@@ -306,6 +307,7 @@ impl TypedAuditBody {
             AuditOpKind::GateTurn => Self::GateTurn(serde_json::from_value(value).ok()?),
             AuditOpKind::SpeechAsr => Self::SpeechAsr(serde_json::from_value(value).ok()?),
             AuditOpKind::SpeechTts => Self::SpeechTts(serde_json::from_value(value).ok()?),
+            AuditOpKind::GateEmbed => Self::GateEmbed(serde_json::from_value(value).ok()?),
             AuditOpKind::ChannelPublish => {
                 Self::ChannelPublish(serde_json::from_value(value).ok()?)
             }

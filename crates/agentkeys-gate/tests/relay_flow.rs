@@ -94,6 +94,36 @@ async fn upstream_models() -> Response {
     Json(json!({"object": "list", "data": [{"id": "ep-doubao"}]})).into_response()
 }
 
+/// #572 — the mock embeddings endpoint: OpenAI shape, one vector per input,
+/// `usage` with prompt == total (embeddings have no completion tokens).
+async fn upstream_embeddings(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    state.requests.lock().unwrap().push((auth, body.clone()));
+    let input_count = match body.get("input") {
+        Some(Value::Array(a)) => a.len(),
+        Some(Value::String(_)) => 1,
+        _ => 0,
+    };
+    let data: Vec<Value> = (0..input_count)
+        .map(|i| json!({"object": "embedding", "index": i, "embedding": [0.1, 0.2]}))
+        .collect();
+    Json(json!({
+        "object": "list",
+        "data": data,
+        "model": body.get("model").cloned().unwrap_or_default(),
+        "usage": {"prompt_tokens": 21, "total_tokens": 21}
+    }))
+    .into_response()
+}
+
 async fn spawn_upstream() -> (SocketAddr, UpstreamState) {
     let state = UpstreamState {
         mode: Arc::new(Mutex::new("ok".to_string())),
@@ -101,6 +131,7 @@ async fn spawn_upstream() -> (SocketAddr, UpstreamState) {
     };
     let app = Router::new()
         .route("/v1/chat/completions", post(upstream_chat))
+        .route("/v1/embeddings", post(upstream_embeddings))
         .route("/v1/models", get(upstream_models))
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -265,6 +296,99 @@ async fn non_streamed_turn_custody_metering_audit() {
     assert_eq!(envs[0]["op_body"]["total_tokens"], 140);
     assert_eq!(envs[0]["op_body"]["outcome"], "ok");
     assert_eq!(envs[0]["result"], 0);
+}
+
+/// #572 — the embeddings relay: custody (vendor key attached relay-side),
+/// metering into the shared totals + the embed dimension, and the GateEmbed
+/// (op_kind 93) audit row.
+#[tokio::test]
+async fn embeddings_call_custody_metering_audit() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/embeddings", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"model": "ep-doubao-embedding", "input": ["one", "two", "three"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"][0]["object"], "embedding");
+    assert_eq!(body["usage"]["total_tokens"], 21);
+
+    // Custody: the upstream saw the VENDOR key, never the relay key; the
+    // caller's model rode through untouched (no chat model_override applied).
+    let reqs = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].0.as_deref(), Some("Bearer ark-vendor-secret"));
+    assert_eq!(reqs[0].1["model"], "ep-doubao-embedding");
+
+    // Metering: embed tokens land in the shared totals AND the embed slice.
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["used_tokens"], 21);
+    assert_eq!(usage["totals"]["embed_tokens"], 21);
+    assert_eq!(usage["totals"]["embed_turns"], 1);
+    assert_eq!(usage["totals"]["turns"], 0);
+
+    // Audit: one GateEmbed (op_kind 93) envelope with the attribution.
+    let envs = gate.audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0]["op_kind"], 93);
+    assert_eq!(envs[0]["actor_omni"], user_omni());
+    assert_eq!(envs[0]["op_body"]["api_key_id"], "k1");
+    assert_eq!(envs[0]["op_body"]["input_count"], 3);
+    assert_eq!(envs[0]["op_body"]["total_tokens"], 21);
+    assert_eq!(envs[0]["op_body"]["outcome"], "ok");
+    assert_eq!(envs[0]["result"], 0);
+}
+
+/// #572 — chat and embeddings burn ONE per-user budget: a chat turn that
+/// exhausts it makes the next embeddings call (any key of the user) a
+/// deterministic 429 that never reaches the upstream.
+#[tokio::test]
+async fn embeddings_share_the_user_budget_with_chat() {
+    let gate = spawn_gate(Some(100)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("{}/v1/embeddings", gate.base))
+        .bearer_auth(RELAY_KEY_2)
+        .json(&json!({"model": "ep-doubao-embedding", "input": "late text"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    let err: Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "budget_exceeded");
+
+    // The embeddings call never reached the upstream (only the chat turn did).
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 1);
+
+    // The denial landed as a GateEmbed row with the NotPermitted result byte.
+    let envs = gate.audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs.len(), 2);
+    assert_eq!(envs[1]["op_kind"], 93);
+    assert_eq!(envs[1]["op_body"]["outcome"], "denied:budget_exceeded");
+    assert_eq!(envs[1]["result"], 2);
 }
 
 #[tokio::test]

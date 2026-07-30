@@ -201,6 +201,43 @@ pub async fn memory_inbox_push(
         None, // vault_role_arn
         region.to_string(),
     );
+    let resp = memory_inbox_push_with(
+        &client,
+        namespace,
+        key,
+        body,
+        kind,
+        operator_omni,
+        actor_omni,
+        device_key_hash,
+        session_bearer,
+    )
+    .await?;
+    Ok(format!(
+        "pushed {} proposal to the master's inbox → {} (content_hash {})",
+        kind.as_str(),
+        resp.s3_key,
+        resp.content_hash
+    ))
+}
+
+/// The push core on an ALREADY-BUILT client — split out so the #573 daemon
+/// absorption bridge (`agentkeys-daemon --propose-once`) can pass its
+/// cap-PoP-configured client (#552 signer custody signs the PoP remotely; the
+/// plain-session CLI wrapper above builds its own client). ONE owner of the
+/// cap-mint + inbox-append sequence either way.
+#[allow(clippy::too_many_arguments)]
+pub async fn memory_inbox_push_with(
+    client: &BackendClient,
+    namespace: &str,
+    key: &str,
+    body: &str,
+    kind: agentkeys_backend_client::protocol::ContextKind,
+    operator_omni: &str,
+    actor_omni: &str,
+    device_key_hash: &str,
+    session_bearer: &str,
+) -> Result<agentkeys_backend_client::protocol::MemoryInboxAppendResp> {
     // DISTINCT `inbox:<ns>` grant (never the `memory:<ns>` read grant) — built from
     // the bare namespace by the single shared helper so the spelling can't drift.
     let service = agentkeys_backend_client::protocol::service_inbox(namespace);
@@ -219,18 +256,12 @@ pub async fn memory_inbox_push(
         .await
         .with_context(|| format!("cap-mint memory-append for inbox namespace `{namespace}`"))?;
     let plaintext_b64 = STANDARD.encode(body.as_bytes());
-    let resp = client
+    client
         .memory_inbox_append(cap, key.to_string(), plaintext_b64, kind)
         .await
         .with_context(|| {
             format!("memory worker inbox-append for namespace `{namespace}` key `{key}`")
-        })?;
-    Ok(format!(
-        "pushed {} proposal to the master's inbox → {} (content_hash {})",
-        kind.as_str(),
-        resp.s3_key,
-        resp.content_hash
-    ))
+        })
 }
 
 /// Vault the credential `service` = `secret` (the symmetric store half of

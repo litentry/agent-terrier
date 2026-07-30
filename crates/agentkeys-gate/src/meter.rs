@@ -21,6 +21,10 @@ pub struct Counters {
     pub cached_tokens: u64,
     pub reasoning_tokens: u64,
     pub turns: u64,
+    /// #572 — the embeddings slice of `total_tokens` (embed calls burn the
+    /// SAME budget as chat; this dimension keeps the split visible).
+    pub embed_tokens: u64,
+    pub embed_turns: u64,
 }
 
 impl Counters {
@@ -31,6 +35,15 @@ impl Counters {
         self.cached_tokens += u.cached_tokens;
         self.reasoning_tokens += u.reasoning_tokens;
         self.turns += 1;
+    }
+
+    /// #572 — one embeddings call. Tokens flow into the shared totals (the
+    /// budget comparand stays `total_tokens`) AND into the embed dimension.
+    fn add_embed(&mut self, u: &UsageCounters) {
+        self.prompt_tokens += u.prompt_tokens;
+        self.total_tokens += u.total_tokens;
+        self.embed_tokens += u.total_tokens;
+        self.embed_turns += 1;
     }
 }
 
@@ -106,6 +119,29 @@ impl Meter {
         bucket.label = key_label.to_string();
         bucket.device_id = device_id.to_string();
         bucket.counters.add(usage);
+    }
+
+    /// #572 — record one embeddings call. Same attribution roots as `record`;
+    /// the tokens land in the shared budget totals plus the embed dimension.
+    pub fn record_embed(
+        &self,
+        user_omni: &str,
+        device_id: &str,
+        api_key_id: &str,
+        key_label: &str,
+        usage: &UsageCounters,
+    ) {
+        let mut users = self.users.write().expect("meter lock poisoned");
+        let user = users.entry(user_omni.to_string()).or_default();
+        user.totals.add_embed(usage);
+        user.by_device
+            .entry(device_id.to_string())
+            .or_default()
+            .add_embed(usage);
+        let bucket = user.by_key.entry(api_key_id.to_string()).or_default();
+        bucket.label = key_label.to_string();
+        bucket.device_id = device_id.to_string();
+        bucket.counters.add_embed(usage);
     }
 
     /// Tokens already accumulated to the user — the budget comparand.
@@ -225,6 +261,34 @@ mod tests {
         let k2 = s.by_api_key.iter().find(|k| k.api_key_id == "k2").unwrap();
         assert_eq!(k2.counters.total_tokens, 30);
         assert_eq!(k2.label, "living room");
+    }
+
+    /// #572 — embed calls burn the SAME budget as chat and stay visible as
+    /// their own dimension.
+    #[test]
+    fn embed_calls_share_the_budget_and_track_their_own_dimension() {
+        let meter = Meter::default();
+        let user = "0xuser";
+        meter.record(user, "esp32-01", "k1", "kid tablet", &usage(10));
+        let embed = UsageCounters {
+            prompt_tokens: 30,
+            completion_tokens: 0,
+            total_tokens: 30,
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        meter.record_embed(user, "esp32-01", "k1", "kid tablet", &embed);
+
+        // The budget comparand includes the embed tokens.
+        assert_eq!(meter.used_total(user), 40);
+        assert_eq!(meter.used_total_for_key(user, "k1"), 40);
+        let s = meter.summary(user, Some(100));
+        assert_eq!(s.used_tokens, 40);
+        assert_eq!(s.totals.embed_tokens, 30);
+        assert_eq!(s.totals.embed_turns, 1);
+        // Chat turns are not inflated by embed calls.
+        assert_eq!(s.totals.turns, 1);
+        assert_eq!(s.totals.completion_tokens, 5);
     }
 
     #[test]

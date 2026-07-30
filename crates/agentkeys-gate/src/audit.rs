@@ -7,7 +7,9 @@
 //! per-api-key attribution lives in the typed body.
 
 use agentkeys_backend_client::{AuditAppendInput, BackendClient};
-use agentkeys_core::audit::{AuditOpKind, GateTurnBody, SpeechAsrBody, SpeechTtsBody};
+use agentkeys_core::audit::{
+    AuditOpKind, GateEmbedBody, GateTurnBody, SpeechAsrBody, SpeechTtsBody,
+};
 
 pub struct Auditor {
     client: BackendClient,
@@ -43,6 +45,14 @@ impl Auditor {
         let result = result_code(&body.outcome);
         let op_body = serde_json::to_value(&body).map_err(|e| e.to_string())?;
         self.emit(user_omni, AuditOpKind::GateTurn, op_body, result)
+            .await
+    }
+
+    /// #572 — one embeddings call through the relay (op_kind 93).
+    pub async fn emit_embed(&self, user_omni: &str, body: GateEmbedBody) -> Result<(), String> {
+        let result = result_code(&body.outcome);
+        let op_body = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+        self.emit(user_omni, AuditOpKind::GateEmbed, op_body, result)
             .await
     }
 

@@ -375,6 +375,27 @@ pub struct SpeechTtsBody {
     pub duration_ms: u64,
 }
 
+/// #572 — one embeddings call through the gate relay (the in-sandbox
+/// OpenViking engine's metered embedding egress). Same attribution model as
+/// GateTurn; embeddings have no completion/streaming legs, so the body
+/// carries the input count plus the two token counters the upstream reports.
+/// Input TEXT never lands here — counts and coordinates only (D13 posture).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateEmbedBody {
+    /// Device the call is attributed to (from the relay key record).
+    pub device_id: String,
+    /// Relay api-key id the caller authenticated with (never the secret).
+    pub api_key_id: String,
+    /// Embedding model / Ark endpoint id the call ran against.
+    pub model: String,
+    /// `"ok"`, `"denied:budget_exceeded"`, or `"upstream_error"`.
+    pub outcome: String,
+    /// Number of inputs embedded (`input` string = 1, array = its length).
+    pub input_count: u64,
+    pub prompt_tokens: u64,
+    pub total_tokens: u64,
+}
+
 // ── 100..109 — channel family (#406 channels data class, audited per #229) ─
 //
 // Emitted by `agentkeys-worker-channel` once per publish/subscribe/teardown.
@@ -772,6 +793,35 @@ mod tests {
         assert_eq!(AuditOpKind::GateTurn.label(), "gate.turn");
         match decoded.typed_body().unwrap() {
             TypedAuditBody::GateTurn(b) => assert_eq!(b, body),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        // #572 — the embeddings-relay row (op_kind 93) round-trips the same way.
+        let embed = GateEmbedBody {
+            device_id: "esp32-lcd4b-01".into(),
+            api_key_id: "gk-kid-tablet".into(),
+            model: "ep-2026-doubao-embedding".into(),
+            outcome: "ok".into(),
+            input_count: 3,
+            prompt_tokens: 210,
+            total_tokens: 210,
+        };
+        let env = envelope_for(
+            [0x44; 32],
+            [0x44; 32],
+            AuditOpKind::GateEmbed,
+            embed.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(decoded.op_kind, AuditOpKind::GateEmbed as u8);
+        assert_eq!(AuditOpKind::GateEmbed.label(), "gate.embed");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::GateEmbed(b) => assert_eq!(b, embed),
             other => panic!("unexpected typed body: {other:?}"),
         }
     }

@@ -1,5 +1,6 @@
-//! HTTP transport. Three caller-facing routes (`/v1/chat/completions`,
-//! `/v1/models`, `/v1/usage`) + `/healthz` for the load balancer.
+//! HTTP transport. The OpenAI-compatible caller routes (`/v1/chat/completions`,
+//! `/v1/embeddings`, `/v1/models`, `/v1/usage`) + the speech/voices legs +
+//! `/healthz` for the load balancer.
 
 use std::sync::Arc;
 
@@ -21,6 +22,9 @@ pub fn router(relay: Arc<Relay>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/chat/completions", post(chat_completions))
+        // #572 — the embeddings relay (same gk_ auth + budgets; the
+        // in-sandbox OpenViking engine's metered embedding egress).
+        .route("/v1/embeddings", post(embeddings))
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
         // #519 — the speech relay legs (same gk_ auth; gate-held Doubao app
@@ -147,6 +151,29 @@ async fn chat_completions(
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         Err(e) => {
             tracing::warn!(key = %caller.key_id, error = %e, "turn failed");
+            error_response(e)
+        }
+    }
+}
+
+/// #572 — the embeddings relay leg. Embeddings never stream, so a Stream
+/// output here is a relay bug, surfaced as a 500 rather than hung.
+async fn embeddings(State(relay): State<Arc<Relay>>, headers: HeaderMap, body: Bytes) -> Response {
+    let caller = match authenticate_live(&relay, &headers) {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
+    match relay.handle_embeddings(&caller, &body).await {
+        Ok(TurnOutput::Full {
+            status,
+            content_type,
+            body,
+        }) => full_response(status, content_type, body),
+        Ok(TurnOutput::Stream { .. }) => error_response(GateError::Internal(
+            "embeddings relay produced a stream".into(),
+        )),
+        Err(e) => {
+            tracing::warn!(key = %caller.key_id, error = %e, "embeddings call failed");
             error_response(e)
         }
     }

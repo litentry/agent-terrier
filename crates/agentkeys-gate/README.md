@@ -28,13 +28,17 @@ conversation (its only body mutations: the optional model override, and
   is *usable* only while gate-provisioned. Custody + metering only, still not
   a control point.
 - Every turn lands on the ledger as a `GateTurn` (op_kind 90) audit row with
-  usage + attribution (arch.md §15.3a).
+  usage + attribution (arch.md §15.3a); every embeddings call as a `GateEmbed`
+  (op_kind 93) row (#572). Embed tokens burn the SAME per-user / per-delegate
+  budgets as chat and stay visible as their own `embed_tokens`/`embed_turns`
+  dimension in the usage rollup.
 
 ## Endpoints
 
 | Route | Auth | What |
 |---|---|---|
 | `POST /v1/chat/completions` | relay key | the proxied turn (streamed + non-streamed) |
+| `POST /v1/embeddings` | relay key | #572 embeddings relay (the in-sandbox OpenViking engine points `OPENVIKING_EMBED_API_BASE` here; no raw vendor key in the sandbox) |
 | `GET /v1/models` | relay key or admin | upstream passthrough |
 | `GET /v1/usage` | relay key → own user; admin → `?user_omni=` or all | the rollup summary |
 | `POST /v1/admin/keys` | admin | #427 provision/rotate a relay key (broker spawn-finalize; secret returned ONCE) |
@@ -56,7 +60,7 @@ the boot log WARNs.
 | `AGENTKEYS_GATE_KEYS_FILE` | JSON: relay keys + per-user budgets (below) |
 | `AGENTKEYS_GATE_DEFAULT_BUDGET_TOKENS` | default per-user budget; unset = unlimited (still metered) |
 | `AGENTKEYS_GATE_ADMIN_TOKEN` | operator bearer for the all-users usage view |
-| `AGENTKEYS_AUDIT_URL` | audit worker base for `GateTurn` appends |
+| `AGENTKEYS_AUDIT_URL` | audit worker base for `GateTurn`/`GateEmbed` appends |
 | `AGENTKEYS_GATE_REQUIRE_AUDIT` | fail a non-streamed turn whose audit append fails |
 
 Keys file:
