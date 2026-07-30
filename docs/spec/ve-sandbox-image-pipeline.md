@@ -12,6 +12,14 @@ bash scripts/operator/build-image-hybrid.sh
 
 That is the whole cycle for a normal code change — also the fleet console's **"build+push+preheat VE sandbox image · HYBRID"** item. It ends with the new image *preheated in veFaaS*, not merely pushed to a registry. Bringing live delegates onto the new image is then **one parent-control "update runtime" click per delegate (#577, Phase 4 below)** — an in-place kill + re-create with the same identity, grants and chat channel. No archive ceremony: archive remains only for actually *removing* a delegate.
 
+For a **Hermes version bump** (the pin moves — #483), the multi-phase routine around this pipeline — drift → bump PR → the human merge gate → CR base re-seed → image cycle → in-image verify — is driven end-to-end by one ceremony driver (#578), re-run after every stop:
+
+```bash
+bash scripts/operator/ship-hermes.sh          # status (default) · ship · verify
+```
+
+It delegates every mutation to the scripts on this page and gates on observables (PR state, the `base/hermes:<pin>-<sha8>` tag in the CR, precache status, `hermes --version` inside the image); merging the bump PR stays a human step, and `--kill-pinners` is the explicit consent for the #577 kill-only unpin.
+
 ## Why the work is split across two machines
 
 The pipeline looks over-engineered until you know that **two directions do not work**, both measured:
