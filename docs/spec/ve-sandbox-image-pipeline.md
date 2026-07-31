@@ -18,7 +18,7 @@ For a **Hermes version bump** (the pin moves — #483), the multi-phase routine 
 bash scripts/operator/ship-hermes.sh          # status (default) · ship · verify
 ```
 
-It delegates every mutation to the scripts on this page and gates on observables (PR state, the `base/hermes:<pin>-<sha8>` tag in the CR, precache status, `hermes --version` inside the image); merging the bump PR stays a human step, and `--kill-pinners` is the explicit consent for the #577 kill-only unpin.
+It delegates every mutation to the scripts on this page and gates on observables (PR state, the `base/hermes:<pin>-<sha8>` tag in the CR, precache status, `hermes --version` inside the image); merging the bump PR stays a human step, and `--kill-pinners` is the explicit consent for the #577 kill-only unpin. Also the fleet console's **"ship Hermes bump · CEREMONY"** item — the bump counterpart of the HYBRID row above.
 
 ## Why the work is split across two machines
 
