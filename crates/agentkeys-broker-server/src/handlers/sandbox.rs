@@ -41,12 +41,16 @@ pub struct SandboxProvision {
 }
 
 impl SandboxProvision {
-    /// The `"sandbox"` object attached to poll/resolve responses.
+    /// The `"sandbox"` object attached to poll/resolve/spawn responses.
+    /// `agent_url` is the delegate's bridge base — the daemon's spawn-time
+    /// preset distribution derives its target from THIS, never from a
+    /// hand-set laptop env (worker-URLs-are-derived rule).
     pub fn to_json(&self) -> serde_json::Value {
         json!({
             "sandbox_id": self.sandbox_id,
             "status": self.status,
             "error": self.error,
+            "agent_url": self.agent_url,
         })
     }
 }

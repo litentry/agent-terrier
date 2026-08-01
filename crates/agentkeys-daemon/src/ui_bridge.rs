@@ -6393,6 +6393,13 @@ async fn spawn_submit_proxy(
                 .pointer("/sandbox/sandbox_id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            // The delegate's bridge base rides in the spawn response (the
+            // veFaaS gateway / per-task ENI) — derived, so a laptop daemon
+            // needs no AGENTKEYS_SANDBOX_BRIDGE_URL to distribute presets.
+            let agent_url = spawned
+                .pointer("/sandbox/agent_url")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             if !preset_id.is_empty() && !delegate_omni.is_empty() {
                 apply_preset_at_spawn(
                     &state,
@@ -6400,6 +6407,7 @@ async fn spawn_submit_proxy(
                     &preset_id,
                     &delegate_omni,
                     sandbox_id.as_deref(),
+                    agent_url.as_deref(),
                 )
                 .await;
             }
@@ -7236,6 +7244,7 @@ async fn apply_preset_at_spawn(
     preset_id: &str,
     delegate_omni: &str,
     sandbox_id: Option<&str>,
+    agent_url: Option<&str>,
 ) {
     let url = format!("{}/v1/presets/{}", broker.trim_end_matches('/'), preset_id);
     let bundle: agentkeys_backend_client::protocol::PresetBundle =
@@ -7299,6 +7308,7 @@ async fn apply_preset_at_spawn(
                 normalize_omni_0x(delegate_omni).to_lowercase()
             ),
             sandbox_id,
+            agent_url,
         )
         .await
         {
@@ -7334,6 +7344,7 @@ async fn apply_preset_at_spawn(
             "/v1/context/apply",
             Some(body),
             sandbox_id,
+            agent_url,
         )
         .await
         {
@@ -10587,7 +10598,7 @@ async fn sandbox_bridge_request(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    sandbox_bridge_request_instanced(state, method, path, body, None).await
+    sandbox_bridge_request_instanced(state, method, path, body, None, None).await
 }
 
 /// #428/#430 per-delegate variant: when `instance` is set, the request carries
@@ -10601,10 +10612,16 @@ async fn sandbox_bridge_request_instanced(
     path: &str,
     body: Option<serde_json::Value>,
     instance: Option<&str>,
+    base_override: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    let base = state.sandbox_bridge_url.as_deref().ok_or_else(|| {
-        "sandbox_unconfigured: no --sandbox-bridge-url / AGENTKEYS_SANDBOX_BRIDGE_URL".to_string()
-    })?;
+    let base = base_override
+        .filter(|b| !b.trim().is_empty())
+        .or(state.sandbox_bridge_url.as_deref())
+        .ok_or_else(|| {
+            "sandbox_unconfigured: no per-delegate agent_url from the broker and no \
+             --sandbox-bridge-url / AGENTKEYS_SANDBOX_BRIDGE_URL"
+                .to_string()
+        })?;
     let url = format!("{}{}", base.trim_end_matches('/'), path);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
@@ -10647,8 +10664,9 @@ async fn apply_persona_to_sandbox(
     state: &SharedUiBridgeState,
     soul_body: &str,
     instance: Option<&str>,
+    bridge_base: Option<&str>,
 ) -> (bool, String) {
-    if state.sandbox_bridge_url.is_none() {
+    if bridge_base.is_none_or(|b| b.trim().is_empty()) && state.sandbox_bridge_url.is_none() {
         return (
             false,
             "sandbox_unconfigured: stored canonically; the sandbox picks it up at next spawn"
@@ -10666,6 +10684,7 @@ async fn apply_persona_to_sandbox(
         "/v1/context/apply",
         Some(body),
         instance,
+        bridge_base,
     )
     .await
     {
@@ -10738,6 +10757,7 @@ async fn persona_commit(
     audit_kind: &str,
     audit_detail: String,
     instance: Option<&str>,
+    bridge_base: Option<&str>,
 ) -> Result<ApiPersonaEditResponse, (axum::http::StatusCode, String)> {
     let backend = persona_backend(state).await?;
     let soul_key = persona_soul_key(delegate_omni);
@@ -10752,7 +10772,8 @@ async fn persona_commit(
         persona_store(state, &backend, &rotated).await?;
         version = v;
     }
-    let (applied, apply_detail) = apply_persona_to_sandbox(state, new_body, instance).await;
+    let (applied, apply_detail) =
+        apply_persona_to_sandbox(state, new_body, instance, bridge_base).await;
     let evt = ApiAuditEvent {
         id: format!("e-persona-{}", now_unix()),
         ts: now_ts_hms(),
@@ -10804,6 +10825,7 @@ async fn edit_master_persona(
             "persona edited for delegate {}",
             normalize_omni_0x(&req.delegate_omni).to_lowercase()
         ),
+        None,
         None,
     )
     .await
@@ -10866,6 +10888,7 @@ async fn rollback_master_persona(
             req.version,
             normalize_omni_0x(&req.delegate_omni).to_lowercase()
         ),
+        None,
         None,
     )
     .await
