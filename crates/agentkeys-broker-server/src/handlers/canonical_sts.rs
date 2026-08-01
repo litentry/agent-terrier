@@ -190,28 +190,35 @@ pub async fn mint_canonical_sts(
         norm(&p.operator_omni),
         p.service.to_lowercase(),
     );
-    let policy = serde_json::json!({
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Sid": "CanonicalReadOneObject",
-            "Effect": "Allow",
-            "Action": "s3:GetObject",
-            "Resource": resource,
-        }]
-    })
-    .to_string();
+    let policy_string;
+    // #582: the VE provider refuses AWS-dialect inline session policies (#510
+    // guard) — same posture as channel-sts one file over. There the scope-down
+    // is PROVIDER-SIDE: the #511 per-class memory role's identity policy
+    // (bots/* on the memory bucket only). The creds never leave the memory
+    // worker (it redeems the cap server-side and streams the object), so the
+    // trust envelope equals the worker's every other class-scoped path; an
+    // exact-object VE rendering is the #512-style intent follow-up on #582.
+    let policy = if state.sts.supports_inline_session_policy() {
+        policy_string = serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "CanonicalReadOneObject",
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": resource,
+            }]
+        })
+        .to_string();
+        Some(policy_string.as_str())
+    } else {
+        None
+    };
 
     // 6. AssumeRole with the operator-tagged OIDC + the scoped policy. The delegate
     //    gets ONLY these narrow, read-only, single-object creds.
     let creds = state
         .sts
-        .assume_role_scoped(
-            memory_role_arn,
-            &p.operator_omni,
-            &oidc_jwt,
-            900,
-            Some(&policy),
-        )
+        .assume_role_scoped(memory_role_arn, &p.operator_omni, &oidc_jwt, 900, policy)
         .await
         .map_err(|e| BrokerError::Internal(format!("canonical-sts AssumeRole: {e}")))?;
 

@@ -8759,14 +8759,9 @@ async fn get_master_memory_entry_inner(
         .map_err(|reason| (StatusCode::CONFLICT, reason))?;
     if let Some(ctx) = ctx {
         let client = reqwest::Client::new();
-        let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-            &ctx.broker,
-            &ctx.j1,
-            &ctx.role_arn,
-            &ctx.region,
-        )
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
+        let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "list"])
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
         // Ok(None) → the namespace has no durable blob (nothing to show); a real
         // worker error surfaces as 502 (not an empty list masking a failure).
         let stored = memory_get_ns_real(&client, &ctx, &creds, &q.ns)
@@ -8895,6 +8890,11 @@ struct RealMemoryCtx {
     j1: String,
     omni: String,
     device_key_hash: String,
+    /// #514/#582 — the memory plane rides the SAME signer decision point as
+    /// config/cred: `Some("ve")` mints through the signer (`role_arn` is then
+    /// carried but unused — the signer selects the role by data class, #511).
+    signer_url: Option<String>,
+    sts_provider: Option<String>,
 }
 
 /// `Ok(None)` → real chain not configured (in-memory fallback). `Ok(Some)` →
@@ -8918,7 +8918,23 @@ async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>,
         j1: c.j1,
         omni: c.omni,
         device_key_hash: c.device_key_hash,
+        signer_url: state.signer_url.clone(),
+        sts_provider: state.sts_provider.clone(),
     }))
+}
+
+impl RealMemoryCtx {
+    fn mint_coords(&self) -> DataPlaneMint<'_> {
+        DataPlaneMint {
+            broker: &self.broker,
+            j1: &self.j1,
+            omni: &self.omni,
+            role_arn: &self.role_arn,
+            region: &self.region,
+            signer_url: self.signer_url.as_deref(),
+            sts_provider: self.sts_provider.as_deref(),
+        }
+    }
 }
 
 struct RealConfigCtx {
@@ -9208,7 +9224,7 @@ async fn mint_master_cap(
 async fn memory_put_ns_real(
     client: &reqwest::Client,
     ctx: &RealMemoryCtx,
-    creds: &agentkeys_provisioner::AwsTempCreds,
+    creds: &DataCreds,
     ns: &str,
     entries: &[StoredMemoryEntry],
 ) -> Result<String, String> {
@@ -9264,7 +9280,7 @@ async fn memory_put_ns_real(
 async fn memory_get_ns_real(
     client: &reqwest::Client,
     ctx: &RealMemoryCtx,
-    creds: &agentkeys_provisioner::AwsTempCreds,
+    creds: &DataCreds,
     ns: &str,
 ) -> Result<Option<Vec<StoredMemoryEntry>>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
@@ -9913,7 +9929,7 @@ const SKILL_MAX_BYTES: usize = 64 * 1024;
 async fn inbox_worker_post(
     http: &reqwest::Client,
     ctx: &RealMemoryCtx,
-    creds: &agentkeys_provisioner::AwsTempCreds,
+    creds: &DataCreds,
     path: &str,
     extra: serde_json::Value,
 ) -> Result<serde_json::Value, (axum::http::StatusCode, String)> {
@@ -9986,14 +10002,7 @@ async fn list_master_inbox(State(state): State<SharedUiBridgeState>) -> axum::re
         }
     };
     let http = reqwest::Client::new();
-    let creds = match agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
-    )
-    .await
-    {
+    let creds = match mint_data_creds(&ctx.mint_coords(), "memory", &["get", "list"]).await {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10051,14 +10060,7 @@ async fn get_master_inbox_entry(
         }
     };
     let http = reqwest::Client::new();
-    let creds = match agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
-    )
-    .await
-    {
+    let creds = match mint_data_creds(&ctx.mint_coords(), "memory", &["get", "list"]).await {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10191,11 +10193,10 @@ async fn accept_master_inbox(
         }
     };
     let http = reqwest::Client::new();
-    let creds = match agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
+    let creds = match mint_data_creds(
+        &ctx.mint_coords(),
+        "memory",
+        &["get", "put", "delete", "list"],
     )
     .await
     {
@@ -10363,11 +10364,10 @@ async fn reject_master_inbox(
         }
     };
     let http = reqwest::Client::new();
-    let creds = match agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
+    let creds = match mint_data_creds(
+        &ctx.mint_coords(),
+        "memory",
+        &["get", "put", "delete", "list"],
     )
     .await
     {
@@ -10491,7 +10491,7 @@ fn now_date_utc() -> String {
 /// The persona storage backend: the real per-ns worker chain when configured,
 /// else the in-memory cache (dev / headless CI — same split as the plant).
 enum PersonaBackend {
-    Real(Box<RealMemoryCtx>, agentkeys_provisioner::AwsTempCreds),
+    Real(Box<RealMemoryCtx>, DataCreds),
     Cache,
 }
 
@@ -10500,19 +10500,14 @@ async fn persona_backend(
 ) -> Result<PersonaBackend, (axum::http::StatusCode, String)> {
     match real_memory_ctx(state).await {
         Ok(Some(ctx)) => {
-            let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-                &ctx.broker,
-                &ctx.j1,
-                &ctx.role_arn,
-                &ctx.region,
-            )
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    format!("STS relay: {e}"),
-                )
-            })?;
+            let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"])
+                .await
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        format!("STS relay: {e}"),
+                    )
+                })?;
             Ok(PersonaBackend::Real(Box::new(ctx), creds))
         }
         Ok(None) => Ok(PersonaBackend::Cache),
@@ -11085,19 +11080,14 @@ async fn plant_master_memory_inner(
         }
 
         // STS creds (memory role) minted once, reused across namespaces.
-        let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-            &ctx.broker,
-            &ctx.j1,
-            &ctx.role_arn,
-            &ctx.region,
-        )
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::BAD_GATEWAY,
-                format!("STS relay: {e}"),
-            )
-        })?;
+        let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"])
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("STS relay: {e}"),
+                )
+            })?;
 
         let mut committed: Vec<ApiMemoryEntry> = Vec::new();
         for (ns, entries) in &by_ns {

@@ -137,28 +137,32 @@ pub async fn mint_inbox_sts(
         norm(&p.actor_omni),
         p.service.to_lowercase(),
     );
-    let policy = serde_json::json!({
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Sid": "InboxAppendOneSubprefix",
-            "Effect": "Allow",
-            "Action": "s3:PutObject",
-            "Resource": resource,
-        }]
-    })
-    .to_string();
+    let policy_string;
+    // #582: VE refuses AWS-dialect inline session policies (#510 guard) — the
+    // channel-sts posture: provider-side scope-down via the #511 memory-class
+    // role. Worker-held creds, same trust envelope as its other class paths;
+    // the exact-sub-prefix VE rendering is the #512-style intent follow-up.
+    let policy = if state.sts.supports_inline_session_policy() {
+        policy_string = serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "InboxAppendOneSubprefix",
+                "Effect": "Allow",
+                "Action": "s3:PutObject",
+                "Resource": resource,
+            }]
+        })
+        .to_string();
+        Some(policy_string.as_str())
+    } else {
+        None
+    };
 
     // 6. AssumeRole with the operator-tagged OIDC + the scoped policy. The worker
     //    gets ONLY these narrow, write-only, single-sub-prefix creds.
     let creds = state
         .sts
-        .assume_role_scoped(
-            memory_role_arn,
-            &p.operator_omni,
-            &oidc_jwt,
-            900,
-            Some(&policy),
-        )
+        .assume_role_scoped(memory_role_arn, &p.operator_omni, &oidc_jwt, 900, policy)
         .await
         .map_err(|e| BrokerError::Internal(format!("inbox-sts AssumeRole: {e}")))?;
 
