@@ -58,7 +58,8 @@ Run this **only on a deliberate Hermes/openviking bump**. The published tag enco
 | 2 | Mac → broker | `scp` the ~50 MB binary |
 | 3 | broker | `setup-image.sh --from-binary`: `docker build` **FROM `$VE_BASE_HERMES`** — BuildKit **skips stage 1 entirely**, so zero foreign egress — with the daemon `COPY` as the **last layer** |
 | 4 | broker | `docker push` → CR, **intra-region** (normally one ~50 MB layer — but see the CR-tier note below) |
-| 5 | broker | `agentkeys-broker-server precache-refresh` → poll until 已预热 |
+| 5 | broker | **veFaaS-faithful boot gate** (pod-env boot of the registry-live digest — Phase 3 below) |
+| 6 | broker | `agentkeys-broker-server precache-refresh` → poll until 已预热 |
 
 Two design details that are load-bearing rather than cosmetic:
 
@@ -84,6 +85,20 @@ Two consequences worth stating plainly, because both contradict things this doc 
 ## Phase 3 — precache refresh: why a push is not enough
 
 **veFaaS spawns the image it has PRECACHED, not what the registry currently serves.** A same-tag re-push is invisible to it. This produced a silent-chat incident (2026-07-23) where the CR held the new image while every sandbox kept booting the previous one.
+
+### The boot gate runs first: a veFaaS pod's env is NOT docker's env (2026-07-30)
+
+**A pod gets ONLY the function's env template + the per-instance `Envs` — the image's baked `ENV`s are NOT merged.** Plain `docker run` *does* merge them, so an image can boot green in every docker check on this page and still exit in every pod. Measured 2026-07-30: the re-seeded AIO base's entrypoint (`/opt/gem/entrypoint.sh`) had grown `mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"`, the function template — captured for `all-in-one-sandbox:1.10.0` — lacked `XDG_RUNTIME_DIR`, so every `CreateSandbox` died `mkdir: cannot create directory ''` → exit 1 → 403 `function_exited`. First symptom: a freshly-spawned delegate's chat silently never answered (the message sat in the channel feed; nginx showed no sandbox ever polling). The pod's own stdout lives in the function's **TLS log topic** (`GetFunction → TlsConfig`) — that is where the `mkdir` line was finally read; `GetFunctionInstanceLogs` 404s once the failed instance is GC'd (minutes).
+
+`setup-image.sh` therefore runs a **boot gate before every precache refresh** (`run_vefaas_boot_gate`, also under `--refresh-only`):
+
+1. resolve the **registry-live digest** of `CR_IMAGE` (never the local tag — the two diverged 2026-07-28 when a laptop escape-hatch push put `c8a98106…` in the CR while the broker's local build was `35e32195…`; the precache serves the CR one) and pull it;
+2. fetch the **live** function env template — `GetFunction` via the operator-side `scripts/operator/lib/ve-api.py` (a stdlib port of `agentkeys-core::ve_sign`), creds from the broker unit's env family, needing the read-only `vefaas:GetFunction` grant ([`ve-broker-vefaas.json`](../../scripts/operator/policies/ve-broker-vefaas.json) Sid `FunctionReadForBootGate`; a 403 here means the cloud policies predate it — converge with `setup-cloud.sh --cloud ve`);
+3. boot the digest with **`env -i` + exactly that template + the function's own `Command`** — pod semantics, image `ENV`s dropped — and require PID 1 alive after `AGENTKEYS_VEFAAS_GATE_SECS` (default 25 s).
+
+A failing gate **blocks the refresh** and prints the container log (byte-for-byte what the pod would log) plus the baked-vs-template key diff with the exact console/`UpdateFunction` remediation. Both directions are measured on the live stack: the broken template reproduces the incident through the gate, and adding the missing keys (`XDG_RUNTIME_DIR=/tmp/runtime-gem`, `GEM_SERVER_PORT=8088`, `MCP_SERVER_PORT=8089`, `MCP_HUB_PORT=8079`) turns it green. Emergency opt-out: `AGENTKEYS_SKIP_VEFAAS_BOOT_GATE=1` — loud, because it re-opens exactly this class.
+
+The same drift is caught **at its source** by `seed-base-images.sh`: on every run it diffs the AIO base's baked env keys against the live function template and fails listing the missing keys + values (opt-out `AGENTKEYS_SKIP_VEFAAS_ENV_CHECK=1`) — a base bump is the deliberate moment the template must be re-synced, the ship-time boot gate is the behavioral backstop.
 
 `ve_faas.rs::refresh_precache()` therefore does: **List → Delete → verify GONE → Precache → poll until `success`**. Each part exists because of a measured failure mode:
 
