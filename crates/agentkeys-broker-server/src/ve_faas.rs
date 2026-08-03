@@ -138,6 +138,15 @@ pub struct VeFaasConfig {
     /// so this ONE call gets a generous ceiling while the quick lifecycle calls
     /// keep the short default.
     pub create_timeout_secs: u32,
+    /// #589 — after a `CreateSandbox` 408 `function_cold_start_timeout`, keep
+    /// polling the named instance for up to this many seconds and ADOPT it
+    /// once Ready (`AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS`, default 120,
+    /// bounds 0..=600; 0 disables the resume). veFaaS caps the synchronous
+    /// create at ~29s but the pod keeps booting server-side, and a blind retry
+    /// CREATES A DUPLICATE — a booting instance is invisible to the reuse
+    /// pre-check (measured 2026-08-01: 3 creates → 3 Ready instances → 3 chat
+    /// loops on one channel).
+    pub coldstart_wait_secs: u32,
     /// Refuse to create past this many instances under the application
     /// (`AGENTKEYS_VEFAAS_MAX_INSTANCES`, default 20) — bounds the blast
     /// radius if label matching ever breaks (see module docs).
@@ -187,6 +196,12 @@ impl VeFaasConfig {
                 "AGENTKEYS_VEFAAS_CREATE_TIMEOUT_SECS must be 15..=600, got {create_timeout_secs}"
             );
         }
+        let coldstart_wait_secs = parse_u32("AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS", 120)?;
+        if coldstart_wait_secs > 600 {
+            bail!(
+                "AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS must be 0..=600, got {coldstart_wait_secs}"
+            );
+        }
         Ok(Some(Self {
             function_id,
             gateway_url,
@@ -196,6 +211,7 @@ impl VeFaasConfig {
                 .unwrap_or_else(|| "/opt/gem/run.sh".to_string()),
             timeout_minutes,
             create_timeout_secs,
+            coldstart_wait_secs,
             max_instances: parse_u32("AGENTKEYS_VEFAAS_MAX_INSTANCES", 20)? as usize,
             allow_direct_ark: non_empty("AGENTKEYS_ALLOW_DIRECT_ARK")
                 .is_some_and(|v| v.trim() == "1"),
@@ -1025,17 +1041,39 @@ impl VeFaasClient {
 
     /// `SetSandboxTimeout` — reset the instance's remaining lifetime to
     /// `timeout_minutes` (the resolve-time keep-alive).
+    ///
+    /// #589 measured: veFaaS caps an instance's expiry at
+    /// `create_time + <create-time Timeout>`, so with the full 1440-min lease
+    /// at create every extension is rejected (`new expire time … is forbiden`)
+    /// BY CONSTRUCTION — that rejection is the steady state, not a fault, and
+    /// the post-expiry path is the #546 spawn-context re-create. A shorter
+    /// initial lease (making extends real, idle instances cheaper) is the
+    /// open follow-up decision on #589.
     pub async fn extend(&self, sandbox_id: &str) -> Result<()> {
-        self.vefaas_call(
-            "SetSandboxTimeout",
-            serde_json::json!({
-                "FunctionId": self.config.function_id,
-                "SandboxId": sandbox_id,
-                "Timeout": self.config.timeout_minutes,
-            }),
-        )
-        .await?;
-        Ok(())
+        match self
+            .vefaas_call(
+                "SetSandboxTimeout",
+                serde_json::json!({
+                    "FunctionId": self.config.function_id,
+                    "SandboxId": sandbox_id,
+                    "Timeout": self.config.timeout_minutes,
+                }),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e)
+                if e.to_string().contains("expire time") && e.to_string().contains("forbiden") =>
+            {
+                tracing::debug!(
+                    sandbox_id = %sandbox_id,
+                    "SetSandboxTimeout at the lifetime cap (expected with a full-lease create) — \
+                     instance keeps its current expiry (#589)"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The instance env for a delegate's hermes-sandbox: the #338 ark family
@@ -1105,12 +1143,63 @@ impl VeFaasClient {
                 "Command": self.config.command,
             });
         }
-        let v = self.vefaas_call("CreateSandbox", body).await?;
+        let v = match self.vefaas_call("CreateSandbox", body).await {
+            Ok(v) => v,
+            // #589 — a cold-start 408 is IN-PROGRESS, not failure: the pod
+            // keeps booting past veFaaS's ~29s create budget and the error
+            // names it. Adopt it once Ready (same philosophy as the precache
+            // rule: a timeout is not a failure — resume, never restart).
+            Err(e) => {
+                if let Some(id) = cold_start_instance_name(&e.to_string()) {
+                    return self.adopt_booting_instance(&id, &e).await;
+                }
+                return Err(e);
+            }
+        };
         let id = v["Result"]["SandboxId"].as_str().unwrap_or_default();
         if id.is_empty() {
             bail!("CreateSandbox returned no Result.SandboxId: {v}");
         }
         Ok(id.to_string())
+    }
+
+    /// #589 — poll the instance a cold-start-timed-out `CreateSandbox` left
+    /// booting, and adopt it once `Ready`. Bounded by
+    /// `AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS`; the ORIGINAL error propagates
+    /// when the budget expires (or the resume is disabled with 0).
+    async fn adopt_booting_instance(
+        &self,
+        sandbox_id: &str,
+        cause: &anyhow::Error,
+    ) -> Result<String> {
+        let budget = self.config.coldstart_wait_secs;
+        if budget == 0 {
+            bail!("{cause} (cold-start resume disabled: AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS=0)");
+        }
+        tracing::warn!(
+            sandbox_id = %sandbox_id,
+            budget_secs = budget,
+            "#589 CreateSandbox hit the veFaaS ~29s cold-start budget — the pod keeps booting; \
+             polling DescribeSandbox to ADOPT it instead of failing (a retry would duplicate it)"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(budget as u64);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let last = match self.describe(sandbox_id).await {
+                Ok((status, _)) if status.eq_ignore_ascii_case("ready") => {
+                    tracing::info!(sandbox_id = %sandbox_id, "#589 cold-start resume: instance Ready — adopted");
+                    return Ok(sandbox_id.to_string());
+                }
+                Ok((status, _)) => status,
+                Err(e) => format!("describe error: {e}"),
+            };
+            if std::time::Instant::now() >= deadline {
+                bail!(
+                    "cold-start resume gave up after {budget}s (last state: {last}) — original \
+                     CreateSandbox error: {cause}"
+                );
+            }
+        }
     }
 
     /// THE #377 entry point: give the delegate its runtime, idempotently.
@@ -1617,5 +1706,53 @@ mod tests {
             "truncated label must still match the full hash"
         );
         assert!(!inst.labeled_for(&format!("0x{}", "b".repeat(64))));
+    }
+}
+
+/// #589 — pull `X-Faas-Instance-Name: <name>` out of a `CreateSandbox`
+/// `function_cold_start_timeout` 408: veFaaS names the instance it left
+/// booting, and adopting it (instead of retrying) is the only duplicate-free
+/// recovery — a booting instance is invisible to the reuse pre-check.
+fn cold_start_instance_name(err: &str) -> Option<String> {
+    if !err.contains("function_cold_start_timeout") {
+        return None;
+    }
+    let tail = err.split("X-Faas-Instance-Name:").nth(1)?;
+    let name: String = tail
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(test)]
+mod cold_start_resume_tests {
+    use super::cold_start_instance_name;
+
+    #[test]
+    fn parses_the_measured_408_body() {
+        // Byte-for-byte the live error from 2026-08-01 (agent-h attempt #1).
+        let err = "vefaas CreateSandbox error (http 408 Request Timeout): Code=UserTimeoutError \
+                   Message=load sandbox cost 29.011241119s, err msg error_code: \
+                   \"function_cold_start_timeout\", error_message \"function cold start timeout, \
+                   X-Faas-Instance-Name: vefaas-667unk7q-nqh31zlgbo-d9msec832hba3806hou0-sandbox\", \
+                   request_id: \"\", please check fn tls log and wait instance ready.";
+        assert_eq!(
+            cold_start_instance_name(err).as_deref(),
+            Some("vefaas-667unk7q-nqh31zlgbo-d9msec832hba3806hou0-sandbox")
+        );
+    }
+
+    #[test]
+    fn other_errors_do_not_resume() {
+        assert_eq!(
+            cold_start_instance_name("http 403 Forbidden: function_exited"),
+            None
+        );
+        assert_eq!(
+            cold_start_instance_name("function_cold_start_timeout with no instance header"),
+            None
+        );
     }
 }

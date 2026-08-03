@@ -114,6 +114,12 @@ The same drift is caught **at its source** by `seed-base-images.sh`: on every ru
 
 **If a delegate is live it pins the registration** — the refresh stops and names the exact instance, delegate hash, and expiry. Two remedies (#577): re-run with **`--kill-pinners`** (`VE_REFRESH_KILL_PINNERS=1` through `setup-image.sh`) — a kill-ONLY unpin: the on-chain bindings stay active and each delegate returns on the new image via the update click once the preheat completes — or archive the delegate (Touch ID) if you actually want it gone. Instances also expire on their own within the veFaaS lifetime (default 1440 min), so an overnight cycle usually finds the registration unpinned.
 
+### Spawn readiness: the pod is Ready when PORT 8090 listens — and the boot must fit ~29s (#589)
+
+`CreateSandbox` is synchronous with a hard server-side **~29s cold-start budget**, and veFaaS readiness is *the configured port (8090, the hermes bridge) accepting connections*. Preheat makes the image itself instant — measured 2026-08-01, the container executed `/opt/gem/run.sh` **0.6s** after the CreateSandbox call — so the entire budget is spent on whatever sits in front of the bridge's `bind()`. The incident: the bridge ran the blocking ACP handshake (`hermes acp` spawn + `initialize`) *before* binding, 16–29s+ on 1 vCPU, so every cold spawn 408'd `function_cold_start_timeout` **while the pod kept booting** — and each blind retry created a duplicate instance (a booting instance is invisible to the reuse pre-check; 3 creates → 3 Ready instances → 3 chat loops on one channel).
+
+Two layers fix it (#589): the bridge now **binds :8090 first and initializes ACP in the background** (gated endpoints answer 503 `acp_starting`; context files applied pre-init land in the first session), and the broker treats a cold-start 408 as **in-progress, not failure** — it parses the instance name out of the 408 and adopts it once `Ready` (`AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS`, default 120, 0 disables). Keep new boot-time work *behind* the bind, never in front of it. Related measured fact: `SetSandboxTimeout` can never extend past `create_time + <create-time Timeout>`, so with the full 1440-min lease at create the keep-alive is a designed no-op and expiry-re-create (#546) is the real path.
+
 ## Phase 4 — bringing delegates onto the new image (#577)
 
 A sandbox **freezes its image at spawn**, so a completed preheat changes only what *future* creates boot. The user-facing half is the #577 update surface:
