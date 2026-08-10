@@ -386,7 +386,7 @@ export function DelegatesPage({
                             }`}
                           >
                             {rt.sandbox_id.length > 14
-                              ? `${rt.sandbox_id.slice(0, 14)}…`
+                              ? `…${rt.sandbox_id.slice(-14)}`
                               : rt.sandbox_id}
                             {rt.sandbox_status ? ` · ${rt.sandbox_status}` : ''}
                             {sandboxExpiryLabel(rt.expire_at)}
