@@ -10,6 +10,7 @@ pub mod gate_admin;
 pub mod handlers;
 pub mod identity;
 pub mod jwt;
+pub mod lease_sweeper;
 pub mod metrics;
 pub mod oidc;
 pub mod plugins;

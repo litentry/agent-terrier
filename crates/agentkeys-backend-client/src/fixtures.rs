@@ -56,10 +56,28 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         cap: json!("<cap-token>"),
         plaintext_b64: "<base64-plaintext>".into(),
         namespace: "<namespace>".into(),
+        // None + skip_serializing_if → the fixture (and its frozen key set)
+        // is unchanged by the #594 keyed-object field.
+        object_key: None,
     };
     let memory_get = MemoryGetBody {
         cap: json!("<cap-token>"),
         namespace: "<namespace>".into(),
+        object_key: None,
+    };
+    // #594 — the KEYED-object variants (the sandbox-checkpoint slot). Same
+    // types, `object_key` set — a separate fixture pair so harness bodies that
+    // exercise keyed objects annotate against a shape that carries the field.
+    let memory_put_keyed = MemoryPutBody {
+        cap: json!("<cap-token>"),
+        plaintext_b64: "<base64-plaintext>".into(),
+        namespace: "<namespace>".into(),
+        object_key: Some(agentkeys_protocol::CHECKPOINT_OBJECT_KEY.into()),
+    };
+    let memory_get_keyed = MemoryGetBody {
+        cap: json!("<cap-token>"),
+        namespace: "<namespace>".into(),
+        object_key: Some(agentkeys_protocol::CHECKPOINT_OBJECT_KEY.into()),
     };
     let config_put = ConfigPutBody {
         cap: json!("<cap-token>"),
@@ -215,6 +233,14 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
             body: serde_json::to_value(&memory_get).expect("memory_get serializes"),
         },
         Fixture {
+            name: "memory_put_body_keyed",
+            body: serde_json::to_value(&memory_put_keyed).expect("memory_put_keyed serializes"),
+        },
+        Fixture {
+            name: "memory_get_body_keyed",
+            body: serde_json::to_value(&memory_get_keyed).expect("memory_get_keyed serializes"),
+        },
+        Fixture {
             name: "config_put_body",
             body: serde_json::to_value(&config_put).expect("config_put serializes"),
         },
@@ -335,6 +361,21 @@ mod tests {
     #[test]
     fn memory_get_body_keys_frozen() {
         assert_eq!(keys_of("memory_get_body"), vec!["cap", "namespace"]);
+    }
+
+    /// #594 — the keyed-object pair: the legacy fixtures above stay
+    /// byte-frozen WITHOUT `object_key` (old workers untouched), while the
+    /// keyed variants pin the field for harness bodies that use it.
+    #[test]
+    fn memory_keyed_body_keys_frozen() {
+        assert_eq!(
+            keys_of("memory_put_body_keyed"),
+            vec!["cap", "namespace", "object_key", "plaintext_b64"]
+        );
+        assert_eq!(
+            keys_of("memory_get_body_keyed"),
+            vec!["cap", "namespace", "object_key"]
+        );
     }
 
     #[test]

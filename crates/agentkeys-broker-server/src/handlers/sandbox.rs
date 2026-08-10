@@ -161,6 +161,7 @@ pub(crate) fn delegate_identity_envs(
     broker_url: Option<&str>,
     channel_worker_override: Option<&str>,
     mgmt_token: Option<&str>,
+    memory_ns: Option<&str>,
 ) -> Vec<(String, String)> {
     use agentkeys_protocol::sandbox_env as env_names;
     let norm0x = |o: &str| format!("0x{}", crate::handlers::accept::norm_omni(o));
@@ -197,6 +198,12 @@ pub(crate) fn delegate_identity_envs(
             env_names::CHANNEL_WORKER_URL.to_string(),
             url.trim().to_string(),
         ));
+    }
+    // #594 — the delegate's own memory namespace, for the in-sandbox
+    // checkpoint loop (OPTIONAL: absent, the daemon derives it from the
+    // `opchat-<label>` channel id; pre-#594 rows have an empty ns).
+    if let Some(ns) = memory_ns.filter(|n| !n.trim().is_empty()) {
+        envs.push((env_names::MEMORY_NS.to_string(), ns.trim().to_string()));
     }
     envs
 }
@@ -341,6 +348,7 @@ pub async fn ensure_for_delegate(
                     issuer.as_deref(),
                     worker_override.as_deref(),
                     Some(&sandbox_mgmt_token(&state.session_keypair, device_key_hash)),
+                    Some(&c.memory_ns),
                 ),
                 c.label.clone(),
             )
@@ -668,6 +676,7 @@ mod tests {
             Some("https://broker.example.cn"),
             None,
             Some("smt1_feed"),
+            Some("watchdog"),
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         for required in agentkeys_protocol::sandbox_env::CHAT_REQUIRED {
@@ -694,6 +703,8 @@ mod tests {
         assert!(!keys.contains(&"AGENTKEYS_CHANNEL_WORKER_URL"));
         // #577 — the management bearer rides every armed create.
         assert_eq!(get("AGENTKEYS_SANDBOX_MGMT_TOKEN"), "smt1_feed");
+        // #594 — the checkpoint namespace rides too.
+        assert_eq!(get("AGENTKEYS_MEMORY_NS"), "watchdog");
     }
 
     /// #577 — the mgmt token is a pure derivation: stable per (key, delegate)
@@ -737,12 +748,16 @@ mod tests {
             None,
             Some("https://channel.example.cn/"),
             None,
+            // #594 — a pre-#594 row's EMPTY ns injects nothing (the daemon
+            // derives from the channel id instead).
+            Some(""),
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         assert!(!keys.contains(&"AGENTKEYS_DEVICE_KEY_HEX"));
         assert!(!keys.contains(&"AGENTKEYS_CHAT_CHANNEL_ID"));
         assert!(!keys.contains(&"AGENTKEYS_BROKER_URL"));
         assert!(!keys.contains(&"AGENTKEYS_SANDBOX_MGMT_TOKEN"));
+        assert!(!keys.contains(&"AGENTKEYS_MEMORY_NS"));
         assert_eq!(
             envs.iter()
                 .find(|(k, _)| k == "AGENTKEYS_CHANNEL_WORKER_URL")

@@ -154,6 +154,7 @@ pub async fn memory_canonical_get(
         .memory_canonical_get(MemoryGetInput {
             cap,
             namespace: namespace.to_string(),
+            object_key: None,
         })
         .await
         .with_context(|| format!("memory worker canonical-get for namespace `{namespace}`"))?;

@@ -11,6 +11,7 @@ use tracing::info;
 
 mod audit_decode;
 mod chat_loop;
+mod checkpoint;
 mod companion;
 mod hardening;
 mod master_session;

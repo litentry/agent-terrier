@@ -260,19 +260,50 @@ pub type CapToken = Value;
 /// `agentkeys_worker_memory::handlers::PutRequest`. `namespace` rides at the
 /// body level for Phase 1 (lifting it into a SIGNED CapPayload field is an M4
 /// follow-up per the wire-real-paths plan §8.2).
+///
+/// `object_key` (#594) selects a KEYED object under the SAME service grant
+/// (`…/memory/<service>.objects/<object_key>.enc`) instead of the legacy
+/// single slot (`…/memory/<service>.enc`). Absent keeps the pre-#594 body
+/// byte-identical, so the frozen fixtures and every old worker are unchanged.
+/// The authority is identical either way — the signed cap `service` — the key
+/// only subdivides storage WITHIN it (the sandbox-checkpoint use case).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryPutBody {
     pub cap: CapToken,
     pub plaintext_b64: String,
     pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
 }
 
 /// Memory-worker `/v1/memory/get` request body. Mirrors
-/// `agentkeys_worker_memory::handlers::GetRequest`.
+/// `agentkeys_worker_memory::handlers::GetRequest`. `object_key` as on
+/// [`MemoryPutBody`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryGetBody {
     pub cap: CapToken,
     pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
+}
+
+/// #594 — the reserved keyed-object slot where a delegate sandbox persists its
+/// runtime CHECKPOINT (the #577 `$HERMES_HOME` export, wrapped in
+/// [`CheckpointEnvelope`]) inside its own `memory:<ns>` grant. ONE name shared
+/// by the writer (in-sandbox daemon checkpoint loop) and the reader (the
+/// restore-on-boot leg of the SAME daemon in the replacement instance).
+pub const CHECKPOINT_OBJECT_KEY: &str = "checkpoint/hermes-home";
+
+/// #594 — the durable checkpoint payload stored at [`CHECKPOINT_OBJECT_KEY`]:
+/// the bridge `session/export` snapshot plus the write time the bridge's
+/// newer-wins import guard compares (`saved_at`, unix seconds). Versioned so a
+/// future shape change fails loud instead of restoring garbage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointEnvelope {
+    pub version: u32,
+    pub saved_at: u64,
+    /// The verbatim bridge export body (`{version, hermes_home, files, …}`).
+    pub snapshot: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1204,12 +1235,18 @@ pub struct MemoryPutInput {
     pub cap: CapToken,
     pub namespace: String,
     pub plaintext_b64: String,
+    /// #594 — keyed object under the same grant (see [`MemoryPutBody`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryGetInput {
     pub cap: CapToken,
     pub namespace: String,
+    /// #594 — keyed object under the same grant; own-memory reads only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2145,6 +2182,13 @@ pub mod sandbox_env {
     /// `device_key_hash`), so nothing new sits at rest. NOT a chat-contract
     /// env — a sandbox without it simply cannot migrate its Hermes sessions.
     pub const MGMT_TOKEN: &str = "AGENTKEYS_SANDBOX_MGMT_TOKEN";
+    /// #594 — the delegate's OWN `memory:<ns>` namespace name (the spawn
+    /// template grant), injected at CREATE so the in-sandbox checkpoint loop
+    /// addresses the right grant even for an INHERITED namespace (#425 O2,
+    /// where ns ≠ label). OPTIONAL: absent, the daemon derives it from the
+    /// `opchat-<label>` channel id (the ceremony's ns-defaults-to-label rule).
+    /// NOT a chat-contract env.
+    pub const MEMORY_NS: &str = "AGENTKEYS_MEMORY_NS";
 
     /// The in-sandbox hermes bridge port — where the #577 management surface
     /// (session export/import, job status) lives, reached through the veFaaS
@@ -2242,6 +2286,55 @@ mod tests {
             sandbox_env::CHAT_CREDENTIAL_ANY,
             ["AGENTKEYS_DEVICE_KEY_HEX", "AGENTKEYS_SESSION_JWT"]
         );
+        // #594 — injector (broker create paths) and consumer (daemon checkpoint
+        // loop) pin the same name; optional, so NOT in CHAT_COMMON/REQUIRED.
+        assert_eq!(sandbox_env::MEMORY_NS, "AGENTKEYS_MEMORY_NS");
+        assert!(!sandbox_env::CHAT_REQUIRED.contains(&sandbox_env::MEMORY_NS));
+    }
+
+    /// #594 — `object_key` is additive: an absent key keeps the pre-#594 wire
+    /// bytes EXACTLY (old workers + frozen fixtures unaffected), and the keyed
+    /// form round-trips. The reserved checkpoint slot name is pinned because
+    /// writer (checkpoint loop) and reader (restore-on-boot) live in different
+    /// processes on different instances.
+    #[test]
+    fn memory_object_key_is_additive_and_checkpoint_slot_is_pinned() {
+        let legacy = MemoryPutBody {
+            cap: serde_json::json!({"t":"cap"}),
+            plaintext_b64: "aGk=".into(),
+            namespace: "memory:watchdog".into(),
+            object_key: None,
+        };
+        let wire = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            wire.get("object_key").is_none(),
+            "absent object_key must not appear on the wire: {wire}"
+        );
+        // Pre-#594 producers (no field at all) still deserialize.
+        let parsed: MemoryPutBody = serde_json::from_value(serde_json::json!({
+            "cap": {"t":"cap"}, "plaintext_b64": "aGk=", "namespace": "memory:watchdog"
+        }))
+        .unwrap();
+        assert_eq!(parsed.object_key, None);
+
+        let keyed = MemoryGetBody {
+            cap: serde_json::json!({"t":"cap"}),
+            namespace: "memory:watchdog".into(),
+            object_key: Some(CHECKPOINT_OBJECT_KEY.into()),
+        };
+        let round: MemoryGetBody =
+            serde_json::from_value(serde_json::to_value(&keyed).unwrap()).unwrap();
+        assert_eq!(round.object_key.as_deref(), Some("checkpoint/hermes-home"));
+
+        let env = CheckpointEnvelope {
+            version: 1,
+            saved_at: 1_700_000_000,
+            snapshot: serde_json::json!({"version":1,"files":[]}),
+        };
+        let round: CheckpointEnvelope =
+            serde_json::from_value(serde_json::to_value(&env).unwrap()).unwrap();
+        assert_eq!(round.saved_at, 1_700_000_000);
+        assert_eq!(round.snapshot["version"], 1);
     }
 
     #[test]

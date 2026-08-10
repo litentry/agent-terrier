@@ -9260,6 +9260,7 @@ async fn memory_put_ns_real(
             cap,
             plaintext_b64: STANDARD.encode(&plaintext),
             namespace: ns.to_string(),
+            object_key: None,
         })
         .send()
         .await
@@ -9313,6 +9314,7 @@ async fn memory_get_ns_real(
         .json(&agentkeys_backend_client::MemoryGetBody {
             cap,
             namespace: ns.to_string(),
+            object_key: None,
         })
         .send()
         .await

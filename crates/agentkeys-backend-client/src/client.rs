@@ -436,6 +436,7 @@ impl BackendClient {
             cap: input.cap,
             plaintext_b64: input.plaintext_b64,
             namespace: input.namespace.clone(),
+            object_key: input.object_key.clone(),
         });
         if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
             for (k, v) in headers {
@@ -473,6 +474,7 @@ impl BackendClient {
         let mut req = self.client.post(&url).json(&MemoryGetBody {
             cap: input.cap,
             namespace: input.namespace.clone(),
+            object_key: input.object_key.clone(),
         });
         if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
             for (k, v) in headers {
@@ -535,6 +537,8 @@ impl BackendClient {
             .json(&MemoryGetBody {
                 cap: input.cap,
                 namespace: input.namespace.clone(),
+                // Canonical stays one-object; the worker 400s a keyed read.
+                object_key: input.object_key.clone(),
             })
             .send()
             .await

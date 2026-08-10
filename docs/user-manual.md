@@ -285,6 +285,28 @@ Updating an agent that was spawned before this feature still works; the app
 just notes that its old runtime couldn't hand its on-disk files over
 ("session export unavailable") — that heals from the next update onward.
 
+## Your agent survives its sandbox's daily lifetime (#594)
+
+An agent's sandbox has a fixed maximum lifetime (about a day on the hosted
+runtime — the **sandbox** row on its card shows when the current lease
+expires). You don't have to do anything about it:
+
+- **It relaunches itself.** Shortly before the lease ends, the system rotates
+  the agent onto a fresh sandbox (waiting for background jobs when it can);
+  if a sandbox dies anyway — expiry, crash — the next sweep brings it back.
+  Your operator can turn this off per stack, in which case the "⟳ update
+  runtime" button on the agent's card is the manual "bring it back" action.
+- **Its workspace survives.** The agent periodically saves a **checkpoint**
+  of its working files (persona, skills, notes it keeps in its home
+  directory) into its own protected storage, and every fresh sandbox restores
+  the latest checkpoint at boot. Only the agent itself can read or write its
+  checkpoint — it lives under the same permission your pairing grant already
+  gave it, encrypted at rest.
+- **The live conversation still restarts.** As with updates, the in-progress
+  chat session is held in the runtime's memory and starts fresh on the new
+  sandbox — the agent greets you anew but remembers everything it had
+  written down.
+
 ## Editing your agent's persona + config files (parent-control, #390)
 
 A bound agent's actor page carries an **agent** panel showing the files that

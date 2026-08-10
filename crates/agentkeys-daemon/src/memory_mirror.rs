@@ -239,6 +239,7 @@ async fn fetch_canonical(
         .memory_canonical_get(MemoryGetInput {
             cap,
             namespace: service,
+            object_key: None,
         })
         .await
         .map_err(|e| ("canonical-get", e))?;

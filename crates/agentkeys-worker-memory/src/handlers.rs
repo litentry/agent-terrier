@@ -23,6 +23,12 @@ use agentkeys_worker_creds::errors::{
 };
 use agentkeys_worker_creds::verify::{self, CapOp, CapPayload, CapToken, DataClass};
 
+/// #594 — request-body ceiling. The sandbox-checkpoint payload is the #577
+/// Hermes-home export (bridge-capped at 32 MiB) plus base64 (×4/3) + JSON
+/// framing; axum's 2 MiB default would 413 any realistic checkpoint. Bounded,
+/// not unlimited: one oversized body still fails loud.
+const MEMORY_BODY_LIMIT_BYTES: usize = 48 * 1024 * 1024;
+
 pub fn build_router(state: SharedMemoryWorkerState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -39,6 +45,9 @@ pub fn build_router(state: SharedMemoryWorkerState) -> Router {
         .route("/v1/memory/inbox-get", post(memory_inbox_get))
         .route("/v1/memory/inbox-delete", post(memory_inbox_delete))
         .route("/v1/memory/teardown", post(memory_teardown))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            MEMORY_BODY_LIMIT_BYTES,
+        ))
         .with_state(state)
 }
 
@@ -63,6 +72,13 @@ async fn healthz(State(state): State<SharedMemoryWorkerState>) -> Json<HealthBod
 pub struct PutRequest {
     pub cap: CapToken,
     pub plaintext_b64: String,
+    /// #594 — optional KEYED object under the SAME signed cap service
+    /// (`…/memory/<service>.objects/<object_key>.enc`); absent = the legacy
+    /// single slot. The sandbox-checkpoint writer uses
+    /// `agentkeys_protocol::CHECKPOINT_OBJECT_KEY` here so the checkpoint can
+    /// never clobber the namespace's working-memory blob.
+    #[serde(default)]
+    pub object_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +95,11 @@ pub struct PutResponse {
 #[derive(Debug, Deserialize)]
 pub struct GetRequest {
     pub cap: CapToken,
+    /// #594 — read a KEYED object (see [`PutRequest::object_key`]). Own-memory
+    /// `Fetch` only; a canonical read with a key is refused (the canonical
+    /// contract — and its broker-minted exact-object STS — is one object).
+    #[serde(default)]
+    pub object_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,12 +129,21 @@ async fn memory_put(
     Json(req): Json<PutRequest>,
 ) -> Result<Json<PutResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Store).await?;
+    // #594 — a malformed object_key is an input rejection (400), never a
+    // storage op: no audit row, nothing touched.
+    if let Some(k) = &req.object_key {
+        validate_object_key(k)?;
+    }
 
     let outcome = memory_put_inner(&state, creds.as_ref(), &req).await;
     // Durable audit (#229): after cap-verify, before the success response.
     // payload_hash covers the stored CIPHERTEXT — never plaintext.
     let audit_body = MemoryPutBody {
-        key: s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service),
+        key: storage_key(
+            &req.cap.payload.actor_omni,
+            &req.cap.payload.service,
+            req.object_key.as_deref(),
+        ),
         payload_hash: match &outcome {
             Ok((_, env_bytes)) => keccak_hex(env_bytes),
             Err(_) => zero_hash(),
@@ -150,13 +180,17 @@ async fn memory_put_inner(
     let aad = envelope::aad(
         &req.cap.payload.operator_omni,
         &req.cap.payload.actor_omni,
-        &req.cap.payload.service,
+        &aad_service(&req.cap.payload.service, req.object_key.as_deref()),
         req.cap.payload.k3_epoch,
     );
     let env_bytes = envelope::encrypt(&state.config.kek_hex_stage1, &plaintext, &aad)
         .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?;
 
-    let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
+    let key = storage_key(
+        &req.cap.payload.actor_omni,
+        &req.cap.payload.service,
+        req.object_key.as_deref(),
+    );
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     s3.put_object()
         .bucket(&state.config.memory_bucket)
@@ -176,6 +210,9 @@ async fn memory_get(
     Json(req): Json<GetRequest>,
 ) -> Result<Json<GetResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Fetch).await?;
+    if let Some(k) = &req.object_key {
+        validate_object_key(k)?;
+    }
     memory_read_after_verify(&state, creds.as_ref(), &req).await
 }
 
@@ -195,6 +232,14 @@ async fn memory_canonical_get(
     Json(req): Json<GetRequest>,
 ) -> Result<Json<GetResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::CanonicalFetch).await?;
+    // #594 — canonical stays a ONE-object contract (its broker-minted STS is
+    // pinned to exactly that key); a keyed canonical read is a caller bug.
+    if req.object_key.is_some() {
+        return Err(err_400(
+            "object_key is not supported on canonical reads".to_string(),
+            "object_key_on_canonical",
+        ));
+    }
     // A' (#295 §7a): the read runs SERVER-SIDE. The delegate sends its OWN
     // session bearer + the cap and gets back ONLY plaintext — never S3 creds.
     // The worker relays that bearer to the broker's /v1/cap/canonical-sts, which
@@ -292,9 +337,10 @@ async fn memory_read_after_verify(
     // plaintext leaves the worker. cap_hash binds the row to the cap that
     // authorized this read; the key reflects the prefix actually read.
     let audit_body = MemoryGetBody {
-        key: s3_key(
+        key: storage_key(
             memory_read_owner(&req.cap.payload),
             &req.cap.payload.service,
+            req.object_key.as_deref(),
         ),
         cap_hash: cap_hash(&req.cap),
     };
@@ -327,7 +373,7 @@ async fn memory_get_inner(
     // an own-memory `Fetch`, `operator` for `CanonicalFetch`. It drives BOTH
     // the S3 key AND the envelope AAD below, so they can never diverge.
     let owner = memory_read_owner(&req.cap.payload);
-    let key = s3_key(owner, &req.cap.payload.service);
+    let key = storage_key(owner, &req.cap.payload.service, req.object_key.as_deref());
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let resp = s3
         .get_object()
@@ -368,7 +414,7 @@ async fn memory_get_inner(
     let aad = envelope::aad(
         &req.cap.payload.operator_omni,
         owner,
-        &req.cap.payload.service,
+        &aad_service(&req.cap.payload.service, req.object_key.as_deref()),
         req.cap.payload.k3_epoch,
     );
     envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
@@ -982,6 +1028,61 @@ fn s3_prefix(actor_omni: &str) -> String {
     )
 }
 
+/// #594 — a keyed-object sub-key: 1..=128 chars of `[a-z0-9._-]` in non-empty
+/// `/`-separated segments, no `.`/`..` segments. Rejects anything that could
+/// escape or alias within the S3 layout; validated BEFORE any storage access.
+fn validate_object_key(k: &str) -> Result<(), ApiError> {
+    let ok = !k.is_empty()
+        && k.len() <= 128
+        && k.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(err_400(
+            "object_key must be 1..=128 chars of [a-z0-9._-] in non-empty '/'-separated \
+             segments (no '.'/'..')"
+                .to_string(),
+            "object_key_invalid",
+        ))
+    }
+}
+
+/// #594 — the storage key for a memory op: the legacy single slot, or the
+/// keyed object under the same service. `.objects/` (with the validated
+/// sub-key charset) can never collide with a legacy `<service>.enc` name, and
+/// stays inside `bots/<owner>/memory/` so the layer-3 IAM prefix and the
+/// teardown prefix-delete cover it unchanged.
+fn storage_key(owner: &str, service: &str, object_key: Option<&str>) -> String {
+    match object_key {
+        Some(k) => format!(
+            "bots/{}/memory/{}.objects/{}.enc",
+            owner.trim_start_matches("0x").to_lowercase(),
+            service.to_lowercase(),
+            k
+        ),
+        None => s3_key(owner, service),
+    }
+}
+
+/// #594 — the AAD service component: keyed objects append the object key under
+/// a `\x1f` (unit separator — outside both the service and object-key
+/// charsets), so an S3-level swap between two encrypted objects of the SAME
+/// service (checkpoint ↔ working slot) fails decryption instead of restoring
+/// the wrong bytes.
+fn aad_service(service: &str, object_key: Option<&str>) -> String {
+    match object_key {
+        Some(k) => format!("{service}\u{1f}{k}"),
+        None => service.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,6 +1102,71 @@ mod tests {
     #[test]
     fn s3_prefix_uses_memory_path() {
         assert_eq!(s3_prefix("0xABCDEF"), "bots/abcdef/memory/");
+    }
+
+    /// #594 — the keyed-object layout: under the SAME `bots/<owner>/memory/`
+    /// prefix (layer-3 IAM + teardown prefix-delete cover it unchanged), and
+    /// `.objects/` can never collide with a legacy `<service>.enc` slot.
+    #[test]
+    fn storage_key_maps_legacy_slot_and_keyed_objects() {
+        assert_eq!(
+            storage_key("0xABCDEF", "memory:watchdog", None),
+            "bots/abcdef/memory/memory:watchdog.enc"
+        );
+        assert_eq!(
+            storage_key(
+                "0xABCDEF",
+                "memory:watchdog",
+                Some("checkpoint/hermes-home")
+            ),
+            "bots/abcdef/memory/memory:watchdog.objects/checkpoint/hermes-home.enc"
+        );
+        assert!(storage_key("0xab", "memory:x", Some("k")).starts_with(&s3_prefix("0xab")));
+        // The reserved checkpoint slot the daemon writes is a valid key.
+        assert!(validate_object_key(agentkeys_protocol::CHECKPOINT_OBJECT_KEY).is_ok());
+    }
+
+    #[test]
+    fn validate_object_key_rejects_traversal_and_bad_charsets() {
+        for ok in [
+            "checkpoint/hermes-home",
+            "a",
+            "a.b-c_d/e0",
+            &"k".repeat(128),
+        ] {
+            assert!(validate_object_key(ok).is_ok(), "{ok:?} should pass");
+        }
+        for bad in [
+            "",
+            "/lead",
+            "trail/",
+            "a//b",
+            "a/../b",
+            ".",
+            "..",
+            "UPPER",
+            "sp ace",
+            "uni\u{1f}sep",
+            &"k".repeat(129),
+        ] {
+            assert!(validate_object_key(bad).is_err(), "{bad:?} should fail");
+        }
+    }
+
+    /// #594 — the AAD binds the object key: a same-service S3 swap between the
+    /// working slot and a keyed object (or between two keyed objects) decrypts
+    /// under a DIFFERENT AAD and fails, instead of restoring the wrong bytes.
+    #[test]
+    fn aad_service_domain_separates_keyed_objects() {
+        let legacy = aad_service("memory:watchdog", None);
+        let keyed = aad_service("memory:watchdog", Some("checkpoint/hermes-home"));
+        let other = aad_service("memory:watchdog", Some("checkpoint/other"));
+        assert_eq!(legacy, "memory:watchdog");
+        assert_ne!(legacy, keyed);
+        assert_ne!(keyed, other);
+        // The separator sits outside both charsets, so no (service, key) pair
+        // can alias another's composition.
+        assert!(keyed.contains('\u{1f}'));
     }
 
     #[test]

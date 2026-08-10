@@ -302,6 +302,10 @@ async fn main() -> anyhow::Result<()> {
     // already serving /healthz=200 so liveness probes succeed.
     spawn_tier2_probes(Arc::clone(&state), tier2_profile);
 
+    // #594 — auto-relaunch of expired/expiring delegate sandboxes (no-op
+    // without a sandbox backend; AGENTKEYS_SANDBOX_AUTORELAUNCH=0 opts out).
+    agentkeys_broker_server::lease_sweeper::spawn_if_enabled(Arc::clone(&state));
+
     let app = create_router(state);
     let addr = format!("{}:{}", args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

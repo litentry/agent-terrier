@@ -56,6 +56,12 @@ pub struct SpawnContext {
     /// The delegate K10 secret (hex) — LEGACY rows only (§1a E2 plaintext,
     /// pre-#552 spawns); EMPTY for signer-custodied delegates.
     pub k10_secret_hex: String,
+    /// #594 — the delegate's own `memory:<ns>` namespace (bare name). Injected
+    /// as `AGENTKEYS_MEMORY_NS` on every create so the in-sandbox checkpoint
+    /// loop addresses the right grant even when the namespace was INHERITED
+    /// (#425 O2, ns ≠ label). EMPTY on pre-#594 rows — the daemon then derives
+    /// ns from the `opchat-<label>` channel id (the ceremony's default rule).
+    pub memory_ns: String,
     pub created_at: i64,
 }
 
@@ -113,22 +119,35 @@ impl SpawnContextStore {
                     chat_channel_id TEXT NOT NULL,
                     k10_address     TEXT NOT NULL DEFAULT '',
                     k10_secret_hex  TEXT NOT NULL,
+                    memory_ns       TEXT NOT NULL DEFAULT '',
                     created_at      INTEGER NOT NULL
                  );",
             )
             .map_err(|e| BrokerError::Internal(format!("init spawn-contexts schema: {e}")))?;
-        // #552 migration for pre-existing #546 DBs: add the address column.
-        // "duplicate column name" = already migrated (or fresh) — a no-op.
-        match self.lock()?.execute(
-            "ALTER TABLE spawn_contexts ADD COLUMN k10_address TEXT NOT NULL DEFAULT ''",
-            [],
-        ) {
-            Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
-            Err(e) => Err(BrokerError::Internal(format!(
-                "migrate spawn-contexts (k10_address): {e}"
-            ))),
+        // In-place column migrations for pre-existing DBs (#552 k10_address,
+        // #594 memory_ns). "duplicate column name" = already migrated (or
+        // fresh) — a no-op.
+        for (col, ddl) in [
+            (
+                "k10_address",
+                "ALTER TABLE spawn_contexts ADD COLUMN k10_address TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "memory_ns",
+                "ALTER TABLE spawn_contexts ADD COLUMN memory_ns TEXT NOT NULL DEFAULT ''",
+            ),
+        ] {
+            match self.lock()?.execute(ddl, []) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column name") => {}
+                Err(e) => {
+                    return Err(BrokerError::Internal(format!(
+                        "migrate spawn-contexts ({col}): {e}"
+                    )))
+                }
+            }
         }
+        Ok(())
     }
 
     /// Insert-or-replace the delegate's context. A respawn after archive mints
@@ -138,14 +157,16 @@ impl SpawnContextStore {
         self.lock()?
             .execute(
                 "INSERT OR REPLACE INTO spawn_contexts
-                 (device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
+                  memory_ns, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     norm(&ctx.device_key_hash),
                     ctx.label,
                     ctx.chat_channel_id,
                     ctx.k10_address,
                     ctx.k10_secret_hex,
+                    ctx.memory_ns,
                     ctx.created_at,
                 ],
             )
@@ -157,7 +178,7 @@ impl SpawnContextStore {
         self.lock()?
             .query_row(
                 "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
-                        created_at
+                        memory_ns, created_at
                  FROM spawn_contexts WHERE device_key_hash = ?1",
                 params![norm(device_key_hash)],
                 |row| {
@@ -167,12 +188,42 @@ impl SpawnContextStore {
                         chat_channel_id: row.get(2)?,
                         k10_address: row.get(3)?,
                         k10_secret_hex: row.get(4)?,
-                        created_at: row.get(5)?,
+                        memory_ns: row.get(5)?,
+                        created_at: row.get(6)?,
                     })
                 },
             )
             .optional()
             .map_err(|e| BrokerError::Internal(format!("get spawn context: {e}")))
+    }
+
+    /// #594 — every durable row, the lease sweeper's work-list. The row set is
+    /// small (one per live delegate binding) and provisioning data only —
+    /// authority is still the per-row chain probe the sweeper performs.
+    pub fn list(&self) -> BrokerResult<Vec<SpawnContext>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
+                        memory_ns, created_at
+                 FROM spawn_contexts ORDER BY created_at",
+            )
+            .map_err(|e| BrokerError::Internal(format!("list spawn contexts: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SpawnContext {
+                    device_key_hash: row.get(0)?,
+                    label: row.get(1)?,
+                    chat_channel_id: row.get(2)?,
+                    k10_address: row.get(3)?,
+                    k10_secret_hex: row.get(4)?,
+                    memory_ns: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| BrokerError::Internal(format!("list spawn contexts: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| BrokerError::Internal(format!("list spawn contexts: {e}")))
     }
 
     /// Delete on confirmed revoke (archive / unpair / fleet revoke) — bounds
@@ -201,6 +252,7 @@ mod tests {
             chat_channel_id: "opchat-watchdog".into(),
             k10_address: "0xabcd".into(),
             k10_secret_hex: "0xdead".into(),
+            memory_ns: "watchdog".into(),
             created_at: 1_700_000_000,
         }
     }
@@ -232,6 +284,9 @@ mod tests {
         let legacy = store.get("aa").unwrap().expect("legacy row");
         assert_eq!(legacy.k10_secret_hex, "0xdead");
         assert_eq!(legacy.k10_address, "");
+        // #594 — pre-#594 rows migrate with an empty ns (daemon derives from
+        // the channel id).
+        assert_eq!(legacy.memory_ns, "");
         // Re-open (second migration run) is a no-op, and new-shape rows work.
         drop(store);
         let store = SpawnContextStore::open(&path).unwrap();
@@ -278,5 +333,21 @@ mod tests {
         assert!(store.delete(&format!("0x{dkh}")).unwrap());
         assert!(store.get(&dkh).unwrap().is_none());
         assert!(!store.delete(&dkh).unwrap());
+    }
+
+    /// #594 — the sweeper's work-list: every row, oldest first, round-tripped
+    /// with the new ns column.
+    #[test]
+    fn list_returns_all_rows_in_created_order() {
+        let store = SpawnContextStore::open_in_memory().unwrap();
+        assert!(store.list().unwrap().is_empty());
+        let mut older = ctx(&"11".repeat(32));
+        older.created_at = 1;
+        store.upsert(&older).unwrap();
+        store.upsert(&ctx(&"22".repeat(32))).unwrap();
+        let rows = store.list().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].device_key_hash, "11".repeat(32));
+        assert_eq!(rows[1].memory_ns, "watchdog");
     }
 }

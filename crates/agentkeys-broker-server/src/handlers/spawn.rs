@@ -750,6 +750,9 @@ async fn finalize_spawn(
                 chat_channel_id: r.chat_channel_id.clone(),
                 k10_address: r.k10_address.clone(),
                 k10_secret_hex: r.k10_secret_hex.clone(),
+                // #594 — the RESOLVED namespace (label-defaulted or #425 O2
+                // inherited): what every re-create injects for the checkpoint.
+                memory_ns: r.memory_ns.clone(),
                 created_at,
             });
         if let Err(e) = persist {
@@ -815,6 +818,8 @@ async fn finalize_spawn(
             &state.session_keypair,
             device_key_hash,
         )),
+        // #594 — the checkpoint loop's namespace (empty on the no-row path).
+        Some(&memory_ns),
     ));
     let sandbox = crate::handlers::sandbox::ensure_for_delegate_with_envs(
         state,

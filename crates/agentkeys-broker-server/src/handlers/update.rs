@@ -362,14 +362,92 @@ pub async fn agent_update(
         }
     }
 
+    let session_bytes32: [u8; 32] = hex::decode(&session_omni)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .unwrap_or([0u8; 32]);
+    match rotate_delegate_runtime(
+        &state,
+        &backend,
+        &req.device_key_hash,
+        &actor_omni,
+        &operator_omni_0x,
+        session_bytes32,
+        req.force,
+        "update",
+    )
+    .await
+    {
+        Ok(outcome) => Ok(Json(AgentUpdateResponse {
+            device_key_hash: req.device_key_hash,
+            old_sandbox_ids: outcome.old_sandbox_ids,
+            sandbox: outcome.sandbox_json,
+            session: outcome.session,
+        })),
+        Err(RotateError::JobsRunning(n)) => Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "jobs_running",
+                "jobs": n,
+                "message": format!(
+                    "{n} background job(s) are running in this delegate's sandbox — \
+                     updating now kills them and their output stream. Wait for them \
+                     to finish, or pass force=true to update anyway."
+                ),
+            })),
+        )),
+        Err(RotateError::Failed(e)) => Err(aerr(StatusCode::BAD_GATEWAY, e)),
+    }
+}
+
+// ─── the shared rotate core (#577 update · #594 lease sweeper) ───────────────
+
+/// One completed rotate: what was killed, the ensure outcome, the hand-off.
+pub(crate) struct RotateOutcome {
+    pub old_sandbox_ids: Vec<String>,
+    pub sandbox_json: serde_json::Value,
+    pub session: SessionHandoff,
+}
+
+pub(crate) enum RotateError {
+    /// #340 background jobs are live and `force` was not set — nothing was
+    /// touched. The handler maps this to its 409; the sweeper retries next
+    /// sweep (until its force margin).
+    JobsRunning(u64),
+    /// Failed before anything was re-created (list/kill) — nothing torn down
+    /// beyond what the message says; safe to retry.
+    Failed(String),
+}
+
+/// The rotate sequence both the #577 one-click update and the #594 lease
+/// sweeper run: best-effort snapshot of the live instance → #340 jobs guard →
+/// kill (+ one `SandboxTeardown` envelope per instance, with the caller's
+/// reason) → re-create through the #546 `ensure_for_delegate` path → import
+/// the snapshot into the replacement (retry while its bridge boots). ONE
+/// owner, so the operator-clicked and lease-driven paths can never drift.
+///
+/// `audit_omni` labels the teardown envelopes: the verified session omni on
+/// the handler path, the chain-probed operator omni on the sweeper path (the
+/// authority the standing spawn-on-pair lifecycle acts under).
+#[allow(clippy::too_many_arguments)] // the one rotate owner — a param per fact
+pub(crate) async fn rotate_delegate_runtime(
+    state: &SharedState,
+    backend: &crate::sandbox_backend::SandboxBackend,
+    device_key_hash: &str,
+    actor_omni: &str,
+    operator_omni_0x: &str,
+    audit_omni: [u8; 32],
+    force: bool,
+    teardown_reason: &str,
+) -> Result<RotateOutcome, RotateError> {
     let live = backend
-        .live_for_device(&req.device_key_hash)
+        .live_for_device(device_key_hash)
         .await
-        .map_err(|e| aerr(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+        .map_err(|e| RotateError::Failed(format!("list live instances: {e:#}")))?;
 
     // Snapshot + job guard against the OLD instance (best-effort, loud).
     let mgmt_token =
-        crate::handlers::sandbox::sandbox_mgmt_token(&state.session_keypair, &req.device_key_hash);
+        crate::handlers::sandbox::sandbox_mgmt_token(&state.session_keypair, device_key_hash);
     let mut snapshot: Option<Vec<u8>> = None;
     let mut session_detail: String;
     if live.is_empty() {
@@ -390,33 +468,23 @@ pub async fn agent_update(
             Ok(body) => {
                 let jobs = parse_jobs_running(&body);
                 if let Some(n) = jobs.filter(|n| *n > 0) {
-                    if !req.force {
-                        return Err((
-                            StatusCode::CONFLICT,
-                            Json(serde_json::json!({
-                                "error": "jobs_running",
-                                "jobs": n,
-                                "message": format!(
-                                    "{n} background job(s) are running in this delegate's sandbox — \
-                                     updating now kills them and their output stream. Wait for them \
-                                     to finish, or pass force=true to update anyway."
-                                ),
-                            })),
-                        ));
+                    if !force {
+                        return Err(RotateError::JobsRunning(n));
                     }
                     tracing::warn!(
-                        device_key_hash = %req.device_key_hash,
+                        device_key_hash = %device_key_hash,
                         jobs = n,
-                        "#577 update FORCED over {n} running background job(s) — their output dies with the instance"
+                        reason = %teardown_reason,
+                        "#577 rotate FORCED over {n} running background job(s) — their output dies with the instance"
                     );
                 }
             }
             // A status failure is not fatal: pre-#577 images have no mgmt
             // surface at all. The export attempt below reports the same cause.
             Err(e) => tracing::info!(
-                device_key_hash = %req.device_key_hash,
+                device_key_hash = %device_key_hash,
                 error = %e,
-                "#577 update: old-instance status probe failed (pre-#577 image?) — proceeding"
+                "#577 rotate: old-instance status probe failed (pre-#577 image?) — proceeding"
             ),
         }
         match mgmt_request(
@@ -455,29 +523,23 @@ pub async fn agent_update(
                 .to_string();
     }
 
-    // Teardown — the same kill the unpair hook performs, with reason "update".
+    // Teardown — the same kill the unpair hook performs, with the caller's
+    // reason ("update" / "lease-expiry").
     let killed = backend
-        .kill_for_device(&req.device_key_hash)
+        .kill_for_device(device_key_hash)
         .await
         .map_err(|e| {
-            aerr(
-                StatusCode::BAD_GATEWAY,
-                format!("teardown failed (nothing re-created yet): {e:#}"),
-            )
+            RotateError::Failed(format!("teardown failed (nothing re-created yet): {e:#}"))
         })?;
-    let session_bytes32: [u8; 32] = hex::decode(&session_omni)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-        .unwrap_or([0u8; 32]);
     for sandbox_id in &killed {
         let env = envelope_for(
-            session_bytes32,
-            session_bytes32,
+            audit_omni,
+            audit_omni,
             AuditOpKind::SandboxTeardown,
             SandboxTeardownBody {
-                device_key_hash: req.device_key_hash.clone(),
+                device_key_hash: device_key_hash.to_string(),
                 sandbox_id: sandbox_id.clone(),
-                reason: "update".into(),
+                reason: teardown_reason.into(),
             },
             AuditResult::Success,
             None,
@@ -490,10 +552,10 @@ pub async fn agent_update(
     // expiry re-create takes (#546 reconstruction + fresh #552 J1 + lazily
     // re-provisioned metered gate key), so update can never drift from it.
     let provision = crate::handlers::sandbox::ensure_for_delegate(
-        &state,
-        &req.device_key_hash,
-        &actor_omni,
-        &operator_omni_0x,
+        state,
+        device_key_hash,
+        actor_omni,
+        operator_omni_0x,
     )
     .await;
     let sandbox_json = provision
@@ -503,6 +565,7 @@ pub async fn agent_update(
     let new_id = provision.as_ref().and_then(|p| p.sandbox_id.clone());
 
     // Restore into the replacement (retry while its daemon boots).
+    let mut migrated = false;
     if let (Some(bytes), Some(new_id)) = (snapshot, new_id.as_deref()) {
         if let Some((base, route_headers)) = backend.instance_mgmt_endpoint(new_id) {
             let deadline = std::time::Instant::now()
@@ -524,24 +587,27 @@ pub async fn agent_update(
                     Ok(body) => {
                         let v: serde_json::Value =
                             serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-                        session_detail = format!(
-                            "hermes home migrated ({} file(s); agent re-sourced: {})",
-                            v.get("restored_files")
-                                .and_then(|n| n.as_u64())
-                                .unwrap_or(0),
-                            v.get("agent_restarted")
-                                .and_then(|b| b.as_bool())
-                                .unwrap_or(false),
-                        );
-                        return Ok(Json(AgentUpdateResponse {
-                            device_key_hash: req.device_key_hash,
-                            old_sandbox_ids: killed,
-                            sandbox: sandbox_json,
-                            session: SessionHandoff {
-                                migrated: true,
-                                detail: session_detail,
-                            },
-                        }));
+                        // #594 — the bridge's newer-wins guard may skip a
+                        // stale snapshot (applied:false); a pre-#594 bridge
+                        // has no `applied` field and always applied.
+                        if v.get("applied").and_then(|b| b.as_bool()).unwrap_or(true) {
+                            migrated = true;
+                            session_detail = format!(
+                                "hermes home migrated ({} file(s); agent re-sourced: {})",
+                                v.get("restored_files")
+                                    .and_then(|n| n.as_u64())
+                                    .unwrap_or(0),
+                                v.get("agent_restarted")
+                                    .and_then(|b| b.as_bool())
+                                    .unwrap_or(false),
+                            );
+                        } else {
+                            session_detail = format!(
+                                "import skipped by the bridge's newer-wins guard (a fresher \
+                                 snapshot was already applied): {v}"
+                            );
+                        }
+                        break;
                     }
                     Err(e) => last_err = e,
                 }
@@ -559,15 +625,14 @@ pub async fn agent_update(
         }
     }
 
-    Ok(Json(AgentUpdateResponse {
-        device_key_hash: req.device_key_hash,
+    Ok(RotateOutcome {
         old_sandbox_ids: killed,
-        sandbox: sandbox_json,
+        sandbox_json,
         session: SessionHandoff {
-            migrated: false,
+            migrated,
             detail: session_detail,
         },
-    }))
+    })
 }
 
 // ─── POST /v1/agent/image-status ─────────────────────────────────────────────

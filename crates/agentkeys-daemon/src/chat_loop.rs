@@ -378,6 +378,11 @@ async fn run(cfg: ChatLoopConfig) {
     if let Some(mirror_cfg) = crate::memory_mirror::MirrorConfig::from_chat_env(cfg.clone()) {
         crate::memory_mirror::spawn(mirror_cfg, credential.clone());
     }
+    // #594 — the runtime checkpoint (restore-on-boot + periodic durable save),
+    // same isolation posture as the mirror: own session, shared credential.
+    if let Some(checkpoint_cfg) = crate::checkpoint::CheckpointConfig::from_chat_env(cfg.clone()) {
+        crate::checkpoint::spawn(checkpoint_cfg, credential.clone());
+    }
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(40))
         .build()
