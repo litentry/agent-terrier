@@ -27,11 +27,11 @@ The pipeline looks over-engineered until you know that **two directions do not w
 | Direction | What happens |
 |---|---|
 | **CN broker → GitHub / PyPI** | The Hermes installer's `git clone` runs ~20 min and dies `GnuTLS recv error (-54) … bytes of body are still expected` — **including with `--network host`**, so it is the transfer truncating, not container NAT. `pip install` from PyPI is the same link. |
-| **Laptop → CN Container Registry** | 39 retries could not land ~660 MB: `toomanyrequests`, `short read … unexpected EOF`, and intermittent **DNS failure** for the CR host. |
+| **Laptop → CN Container Registry (BULK)** | 39 retries could not land ~660 MB of genuinely-new layers into an empty repo: `toomanyrequests`, `short read … unexpected EOF`, and intermittent **DNS failure** for the CR host. The qualifier matters: that is the **no-mount-candidates** regime. An *incremental* push whose base layers already live in the CR **cross-repo-mounts** them (~18 real blob ops) and landed **first try** (measured 2026-07-28) — see the CR-tier section below. |
 
-So neither machine can do the whole job. The split follows directly: **the Mac compiles and seeds the foreign layers; the broker builds and pushes.** Crucially, *at image-build time nothing crosses the border at all* — that is what makes the cycle reliable rather than merely faster.
+So neither machine can do the whole BULK job, and the CR refuses many-OPERATION pushes from anywhere (the frequency refusal below bit the broker's intra-region push hardest). The split follows: **the Mac compiles and seeds the foreign layers once; the routine push runs from whichever machine holds the seeded base locally** — normally the Mac, whose incremental push cross-mounts everything but the changed ~50 MB — **with the broker as the fallback builder/pusher and always the boot-gate + precache-refresh host.** Crucially, *at image-build time nothing crosses the border at all* on either path — the foreign layers ride the seeded base.
 
-This is also why the daemon travels as a **~50 MB binary over scp** instead of a ~17 GB image over the registry protocol.
+This is also why the daemon travels as a **~50 MB artifact** (a layer upload on the laptop path, an scp on the broker path) instead of a ~17 GB image over the registry protocol.
 
 ## Phase 1 — seed the base (RARE)
 
@@ -54,17 +54,38 @@ Run this **only on a deliberate Hermes/openviking bump**. The published tag enco
 
 | Step | Where | What |
 |---|---|---|
-| 1 | Mac | cross-compile `agentkeys-daemon` for `linux/amd64` (fast cores; ~3 min incremental) |
-| 2 | Mac → broker | `scp` the ~50 MB binary |
-| 3 | broker | `setup-image.sh --from-binary`: `docker build` **FROM `$VE_BASE_HERMES`** — BuildKit **skips stage 1 entirely**, so zero foreign egress — with the daemon `COPY` as the **last layer** |
-| 4 | broker | `docker push` → CR, **intra-region** (normally one ~50 MB layer — but see the CR-tier note below) |
-| 5 | broker | **veFaaS-faithful boot gate** (pod-env boot of the registry-live digest — Phase 3 below) |
-| 6 | broker | `agentkeys-broker-server precache-refresh` → poll until 已预热 |
+| 1 | Mac | cross-compile `agentkeys-daemon` for `linux/amd64` — **natively via `cargo-zigbuild` when installed** (#597: 2m56s full build measured 2026-08-10, glibc floor 2.35 = the hermes base's, vendored OpenSSL feature; `SBX_CROSS=qemu` forces the container path), else the QEMU builder |
+| 2 | Mac | **push-path pick from observable state** (`--push-path` / `VE_PUSH_PATH`, default `auto`, printed loud): seeded `VE_BASE_HERMES` present in the local docker → **LAPTOP**, else **BROKER** |
+| 3-L | Mac (LAPTOP path) | **BuildKit assembly `FROM $VE_BASE_HERMES`** (stage 1 skipped — the base layers stay **byte-identical** to the CR's, so they mount/exist on push, ~18 real blob ops: the only regime measured to clear the frequency refusal). The classic-builder+cache mode is a buildx-broken fallback only: a cold cache re-runs the foreign stage (~30 min, measured 2026-08-10) and its rebuilt NEW-digest layers 429 on push |
+| 3-B | Mac → broker (BROKER path) | `scp` the ~50 MB binary; `setup-image.sh --from-binary`: `docker build` **FROM `$VE_BASE_HERMES`** — BuildKit **skips stage 1 entirely**, zero foreign egress, daemon `COPY` as the **last layer** — then `docker push` → CR, **intra-region** |
+| 4 | broker | **veFaaS-faithful boot gate** (pod-env boot of the registry-live digest — Phase 3 below) |
+| 5 | broker | `agentkeys-broker-server precache-refresh` → poll until 已预热 — the LAPTOP path reaches 4-5 via `setup-image.sh --refresh-only`, after which the broker's local image copy is **STALE**: never `--push-only` there until it rebuilds (the #578 footgun) |
 
 Two design details that are load-bearing rather than cosmetic:
 
 - **`FOREIGN_BASE` must be a global `ARG`** (declared before the *first* `FROM`). An `ARG` written inside a stage body is stage-scoped and invisible to a later `FROM`, which fails with `base name (${FOREIGN_BASE}) should not be blank`.
 - **BuildKit is required on the broker** when `FOREIGN_BASE` is set — only BuildKit prunes an unreferenced stage. The classic builder walks every stage and would run the Hermes clone anyway, so `build.sh` hard-errors on that combination.
+
+### Versioned tags — blue-green precache (#598, the DEFAULT)
+
+Every cycle mints an immutable tag — `hermes-sandbox:v<utc-stamp>-g<sha8>` (`build-push-ve.sh`; the hybrid mints once and passes it to every leg) — instead of mutating `:latest`. This inverts the production-hostile ordering the mutable tag forced: a **new** URL has no existing precache registration, so `refresh_precache()` takes its **fresh-registration path — no delete, no pinner pre-flight** — and **live delegates keep serving the old version for the entire ~30 min preheat**. Nothing is killed or archived up front.
+
+The cycle then has a gated second half, run after the preheat reports 已预热:
+
+```bash
+# 1. commit + push the env file's CR_IMAGE change (the flip gates on origin carrying it)
+# 2. point SPAWNS at the new version (unit converge, step 5, on the VE host):
+bash scripts/operator/build-image-hybrid.sh --flip
+```
+
+After the flip, new spawns and the #577 **"update runtime"** clicks use the new version — delegates migrate one at a time, each with only its own in-place restart. Old versions stay servable throughout; VE documents **100 image versions/repo** on 小微版 (the tier table above), so retention is not a near-term constraint. Opt-outs: `VE_CR_TAG=<tag>` pins an explicit tag (`VE_CR_TAG=latest` restores the mutable-tag semantics below), `VE_IMAGE_VERSIONING=0` disables the mint. **Mutable-tag mode keeps the old rules**: a same-tag re-push is invisible until a delete+re-add refresh, and a live delegate PINS that registration (`--kill-pinners` / archive). Follow-ups tracked on #598: a `precache-refresh --prune-stale` GC for old unpinned registrations + CR tag retention. The registration quota IS documented in the console (沙箱镜像 banner, read 2026-08-11): the preheat feature is in free public beta with a **default cap of 20 preheated images** and a **default 15-day retention (默认保留 15 天)** — whether the 15 days expires the warmed cache or the registration row is unverified; treat registrations older than ~2 weeks as suspect and re-preheat at the next flip.
+
+### Layer budget — the push-op ceiling is structural (2026-08-10)
+
+The refusal counts **every blob operation, existence checks included**: an 84-layer image (63 base + 21 final-stage) was 429'd from the Mac with *zero* bytes pending upload. Two structural changes keep every push deterministically under the measured-safe ~18 ops:
+
+1. **Assembly-stage fold** (Dockerfile): all final-stage work runs in a build-local `assembly` stage; the shipped stage adds **5 `COPY --from` layers** instead of 21 (verified: 68 total). New files go into `assembly` and ride one of the five COPYs — never a sixth layer without re-checking the budget.
+2. **Flat base** — `setup-image.sh --flatten-base` on the **broker**: re-publishes `VE_BASE_HERMES` as a **single-layer** image (`…/base/hermes-flat:<same suffix>`, config metadata re-applied, env-key parity asserted — the `function_exited` class), recorded as `VE_BASE_HERMES_FLAT` and preferred by every build once set → the final image is **~6 layers ≈ ~12 push ops**, and BOTH push hosts drop under the ceiling. Idempotent; re-run after every base re-seed. Its own push is few-op/many-byte (~13 GB single blob, intra-region, ~35 min at the 50 Mbps cap) — the one combination not yet measured; `docker push` resumes per-LAYER, so a truncated blob restarts that blob.
 
 ### The CR tier is a real ceiling on step 4 — know it before blaming the pipeline
 
@@ -80,7 +101,7 @@ Two design details that are load-bearing rather than cosmetic:
 Two consequences worth stating plainly, because both contradict things this doc used to imply:
 
 1. **The broker's push is NOT a privileged private path.** 小微版 has no VPC access, so it pushes over the *public* endpoint at 50 Mbps like any other client — a full ~15 GB image is ≥40 min at the cap. Its advantage over the laptop is proximity and reliability, not a special link. The pipeline is designed so this rarely matters: the daemon `COPY` is the last layer, so a normal code push moves ~50 MB.
-2. **A `request frequency is too high, try later` refusal is UNDOCUMENTED.** VE publishes no push QPS/frequency limit for any tier, and the [push-failure FAQ](https://www.volcengine.com/docs/6420/78516) covers only `unauthorized`. Measured 2026-07-27: a 3-layer push succeeded while an 81-layer push was refused **both** with ~15 GB of new layers and with ~50 MB into a repo already holding them; `max-concurrent-uploads=1` changed nothing; reads were fine throughout. So it is neither bytes, storage, nor concurrency — and there is **no documented reset window to wait for**. Treat it as a support-ticket item (VE's own remedy for limits is 提升实例配额) or a reason to move to 标准版. A bump run is where this bites, because re-seeding the base pushes a fresh multi-GB image right before the hybrid does.
+2. **A `request frequency is too high, try later` refusal is UNDOCUMENTED — and retry-futile.** VE publishes no push QPS/frequency limit for any tier, and the [push-failure FAQ](https://www.volcengine.com/docs/6420/78516) covers only `unauthorized`. Measured 2026-07-27: a 3-layer push succeeded while an 81-layer push was refused **both** with ~15 GB of new layers and with ~50 MB into a repo already holding them; `max-concurrent-uploads=1` changed nothing; reads were fine throughout. So it is neither bytes, storage, nor concurrency — and there is **no documented reset window to wait for** (11–39 consecutive 60s-spaced retries all refused, measured 2026-07-28 and 2026-08-09). Two consequences in the tooling: the hybrid's `auto` push-path pick avoids entering this regime whenever the seeded base is local (the LAPTOP path's cross-mount push is the one measured escape), and `push_with_retry` (build.sh) **fails fast** — after `PUSH_FREQ_MAX_RETRIES` (default 3) consecutive frequency refusals it stops with rc 75 and prints that escape instead of grinding the 40-attempt transient budget. Past the tooling, escalate to VE support (提升实例配额 is their documented channel for limits). Because the refusal is undocumented, **no tier or config change is a verified fix**: 标准版's documented gains (bandwidth, VPC quota) are not the failing dimension, and whether it alters this refusal has never been measured — do not plan a migration around that assumption. A bump run is where this bites, because re-seeding the base pushes a fresh multi-GB image right before the hybrid does.
 
 ## Phase 3 — precache refresh: why a push is not enough
 
@@ -134,7 +155,8 @@ A sandbox **freezes its image at spawn**, so a completed preheat changes only wh
 
 | Command | Use |
 |---|---|
-| `scripts/operator/build-image-hybrid.sh` | **the normal path** — laptop-driven, ends preheated |
+| `scripts/operator/build-image-hybrid.sh` | **the normal path** — laptop-driven, ends with the new version preheated (#598: alongside the old) |
+| `scripts/operator/build-image-hybrid.sh --flip` | the #598 second half — after 已预热 + the env commit, point spawns at the new version (unit converge) |
 | `scripts/operator/seed-base-images.sh` | rare — only on a Hermes/openviking bump |
 | `scripts/operator/setup-image.sh --from-binary` | the broker-side half the hybrid invokes (run directly if the binary is already staged) |
 | `scripts/operator/setup-image.sh --push-only` | re-push + refresh with no rebuild — the usual "unpin, then re-run" follow-up (`VE_REFRESH_KILL_PINNERS=1` opts into the kill-only unpin) |

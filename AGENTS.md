@@ -110,6 +110,9 @@ measured one, so the burden is on the writing to mark which it is.
 
 Pairs with the Diagnosis-before-edit policy: diagnose the root, fix it at the source; an override is a last resort, never a reflex.
 
+## Verify-before-merge policy
+Verify from the worktree/branch first — never ask the operator to merge as a verification prerequisite. Merge is always the LAST step, after live verification passes.
+
 ## Land-the-fix policy
 Once a local repro proves a fix is correct, **land it the same turn**: edit every affected file (search repo-wide — never assume one file), commit, push to your working branch (PR'd to `origin/main`). Do not stop at "verified locally" or "fixed in one place" — the next operator running the docs will hit the same bug if the fix isn't on `origin/main`. Pair this with the diagnosis-before-edit policy: diagnose once, fix everywhere, push immediately.
 

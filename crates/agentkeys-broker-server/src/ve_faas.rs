@@ -733,9 +733,13 @@ impl VeFaasClient {
                          active, and once the preheat completes each delegate comes back on the \
                          NEW image via one parent-control 'update runtime' click (no archive \
                          ceremony); or (b) archive the delegate(s) in parent-control (Touch ID) \
-                         if you actually want them GONE. Then re-run: \
-                         bash scripts/operator/setup-image.sh --push-only  (the build + push are \
-                         already done; --push-only re-pushes cheap layers and re-runs this refresh).",
+                         if you actually want them GONE. Then re-run the refresh: \
+                         bash scripts/operator/setup-image.sh --refresh-only (or --push-only ONLY \
+                         on the host that built+pushed the image — elsewhere it would overwrite \
+                         the fresh tag with a stale local copy, #578). NOTE: the #598 versioned \
+                         cycle (default) avoids this entirely — a NEW tag preheats alongside the \
+                         pinned registration, no delete needed; this stop means you are refreshing \
+                         a MUTABLE tag a live instance runs.",
                         pinners.len(),
                         who.join("; ")
                     );

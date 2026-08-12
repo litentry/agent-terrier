@@ -94,3 +94,14 @@ reqwest = { version = "0.12", features = ["json"] }
 serde_json = { workspace = true }
 # issue #220 — tempdir-scoped master-session persistence tests (never touch $HOME).
 tempfile = "3"
+
+# #597 — the zigbuild native cross-compile (e2e/sandbox-build-push.sh fast path)
+# links the tree's openssl-sys/native-tls for x86_64-linux via a VENDORED
+# OpenSSL build (feature unification flips the shared openssl-sys). OFF for
+# every native build — broker/daemon deployments are byte-unchanged.
+[features]
+vendored-openssl = ["dep:openssl", "openssl/vendored"]
+
+[dependencies.openssl]
+version = "0.10"
+optional = true

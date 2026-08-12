@@ -70,3 +70,12 @@ reqwest = { version = "0.12", features = ["json"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = { workspace = true }
 tempfile = "3"
+
+# #597 — see agentkeys-daemon's twin: vendored OpenSSL for the zigbuild
+# cross-compile only; OFF for every native build.
+[features]
+vendored-openssl = ["dep:openssl", "openssl/vendored"]
+
+[dependencies.openssl]
+version = "0.10"
+optional = true
