@@ -9,11 +9,14 @@ import * as bridgePlugin from '../src/bridge.js';
 // webserver over REAL HTTP without a live LLM.
 function fakeAgents(ctx: Context, sessionId: string) {
   let resolveIdle: (() => void) | undefined;
+  let signalFollowup: (() => void) | undefined;
+  const followupCalled = () => new Promise<void>((r) => (signalFollowup = r));
+  const createCalls: unknown[] = [];
   const agent = {
     options: { model: 'mock-model' },
     session: { id: sessionId },
     followup() {
-      /* the test emits events + then releases whenIdle */
+      signalFollowup?.();
     },
     whenIdle: () => new Promise<void>((r) => (resolveIdle = r)),
   };
@@ -23,7 +26,8 @@ function fakeAgents(ctx: Context, sessionId: string) {
   const releaseIdle = () => resolveIdle?.();
   return {
     service: {
-      async create() {
+      async create(options: unknown) {
+        createCalls.push(options);
         return { agent, dispose: async () => {} };
       },
       get() {
@@ -32,6 +36,8 @@ function fakeAgents(ctx: Context, sessionId: string) {
     },
     emit,
     releaseIdle,
+    followupCalled,
+    createCalls,
   };
 }
 
@@ -41,11 +47,15 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function boot() {
+async function boot(opts?: { defaultModel?: { provider: string; model: string } }) {
   ctx = new Context();
   const fake = fakeAgents(ctx, 'agentkeys-bridge-session');
   ctx.provide('agents', fake.service);
   ctx.provide('sessions', {});
+  if (opts?.defaultModel) {
+    const selection = opts.defaultModel;
+    ctx.provide('agentDefaultModel', { currentSelection: () => selection });
+  }
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 });
   await ctx.plugin(bridgePlugin, { cwd: '/tmp', engine: 'dsh', model: 'mock-model' });
   const base = `http://127.0.0.1:${ctx.webServer.port}`;
@@ -73,6 +83,38 @@ describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
   // byte-exactly by the TurnStreamer unit tests against synthetic events (the
   // real session/event bus is scope-routed by a live Session, which a fake
   // cannot faithfully drive); the live agent path verifies in the #615 image.
+
+  it('the agent is created WITH the shared default provider/model when the service is up (#631)', async () => {
+    const { fake } = await boot({ defaultModel: { provider: 'gate', model: 'ep-test' } });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fake.createCalls[0]).toMatchObject({ agentOptions: { provider: 'gate', model: 'ep-test' } });
+  });
+
+  it('falls back to its own config provider/model when no agentDefaultModel service exists (#631)', async () => {
+    const { fake } = await boot();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fake.createCalls[0]).toMatchObject({ agentOptions: { provider: 'gate', model: 'mock-model' } });
+  });
+
+  it('a turn that ends in error surfaces as 502, never a 200 empty reply (#631)', async () => {
+    const { base, fake } = await boot();
+    await new Promise((r) => setTimeout(r, 20)); // agent created at activation
+    const followedUp = fake.followupCalled();
+    const pending = fetch(`${base}/v1/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'hi' }),
+    });
+    await followedUp;
+    fake.emit('turn/end', {
+      turn: 1,
+      reason: { kind: 'error', error: { message: 'no provider/model', code: 'UNKNOWN' } },
+    });
+    fake.releaseIdle();
+    const res = await pending;
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: 'agent error: no provider/model' });
+  });
 
   it('v1/chat rejects a bad body with 400', async () => {
     const { base } = await boot();

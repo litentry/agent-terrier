@@ -69,9 +69,22 @@ export class TurnStreamer {
       case 'assistant/message':
         this.accumulateUsage((event.data as { usage?: unknown }).usage);
         return [];
+      case 'turn/end':
+        return this.onTurnEnd(event.data);
       default:
         return [];
     }
+  }
+
+  /** A turn that ends with reason kind `error` becomes the error frame — the
+   *  #631 local twin caught the model-less agent ending its turn in error
+   *  while the bridge answered 200 with an empty reply. */
+  private onTurnEnd(data: unknown): BridgeFrame[] {
+    const reason = (data as { reason?: { kind?: unknown; error?: { message?: unknown } } } | undefined)
+      ?.reason;
+    if (!reason || reason.kind !== 'error') return [];
+    const message = typeof reason.error?.message === 'string' ? reason.error.message : 'turn failed';
+    return this.fail(`agent error: ${message}`);
   }
 
   private onChunk(data: unknown): BridgeFrame[] {
@@ -138,5 +151,10 @@ export class TurnStreamer {
   /** The accumulated non-stream reply text and usage (read after the turn). */
   reply(): { reply: string; totalTokens: number } {
     return { reply: this.replyText, totalTokens: this.totalTokens };
+  }
+
+  /** The turn's error message, when it ended in error (read after the turn). */
+  errored(): string | undefined {
+    return this.erroredWith;
   }
 }

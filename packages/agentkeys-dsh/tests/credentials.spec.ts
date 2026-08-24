@@ -75,6 +75,22 @@ describe('AgentKeys credential provider (dsh seam)', () => {
     mode = 'ok';
   });
 
+  it('an unmapped ref falls through to the process env (#631: the gate ARK_API_KEY transport)', async () => {
+    const name = 'AGENTKEYS_TEST_ENV_FALLTHROUGH_631';
+    process.env[name] = 'env-held-key';
+    try {
+      const creds = await provider();
+      const before = seen.length;
+      expect(await creds.resolve(credentialRef(name))).toEqual({ value: 'env-held-key', source: 'launch-env' });
+      expect((await creds.describe(credentialRef(name))).configured).toBe(true);
+      expect(seen.length).toBe(before); // env fallthrough never touches the daemon
+    } finally {
+      delete process.env[name];
+    }
+    const creds = await provider();
+    expect(await creds.resolve(credentialRef(name))).toBeUndefined();
+  });
+
   it('rejects delegate-side writes', async () => {
     const creds = await provider();
     await expect(creds.set(credentialRef('OPENROUTER_API_KEY'), 'x')).rejects.toThrow(/master ceremony/);

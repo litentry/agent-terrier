@@ -117,7 +117,7 @@ A future dsh "always allow" or any other permission-surface change cannot move t
 | D1 chain is the single authority | pass | grants remain the only writable policy; the guard/answerer project them, never originate authority |
 | D2 stateless broker | pass | no broker change; no new durable store anywhere (a dsh-side cache, if ever used, is compiler-owned and reconstructible) |
 | D3 keys never leave their machine | pass | K10 stays in the signer (#552); the credential provider resolves per operation via cap-mint, nothing at rest in the sandbox |
-| D4 no ambient authority | pass | creds are references resolved per operation; an ungranted reference fails `MISSING_CREDENTIAL`; unmapped tools are denied |
+| D4 no ambient authority | pass | creds are references resolved per operation; an ungranted VAULT-mapped reference fails `MISSING_CREDENTIAL`; unmapped tools are denied. One scoped exception (#631): a reference NOT mapped to a vault service falls through to the launch environment — that is the §3.2 gate-pair transport (`ARK_API_KEY` arrives as broker-injected spawn env, and dsh consults only the mounted credentials service, never env, once one exists), not a grant bypass: vault-mapped refs never read env |
 | D5 broker never writes chain | pass | untouched |
 | D6 PII off-chain | pass | capability-service strings (`tool:web`, `plugin:<id>`) carry no PII |
 | D7 one owner per contract | n/a | no contract change |

@@ -11,8 +11,14 @@
  * against the chain, and the value flows through one response: nothing at rest
  * in the sandbox, rotation/revocation land on the very next request.
  *
- * Unmapped references resolve `undefined` (= unconfigured, the seam's absent
- * state). Writes are rejected: vault stores are master ceremonies, never a
+ * Unmapped references fall through to the PROCESS ENVIRONMENT (then resolve
+ * `undefined` = unconfigured). The fallthrough is load-bearing, not a
+ * convenience: dsh consults ONLY the mounted credentials service when one
+ * exists (`resolveApiKey` is a ternary, not a chain — #631), and the sandbox
+ * env contract (spec §3.2) delivers the gate LLM key AS env (`ARK_API_KEY`).
+ * Without the fallthrough, mounting this provider makes the gate route
+ * unresolvable on every pod. Mapped refs never consult env — vault-owned.
+ * Writes are rejected: vault stores are master ceremonies, never a
  * delegate-side write. The record half is unsupported (no AgentKeys consumer).
  *
  * This is a Service class — the ONE case where a default export is correct
@@ -62,7 +68,13 @@ export class AgentKeysCredentialProvider extends CredentialProvider {
 
   async resolve(ref: CredentialRef): Promise<ResolvedCredential | undefined> {
     const service = this.serviceOf(ref);
-    if (!service) return undefined;
+    if (!service) {
+      const fromEnv = process.env[String(ref)];
+      if (typeof fromEnv === 'string' && fromEnv.length > 0) {
+        return { value: fromEnv, source: 'launch-env' };
+      }
+      return undefined;
+    }
     const url = this.config.credentialUrl ?? DEFAULT_CREDENTIAL_URL;
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     const token = this.config.bridgeToken ?? process.env.AGENTKEYS_BRIDGE_TOKEN ?? '';
@@ -86,10 +98,14 @@ export class AgentKeysCredentialProvider extends CredentialProvider {
   }
 
   async describe(ref: CredentialRef): Promise<CredentialInfo> {
-    const mapped = this.serviceOf(ref) !== undefined;
-    return mapped
-      ? { configured: true, source: 'agentkeys-vault', writable: false }
-      : { configured: false, writable: false };
+    if (this.serviceOf(ref) !== undefined) {
+      return { configured: true, source: 'agentkeys-vault', writable: false };
+    }
+    const fromEnv = process.env[String(ref)];
+    if (typeof fromEnv === 'string' && fromEnv.length > 0) {
+      return { configured: true, source: 'launch-env', writable: false };
+    }
+    return { configured: false, writable: false };
   }
 
   async set(_ref: CredentialRef, _value: string): Promise<void> {

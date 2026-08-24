@@ -48,6 +48,9 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/actors/:id/scope	legacy scope update (panel uses /v1/scope/build+submit, covered) — remove route or test when panel migration completes
 /v1/actors/:id/scope/grant	same legacy scope surface
 /v1/actors/:id/payment-cap	payment caps UI not wired to chain yet (#97 payments pending)
+/v1/sandbox/self/audit	serves the in-sandbox dsh suite (#611-613); client half pinned by packages/agentkeys-dsh/tests/audit.spec.ts against the wire shape — daemon-handler runtime test lands with the #620 spawn-valve e2e (needs a spawned dsh sandbox on the test stack)
+/v1/sandbox/self/credential	same dsh-suite surface — client half pinned by packages/agentkeys-dsh/tests/credentials.spec.ts; daemon handler needs the #620 spawned-sandbox e2e
+/v1/sandbox/self/grants	same dsh-suite surface — client half pinned by packages/agentkeys-dsh/tests/guard.spec.ts; daemon handler needs the #620 spawned-sandbox e2e
 /v1/actors/:id/revoke	master-gated revoke (gas) — covered at CLI level by heima-device-revoke.sh; web submit needs signed UserOp e2e
 /v1/actors/:id/caps/revoke	cap revoke — broker cap.rs unit-tests the revoked-deny; web path needs a live cap fixture (former MCP-tool coverage retired, #560)
 /v1/audit/stream	SSE — curl smoke would hang a step; needs a timeout-bounded SSE reader helper

@@ -30,14 +30,38 @@ export const inject = ['agents', 'sessions', 'webServer'];
 export interface Config {
   cwd?: string;
   engine?: string;
+  provider?: string;
   model?: string;
 }
 
 export const Config: z<Config> = z.object({
   cwd: z.string().default('/opt/agentkeys'),
   engine: z.string().default('dsh'),
+  provider: z.string().default('gate'),
   model: z.string().default(process.env.LLM_ENDPOINT_ID ?? '(unset)'),
 });
+
+interface ModelSelection {
+  provider: string;
+  model: string;
+}
+
+/** The provider/model the agent is created with. `ctx.agents.create` does NOT
+ *  consult the profile's `agent-default-model` row on its own (the #631 local
+ *  twin: a model-less create succeeds, then every turn ends in error) — so the
+ *  bridge reads the shared `agentDefaultModel` service exactly like the
+ *  `dsh-headless` runner does, falling back to its own config (same env pair
+ *  the profile's rows read) when the service isn't up yet. */
+function currentSelection(ctx: Context, config: Config): ModelSelection | undefined {
+  const service = (ctx as { get?: (name: string) => unknown }).get?.('agentDefaultModel') as
+    | { currentSelection(): ModelSelection }
+    | undefined;
+  if (service) return service.currentSelection();
+  if (config.model && config.model !== '(unset)') {
+    return { provider: config.provider ?? 'gate', model: config.model };
+  }
+  return undefined;
+}
 
 const SESSION_ID = 'agentkeys-bridge-session';
 
@@ -71,13 +95,18 @@ export function apply(ctx: Context, config: Config): void {
     if (starting) return undefined;
     starting = true;
     try {
+      const selection = currentSelection(ctx, config);
       handle = await ctx.agents.create({
         sessionId: SessionId(SESSION_ID),
         meta: { cwd: config.cwd ?? '/opt/agentkeys' },
+        ...(selection ? { agentOptions: selection } : {}),
       });
       version = handle.agent.options.model ?? version;
       return handle;
-    } catch {
+    } catch (e) {
+      // Loud (→ the dsh unit log): a silently-swallowed create failure reads
+      // as an eternal 503 acp_starting from outside.
+      console.error(`agentkeys-bridge: agent create failed: ${(e as Error).message}`);
       return undefined;
     } finally {
       starting = false;
@@ -155,6 +184,11 @@ export function apply(ctx: Context, config: Config): void {
         }
         try {
           const streamer = await runTurn(text);
+          const failure = streamer.errored();
+          if (failure !== undefined) {
+            sendJson(res, 502, { error: failure });
+            return;
+          }
           const { reply, totalTokens } = streamer.reply();
           sendJson(res, 200, chatReply(reply, totalTokens));
         } catch (e) {

@@ -79,6 +79,23 @@ describe('TurnStreamer (session events → frames)', () => {
     expect(s.reply()).toEqual({ reply: 'Hello', totalTokens: 15 });
   });
 
+  it('a turn/end with an error reason becomes the error frame (#631: never a silent empty reply)', () => {
+    const s = new TurnStreamer();
+    s.push(ev('assistant/chunk', { chunk: { type: 'text-delta', index: 0, text: 'partial' } }));
+    const frames = s.push(
+      ev('turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'no provider/model', code: 'UNKNOWN' } } }),
+    );
+    expect(frames).toEqual([{ type: 'error', error: 'agent error: no provider/model' }]);
+    expect(s.errored()).toBe('agent error: no provider/model');
+    expect(s.finish()).toEqual([]); // no done after the turn error
+  });
+
+  it('a clean turn/end emits nothing and leaves errored() unset', () => {
+    const s = new TurnStreamer();
+    expect(s.push(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }))).toEqual([]);
+    expect(s.errored()).toBeUndefined();
+  });
+
   it('error and done are mutually exclusive; frames stop after either', () => {
     const s = new TurnStreamer();
     expect(s.fail('agent error: x')).toEqual([{ type: 'error', error: 'agent error: x' }]);
