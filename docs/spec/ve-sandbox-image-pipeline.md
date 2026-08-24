@@ -201,4 +201,13 @@ The daemon `COPY` is deliberately the **final** layer: it is the only thing that
 1. `bash scripts/operator/build-image-dsh.sh` — auto-seed (when `VE_BASE_DSH` is absent) → daemon cross-compile → build+push `dsh-sandbox:v<stamp>-g<sha8>` → register+preheat via the broker's `setup-image.sh --refresh-only` (the one owner of the refresh) → record `CR_IMAGE_DSH`.
 2. `bash scripts/operator/build-image-dsh.sh --flip` — after committing the env file: converge broker step 5. Until the #620 runtime valve lands, nothing spawns from `CR_IMAGE_DSH`; the flip stages the ref.
 
+The dsh cycle carries the SAME hard-won push-budget machinery as the hermes one, because the CR ceiling is a property of the registry, not of the runtime:
+
+- **Flat base (#598)** — `setup-image.sh --flatten-base --family dsh` (run ON the broker, after every re-seed) republishes `VE_BASE_DSH` as a ONE-layer image and records `VE_BASE_DSH_FLAT`. The flatten mechanism has exactly one owner: the `--family` flag selects the env-var pair, so the space pre-flight, the Env/Entrypoint parity gate and the idempotent skip are never duplicated per runtime. Builds prefer the flat base once it is set.
+- **Push path auto-pick (#593)** — the cycle picks LAPTOP when the base is in the local docker (its layers cross-repo-mount, ~18 blob ops — the regime measured to land) and BROKER otherwise, and says which and why. Override with `VE_PUSH_PATH=laptop|broker`.
+- **Refusal fail-fast (#568)** — the CR's undocumented `request frequency is too high` is retry-FUTILE, so the push retries ordinary transport errors but exits **75** after 3 consecutive refusals, naming the two real remedies (flatten the base; push from the laptop) instead of spinning.
+- **Tag reuse** — a re-run for the same commit reuses its versioned tag, so a timed-out ~30-min preheat RESUMES on the same URL instead of orphaning it.
+
+Fleet console: the dsh rows mirror the hermes trio one-for-one — **HYBRID cycle · flatten · flip**, plus the #619 **ship DSH bump · CEREMONY** over them.
+
 The first cycle answers the #610 spike items 2–4 (pod boot vs the readiness budget, Landlock/bwrap availability, the function env-template keys — `DSH_HOME` is the new #587-class template key). The hermes sections above remain authoritative until #621 deletes that image.

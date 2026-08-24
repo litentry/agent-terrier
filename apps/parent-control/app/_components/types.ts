@@ -39,6 +39,10 @@ export interface Actor {
    *  channel grants. A CHANNEL commit must SUBTRACT these from what it echoes —
    *  otherwise removing a channel silently re-adds it. See channelGrantCommit. */
   scopeChannelServiceIds?: string[];
+  /** #614/#617 — the subset of scopeUnknownServiceIds the daemon resolved to a
+   *  `tool:<class>` capability grant. Subtracted from `preserve` on a capability
+   *  commit so a switch-off actually takes (same role as scopeChannelServiceIds). */
+  scopeCapabilityServiceIds?: string[];
   /** On-chain SidecarRegistry device key hash — the Touch-ID unpair's target
    *  (revokeAgentDevice must run as the master-account UserOp). */
   deviceKeyHash?: string;
@@ -164,6 +168,95 @@ export const isChannelService = (svc: string): boolean => /^channel-(pub|sub):/i
  *  Never cap-mintable (the broker + workers reject), so they gate what the model
  *  may ATTEMPT, never what data a worker serves. */
 export const isCapabilityService = (svc: string): boolean => /^(tool|plugin):/i.test(svc.trim());
+
+/** #617 — the tool classes an owner can grant from the UI. Lockstep with the
+ *  daemon's `CAPABILITY_TOOL_CLASSES` (hash→name recovery) and the runtime
+ *  guard's compiled allowlist: a class the owner can toggle here must be one the
+ *  guard understands, or the grant would be inert. `plugin:<id>` is deliberately
+ *  NOT toggleable — plugins are what an app is BUILT FROM (an install-batch
+ *  fact, like an iOS app's frameworks), surfaced read-only as "Built with". */
+export const TOOL_CLASSES = ['web', 'code', 'schedule'] as const;
+export type ToolClass = (typeof TOOL_CLASSES)[number];
+
+/** `tool:<class>` for a class the UI offers. */
+export const toolService = (cls: ToolClass): string => `tool:${cls}`;
+
+/** True for the read-only half of the capability family (see TOOL_CLASSES). */
+export const isPluginService = (svc: string): boolean => /^plugin:/i.test(svc.trim());
+
+/** #617 — the exact `setScope` inputs for changing an actor's CAPABILITY grants.
+ *
+ *  The twin of {@link channelGrantCommit}, and it exists for the same reason:
+ *  `setScope` is set-replace, so a capability commit must restate the WHOLE
+ *  grant set, and it must SUBTRACT the capability hashes from `preserve` —
+ *  `scopeUnknownServiceIds` deliberately still contains them (so a MEMORY commit
+ *  cannot wipe capabilities), so echoing it verbatim here would silently re-add
+ *  the very tool class the owner just switched off.
+ *
+ *  `plugin:` names are restated, never staged: they ride the install batch. */
+/** #617 activity report — the two RUNTIME audit op_kinds the dsh suite tees
+ *  (110 `runtime.tool_result`, 111 `runtime.approval`, #612). Kept here rather
+ *  than inlined in the view so the owner-language mapping is unit-testable. */
+export const OP_KIND_RUNTIME_TOOL_RESULT = 110;
+export const OP_KIND_RUNTIME_APPROVAL = 111;
+
+/** One owner-language activity line for a decoded runtime envelope.
+ *
+ *  DENIALS ARE SHOWN, never hidden: seeing "asked to run code — you said no" is
+ *  how an owner learns the guard is working. `undefined` for every other
+ *  op_kind — the generic decode rows already cover those. */
+export const runtimeActivityLine = (env: {
+  op_kind: number;
+  op_body?: Record<string, unknown> | null;
+  result?: number;
+}): { text: string; denied: boolean } | undefined => {
+  const body = env.op_body ?? {};
+  const tool = typeof body.tool === 'string' && body.tool ? body.tool : 'a tool';
+  if (env.op_kind === OP_KIND_RUNTIME_TOOL_RESULT) {
+    const failed = body.is_error === true || env.result === 1;
+    return failed
+      ? { text: `Tried to use ${tool} — it did not complete`, denied: true }
+      : { text: `Used ${tool}`, denied: false };
+  }
+  if (env.op_kind === OP_KIND_RUNTIME_APPROVAL) {
+    const outcome = typeof body.outcome === 'string' ? body.outcome : 'unavailable';
+    switch (outcome) {
+      case 'allowed-once':
+        return { text: `Asked to use ${tool} — you allowed it once`, denied: false };
+      case 'rejected':
+        return { text: `Asked to use ${tool} — you declined`, denied: true };
+      case 'cancelled':
+        return { text: `Asked to use ${tool} — the request was withdrawn`, denied: true };
+      default:
+        return { text: `Asked to use ${tool} — no answer reached it, so it was refused`, denied: true };
+    }
+  }
+  return undefined;
+};
+
+export const capabilityGrantCommit = (
+  a: Actor,
+  stagedToolServices: string[],
+): { services: string[]; preserve: string[] } => {
+  const memoryNames = Object.entries(a.scope ?? {}).flatMap(([ns, bits]) => [
+    ...(bits?.read ? [`memory:${ns}`] : []),
+    ...(bits?.write ? [`inbox:${ns}`] : []),
+  ]);
+  // everything we know by name that this commit does NOT own: channels, creds,
+  // and the plugin half of the capability family.
+  const otherKnown = (a.services ?? []).filter(
+    (s) => !isCapabilityService(s) || isPluginService(s),
+  );
+  const capabilityHashes = new Set(
+    (a.scopeCapabilityServiceIds ?? []).map((h) => h.toLowerCase()),
+  );
+  return {
+    services: Array.from(new Set([...memoryNames, ...otherKnown, ...stagedToolServices])),
+    preserve: (a.scopeUnknownServiceIds ?? []).filter(
+      (h) => !capabilityHashes.has(h.toLowerCase()),
+    ),
+  };
+};
 
 /** A bound actor whose known grants are all channel services = a channel-endpoint
  *  device (D6). Only decidable when the daemon knows the service NAMES (accepts

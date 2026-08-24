@@ -4,7 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { NAMESPACES } from '@/lib/constants';
 import { Dot, Panel } from './shared';
 import type { Actor, Namespace, ScopeBits, VaultItem } from './types';
-import { isCapabilityService, isChannelService } from './types';
+import { isCapabilityService, isChannelService, isPluginService, TOOL_CLASSES, toolService, type ToolClass } from './types';
 import type { ProposedScope } from '@/lib/client/types';
 
 // Segmented control: deny | read | read+write
@@ -93,6 +93,21 @@ const NS_WHY: Record<Namespace, string> = {
 };
 
 // Mobile-style scoped permission list (replaces the table view). The "tables won't scale" ask.
+// #617 — owner-language labels for the tool classes. The rows say what the
+// delegate may DO, never how the runtime enforces it (the state line carries
+// the service string for operators who want it).
+const CAP_ICON: Record<string, string> = { web: '\u2601', code: '\u2328', schedule: '\u23f1' };
+const CAP_TITLE: Record<string, string> = {
+  web: 'Web access',
+  code: 'Code execution',
+  schedule: 'Scheduled reports',
+};
+const CAP_WHY: Record<string, string> = {
+  web: 'let it fetch pages and search the web while working on your task',
+  code: 'let it run code and shell commands inside its own sandbox',
+  schedule: 'let it run on a schedule (a daily report) without you asking each time',
+};
+
 export function PermissionList({
   actor,
   editable,
@@ -100,6 +115,7 @@ export function PermissionList({
   onScopeChange,
   onPaymentTap,
   onCredTap,
+  onCapabilityChange,
 }: {
   actor: Actor;
   editable: boolean;
@@ -107,6 +123,9 @@ export function PermissionList({
   onScopeChange?: (ns: Namespace | '__email', v: ScopeBits | boolean) => void;
   onPaymentTap?: () => void;
   onCredTap?: (v: VaultItem) => void;
+  /** #617 — a capability toggle IS a grant: the handler runs the same setScope
+   *  ceremony the memory toggles do. Absent ⇒ the section renders read-only. */
+  onCapabilityChange?: (svc: string, granted: boolean) => void;
 }) {
   const scope = actor.scope ?? ({} as Record<Namespace, ScopeBits>);
   const services = actor.services ?? [];
@@ -123,6 +142,14 @@ export function PermissionList({
   // runtime may ATTEMPT (guard/preset-compiled), never a data-plane grant. Shown
   // read-only here; the grant/revoke editor ships with the runtime UI (#617).
   const capabilityGrants = services.filter(isCapabilityService);
+  // #617 — the two halves render differently BECAUSE they mean different things:
+  // a tool class is a live policy the owner controls; a plugin mount is a fact of
+  // what the app was built from (install-batch, iOS-framework-like) and is
+  // disclosure only. Never offer a toggle that cannot take effect.
+  const grantedTools = new Set(
+    capabilityGrants.filter((s) => !isPluginService(s)).map((s) => s.toLowerCase()),
+  );
+  const pluginGrants = capabilityGrants.filter(isPluginService);
 
   return (
     <div className="perm-list">
@@ -146,24 +173,44 @@ export function PermissionList({
           })}
         </PermSection>
       )}
-      {/* CAPABILITIES (#614) */}
-      {capabilityGrants.length > 0 && (
-        <PermSection title="Capabilities" summary={`${capabilityGrants.length} grant${capabilityGrants.length === 1 ? '' : 's'}`}>
-          {capabilityGrants.map((svc) => {
-            const isTool = svc.toLowerCase().startsWith('tool:');
-            const id = svc.split(':').slice(1).join(':');
+      {/* CAPABILITIES (#614 vocabulary, #617 owner control) */}
+      {(editable || capabilityGrants.length > 0) && (
+        <PermSection
+          title="Capabilities"
+          summary={`${grantedTools.size} of ${TOOL_CLASSES.length} tool classes`}
+        >
+          {TOOL_CLASSES.map((cls: ToolClass) => {
+            const svc = toolService(cls);
+            const on = grantedTools.has(svc.toLowerCase());
             return (
               <PermRow
                 key={svc}
-                icon={isTool ? '⚙' : '▦'}
-                title={id}
-                why={isTool ? 'tool class — the runtime guard allows this action family in-loop' : 'plugin mount — this capability provider may be mounted in the session'}
-                state={`${svc} · never cap-mintable · enforced by the runtime guard (spec §4.2)`}
-                granted={true}
-                control={<span className="perm-readonly on">{isTool ? 'tool' : 'plugin'}</span>}
+                icon={CAP_ICON[cls]}
+                title={CAP_TITLE[cls]}
+                why={CAP_WHY[cls]}
+                state={`${svc} · in-loop guard · never cap-mintable`}
+                granted={on}
+                control={
+                  editable && onCapabilityChange ? (
+                    <PermSwitch on={on} onToggle={(v) => onCapabilityChange(svc, v)} />
+                  ) : (
+                    <span className={`perm-readonly ${on ? 'on' : ''}`}>{on ? 'on' : 'off'}</span>
+                  )
+                }
               />
             );
           })}
+          {pluginGrants.map((svc) => (
+            <PermRow
+              key={svc}
+              icon="▦"
+              title={svc.split(':').slice(1).join(':')}
+              why="built with — a capability provider this app is composed from, granted with the install batch"
+              state={`${svc} · disclosure, not a switch`}
+              granted={true}
+              control={<span className="perm-readonly on">built in</span>}
+            />
+          ))}
         </PermSection>
       )}
       {/* MEMORY */}

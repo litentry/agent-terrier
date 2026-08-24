@@ -36,7 +36,7 @@ import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import type { ChainInfo, ChainListEntry, ChannelDef, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
-import { actorIsChannelEndpoint, isChannelService } from './types';
+import { actorIsChannelEndpoint, isChannelService, runtimeActivityLine } from './types';
 
 // #242: does a daemon error detail mean the master J1 lapsed (vs a genuine
 // missing-config / transport error)? The daemon says "master session expired —
@@ -1652,6 +1652,20 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
           <div className="panel-head"><span>── decoded audit envelope{envs.length > 1 ? ` ${i + 1}/${envs.length}` : ''} · cbor v{e.version}</span></div>
           <div className="panel-body">
             <div className="tx-decode">
+              {/* #617 activity report — the owner-language line for a RUNTIME
+                  envelope, above the raw rows. Denials render as a warning so
+                  "it asked and was refused" is as visible as "it acted". */}
+              {(() => {
+                const line = runtimeActivityLine(e);
+                return line ? (
+                  <div className="tx-row">
+                    <span className="tx-k">activity</span>
+                    <span className="tx-v" style={line.denied ? { color: 'var(--warn, #935A00)' } : undefined}>
+                      {line.text}
+                    </span>
+                  </div>
+                ) : null;
+              })()}
               <div className="tx-row"><span className="tx-k">op_kind</span><span className="tx-v mono">{e.op_kind}{e.op_kind_label ? ` · ${e.op_kind_label}` : ' · Unknown(byte)'}</span></div>
               {e.intent_text && <div className="tx-row"><span className="tx-k">intent</span><span className="tx-v">{e.intent_text}</span></div>}
               {Object.entries(e.op_body || {}).map(([k, v]) => (

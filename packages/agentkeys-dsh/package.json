@@ -13,7 +13,8 @@
     "./credentials": "./lib/credentials.js",
     "./audit": "./lib/audit.js",
     "./bridge": "./lib/bridge.js",
-    "./bridge-mgmt": "./lib/bridge-mgmt.js"
+    "./bridge-mgmt": "./lib/bridge-mgmt.js",
+    "./invariant": "./lib/invariant.js"
   },
   "files": [
     "lib/",

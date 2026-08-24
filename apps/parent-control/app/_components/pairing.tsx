@@ -7,6 +7,7 @@ import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
 import { Dot, PageHead } from './shared';
 import { PermissionView } from './permissions';
 import type { Actor, PairingRequest } from './types';
+import { isCapabilityService } from './types';
 
 // #249 — the accept card's scope picker rows: every grantable service the
 // operator can select before Touch ID. Defaults = the REQUESTED tokens; a bare
@@ -29,6 +30,13 @@ function scopeOptions(
       p.ns.forEach((ns) => push(`${p.cap}:${ns}`, p.reason, true));
     } else if (p.cap === 'memory') {
       namespaces.forEach((ns) => push(`memory:${ns}`, `${p.reason} (memory class — pick namespaces)`, true));
+    }
+    // #617 — a requested CAPABILITY token (`tool:<class>`) is grantable as-is:
+    // it carries no namespace by design (the class IS the whole grant), so it
+    // must not fall into the ns-less "not grantable here" bucket below.
+    else if (p.cap.toLowerCase() === 'tool') {
+      // the daemon splits `tool:web` into cap='tool', ns=['web']; a bare `tool`
+      // request names no class and stays un-grantable (nothing to compile).
     }
     // A bare NON-memory token can't compile to an on-chain service — surfaced
     // separately in the card, never silently dropped into a grant.
@@ -571,6 +579,10 @@ function PairRequestCard({
   onDecline: (id: string) => void;
 }) {
   const options = scopeOptions(req, namespaces);
+  // #617 install sheet — two sections in the owner's language: what the delegate
+  // may REACH (data-service grants) and what it may DO (capability grants).
+  const dataOptions = options.filter((o) => !isCapabilityService(o.svc));
+  const capOptions = options.filter((o) => isCapabilityService(o.svc));
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(options.filter((o) => o.preselected).map((o) => o.svc)),
   );
@@ -584,6 +596,8 @@ function PairRequestCard({
   };
   // Bare ns-less NON-memory tokens can't compile to an on-chain service —
   // show them so a request is never silently narrowed.
+  // #617 — `tool` with no class is genuinely un-grantable (same as any bare
+  // non-memory token); `tool:web` carries its class in `ns` and is handled above.
   const bareUnknown = req.requested.filter((p) => p.ns.length === 0 && p.cap !== 'memory');
   // Keep the request's token order: grant exactly what's checked.
   const services = options.filter((o) => selected.has(o.svc)).map((o) => o.svc);
@@ -653,7 +667,30 @@ function PairRequestCard({
               <div className="pair-k" style={{ marginBottom: 8 }}>
                 grant permissions · {services.length} of {options.length} selected
               </div>
-              {options.map((o) => (
+              {/* #617 — the install sheet's two sections. Data & devices = what it
+                  may REACH (cap-minted, worker-enforced); Capabilities = what it
+                  may DO (in-loop guard, never cap-mintable). Same checkbox, same
+                  single Touch ID — the split is the owner's mental model, not two
+                  ceremonies. */}
+              {dataOptions.length > 0 && (
+                <div className="pair-k" style={{ margin: '10px 0 4px', opacity: 0.75 }}>data &amp; devices</div>
+              )}
+              {dataOptions.map((o) => (
+                <label key={o.svc} className="pair-perm-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(o.svc)}
+                    onChange={() => toggle(o.svc)}
+                    style={{ accentColor: 'var(--ink)' }}
+                  />
+                  <span className="chip mono">{o.svc}</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--ink-dim)' }}>{o.reason}</span>
+                </label>
+              ))}
+              {capOptions.length > 0 && (
+                <div className="pair-k" style={{ margin: '10px 0 4px', opacity: 0.75 }}>capabilities</div>
+              )}
+              {capOptions.map((o) => (
                 <label key={o.svc} className="pair-perm-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
                   <input
                     type="checkbox"
