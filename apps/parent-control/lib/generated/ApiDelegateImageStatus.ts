@@ -7,6 +7,13 @@ export type ApiDelegateImageStatus = { device_key_hash: string, sandbox_id: stri
  */
 expire_at: string | null, booted_registration_id: string | null, 
 /**
+ * The frozen registration's source image ref — the VERSIONED tag the
+ * instance actually booted (#598 `…:vYYYYMMDD-HHMMSS-g<sha8>`), the
+ * human "which build is this delegate on" answer next to the fleet's
+ * current `image` above.
+ */
+booted_image_url: string | null, 
+/**
  * The LIVE agent identity the instance's bridge reports (#577 follow-up):
  * ACP agent name (`hermes-agent`), its running version (the Hermes-bump
  * ground truth), and the LLM endpoint id.

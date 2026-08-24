@@ -44,6 +44,16 @@ function scopeOptions(
 // two-duplicate-cards incident this issue fixes). `expiresAt` of 0 means the broker
 // row predates the field → "expiry unknown" rather than a bogus countdown.
 
+/** The image ref's version tag (#598 `…:vYYYYMMDD-HHMMSS-g<sha8>`) — the
+ *  human "which build" answer. Falls back to the ref's tail so a digest or
+ *  bare tag still renders something identifying. */
+function imageTag(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const tail = url.split('/').pop() ?? url;
+  const i = tail.lastIndexOf(':');
+  return i >= 0 ? tail.slice(i + 1) : tail;
+}
+
 export function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
@@ -123,6 +133,15 @@ export function DelegatesPage({
   // (it doubles as "respawn now" for an expired/dead sandbox).
   const [imageStatus, setImageStatus] = useState<ApiImageStatus | null>(null);
   const [updating, setUpdating] = useState<Set<string>>(new Set());
+  // Post-update verification (#577 observability): after the update POST
+  // returns, poll image-status until the REPLACEMENT reports it booted the
+  // current registration (and, once its bridge finishes the ACP handshake,
+  // which engine/version is actually running) — the durable per-card
+  // `lastUpdate` line is the record; toasts are just the live echo.
+  const [verifying, setVerifying] = useState<Set<string>>(new Set());
+  const [lastUpdate, setLastUpdate] = useState<
+    Map<string, { at: string; ok: boolean; text: string }>
+  >(new Map());
   const [forceArmed, setForceArmed] = useState<Set<string>>(new Set());
   const toast = showToast ?? ((msg: string) => console.log('[delegates]', msg));
   const updatableHashes = pairedAgents
@@ -159,11 +178,69 @@ export function DelegatesPage({
   const staleFor = (dkh: string | undefined): boolean | null =>
     imageRowFor(dkh)?.stale ?? null;
 
+  const recordUpdate = useCallback((dkh: string, ok: boolean, text: string) => {
+    setLastUpdate((prev) => {
+      const next = new Map(prev);
+      next.set(dkh, { at: new Date().toLocaleTimeString(), ok, text });
+      return next;
+    });
+  }, []);
+
+  // Poll until the replacement instance provably runs the current image (its
+  // frozen registration == the current one) and, best-effort, until its
+  // bridge reports the live engine/version. ~60s cap: a sandbox that hasn't
+  // handshaken by then is recorded as "not reporting yet", never left silent.
+  const verifyUpdated = useCallback(
+    async (a: Actor, dkh: string) => {
+      setVerifying((prev) => new Set(prev).add(dkh));
+      try {
+        for (let i = 0; i < 12; i++) {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((res) => setTimeout(res, 5000));
+          // eslint-disable-next-line no-await-in-loop
+          const r = await client.agentImageStatus([dkh]);
+          if (!r.ok) continue;
+          const row = r.data.delegates[0];
+          const onCurrent =
+            row?.stale === false ||
+            (!!row?.booted_registration_id &&
+              row.booted_registration_id === r.data.current_registration_id);
+          if (row && onCurrent) {
+            const ver = [row.agent_engine, row.agent_version].filter(Boolean).join(' ');
+            const tag = imageTag(row.booted_image_url);
+            if (!row.agent_version && i < 11) continue; // registration is current — keep waiting for the live version
+            recordUpdate(
+              dkh,
+              true,
+              `✓ verified on the current image — ${ver || 'runtime'}${tag ? ` · ${tag}` : ''}`,
+            );
+            toast(`${a.label} verified on the current image${ver ? ` (${ver})` : ''}.`);
+            return;
+          }
+        }
+        recordUpdate(
+          dkh,
+          true,
+          'updated — the new runtime is not reporting its version yet; refresh in a minute',
+        );
+      } finally {
+        setVerifying((prev) => {
+          const next = new Set(prev);
+          next.delete(dkh);
+          return next;
+        });
+        refreshImageStatus();
+      }
+    },
+    [client, recordUpdate, refreshImageStatus, toast],
+  );
+
   const updateOne = useCallback(
     async (a: Actor) => {
       const dkh = a.deviceKeyHash;
       if (!dkh || updating.has(dkh)) return;
       setUpdating((prev) => new Set(prev).add(dkh));
+      recordUpdate(dkh, true, 'update requested — killing + re-creating the sandbox…');
       try {
         const r = await client.agentUpdate({ deviceKeyHash: dkh, force: forceArmed.has(dkh) });
         if (r.ok) {
@@ -179,6 +256,16 @@ export function DelegatesPage({
               : `${a.label} updated${d.sandbox_id ? ` (sandbox ${d.sandbox_id})` : ''} — ${d.session_detail}`,
             !!d.sandbox_error,
           );
+          if (d.sandbox_error) {
+            recordUpdate(dkh, false, `re-create FAILED — ${d.sandbox_error}`);
+          } else {
+            recordUpdate(
+              dkh,
+              true,
+              `sandbox re-created${d.sandbox_id ? ` (…${d.sandbox_id.slice(-14)})` : ''} — ${d.session_detail} — verifying…`,
+            );
+            void verifyUpdated(a, dkh);
+          }
         } else {
           const detail = r.status?.detail ?? 'update failed';
           if (detail.includes('jobs_running')) {
@@ -189,8 +276,10 @@ export function DelegatesPage({
                 'Click again to update anyway.',
               true,
             );
+            recordUpdate(dkh, false, 'refused — background jobs running (click again to force)');
           } else {
             toast(`${a.label} update failed — ${detail}`, true);
+            recordUpdate(dkh, false, `failed — ${detail}`);
           }
         }
       } finally {
@@ -202,7 +291,7 @@ export function DelegatesPage({
         refreshImageStatus();
       }
     },
-    [client, forceArmed, refreshImageStatus, toast, updating],
+    [client, forceArmed, recordUpdate, refreshImageStatus, toast, updating, verifyUpdated],
   );
 
   const staleAgents = pairedAgents.filter((a) => staleFor(a.deviceKeyHash) === true);
@@ -316,6 +405,12 @@ export function DelegatesPage({
         <button className={view === 'permissions' ? 'on' : ''} onClick={() => setView('permissions')}>permission view</button>
       </div>
 
+      {view === 'devices' && imageStatus?.image && (
+        <p className="muted" style={{ fontSize: 11.5, margin: '0 0 8px' }} title={imageStatus.image}>
+          fleet current image · {imageTag(imageStatus.image)}
+          {imageStatus.precache_status ? ` · precache ${imageStatus.precache_status}` : ''}
+        </p>
+      )}
       {view === 'devices' && (
         <div className="device-grid">
           {pairedAgents.map((a) => (
@@ -353,13 +448,21 @@ export function DelegatesPage({
                   if (!rt) return null;
                   return (
                     <>
-                      {(rt.agent_engine || rt.agent_version) && (
+                      {(rt.agent_engine || rt.agent_version || rt.booted_image_url) && (
                         <>
                           <dt>runtime</dt>
-                          <dd title={rt.model ? `LLM endpoint: ${rt.model}` : undefined}>
+                          <dd
+                            title={[
+                              rt.model ? `LLM endpoint: ${rt.model}` : null,
+                              rt.booted_image_url ? `booted image: ${rt.booted_image_url}` : null,
+                            ]
+                              .filter(Boolean)
+                              .join('\n') || undefined}
+                          >
                             {rt.agent_engine ?? 'agent'}
                             {rt.agent_version ? ` ${rt.agent_version}` : ''}
-                            {rt.stale === false ? ' · current image' : ''}
+                            {imageTag(rt.booted_image_url) ? ` · ${imageTag(rt.booted_image_url)}` : ''}
+                            {rt.stale === false ? ' · current' : ''}
                           </dd>
                         </>
                       )}
@@ -407,17 +510,41 @@ export function DelegatesPage({
               {a.status !== 'bad' && a.deviceKeyHash && (
                 <button
                   className={`btn sm ${staleFor(a.deviceKeyHash) === true ? 'primary' : ''}`}
-                  disabled={updating.has(a.deviceKeyHash)}
+                  disabled={updating.has(a.deviceKeyHash) || verifying.has(a.deviceKeyHash)}
                   onClick={() => updateOne(a)}
                   title="Re-create this agent's sandbox on the current image. Identity, grants, channel and persona are preserved; the live conversation restarts."
                 >
                   {updating.has(a.deviceKeyHash)
                     ? 'updating… (may take a minute)'
-                    : forceArmed.has(a.deviceKeyHash)
-                      ? '⟳ update anyway (kills running jobs)'
-                      : '⟳ update runtime'}
+                    : verifying.has(a.deviceKeyHash)
+                      ? 'verifying new runtime…'
+                      : forceArmed.has(a.deviceKeyHash)
+                        ? '⟳ update anyway (kills running jobs)'
+                        : '⟳ update runtime'}
                 </button>
               )}
+              {/* #577 observability — the durable update record: what the last
+                  click did (re-created + hand-off outcome, then the verified
+                  engine/version/tag) or exactly why it failed. Survives the
+                  toast; cleared only by a page reload. */}
+              {a.deviceKeyHash &&
+                lastUpdate.get(a.deviceKeyHash) &&
+                (() => {
+                  const lu = lastUpdate.get(a.deviceKeyHash)!;
+                  return (
+                    <div
+                      className="muted"
+                      style={{
+                        marginTop: 6,
+                        fontSize: 11,
+                        lineHeight: 1.4,
+                        ...(lu.ok ? {} : { color: 'var(--bad, #b00020)' }),
+                      }}
+                    >
+                      last update {lu.at} — {lu.text}
+                    </div>
+                  );
+                })()}
             </div>
           ))}
         </div>

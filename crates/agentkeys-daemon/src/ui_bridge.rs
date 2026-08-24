@@ -6962,6 +6962,11 @@ pub struct ApiDelegateImageStatus {
     /// without one).
     pub expire_at: Option<String>,
     pub booted_registration_id: Option<String>,
+    /// The frozen registration's source image ref — the VERSIONED tag the
+    /// instance actually booted (#598 `…:vYYYYMMDD-HHMMSS-g<sha8>`), the
+    /// human "which build is this delegate on" answer next to the fleet's
+    /// current `image` above.
+    pub booted_image_url: Option<String>,
     /// The LIVE agent identity the instance's bridge reports (#577 follow-up):
     /// ACP agent name (`hermes-agent`), its running version (the Hermes-bump
     /// ground truth), and the LLM endpoint id.
@@ -7133,6 +7138,7 @@ async fn agent_image_status_proxy(
                             sandbox_status: rs("sandbox_status"),
                             expire_at: rs("expire_at"),
                             booted_registration_id: rs("booted_registration_id"),
+                            booted_image_url: rs("booted_image_url"),
                             agent_engine: rs("agent_engine"),
                             agent_version: rs("agent_version"),
                             model: rs("model"),

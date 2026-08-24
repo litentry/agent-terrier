@@ -442,10 +442,17 @@ pub(crate) async fn rotate_delegate_runtime(
     force: bool,
     teardown_reason: &str,
 ) -> Result<RotateOutcome, RotateError> {
+    let rotate_started = std::time::Instant::now();
     let live = backend
         .live_for_device(device_key_hash)
         .await
         .map_err(|e| RotateError::Failed(format!("list live instances: {e:#}")))?;
+    tracing::info!(
+        device_key_hash = %device_key_hash,
+        reason = %teardown_reason,
+        live_instances = live.len(),
+        "#577 rotate: starting (snapshot → kill → re-create → import)"
+    );
 
     // Snapshot + job guard against the OLD instance (best-effort, loud).
     let mgmt_token =
@@ -627,6 +634,16 @@ pub(crate) async fn rotate_delegate_runtime(
         }
     }
 
+    tracing::info!(
+        device_key_hash = %device_key_hash,
+        reason = %teardown_reason,
+        killed = killed.len(),
+        new_sandbox = %new_id.as_deref().unwrap_or("(create failed)"),
+        migrated,
+        handoff = %session_detail,
+        elapsed_ms = rotate_started.elapsed().as_millis() as u64,
+        "#577 rotate: complete"
+    );
     Ok(RotateOutcome {
         old_sandbox_ids: killed,
         sandbox_json,
