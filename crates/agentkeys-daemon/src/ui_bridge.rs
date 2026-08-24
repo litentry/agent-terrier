@@ -839,6 +839,15 @@ pub struct ApiActor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub scope_channel_service_ids: Option<Vec<String>>,
+    /// #614: the SUBSET of `scope_unknown_service_ids` this daemon resolved to a
+    /// capability service (`tool:<class>` — enumerable candidates; `plugin:<id>`
+    /// names ride the binding-manifest path into `services` instead). Same
+    /// preserve semantics as `scope_channel_service_ids` (#541): the hashes stay
+    /// in `scope_unknown_service_ids` so a memory commit echoes them, and a
+    /// future capability editor subtracts exactly this subset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub scope_capability_service_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub payment_cap: Option<ApiPaymentCap>,
@@ -3703,6 +3712,14 @@ fn parse_scope_return(raw: &[u8]) -> Result<(Vec<[u8; 32]>, bool, bool), String>
 /// accept + `heima-scope-set.sh` write (the terminology rule at the byte level).
 const SCOPE_NAMESPACES: [&str; 4] = ["personal", "family", "work", "travel"];
 
+/// #614: the enumerable `tool:<class>` candidates used ONLY for hash→name
+/// recovery (the grant string set itself is open — extend when a new tool class
+/// ships). `plugin:<id>` is unbounded and cannot be enumerated: those names
+/// surface via the binding manifest / `services`, like channel names do via the
+/// registry. Keep in lockstep with the classes the runtime guard consumes
+/// (spec `docs/spec/delegate-runtime-dsh.md` §4.2).
+const CAPABILITY_TOOL_CLASSES: [&str; 3] = ["web", "code", "schedule"];
+
 /// Mirror the ON-CHAIN scope grant into an actor's `scope` map (the permission
 /// panel's data source). The chain is the source of truth for scope — without
 /// this, a granted agent showed DENY on every namespace because nothing ever
@@ -3966,6 +3983,7 @@ async fn reconcile_actors_from_chain(
                         scope: None,
                         scope_unknown_service_ids: None,
                         scope_channel_service_ids: None,
+                        scope_capability_service_ids: None,
                         payment_cap: None,
                         time_window: None,
                         services: None,
@@ -4062,6 +4080,7 @@ async fn reconcile_actors_from_chain(
                 scope: None,
                 scope_unknown_service_ids: None,
                 scope_channel_service_ids: None,
+                scope_capability_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services,
@@ -4177,15 +4196,32 @@ async fn reconcile_actors_from_chain(
                         .filter(|h| channel_candidates.contains_key(&h.to_lowercase()))
                         .cloned()
                         .collect();
+                    // #614: the same recovery for capability grants — enumerable
+                    // `tool:<class>` candidates, so the hashes get names without
+                    // any registry. `plugin:<id>` names arrive via the manifest
+                    // self-heal below instead.
+                    let capability_candidates: HashMap<String, String> =
+                        capability_service_candidates();
+                    let capability_matched: Vec<String> = unknown_ids
+                        .iter()
+                        .filter_map(|h| capability_candidates.get(&h.to_lowercase()).cloned())
+                        .collect();
+                    let capability_ids: Vec<String> = unknown_ids
+                        .iter()
+                        .filter(|h| capability_candidates.contains_key(&h.to_lowercase()))
+                        .cloned()
+                        .collect();
                     if let Some(a) = state.actors.write().await.get_mut(&id) {
                         a.scope = scope;
                         a.scope_channel_service_ids =
                             (!channel_ids.is_empty()).then_some(channel_ids);
+                        a.scope_capability_service_ids =
+                            (!capability_ids.is_empty()).then_some(capability_ids);
                         a.scope_unknown_service_ids =
                             (!unknown_ids.is_empty()).then_some(unknown_ids);
-                        if !matched.is_empty() {
+                        if !matched.is_empty() || !capability_matched.is_empty() {
                             let services = a.services.get_or_insert_with(Vec::new);
-                            for name in matched {
+                            for name in matched.into_iter().chain(capability_matched) {
                                 if !services.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
                                     services.push(name);
                                 }
@@ -5472,11 +5508,30 @@ async fn decode_audit_event(
 /// `memory:<ns>` + DISTINCT `inbox:<ns>` grants for every namespace (#339), each
 /// actor's cred services (`<svc>` and `cred:<svc>`), and a few well-known worker
 /// services. The reverse of the on-chain keccak the broker/`heima-scope-set` write.
+/// #614: `keccak(tool:<class>)` → name for the enumerable capability classes —
+/// the hash→name direction only the daemon can supply (same reason as #541).
+fn capability_service_candidates() -> HashMap<String, String> {
+    CAPABILITY_TOOL_CLASSES
+        .iter()
+        .map(|class| {
+            let name = agentkeys_backend_client::protocol::service_tool(class);
+            let h = format!(
+                "0x{}",
+                hex::encode(agentkeys_core::device_crypto::keccak256(name.as_bytes()))
+            );
+            (h, name)
+        })
+        .collect()
+}
+
 fn scope_name_map(actor_services: &[String]) -> HashMap<String, String> {
     let mut candidates: Vec<String> = Vec::new();
     for ns in SCOPE_NAMESPACES {
         candidates.push(format!("memory:{ns}"));
         candidates.push(format!("inbox:{ns}"));
+    }
+    for class in CAPABILITY_TOOL_CLASSES {
+        candidates.push(agentkeys_backend_client::protocol::service_tool(class));
     }
     for svc in actor_services {
         candidates.push(svc.clone());
@@ -5996,6 +6051,7 @@ async fn ack_pairing(
                     scope: None,
                     scope_unknown_service_ids: None,
                     scope_channel_service_ids: None,
+                    scope_capability_service_ids: None,
                     payment_cap: None,
                     time_window: None,
                     services: (!services.is_empty()).then_some(services),
@@ -8456,6 +8512,7 @@ async fn register_pairing(
         scope: None,
         scope_unknown_service_ids: None,
         scope_channel_service_ids: None,
+        scope_capability_service_ids: None,
         payment_cap: None,
         time_window: None,
         services: None,
@@ -12040,6 +12097,7 @@ mod tests {
             scope: None,
             scope_unknown_service_ids: None,
             scope_channel_service_ids: None,
+            scope_capability_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -12292,6 +12350,33 @@ mod tests {
     /// directly. An unknown service (e.g. `cred:<svc>`) is preserved verbatim for the
     /// panel's set-replace commit.
     #[test]
+    fn capability_candidates_recover_tool_class_names() {
+        // #614: keccak(service_tool(class)) reverses to the name for every
+        // enumerable class, and the audit name-map decodes them too — while a
+        // plugin:<id> (open-ended) stays un-enumerated by design.
+        let cands = capability_service_candidates();
+        assert_eq!(cands.len(), CAPABILITY_TOOL_CLASSES.len());
+        let web_hash = format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(b"tool:web"))
+        );
+        assert_eq!(cands.get(&web_hash).map(String::as_str), Some("tool:web"));
+        let map = scope_name_map(&["plugin:openviking".to_string()]);
+        assert_eq!(map.get(&web_hash).map(String::as_str), Some("tool:web"));
+        let plugin_hash = format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(
+                b"plugin:openviking"
+            ))
+        );
+        // named because the caller passed the manifest name into actor_services
+        assert_eq!(
+            map.get(&plugin_hash).map(String::as_str),
+            Some("plugin:openviking")
+        );
+    }
+
+    #[test]
     fn classify_scope_hashes_separates_shared_read_from_inbox_write() {
         use agentkeys_core::device_crypto::keccak256;
         let mem = keccak256(b"memory:travel");
@@ -12497,6 +12582,7 @@ mod tests {
             scope: None,
             scope_unknown_service_ids: None,
             scope_channel_service_ids: None,
+            scope_capability_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -13671,6 +13757,7 @@ mod tests {
             scope: None,
             scope_unknown_service_ids: None,
             scope_channel_service_ids: None,
+            scope_capability_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -13709,6 +13796,7 @@ mod tests {
             scope: None,
             scope_unknown_service_ids: None,
             scope_channel_service_ids: None,
+            scope_capability_service_ids: None,
             payment_cap: None,
             time_window: None,
             services: None,
@@ -13758,6 +13846,7 @@ mod tests {
                 scope: None,
                 scope_unknown_service_ids: None,
                 scope_channel_service_ids: None,
+                scope_capability_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services: None,
@@ -13789,6 +13878,7 @@ mod tests {
                 scope: None,
                 scope_unknown_service_ids: None,
                 scope_channel_service_ids: None,
+                scope_capability_service_ids: None,
                 payment_cap: None,
                 time_window: None,
                 services: None,
@@ -15219,6 +15309,7 @@ mod tests {
                     scope: None,
                     scope_unknown_service_ids: None,
                     scope_channel_service_ids: None,
+                    scope_capability_service_ids: None,
                     payment_cap: None,
                     time_window: None,
                     services: None,

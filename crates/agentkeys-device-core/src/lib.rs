@@ -249,12 +249,38 @@ pub fn delegation_payload(
 /// Case-insensitive. This is the ONE owner of the delegation-scope policy (#203):
 /// the broker's fast-fail cap-mint check AND the worker's authoritative re-verify
 /// both call it, so they cannot diverge on what a delegation authorizes.
+/// `no_std` twin of `agentkeys_protocol::is_capability_service` (#614): the
+/// capability-service family is `tool:` / `plugin:` prefixed. This crate cannot
+/// depend on the std protocol crate (it is FFI-shared with the ESP32 firmware),
+/// so the check is inlined; the frozen test `capability_token_twin_matches_protocol`
+/// keeps it in lockstep with the authoritative owner. Case-insensitive; the
+/// caller has already lowercased + trimmed.
+fn is_capability_service_token(lower_trimmed: &str) -> bool {
+    lower_trimmed.starts_with("tool:") || lower_trimmed.starts_with("plugin:")
+}
+
 pub fn cap_in_scope(scope: &str, data_class: &str, op: &str, service: &str) -> bool {
     let dc = data_class.trim().to_lowercase();
     let op = op.trim().to_lowercase();
     let svc = service.trim().to_lowercase();
+    // #614 (spec §4.2): capability services (`tool:`/`plugin:`) are runtime-guard
+    // grants — no delegation scope may authorize a cap for one, and a capability
+    // token inside a scope grants nothing. Without this, `tool:web` in a scope
+    // would silently parse as data_class="tool" (inert by luck), and a cap whose
+    // service is itself `tool:web` would match an exact token — make the family
+    // explicitly denied instead of accidentally inert. (Predicate inlined rather
+    // than imported: this crate is `#![no_std]` + FFI-shared with the ESP32
+    // firmware, so it must not depend on the std `agentkeys-protocol`; the ONE
+    // authoritative owner stays `is_capability_service` there — this local twin
+    // is prefix-only by construction and pinned by the test below.)
+    if is_capability_service_token(&svc) {
+        return false;
+    }
     scope.split_whitespace().any(|tok| {
         let tok = tok.to_lowercase();
+        if is_capability_service_token(&tok) {
+            return false; // this token grants nothing; others may still match
+        }
         if tok == svc || tok == dc {
             return true;
         }
@@ -345,6 +371,50 @@ pub fn ecrecover_eip191(message: &[u8], signature_hex: &str) -> Result<String, D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_token_twin_matches_protocol() {
+        // #614: this crate's no_std prefix twin must agree with the
+        // authoritative agentkeys_protocol::is_capability_service on the family.
+        for cap in ["tool:web", "plugin:x", "tool:", "plugin:openviking"] {
+            assert!(is_capability_service_token(cap), "{cap} is capability");
+        }
+        for data in [
+            "memory:travel",
+            "cred:openrouter",
+            "config",
+            "toolbox",
+            "tooling:web",
+        ] {
+            assert!(
+                !is_capability_service_token(data),
+                "{data} is not capability"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_services_are_denied_and_inert_in_delegation_scopes() {
+        // #614 (spec §4.2): a cap for a capability service matches NO delegation
+        // scope — even an exact token — and a capability token in a scope grants
+        // nothing while leaving sibling tokens live.
+        assert!(!cap_in_scope("tool:web", "memory", "fetch", "tool:web"));
+        assert!(!cap_in_scope(
+            "plugin:x memory",
+            "memory",
+            "fetch",
+            "plugin:x"
+        ));
+        // capability token is inert, the data token beside it still works
+        assert!(cap_in_scope(
+            "tool:web memory:travel",
+            "memory",
+            "fetch",
+            "memory:travel"
+        ));
+        // and `tool:web` no longer half-parses as data_class="tool"
+        assert!(!cap_in_scope("tool:web", "tool", "web", "anything"));
+    }
 
     // A fixed, valid secp256k1 scalar — deterministic tests with no RNG (keygen
     // from randomness is the std/device layer's job, not this crate's).

@@ -634,6 +634,24 @@ async fn mint_cap(
             "service must not contain wildcard or path characters (* ? / \\ ..)".into(),
         ));
     }
+    // #614 (spec §4.2 delegate-runtime-dsh): capability services — `tool:<class>`,
+    // `plugin:<id>` — are grant strings for the delegate runtime's tool guard and
+    // preset compiler ONLY. No worker owns them, so no cap may ever be minted for
+    // one, on ANY endpoint (mint_cap is the single chokepoint for all eleven).
+    // Without this gate a chain-granted `tool:web` would mint a memory-class cap
+    // and the memory worker would key S3 off it — free scratch storage under a
+    // capability grant. Checked BEFORE the chain scope read so the reason code is
+    // family-specific regardless of grant state (the stage-3 negative pins the
+    // distinction from `service_not_in_scope`).
+    if agentkeys_protocol::is_capability_service(&req.service) {
+        return Err(CapError::Forbidden(
+            format!(
+                "capability service {:?} is never cap-mintable — tool:/plugin: grants are consumed by the delegate runtime's guard/preset compiler only (#614)",
+                req.service
+            ),
+            "cap_capability_service_not_mintable",
+        ));
+    }
     let ttl = req.ttl_seconds.clamp(60, 1800);
 
     // 0. Session JWT auth — caller must hold the operator session.
@@ -1524,6 +1542,20 @@ mod tests {
         let h1 = keccak256_of_lc_service("OpenRouter");
         let h2 = keccak256_of_lc_service("openrouter");
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn capability_services_hash_distinctly_but_never_reach_the_hasher() {
+        // #614: tool: and plugin: are distinct on-chain ids (grant-side), while
+        // the mint path rejects them before any chain read — the near-miss
+        // `cred:tool` stays mintable (it is a data service).
+        assert_ne!(
+            keccak256_of_lc_service("tool:web"),
+            keccak256_of_lc_service("plugin:web")
+        );
+        assert!(agentkeys_protocol::is_capability_service("tool:web"));
+        assert!(agentkeys_protocol::is_capability_service("plugin:web"));
+        assert!(!agentkeys_protocol::is_capability_service("cred:tool"));
     }
 
     #[test]

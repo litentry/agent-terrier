@@ -2140,6 +2140,40 @@ pub fn service_channel_sub(channel_id: &str) -> String {
     format!("channel-sub:{channel_id}")
 }
 
+/// Build the **capability-service** grant string for an action family —
+/// `tool:<class>` (e.g. `tool:web`, `tool:code`, `tool:schedule`; spec
+/// `docs/spec/delegate-runtime-dsh.md` §4.2). Capability services are consumed
+/// ONLY by the delegate runtime's preset compiler + in-loop tool guard (#614):
+/// granting one changes what the model may attempt, never what data a worker
+/// serves. See [`is_capability_service`] for the never-cap-mintable rule.
+pub fn service_tool(class: &str) -> String {
+    format!("tool:{class}")
+}
+
+/// Build the **capability-service** grant string for a runtime plugin mount —
+/// `plugin:<id>` (spec §4.2, #614): may this capability provider be mounted in
+/// the delegate's session at all. Minted with the install batch; consumed only
+/// by the runtime's preset compiler. Never cap-mintable ([`is_capability_service`]).
+pub fn service_plugin(id: &str) -> String {
+    format!("plugin:{id}")
+}
+
+/// True when `service` belongs to the **capability-service** family
+/// (`tool:<class>` / `plugin:<id>` — spec §4.2, #614): grant strings whose only
+/// consumers are the delegate runtime's tool guard and preset compiler. NO
+/// worker owns them, so **no cap may ever be minted for one** — the broker
+/// rejects at mint (`cap_capability_service_not_mintable`), the shared worker
+/// verify re-rejects (defence-in-depth; a granted `tool:web` would otherwise
+/// mint a memory-class cap and become scratch storage in the memory bucket),
+/// and the delegation-scope matcher treats them as inert. Case-insensitive to
+/// match the chain's `keccak256(lowercase(service))` grant hashing; leading
+/// whitespace tolerated to match that same trim.
+pub fn is_capability_service(service: &str) -> bool {
+    let s = service.trim();
+    let lower = s.to_ascii_lowercase();
+    lower.starts_with("tool:") || lower.starts_with("plugin:")
+}
+
 /// The delegate-sandbox env contract (#430/#546) — the variable names the
 /// broker's spawn paths inject and the sandbox-resident daemon's chat loop
 /// consumes. ONE definition (the #203 discipline applied to env names): the
@@ -2375,6 +2409,51 @@ mod tests {
             CapMintOp::ChannelPublish.op_str(),
             CapMintOp::ChannelSubscribe.op_str()
         );
+    }
+
+    #[test]
+    fn capability_services_are_recognized_and_data_services_are_not() {
+        // #614: the family predicate is the ONE owner of the never-cap-mintable
+        // rule — the broker gate, the worker re-reject and the delegation-scope
+        // matcher all call it, so they cannot diverge on what "capability" means.
+        assert_eq!(service_tool("web"), "tool:web");
+        assert_eq!(
+            service_plugin("openviking-memory"),
+            "plugin:openviking-memory"
+        );
+        for cap in ["tool:web", "plugin:x", "TOOL:Web", "  tool:schedule"] {
+            assert!(is_capability_service(cap), "{cap} must be capability");
+        }
+        for data in [
+            "memory:travel",
+            "inbox:travel",
+            "channel-pub:cam",
+            "channel-sub:cam",
+            "cred:openrouter",
+            "openrouter",
+            "config",
+            "speech",
+            "toolbox", // prefix near-miss: no colon family
+            "tooling:web",
+            "plugins:web",
+        ] {
+            assert!(
+                !is_capability_service(data),
+                "{data} must NOT be capability"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_grant_never_classifies_a_bind_as_device_only() {
+        // #614 ∩ #409 D9: a capability grant is a DELEGATE grant — a bind
+        // carrying one must keep its sandbox, whether alone or mixed with
+        // channel grants.
+        assert!(!scope_is_device_only("tool:web"));
+        assert!(!scope_is_device_only("channel-pub:cam, tool:web"));
+        assert!(!scope_is_device_only(
+            "channel-pub:cam channel-sub:cam plugin:openviking"
+        ));
     }
 
     #[test]

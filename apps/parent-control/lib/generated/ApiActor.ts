@@ -44,7 +44,16 @@ scope_unknown_service_ids?: Array<string>,
  * and re-sends the channel NAMES it wants, so removal actually takes.
  * Only the daemon can supply this: the hash→name direction needs keccak.
  */
-scope_channel_service_ids?: Array<string>, payment_cap?: ApiPaymentCap, time_window?: ApiTimeWindow, services?: Array<string>, 
+scope_channel_service_ids?: Array<string>, 
+/**
+ * #614: the SUBSET of `scope_unknown_service_ids` this daemon resolved to a
+ * capability service (`tool:<class>` — enumerable candidates; `plugin:<id>`
+ * names ride the binding-manifest path into `services` instead). Same
+ * preserve semantics as `scope_channel_service_ids` (#541): the hashes stay
+ * in `scope_unknown_service_ids` so a memory commit echoes them, and a
+ * future capability editor subtracts exactly this subset.
+ */
+scope_capability_service_ids?: Array<string>, payment_cap?: ApiPaymentCap, time_window?: ApiTimeWindow, services?: Array<string>, 
 /**
  * #225 E7 actor page: the actor's on-chain account. master → its passkey
  * P256Account when bound (absent when unbound); agent → its K10 device

@@ -138,7 +138,7 @@ A future dsh "always allow" or any other permission-surface change cannot move t
 - **OpenViking transport — A.** Upstream `@openviking/dsh-memory-plugin` as-is (its loopback stdio proxy to the in-sandbox server); no fork. suite-7 assertions rename to the plugin's `mcp__…` tool names.
 - **Checkpoint key — migrate.** `checkpoint/hermes-home` → `checkpoint/dsh-home`; the daemon reads both during the rollout window and writes only the new key; the old key is dropped in the Hermes deprecation step.
 - **Inter-app references — deferred** (§4.3); the memory-grant direction qualifier goes with it (read-only cross-app sharing was its only driver).
-- **Validation item (work, not a decision):** capability-service strings must pass the scope-service catalog + broker validation (the #572 lockstep `MOCK_SCOPE_SERVICES` trap applies) and get parent-control rendering — expected to need no wire-contract change; verified, not assumed (#614).
+- **Validation item (work, not a decision):** capability-service strings must pass the scope-service catalog + broker validation (the #572 lockstep `MOCK_SCOPE_SERVICES` trap applies) and get parent-control rendering — verified in #614: no wire-contract change (the frozen protocol key-set tests are untouched; the family is a string value, not a new field).
 
 ## 8. Verification gates before the default flips
 

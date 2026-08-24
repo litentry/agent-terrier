@@ -190,3 +190,36 @@ describe('a channel-grant commit restates the whole set without collateral damag
     expect(preserve).toEqual([]);
   });
 });
+
+// #614 — capability grants survive both commit paths: a channel commit keeps the
+// NAME in services (isCapabilityService is not a channel) and the memory-path
+// preserve semantics keep the HASH (capability ids stay inside
+// scopeUnknownServiceIds, mirroring the #541 channel pattern).
+import { channelGrantCommit as cgc, isCapabilityService } from '../../app/_components/types';
+
+describe('capability services (#614)', () => {
+  it('recognizes the family and only the family', () => {
+    expect(isCapabilityService('tool:web')).toBe(true);
+    expect(isCapabilityService('PLUGIN:openviking')).toBe(true);
+    expect(isCapabilityService('memory:travel')).toBe(false);
+    expect(isCapabilityService('channel-pub:cam')).toBe(false);
+    expect(isCapabilityService('toolbox')).toBe(false);
+  });
+
+  it('channelGrantCommit keeps capability names and preserves their hashes', () => {
+    const actor: any = {
+      scope: { travel: { read: true, write: false } },
+      services: ['tool:web', 'channel-pub:cam'],
+      scopeChannelServiceIds: ['0xchan'],
+      scopeCapabilityServiceIds: ['0xcap'],
+      scopeUnknownServiceIds: ['0xchan', '0xcap', '0xcred'],
+    };
+    const { services, preserve } = cgc(actor, ['channel-sub:door']);
+    expect(services).toContain('tool:web'); // named grant restated
+    expect(services).toContain('memory:travel');
+    expect(services).not.toContain('channel-pub:cam'); // channels come from staged set
+    expect(preserve).toContain('0xcap'); // capability hash preserved
+    expect(preserve).toContain('0xcred');
+    expect(preserve).not.toContain('0xchan'); // channel hash subtracted (#541)
+  });
+});

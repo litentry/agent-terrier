@@ -159,6 +159,12 @@ export interface PairingRequest {
 /** `channel-pub:<id>` / `channel-sub:<id>` — the only grants a device may hold (D6). */
 export const isChannelService = (svc: string): boolean => /^channel-(pub|sub):/i.test(svc.trim());
 
+/** #614 — capability services (`tool:<class>` / `plugin:<id>`, spec delegate-runtime-dsh §4.2):
+ *  grants consumed only by the delegate runtime's tool guard / preset compiler.
+ *  Never cap-mintable (the broker + workers reject), so they gate what the model
+ *  may ATTEMPT, never what data a worker serves. */
+export const isCapabilityService = (svc: string): boolean => /^(tool|plugin):/i.test(svc.trim());
+
 /** A bound actor whose known grants are all channel services = a channel-endpoint
  *  device (D6). Only decidable when the daemon knows the service NAMES (accepts
  *  done through this daemon session); after a daemon restart a chain-reconstructed

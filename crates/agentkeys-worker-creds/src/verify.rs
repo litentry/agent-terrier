@@ -201,6 +201,10 @@ pub enum VerifyError {
     ChainRpc(String),
     #[error("requested service not in agent's on-chain scope")]
     NotInScope,
+    #[error(
+        "capability service is never cap-mintable (tool:/plugin: grants are runtime-guard grants, no worker owns them — #614)"
+    )]
+    CapabilityService,
     #[error("device not registered or revoked")]
     DeviceInactive,
     #[error("device binding mismatch on {field}")]
@@ -262,6 +266,14 @@ pub fn check_op(token: &CapToken, expected: CapOp) -> Result<(), VerifyError> {
 /// expect the same CapOp::Store. The data_class binding is signed into
 /// the cap payload by the broker, so it cannot be forged downstream.
 pub fn check_data_class(token: &CapToken, expected: DataClass) -> Result<(), VerifyError> {
+    // #614 defence-in-depth (spec §4.2): a capability service (`tool:`/`plugin:`)
+    // belongs to NO data class — no worker owns one, so a cap naming one is
+    // invalid at every endpoint even if a compromised broker signed it. Every
+    // worker calls check_data_class (the #90 per-class gate), which makes this
+    // the shared chokepoint on the verify side, mirroring the broker's mint gate.
+    if agentkeys_protocol::is_capability_service(&token.payload.service) {
+        return Err(VerifyError::CapabilityService);
+    }
     if token.payload.data_class != expected {
         return Err(VerifyError::DataClassMismatch {
             expected,
@@ -911,6 +923,27 @@ mod tests {
             keccak_lc_service("OpenRouter"),
             keccak_lc_service("openrouter")
         );
+    }
+
+    #[test]
+    fn capability_service_caps_are_rejected_at_every_worker() {
+        // #614: even a broker-signed cap for `tool:web` dies at check_data_class,
+        // which all five workers call — the verify-side twin of the mint gate.
+        let mut token = sample_token_with_class(CapOp::Fetch, DataClass::Memory);
+        token.payload.service = "tool:web".into();
+        match check_data_class(&token, DataClass::Memory) {
+            Err(VerifyError::CapabilityService) => {}
+            other => panic!("expected CapabilityService, got {other:?}"),
+        }
+        token.payload.service = "PLUGIN:openviking".into();
+        assert!(matches!(
+            check_data_class(&token, DataClass::Memory),
+            Err(VerifyError::CapabilityService)
+        ));
+        // and a data service still passes the family gate (fails or passes on
+        // class alone)
+        token.payload.service = "memory:travel".into();
+        assert!(check_data_class(&token, DataClass::Memory).is_ok());
     }
 
     #[test]

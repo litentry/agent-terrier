@@ -4,7 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { NAMESPACES } from '@/lib/constants';
 import { Dot, Panel } from './shared';
 import type { Actor, Namespace, ScopeBits, VaultItem } from './types';
-import { isChannelService } from './types';
+import { isCapabilityService, isChannelService } from './types';
 import type { ProposedScope } from '@/lib/client/types';
 
 // Segmented control: deny | read | read+write
@@ -119,6 +119,10 @@ export function PermissionList({
   // permission picture; grant edits live on the channels page (devices) / the
   // staged scope commit (delegates).
   const channelGrants = services.filter(isChannelService);
+  // #614 — capability grants (`tool:<class>` / `plugin:<id>`): what the delegate's
+  // runtime may ATTEMPT (guard/preset-compiled), never a data-plane grant. Shown
+  // read-only here; the grant/revoke editor ships with the runtime UI (#617).
+  const capabilityGrants = services.filter(isCapabilityService);
 
   return (
     <div className="perm-list">
@@ -137,6 +141,26 @@ export function PermissionList({
                 state={`${svc} · cap-gated · worker chain re-verify (§17.5)`}
                 granted={true}
                 control={<span className="perm-readonly on">{pub ? 'pub' : 'sub'}</span>}
+              />
+            );
+          })}
+        </PermSection>
+      )}
+      {/* CAPABILITIES (#614) */}
+      {capabilityGrants.length > 0 && (
+        <PermSection title="Capabilities" summary={`${capabilityGrants.length} grant${capabilityGrants.length === 1 ? '' : 's'}`}>
+          {capabilityGrants.map((svc) => {
+            const isTool = svc.toLowerCase().startsWith('tool:');
+            const id = svc.split(':').slice(1).join(':');
+            return (
+              <PermRow
+                key={svc}
+                icon={isTool ? '⚙' : '▦'}
+                title={id}
+                why={isTool ? 'tool class — the runtime guard allows this action family in-loop' : 'plugin mount — this capability provider may be mounted in the session'}
+                state={`${svc} · never cap-mintable · enforced by the runtime guard (spec §4.2)`}
+                granted={true}
+                control={<span className="perm-readonly on">{isTool ? 'tool' : 'plugin'}</span>}
               />
             );
           })}
