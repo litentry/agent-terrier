@@ -22,6 +22,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { AgentHandle } from '@deepseek-ai/dsh-agent';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import { chatReply, encodeFrame, healthzBody } from './bridge-frames.js';
+import { exportHome, homeBytes, importHome } from './bridge-mgmt.js';
 import { TurnStreamer } from './bridge-stream.js';
 
 export const name = 'agentkeys-bridge';
@@ -32,6 +33,11 @@ export interface Config {
   engine?: string;
   provider?: string;
   model?: string;
+  /** The runtime home the #616 mgmt surface snapshots. */
+  homeDir?: string;
+  /** #577 mgmt bearer override (default: env AGENTKEYS_SANDBOX_MGMT_TOKEN).
+   *  Empty/absent = the surface answers 404 not-armed (fail closed). */
+  mgmtToken?: string;
 }
 
 export const Config: z<Config> = z.object({
@@ -39,6 +45,8 @@ export const Config: z<Config> = z.object({
   engine: z.string().default('dsh'),
   provider: z.string().default('gate'),
   model: z.string().default(process.env.LLM_ENDPOINT_ID ?? '(unset)'),
+  homeDir: z.string().default(process.env.DSH_HOME ?? '/root/.dsh'),
+  mgmtToken: z.string(),
 });
 
 interface ModelSelection {
@@ -140,6 +148,27 @@ export function apply(ctx: Context, config: Config): void {
     return run;
   }
 
+  /** #577 fail-closed mgmt auth: unset ⇒ 404 not-armed; wrong ⇒ 403. Never
+   *  falls through to the bridge token. Constant-time compare. */
+  function mgmtGate(req: IncomingMessage, res: ServerResponse): boolean {
+    const expected = config.mgmtToken ?? process.env.AGENTKEYS_SANDBOX_MGMT_TOKEN ?? '';
+    if (!expected) {
+      sendJson(res, 404, { error: 'mgmt surface not armed (no AGENTKEYS_SANDBOX_MGMT_TOKEN)' });
+      return false;
+    }
+    const presented = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
+    const a = Buffer.from(presented);
+    const b = Buffer.from(expected);
+    const equal = a.length === b.length && a.every((x, i) => x === b[i]);
+    if (!equal) {
+      sendJson(res, 403, { error: 'mgmt bearer missing or invalid' });
+      return false;
+    }
+    return true;
+  }
+
+  const home = () => config.homeDir ?? process.env.DSH_HOME ?? '/root/.dsh';
+
   const routes: WebRoute[] = [
     {
       kind: 'exact',
@@ -200,6 +229,65 @@ export function apply(ctx: Context, config: Config): void {
       kind: 'exact',
       path: '/v1/jobs',
       handler: (_req, res) => sendJson(res, 200, { jobs: [] }),
+    },
+    {
+      kind: 'exact',
+      path: '/v1/sandbox/mgmt/status',
+      handler: async (req, res) => {
+        if (!mgmtGate(req, res)) return;
+        sendJson(res, 200, {
+          ok: true,
+          jobs: null,
+          hermes_home: home(),
+          hermes_home_bytes: await homeBytes(home()),
+        });
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/v1/sandbox/mgmt/session/export',
+      handler: async (req, res) => {
+        if (!mgmtGate(req, res)) return;
+        try {
+          sendJson(res, 200, await exportHome(home()));
+        } catch (e) {
+          const err = e as Error & { code?: number };
+          sendJson(res, err.code === 413 ? 413 : 500, { error: err.code === 413 ? err.message : `export failed: ${err.message}` });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/v1/sandbox/mgmt/session/import',
+      handler: async (req, res) => {
+        if (!mgmtGate(req, res)) return;
+        let body: Record<string, unknown>;
+        try {
+          body = (await readBody(req)) as Record<string, unknown>;
+        } catch (e) {
+          sendJson(res, 400, { error: `bad request: ${(e as Error).message}` });
+          return;
+        }
+        try {
+          const outcome = await importHome(home(), body);
+          let agentRestarted = false;
+          if (outcome.applied && body.restart !== false && handle) {
+            // the dsh restart = dispose + lazy re-create on the next turn
+            await handle.dispose().catch(() => {});
+            handle = undefined;
+            agentRestarted = true;
+          }
+          sendJson(res, 200, {
+            ...outcome,
+            agent_restarted: agentRestarted,
+            session: null,
+          });
+        } catch (e) {
+          const err = e as Error & { code?: number };
+          const status = err.code === 400 ? 400 : err.code === 413 ? 413 : 500;
+          sendJson(res, status, { error: status === 500 ? `import write failed: ${err.message}` : err.message });
+        }
+      },
     },
   ];
 

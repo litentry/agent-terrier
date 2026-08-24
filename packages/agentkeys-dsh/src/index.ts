@@ -23,3 +23,5 @@ export {
 } from './bridge-frames.js';
 export type { BridgeFrame, ChatReply, HealthzBody } from './bridge-frames.js';
 export { TurnStreamer } from './bridge-stream.js';
+export { exportHome, homeBytes, importHome, isExcludedPath, relPathOk, MGMT_SNAPSHOT_MAX_BYTES } from './bridge-mgmt.js';
+export type { SnapshotDoc, SnapshotFile, ImportOutcome } from './bridge-mgmt.js';

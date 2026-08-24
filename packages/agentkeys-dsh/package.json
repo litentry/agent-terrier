@@ -1,7 +1,7 @@
 {
   "name": "@agentkeys/dsh-suite",
   "version": "0.1.0",
-  "description": "AgentKeys plugin suite for DeepSeek Harness (dsh): in-loop tool guard + approval answerer projecting on-chain grants (spec docs/spec/delegate-runtime-dsh.md §4.2)",
+  "description": "AgentKeys plugin suite for DeepSeek Harness (dsh): in-loop tool guard + approval answerer projecting on-chain grants (spec docs/spec/delegate-runtime-dsh.md \u00a74.2)",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -12,7 +12,8 @@
     "./package.json": "./package.json",
     "./credentials": "./lib/credentials.js",
     "./audit": "./lib/audit.js",
-    "./bridge": "./lib/bridge.js"
+    "./bridge": "./lib/bridge.js",
+    "./bridge-mgmt": "./lib/bridge-mgmt.js"
   },
   "files": [
     "lib/",

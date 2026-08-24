@@ -294,6 +294,16 @@ pub struct MemoryGetBody {
 /// restore-on-boot leg of the SAME daemon in the replacement instance).
 pub const CHECKPOINT_OBJECT_KEY: &str = "checkpoint/hermes-home";
 
+/// #616 — the dsh runtime's checkpoint slot (`checkpoint/dsh-home`), the twin
+/// of [`CHECKPOINT_OBJECT_KEY`]. The daemon writes the key matching its
+/// runtime (`AGENTKEYS_AGENT_RUNTIME`) and restores ONLY that key: a snapshot
+/// is a runtime-home byte image, so a cross-runtime restore would import the
+/// WRONG home format — a hermes-era snapshot is deliberately not offered to a
+/// dsh bridge (a flipped delegate starts its dsh life from canonical memory,
+/// which the mirror rebuilds). The legacy key stays untouched until the #621
+/// deprecation removes the hermes machinery.
+pub const CHECKPOINT_OBJECT_KEY_DSH: &str = "checkpoint/dsh-home";
+
 /// #594 — the durable checkpoint payload stored at [`CHECKPOINT_OBJECT_KEY`]:
 /// the bridge `session/export` snapshot plus the write time the bridge's
 /// newer-wins import guard compares (`saved_at`, unix seconds). Versioned so a
@@ -302,6 +312,11 @@ pub const CHECKPOINT_OBJECT_KEY: &str = "checkpoint/hermes-home";
 pub struct CheckpointEnvelope {
     pub version: u32,
     pub saved_at: u64,
+    /// #616 — which runtime's home this snapshot images (`hermes` | `dsh`).
+    /// Absent = a pre-#616 (hermes-era) envelope. Observability only: the
+    /// restore path already selects by object KEY, never by this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     /// The verbatim bridge export body (`{version, hermes_home, files, …}`).
     pub snapshot: Value,
 }
@@ -2362,6 +2377,7 @@ mod tests {
 
         let env = CheckpointEnvelope {
             version: 1,
+            runtime: Some("hermes".into()),
             saved_at: 1_700_000_000,
             snapshot: serde_json::json!({"version":1,"files":[]}),
         };

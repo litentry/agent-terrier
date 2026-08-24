@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use agentkeys_backend_client::protocol::{
     service_memory, CapMintOp, CapMintRequest, CheckpointEnvelope, MemoryGetInput, MemoryPutInput,
-    CHECKPOINT_OBJECT_KEY,
+    CHECKPOINT_OBJECT_KEY, CHECKPOINT_OBJECT_KEY_DSH,
 };
 use agentkeys_backend_client::{normalize_omni_0x, BackendClient, BackendError};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -55,6 +55,15 @@ pub struct CheckpointConfig {
     pub interval: Duration,
     /// Refuse-loudly ceiling for one export body (raw bridge JSON bytes).
     pub max_bytes: usize,
+    /// #616 — the reserved memory object key this delegate's checkpoints live
+    /// under, selected by runtime (`AGENTKEYS_AGENT_RUNTIME=dsh` →
+    /// `checkpoint/dsh-home`, else the legacy `checkpoint/hermes-home`). The
+    /// restore path reads ONLY this key: a snapshot is a runtime-home byte
+    /// image, so offering a hermes-era snapshot to a dsh bridge would import
+    /// the wrong home format (a flipped delegate starts fresh from canonical).
+    pub object_key: String,
+    /// The runtime label stamped into the envelope (observability).
+    pub runtime: String,
 }
 
 impl CheckpointConfig {
@@ -124,6 +133,15 @@ impl CheckpointConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&b| (64 * 1024..=32 * 1024 * 1024).contains(&b))
             .unwrap_or(8 * 1024 * 1024);
+        let runtime = read("AGENTKEYS_AGENT_RUNTIME")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "hermes".to_string());
+        let object_key = if runtime == "dsh" {
+            CHECKPOINT_OBJECT_KEY_DSH.to_string()
+        } else {
+            CHECKPOINT_OBJECT_KEY.to_string()
+        };
         Some(Self {
             chat,
             memory_worker_url,
@@ -131,6 +149,8 @@ impl CheckpointConfig {
             mgmt_token,
             interval: Duration::from_secs(interval),
             max_bytes,
+            object_key,
+            runtime,
         })
     }
 
@@ -303,6 +323,7 @@ async fn save_once(
     let envelope = CheckpointEnvelope {
         version: 1,
         saved_at: export.snapshot_at,
+        runtime: Some(cfg.runtime.clone()),
         snapshot: export.snapshot,
     };
     let plaintext =
@@ -329,7 +350,7 @@ async fn save_once(
             cap,
             namespace: service,
             plaintext_b64: STANDARD.encode(&plaintext),
-            object_key: Some(CHECKPOINT_OBJECT_KEY.to_string()),
+            object_key: Some(cfg.object_key.clone()),
         })
         .await
         .map_err(|e| classify_save(e, "memory-put"))?;
@@ -458,7 +479,7 @@ async fn restore_once(
         .memory_get(MemoryGetInput {
             cap,
             namespace: service,
-            object_key: Some(CHECKPOINT_OBJECT_KEY.to_string()),
+            object_key: Some(cfg.object_key.clone()),
         })
         .await
     {
@@ -616,5 +637,32 @@ mod tests {
         let cfg = CheckpointConfig::from_lookup(&read, chat("opchat-w")).expect("enabled");
         assert_eq!(cfg.interval.as_secs(), 900);
         assert_eq!(cfg.max_bytes, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn checkpoint_key_selects_by_runtime_env() {
+        // #616: AGENTKEYS_AGENT_RUNTIME=dsh writes checkpoint/dsh-home; absent
+        // or anything else stays on the legacy hermes key. Lookup-injected.
+        let base = |k: &str| -> Option<String> {
+            match k {
+                "AGENTKEYS_SANDBOX_MGMT_TOKEN" => Some("smt1_x".into()),
+                "AGENTKEYS_MEMORY_NS" => Some("watchdog".into()),
+                _ => None,
+            }
+        };
+        let mk_chat = || chat("opchat-watchdog");
+        let legacy = CheckpointConfig::from_lookup(&base, mk_chat()).expect("cfg");
+        assert_eq!(legacy.object_key, CHECKPOINT_OBJECT_KEY);
+        assert_eq!(legacy.runtime, "hermes");
+        let dsh_env = |k: &str| -> Option<String> {
+            if k == "AGENTKEYS_AGENT_RUNTIME" {
+                Some("dsh".into())
+            } else {
+                base(k)
+            }
+        };
+        let dsh = CheckpointConfig::from_lookup(&dsh_env, mk_chat()).expect("cfg");
+        assert_eq!(dsh.object_key, CHECKPOINT_OBJECT_KEY_DSH);
+        assert_eq!(dsh.runtime, "dsh");
     }
 }

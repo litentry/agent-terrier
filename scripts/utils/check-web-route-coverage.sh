@@ -45,6 +45,9 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/auth/logout	session-mutating (downgrades the seeded J1) — would break later suite-6 steps; needs an isolated-daemon test
 /v1/auth/relogin/start	#242 passkey re-login — browser WebAuthn assert; broker halves live-verified in #242; CDP virtual-authenticator planned
 /v1/auth/relogin/finish	same re-login ceremony pair
+/v1/sandbox/self/audit	#612 runtime-audit tee sink — a SANDBOX-INTERNAL route (delegate daemon, sandbox-self bearer), never reachable from the web app; covered by the dsh suite's audit tests + the daemon's op_kind allowlist unit test. Retire this waiver when a suite-6 step drives a live delegate's tee.
+/v1/sandbox/self/credential	#612 vault-backed credential resolution — sandbox-internal (delegate daemon, sandbox-self bearer), not a web surface; the resolve path is unit-tested in the suite and the cap-mint half is covered by suite-3. Retire with a live in-sandbox credential fetch step.
+/v1/sandbox/self/grants	#611 grant-projection read the in-loop guard compiles its allowlist from — sandbox-internal (delegate daemon), not a web surface; chain-read half is unit-tested (classify_scope_hashes) and the guard's compile is covered in the dsh suite. Retire with a live delegate guard step.
 /v1/actors/:id/scope	legacy scope update (panel uses /v1/scope/build+submit, covered) — remove route or test when panel migration completes
 /v1/actors/:id/scope/grant	same legacy scope surface
 /v1/actors/:id/payment-cap	payment caps UI not wired to chain yet (#97 payments pending)
