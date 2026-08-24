@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useClient } from '@/lib/ClientProvider';
+import { sandboxExpiryLabel } from '@/lib/client/sandboxExpiry';
 import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
 import { Dot, PageHead } from './shared';
 import { PermissionView } from './permissions';
@@ -42,18 +43,6 @@ function scopeOptions(
 // that a card is a STALE / duplicate request to refuse rather than approve (the
 // two-duplicate-cards incident this issue fixes). `expiresAt` of 0 means the broker
 // row predates the field → "expiry unknown" rather than a bogus countdown.
-// #577 follow-up — render the sandbox's veFaaS lease deadline compactly:
-// relative when parseable ("expires in 3h"), verbatim otherwise, empty when
-// the backend has no expiry (ECS).
-function sandboxExpiryLabel(expireAt: string | null | undefined): string {
-  if (!expireAt) return '';
-  const t = Date.parse(expireAt);
-  if (Number.isNaN(t)) return ` · expires ${expireAt}`;
-  const mins = Math.round((t - Date.now()) / 60000);
-  if (mins <= 0) return ' · expired';
-  if (mins < 60) return ` · expires in ${mins}m`;
-  return ` · expires in ${Math.round(mins / 60)}h`;
-}
 
 export function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));

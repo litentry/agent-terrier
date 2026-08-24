@@ -1013,7 +1013,9 @@ impl VeFaasClient {
         Ok(parse_instances(&v))
     }
 
-    /// `DescribeSandbox` → `(status, expire_at)` for one instance.
+    /// `DescribeSandbox` → `(status, expire_at)` for one instance. `expire_at`
+    /// is RFC3339-normalized like the list path ([`normalize_expire_at`]) —
+    /// both entry points for the vendor field, one shape out.
     pub async fn describe(&self, sandbox_id: &str) -> Result<(String, String)> {
         let v = self
             .vefaas_call(
@@ -1026,7 +1028,7 @@ impl VeFaasClient {
             .await?;
         Ok((
             v["Result"]["Status"].as_str().unwrap_or("?").to_string(),
-            v["Result"]["ExpireAt"].as_str().unwrap_or("?").to_string(),
+            normalize_expire_at(v["Result"]["ExpireAt"].as_str().unwrap_or("?")),
         ))
     }
 
@@ -1350,9 +1352,63 @@ fn label_map<V: AsRef<str>>(labels: &[(&str, V)]) -> serde_json::Value {
     serde_json::Value::Object(m)
 }
 
+/// Normalize a veFaaS `ExpireAt` to RFC3339 — the ONE place in the system
+/// that knows the vendor's timestamp shape.
+///
+/// **Measured live 2026-08-14** (VE prod broker, `ListSandboxes`): the API
+/// emits Go's `time.Time` default `String()` layout —
+/// `2026-08-15 15:50:54 +0800 CST` — NOT RFC3339. Every consumer that assumed
+/// otherwise was silently wrong, in two different ways:
+///
+/// - the #594 lease sweeper's strict `parse_from_rfc3339` REJECTED it, so it
+///   fail-closed to "no expiry" and never warm-rotated a single VE instance
+///   (logged every sweep as `unparseable ExpireAt`);
+/// - parent-control's `Date.parse` does NOT fail on it — V8 honors the
+///   trailing zone ABBREVIATION `CST` as *US Central* (−6) and ignores the
+///   authoritative `+0800`, rendering a countdown 14 h too long (a 24 h lease
+///   displayed as "expires in 38h").
+///
+/// So the fix belongs HERE, at the boundary, not in each consumer: everything
+/// downstream (`LiveRuntime`, `/v1/agent/image-status`, the sweeper, the web
+/// card) reads one unambiguous shape. The numeric offset is authoritative and
+/// the zone abbreviation is dropped precisely because it is ambiguous.
+///
+/// An unrecognized shape passes through UNCHANGED (never guessed): the sweeper
+/// then refuses to rotate on it and says so, and the UI renders it verbatim —
+/// both loud, neither invented.
+pub(crate) fn normalize_expire_at(raw: &str) -> String {
+    let t = raw.trim();
+    // Empty / "?" = no expiry (an ECS task, or a row the API left blank).
+    if t.is_empty() || t == "?" {
+        return String::new();
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(t) {
+        return dt.to_rfc3339();
+    }
+    // Go `time.Time`: "2006-01-02 15:04:05[.fff] -0700 [MST]". Take the first
+    // three whitespace tokens (date, clock, numeric offset) and drop whatever
+    // trails — the zone name, or Go's `m=+0.000` monotonic suffix.
+    let mut tokens = t.split_whitespace();
+    if let (Some(date), Some(clock), Some(offset)) = (tokens.next(), tokens.next(), tokens.next()) {
+        let core = format!("{date} {clock} {offset}");
+        for fmt in [
+            "%Y-%m-%d %H:%M:%S%.f %z",
+            "%Y-%m-%d %H:%M:%S%.f %:z",
+            "%Y-%m-%d %H:%M:%S%.f %#z",
+        ] {
+            if let Ok(dt) = chrono::DateTime::parse_from_str(&core, fmt) {
+                return dt.to_rfc3339();
+            }
+        }
+    }
+    t.to_string()
+}
+
 /// Parse `Result.Sandboxes[]` rows. Field names per the probe's proven
 /// parser (`Id`/`Status`/`ExpireAt`); `Metadata` accepted as either a string
 /// map or a `[{Key,Value}]` list (the two shapes VE APIs use for maps).
+/// `ExpireAt` is normalized to RFC3339 here (see [`normalize_expire_at`]) so
+/// no consumer ever meets the vendor's ambiguous zone-abbreviation form.
 fn parse_instances(v: &serde_json::Value) -> Vec<SandboxInstance> {
     let Some(list) = v["Result"]["Sandboxes"].as_array() else {
         return Vec::new();
@@ -1361,7 +1417,7 @@ fn parse_instances(v: &serde_json::Value) -> Vec<SandboxInstance> {
         .map(|s| SandboxInstance {
             id: s["Id"].as_str().unwrap_or_default().to_string(),
             status: s["Status"].as_str().unwrap_or_default().to_string(),
-            expire_at: s["ExpireAt"].as_str().unwrap_or_default().to_string(),
+            expire_at: normalize_expire_at(s["ExpireAt"].as_str().unwrap_or_default()),
             metadata: parse_metadata(&s["Metadata"]),
         })
         .collect()
@@ -1564,7 +1620,10 @@ mod tests {
     fn parse_instances_reads_probe_shape_and_both_metadata_encodings() {
         let v = serde_json::json!({
             "Result": { "Sandboxes": [
-                { "Id": "a", "Status": "Ready", "ExpireAt": "2026-07-06T00:00:00+08:00",
+                // Row `a` carries the shape MEASURED on the live VE broker
+                // 2026-08-14 (Go `time.Time`, not RFC3339) — normalized on the
+                // way out so no consumer meets the ambiguous `CST`.
+                { "Id": "a", "Status": "Ready", "ExpireAt": "2026-08-15 15:50:54 +0800 CST",
                   "Metadata": { LABEL_DEVICE_KEY_HASH: "0x11", LABEL_MANAGED_BY: MANAGED_BY_VALUE } },
                 { "Id": "b", "Status": "Starting", "ExpireAt": "",
                   "Metadata": [ { "Key": LABEL_DEVICE_KEY_HASH, "Value": "0x22" } ] },
@@ -1573,10 +1632,66 @@ mod tests {
         });
         let rows = parse_instances(&v);
         assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].expire_at, "2026-08-15T15:50:54+08:00");
+        assert_eq!(rows[1].expire_at, "");
         assert_eq!(rows[0].metadata[LABEL_DEVICE_KEY_HASH], "0x11");
         assert_eq!(rows[1].metadata[LABEL_DEVICE_KEY_HASH], "0x22");
         assert!(rows[2].metadata.is_empty());
         assert!(rows[0].is_live() && rows[1].is_live() && !rows[2].is_live());
+        // The sweeper's strict RFC3339 parse — the consumer this normalization
+        // exists for — accepts the normalized value (it rejected the raw one).
+        assert!(crate::lease_sweeper::parse_expire_at(&rows[0].expire_at).is_some());
+    }
+
+    /// The bug this normalization fixes, pinned end to end (measured live on
+    /// the VE prod broker 2026-08-14, `ListSandboxes`).
+    #[test]
+    fn normalize_expire_at_converts_the_measured_go_time_layout() {
+        // THE string the API actually returns, and the instant it denotes.
+        let got = normalize_expire_at("2026-08-15 15:50:54 +0800 CST");
+        assert_eq!(got, "2026-08-15T15:50:54+08:00");
+        // Same instant as the unambiguous form — the +0800 wins, `CST` (which
+        // JS `Date.parse` reads as US Central, −6) is dropped, not honored.
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&got)
+                .unwrap()
+                .timestamp(),
+            chrono::DateTime::parse_from_rfc3339("2026-08-15T07:50:54Z")
+                .unwrap()
+                .timestamp()
+        );
+        // Variants the vendor may emit: no zone name, fractional seconds, and
+        // Go's monotonic-clock suffix.
+        for raw in [
+            "2026-08-15 15:50:54 +0800",
+            "2026-08-15 15:50:54.123456 +0800 CST",
+            "2026-08-15 15:50:54 +0800 CST m=+0.000000001",
+        ] {
+            let out = normalize_expire_at(raw);
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&out).is_ok(),
+                "{raw:?} → {out:?} is not RFC3339"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_expire_at_is_idempotent_and_never_guesses() {
+        // Already-RFC3339 input (what a future API version may send) survives.
+        assert_eq!(
+            normalize_expire_at("2026-07-06T00:00:00+08:00"),
+            "2026-07-06T00:00:00+08:00"
+        );
+        // "no expiry" spellings collapse to empty (the ECS/blank case).
+        assert_eq!(normalize_expire_at(""), "");
+        assert_eq!(normalize_expire_at("   "), "");
+        assert_eq!(normalize_expire_at("?"), "");
+        // An UNKNOWN shape passes through untouched — never reinterpreted into
+        // a plausible-but-invented instant. Downstream then fails loud: the
+        // sweeper refuses to rotate and logs the raw string.
+        assert_eq!(normalize_expire_at("next tuesday"), "next tuesday");
+        assert_eq!(normalize_expire_at("1786246717"), "1786246717");
+        assert!(crate::lease_sweeper::parse_expire_at("next tuesday").is_none());
     }
 
     #[test]

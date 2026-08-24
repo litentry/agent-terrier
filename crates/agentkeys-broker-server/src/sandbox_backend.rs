@@ -77,8 +77,10 @@ pub fn no_create_envs() -> CreateEnvProvider {
 
 /// One live runtime row for the #577 update/status paths — id + coarse
 /// status, cloud-agnostic (veFaaS SandboxId / ECS task ARN). `expire_at` is
-/// the veFaaS lease deadline verbatim; empty on backends without one (ECS
-/// tasks have no expiry).
+/// the veFaaS lease deadline **normalized to RFC3339** at the driver boundary
+/// ([`ve_faas::normalize_expire_at`](crate::ve_faas::normalize_expire_at) —
+/// the vendor emits Go's ambiguous `… +0800 CST` form); empty on backends
+/// without one (ECS tasks have no expiry).
 #[derive(Debug, Clone)]
 pub struct LiveRuntime {
     pub id: String,

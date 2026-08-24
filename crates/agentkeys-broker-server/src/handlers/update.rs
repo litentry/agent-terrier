@@ -117,8 +117,10 @@ pub struct DelegateImageStatus {
     pub sandbox_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox_status: Option<String>,
-    /// The instance's veFaaS lease deadline, verbatim (absent on backends
-    /// without one — ECS tasks have no expiry).
+    /// The instance's veFaaS lease deadline as RFC3339 (normalized at the
+    /// driver boundary — the vendor's own `2026-08-15 15:50:54 +0800 CST`
+    /// form is NOT safe for a client's `Date.parse`). Absent on backends
+    /// without a lease (ECS tasks have no expiry).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expire_at: Option<String>,
     /// The registration id this instance froze at spawn.

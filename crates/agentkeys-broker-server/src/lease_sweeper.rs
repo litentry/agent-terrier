@@ -88,12 +88,19 @@ impl SweeperConfig {
     }
 }
 
-/// Parse a veFaaS `ExpireAt` into unix seconds. The measured live shape is
-/// RFC3339 with a zone offset (`2026-07-06T00:00:00+08:00` — the pinned
-/// `parse_instances` probe fixture); empty / `?` means no expiry (ECS, or a
-/// row without one). Anything else is UNKNOWN — the caller logs the raw
-/// string and does NOT rotate on a guess (evidence policy: never invent the
-/// vendor's format).
+/// Parse an `ExpireAt` into unix seconds. Input is RFC3339, because
+/// [`ve_faas::normalize_expire_at`](crate::ve_faas::normalize_expire_at) has
+/// already converted the vendor's shape at the boundary; empty / `?` means no
+/// expiry (ECS, or a row without one).
+///
+/// This stays STRICT on purpose. The vendor's real layout is Go's `time.Time`
+/// (`2026-08-15 15:50:54 +0800 CST`), whose trailing zone abbreviation is
+/// ambiguous — teaching this parser to read it would put the format knowledge
+/// in two places, and the earlier revision that assumed RFC3339 here is
+/// exactly why no VE instance was ever warm-rotated (every sweep logged
+/// `unparseable ExpireAt`). One owner, at the boundary; anything that still
+/// arrives unrecognized is UNKNOWN and the caller does NOT rotate on a guess
+/// (evidence policy: never invent the vendor's format).
 pub(crate) fn parse_expire_at(raw: &str) -> Option<i64> {
     let t = raw.trim();
     if t.is_empty() || t == "?" {
