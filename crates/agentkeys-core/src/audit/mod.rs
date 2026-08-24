@@ -59,8 +59,9 @@ pub use bodies::{
     DelegateArchiveBody, DelegateSpawnBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody,
     EmailSendBody, GateEmbedBody, GateTurnBody, GatewayRelayBody, K10RotateBody,
     K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody,
-    PaymentDirectBody, PaymentEscrowRedeemBody, SandboxSpawnBody, SandboxTeardownBody,
-    ScopeGrantBody, ScopeRevokeBody, SignEip191Body, SignEip712Body, SpeechAsrBody, SpeechTtsBody,
+    PaymentDirectBody, PaymentEscrowRedeemBody, RuntimeApprovalBody, RuntimeToolResultBody,
+    SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body,
+    SignEip712Body, SpeechAsrBody, SpeechTtsBody,
 };
 pub use op_kind::AuditOpKind;
 
@@ -254,6 +255,8 @@ pub enum TypedAuditBody {
     ChannelTeardown(ChannelTeardownBody),
     GatewayRelay(GatewayRelayBody),
     ContactBind(ContactBindBody),
+    RuntimeToolResult(RuntimeToolResultBody),
+    RuntimeApproval(RuntimeApprovalBody),
 }
 
 impl TypedAuditBody {
@@ -319,6 +322,12 @@ impl TypedAuditBody {
             }
             AuditOpKind::GatewayRelay => Self::GatewayRelay(serde_json::from_value(value).ok()?),
             AuditOpKind::ContactBind => Self::ContactBind(serde_json::from_value(value).ok()?),
+            AuditOpKind::RuntimeToolResult => {
+                Self::RuntimeToolResult(serde_json::from_value(value).ok()?)
+            }
+            AuditOpKind::RuntimeApproval => {
+                Self::RuntimeApproval(serde_json::from_value(value).ok()?)
+            }
         })
     }
 }

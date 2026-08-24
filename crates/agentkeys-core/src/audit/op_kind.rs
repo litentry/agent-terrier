@@ -89,6 +89,13 @@ pub enum AuditOpKind {
     /// #407 — a contact bind transitioned (pending → bound / declined) after the
     /// master's confirm (the tier proposal is advisory; this row is the write).
     ContactBind = 104,
+    /// #612 — a delegate-runtime tool outcome (the dsh pipeline's frozen
+    /// `tools/result`), teed by the in-sandbox daemon on the delegate's own
+    /// authority. `result` carries success/failure; the body names the tool.
+    RuntimeToolResult = 110,
+    /// #612 — a delegate-runtime approval decision (`approval/asked` +
+    /// `approval/decided` pair): which tool asked and what the outcome was.
+    RuntimeApproval = 111,
 }
 
 impl AuditOpKind {
@@ -131,6 +138,8 @@ impl AuditOpKind {
             102 => Self::ChannelTeardown,
             103 => Self::GatewayRelay,
             104 => Self::ContactBind,
+            110 => Self::RuntimeToolResult,
+            111 => Self::RuntimeApproval,
             _ => return None,
         })
     }
@@ -175,6 +184,8 @@ impl AuditOpKind {
             Self::ChannelTeardown => "channel.teardown",
             Self::GatewayRelay => "gateway.relay",
             Self::ContactBind => "gateway.contact_bind",
+            Self::RuntimeToolResult => "runtime.tool_result",
+            Self::RuntimeApproval => "runtime.approval",
         }
     }
 }
@@ -190,6 +201,8 @@ mod tests {
     fn every_op_kind_roundtrips_through_u8() {
         let all = [
             AuditOpKind::CredStore,
+            AuditOpKind::RuntimeToolResult,
+            AuditOpKind::RuntimeApproval,
             AuditOpKind::CredFetch,
             AuditOpKind::CredTeardown,
             AuditOpKind::MemoryPut,
@@ -240,7 +253,7 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [
-            3u8, 9, 14, 19, 22, 32, 42, 57, 62, 71, 83, 89, 94, 99, 105, 109, 110, 200, 250, 255,
+            3u8, 9, 14, 19, 22, 32, 42, 57, 62, 71, 83, 89, 94, 99, 105, 109, 112, 200, 250, 255,
         ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),
@@ -291,6 +304,8 @@ mod tests {
             AuditOpKind::ChannelTeardown as u8,
             AuditOpKind::GatewayRelay as u8,
             AuditOpKind::ContactBind as u8,
+            AuditOpKind::RuntimeToolResult as u8,
+            AuditOpKind::RuntimeApproval as u8,
         ];
         let s: HashSet<_> = all.iter().copied().collect();
         assert_eq!(s.len(), all.len(), "duplicate byte assignment");

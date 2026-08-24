@@ -840,3 +840,23 @@ mod tests {
         assert_eq!(body.r#ref, "0xabc");
     }
 }
+
+/// #612 — one delegate-runtime tool outcome (the dsh pipeline's frozen
+/// `tools/result`), teed by the in-sandbox daemon on the delegate's own
+/// authority. Small by design: the durable session log holds the full record;
+/// this row is the owner-auditable fact that the tool ran (or was denied).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeToolResultBody {
+    pub tool: String,
+    pub call_id: String,
+    pub is_error: bool,
+}
+
+/// #612 — one delegate-runtime approval decision (the `approval/asked` /
+/// `approval/decided` pair): which tool asked and what the closed outcome was
+/// (`allowed-once` / `rejected` / `cancelled` / `unavailable`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeApprovalBody {
+    pub tool: String,
+    pub outcome: String,
+}

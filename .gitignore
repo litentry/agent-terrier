@@ -91,3 +91,5 @@ design-system/package-lock.json
 /apps/website/src/routeTree.gen.ts
 /apps/mobile-mock/src/routeTree.gen.ts
 /apps/design-system/src/routeTree.gen.ts
+packages/agentkeys-dsh/lib/
+packages/agentkeys-dsh/node_modules/

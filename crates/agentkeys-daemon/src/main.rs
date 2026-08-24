@@ -21,6 +21,7 @@ mod persona;
 mod presets;
 mod propose;
 mod proxy;
+mod self_backend;
 mod session;
 mod ui_bridge;
 

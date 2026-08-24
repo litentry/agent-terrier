@@ -183,6 +183,8 @@ fn op_kind_for(kind: &str) -> Option<u8> {
     Some(match kind {
         "cred.store" => K::CredStore,
         "cred.fetch" => K::CredFetch,
+        "runtime.tool_result" => K::RuntimeToolResult,
+        "runtime.approval" => K::RuntimeApproval,
         "memory.write" => K::MemoryPut,
         "memory.read" => K::MemoryGet,
         "scope.grant" => K::ScopeGrant,

@@ -1200,6 +1200,9 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/sandbox/self/grants", get(sandbox_self_grants))
+        .route("/v1/sandbox/self/credential", post(sandbox_self_credential))
+        .route("/v1/sandbox/self/audit", post(sandbox_self_audit))
         .route("/v1/k11/enroll/begin", post(enroll_begin))
         .route("/v1/k11/enroll/finish", post(enroll_finish))
         .route("/v1/master/register/submit", post(master_register_submit))
@@ -3677,6 +3680,310 @@ fn registry_address(state: &UiBridgeState) -> Option<String> {
 }
 
 /// The AgentKeysScope address from the compiled-in chain profile.
+/// #611 — the sandbox delegate's OWN grant view, served by the in-sandbox
+/// daemon so the dsh AgentKeys plugin suite (the in-loop tool guard + approval
+/// answerer) consumes ONE Rust-owned resolution of the chain state instead of
+/// re-implementing scope parsing in TypeScript (the #203 one-owner discipline,
+/// D1: the chain stays the only authority — this is a read-through view).
+///
+/// Auth mirrors the sandbox bridge's `AGENTKEYS_BRIDGE_TOKEN` semantics:
+/// bearer-gated when the env var is set, open when unset (dev mode). On a
+/// MASTER daemon (no `AGENTKEYS_ACTOR_OMNI` in the env) the route answers 404 —
+/// the self-view exists only where a delegate identity does.
+#[derive(Clone, Debug, PartialEq)]
+struct SandboxSelfIdentity {
+    actor_omni: String,
+    operator_omni: String,
+    bridge_token: Option<String>,
+}
+
+/// Pure env-shape resolver (#258 discipline: lookup injected, no env mutation
+/// in tests). `None` when this daemon serves no sandbox delegate identity.
+fn sandbox_self_identity(lookup: impl Fn(&str) -> Option<String>) -> Option<SandboxSelfIdentity> {
+    let actor = lookup(agentkeys_backend_client::protocol::sandbox_env::ACTOR_OMNI)?
+        .trim()
+        .to_string();
+    if actor.is_empty() {
+        return None;
+    }
+    let operator = lookup(agentkeys_backend_client::protocol::sandbox_env::OPERATOR_OMNI)?
+        .trim()
+        .to_string();
+    if operator.is_empty() {
+        return None;
+    }
+    let bridge_token = lookup("AGENTKEYS_BRIDGE_TOKEN")
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    Some(SandboxSelfIdentity {
+        actor_omni: actor,
+        operator_omni: operator,
+        bridge_token,
+    })
+}
+
+/// Constant-time bearer compare (the Python bridge uses hmac.compare_digest for
+/// the same check; an early-exit == would leak prefix length via timing).
+fn ct_bearer_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Pure name assembly for the self-grant view: memory/inbox names from the
+/// classified scope map, capability names (`tool:<class>`) recovered via the
+/// enumerable candidates, everything else left as raw unresolved hashes
+/// (`cred:<x>` etc. — the delegate does not need their names to guard tools).
+fn assemble_self_grant_names(
+    scope: &Option<HashMap<String, ApiScopeBits>>,
+    unknown_ids: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut names: Vec<String> = Vec::new();
+    if let Some(map) = scope {
+        let mut namespaces: Vec<&String> = map.keys().collect();
+        namespaces.sort();
+        for ns in namespaces {
+            let bits = &map[ns];
+            if bits.read {
+                names.push(format!("memory:{ns}"));
+            }
+            if bits.write {
+                names.push(format!("inbox:{ns}"));
+            }
+        }
+    }
+    let candidates = capability_service_candidates();
+    let mut unresolved: Vec<String> = Vec::new();
+    for h in unknown_ids {
+        match candidates.get(&h.to_lowercase()) {
+            Some(name) => names.push(name.clone()),
+            None => unresolved.push(h.clone()),
+        }
+    }
+    (names, unresolved)
+}
+
+/// Shared gate for the `/v1/sandbox/self/*` surface: 404 off-sandbox, bearer
+/// per the bridge's open-when-unset `AGENTKEYS_BRIDGE_TOKEN` semantics.
+fn sandbox_self_gate(
+    headers: &HeaderMap,
+) -> Result<SandboxSelfIdentity, (StatusCode, Json<serde_json::Value>)> {
+    let Some(identity) = sandbox_self_identity(|k| std::env::var(k).ok()) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not a sandbox delegate daemon (no AGENTKEYS_ACTOR_OMNI identity)"
+            })),
+        ));
+    };
+    if let Some(expected) = &identity.bridge_token {
+        let presented = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if !ct_bearer_eq(presented, expected) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "unauthorized: missing or invalid bearer token"
+                })),
+            ));
+        }
+    }
+    Ok(identity)
+}
+
+#[derive(Deserialize)]
+struct SelfCredentialRequest {
+    service: String,
+}
+
+/// #612 — per-operation credential resolve on the delegate's own authority:
+/// mint a `CredFetch` cap → cred worker → vault value, one response, nothing
+/// at rest. The dsh suite's credential provider calls this per resolve (the
+/// credentials-seam rule: consumers never cache across operations).
+async fn sandbox_self_credential(
+    headers: HeaderMap,
+    Json(req): Json<SelfCredentialRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = sandbox_self_gate(&headers) {
+        return resp;
+    }
+    let service = req.service.trim().to_string();
+    if service.is_empty() || service.len() > 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "service must be 1..=64 chars" })),
+        );
+    }
+    if agentkeys_backend_client::protocol::is_capability_service(&service) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "capability services (tool:/plugin:) are never credentials (#614)"
+            })),
+        );
+    }
+    let backend = match crate::self_backend::acquire().await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": format!("self backend unavailable: {e}") })),
+            )
+        }
+    };
+    match backend.cred_fetch_plaintext_b64(&service).await {
+        Ok(value_b64) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "service": service,
+                "value_b64": value_b64,
+                "source": "agentkeys-vault",
+            })),
+        ),
+        Err(crate::self_backend::SelfCredError::Denied(status, body)) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(serde_json::json!({ "error": format!("data plane refused: {body}") })),
+        ),
+        Err(crate::self_backend::SelfCredError::EnvelopeOnly) => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": "cred_envelope_requires_kek_release",
+                "detail": "this credential is a v3 envelope; delegate-side KEK release is #91 — not available yet"
+            })),
+        ),
+        Err(crate::self_backend::SelfCredError::Unavailable(e))
+        | Err(crate::self_backend::SelfCredError::Failed(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e })),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct SelfAuditRequest {
+    op_kind: u8,
+    op_body: serde_json::Value,
+    result: u8,
+    #[serde(default)]
+    intent_text: Option<String>,
+}
+
+/// #612 — the runtime-audit tee sink: the dsh suite posts tool outcomes +
+/// approval decisions; the daemon appends them to the audit worker AS the
+/// delegate. Only the two runtime op_kinds are accepted — this route must
+/// never become a generic append proxy.
+async fn sandbox_self_audit(
+    headers: HeaderMap,
+    Json(req): Json<SelfAuditRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = sandbox_self_gate(&headers) {
+        return resp;
+    }
+    let allowed = [
+        agentkeys_core::audit::AuditOpKind::RuntimeToolResult as u8,
+        agentkeys_core::audit::AuditOpKind::RuntimeApproval as u8,
+    ];
+    if !allowed.contains(&req.op_kind) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "op_kind {} not allowed here — this sink accepts only the runtime kinds {:?}",
+                    req.op_kind, allowed
+                )
+            })),
+        );
+    }
+    let backend = match crate::self_backend::acquire().await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": format!("self backend unavailable: {e}") })),
+            )
+        }
+    };
+    match backend
+        .audit_append(req.op_kind, req.op_body, req.result, req.intent_text)
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e })),
+        ),
+    }
+}
+
+async fn sandbox_self_grants(
+    State(state): State<SharedUiBridgeState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(identity) = sandbox_self_identity(|k| std::env::var(k).ok()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not a sandbox delegate daemon (no AGENTKEYS_ACTOR_OMNI identity)"
+            })),
+        );
+    };
+    if let Some(expected) = &identity.bridge_token {
+        let presented = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if !ct_bearer_eq(presented, expected) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "unauthorized: missing or invalid bearer token"
+                })),
+            );
+        }
+    }
+    let Some(scope_contract) = scope_contract_address(&state) else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "chain profile carries no AgentKeysScope contract"
+            })),
+        );
+    };
+    let rpc = state.chain_profile.rpc.http.clone();
+    match fetch_actor_scope_from_chain(
+        &rpc,
+        &scope_contract,
+        &identity.operator_omni,
+        &identity.actor_omni,
+    )
+    .await
+    {
+        Ok((scope, unknown_ids)) => {
+            let (services, unresolved) = assemble_self_grant_names(&scope, &unknown_ids);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "actor_omni": identity.actor_omni,
+                    "operator_omni": identity.operator_omni,
+                    "services": services,
+                    "unresolved_service_ids": unresolved,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("scope read failed: {e}") })),
+        ),
+    }
+}
+
 fn scope_contract_address(state: &UiBridgeState) -> Option<String> {
     state
         .chain_profile
@@ -12349,6 +12656,43 @@ mod tests {
     /// keccak("memory:<ns>")`) — the delegate never writes the master's shared memory
     /// directly. An unknown service (e.g. `cred:<svc>`) is preserved verbatim for the
     /// panel's set-replace commit.
+    #[test]
+    fn sandbox_self_identity_and_grant_names_resolve() {
+        // #611: identity comes only from the sandbox env pair; master daemons
+        // (no ACTOR_OMNI) get None -> the route 404s. Lookup injected (#258).
+        assert!(sandbox_self_identity(|_| None).is_none());
+        let env = |k: &str| match k {
+            "AGENTKEYS_ACTOR_OMNI" => Some("0xactor".to_string()),
+            "AGENTKEYS_OPERATOR_OMNI" => Some("0xop".to_string()),
+            "AGENTKEYS_BRIDGE_TOKEN" => Some("tok".to_string()),
+            _ => None,
+        };
+        let id = sandbox_self_identity(env).expect("identity");
+        assert_eq!(id.bridge_token.as_deref(), Some("tok"));
+        assert!(ct_bearer_eq("tok", "tok"));
+        assert!(!ct_bearer_eq("tok", "tok2"));
+        assert!(!ct_bearer_eq("tok", "toK"));
+
+        let mut map = HashMap::new();
+        map.insert(
+            "travel".to_string(),
+            ApiScopeBits {
+                read: true,
+                write: true,
+            },
+        );
+        let web_hash = format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(b"tool:web"))
+        );
+        let (names, unresolved) =
+            assemble_self_grant_names(&Some(map), &[web_hash, "0xdead".to_string()]);
+        assert!(names.contains(&"memory:travel".to_string()));
+        assert!(names.contains(&"inbox:travel".to_string()));
+        assert!(names.contains(&"tool:web".to_string()));
+        assert_eq!(unresolved, vec!["0xdead".to_string()]);
+    }
+
     #[test]
     fn capability_candidates_recover_tool_class_names() {
         // #614: keccak(service_tool(class)) reverses to the name for every

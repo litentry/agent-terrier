@@ -193,3 +193,12 @@ Cheap first pass without touching the sandbox: on the broker, `channel/poll` in 
 ## Layer ordering — keep the daemon last
 
 The daemon `COPY` is deliberately the **final** layer: it is the only thing that changes on a normal code push, so a rebuild invalidates exactly one ~50 MB layer and a re-push uploads only that. **Anything added below it re-inflates every incremental push** — put new steps above it.
+
+## The dsh twin (#615 — epic #609)
+
+`docker/dsh-sandbox` is the DeepSeek Harness delegate image, built and shipped by the SAME machinery this doc describes — two-stage foreign/final split, versioned #598 tags, the precache refresh contract, the boot-gate posture. Differences from the hermes image: stage 1 carries Node 24 + the exact-pinned `@deepseek-ai/dsh` + `@openviking/dsh-memory-plugin` + pip `openviking` (0.4.16+, the `viking://~` requirement measured on #610), published as **`VE_BASE_DSH`** by `scripts/operator/seed-dsh-base.sh`; the final stage bakes the `DSH_HOME` profile + the `@agentkeys/dsh-suite` tarball, with the daemon still the last layer. The operator cycle is exactly two headless commands from the laptop:
+
+1. `bash scripts/operator/build-image-dsh.sh` — auto-seed (when `VE_BASE_DSH` is absent) → daemon cross-compile → build+push `dsh-sandbox:v<stamp>-g<sha8>` → register+preheat via the broker's `setup-image.sh --refresh-only` (the one owner of the refresh) → record `CR_IMAGE_DSH`.
+2. `bash scripts/operator/build-image-dsh.sh --flip` — after committing the env file: converge broker step 5. Until the #620 runtime valve lands, nothing spawns from `CR_IMAGE_DSH`; the flip stages the ref.
+
+The first cycle answers the #610 spike items 2–4 (pod boot vs the readiness budget, Landlock/bwrap availability, the function env-template keys — `DSH_HOME` is the new #587-class template key). The hermes sections above remain authoritative until #621 deletes that image.

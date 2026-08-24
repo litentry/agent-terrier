@@ -25,6 +25,7 @@ crates/
 
 # ─── Provisioner (service signup/scraper contribution surface) ────────────────
 provisioner-scripts/
+packages/
 
 # ─── Firmware (hardware integrators) ──────────────────────────────────────────
 firmware/
