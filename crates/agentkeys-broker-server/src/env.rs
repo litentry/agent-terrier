@@ -118,6 +118,12 @@ pub const BROKER_SESSION_KEYPAIR_PATH: &str = "BROKER_SESSION_KEYPAIR_PATH";
 /// Optional. TTL in seconds of session JWTs minted by `/v1/auth/*/verify`.
 /// Range \[60, 86400\]. Default 18000 (5 hours).
 pub const BROKER_SESSION_JWT_TTL_SECONDS: &str = "BROKER_SESSION_JWT_TTL_SECONDS";
+/// Optional. TTL in seconds of the `J1_agent` a delegate SANDBOX boots with
+/// (#642). Default 90000 (25 h) — a pod lives a full 24 h veFaaS lease and the
+/// interactive 5 h default left its cap-minted legs (checkpoint, mirror,
+/// creds) dead for the lease tail; the J1 dies with the pod and every
+/// re-create mints fresh, so the TTL tracks the lease, not a login session.
+pub const BROKER_DELEGATE_SESSION_JWT_TTL_SECONDS: &str = "BROKER_DELEGATE_SESSION_JWT_TTL_SECONDS";
 
 // ---------------------------------------------------------------------------
 // Auth method selection
@@ -332,6 +338,11 @@ pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
         (
             BROKER_SESSION_JWT_TTL_SECONDS,
             "TTL of session JWTs [60, 86400].",
+            Group::SessionJwt,
+        ),
+        (
+            BROKER_DELEGATE_SESSION_JWT_TTL_SECONDS,
+            "TTL of the delegate-sandbox J1_agent (#642); default 90000 = 25 h, tracking the lease.",
             Group::SessionJwt,
         ),
         // Auth method selection

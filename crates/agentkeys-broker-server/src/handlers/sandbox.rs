@@ -254,7 +254,7 @@ pub(crate) fn mint_delegate_session_jwt(
         operator_omni,
         derivation_path,
         k10_address,
-        crate::handlers::agent::session_jwt_ttl_seconds(),
+        crate::handlers::agent::delegate_session_jwt_ttl_seconds(),
     ) {
         Ok(jwt) => Some(jwt),
         Err(e) => {

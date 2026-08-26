@@ -52,3 +52,38 @@ pub(crate) fn session_jwt_ttl_seconds() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(18_000)
 }
+
+/// #642 — TTL for the `J1_agent` a delegate SANDBOX boots with. A pod lives a
+/// full 24 h veFaaS lease; the interactive 5 h default left every cap-minted
+/// leg in the pod (checkpoint saves, the #566 mirror, cred fetches) dead for
+/// the lease tail — measured live (first `ExpiredSignature` 5 h after spawn)
+/// while chat kept answering. The J1 dies with the pod and every re-create
+/// mints fresh, so this tracks the lease, not a login session; masters keep
+/// the 5 h default above.
+pub(crate) fn delegate_session_jwt_ttl_seconds() -> u64 {
+    delegate_session_jwt_ttl_from(
+        std::env::var(crate::env::BROKER_DELEGATE_SESSION_JWT_TTL_SECONDS).ok(),
+    )
+}
+
+/// Pure core of [`delegate_session_jwt_ttl_seconds`] (the no-env-mutation
+/// test seam).
+pub(crate) fn delegate_session_jwt_ttl_from(raw: Option<String>) -> u64 {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|v| *v >= 60)
+        .unwrap_or(90_000)
+}
+
+#[cfg(test)]
+mod ttl_tests {
+    use super::*;
+
+    #[test]
+    fn delegate_ttl_defaults_to_a_full_lease_and_rejects_garbage() {
+        assert_eq!(delegate_session_jwt_ttl_from(None), 90_000);
+        assert_eq!(delegate_session_jwt_ttl_from(Some("86400".into())), 86_400);
+        // Garbage and sub-minute values fall back to the lease-tracking default.
+        assert_eq!(delegate_session_jwt_ttl_from(Some("nope".into())), 90_000);
+        assert_eq!(delegate_session_jwt_ttl_from(Some("0".into())), 90_000);
+    }
+}

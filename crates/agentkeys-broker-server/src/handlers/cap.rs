@@ -609,6 +609,34 @@ fn op_requires_actor_session(op: CapOp) -> bool {
     )
 }
 
+/// #642 — ops a signer-custodied delegate performs against its OWN store with
+/// its OWN session: plain `Store`/`Fetch` (the #594 checkpoint's two legs, and
+/// any own-namespace memory op). The operator path stays valid (master-self
+/// and daemon flows are untouched); the actor path rides the SAME chain-grant
+/// scope check as `CanonicalFetch`/`Append` (`operator != actor` bypasses the
+/// master-self skip, so the actor's on-chain `memory:<ns>` grant is the
+/// authorization) and the per-data-class gates below are unaffected
+/// (`enforce_cred_store_master_self` keeps cred-store master-only; config has
+/// no delegate grants). Before this, the sandbox checkpoint could NEVER mint:
+/// its pod holds only the actor session (#552), and Store/Fetch demanded the
+/// operator bearer — measured live as `403 operator_mismatch` on every tick
+/// of the first dsh delegate's checkpoint loop.
+fn op_accepts_actor_session(op: CapOp) -> bool {
+    matches!(op, CapOp::Store | CapOp::Fetch)
+}
+
+/// #642 — pure session-holder verdict for one mint: which session may mint
+/// `op` given the request's operator/actor omnis (all normalized).
+fn session_holder_ok(op: CapOp, session_omni: &str, req_omni: &str, req_actor: &str) -> bool {
+    if op_requires_actor_session(op) {
+        session_omni == req_actor
+    } else if op_accepts_actor_session(op) {
+        session_omni == req_omni || session_omni == req_actor
+    } else {
+        session_omni == req_omni
+    }
+}
+
 async fn mint_cap(
     state: SharedState,
     headers: HeaderMap,
@@ -665,18 +693,16 @@ async fn mint_cap(
         .map_err(|e| CapError::InvalidInput(format!("operator_omni invalid: {e}")))?;
     let req_actor = normalize_hex32(&req.actor_omni)
         .map_err(|e| CapError::InvalidInput(format!("actor_omni invalid: {e}")))?;
-    // Who must hold the session? The DELEGATED actor-session ops (see
-    // `op_requires_actor_session`) are minted by the ACTOR with its OWN session
-    // (`session == actor`); the master's on-chain grant (checked below because
-    // operator != actor bypasses the master-self skip) is the authorization. A
-    // sandboxed delegate / paired device must never hold the operator session
-    // bearer. Every other op is operator-session-minted.
-    let required_session_omni = if op_requires_actor_session(op) {
-        &req_actor
-    } else {
-        &req_omni
-    };
-    if session_omni != *required_session_omni {
+    // Who must hold the session? Three classes (`session_holder_ok`): the
+    // DELEGATED actor-session ops are minted by the ACTOR with its OWN session
+    // (`session == actor`); own-store `Store`/`Fetch` accept EITHER holder
+    // (#642 — the sandbox checkpoint mints with the actor session; masters and
+    // the daemon keep the operator path); everything else is operator-only. In
+    // every actor-minted case the master's on-chain grant (checked below,
+    // because operator != actor bypasses the master-self skip) is the
+    // authorization — a sandboxed delegate / paired device never holds the
+    // operator session bearer.
+    if !session_holder_ok(op, &session_omni, &req_omni, &req_actor) {
         return Err(CapError::OperatorMismatch);
     }
 
@@ -1236,6 +1262,49 @@ impl FromPkcs8Pem for SigningKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_holder_rule_covers_all_three_op_classes() {
+        let operator = "aa11";
+        let actor = "bb22";
+        let stranger = "cc33";
+        // #642 — own-store ops accept EITHER holder: the sandbox checkpoint
+        // mints with the actor session, masters/daemon keep the operator path.
+        for op in [CapOp::Store, CapOp::Fetch] {
+            assert!(session_holder_ok(op, operator, operator, actor));
+            assert!(session_holder_ok(op, actor, operator, actor));
+            assert!(!session_holder_ok(op, stranger, operator, actor));
+        }
+        // Delegated actor-session ops: the actor's OWN session only.
+        for op in [
+            CapOp::CanonicalFetch,
+            CapOp::Append,
+            CapOp::ChannelPublish,
+            CapOp::ChannelSubscribe,
+            CapOp::SpeechUse,
+        ] {
+            assert!(session_holder_ok(op, actor, operator, actor));
+            assert!(!session_holder_ok(op, operator, operator, actor));
+        }
+        // Everything else stays operator-only.
+        for op in [CapOp::Teardown, CapOp::Classify] {
+            assert!(session_holder_ok(op, operator, operator, actor));
+            assert!(!session_holder_ok(op, actor, operator, actor));
+        }
+        // Master-self (operator == actor) coincides for every class.
+        assert!(session_holder_ok(
+            CapOp::Store,
+            operator,
+            operator,
+            operator
+        ));
+        assert!(session_holder_ok(
+            CapOp::CanonicalFetch,
+            operator,
+            operator,
+            operator
+        ));
+    }
 
     #[test]
     fn cap_op_serializes_snake_case() {
