@@ -36,10 +36,23 @@ impl UpstreamClient {
 
     /// POST the embeddings body (#572). Same custody as chat: the vendor key
     /// is attached here, never held by the caller (the in-sandbox OpenViking
-    /// engine sends its `gk_` relay key to the gate instead).
-    pub async fn embeddings(&self, body: &Value) -> GateResult<reqwest::Response> {
+    /// engine sends its `gk_` relay key to the gate instead). `multimodal`
+    /// selects Ark's `/embeddings/multimodal` twin (#639 — the surface the
+    /// doubao-embedding-vision endpoint serves and OpenViking 0.4.16 calls;
+    /// the text `/embeddings` API is refused by that model family, measured
+    /// 2026-08-26).
+    pub async fn embeddings(
+        &self,
+        body: &Value,
+        multimodal: bool,
+    ) -> GateResult<reqwest::Response> {
+        let path = if multimodal {
+            "/embeddings/multimodal"
+        } else {
+            "/embeddings"
+        };
         self.client
-            .post(format!("{}/embeddings", self.base_url))
+            .post(format!("{}{}", self.base_url, path))
             .bearer_auth(&self.api_key)
             .json(body)
             .send()

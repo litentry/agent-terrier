@@ -302,7 +302,12 @@ impl Relay {
     /// The chat `model_override` is deliberately NOT applied: it names the CHAT
     /// Ark endpoint id, and an embeddings call runs against a different
     /// (embedding-family) endpoint the caller names in its own body.
-    pub async fn handle_embeddings(&self, caller: &RelayKey, raw: &[u8]) -> GateResult<TurnOutput> {
+    pub async fn handle_embeddings(
+        &self,
+        caller: &RelayKey,
+        raw: &[u8],
+        multimodal: bool,
+    ) -> GateResult<TurnOutput> {
         let body: Value = serde_json::from_slice(raw)
             .map_err(|e| GateError::BadRequest(format!("invalid embeddings body: {e}")))?;
         if !body.is_object() {
@@ -359,7 +364,7 @@ impl Relay {
             }
         }
 
-        let resp = match self.upstream.embeddings(&body).await {
+        let resp = match self.upstream.embeddings(&body, multimodal).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(key = %caller.key_id, error = %e, "upstream unreachable");

@@ -25,6 +25,7 @@ pub fn router(relay: Arc<Relay>) -> Router {
         // #572 — the embeddings relay (same gk_ auth + budgets; the
         // in-sandbox OpenViking engine's metered embedding egress).
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/embeddings/multimodal", post(embeddings_multimodal))
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
         // #519 — the speech relay legs (same gk_ auth; gate-held Doubao app
@@ -159,11 +160,30 @@ async fn chat_completions(
 /// #572 — the embeddings relay leg. Embeddings never stream, so a Stream
 /// output here is a relay bug, surfaced as a 500 rather than hung.
 async fn embeddings(State(relay): State<Arc<Relay>>, headers: HeaderMap, body: Bytes) -> Response {
+    embeddings_leg(relay, headers, body, false).await
+}
+
+/// #639 — the multimodal twin: OpenViking 0.4.16 appends `/embeddings/multimodal`
+/// for the doubao-embedding-vision family; same auth, metering and budgets.
+async fn embeddings_multimodal(
+    State(relay): State<Arc<Relay>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    embeddings_leg(relay, headers, body, true).await
+}
+
+async fn embeddings_leg(
+    relay: Arc<Relay>,
+    headers: HeaderMap,
+    body: Bytes,
+    multimodal: bool,
+) -> Response {
     let caller = match authenticate_live(&relay, &headers) {
         Ok(c) => c,
         Err(e) => return error_response(e),
     };
-    match relay.handle_embeddings(&caller, &body).await {
+    match relay.handle_embeddings(&caller, &body, multimodal).await {
         Ok(TurnOutput::Full {
             status,
             content_type,
