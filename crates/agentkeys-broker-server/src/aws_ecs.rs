@@ -1,8 +1,8 @@
 //! Broker-driven ECS/Fargate sandbox lifecycle (issue #440) — the AWS-stack
-//! twin of [`ve_faas`](crate::ve_faas): one hermes-sandbox task per delegate,
+//! twin of [`ve_faas`](crate::ve_faas): one dsh-sandbox task per delegate,
 //! spawned/killed by the broker on the delegation/pairing lifecycle, behind
 //! the SAME [`SandboxBackend`](crate::sandbox_backend) seam. Same image
-//! (`docker/hermes-sandbox`, published to ECR by `build.sh`), same label
+//! (`docker/dsh-sandbox`, published to ECR by `build.sh`), same label
 //! discipline, same quota invariant:
 //!
 //! | veFaaS action       | ECS twin                                          |
@@ -66,11 +66,11 @@ pub struct EcsSandboxConfig {
     /// broker SG only (private-IP model).
     pub security_groups: Vec<String>,
     /// Container name inside the task definition
-    /// (`AGENTKEYS_SANDBOX_ECS_CONTAINER`, default `hermes-sandbox`) — the
+    /// (`AGENTKEYS_SANDBOX_ECS_CONTAINER`, default `dsh-sandbox`) — the
     /// env-override target.
     pub container_name: String,
     /// The sandbox bridge port (`AGENTKEYS_SANDBOX_ECS_PORT`, default 8090 —
-    /// the hermes bridge, same as the VE driver's default).
+    /// the dsh bridge, same as the VE driver's default).
     pub port: u32,
     /// `AGENTKEYS_SANDBOX_ECS_ASSIGN_PUBLIC_IP` (default `1`): Fargate in a
     /// public subnet needs a public IP to PULL from ECR (no NAT in the
@@ -134,7 +134,7 @@ impl EcsSandboxConfig {
             subnets,
             security_groups,
             container_name: non_empty("AGENTKEYS_SANDBOX_ECS_CONTAINER")
-                .unwrap_or_else(|| "hermes-sandbox".to_string()),
+                .unwrap_or_else(|| "dsh-sandbox".to_string()),
             port: parse_u32("AGENTKEYS_SANDBOX_ECS_PORT", 8090)?,
             assign_public_ip: non_empty("AGENTKEYS_SANDBOX_ECS_ASSIGN_PUBLIC_IP")
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
@@ -520,7 +520,7 @@ mod tests {
     fn config_defaults_and_csv_parsing() {
         let cfg = EcsSandboxConfig::from_lookup(cfg_lookup(&[
             ("AGENTKEYS_SANDBOX_ECS_CLUSTER", "agentkeys-sandbox"),
-            ("AGENTKEYS_SANDBOX_ECS_TASKDEF", "hermes-sandbox"),
+            ("AGENTKEYS_SANDBOX_ECS_TASKDEF", "dsh-sandbox"),
             ("AGENTKEYS_SANDBOX_ECS_SUBNETS", "subnet-a, subnet-b ,"),
             ("AGENTKEYS_SANDBOX_ECS_SECURITY_GROUPS", "sg-1"),
         ]))
@@ -528,7 +528,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.subnets, vec!["subnet-a", "subnet-b"]);
         assert_eq!(cfg.security_groups, vec!["sg-1"]);
-        assert_eq!(cfg.container_name, "hermes-sandbox");
+        assert_eq!(cfg.container_name, "dsh-sandbox");
         assert_eq!(cfg.port, 8090);
         assert!(cfg.assign_public_ip);
         assert_eq!(cfg.max_tasks, 20);

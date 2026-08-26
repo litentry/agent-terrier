@@ -1114,12 +1114,8 @@ mod tests {
             "bots/abcdef/memory/memory:watchdog.enc"
         );
         assert_eq!(
-            storage_key(
-                "0xABCDEF",
-                "memory:watchdog",
-                Some("checkpoint/hermes-home")
-            ),
-            "bots/abcdef/memory/memory:watchdog.objects/checkpoint/hermes-home.enc"
+            storage_key("0xABCDEF", "memory:watchdog", Some("checkpoint/dsh-home")),
+            "bots/abcdef/memory/memory:watchdog.objects/checkpoint/dsh-home.enc"
         );
         assert!(storage_key("0xab", "memory:x", Some("k")).starts_with(&s3_prefix("0xab")));
         // The reserved checkpoint slot the daemon writes is a valid key.
@@ -1128,12 +1124,7 @@ mod tests {
 
     #[test]
     fn validate_object_key_rejects_traversal_and_bad_charsets() {
-        for ok in [
-            "checkpoint/hermes-home",
-            "a",
-            "a.b-c_d/e0",
-            &"k".repeat(128),
-        ] {
+        for ok in ["checkpoint/dsh-home", "a", "a.b-c_d/e0", &"k".repeat(128)] {
             assert!(validate_object_key(ok).is_ok(), "{ok:?} should pass");
         }
         for bad in [
@@ -1159,7 +1150,7 @@ mod tests {
     #[test]
     fn aad_service_domain_separates_keyed_objects() {
         let legacy = aad_service("memory:watchdog", None);
-        let keyed = aad_service("memory:watchdog", Some("checkpoint/hermes-home"));
+        let keyed = aad_service("memory:watchdog", Some("checkpoint/dsh-home"));
         let other = aad_service("memory:watchdog", Some("checkpoint/other"));
         assert_eq!(legacy, "memory:watchdog");
         assert_ne!(legacy, keyed);

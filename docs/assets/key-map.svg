@@ -12,7 +12,7 @@
 
   <!-- ======================= TITLE ======================= -->
   <text x="40" y="42" font-size="22" font-weight="bold" fill="#111827">AgentKeys key map — how keys are generated, bound, and why privacy &amp; security hold</text>
-  <text x="40" y="66" font-size="12" fill="#6b7280">Worked example: agentkeys init --email test@litentry.org, then pair agent "hermes". All hashes real; the wallet is illustrative (only the TEE can produce it). Companion to arch.md §4.1.</text>
+  <text x="40" y="66" font-size="12" fill="#6b7280">Worked example: agentkeys init --email test@litentry.org, then pair agent "demo". All hashes real; the wallet is illustrative (only the TEE can produce it). Companion to arch.md §4.1.</text>
 
   <!-- ======================= BOX A: IDENTITY (transient) ======================= -->
   <rect x="40" y="110" width="270" height="210" rx="10" fill="#f3f4f6" stroke="#6b7280" stroke-width="2"/>
@@ -42,7 +42,7 @@
   <text x="388" y="196" font-size="10.5" font-family="Menlo, monospace" fill="#111827">initial_master_wallet_K3_v1 = HKDF(K3_v1, identity_omni)</text>
   <text x="388" y="212" font-size="10.5" font-family="Menlo, monospace" fill="#6b7280">  → 0x7c41e8a3…c6e4d21b   (illustrative)</text>
   <text x="388" y="236" font-size="10.5" font-family="Menlo, monospace" fill="#111827">K4 current_master_wallet = HKDF(K3_v[e], O_master)</text>
-  <text x="388" y="256" font-size="10.5" font-family="Menlo, monospace" fill="#111827">K4 wallet_hermes         = HKDF(K3_v[e], O_hermes)</text>
+  <text x="388" y="256" font-size="10.5" font-family="Menlo, monospace" fill="#111827">K4 wallet_demo           = HKDF(K3_v[e], O_demo  )</text>
   <text x="388" y="276" font-size="10.5" font-family="Menlo, monospace" fill="#111827">credential_kek = HKDF(K3_v[e], "agentkeys.user.v1"||omni)</text>
   <text x="388" y="304" font-size="10.5" font-style="italic" fill="#b91c1c">broker, daemon, workers, even host root: none can read K3 or K4</text>
   <text x="388" y="320" font-size="10.5" font-style="italic" fill="#b91c1c">— they only see addresses and signatures</text>
@@ -65,8 +65,8 @@
   <text x="858" y="160" font-size="10.5" font-family="Menlo, monospace" fill="#111827">O_master = SHA256("agentkeys"||"evm"||wallet)</text>
   <text x="858" y="176" font-size="10.5" font-family="Menlo, monospace" fill="#6b7280">  = a8fde0c5…5d81d9</text>
   <text x="858" y="192" font-size="9.5" font-style="italic" fill="#6b7280">= the wallet's own identity omni — email not in the preimage</text>
-  <text x="858" y="216" font-size="10.5" font-family="Menlo, monospace" fill="#111827">O_hermes = SHA256("agentkeys-hdkd-v1"||</text>
-  <text x="858" y="232" font-size="10.5" font-family="Menlo, monospace" fill="#111827">           O_master||"//hermes")</text>
+  <text x="858" y="216" font-size="10.5" font-family="Menlo, monospace" fill="#111827">O_demo   = SHA256("agentkeys-hdkd-v1"||</text>
+  <text x="858" y="232" font-size="10.5" font-family="Menlo, monospace" fill="#111827">           O_master||"//demo"  )</text>
   <text x="858" y="248" font-size="10.5" font-family="Menlo, monospace" fill="#6b7280">  = a152e6b3…54f7a1</text>
   <text x="858" y="272" font-size="10.5" font-style="italic" fill="#1d4ed8">public + recomputable by design — zero secrets;</text>
   <text x="858" y="288" font-size="10.5" font-style="italic" fill="#1d4ed8">knowing an omni grants NOTHING (see bindings ↓)</text>
@@ -119,7 +119,7 @@
   <text x="458" y="466" font-size="14" font-weight="bold" fill="#7c3aed">5 · ON-CHAIN — single source of truth, default-deny</text>
   <text x="458" y="492" font-size="10.5" font-family="Menlo, monospace" fill="#111827">SidecarRegistry: device_key_hash →</text>
   <text x="458" y="508" font-size="10.5" font-family="Menlo, monospace" fill="#111827">  (operator_omni, actor_omni, roles)</text>
-  <text x="458" y="532" font-size="10.5" font-family="Menlo, monospace" fill="#111827">AgentKeysScope: (O_master, O_hermes) →</text>
+  <text x="458" y="532" font-size="10.5" font-family="Menlo, monospace" fill="#111827">AgentKeysScope: (O_master, O_demo  ) →</text>
   <text x="458" y="548" font-size="10.5" font-family="Menlo, monospace" fill="#111827">  {services…}   — no row = NO access</text>
   <text x="458" y="576" font-size="10.5" font-style="italic" fill="#7c3aed">a paired device with no scope grant can authenticate</text>
   <text x="458" y="592" font-size="10.5" font-style="italic" fill="#7c3aed">but do nothing — installed ≠ permitted</text>
@@ -179,14 +179,14 @@
   <circle cx="72" cy="850" r="11" fill="#0f172a"/>
   <text x="72" y="854" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S2</text>
   <text x="94" y="847" font-size="11.5" font-weight="bold" fill="#111827">Public anchors, gated bindings.</text>
-  <text x="94" y="863" font-size="10.5" fill="#374151">Omnis carry zero secrets — anyone can compute O_hermes, nobody can bind to it: a binding</text>
+  <text x="94" y="863" font-size="10.5" fill="#374151">Omnis carry zero secrets — anyone can compute O_demo  , nobody can bind to it: a binding</text>
   <text x="94" y="878" font-size="10.5" fill="#374151">requires the master's J1-gated pairing claim plus the master's K11 Touch ID UserOp on chain.</text>
 
   <circle cx="72" cy="910" r="11" fill="#0f172a"/>
   <text x="72" y="914" font-size="9.5" font-weight="bold" fill="#ffffff" text-anchor="middle">S3</text>
   <text x="94" y="907" font-size="11.5" font-weight="bold" fill="#111827">Per-actor blast radius.</text>
   <text x="94" y="923" font-size="10.5" fill="#374151">Each actor gets its own K4 wallet, S3 prefix (enforced by IAM PrincipalTag), scope row and audit</text>
-  <text x="94" y="938" font-size="10.5" fill="#374151">identity. A compromised hermes VM touches bots/a152e6b3…/ only — master and siblings unreachable.</text>
+  <text x="94" y="938" font-size="10.5" fill="#374151">identity. A compromised demo-agent VM touches bots/a152e6b3…/ only — master and siblings unreachable.</text>
 
   <!-- column 2 -->
   <circle cx="772" cy="730" r="11" fill="#0f172a"/>

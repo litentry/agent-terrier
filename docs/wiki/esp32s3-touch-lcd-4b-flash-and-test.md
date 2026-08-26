@@ -1,6 +1,6 @@
 **Scope:** how to build, flash, and test the AgentKeys on-device firmware on the Waveshare
 **ESP32-S3-Touch-LCD-4B** (issue [#348](https://github.com/litentry/agentKeys/issues/348)). The
-device is a thin voice client to its assigned cloud agent (a `hermes-sandbox` instance); the LVGL
+device is a thin voice client to its assigned cloud agent (a `dsh-sandbox` instance); the LVGL
 UI mirrors the `volcano-probe` TUI. Source: [`firmware/esp32s3-touch-lcd-4b`](../../firmware/esp32s3-touch-lcd-4b/README.md).
 
 **Status (phased delivery):** P0 board bring-up + P1 LVGL UI + the agent `/v1/chat` client ship
@@ -35,7 +35,7 @@ when a step needs hand-holding.
 - Waveshare **ESP32-S3-Touch-LCD-4B** board.
 - A **data** USB-C cable (not a charge-only cable) from your computer to the board's USB-C port.
 - A 2.4 GHz WiFi network the board can reach.
-- (For the agent test) a reachable **agent endpoint** — a running `hermes-sandbox` bridge over
+- (For the agent test) a reachable **agent endpoint** — a running `dsh-sandbox` bridge over
   HTTPS — and its **bearer** (`AGENTKEYS_BRIDGE_TOKEN`, PR [#347](https://github.com/litentry/agentKeys/pull/347)).
 
 **Host toolchain: ESP-IDF ≥ 5.3** (the BSP's floor). Either the

@@ -13,7 +13,7 @@ Delegate-sandbox spawn used to be VE-only (`ve_faas.rs`, #377). #440 extracts th
 | Quota key | `Metadata` labels | task **tags** (same label names — ONE definition in `ve_faas.rs`) + `startedBy=agentkeys-broker` |
 | Lifetime | veFaaS timeout, extended per resolve | none (explicit stop; **idle teardown = follow-up**) |
 | `agent_url` | ONE static gateway fronting all instances | **per-task** `http://<ENI private ip>:8090`, carried in the ensure outcome |
-| Image | our `docker/hermes-sandbox` → Volcano CR (`CR_IMAGE`) | the SAME image → ECR (`ECR_IMAGE` leg of `build.sh`) |
+| Image | our `docker/dsh-sandbox` → Volcano CR (`CR_IMAGE`) | the SAME image → ECR (`ECR_IMAGE` leg of `build.sh`) |
 | LLM env | #338 `ark` family (Ark) | #338 `ark` family — the family FILE carries this stack's OpenAI-compatible endpoint |
 
 Both drivers configured = boot-time hard error (one backend per broker; no-silent-override). Handlers ([`handlers/sandbox.rs`](../../crates/agentkeys-broker-server/src/handlers/sandbox.rs) — the only call site) are cloud-blind: spawn-on-reason, kill-on-unpair, quota ≤1 live runtime per delegate, `SandboxSpawn`/`SandboxTeardown` audit emits (op_kinds 53/54; the audit body's `function_id` carries the veFaaS app id or `cluster/taskdef` — wire name unchanged, #203).
@@ -34,7 +34,7 @@ The task runs with an **execution role only** (ECR pull + CloudWatch logs). **No
 bash scripts/operator/setup-cloud.sh --only-step 18        # laptop, agentkeys-admin
 # 2. build + push OUR image (linux/amd64):
 PLATFORM=linux/amd64 ECR_IMAGE=$(grep ^SANDBOX_ECR_IMAGE= scripts/operator-workstation.env | cut -d= -f2) \
-  bash docker/hermes-sandbox/build.sh
+  bash docker/dsh-sandbox/build.sh
 # 3. redeploy the broker host so the unit env carries AGENTKEYS_SANDBOX_ECS_*:
 bash scripts/operator/setup-broker-host.sh --ref main      # on the broker host
 ```

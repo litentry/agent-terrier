@@ -265,7 +265,7 @@ impl PairingRequestStore {
     /// request for the SAME `device_pubkey`. Re-running `--request-pairing` (esp.
     /// `--force`, or after a lost local state file) therefore leaves **exactly one**
     /// open request for the device instead of accumulating duplicate pending cards
-    /// (the real incident: two stale `hermes` cards for one device). The DELETE is
+    /// (the real incident: two stale delegate cards for one device). The DELETE is
     /// authenticated — the handler verifies `pop_sig` recovers to `device_pubkey`
     /// BEFORE calling this, so only the device-key holder can supersede its own open
     /// requests. CLAIMED rows are NOT touched (they are the master's bind queue; a

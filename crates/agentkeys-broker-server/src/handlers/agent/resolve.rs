@@ -9,7 +9,7 @@
 //! once, during the claim window): `/resolve` works for the lifetime of the
 //! binding, long after the §10.2 request rows have expired.
 //!
-//! `agent_url` is the device's assigned runtime (its hermes-sandbox bridge).
+//! `agent_url` is the device's assigned runtime (its dsh-sandbox bridge).
 //! When the broker carries sandbox-lifecycle config (#377), resolve ALSO
 //! ensures the delegate's veFaaS instance exists (idempotent spawn — the
 //! create-on-boot half of "create-on-pair, broker-driven") and returns the
@@ -105,7 +105,7 @@ pub async fn agent_resolve(
         "resolved §10.2 binding — J1_agent minted"
     );
 
-    // 4. #377: a DELEGATE needs its runtime — ensure its hermes-sandbox instance
+    // 4. #377: a DELEGATE needs its runtime — ensure its dsh-sandbox instance
     //    exists (idempotent; extends the lifetime of a live one). Best-effort
     //    against the resolve: a veFaaS failure is surfaced in `sandbox.error`,
     //    never a resolve failure. #409 D9: a channel-endpoint DEVICE never

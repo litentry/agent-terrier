@@ -288,21 +288,15 @@ pub struct MemoryGetBody {
 }
 
 /// #594 — the reserved keyed-object slot where a delegate sandbox persists its
-/// runtime CHECKPOINT (the #577 `$HERMES_HOME` export, wrapped in
+/// runtime CHECKPOINT (the #577 runtime-home export, wrapped in
 /// [`CheckpointEnvelope`]) inside its own `memory:<ns>` grant. ONE name shared
 /// by the writer (in-sandbox daemon checkpoint loop) and the reader (the
 /// restore-on-boot leg of the SAME daemon in the replacement instance).
-pub const CHECKPOINT_OBJECT_KEY: &str = "checkpoint/hermes-home";
-
-/// #616 — the dsh runtime's checkpoint slot (`checkpoint/dsh-home`), the twin
-/// of [`CHECKPOINT_OBJECT_KEY`]. The daemon writes the key matching its
-/// runtime (`AGENTKEYS_AGENT_RUNTIME`) and restores ONLY that key: a snapshot
-/// is a runtime-home byte image, so a cross-runtime restore would import the
-/// WRONG home format — a hermes-era snapshot is deliberately not offered to a
-/// dsh bridge (a flipped delegate starts its dsh life from canonical memory,
-/// which the mirror rebuilds). The legacy key stays untouched until the #621
-/// deprecation removes the hermes machinery.
-pub const CHECKPOINT_OBJECT_KEY_DSH: &str = "checkpoint/dsh-home";
+/// Since #621 (Hermes deprecation) there is exactly ONE runtime and ONE slot —
+/// `checkpoint/dsh-home`; the hermes-era `checkpoint/hermes-home` objects are
+/// orphaned data (a snapshot is a runtime-home byte image, never restored
+/// cross-runtime — a migrated delegate started from canonical memory).
+pub const CHECKPOINT_OBJECT_KEY: &str = "checkpoint/dsh-home";
 
 /// #594 — the durable checkpoint payload stored at [`CHECKPOINT_OBJECT_KEY`]:
 /// the bridge `session/export` snapshot plus the write time the bridge's
@@ -312,12 +306,14 @@ pub const CHECKPOINT_OBJECT_KEY_DSH: &str = "checkpoint/dsh-home";
 pub struct CheckpointEnvelope {
     pub version: u32,
     pub saved_at: u64,
-    /// #616 — which runtime's home this snapshot images (`hermes` | `dsh`).
-    /// Absent = a pre-#616 (hermes-era) envelope. Observability only: the
-    /// restore path already selects by object KEY, never by this field.
+    /// #616 — which runtime's home this snapshot images. Observability only
+    /// (`dsh` since #621; absent or `hermes` = a pre-#621 envelope); the
+    /// restore path selects by object KEY, never by this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
-    /// The verbatim bridge export body (`{version, hermes_home, files, …}`).
+    /// The verbatim bridge export body (`{version, hermes_home, files, …}` —
+    /// the `hermes_home` FIELD NAME is the frozen wire shape, predating #621;
+    /// under dsh it carries the `DSH_HOME` path).
     pub snapshot: Value,
 }
 
@@ -2229,7 +2225,7 @@ pub mod sandbox_env {
     /// (the one-click image-update hand-off); the broker re-derives the same
     /// value at call time (keyed on its session keypair + the delegate's
     /// `device_key_hash`), so nothing new sits at rest. NOT a chat-contract
-    /// env — a sandbox without it simply cannot migrate its Hermes sessions.
+    /// env — a sandbox without it simply cannot migrate its runtime home.
     pub const MGMT_TOKEN: &str = "AGENTKEYS_SANDBOX_MGMT_TOKEN";
     /// #594 — the delegate's OWN `memory:<ns>` namespace name (the spawn
     /// template grant), injected at CREATE so the in-sandbox checkpoint loop
@@ -2239,12 +2235,12 @@ pub mod sandbox_env {
     /// NOT a chat-contract env.
     pub const MEMORY_NS: &str = "AGENTKEYS_MEMORY_NS";
 
-    /// The in-sandbox hermes bridge port — where the #577 management surface
+    /// The in-sandbox bridge port — where the #577 management surface
     /// (session export/import, job status) lives, reached through the veFaaS
     /// gateway with `x-faas-proxy-port`. The bridge, not the daemon, hosts it
-    /// because the bridge runs as root and OWNS `$HERMES_HOME` (`/root/.hermes`,
+    /// because the bridge runs as root and OWNS the runtime home (`/root/.dsh`,
     /// unreadable by the daemon's `gem` user). ONE owner: the image's
-    /// supervisord unit pins `PORT="8090"` on `hermes_bridge.py`.
+    /// supervisord unit pins `PORT="8090"` on the bridge.
     pub const SANDBOX_BRIDGE_PORT: u16 = 8090;
 
     /// The identity/link envs required in BOTH custody modes (#552).
@@ -2373,11 +2369,11 @@ mod tests {
         };
         let round: MemoryGetBody =
             serde_json::from_value(serde_json::to_value(&keyed).unwrap()).unwrap();
-        assert_eq!(round.object_key.as_deref(), Some("checkpoint/hermes-home"));
+        assert_eq!(round.object_key.as_deref(), Some("checkpoint/dsh-home"));
 
         let env = CheckpointEnvelope {
             version: 1,
-            runtime: Some("hermes".into()),
+            runtime: Some("dsh".into()),
             saved_at: 1_700_000_000,
             snapshot: serde_json::json!({"version":1,"files":[]}),
         };

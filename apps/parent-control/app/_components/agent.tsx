@@ -109,7 +109,7 @@ export function AgentPanel({ actor }: { actor: Actor }) {
         <span className="lbl">☰ persona</span>
         <span>
           <strong>SOUL.md</strong> frames every turn of this agent — edit it here and it applies{' '}
-          <strong>live</strong> (the agent re-sources; hermes reloads the persona at session start).
+          <strong>live</strong> (the agent re-sources; the runtime reloads the persona at session start).
           The AgentKeys preset (<span className="mono">agent-terrier.md</span>) is a{' '}
           <strong>locked base layer</strong>, always appended and never editable. Edits are
           validated (size cap, no secrets, the persona may never claim to BE AgentKeys) and

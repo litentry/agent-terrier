@@ -45,7 +45,7 @@ pub enum AuditOpKind {
     DeviceAdd = 50,
     DeviceRevoke = 51,
     K10Rotate = 52,
-    /// #377 — the broker spawned a veFaaS hermes-sandbox instance for a
+    /// #377 — the broker spawned a veFaaS delegate-sandbox instance for a
     /// delegate device (create-on-pair / ensure-on-resolve).
     SandboxSpawn = 53,
     /// #377 — the broker killed a delegate's sandbox instance (unpair).

@@ -181,7 +181,7 @@ Stack selection gained the cloud axis ahead of the follow-ups below, with the VE
 
 The broker's VE credential plane gained a SECOND consumer beyond `ve_sts`:
 [`ve_faas.rs`](../../crates/agentkeys-broker-server/src/ve_faas.rs) drives the
-delegate hermes-sandbox lifecycle (`CreateSandbox` / `DescribeSandbox` /
+delegate dsh-sandbox lifecycle (`CreateSandbox` / `DescribeSandbox` /
 `ListSandboxes` / `SetSandboxTimeout` / `KillSandbox`, `service=vefaas`) on the
 SAME `ve_sign` signer and the SAME `VOLCENGINE_ACCESS_KEY`/`_SECRET_KEY`
 identity — spawn-on-pair/resolve, one instance per delegate (Metadata-labeled,

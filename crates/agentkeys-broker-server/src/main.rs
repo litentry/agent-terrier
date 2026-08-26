@@ -72,7 +72,7 @@ enum Command {
     /// once the entry reports Preheated.
     PrecacheRefresh {
         /// Max seconds to wait for the entry to reach Preheated. Default 1h:
-        /// a real preheat of the hermes image took ~30 MINUTES (measured
+        /// a real preheat of a sandbox image took ~30 MINUTES (measured
         /// 2026-07-26 — submitted 17:29 UTC, `success` 17:58), so the old
         /// 600 s default timed out on a perfectly healthy preheat. Exceeding
         /// this is not fatal — a re-run RESUMES the wait rather than
@@ -232,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
         Some(b) => tracing::info!(
             backend = %b.kind(),
             runtime = %b.runtime_ref(),
-            "sandbox lifecycle ENABLED — delegates get a hermes-sandbox on pair/resolve (#377/#440)"
+            "sandbox lifecycle ENABLED — delegates get a dsh-sandbox on pair/resolve (#377/#440)"
         ),
         None => tracing::info!(
             "sandbox lifecycle disabled (no SANDBOX_FUNCTION_ID / AGENTKEYS_SANDBOX_ECS_CLUSTER) — devices use their compiled AGENT_BASE_URL"

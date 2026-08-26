@@ -448,7 +448,7 @@ export function DelegatesPage({
                 </dd>
                 <dt>active</dt><dd className="muted">{a.lastActive}</dd>
                 {/* #577 follow-up — the LIVE runtime identity (bridge-reported
-                    Hermes engine + version, the bump ground truth) and the
+                    agent engine + version, the bump ground truth) and the
                     sandbox instance behind this delegate. Absent rows render
                     nothing: a dead sandbox or an older daemon hides them. */}
                 {(() => {
@@ -513,7 +513,7 @@ export function DelegatesPage({
               )}
               {/* #577 — the in-place runtime update: kill + re-create on the
                   current image, SAME identity/grants/channel, best-effort
-                  Hermes-home hand-off. No archive ceremony, no Touch ID. Also
+                  runtime-home hand-off. No archive ceremony, no Touch ID. Also
                   the "respawn now" affordance for an expired sandbox. */}
               {a.status !== 'bad' && a.deviceKeyHash && (
                 <button

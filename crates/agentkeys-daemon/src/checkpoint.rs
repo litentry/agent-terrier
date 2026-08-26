@@ -5,7 +5,7 @@
 //! Hermes-home hand-off only works between two LIVE instances (broker-RAM
 //! relay) — at expiry there is nothing left to export. This loop makes the
 //! delegate's exportable runtime context DURABLE: periodically ask the local
-//! bridge for its `$HERMES_HOME` snapshot (`/v1/sandbox/mgmt/session/export`,
+//! bridge for its runtime-home snapshot (`/v1/sandbox/mgmt/session/export`,
 //! the same #577 surface the broker relay uses) and persist it into the
 //! delegate's OWN `memory:<ns>` grant under the reserved keyed-object slot
 //! `agentkeys_protocol::CHECKPOINT_OBJECT_KEY`. At boot, the replacement
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use agentkeys_backend_client::protocol::{
     service_memory, CapMintOp, CapMintRequest, CheckpointEnvelope, MemoryGetInput, MemoryPutInput,
-    CHECKPOINT_OBJECT_KEY, CHECKPOINT_OBJECT_KEY_DSH,
+    CHECKPOINT_OBJECT_KEY,
 };
 use agentkeys_backend_client::{normalize_omni_0x, BackendClient, BackendError};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -57,13 +57,10 @@ pub struct CheckpointConfig {
     pub max_bytes: usize,
     /// #616 — the reserved memory object key this delegate's checkpoints live
     /// under, selected by runtime (`AGENTKEYS_AGENT_RUNTIME=dsh` →
-    /// `checkpoint/dsh-home`, else the legacy `checkpoint/hermes-home`). The
-    /// restore path reads ONLY this key: a snapshot is a runtime-home byte
-    /// image, so offering a hermes-era snapshot to a dsh bridge would import
-    /// the wrong home format (a flipped delegate starts fresh from canonical).
+    /// `checkpoint/dsh-home` (#621 — one runtime, one slot). The restore path
+    /// reads ONLY this key; hermes-era `checkpoint/hermes-home` objects are
+    /// orphaned data, never restored cross-runtime.
     pub object_key: String,
-    /// The runtime label stamped into the envelope (observability).
-    pub runtime: String,
 }
 
 impl CheckpointConfig {
@@ -133,15 +130,8 @@ impl CheckpointConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&b| (64 * 1024..=32 * 1024 * 1024).contains(&b))
             .unwrap_or(8 * 1024 * 1024);
-        let runtime = read("AGENTKEYS_AGENT_RUNTIME")
-            .map(|v| v.trim().to_ascii_lowercase())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| "hermes".to_string());
-        let object_key = if runtime == "dsh" {
-            CHECKPOINT_OBJECT_KEY_DSH.to_string()
-        } else {
-            CHECKPOINT_OBJECT_KEY.to_string()
-        };
+        // #621 — one runtime, one slot: the dsh home key is THE checkpoint key.
+        let object_key = CHECKPOINT_OBJECT_KEY.to_string();
         Some(Self {
             chat,
             memory_worker_url,
@@ -150,7 +140,6 @@ impl CheckpointConfig {
             interval: Duration::from_secs(interval),
             max_bytes,
             object_key,
-            runtime,
         })
     }
 
@@ -247,7 +236,7 @@ async fn run_loop(cfg: CheckpointConfig, credential: Arc<DelegateCredential>) {
                     bytes,
                     cap = cfg.max_bytes,
                     "#594 checkpoint: export exceeds the size cap — NOT saved (trim \
-                     $HERMES_HOME or raise AGENTKEYS_CHECKPOINT_MAX_BYTES)"
+                     the runtime home or raise AGENTKEYS_CHECKPOINT_MAX_BYTES)"
                 ),
                 Err(SaveError::SessionExpired) => session = None,
                 Err(SaveError::Failed(e)) => {
@@ -323,7 +312,7 @@ async fn save_once(
     let envelope = CheckpointEnvelope {
         version: 1,
         saved_at: export.snapshot_at,
-        runtime: Some(cfg.runtime.clone()),
+        runtime: Some("dsh".to_string()),
         snapshot: export.snapshot,
     };
     let plaintext =
@@ -640,9 +629,8 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_key_selects_by_runtime_env() {
-        // #616: AGENTKEYS_AGENT_RUNTIME=dsh writes checkpoint/dsh-home; absent
-        // or anything else stays on the legacy hermes key. Lookup-injected.
+    fn checkpoint_key_is_the_single_dsh_slot() {
+        // #621: one runtime, one slot — no env selects a key anymore.
         let base = |k: &str| -> Option<String> {
             match k {
                 "AGENTKEYS_SANDBOX_MGMT_TOKEN" => Some("smt1_x".into()),
@@ -650,19 +638,8 @@ mod tests {
                 _ => None,
             }
         };
-        let mk_chat = || chat("opchat-watchdog");
-        let legacy = CheckpointConfig::from_lookup(&base, mk_chat()).expect("cfg");
-        assert_eq!(legacy.object_key, CHECKPOINT_OBJECT_KEY);
-        assert_eq!(legacy.runtime, "hermes");
-        let dsh_env = |k: &str| -> Option<String> {
-            if k == "AGENTKEYS_AGENT_RUNTIME" {
-                Some("dsh".into())
-            } else {
-                base(k)
-            }
-        };
-        let dsh = CheckpointConfig::from_lookup(&dsh_env, mk_chat()).expect("cfg");
-        assert_eq!(dsh.object_key, CHECKPOINT_OBJECT_KEY_DSH);
-        assert_eq!(dsh.runtime, "dsh");
+        let cfg = CheckpointConfig::from_lookup(&base, chat("opchat-watchdog")).expect("cfg");
+        assert_eq!(cfg.object_key, CHECKPOINT_OBJECT_KEY);
+        assert_eq!(cfg.object_key, "checkpoint/dsh-home");
     }
 }

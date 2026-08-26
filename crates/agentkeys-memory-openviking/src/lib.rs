@@ -2,8 +2,8 @@
 //! integration shape `docs/plan/issue-566-openviking-native-memory-provider.md`.
 //!
 //! OpenViking (`volcengine/OpenViking`) is a self-hosted context database. Since
-//! #566 it is Hermes' FIRST-CLASS native memory provider (`memory.provider:
-//! openviking` — the agent reads/writes it directly via `viking_search` /
+//! #566 it is the AI runtime's FIRST-CLASS native memory provider (under dsh via
+//! the official openviking memory plugin — the agent reads/writes it directly via `viking_search` /
 //! `viking_remember`), and AgentKeys' gate bound moved to INGEST-time: this
 //! crate's consumer is the daemon's distribution mirror, which may only write
 //! what `canonical-get` returned (the memory worker enforces per-namespace
@@ -39,7 +39,7 @@
 //! lines and delete-throughs lines the gate no longer returns (revocation
 //! self-heals; a fresh sandbox rebuilds from canonical). OpenViking can rank
 //! but can never WIDEN visibility, and it is never load-bearing — engine down
-//! ⇒ Hermes falls back to its built-in memory; the mirror retries next pass.
+//! ⇒ the agent falls back to its built-in memory; the mirror retries next pass.
 
 use agentkeys_memory_engine::MemoryLine;
 
@@ -77,6 +77,8 @@ impl OpenVikingClient {
             std::env::var("OPENVIKING_API_KEY").unwrap_or_default(),
             std::env::var("OPENVIKING_ACCOUNT").unwrap_or_else(|_| "default".to_string()),
             std::env::var("OPENVIKING_USER").unwrap_or_else(|_| "default".to_string()),
+            // The engine tree's agent coordinate — the historical hermes-era default,
+            // kept for tree continuity (#621); override via OPENVIKING_AGENT.
             std::env::var("OPENVIKING_AGENT").unwrap_or_else(|_| "hermes".to_string()),
         ))
     }
@@ -100,7 +102,7 @@ impl OpenVikingClient {
 
     fn with_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         // `Actor-Peer` is the header the server's trusted mode reads (and what
-        // the Hermes plugin sends); the legacy `Agent` spelling rides along for
+        // the hermes-era plugin sent); the legacy `Agent` spelling rides along for
         // older servers that logged it.
         let mut req = req
             .header("X-OpenViking-Actor-Peer", &self.agent)

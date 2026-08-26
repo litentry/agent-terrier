@@ -364,7 +364,7 @@ export class DaemonBackend implements AgentKeysClient {
 
   // #577 — one-click in-place image update: kill + re-create on the durable
   // spawn context (same identity/channel/derivation; no chain write, no Touch
-  // ID) with a best-effort Hermes-home hand-off. Slow by nature (a sandbox
+  // ID) with a best-effort runtime-home hand-off. Slow by nature (a sandbox
   // create on the preheated image runs tens of seconds) — callers show busy UI.
   async agentUpdate(input: {
     deviceKeyHash: string;

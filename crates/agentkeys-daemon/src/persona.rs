@@ -21,7 +21,7 @@ pub(crate) const PERSONA_HISTORY_KEEP: usize = 5;
 /// Validate a persona body at EDIT time (§16.2 item 3): non-empty, the
 /// [`PERSONA_MAX_BYTES`] cap, no secret-shaped content, and the agent-agnostic
 /// guardrail — the persona must never claim to BE AgentKeys (AgentKeys is the
-/// key/permission layer; the agent is e.g. Hermes). The scans are best-effort
+/// key/permission layer; the agent is e.g. the dsh runtime). The scans are best-effort
 /// linters over known shapes, not a DLP guarantee — they catch the honest
 /// mistakes (pasting a key file, cargo-culting "I am AgentKeys" from a doc).
 pub(crate) fn validate_persona_body(body: &str) -> Result<(), String> {
@@ -50,7 +50,7 @@ pub(crate) fn validate_persona_body(body: &str) -> Result<(), String> {
             return Err(format!(
                 "persona_identity_claim: found `{claim}` — the persona must never claim to \
                  BE AgentKeys (AgentKeys is the key/permission layer; the agent is the \
-                 assistant, e.g. Hermes)"
+                 assistant, e.g. the dsh agent)"
             ));
         }
     }

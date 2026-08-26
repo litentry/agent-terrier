@@ -6,7 +6,7 @@
  */
 export type ApiAgentUpdateResult = { device_key_hash: string, old_sandbox_ids: Array<string>, sandbox_id: string | null, sandbox_status: string | null, sandbox_error: string | null, 
 /**
- * Whether the Hermes-home hand-off landed in the replacement.
+ * Whether the runtime-home hand-off landed in the replacement.
  */
 session_migrated: boolean, 
 /**

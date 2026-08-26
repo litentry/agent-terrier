@@ -20,7 +20,7 @@
 //! on-chain gate still rejects every downstream mint until then.
 //!
 //! On hosts with sandbox-lifecycle config, the claimed branch ALSO ensures the
-//! delegate's veFaaS hermes-sandbox exists (#377 create-on-pair) and returns
+//! delegate's veFaaS dsh-sandbox exists (#377 create-on-pair) and returns
 //! `agent_url` + a `sandbox` outcome object, mirroring `/v1/agent/resolve`.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
@@ -122,7 +122,7 @@ pub async fn pairing_poll(
     // 4. #377 create-on-pair — but **device pairing NEVER spawns** (#409 D9). A
     //    device is a channel endpoint (its scope is channel-only, D6): binding it
     //    attaches channels, never a runtime. Only a DELEGATE claim (any non-
-    //    channel grant, or an as-yet-unscoped delegate) gets its hermes-sandbox
+    //    channel grant, or an as-yet-unscoped delegate) gets its dsh-sandbox
     //    ensured so the first talk doesn't 500 `no_ready_instance`. Best-effort:
     //    a veFaaS failure rides in `sandbox.error`; the pairing already succeeded.
     let is_device = agentkeys_protocol::scope_is_device_only(&requested_scope);

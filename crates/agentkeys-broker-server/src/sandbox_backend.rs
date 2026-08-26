@@ -245,9 +245,9 @@ impl SandboxBackend {
     }
 
     /// #577 — where the broker reaches ONE instance's management surface (the
-    /// hermes bridge's `/v1/sandbox/mgmt/*` routes on
+    /// dsh bridge's `/v1/sandbox/mgmt/*` routes on
     /// [`agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT`] — the bridge,
-    /// not the daemon, owns `$HERMES_HOME`): a base URL + the headers that pin
+    /// not the daemon, owns `$DSH_HOME`): a base URL + the headers that pin
     /// the request to THAT instance. veFaaS fronts every instance behind the
     /// shared gateway with per-request routing headers (the measured
     /// `x-faas-instance-name`/`x-faas-proxy-port` contract — AGENTS.ops

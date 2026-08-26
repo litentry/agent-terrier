@@ -191,7 +191,7 @@ pub struct K10RotateBody {
     pub new_device_key_hash: String,
 }
 
-/// #377 — the broker spawned a veFaaS hermes-sandbox instance for a delegate
+/// #377 — the broker spawned a veFaaS delegate-sandbox instance for a delegate
 /// device (create-on-pair at §10.2 poll, or ensure-on-resolve at #367 boot).
 /// Emitted only when an instance was actually CREATED — an idempotent ensure
 /// that found an existing live instance is a no-op and emits nothing.

@@ -211,7 +211,7 @@ pub struct UiBridgeState {
     /// locally (deterministic, dev/no-infra). Drives cred auto-categorize (#207 item 7)
     /// + connect-time auto-distribute (#207 item 5).
     pub classify_url: Option<String>,
-    /// #390 — the bound agent's sandbox BRIDGE base URL (hermes_bridge.py,
+    /// #390 — the bound agent's sandbox BRIDGE base URL (the in-sandbox bridge,
     /// e.g. `http://127.0.0.1:8090`): the persona/context apply + restart
     /// target. `None` ⇒ persona edits still persist canonically but report
     /// `applied: false` (`sandbox_unconfigured`), and the restart verb 503s.
@@ -6928,7 +6928,7 @@ pub struct ApiAgentUpdateResult {
     pub sandbox_id: Option<String>,
     pub sandbox_status: Option<String>,
     pub sandbox_error: Option<String>,
-    /// Whether the Hermes-home hand-off landed in the replacement.
+    /// Whether the runtime-home hand-off landed in the replacement.
     pub session_migrated: bool,
     /// Always-present human-readable hand-off outcome (what migrated, or why
     /// nothing could — pre-#577 image, unsupported backend, oversized home).
@@ -6968,7 +6968,7 @@ pub struct ApiDelegateImageStatus {
     /// current `image` above.
     pub booted_image_url: Option<String>,
     /// The LIVE agent identity the instance's bridge reports (#577 follow-up):
-    /// ACP agent name (`hermes-agent`), its running version (the Hermes-bump
+    /// agent name the bridge reports (`dsh` since #621), its running version (the bump
     /// ground truth), and the LLM endpoint id.
     pub agent_engine: Option<String>,
     pub agent_version: Option<String>,
@@ -7603,7 +7603,8 @@ async fn master_chat_poll(
 /// compiled-in catalog, seed the delegate's persona canonical (the #390 store
 /// — versioned; the locked base layer is appended at apply) + apply it into
 /// the FRESH sandbox (instance-routed via `x-faas-instance-name`), and
-/// distribute the skills docs to `$HERMES_HOME/skills/`. Best-effort LOUD:
+/// distribute the skills docs through the bridge's skills surface (it owns
+/// the runtime home's skills dir). Best-effort LOUD:
 /// the on-chain ceremony is already final, so every failure surfaces in the
 /// audit feed + logs and never fails the submit. Content, never authority —
 /// nothing here grants anything beyond the phase-1 template.
@@ -7725,7 +7726,7 @@ async fn apply_preset_at_spawn(
                         preset_id,
                         "bridge accepted the apply but returned no skills_written — the \
                          sandbox image predates #428 skills distribution; rebuild \
-                         docker/hermes-sandbox"
+                         docker/dsh-sandbox"
                     );
                     "skills NOT distributed (pre-#428 sandbox image — rebuild required)".into()
                 }
@@ -7735,7 +7736,7 @@ async fn apply_preset_at_spawn(
                     target: "agentkeys.daemon.ui_bridge",
                     preset_id,
                     "bridge rejected the skills apply ({e}) — pre-#428 sandbox image; \
-                     rebuild docker/hermes-sandbox"
+                     rebuild docker/dsh-sandbox"
                 );
                 "skills NOT distributed (pre-#428 sandbox image — rebuild required)".into()
             }
@@ -10789,7 +10790,7 @@ async fn reject_master_inbox(
 // validated at EDIT time (crate::persona), stored VERSIONED in the reserved
 // `persona` memory namespace (key `soul:<omni>` + `soul:<omni>@<n>` history),
 // and APPLIED into the bound agent's sandbox via the bridge's
-// `/v1/context/apply` (file write + ACP re-source — hermes reloads SOUL.md at
+// `/v1/context/apply` (file write + agent re-source — the runtime reloads the persona at
 // session creation). Storage rides the SAME per-ns machinery as the plant
 // (real worker or in-memory fallback) but writes the array WHOLESALE under the
 // plant lock — rotation is not a merge.
@@ -10962,7 +10963,7 @@ async fn persona_store(
     }
 }
 
-/// One request to the configured sandbox bridge (hermes_bridge.py). `Err` is a
+/// One request to the configured sandbox bridge. `Err` is a
 /// human-readable transport/HTTP reason — the callers surface it explicitly.
 async fn sandbox_bridge_request(
     state: &SharedUiBridgeState,

@@ -292,7 +292,7 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_WORKER_CLASSIFY_URL")]
     classify_url: Option<String>,
 
-    /// #390 — the bound agent's sandbox BRIDGE base URL (hermes_bridge.py, e.g.
+    /// #390 — the bound agent's sandbox BRIDGE base URL (the in-sandbox bridge, e.g.
     /// http://127.0.0.1:8090 for the local dev sandbox). Set ⇒ persona edits and
     /// the restart verb APPLY live into the sandbox (file write + ACP re-source);
     /// unset ⇒ persona edits persist canonically only (`applied: false`) and the
@@ -2233,7 +2233,7 @@ mod pairing_poll_tests {
             "0xdevice",
             "childomni",
             "operomni",
-            "//hermes",
+            "//demo-agent",
             "dkh",
             "popsig",
             "/s.jwt",
@@ -2538,7 +2538,7 @@ mod pairing_poll_tests {
         // Valid shapes (64-char lowercase hex omni; //label path) pass.
         assert!(is_omni_hex(&"0123456789abcdef".repeat(4)));
         assert!(is_omni_hex(&"a".repeat(64)));
-        assert!(is_derivation_path("//hermes"));
+        assert!(is_derivation_path("//demo-agent"));
         assert!(is_derivation_path("//agent-01"));
 
         // Reflected tokens / wrong shapes are rejected — these would otherwise
@@ -2559,8 +2559,8 @@ mod pairing_poll_tests {
         for bad in [
             "//session_jwt=SENTINEL_JWT", // label charset
             "//UPPER",
-            "/hermes", // single slash
-            "//",      // empty label
+            "/demo-agent", // single slash
+            "//",          // empty label
             "session_jwt=x",
             "",
         ] {
@@ -2576,12 +2576,12 @@ mod pairing_poll_tests {
         // 64-char lowercase hex operator omni; child is its REAL HDKD derivation
         // (the semantic check requires child_omni == HDKD(operator, label)).
         let operator = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let child = agentkeys_core::actor_omni::child_omni_hex(operator, "hermes").unwrap();
+        let child = agentkeys_core::actor_omni::child_omni_hex(operator, "demo-agent").unwrap();
         let ok = serde_json::json!({
             "session_jwt": "tok",
             "child_omni": child.clone(),
             "operator_omni": operator,
-            "derivation_path": "//hermes",
+            "derivation_path": "//demo-agent",
         });
         assert!(validate_claimed_binding(&ok).is_ok());
 
@@ -2602,7 +2602,7 @@ mod pairing_poll_tests {
         // Missing session_jwt is rejected (before any field/HDKD check) without
         // echoing the body.
         let no_jwt = serde_json::json!({
-            "child_omni": child.clone(), "operator_omni": operator, "derivation_path": "//hermes",
+            "child_omni": child.clone(), "operator_omni": operator, "derivation_path": "//demo-agent",
         });
         assert!(validate_claimed_binding(&no_jwt).is_err());
     }
@@ -2618,7 +2618,7 @@ mod pairing_poll_tests {
             "session_jwt": "tok",
             "child_omni": wrong_child,
             "operator_omni": operator,
-            "derivation_path": "//hermes",
+            "derivation_path": "//demo-agent",
         });
         let err = validate_claimed_binding(&v)
             .expect_err("HDKD child mismatch must be rejected")

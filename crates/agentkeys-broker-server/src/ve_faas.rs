@@ -1,4 +1,4 @@
-//! Broker-driven veFaaS sandbox lifecycle (issue #377) — one hermes-sandbox
+//! Broker-driven veFaaS sandbox lifecycle (issue #377) — one dsh-sandbox
 //! instance per delegate device, spawned/extended/killed by the broker on the
 //! delegation/pairing lifecycle. veFaaS OpenAPI on the SAME [`ve_sign`]
 //! Signature V4 signer as [`ve_sts`](crate::ve_sts) (`service = "vefaas"`,
@@ -101,7 +101,7 @@ const DELETE_GONE_SECS: u64 = 60;
 const POLL_INTERVAL_SECS: u64 = 10;
 
 /// How often an in-flight preheat logs progress. A real preheat of the ~18 GB
-/// hermes image takes ~30 MINUTES (measured 2026-07-26: submitted 17:29 UTC,
+/// sandbox image takes ~30 MINUTES (measured 2026-07-26: submitted 17:29 UTC,
 /// `success` at 17:58), so logging every poll produced ~180 identical lines.
 const PROGRESS_LOG_SECS: u64 = 120;
 
@@ -116,11 +116,11 @@ pub struct VeFaasConfig {
     /// returned as `agent_url` on resolve. Trailing `/` trimmed so the
     /// device's `POST <url>/v1/chat` never doubles the slash.
     pub gateway_url: String,
-    /// Hermes image in Volcano CR (`CR_IMAGE`, ve-deployment.md §2). Empty =
+    /// delegate image in Volcano CR (`CR_IMAGE`, ve-deployment.md §2). Empty =
     /// spawn on the sandbox application's console-configured image.
     pub image: String,
     /// Instance exposed port = the gateway's default proxy target
-    /// (`AGENTKEYS_VEFAAS_PORT`, default 8090 — the hermes bridge).
+    /// (`AGENTKEYS_VEFAAS_PORT`, default 8090 — the sandbox bridge).
     pub port: u32,
     /// Instance command (`AGENTKEYS_VEFAAS_COMMAND`, default `/opt/gem/run.sh`
     /// — the base-image entrypoint, same default as spawn-vefaas.sh).
@@ -134,7 +134,7 @@ pub struct VeFaasConfig {
     /// (`AGENTKEYS_VEFAAS_CREATE_TIMEOUT_SECS`, default 180; bounds 15..=600).
     /// SEPARATE from `timeout_minutes` (the sandbox LIFETIME): provisioning an
     /// instance from a large preheated image routinely exceeds the 15s default
-    /// client timeout (#543 "operation timed out" on a 17 GB hermes-sandbox spawn),
+    /// client timeout (#543 "operation timed out" on a 17 GB image spawn),
     /// so this ONE call gets a generous ceiling while the quick lifecycle calls
     /// keep the short default.
     pub create_timeout_secs: u32,
@@ -157,40 +157,6 @@ pub struct VeFaasConfig {
     pub allow_direct_ark: bool,
     pub host: String,
     pub region: String,
-}
-
-/// #620 — the delegate-runtime valve. The broker spawns whichever AI runtime
-/// `AGENTKEYS_AGENT_RUNTIME` selects, so the migration from Hermes to dsh (and a
-/// rollback) is one broker env var plus a converge — never a code change or a
-/// per-delegate ceremony. Resolved ONCE at config load, so the precache, the
-/// `CreateSandbox` call and the #577 refresh all spawn the SAME image by
-/// construction (they read `self.config.image`).
-///
-/// - unset / `hermes` (the default through the whole migration) → `CR_IMAGE`
-/// - `dsh` → `CR_IMAGE_DSH`; **fails loud** when that ref is unset, because a
-///   silent fall-back to an empty image would let the broker spawn the app
-///   default while every surface reports healthy (the #543/#552 silent-chat
-///   class). The remedy is named in the error: build + commit the ref first.
-/// - anything else → a hard error (a typo must never resolve to a runtime).
-///
-/// Pure over its inputs so it is unit-tested without touching process env (the
-/// #258/#259 no-env-mutation-in-tests rule).
-pub fn resolve_runtime_image(
-    runtime: Option<&str>,
-    cr_image: Option<String>,
-    cr_image_dsh: Option<String>,
-) -> Result<String> {
-    match runtime.map(str::trim).unwrap_or("hermes") {
-        "hermes" => Ok(cr_image.unwrap_or_default()),
-        "dsh" => cr_image_dsh.ok_or_else(|| {
-            anyhow!(
-                "AGENTKEYS_AGENT_RUNTIME=dsh but CR_IMAGE_DSH is unset — the broker would spawn                  the app default (silent wrong-runtime). Build + commit the ref first:                  bash scripts/operator/build-image-dsh.sh (records CR_IMAGE_DSH), then converge."
-            )
-        }),
-        other => bail!(
-            "AGENTKEYS_AGENT_RUNTIME={other:?} is not a known runtime (want: hermes | dsh) —              refusing to guess which image to spawn"
-        ),
-    }
 }
 
 impl VeFaasConfig {
@@ -239,11 +205,7 @@ impl VeFaasConfig {
         Ok(Some(Self {
             function_id,
             gateway_url,
-            image: resolve_runtime_image(
-                non_empty("AGENTKEYS_AGENT_RUNTIME").as_deref(),
-                non_empty("CR_IMAGE"),
-                non_empty("CR_IMAGE_DSH"),
-            )?,
+            image: non_empty("CR_IMAGE").unwrap_or_default(),
             port: parse_u32("AGENTKEYS_VEFAAS_PORT", 8090)?,
             command: non_empty("AGENTKEYS_VEFAAS_COMMAND")
                 .unwrap_or_else(|| "/opt/gem/run.sh".to_string()),
@@ -390,7 +352,7 @@ impl VeFaasClient {
     ///
     ///   SANDBOX_FUNCTION_ID                the sandbox application (enables the feature)
     ///   SANDBOX_GATEWAY_URL                devices' agent base URL (required with the above)
-    ///   CR_IMAGE                           hermes image in Volcano CR (empty = app default)
+    ///   CR_IMAGE                           delegate image in Volcano CR (empty = app default)
     ///   AGENTKEYS_VEFAAS_PORT              default 8090
     ///   AGENTKEYS_VEFAAS_COMMAND           default /opt/gem/run.sh
     ///   AGENTKEYS_VEFAAS_TIMEOUT_MINUTES   default 1440 (3..=1440)
@@ -1120,7 +1082,7 @@ impl VeFaasClient {
         }
     }
 
-    /// The instance env for a delegate's hermes-sandbox: the #338 ark family
+    /// The instance env for a delegate's sandbox: the #338 ark family
     /// (resolved NOW so rotations apply) + the optional search model. A
     /// missing ark family is a HARD error with the rotation command — an
     /// instance without an LLM key would boot broken in a way the device
@@ -1546,84 +1508,17 @@ mod tests {
     }
 
     #[test]
-    fn runtime_valve_defaults_to_hermes_image() {
-        // #620: unset or "hermes" → CR_IMAGE, through the whole migration.
-        assert_eq!(
-            resolve_runtime_image(None, Some("cr/hermes:v1".into()), Some("cr/dsh:v1".into()))
-                .unwrap(),
-            "cr/hermes:v1"
-        );
-        assert_eq!(
-            resolve_runtime_image(Some("hermes"), Some("cr/hermes:v1".into()), None).unwrap(),
-            "cr/hermes:v1"
-        );
-        // trailing space (env-file sloppiness) is trimmed, not a typo
-        assert_eq!(
-            resolve_runtime_image(Some(" dsh "), None, Some("cr/dsh:v1".into())).unwrap(),
-            "cr/dsh:v1"
-        );
-    }
-
-    #[test]
-    fn runtime_valve_dsh_selects_the_dsh_image() {
-        assert_eq!(
-            resolve_runtime_image(
-                Some("dsh"),
-                Some("cr/hermes:v1".into()),
-                Some("cr/dsh:v9".into())
-            )
-            .unwrap(),
-            "cr/dsh:v9"
-        );
-    }
-
-    #[test]
-    fn runtime_valve_dsh_without_ref_fails_loud() {
-        // the silent-wrong-runtime guard: dsh selected but no CR_IMAGE_DSH.
-        let err = resolve_runtime_image(Some("dsh"), Some("cr/hermes:v1".into()), None)
-            .err()
-            .unwrap();
-        assert!(err.to_string().contains("CR_IMAGE_DSH is unset"), "{err}");
-        assert!(err.to_string().contains("build-image-dsh.sh"), "{err}");
-    }
-
-    #[test]
-    fn runtime_valve_unknown_runtime_is_a_hard_error() {
-        let err = resolve_runtime_image(Some("openclaw"), Some("cr/h:v1".into()), None)
-            .err()
-            .unwrap();
-        assert!(err.to_string().contains("not a known runtime"), "{err}");
-    }
-
-    #[test]
-    fn config_runtime_valve_flows_through_from_lookup() {
-        // end-to-end: the valve selects the image the whole spawn path reads.
-        let base = [
+    fn config_image_comes_straight_from_cr_image() {
+        // #621 — the runtime valve is gone: CR_IMAGE is THE image every spawn
+        // path reads (precache, CreateSandbox, the #577 refresh).
+        let cfg = VeFaasConfig::from_lookup(cfg_lookup(&[
             ("SANDBOX_FUNCTION_ID", "fn1"),
             ("SANDBOX_GATEWAY_URL", "https://gw.example"),
-            ("CR_IMAGE", "cr/hermes:v1"),
-            ("CR_IMAGE_DSH", "cr/dsh:v2"),
-        ];
-        let hermes = VeFaasConfig::from_lookup(cfg_lookup(&base))
-            .unwrap()
-            .unwrap();
-        assert_eq!(hermes.image, "cr/hermes:v1");
-
-        let mut dsh_env = base.to_vec();
-        dsh_env.push(("AGENTKEYS_AGENT_RUNTIME", "dsh"));
-        let dsh = VeFaasConfig::from_lookup(cfg_lookup(&dsh_env))
-            .unwrap()
-            .unwrap();
-        assert_eq!(dsh.image, "cr/dsh:v2");
-
-        // dsh selected, no ref → the whole config load fails loud
-        let broken: Vec<_> = base
-            .iter()
-            .filter(|(k, _)| *k != "CR_IMAGE_DSH")
-            .copied()
-            .chain([("AGENTKEYS_AGENT_RUNTIME", "dsh")])
-            .collect();
-        assert!(VeFaasConfig::from_lookup(cfg_lookup(&broken)).is_err());
+            ("CR_IMAGE", "cr/dsh-sandbox:v2"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(cfg.image, "cr/dsh-sandbox:v2");
     }
 
     #[test]

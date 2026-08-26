@@ -34,7 +34,7 @@ export interface InboxItemBody {
 }
 
 /** #390 — one live context file shaping the bound agent. Shape owned by the
- *  sandbox bridge (`hermes_bridge.py context_files()`), proxied verbatim by
+ *  sandbox bridge (its `context_files()` surface), proxied verbatim by
  *  the daemon (`GET /v1/master/agent/context`) — NOT a ts-rs type because the
  *  producer is Python, not Rust. */
 export interface AgentContextFile {
@@ -622,7 +622,7 @@ export interface AgentKeysClient {
   // #390 — the per-delegate persona (`SOUL.md`) editor + the agent restart /
   // live-context legs (master-hub-topology.md §16). `ApiPersonaState` /
   // `ApiPersonaEditResponse` are ts-rs-generated wire types; the context-files
-  // shape is owned by the sandbox bridge (hermes_bridge.py `context_files()`),
+  // shape is owned by the sandbox bridge (`context_files()`),
   // proxied verbatim by the daemon.
   getPersona(delegateOmni: string): Promise<Result<ApiPersonaState>>;
   editPersona(delegateOmni: string, body: string): Promise<Result<ApiPersonaEditResponse>>;
@@ -749,7 +749,7 @@ export interface AgentKeysClient {
   archiveSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse>>;
   /** #577 — one-click in-place image update (kill + re-create on the durable
    *  spawn context; same identity/channel; no chain write, no Touch ID) with a
-   *  best-effort Hermes-home hand-off. Slow (a sandbox create takes tens of
+   *  best-effort runtime-home hand-off. Slow (a sandbox create takes tens of
    *  seconds) — show busy UI. */
   agentUpdate(input: {
     deviceKeyHash: string;

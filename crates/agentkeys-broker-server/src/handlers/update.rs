@@ -6,21 +6,18 @@
 //! #546 spawn context** — same actor/omni, same K10 derivation (a fresh #552
 //! J1 is minted per create), same chat channel, no on-chain write, no Touch
 //! ID, no slot movement. Between kill and re-create it performs a BEST-EFFORT
-//! Hermes-home hand-off: export the old instance's on-disk `$HERMES_HOME`
-//! state through the in-sandbox daemon's #577 management surface, import it
+//! runtime-home hand-off: export the old instance's on-disk `DSH_HOME`
+//! state through the in-sandbox bridge's #577 management surface, import it
 //! into the replacement, then re-source the agent. Every degradation
 //! (pre-#577 image with no export endpoint, ECS backend with no
 //! broker-routable management path, oversized home) is SURFACED in the
-//! response — the update itself still lands.
+//! response — the update itself still lands. (The wire doc's `hermes_home`
+//! FIELD NAME is the frozen shape, predating #621.)
 //!
-//! What the hand-off can and cannot preserve (measured, not assumed): Hermes
-//! keeps its config / persona / skills / backups on disk under `$HERMES_HOME`
-//! — those migrate. The live ACP conversation is held in the hermes bridge's
-//! process MEMORY (`hermes_bridge.py` — "the session IS the memory") and dies
-//! with the instance, exactly as it already does at every veFaaS expiry
-//! (default lifetime 1440 min). Making the transcript itself durable is a
-//! Hermes-config/persistence question tracked in #577's follow-ups, not
-//! something this relay can conjure.
+//! What the hand-off can and cannot preserve: the runtime home carries the
+//! profile patch, durable session JSONL and skills docs — those migrate.
+//! Anything held only in process memory dies with the instance, exactly as it
+//! already does at every veFaaS expiry (default lifetime 1440 min).
 //!
 //! `POST /v1/agent/image-status` (same auth) is the staleness signal: veFaaS
 //! exposes no image digest, but an instance FREEZES the pre-cache
@@ -40,9 +37,9 @@ use crate::handlers::accept::{aerr, bearer, eth_call, load_accept_config, norm_o
 use crate::handlers::revoke::{parse_device_probe, DeviceProbe};
 use crate::state::SharedState;
 
-/// Ceiling for one exported Hermes home (the JSON snapshot body, bytes).
-/// `$HERMES_HOME` is config + persona + skills docs (32 KiB/skill cap at the
-/// bridge) + optional upstream backups — tens of KiB in practice; 32 MiB is
+/// Ceiling for one exported runtime home (the JSON snapshot body, bytes).
+/// `DSH_HOME` is the profile patch + durable session JSONL + skills docs
+/// (32 KiB/skill cap at the bridge) — tens of KiB in practice; 32 MiB is
 /// generous headroom, and anything larger is refused LOUDLY rather than
 /// relayed through broker RAM unbounded (D2: the snapshot only ever lives in
 /// this request's memory, never at rest).
@@ -80,7 +77,7 @@ pub struct AgentUpdateResponse {
     pub session: SessionHandoff,
 }
 
-/// The Hermes-home hand-off outcome — always present, never silent.
+/// The runtime-home hand-off outcome — always present, never silent.
 #[derive(Debug, Serialize)]
 pub struct SessionHandoff {
     pub migrated: bool,
@@ -130,7 +127,7 @@ pub struct DelegateImageStatus {
     pub booted_image_url: Option<String>,
     /// The LIVE agent identity the instance's bridge `/healthz` reports —
     /// what is actually RUNNING, not what the image tag claims. `agent_engine`
-    /// is the ACP agent name (`hermes-agent`), `agent_version` its version
+    /// is the agent name the bridge reports (`dsh` since #621), `agent_version`
     /// (the #483 bump cadence's ground truth), `model` the LLM endpoint id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_engine: Option<String>,
@@ -454,24 +451,6 @@ pub(crate) async fn rotate_delegate_runtime(
         "#577 rotate: starting (snapshot → kill → re-create → import)"
     );
 
-    // #640 — a session hand-off is only meaningful within ONE runtime family:
-    // a snapshot is a runtime-home byte image (#616), so importing a hermes
-    // home into DSH_HOME (or back, on a rollback) plants the wrong home
-    // format. Skip the hand-off on POSITIVE evidence of a family switch (the
-    // old instance's spawn-frozen tag vs what the #620 valve resolves now);
-    // unknowns (ECS, console-default image) keep the hand-off, never guess.
-    let runtime_switch: Option<(String, String)> = match (live.first(), backend.current_image_tag())
-    {
-        (Some(inst), Some(current)) => backend
-            .booted_image_info(&inst.id)
-            .await
-            .ok()
-            .flatten()
-            .filter(|b| is_runtime_family_switch(&b.source_image_url, &current))
-            .map(|b| (b.source_image_url, current)),
-        _ => None,
-    };
-
     // Snapshot + job guard against the OLD instance (best-effort, loud).
     let mgmt_token =
         crate::handlers::sandbox::sandbox_mgmt_token(&state.session_keypair, device_key_hash);
@@ -514,20 +493,7 @@ pub(crate) async fn rotate_delegate_runtime(
                 "#577 rotate: old-instance status probe failed (pre-#577 image?) — proceeding"
             ),
         }
-        if let Some((old_image, new_image)) = &runtime_switch {
-            session_detail = format!(
-                "session hand-off skipped: runtime family switch ({} → {}) — a home snapshot \
-                 is runtime-keyed (#616); the replacement starts from canonical memory",
-                image_repo(old_image),
-                image_repo(new_image)
-            );
-            tracing::info!(
-                device_key_hash = %device_key_hash,
-                old_image = %old_image,
-                new_image = %new_image,
-                "#640 rotate: session hand-off skipped — runtime family switch"
-            );
-        } else {
+        {
             match mgmt_request(
                 &state.http,
                 &base,
@@ -553,7 +519,7 @@ pub(crate) async fn rotate_delegate_runtime(
                 }
                 Err(e) => {
                     session_detail = format!(
-                        "session export unavailable ({e}) — updated without the Hermes-home \
+                        "session export unavailable ({e}) — updated without the runtime-home \
                          hand-off (a pre-#577 image has no export surface; this heals once the \
                          new image runs)"
                     );
@@ -636,7 +602,7 @@ pub(crate) async fn rotate_delegate_runtime(
                         if v.get("applied").and_then(|b| b.as_bool()).unwrap_or(true) {
                             migrated = true;
                             session_detail = format!(
-                                "hermes home migrated ({} file(s); agent re-sourced: {})",
+                                "runtime home migrated ({} file(s); agent re-sourced: {})",
                                 v.get("restored_files")
                                     .and_then(|n| n.as_u64())
                                     .unwrap_or(0),
@@ -658,7 +624,7 @@ pub(crate) async fn rotate_delegate_runtime(
                     session_detail = format!(
                         "exported, but import into the replacement kept failing for \
                          {IMPORT_RETRY_WINDOW_SECS}s (last: {last_err}) — the new instance runs \
-                         with a fresh Hermes home"
+                         with a fresh runtime home"
                     );
                     break;
                 }
@@ -795,67 +761,14 @@ pub async fn agent_image_status(
     }))
 }
 
-/// The repo path of an image ref — the ref minus a trailing `:tag` (a colon
-/// followed by a slash-free suffix; a `host:port/...` ref keeps its port).
-fn image_repo(image_ref: &str) -> &str {
-    match image_ref.trim().rsplit_once(':') {
-        Some((repo, tag)) if !tag.contains('/') => repo,
-        _ => image_ref.trim(),
-    }
-}
-
-/// #640 — pure verdict: does moving `old_ref` → `current_ref` cross a runtime
-/// family (hermes-sandbox ⇄ dsh-sandbox)? Repo-path comparison: a tag bump
-/// within one family is NOT a switch (the hand-off stays), a family change in
-/// either direction is.
-fn is_runtime_family_switch(old_ref: &str, current_ref: &str) -> bool {
-    image_repo(old_ref) != image_repo(current_ref)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn image_repo_strips_only_a_slash_free_tag() {
-        assert_eq!(
-            image_repo("cr.example.com/agentkeys/dsh-sandbox:v202608241032-gda35a18a"),
-            "cr.example.com/agentkeys/dsh-sandbox"
-        );
-        // Untagged ref stays whole.
-        assert_eq!(
-            image_repo("cr.example.com/agentkeys/dsh-sandbox"),
-            "cr.example.com/agentkeys/dsh-sandbox"
-        );
-        // A registry port is not a tag.
-        assert_eq!(
-            image_repo("registry:5000/agentkeys/dsh-sandbox"),
-            "registry:5000/agentkeys/dsh-sandbox"
-        );
-        assert_eq!(
-            image_repo("registry:5000/agentkeys/dsh-sandbox:v1"),
-            "registry:5000/agentkeys/dsh-sandbox"
-        );
-    }
-
-    #[test]
-    fn runtime_family_switch_fires_on_family_change_only() {
-        let hermes = "cr.example.com/agentkeys/hermes-sandbox:v20260813-053412-g753b5d51";
-        let dsh = "cr.example.com/agentkeys/dsh-sandbox:v202608241032-gda35a18a";
-        // The migration direction and the rollback direction both switch.
-        assert!(is_runtime_family_switch(hermes, dsh));
-        assert!(is_runtime_family_switch(dsh, hermes));
-        // A tag bump within one family is NOT a switch — the hand-off stays.
-        assert!(!is_runtime_family_switch(
-            dsh,
-            "cr.example.com/agentkeys/dsh-sandbox:v299901010101-gdeadbeef"
-        ));
-        assert!(!is_runtime_family_switch(hermes, hermes));
-    }
-
-    #[test]
     fn parse_agent_health_reads_the_bridge_healthz_shape() {
-        // The live shape (hermes_bridge.py /healthz — same body on 200 and
+        // The live shape (the bridge /healthz — same body on 200 and; the
+        // hermes-agent row is historical data proving shape-generality
         // the 503-while-restarting case, which is why status is ignored).
         let h = parse_agent_health(
             br#"{"ok":true,"engine":"hermes-agent","version":"0.19.0","model":"ep-2025-x"}"#,

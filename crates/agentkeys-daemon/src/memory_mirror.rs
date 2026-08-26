@@ -1,7 +1,7 @@
 //! #566 — the delegate-side DISTRIBUTION MIRROR (arch §17.6 `context flows`,
 //! plan `docs/plan/issue-566-openviking-native-memory-provider.md`).
 //!
-//! Hermes consumes OpenViking as its first-class native memory provider
+//! The delegate runtime consumes OpenViking as its first-class native memory provider
 //! (`memory.provider: openviking`, in-sandbox engine on :1933). The AgentKeys
 //! bound is enforced at INGEST-time: this mirror is the only writer of
 //! canonical-derived content into the engine, and it can only write what
@@ -19,7 +19,7 @@
 //!   else -> transient -> leave the index untouched (durable truth is never
 //!           here; a fresh sandbox rebuilds from canonical).
 //!
-//! Never load-bearing: engine down ⇒ log-once + retry next interval; Hermes
+//! Never load-bearing: engine down ⇒ log-once + retry next interval; the agent
 //! falls back to its built-in memory and chat is unaffected.
 
 use std::sync::Arc;
@@ -95,7 +95,9 @@ impl MirrorConfig {
             .filter(|&s| (30..=3600).contains(&s))
             .unwrap_or(300);
         // In-sandbox the engine is co-located; the env identity defaults match
-        // the Hermes plugin's (`default`/`default`/`hermes`) so the mirror's
+        // the engine tree's historical coordinates (`default`/`default`/`hermes`,
+        // the hermes-era plugin default — kept for tree continuity, override via
+        // OPENVIKING_AGENT) so the mirror's
         // `viking://user/<user>/…` URIs live in the tree `viking_search`
         // queries. Tenancy is structural — one engine per sandbox (§17.6).
         let engine_endpoint =
@@ -393,7 +395,7 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
             if !engine_down_logged {
                 tracing::info!(
                     "#566 memory mirror: engine unreachable — idle until it answers /health \
-                     (Hermes falls back to built-in memory; chat unaffected)"
+                     (the agent falls back to built-in memory; chat unaffected)"
                 );
                 engine_down_logged = true;
             }

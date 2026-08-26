@@ -6,7 +6,7 @@
 //! `/v1/cap/speech-sts` for short-TTL AWS creds valid ONLY for Transcribe
 //! streaming + Polly synthesis. No long-lived speech secret exists anywhere on
 //! the AWS stack — this module is ALSO the sandbox's consumption reference
-//! (the hermes-sandbox image ships this binary).
+//! (the dsh-sandbox image ships this binary).
 //!
 //! - `speech creds` — mint + redeem, print the scoped creds as JSON (the
 //!   sandbox hook feeds them to whatever speech client it embeds).

@@ -10,8 +10,8 @@ go through the agent's API or the LLM — they read `/proc` and signal process g
 harness works for Hermes, an OpenClaw/Claude-style runtime, or a hand-rolled script, unchanged; only
 a thin per-agent seam differs (see [Per-agent seams](#per-agent-seams)).
 
-Reference implementation in this repo: the hermes-sandbox bridge `/v1/jobs` API
-([`docker/hermes-sandbox/hermes_bridge.py`](../../docker/hermes-sandbox/hermes_bridge.py)), the
+Reference implementation in this repo: the dsh-sandbox bridge `/v1/jobs` API
+([`packages/agentkeys-dsh/src/bridge.ts`](../../packages/agentkeys-dsh/src/bridge.ts)), the
 device probe's jobs panel (the operator-internal front-end client), and
 the agent knowledge page ([`docs/wiki/on-device-agent-and-agentkeys.md`](../wiki/on-device-agent-and-agentkeys.md)).
 Tracked under issue #340 item 2.
@@ -80,7 +80,7 @@ Everything above is agent-agnostic. Only two pieces are runtime-specific:
 | `/v1/jobs` list + kill (`/proc`, `pgid`) | ✅ unchanged | nothing |
 | jobs-dir convention + tail → device stream | ✅ unchanged | nothing |
 | front-end panel (HTTP) | ✅ unchanged | nothing |
-| **chat adapter** (e.g. `/v1/chat` ↔ Hermes ACP) | ❌ | implement the new runtime's transport |
+| **chat adapter** (e.g. `/v1/chat` ↔ the runtime's agent loop) | ❌ | implement the new runtime's transport |
 | **convention injection** (the agent knowledge text) | ❌ (thin) | give the new agent the same 5-point contract |
 
 ### Adapting to another agent (checklist)

@@ -67,7 +67,7 @@ pub struct AppState {
     /// OmniAccount. Recovery flow consults this to find which master
     /// should sign the recovery grant.
     pub identity_link_store: Arc<IdentityLinkStore>,
-    /// #377/#440 broker-driven sandbox lifecycle (one hermes-sandbox per
+    /// #377/#440 broker-driven sandbox lifecycle (one dsh-sandbox per
     /// delegate device, spawned on pair/resolve, killed on unpair) behind the
     /// per-cloud [`SandboxBackend`](crate::sandbox_backend::SandboxBackend)
     /// seam (veFaaS on VE, ECS/Fargate on AWS). `None` when the host carries

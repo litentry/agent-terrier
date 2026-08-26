@@ -15,7 +15,7 @@ expire_at: string | null, booted_registration_id: string | null,
 booted_image_url: string | null, 
 /**
  * The LIVE agent identity the instance's bridge reports (#577 follow-up):
- * ACP agent name (`hermes-agent`), its running version (the Hermes-bump
+ * agent name the bridge reports (`dsh` since #621), its running version (the bump
  * ground truth), and the LLM endpoint id.
  */
 agent_engine: string | null, agent_version: string | null, model: string | null, 

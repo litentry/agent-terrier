@@ -9,7 +9,7 @@ operator or end user needs to know about how AgentKeys touches their machine.
 
 ## Your agent's long-term memory: OpenViking, bounded by your grants (#566)
 
-Inside every AgentKeys sandbox, the Hermes agent uses **OpenViking as its
+Inside every AgentKeys sandbox, the agent uses **OpenViking as its
 native memory provider** (`memory.provider: openviking` — the agent's own
 `viking_search` / `viking_remember` tools). What the agent can *recall* from
 your family's shared memory is bounded by **your grants**, not by the agent's
@@ -33,21 +33,6 @@ Operators: enabling semantic search requires an explicit embedding model
 (the embed key/base default through the metered gate relay on gate-provisioned
 stacks) — see the OpenViking operator runbook (`operator-docs/`, not in
 the OSS mirror).
-
-### Historical: removing a leftover `agentkeys wire` hooks block
-
-Older releases shipped `agentkeys wire <runtime>`, which wrote a managed
-`hooks:` block into `~/.hermes/config.yaml` (delimited by
-`# >>> agentkeys wire … >>>` / `# <<< agentkeys wire <<<` sentinel comments)
-plus hook scripts under `~/.hermes/agent-hooks/`. That surface was retired with
-the MCP server (#560/#566) — the hooks now point at a server that no longer
-exists, and because the permission hook **failed closed**, a leftover block
-blocks every tool call in that runtime. If you ever ran wire, clean up by
-hand (there was never a working `--unwire`):
-
-1. delete the sentinel-delimited `hooks:` block (and `hooks_auto_accept: true`)
-   from `~/.hermes/config.yaml`, and
-2. `rm -rf ~/.hermes/agent-hooks/`.
 
 ## Onboarding asks for Touch ID twice (parent-control)
 
@@ -276,7 +261,7 @@ expired. **Archive** remains the separate, Touch-ID-gated action for actually
 retiring an agent — updating never archives.
 
 Each agent's card also shows what is actually running: a **runtime** row with
-the live engine + version its sandbox reports (e.g. `hermes-agent 0.19.0` —
+the live engine + version its sandbox reports (e.g. `dsh` —
 hover for the LLM endpoint), and a **sandbox** row with the instance id,
 status, and when its lease expires. These reflect the RUNNING instance, not
 what was last shipped — so after an update you can see the new version took.

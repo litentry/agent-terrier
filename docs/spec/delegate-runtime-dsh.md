@@ -1,6 +1,6 @@
 # Delegate runtime: DeepSeek Harness (dsh) + the AgentKeys plugin suite
 
-**Status:** decision record + target architecture. Owner decision 2026-08-23 (Hanwen Cheng). **Not yet live** — until the migration's flip step the production delegate runtime is still Hermes (see [`ve-sandbox-image-pipeline.md`](ve-sandbox-image-pipeline.md)); [`arch.md` §5](../arch.md) `AI runtime` row points here as the target. Tracking: epic #609; plan: `docs/plan/dsh-runtime-migration.md` (operator-internal).
+**Status:** decision record + LIVE architecture. Owner decision 2026-08-23 (Hanwen Cheng); **live since 2026-08-25** — the VE prod default flipped (#620), the first dsh delegate runs in production, and Hermes was fully deleted with #621 (see [`ve-sandbox-image-pipeline.md`](ve-sandbox-image-pipeline.md)); [`arch.md` §5](../arch.md) `AI runtime` row points here. Tracking: epic #609; plan: `docs/plan/dsh-runtime-migration.md` (operator-internal).
 
 **Scope:** what runs inside a delegate's sandbox, how AgentKeys authority is enforced in-loop, the grant vocabulary that makes that enforcement a pure projection of on-chain grants, and what the owner sees. Out of scope: chain contracts, broker/worker data-plane changes (none required), cloud/deploy mechanics (plan).
 
