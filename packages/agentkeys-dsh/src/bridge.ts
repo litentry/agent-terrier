@@ -98,17 +98,40 @@ export function apply(ctx: Context, config: Config): void {
   // second /v1/chat waits behind the first.
   let turnLock: Promise<unknown> = Promise.resolve();
 
+  /** The dsh session-persistence collision family: a persisted log exists for
+   *  our FIXED session id — the #616 hand-off/checkpoint-restore lands the
+   *  previous instance's log (before the lazy first-turn create, or under a
+   *  live session). dsh's own contract for it is "load/resume it instead of
+   *  creating" (dsh-session-persistence), so every spelling routes to resume. */
+  const SESSION_COLLISION = /persisted log|id collision|load\/resume it instead/i;
+
+  async function createOrResumeAgent(): Promise<AgentHandle> {
+    const selection = currentSelection(ctx, config);
+    const agentOptions = selection ? { agentOptions: selection } : {};
+    try {
+      return await ctx.agents.create({
+        sessionId: SessionId(SESSION_ID),
+        meta: { cwd: config.cwd ?? '/opt/agentkeys' },
+        ...agentOptions,
+      });
+    } catch (e) {
+      if (!SESSION_COLLISION.test(String((e as Error).message ?? e))) throw e;
+      console.error(
+        'agentkeys-bridge: persisted session log found for the bridge session — resuming it (#616 hand-off)',
+      );
+      return await ctx.agents.resume({
+        resumeSessionId: SessionId(SESSION_ID),
+        ...agentOptions,
+      });
+    }
+  }
+
   async function ensureAgent(): Promise<AgentHandle | undefined> {
     if (handle) return handle;
     if (starting) return undefined;
     starting = true;
     try {
-      const selection = currentSelection(ctx, config);
-      handle = await ctx.agents.create({
-        sessionId: SessionId(SESSION_ID),
-        meta: { cwd: config.cwd ?? '/opt/agentkeys' },
-        ...(selection ? { agentOptions: selection } : {}),
-      });
+      handle = await createOrResumeAgent();
       version = handle.agent.options.model ?? version;
       return handle;
     } catch (e) {
@@ -118,6 +141,28 @@ export function apply(ctx: Context, config: Config): void {
       return undefined;
     } finally {
       starting = false;
+    }
+  }
+
+  /** Run one turn; if it dies on the session-collision family (the
+   *  create-before-import ordering: the live session was created BEFORE the
+   *  #616 import landed the old log), dispose the live handle, re-ensure —
+   *  which resumes the persisted log — and retry ONCE. */
+  async function runTurnRecovering(
+    text: string,
+    onFrame?: (frame: string) => void,
+  ): Promise<TurnStreamer> {
+    try {
+      return await runTurn(text, onFrame);
+    } catch (e) {
+      if (!SESSION_COLLISION.test(String((e as Error).message ?? e))) throw e;
+      console.error(
+        'agentkeys-bridge: turn hit a session-log collision — disposing the live session and resuming the persisted one (#616)',
+      );
+      if (handle) await handle.dispose().catch(() => {});
+      handle = undefined;
+      await ensureAgent();
+      return await runTurn(text, onFrame);
     }
   }
 
@@ -204,7 +249,7 @@ export function apply(ctx: Context, config: Config): void {
         if (wantStream) {
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
           try {
-            await runTurn(text, (frame) => res.write(frame));
+            await runTurnRecovering(text, (frame) => res.write(frame));
           } catch (e) {
             res.write(encodeFrame({ type: 'error', error: `agent error: ${(e as Error).message}` }));
           }
@@ -212,7 +257,7 @@ export function apply(ctx: Context, config: Config): void {
           return;
         }
         try {
-          const streamer = await runTurn(text);
+          const streamer = await runTurnRecovering(text);
           const failure = streamer.errored();
           if (failure !== undefined) {
             sendJson(res, 502, { error: failure });

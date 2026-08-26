@@ -24,10 +24,36 @@ function fakeAgents(ctx: Context, sessionId: string) {
     ctx.emit(ctx as never, 'session/event', { id: sessionId } as never, { type, data } as never);
   };
   const releaseIdle = () => resolveIdle?.();
+  const resumeCalls: unknown[] = [];
+  const disposeCalls: unknown[] = [];
+  const modes = { createCollides: false, followupCollidesOnce: false };
+  const COLLISION_MSG =
+    'session "agentkeys-bridge-session" already has a persisted log on disk that does not match this live session (id collision)';
   return {
     service: {
       async create(options: unknown) {
         createCalls.push(options);
+        if (modes.createCollides) throw new Error(COLLISION_MSG);
+        return {
+          agent: {
+            ...agent,
+            followup() {
+              if (modes.followupCollidesOnce) {
+                modes.followupCollidesOnce = false;
+                // from here the imported log exists on disk: create collides too
+                modes.createCollides = true;
+                throw new Error(COLLISION_MSG);
+              }
+              signalFollowup?.();
+            },
+          },
+          dispose: async () => {
+            disposeCalls.push(1);
+          },
+        };
+      },
+      async resume(options: unknown) {
+        resumeCalls.push(options);
         return { agent, dispose: async () => {} };
       },
       get() {
@@ -38,6 +64,9 @@ function fakeAgents(ctx: Context, sessionId: string) {
     releaseIdle,
     followupCalled,
     createCalls,
+    resumeCalls,
+    disposeCalls,
+    modes,
   };
 }
 
@@ -47,9 +76,13 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function boot(opts?: { defaultModel?: { provider: string; model: string } }) {
+async function boot(opts?: {
+  defaultModel?: { provider: string; model: string };
+  preMode?: (fake: ReturnType<typeof fakeAgents>) => void;
+}) {
   ctx = new Context();
   const fake = fakeAgents(ctx, 'agentkeys-bridge-session');
+  opts?.preMode?.(fake);
   ctx.provide('agents', fake.service);
   ctx.provide('sessions', {});
   if (opts?.defaultModel) {
@@ -114,6 +147,35 @@ describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
     const res = await pending;
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ error: 'agent error: no provider/model' });
+  });
+
+  it('#646: a persisted session log at create time is RESUMED, not re-created', async () => {
+    const { fake } = await boot({ preMode: (f) => (f.modes.createCollides = true) });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fake.createCalls.length).toBeGreaterThan(0);
+    expect(fake.resumeCalls.length).toBeGreaterThan(0);
+    const opts = fake.resumeCalls[0] as { resumeSessionId?: unknown };
+    expect(String(opts.resumeSessionId)).toContain('agentkeys-bridge-session');
+  });
+
+  it('#646: a turn-level session collision disposes the live handle, resumes, and retries once', async () => {
+    const { base, fake } = await boot();
+    await new Promise((r) => setTimeout(r, 20));
+    fake.modes.followupCollidesOnce = true;
+    const turn = fetch(`${base}/v1/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'hello', stream: false }),
+    });
+    // the retry's followup fires after dispose+resume; then finish the turn
+    await fake.followupCalled();
+    fake.emit('assistant/chunk', { text: 'back' });
+    fake.emit('turn/end', { usage: { total_tokens: 5 } });
+    fake.releaseIdle();
+    const res = await turn;
+    expect(res.status).toBe(200);
+    expect(fake.disposeCalls.length).toBeGreaterThan(0);
+    expect(fake.resumeCalls.length).toBeGreaterThan(0);
   });
 
   it('v1/chat rejects a bad body with 400', async () => {
