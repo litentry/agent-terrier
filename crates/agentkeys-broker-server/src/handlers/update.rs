@@ -454,6 +454,24 @@ pub(crate) async fn rotate_delegate_runtime(
         "#577 rotate: starting (snapshot → kill → re-create → import)"
     );
 
+    // #640 — a session hand-off is only meaningful within ONE runtime family:
+    // a snapshot is a runtime-home byte image (#616), so importing a hermes
+    // home into DSH_HOME (or back, on a rollback) plants the wrong home
+    // format. Skip the hand-off on POSITIVE evidence of a family switch (the
+    // old instance's spawn-frozen tag vs what the #620 valve resolves now);
+    // unknowns (ECS, console-default image) keep the hand-off, never guess.
+    let runtime_switch: Option<(String, String)> = match (live.first(), backend.current_image_tag())
+    {
+        (Some(inst), Some(current)) => backend
+            .booted_image_info(&inst.id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|b| is_runtime_family_switch(&b.source_image_url, &current))
+            .map(|b| (b.source_image_url, current)),
+        _ => None,
+    };
+
     // Snapshot + job guard against the OLD instance (best-effort, loud).
     let mgmt_token =
         crate::handlers::sandbox::sandbox_mgmt_token(&state.session_keypair, device_key_hash);
@@ -496,34 +514,50 @@ pub(crate) async fn rotate_delegate_runtime(
                 "#577 rotate: old-instance status probe failed (pre-#577 image?) — proceeding"
             ),
         }
-        match mgmt_request(
-            &state.http,
-            &base,
-            &route_headers,
-            &mgmt_token,
-            reqwest::Method::GET,
-            "/v1/sandbox/mgmt/session/export",
-            None,
-            60,
-        )
-        .await
-        {
-            Ok(body) if body.len() > SESSION_SNAPSHOT_MAX_BYTES => {
-                session_detail = format!(
-                    "session export skipped: snapshot {} bytes exceeds the {} byte cap",
-                    body.len(),
-                    SESSION_SNAPSHOT_MAX_BYTES
-                );
-            }
-            Ok(body) => {
-                session_detail = format!("exported {} bytes from the old instance", body.len());
-                snapshot = Some(body);
-            }
-            Err(e) => {
-                session_detail = format!(
-                    "session export unavailable ({e}) — updated without the Hermes-home hand-off \
-                     (a pre-#577 image has no export surface; this heals once the new image runs)"
-                );
+        if let Some((old_image, new_image)) = &runtime_switch {
+            session_detail = format!(
+                "session hand-off skipped: runtime family switch ({} → {}) — a home snapshot \
+                 is runtime-keyed (#616); the replacement starts from canonical memory",
+                image_repo(old_image),
+                image_repo(new_image)
+            );
+            tracing::info!(
+                device_key_hash = %device_key_hash,
+                old_image = %old_image,
+                new_image = %new_image,
+                "#640 rotate: session hand-off skipped — runtime family switch"
+            );
+        } else {
+            match mgmt_request(
+                &state.http,
+                &base,
+                &route_headers,
+                &mgmt_token,
+                reqwest::Method::GET,
+                "/v1/sandbox/mgmt/session/export",
+                None,
+                60,
+            )
+            .await
+            {
+                Ok(body) if body.len() > SESSION_SNAPSHOT_MAX_BYTES => {
+                    session_detail = format!(
+                        "session export skipped: snapshot {} bytes exceeds the {} byte cap",
+                        body.len(),
+                        SESSION_SNAPSHOT_MAX_BYTES
+                    );
+                }
+                Ok(body) => {
+                    session_detail = format!("exported {} bytes from the old instance", body.len());
+                    snapshot = Some(body);
+                }
+                Err(e) => {
+                    session_detail = format!(
+                        "session export unavailable ({e}) — updated without the Hermes-home \
+                         hand-off (a pre-#577 image has no export surface; this heals once the \
+                         new image runs)"
+                    );
+                }
             }
         }
     } else {
@@ -761,9 +795,63 @@ pub async fn agent_image_status(
     }))
 }
 
+/// The repo path of an image ref — the ref minus a trailing `:tag` (a colon
+/// followed by a slash-free suffix; a `host:port/...` ref keeps its port).
+fn image_repo(image_ref: &str) -> &str {
+    match image_ref.trim().rsplit_once(':') {
+        Some((repo, tag)) if !tag.contains('/') => repo,
+        _ => image_ref.trim(),
+    }
+}
+
+/// #640 — pure verdict: does moving `old_ref` → `current_ref` cross a runtime
+/// family (hermes-sandbox ⇄ dsh-sandbox)? Repo-path comparison: a tag bump
+/// within one family is NOT a switch (the hand-off stays), a family change in
+/// either direction is.
+fn is_runtime_family_switch(old_ref: &str, current_ref: &str) -> bool {
+    image_repo(old_ref) != image_repo(current_ref)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_repo_strips_only_a_slash_free_tag() {
+        assert_eq!(
+            image_repo("cr.example.com/agentkeys/dsh-sandbox:v202608241032-gda35a18a"),
+            "cr.example.com/agentkeys/dsh-sandbox"
+        );
+        // Untagged ref stays whole.
+        assert_eq!(
+            image_repo("cr.example.com/agentkeys/dsh-sandbox"),
+            "cr.example.com/agentkeys/dsh-sandbox"
+        );
+        // A registry port is not a tag.
+        assert_eq!(
+            image_repo("registry:5000/agentkeys/dsh-sandbox"),
+            "registry:5000/agentkeys/dsh-sandbox"
+        );
+        assert_eq!(
+            image_repo("registry:5000/agentkeys/dsh-sandbox:v1"),
+            "registry:5000/agentkeys/dsh-sandbox"
+        );
+    }
+
+    #[test]
+    fn runtime_family_switch_fires_on_family_change_only() {
+        let hermes = "cr.example.com/agentkeys/hermes-sandbox:v20260813-053412-g753b5d51";
+        let dsh = "cr.example.com/agentkeys/dsh-sandbox:v202608241032-gda35a18a";
+        // The migration direction and the rollback direction both switch.
+        assert!(is_runtime_family_switch(hermes, dsh));
+        assert!(is_runtime_family_switch(dsh, hermes));
+        // A tag bump within one family is NOT a switch — the hand-off stays.
+        assert!(!is_runtime_family_switch(
+            dsh,
+            "cr.example.com/agentkeys/dsh-sandbox:v299901010101-gdeadbeef"
+        ));
+        assert!(!is_runtime_family_switch(hermes, hermes));
+    }
 
     #[test]
     fn parse_agent_health_reads_the_bridge_healthz_shape() {
