@@ -391,7 +391,9 @@ pub(crate) async fn build_credential(cfg: &ChatLoopConfig) -> Option<DelegateCre
             };
             tracing::info!(
                 address = %derived.address,
-                "#552 chat loop: signer custody active — no device key in this sandbox"
+                "#552 chat loop: signer custody active (healthy, by design — the K10 never \
+                 enters the sandbox; the signer signs remotely; address = the custodied \
+                 key's derived address)"
             );
             DelegateCredential::Signer {
                 client,
