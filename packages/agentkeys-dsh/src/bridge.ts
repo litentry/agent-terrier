@@ -100,29 +100,64 @@ export function apply(ctx: Context, config: Config): void {
 
   /** The dsh session-persistence collision family: a persisted log exists for
    *  our FIXED session id — the #616 hand-off/checkpoint-restore lands the
-   *  previous instance's log (before the lazy first-turn create, or under a
-   *  live session). dsh's own contract for it is "load/resume it instead of
-   *  creating" (dsh-session-persistence), so every spelling routes to resume. */
+   *  previous instance's log. It surfaces at CREATE only in a narrow race;
+   *  the common thrower is the lazy persistence BIND on the first turn WRITE
+   *  (`adoptLivePrefix`: a fresh session's seed cannot cover the imported
+   *  prefix → "id collision"), measured live on agent-i 2026-08-26. dsh's
+   *  contract for every spelling is "load/resume it instead of creating". */
   const SESSION_COLLISION = /persisted log|id collision|load\/resume it instead/i;
+  /** dsh-session-persistence `prepare()` on an id with no stored log. */
+  const SESSION_NOT_FOUND = /session ".*" not found/i;
+
+  function agentOpts() {
+    const selection = currentSelection(ctx, config);
+    return selection ? { agentOptions: selection } : {};
+  }
+
+  /** Resume the bridge session's persisted log; undefined when none exists.
+   *  The caller must hold no live session for the id — `prepare()` waits for
+   *  retirement, so dispose before resuming. */
+  async function resumeAgent(): Promise<AgentHandle | undefined> {
+    try {
+      return await ctx.agents.resume({
+        resumeSessionId: SessionId(SESSION_ID),
+        ...agentOpts(),
+      });
+    } catch (e) {
+      if (SESSION_NOT_FOUND.test(String((e as Error).message ?? e))) return undefined;
+      throw e;
+    }
+  }
 
   async function createOrResumeAgent(): Promise<AgentHandle> {
-    const selection = currentSelection(ctx, config);
-    const agentOptions = selection ? { agentOptions: selection } : {};
+    // RESUME-FIRST: the bridge session id is fixed, so a persisted log is
+    // always ours to continue. create() does NOT probe the stored log — the
+    // persistence layer binds lazily at the first write and only THEN
+    // collides, killing the turn — so create-first turns an imported log
+    // into a poisoned session instead of the previous conversation.
+    const resumed = await resumeAgent();
+    if (resumed) {
+      console.error(
+        'agentkeys-bridge: resumed the persisted bridge session (#616 hand-off)',
+      );
+      return resumed;
+    }
     try {
       return await ctx.agents.create({
         sessionId: SessionId(SESSION_ID),
         meta: { cwd: config.cwd ?? '/opt/agentkeys' },
-        ...agentOptions,
+        ...agentOpts(),
       });
     } catch (e) {
       if (!SESSION_COLLISION.test(String((e as Error).message ?? e))) throw e;
+      // The create-time guard: a log landed between the resume probe and
+      // create (the import races the lazy first-turn ensure).
       console.error(
-        'agentkeys-bridge: persisted session log found for the bridge session — resuming it (#616 hand-off)',
+        'agentkeys-bridge: persisted session log landed during create — resuming it (#616 hand-off)',
       );
-      return await ctx.agents.resume({
-        resumeSessionId: SessionId(SESSION_ID),
-        ...agentOptions,
-      });
+      const raced = await resumeAgent();
+      if (raced) return raced;
+      throw e;
     }
   }
 

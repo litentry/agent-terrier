@@ -26,35 +26,45 @@ function fakeAgents(ctx: Context, sessionId: string) {
   const releaseIdle = () => resolveIdle?.();
   const resumeCalls: unknown[] = [];
   const disposeCalls: unknown[] = [];
-  const modes = { createCollides: false, followupCollidesOnce: false };
-  const COLLISION_MSG =
+  // Real dsh-session-persistence semantics (measured live, 2026-08-26):
+  // create() does NOT probe the stored log — persistence binds lazily at the
+  // first WRITE, and a fresh session over an imported log dies THERE with the
+  // bind-time "id collision" (adoptLivePrefix). resume() prepares the stored
+  // log as the session's own history, or throws `session "<id>" not found`.
+  // createCollides models the narrow guard-1 race: create itself refuses AND
+  // the log is on disk from that moment.
+  const modes = { createCollides: false, persistedLog: false };
+  const BIND_COLLISION_MSG =
     'session "agentkeys-bridge-session" already has a persisted log on disk that does not match this live session (id collision)';
+  const CREATE_GUARD_MSG =
+    'session "agentkeys-bridge-session" already has a persisted log on disk; load/resume it instead of creating';
+  const mkHandle = (resumed: boolean) => ({
+    agent: {
+      ...agent,
+      followup() {
+        if (!resumed && modes.persistedLog) throw new Error(BIND_COLLISION_MSG);
+        signalFollowup?.();
+      },
+    },
+    dispose: async () => {
+      disposeCalls.push(resumed ? 'resumed' : 'created');
+    },
+  });
   return {
     service: {
       async create(options: unknown) {
         createCalls.push(options);
-        if (modes.createCollides) throw new Error(COLLISION_MSG);
-        return {
-          agent: {
-            ...agent,
-            followup() {
-              if (modes.followupCollidesOnce) {
-                modes.followupCollidesOnce = false;
-                // from here the imported log exists on disk: create collides too
-                modes.createCollides = true;
-                throw new Error(COLLISION_MSG);
-              }
-              signalFollowup?.();
-            },
-          },
-          dispose: async () => {
-            disposeCalls.push(1);
-          },
-        };
+        if (modes.createCollides) {
+          modes.persistedLog = true;
+          throw new Error(CREATE_GUARD_MSG);
+        }
+        return mkHandle(false);
       },
       async resume(options: unknown) {
         resumeCalls.push(options);
-        return { agent, dispose: async () => {} };
+        if (!modes.persistedLog)
+          throw new Error('session "agentkeys-bridge-session" not found');
+        return mkHandle(true);
       },
       get() {
         return agent;
@@ -149,32 +159,49 @@ describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
     expect(await res.json()).toEqual({ error: 'agent error: no provider/model' });
   });
 
-  it('#646: a persisted session log at create time is RESUMED, not re-created', async () => {
-    const { fake } = await boot({ preMode: (f) => (f.modes.createCollides = true) });
+  it('#646: a persisted log at boot is RESUMED — create is never attempted', async () => {
+    const { fake } = await boot({ preMode: (f) => (f.modes.persistedLog = true) });
     await new Promise((r) => setTimeout(r, 30));
-    expect(fake.createCalls.length).toBeGreaterThan(0);
+    expect(fake.createCalls.length).toBe(0);
     expect(fake.resumeCalls.length).toBeGreaterThan(0);
     const opts = fake.resumeCalls[0] as { resumeSessionId?: unknown };
     expect(String(opts.resumeSessionId)).toContain('agentkeys-bridge-session');
   });
 
-  it('#646: a turn-level session collision disposes the live handle, resumes, and retries once', async () => {
+  it('#646: no persisted log — the resume probe falls through to create', async () => {
+    const { fake } = await boot();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fake.resumeCalls.length).toBeGreaterThan(0);
+    expect(fake.createCalls.length).toBe(1);
+  });
+
+  it('#646: the create-time guard race (log lands mid-create) resumes the raced log', async () => {
+    const { fake } = await boot({ preMode: (f) => (f.modes.createCollides = true) });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fake.createCalls.length).toBe(1);
+    // probe (not found) → create (guard) → raced resume (succeeds)
+    expect(fake.resumeCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('#646: a BIND-time collision mid-turn (import landed after create) disposes, resumes, retries once', async () => {
     const { base, fake } = await boot();
     await new Promise((r) => setTimeout(r, 20));
-    fake.modes.followupCollidesOnce = true;
+    // the #616 import lands the previous instance's log AFTER the live create:
+    // the next turn's first write hits the lazy persistence bind and collides
+    fake.modes.persistedLog = true;
     const turn = fetch(`${base}/v1/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: 'hello', stream: false }),
     });
-    // the retry's followup fires after dispose+resume; then finish the turn
+    // the retry's followup fires on the RESUMED handle; then finish the turn
     await fake.followupCalled();
     fake.emit('assistant/chunk', { text: 'back' });
     fake.emit('turn/end', { usage: { total_tokens: 5 } });
     fake.releaseIdle();
     const res = await turn;
     expect(res.status).toBe(200);
-    expect(fake.disposeCalls.length).toBeGreaterThan(0);
+    expect(fake.disposeCalls).toContain('created');
     expect(fake.resumeCalls.length).toBeGreaterThan(0);
   });
 
