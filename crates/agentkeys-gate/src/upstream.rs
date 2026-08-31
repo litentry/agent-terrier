@@ -60,6 +60,29 @@ impl UpstreamClient {
             .map_err(|e| GateError::Upstream(format!("upstream transport: {e}")))
     }
 
+    /// #653 — GET the SearXNG JSON API. No credential: the search upstream is
+    /// the broker-host loopback SearXNG, and the ENGINE SET (pinned by the
+    /// gate's config, never the caller) is the policy surface.
+    pub async fn search_get(
+        client: &reqwest::Client,
+        base_url: &str,
+        q: &str,
+        engines: &str,
+        language: Option<&str>,
+    ) -> GateResult<reqwest::Response> {
+        let mut req = client.get(format!("{base_url}/search")).query(&[
+            ("q", q),
+            ("format", "json"),
+            ("engines", engines),
+        ]);
+        if let Some(lang) = language.filter(|l| !l.trim().is_empty()) {
+            req = req.query(&[("language", lang)]);
+        }
+        req.send()
+            .await
+            .map_err(|e| GateError::Upstream(format!("search upstream transport: {e}")))
+    }
+
     /// GET /models passthrough (OpenAI clients often list models at boot).
     pub async fn models(&self) -> GateResult<reqwest::Response> {
         self.client

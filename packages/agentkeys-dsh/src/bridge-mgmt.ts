@@ -115,7 +115,48 @@ export function resetImportGuardForTests(): void {
   lastImportSnapshotAt = undefined;
 }
 
-export async function importHome(root: string, doc: unknown): Promise<ImportOutcome> {
+/** Wait (bounded) until every EXISTING file in `paths` has stopped changing.
+ *  The #616 import must not overwrite the session log while the just-disposed
+ *  session's persistence retirement is still flushing it: the flush then fails
+ *  against the replaced bytes, the retirement aborts, and the orphaned
+ *  persistence owner wedges every later resume/create into a permanent
+ *  `acp_starting` ("already has a live persistence owner" — measured on the
+ *  2026-09-01 pod). Quiet = no mtime/size change across `quietMs`. */
+export async function settleQuiet(paths: string[], quietMs = 400, maxMs = 8000): Promise<void> {
+  const started = Date.now();
+  const sig = async () =>
+    JSON.stringify(
+      await Promise.all(
+        paths.map(async (pth) => {
+          try {
+            const st = await fs.stat(pth);
+            return [pth, st.mtimeMs, st.size];
+          } catch {
+            return [pth, 0, 0];
+          }
+        }),
+      ),
+    );
+  let last = await sig();
+  let lastChange = Date.now();
+  while (Date.now() - started < maxMs) {
+    await new Promise((r) => setTimeout(r, 100));
+    const cur = await sig();
+    if (cur !== last) {
+      last = cur;
+      lastChange = Date.now();
+    } else if (Date.now() - lastChange >= quietMs) return;
+  }
+}
+
+export async function importHome(
+  root: string,
+  doc: unknown,
+  /** Invoked AFTER full validation + the newer-wins gate pass, BEFORE any byte
+   *  lands — the bridge disposes the live agent here so the session's
+   *  retirement flush completes against the UNCHANGED log (see settleQuiet). */
+  beforeWrite?: (targets: string[]) => Promise<void>,
+): Promise<ImportOutcome> {
   const d = doc as Partial<SnapshotDoc> & { snapshot_at?: unknown };
   if (d.version !== 1) throw Object.assign(new Error(`unsupported snapshot version ${JSON.stringify(d.version)}`), { code: 400 });
   if (!Array.isArray(d.files)) throw Object.assign(new Error('files must be a list'), { code: 400 });
@@ -154,6 +195,7 @@ export async function importHome(root: string, doc: unknown): Promise<ImportOutc
     if (isExcludedPath(rel)) continue; // image-owned: silently skipped on write too
     writes.push({ abs, buf });
   }
+  if (writes.length > 0 && beforeWrite) await beforeWrite(writes.map((w) => w.abs));
   for (const w of writes) {
     await fs.mkdir(path.dirname(w.abs), { recursive: true });
     const tmp = `${w.abs}.tmp`;

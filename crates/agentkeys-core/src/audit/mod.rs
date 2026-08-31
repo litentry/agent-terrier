@@ -57,7 +57,7 @@ pub use bodies::{
     ChannelPublishBody, ChannelSubscribeBody, ChannelTeardownBody, ConfigGetBody, ConfigPutBody,
     ConfigTeardownBody, ContactBindBody, CredFetchBody, CredStoreBody, CredTeardownBody,
     DelegateArchiveBody, DelegateSpawnBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody,
-    EmailSendBody, GateEmbedBody, GateTurnBody, GatewayRelayBody, K10RotateBody,
+    EmailSendBody, GateEmbedBody, GateSearchBody, GateTurnBody, GatewayRelayBody, K10RotateBody,
     K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody,
     PaymentDirectBody, PaymentEscrowRedeemBody, RuntimeApprovalBody, RuntimeToolResultBody,
     SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body,
@@ -250,6 +250,7 @@ pub enum TypedAuditBody {
     SpeechAsr(SpeechAsrBody),
     SpeechTts(SpeechTtsBody),
     GateEmbed(GateEmbedBody),
+    GateSearch(GateSearchBody),
     ChannelPublish(ChannelPublishBody),
     ChannelSubscribe(ChannelSubscribeBody),
     ChannelTeardown(ChannelTeardownBody),
@@ -311,6 +312,7 @@ impl TypedAuditBody {
             AuditOpKind::SpeechAsr => Self::SpeechAsr(serde_json::from_value(value).ok()?),
             AuditOpKind::SpeechTts => Self::SpeechTts(serde_json::from_value(value).ok()?),
             AuditOpKind::GateEmbed => Self::GateEmbed(serde_json::from_value(value).ok()?),
+            AuditOpKind::GateSearch => Self::GateSearch(serde_json::from_value(value).ok()?),
             AuditOpKind::ChannelPublish => {
                 Self::ChannelPublish(serde_json::from_value(value).ok()?)
             }

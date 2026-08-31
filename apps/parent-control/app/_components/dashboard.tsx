@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { CHIP_STYLES, NAMESPACES } from '@/lib/constants';
 import type { ConnectionStatus } from '@/lib/client/types';
 import { AgentTabsPanel } from './agent_tabs';
-import { AutoDistributePanel, PermissionList } from './permissions';
+import { AutoDistributePanel, StagedPermissionEditor } from './permissions';
 import type { ProposedScope } from '@/lib/client/types';
 import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
 import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
@@ -267,104 +267,6 @@ export function ActorDetail({
   // concepts a conduit cannot hold).
   const isDevice = actorIsChannelEndpoint(actor);
 
-  // #248 — memory toggles STAGE locally (the chain mirror would overwrite an
-  // optimistic write on the next refetch); the commit bar lands them on chain
-  // with one Touch ID. `null` = no staged changes (panel shows the chain truth).
-  const [stagedScope, setStagedScope] = useState<Record<Namespace, ScopeBits> | null>(null);
-  // #617 — capability grants stage the SAME way and commit in the SAME setScope:
-  // a toggle IS a grant, and there is exactly one way authority ever changes, so
-  // memory + capability changes land together under one Touch ID rather than
-  // asking the owner to sign twice for one intent. `null` = nothing staged.
-  const [stagedTools, setStagedTools] = useState<string[] | null>(null);
-  const [committing, setCommitting] = useState(false);
-  useEffect(() => {
-    setStagedScope(null); // switching actors drops any uncommitted staging
-    setStagedTools(null);
-  }, [actor.id]);
-
-  const chainScope = (actor.scope ?? {}) as Record<Namespace, ScopeBits>;
-  const effectiveScope = stagedScope ?? chainScope;
-
-  // The capability grants as the chain currently holds them (names only — the
-  // daemon recovers `tool:<class>` names from their hashes; see #614).
-  const chainTools = (actor.services ?? []).filter(
-    (svc) => isCapabilityService(svc) && !isPluginService(svc),
-  );
-  const effectiveTools = stagedTools ?? chainTools;
-  const setCapability = (svc: string, granted: boolean) => {
-    const next = new Set(effectiveTools.map((s) => s.toLowerCase()));
-    if (granted) next.add(svc.toLowerCase()); else next.delete(svc.toLowerCase());
-    setStagedTools([...next]);
-  };
-
-  const setScope = (ns: Namespace | '__email', v: ScopeBits | boolean) => {
-    if (ns === '__email') {
-      const services = new Set(actor.services ?? []);
-      if (v) services.add('email'); else services.delete('email');
-      onUpdate(actor.id, { services: [...services] });
-      return;
-    }
-    setStagedScope({ ...effectiveScope, [ns]: v as ScopeBits });
-  };
-
-  // The staged grant as on-chain services: every namespace with read or write.
-  // The chain grant carries ONE read-only bit for the whole set, so any staged
-  // r+w commits the set as read+write (the bar says which before Touch ID).
-  // #339 — two INDEPENDENT grants per namespace: read → memory:<ns> (read the
-  // master's shared memory), write → inbox:<ns> (write/suggest into the master's
-  // inbox). No direct shared-memory write exists, so there is no r+w ladder.
-  const stagedRead = stagedScope
-    ? NAMESPACES.filter((ns) => stagedScope[ns]?.read)
-    : [];
-  const stagedWrite = stagedScope
-    ? NAMESPACES.filter((ns) => stagedScope[ns]?.write)
-    : [];
-  const memoryDirty =
-    stagedScope !== null &&
-    NAMESPACES.some((ns) => {
-      const a = chainScope[ns] ?? { read: false, write: false };
-      const b = stagedScope[ns] ?? { read: false, write: false };
-      return a.read !== b.read || a.write !== b.write;
-    });
-  const toolsDirty =
-    stagedTools !== null &&
-    (stagedTools.length !== chainTools.length ||
-      stagedTools.some((t) => !chainTools.some((c) => c.toLowerCase() === t.toLowerCase())));
-  const stagedDirty = memoryDirty || toolsDirty;
-
-  const commitStaged = async () => {
-    if (!stagedDirty || committing) return;
-    setCommitting(true);
-    // #617 — ONE set-replace carrying BOTH halves. The helper is what makes a
-    // capability switch-OFF actually take: `scopeUnknownServiceIds` deliberately
-    // still holds the capability hashes (so a memory commit cannot wipe them), so
-    // the preserve set must SUBTRACT them here or the grant would be re-added.
-    // Memory names come from the STAGED scope, not the chain mirror.
-    const stagedMemoryNames = [
-      ...stagedRead.map((ns) => `memory:${ns}`),
-      ...stagedWrite.map((ns) => `inbox:${ns}`),
-    ];
-    const { services: capServices, preserve } = capabilityGrantCommit(
-      { ...actor, scope: (stagedScope ?? chainScope) as Actor['scope'] },
-      effectiveTools,
-    );
-    const services = Array.from(new Set([...capServices, ...stagedMemoryNames]));
-    const ok = await onCommitScope(
-      actor,
-      services,
-      // The on-chain readOnly bit is a dead flag (isServiceInScope ignores it);
-      // shared memory is read-only to a delegate and contribution is via the inbox
-      // grant, so pass a fixed value rather than surface a toggle for it.
-      true,
-      preserve,
-    );
-    setCommitting(false);
-    if (ok) {
-      setStagedScope(null); // the refetched chain mirror now shows the grant
-      setStagedTools(null);
-    }
-  };
-
   return (
     <>
       <PageHead
@@ -447,39 +349,15 @@ export function ActorDetail({
             Maps to ScopeContract[O_master][{actor.omni}]. Memory toggles stage below; <strong>commit · Touch ID</strong> lands
             them on chain (one setScope, master K11) — until then the chain grant is unchanged.
           </div>
-          <PermissionList
-            actor={{ ...actor, scope: effectiveScope, services: [...(actor.services ?? []).filter((sv) => !isCapabilityService(sv) || isPluginService(sv)), ...effectiveTools] }}
-            editable
-            onScopeChange={setScope}
-            onCapabilityChange={setCapability}
+          <StagedPermissionEditor
+            actor={actor}
+            onCommitScope={onCommitScope}
+            onEmailChange={(granted) => {
+              const services = new Set(actor.services ?? []);
+              if (granted) services.add('email'); else services.delete('email');
+              onUpdate(actor.id, { services: [...services] });
+            }}
           />
-          {stagedDirty && (
-            <div
-              className="banner"
-              style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}
-            >
-              <span className="lbl">staged</span>
-              <span style={{ fontSize: 11.5, flex: '1 1 auto' }}>
-                {stagedRead.length === 0 && stagedWrite.length === 0
-                  ? 'Revokes every memory + inbox grant (credential / email grants are unchanged).'
-                  : [
-                      stagedRead.length > 0
-                        ? `Reads ${stagedRead.map((ns) => `memory:${ns}`).join(' · ')}.`
-                        : '',
-                      stagedWrite.length > 0
-                        ? `Suggests ${stagedWrite.map((ns) => `inbox:${ns}`).join(' · ')}.`
-                        : '',
-                    ].filter(Boolean).join(' ')}
-                {' '}One on-chain setScope (master K11).
-              </span>
-              <span style={{ display: 'flex', gap: 8 }}>
-                <button className="btn" disabled={committing} onClick={() => setStagedScope(null)}>discard</button>
-                <button className="btn primary" disabled={committing} onClick={commitStaged}>
-                  {committing ? 'committing…' : 'commit · Touch ID'}
-                </button>
-              </span>
-            </div>
-          )}
         </Panel>
       )}
 

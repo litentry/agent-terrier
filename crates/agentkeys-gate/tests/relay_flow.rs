@@ -212,6 +212,7 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
         aws_region: "us-east-1".into(),
         speech_asr: None,
         speech_tts: None,
+        search: None,
     };
     let relay = Arc::new(Relay::new(config));
     let app = server::router(relay);
@@ -778,4 +779,120 @@ async fn per_delegate_budget_429s_deterministically_under_the_user_budget() {
         "denied GateTurn envelope",
     )
     .await;
+}
+
+// ── #653 — the web-search relay ─────────────────────────────────────────────
+
+#[derive(Clone, Default)]
+struct SearxState {
+    queries: Arc<Mutex<Vec<Value>>>,
+}
+
+async fn searx_search(
+    State(state): State<SearxState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    state
+        .queries
+        .lock()
+        .unwrap()
+        .push(serde_json::to_value(&params).unwrap());
+    Json(json!({
+        "query": params.get("q").cloned().unwrap_or_default(),
+        "results": [
+            {"title": "Weather in Hangzhou", "url": "https://a.example/w", "content": "Sunny, 31°C.", "engine": "bing"},
+            {"title": "Hangzhou 7-day", "url": "https://b.example/7d", "content": "Forecast…", "engine": "bing"}
+        ],
+        "answers": ["31°C and sunny"]
+    }))
+    .into_response()
+}
+
+/// The search relay: gk_ auth, the ENGINE SET pinned by gate config (never
+/// the caller), the compact wire shape, and the GateSearch (op_kind 94) row.
+#[tokio::test]
+async fn search_call_pins_engines_maps_results_and_audits() {
+    let searx = SearxState::default();
+    let searx_app = Router::new()
+        .route("/search", get(searx_search))
+        .with_state(searx.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let searx_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, searx_app).await.unwrap() });
+
+    let (up_addr, _upstream) = spawn_upstream().await;
+    let (audit_addr, audit) = spawn_audit().await;
+    let config = GateConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        upstream: UpstreamConfig {
+            base_url: format!("http://{up_addr}/v1"),
+            api_key: UPSTREAM_KEY.into(),
+            model_override: None,
+        },
+        keys: relay_keys(),
+        user_budgets: Default::default(),
+        default_budget_tokens: None,
+        admin_token: None,
+        keys_file: None,
+        audit_url: Some(format!("http://{audit_addr}")),
+        require_audit: false,
+        aws_region: "us-east-1".into(),
+        speech_asr: None,
+        speech_tts: None,
+        search: Some(agentkeys_gate::config::SearchConfig {
+            base_url: format!("http://{searx_addr}"),
+            engines: "bing".into(),
+        }),
+    };
+    let relay = Arc::new(Relay::new(config));
+    let app = server::router(relay);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/search"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"q": "hangzhou weather", "count": 1, "engines": "google,duckduckgo"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["engine"], "bing");
+    assert_eq!(body["results"].as_array().unwrap().len(), 1, "count cap");
+    assert_eq!(body["results"][0]["url"], "https://a.example/w");
+    assert_eq!(body["answers"][0], "31°C and sunny");
+
+    // The engine set the mock saw is the GATE's, not the caller's attempt.
+    let queries = searx.queries.lock().unwrap().clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0]["engines"], "bing");
+    assert_eq!(queries[0]["format"], "json");
+
+    // Audit: one GateSearch (op_kind 94) row, counts not query text.
+    wait_for(
+        || !audit.envelopes.lock().unwrap().is_empty(),
+        "GateSearch audit row",
+    )
+    .await;
+    let envs = audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs[0]["op_kind"], 94);
+    assert_eq!(envs[0]["op_body"]["engines"], "bing");
+    assert_eq!(envs[0]["op_body"]["result_count"], 1);
+    assert_eq!(envs[0]["op_body"]["query_chars"], 16);
+    assert!(
+        envs[0]["op_body"].get("q").is_none(),
+        "no query text in audit"
+    );
+
+    // An unauthenticated call refuses.
+    let resp = client
+        .post(format!("http://{addr}/v1/search"))
+        .json(&json!({"q": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
 }

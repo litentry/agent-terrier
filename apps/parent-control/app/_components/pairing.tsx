@@ -98,6 +98,7 @@ export function DelegatesPage({
   claiming,
   justPaired,
   onManage,
+  onCommitScope,
   onUnpair,
   onNewAgent,
   onArchive,
@@ -119,6 +120,9 @@ export function DelegatesPage({
   claiming: boolean;
   justPaired: string | null;
   onManage?: (id: string) => void;
+  /** #248/#617 — when provided, the permission view mounts the SAME staged
+   *  editor as the actor page (memory + capabilities, one setScope commit). */
+  onCommitScope?: (a: Actor, services: string[], readOnly: boolean, preserveOverride?: string[]) => Promise<boolean>;
   onUnpair?: (a: Actor) => void;
   /** #429 — open the "New agent" spawn modal (one Touch ID, zero rendezvous). */
   onNewAgent?: () => void;
@@ -558,7 +562,7 @@ export function DelegatesPage({
         </div>
       )}
 
-      {view === 'permissions' && <PermissionView agents={pairedAgents} onManage={onManage} />}
+      {view === 'permissions' && <PermissionView agents={pairedAgents} onManage={onManage} onCommitScope={onCommitScope} />}
     </>
   );
 }

@@ -79,6 +79,18 @@ pub struct Cli {
     /// audit-only path, but required by the one-owner client).
     #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
     pub aws_region: String,
+
+    /// #653 — base URL of the SearXNG instance the `/v1/search` leg relays to
+    /// (the broker-host loopback service). Unset = the leg is unconfigured on
+    /// this gate (its endpoint refuses 503, loudly logged at boot).
+    #[arg(long, env = "AGENTKEYS_GATE_SEARCH_URL")]
+    pub search_url: Option<String>,
+
+    /// #653 — engine set the gate pins on every SearXNG query (callers cannot
+    /// widen it). Bing is the deployment default (owner decision, 2026-08-31);
+    /// Baidu/Sogou/Quark stay reachable via this knob, never per-request.
+    #[arg(long, env = "AGENTKEYS_GATE_SEARCH_ENGINES", default_value = "bing")]
+    pub search_engines: String,
 }
 
 /// One relay key record: the caller credential a sandbox/device presents,
@@ -136,6 +148,14 @@ pub struct UpstreamConfig {
     pub model_override: Option<String>,
 }
 
+/// #653 — the search relay's one upstream (a self-hosted SearXNG; no vendor
+/// key — the engine set is the policy surface).
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    pub base_url: String,
+    pub engines: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct GateConfig {
     pub listen: SocketAddr,
@@ -160,6 +180,8 @@ pub struct GateConfig {
     /// boot); a present-but-malformed family file fails boot instead.
     pub speech_asr: Option<AsrCreds>,
     pub speech_tts: Option<TtsCreds>,
+    /// #653 web-search relay — `None` = leg unconfigured (503, loud at boot).
+    pub search: Option<SearchConfig>,
 }
 
 /// Missing vars = the family is legitimately unconfigured (None). A family
@@ -259,6 +281,13 @@ impl GateConfig {
             aws_region: cli.aws_region,
             speech_asr: optional_family(ark.asr())?,
             speech_tts: optional_family(ark.tts())?,
+            search: cli
+                .search_url
+                .filter(|u| !u.trim().is_empty())
+                .map(|u| SearchConfig {
+                    base_url: u.trim().trim_end_matches('/').to_string(),
+                    engines: cli.search_engines.trim().to_string(),
+                }),
         })
     }
 
@@ -294,6 +323,7 @@ mod tests {
             aws_region: "us-east-1".into(),
             speech_asr: None,
             speech_tts: None,
+            search: None,
         }
     }
 
@@ -313,6 +343,8 @@ mod tests {
             upstream_base_url: None,
             upstream_api_key: None,
             upstream_api_key_file: None,
+            search_url: None,
+            search_engines: "bing".into(),
             model: None,
             keys_file: None,
             default_budget_tokens: None,

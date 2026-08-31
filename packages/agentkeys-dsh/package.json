@@ -14,7 +14,8 @@
     "./audit": "./lib/audit.js",
     "./bridge": "./lib/bridge.js",
     "./bridge-mgmt": "./lib/bridge-mgmt.js",
-    "./invariant": "./lib/invariant.js"
+    "./invariant": "./lib/invariant.js",
+    "./web-search": "./lib/web-search.js"
   },
   "files": [
     "lib/",

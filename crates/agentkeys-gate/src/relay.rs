@@ -19,7 +19,9 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use tokio_stream::wrappers::ReceiverStream;
 
-use agentkeys_core::audit::{GateEmbedBody, GateTurnBody, SpeechAsrBody, SpeechTtsBody};
+use agentkeys_core::audit::{
+    GateEmbedBody, GateSearchBody, GateTurnBody, SpeechAsrBody, SpeechTtsBody,
+};
 use base64::Engine;
 
 use crate::audit::Auditor;
@@ -44,6 +46,9 @@ pub struct Relay {
     /// #527 — the gate-held IAM credential for the voices catalog OpenAPI
     /// (`None` = unconfigured; `GET /v1/audio/voices` then 503s). See voices.rs.
     pub voices: Option<crate::voices::VoicesConfig>,
+    /// #653 — transport for the SearXNG relay (its base/engines live in
+    /// `config.search`; `None` config = the leg 503s).
+    search_http: reqwest::Client,
     auditor: Option<Arc<Auditor>>,
 }
 
@@ -61,6 +66,65 @@ pub enum TurnOutput {
         content_type: String,
         rx: ReceiverStream<Result<bytes::Bytes, std::io::Error>>,
     },
+}
+
+/// #653 — search result caps: the tool feeds an LLM turn, so small and
+/// snippet-truncated beats exhaustive.
+const DEFAULT_SEARCH_RESULTS: u64 = 5;
+const MAX_SEARCH_RESULTS: u64 = 10;
+const MAX_SNIPPET_CHARS: usize = 400;
+
+/// Map a SearXNG `format=json` response to the compact wire shape the
+/// `web_search` tool renders: top-N `{title,url,snippet}` plus any direct
+/// `answers`. Pure — unit-tested against a captured SearXNG shape.
+pub(crate) fn compact_search_results(v: &Value, engines: &str, cap: usize) -> Value {
+    let truncate = |s: &str| -> String {
+        if s.chars().count() <= MAX_SNIPPET_CHARS {
+            s.to_string()
+        } else {
+            let cut: String = s.chars().take(MAX_SNIPPET_CHARS).collect();
+            format!("{cut}…")
+        }
+    };
+    let results: Vec<Value> = v
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| {
+                    let url = r.get("url").and_then(Value::as_str)?;
+                    Some(serde_json::json!({
+                        "title": r.get("title").and_then(Value::as_str).unwrap_or_default(),
+                        "url": url,
+                        "snippet": truncate(r.get("content").and_then(Value::as_str).unwrap_or_default()),
+                    }))
+                })
+                .take(cap)
+                .collect()
+        })
+        .unwrap_or_default();
+    let answers: Vec<Value> = v
+        .get("answers")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| match x {
+                    Value::String(s) => Some(Value::String(truncate(s))),
+                    Value::Object(o) => o
+                        .get("answer")
+                        .and_then(Value::as_str)
+                        .map(|s| Value::String(truncate(s))),
+                    _ => None,
+                })
+                .take(3)
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "engine": engines,
+        "results": results,
+        "answers": answers,
+    })
 }
 
 impl Relay {
@@ -82,6 +146,7 @@ impl Relay {
             upstream,
             speech,
             voices,
+            search_http: reqwest::Client::new(),
             auditor,
         }
     }
@@ -293,6 +358,168 @@ impl Relay {
                 tracing::error!(user = %user_omni, error = %e, "GateEmbed audit append failed");
             }
         }
+    }
+
+    fn search_body(
+        caller: &RelayKey,
+        engines: &str,
+        outcome: &str,
+        query_chars: u64,
+        result_count: u64,
+    ) -> GateSearchBody {
+        GateSearchBody {
+            device_id: caller.device_id.clone(),
+            api_key_id: caller.key_id.clone(),
+            engines: engines.to_string(),
+            outcome: outcome.to_string(),
+            query_chars,
+            result_count,
+        }
+    }
+
+    /// Best-effort GateSearch audit for paths that cannot retro-fail the call.
+    async fn audit_search_best_effort(&self, user_omni: &str, body: GateSearchBody) {
+        if let Some(auditor) = &self.auditor {
+            if let Err(e) = auditor.emit_search(user_omni, body).await {
+                tracing::error!(user = %user_omni, error = %e, "GateSearch audit append failed");
+            }
+        }
+    }
+
+    /// #653 — the web-search relay: the delegate `web_search` tool's metered
+    /// egress to the broker-host SearXNG. The engine set is PINNED by gate
+    /// config (Bing by deployment default — callers cannot widen it); token
+    /// budgets gate the call the same as chat/embeddings (a budget-exhausted
+    /// user should not keep feeding search results into turns), but a search
+    /// burns no tokens.
+    pub async fn handle_search(&self, caller: &RelayKey, raw: &[u8]) -> GateResult<TurnOutput> {
+        let Some(search) = self.config.search.clone() else {
+            return Err(GateError::NotConfigured(
+                "search relay not configured on this gate (AGENTKEYS_GATE_SEARCH_URL)".into(),
+            ));
+        };
+        let body: Value = serde_json::from_slice(raw)
+            .map_err(|e| GateError::BadRequest(format!("invalid search body: {e}")))?;
+        let q = body
+            .get("q")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        if q.is_empty() {
+            return Err(GateError::BadRequest(
+                "search body needs a non-empty `q` string".into(),
+            ));
+        }
+        let count = body
+            .get("count")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_SEARCH_RESULTS)
+            .clamp(1, MAX_SEARCH_RESULTS) as usize;
+        let language = body.get("language").and_then(Value::as_str);
+        let query_chars = q.chars().count() as u64;
+
+        // The same two deterministic budget gates as chat/embeddings.
+        if let Some(budget) = self.config.budget_for(&caller.user_omni) {
+            let used = self.meter.used_total(&caller.user_omni);
+            if used >= budget {
+                let row = Self::search_body(
+                    caller,
+                    &search.engines,
+                    "denied:budget_exceeded",
+                    query_chars,
+                    0,
+                );
+                self.audit_search_best_effort(&caller.user_omni, row).await;
+                return Err(GateError::Budget(format!(
+                    "user token budget exhausted ({used}/{budget})"
+                )));
+            }
+        }
+        if let Some(key_budget) = self.keys.budget_for_key(&caller.key_id) {
+            let key_used = self
+                .meter
+                .used_total_for_key(&caller.user_omni, &caller.key_id);
+            if key_used >= key_budget {
+                let row = Self::search_body(
+                    caller,
+                    &search.engines,
+                    "denied:budget_exceeded",
+                    query_chars,
+                    0,
+                );
+                self.audit_search_best_effort(&caller.user_omni, row).await;
+                return Err(GateError::Budget(format!(
+                    "delegate token budget exhausted ({key_used}/{key_budget} for key {})",
+                    caller.key_id
+                )));
+            }
+        }
+
+        let resp = match UpstreamClient::search_get(
+            &self.search_http,
+            &search.base_url,
+            &q,
+            &search.engines,
+            language,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(key = %caller.key_id, error = %e, "search upstream unreachable");
+                let row =
+                    Self::search_body(caller, &search.engines, "upstream_error", query_chars, 0);
+                self.audit_search_best_effort(&caller.user_omni, row).await;
+                return Err(e);
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let code = status.as_u16();
+            let upstream_body = resp.bytes().await.unwrap_or_default();
+            tracing::warn!(
+                key = %caller.key_id,
+                status = code,
+                body = %String::from_utf8_lossy(&upstream_body[..upstream_body.len().min(400)]),
+                "search upstream non-2xx"
+            );
+            let row = Self::search_body(caller, &search.engines, "upstream_error", query_chars, 0);
+            self.audit_search_best_effort(&caller.user_omni, row).await;
+            return Err(GateError::Upstream(format!(
+                "search upstream returned HTTP {code}"
+            )));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| GateError::Upstream(format!("reading search response: {e}")))?;
+        let parsed: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| GateError::Upstream(format!("unparseable search response: {e}")))?;
+        let compact = compact_search_results(&parsed, &search.engines, count);
+        let result_count = compact
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|a| a.len() as u64)
+            .unwrap_or(0);
+
+        let row = Self::search_body(caller, &search.engines, "ok", query_chars, result_count);
+        if let Some(auditor) = &self.auditor {
+            if let Err(e) = auditor.emit_search(&caller.user_omni, row).await {
+                tracing::error!(user = %caller.user_omni, error = %e, "GateSearch audit append failed");
+                if self.config.require_audit {
+                    return Err(GateError::Audit(
+                        "search completed but could not be recorded (require_audit)".into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(TurnOutput::Full {
+            status: 200,
+            content_type: "application/json".into(),
+            body: serde_json::to_vec(&compact).unwrap_or_default(),
+        })
     }
 
     /// #572 — the embeddings relay: the in-sandbox OpenViking engine's metered
@@ -717,5 +944,67 @@ impl Relay {
             )));
         }
         Ok((status, content_type, body.to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A captured-shape SearXNG `format=json` response (fields the mapper
+    /// reads; extra fields present to prove they are ignored).
+    fn searxng_fixture() -> Value {
+        serde_json::json!({
+            "query": "hangzhou weather",
+            "number_of_results": 3,
+            "results": [
+                {"title": "Weather in Hangzhou", "url": "https://a.example/w", "content": "Sunny, 31°C, humid.", "engine": "bing", "score": 1.9},
+                {"title": "Hangzhou 7-day", "url": "https://b.example/7d", "content": "Forecast…", "engine": "bing"},
+                {"title": "No content field", "url": "https://c.example/x"},
+                {"title": "no url — dropped"}
+            ],
+            "answers": ["31°C and sunny"],
+            "suggestions": ["hangzhou weather tomorrow"]
+        })
+    }
+
+    #[test]
+    fn compact_mapper_takes_cap_drops_urlless_and_keeps_answers() {
+        let out = compact_search_results(&searxng_fixture(), "bing", 2);
+        assert_eq!(out["engine"], "bing");
+        let results = out["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2, "cap applies");
+        assert_eq!(results[0]["url"], "https://a.example/w");
+        assert_eq!(results[0]["snippet"], "Sunny, 31°C, humid.");
+        assert_eq!(out["answers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compact_mapper_survives_empty_and_alien_shapes() {
+        let out = compact_search_results(&serde_json::json!({}), "bing", 5);
+        assert_eq!(out["results"].as_array().unwrap().len(), 0);
+        let out =
+            compact_search_results(&serde_json::json!({"results": "not-an-array"}), "bing", 5);
+        assert_eq!(out["results"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn compact_mapper_truncates_long_snippets() {
+        let long = "x".repeat(1000);
+        let v = serde_json::json!({"results": [{"title": "t", "url": "https://a.example", "content": long}]});
+        let out = compact_search_results(&v, "bing", 5);
+        let snippet = out["results"][0]["snippet"].as_str().unwrap();
+        assert!(
+            snippet.chars().count() <= MAX_SNIPPET_CHARS + 1,
+            "cap+ellipsis"
+        );
+        assert!(snippet.ends_with('…'));
+    }
+
+    #[test]
+    fn compact_mapper_reads_object_answers() {
+        let v = serde_json::json!({"results": [], "answers": [{"answer": "42", "url": "https://a.example"}]});
+        let out = compact_search_results(&v, "bing", 5);
+        assert_eq!(out["answers"][0], "42");
     }
 }

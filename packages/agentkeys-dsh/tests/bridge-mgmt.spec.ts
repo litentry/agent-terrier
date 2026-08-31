@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { exportHome, importHome, isExcludedPath, relPathOk, resetImportGuardForTests } from '../src/bridge-mgmt.js';
+import { exportHome, importHome, isExcludedPath, relPathOk, resetImportGuardForTests, settleQuiet } from '../src/bridge-mgmt.js';
 
 let home: string;
 beforeEach(async () => {
@@ -68,5 +68,75 @@ describe('bridge mgmt snapshot (#616)', () => {
     expect(isExcludedPath('profiles/agentkeys/node_modules/x/y.js')).toBe(true);
     expect(isExcludedPath('profiles/agentkeys/package.json')).toBe(true);
     expect(isExcludedPath('sessions/a.jsonl')).toBe(false);
+  });
+});
+
+describe('#616 import ordering (the orphaned-persistence-owner wedge)', () => {
+  const doc = (at: number, content = 'NEW') => ({
+    version: 1,
+    snapshot_at: at,
+    files: [{ path: 'sessions/s.jsonl', content_b64: Buffer.from(content).toString('base64') }],
+  });
+
+  it('beforeWrite runs AFTER validation + newer-wins, BEFORE any byte lands', async () => {
+    await fs.mkdir(path.join(home, 'sessions'), { recursive: true });
+    const target = path.join(home, 'sessions', 's.jsonl');
+    await fs.writeFile(target, 'OLD');
+    let sawInsideHook: string | undefined;
+    let hookTargets: string[] = [];
+    const outcome = await importHome(home, doc(10), async (targets) => {
+      hookTargets = targets;
+      sawInsideHook = await fs.readFile(target, 'utf8');
+    });
+    expect(outcome.applied).toBe(true);
+    expect(sawInsideHook).toBe('OLD'); // dispose window: log still untouched
+    expect(hookTargets).toEqual([target]);
+    expect(await fs.readFile(target, 'utf8')).toBe('NEW');
+  });
+
+  it('a stale snapshot never invokes beforeWrite (no agent restart on reject)', async () => {
+    await importHome(home, doc(100));
+    let invoked = false;
+    const stale = await importHome(home, doc(50), async () => {
+      invoked = true;
+    });
+    expect(stale.applied).toBe(false);
+    expect(invoked).toBe(false);
+  });
+
+  it('an invalid doc never invokes beforeWrite', async () => {
+    let invoked = false;
+    await expect(
+      importHome(home, { version: 1, files: [{ path: '../escape', content_b64: 'eA==' }] }, async () => {
+        invoked = true;
+      }),
+    ).rejects.toThrow(/escapes|invalid/);
+    expect(invoked).toBe(false);
+  });
+
+  it('settleQuiet waits out an active writer, returns once quiet', async () => {
+    const target = path.join(home, 'busy.jsonl');
+    await fs.writeFile(target, 'a');
+    // a retirement-flush stand-in: keeps appending for ~350ms, then stops
+    const writer = (async () => {
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 70));
+        await fs.appendFile(target, 'x');
+      }
+    })();
+    const started = Date.now();
+    await settleQuiet([target], 150, 3000);
+    await writer;
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(350); // did not return mid-flush
+    const size1 = (await fs.stat(target)).size;
+    await new Promise((r) => setTimeout(r, 100));
+    expect((await fs.stat(target)).size).toBe(size1); // writer truly done
+  });
+
+  it('settleQuiet is fast for quiet or absent files', async () => {
+    const started = Date.now();
+    await settleQuiet([path.join(home, 'nope.jsonl')], 120, 3000);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

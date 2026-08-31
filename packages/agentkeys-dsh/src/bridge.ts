@@ -22,7 +22,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { AgentHandle } from '@deepseek-ai/dsh-agent';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import { chatReply, encodeFrame, healthzBody } from './bridge-frames.js';
-import { exportHome, homeBytes, importHome } from './bridge-mgmt.js';
+import { exportHome, homeBytes, importHome, settleQuiet } from './bridge-mgmt.js';
 import { TurnStreamer } from './bridge-stream.js';
 
 export const name = 'agentkeys-bridge';
@@ -349,14 +349,22 @@ export function apply(ctx: Context, config: Config): void {
           return;
         }
         try {
-          const outcome = await importHome(home(), body);
           let agentRestarted = false;
-          if (outcome.applied && body.restart !== false && handle) {
-            // the dsh restart = dispose + lazy re-create on the next turn
-            await handle.dispose().catch(() => {});
-            handle = undefined;
-            agentRestarted = true;
-          }
+          // Dispose BEFORE any byte lands (the hook runs after validation +
+          // the newer-wins gate, so a rejected snapshot never restarts the
+          // agent): the live session's retirement flush must complete against
+          // the UNCHANGED log — overwriting it mid-flush aborts the retirement
+          // and orphans the persistence owner, wedging every later ensure into
+          // a permanent acp_starting (measured live, 2026-09-01). Then wait
+          // for the flush to go quiet before the writes.
+          const outcome = await importHome(home(), body, async (targets) => {
+            if (body.restart !== false && handle) {
+              await handle.dispose().catch(() => {});
+              handle = undefined;
+              agentRestarted = true;
+            }
+            await settleQuiet(targets);
+          });
           sendJson(res, 200, {
             ...outcome,
             agent_restarted: agentRestarted,

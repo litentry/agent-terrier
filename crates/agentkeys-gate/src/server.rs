@@ -26,6 +26,9 @@ pub fn router(relay: Arc<Relay>) -> Router {
         // in-sandbox OpenViking engine's metered embedding egress).
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/embeddings/multimodal", post(embeddings_multimodal))
+        // #653 — the web-search relay (SearXNG behind the gate; engine set
+        // pinned by config — Bing by deployment default).
+        .route("/v1/search", post(search))
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
         // #519 — the speech relay legs (same gk_ auth; gate-held Doubao app
@@ -194,6 +197,28 @@ async fn embeddings_leg(
         )),
         Err(e) => {
             tracing::warn!(key = %caller.key_id, error = %e, "embeddings call failed");
+            error_response(e)
+        }
+    }
+}
+
+/// #653 — the web-search relay leg. Searches never stream.
+async fn search(State(relay): State<Arc<Relay>>, headers: HeaderMap, body: Bytes) -> Response {
+    let caller = match authenticate_live(&relay, &headers) {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
+    match relay.handle_search(&caller, &body).await {
+        Ok(TurnOutput::Full {
+            status,
+            content_type,
+            body,
+        }) => full_response(status, content_type, body),
+        Ok(TurnOutput::Stream { .. }) => {
+            error_response(GateError::Internal("search relay produced a stream".into()))
+        }
+        Err(e) => {
+            tracing::warn!(key = %caller.key_id, error = %e, "search call failed");
             error_response(e)
         }
     }

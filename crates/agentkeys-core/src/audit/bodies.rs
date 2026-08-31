@@ -396,6 +396,26 @@ pub struct GateEmbedBody {
     pub total_tokens: u64,
 }
 
+/// #653 — one web search through the gate's SearXNG relay (op_kind 94).
+/// Query TEXT never lands on-chain-adjacent storage — the body carries the
+/// engine set, the query LENGTH, and the result count only (D13 posture).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateSearchBody {
+    /// Device the call is attributed to (from the relay key record).
+    pub device_id: String,
+    /// Relay api-key id the caller authenticated with (never the secret).
+    pub api_key_id: String,
+    /// Engine set the gate queried (e.g. `"bing"` — the gate's configured
+    /// default; callers cannot widen it).
+    pub engines: String,
+    /// `"ok"`, `"denied:budget_exceeded"`, or `"upstream_error"`.
+    pub outcome: String,
+    /// Characters in the query (never the query itself).
+    pub query_chars: u64,
+    /// Results returned to the caller after the gate's cap.
+    pub result_count: u64,
+}
+
 // ── 100..109 — channel family (#406 channels data class, audited per #229) ─
 //
 // Emitted by `agentkeys-worker-channel` once per publish/subscribe/teardown.
