@@ -87,6 +87,22 @@ pub async fn agent_resolve(
     // 3. Mint a FRESH J1_agent from the on-chain binding (actor = child, operator =
     //    master). derivation_path is informational — the cap-mint gate keys on
     //    operator/actor/device, not the path — so "//resolved" marks this path.
+    //
+    //    TTL: a SANDBOX DELEGATE (server-side truth: it has a #546 spawn-context
+    //    row) gets the lease-aligned delegate TTL — the #643 split applied to
+    //    THIS mint site too. The in-sandbox daemon adopts the resolve J1 as its
+    //    bearer (`on_new_session`), and a device-TTL mint here silently traded
+    //    the 25h boot J1 for a 5h one: every pod's data plane died ~5h after
+    //    boot with signer `ExpiredSignature` (measured on agent-i, 2026-08-31 —
+    //    the instance env J1 was still valid while the bearer was not).
+    //    Hardware devices (no row) keep the short TTL; they re-resolve on boot.
+    let is_sandbox_delegate =
+        matches!(state.spawn_context_store.get(&device_key_hash), Ok(Some(_)));
+    let ttl_seconds = if is_sandbox_delegate {
+        crate::handlers::agent::delegate_session_jwt_ttl_seconds()
+    } else {
+        session_jwt_ttl_seconds()
+    };
     let session_jwt = mint_agent_session_jwt(
         &state.session_keypair,
         &state.config.oidc_issuer,
@@ -94,7 +110,7 @@ pub async fn agent_resolve(
         &device.operator_omni,
         "//resolved",
         &body.device_pubkey,
-        session_jwt_ttl_seconds(),
+        ttl_seconds,
     )
     .map_err(|e| BrokerError::Internal(format!("mint J1_agent: {e}")))?;
 
@@ -102,6 +118,8 @@ pub async fn agent_resolve(
         device = %body.device_pubkey,
         operator_omni = %device.operator_omni,
         actor_omni = %device.actor_omni,
+        ttl_seconds,
+        delegate = is_sandbox_delegate,
         "resolved §10.2 binding — J1_agent minted"
     );
 

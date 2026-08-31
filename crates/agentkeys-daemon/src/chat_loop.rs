@@ -274,12 +274,53 @@ impl DelegateCredential {
     }
 
     /// Resolve handed back a fresh J1: signer mode rotates its bearer so
-    /// every subsequent signer call rides the newest session.
+    /// every subsequent signer call rides the newest session — **newer-wins
+    /// by `exp`**. A resolve minted at the short device TTL must never
+    /// replace a longer-lived boot J1 while that one is still valid (the
+    /// 2026-08-31 agent-i death: the 25h boot J1 was traded for a 5h resolve
+    /// J1, and once IT expired nothing could refresh it — the refresh itself
+    /// needs a live bearer). A current bearer that is expired or unreadable
+    /// always loses to the incoming one.
     pub(crate) async fn on_new_session(&self, jwt: &str) {
         if let Self::Signer { bearer, .. } = self {
-            *bearer.write().await = jwt.to_string();
+            let mut cur = bearer.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let cur_exp = jwt_exp_claim(&cur);
+            let new_exp = jwt_exp_claim(jwt);
+            let keep_current = match (cur_exp, new_exp) {
+                (Some(c), Some(n)) => c > now && n < c,
+                (Some(c), None) => c > now,
+                (None, _) => false,
+            };
+            if keep_current {
+                tracing::debug!(
+                    cur_exp,
+                    new_exp,
+                    "#552 bearer: keeping the longer-lived session (newer-wins by exp)"
+                );
+                return;
+            }
+            *cur = jwt.to_string();
         }
     }
+}
+
+/// The `exp` claim of a JWT, decoded WITHOUT verification — the daemon is not
+/// the token's verifier (the signer/broker are); this only orders two bearers
+/// it already holds by lifetime. `None` = unreadable/absent.
+fn jwt_exp_claim(jwt: &str) -> Option<u64> {
+    use base64::Engine as _;
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim())
+        .ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()?
+        .get("exp")?
+        .as_u64()
 }
 
 /// Build the signing credential. LEGACY: materialize the injected K10 into
@@ -1326,6 +1367,97 @@ fn shellexpand_home(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jwt_with_exp(exp: Option<u64>) -> String {
+        use base64::Engine as _;
+        let payload = match exp {
+            Some(e) => format!("{{\"exp\":{e}}}"),
+            None => "{}".to_string(),
+        };
+        format!(
+            "h.{}.s",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+        )
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn signer_credential(bearer_jwt: &str) -> DelegateCredential {
+        DelegateCredential::Signer {
+            client: std::sync::Arc::new(agentkeys_core::signer_client::DeviceSignerClient::new(
+                "http://127.0.0.1:1",
+            )),
+            bearer: std::sync::Arc::new(tokio::sync::RwLock::new(bearer_jwt.to_string())),
+            actor_omni: format!("0x{}", "ab".repeat(32)),
+            address: "0xabc".into(),
+            device_key_hash: "0xdef".into(),
+        }
+    }
+
+    async fn bearer_of(c: &DelegateCredential) -> String {
+        match c {
+            DelegateCredential::Signer { bearer, .. } => bearer.read().await.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn jwt_exp_claim_reads_exp_and_rejects_garbage() {
+        assert_eq!(jwt_exp_claim(&jwt_with_exp(Some(42))), Some(42));
+        assert_eq!(jwt_exp_claim(&jwt_with_exp(None)), None);
+        assert_eq!(jwt_exp_claim("not-a-jwt"), None);
+        assert_eq!(jwt_exp_claim(""), None);
+    }
+
+    // ── the 2026-08-31 agent-i death: a short resolve J1 must not replace a
+    //    longer-lived, still-valid boot J1 ─────────────────────────────────
+    #[tokio::test]
+    async fn on_new_session_keeps_a_longer_lived_valid_bearer() {
+        let long = jwt_with_exp(Some(now_secs() + 90_000));
+        let short = jwt_with_exp(Some(now_secs() + 18_000));
+        let cred = signer_credential(&long);
+        cred.on_new_session(&short).await;
+        assert_eq!(bearer_of(&cred).await, long);
+    }
+
+    #[tokio::test]
+    async fn on_new_session_adopts_a_longer_lived_bearer() {
+        let short = jwt_with_exp(Some(now_secs() + 18_000));
+        let long = jwt_with_exp(Some(now_secs() + 90_000));
+        let cred = signer_credential(&short);
+        cred.on_new_session(&long).await;
+        assert_eq!(bearer_of(&cred).await, long);
+    }
+
+    #[tokio::test]
+    async fn on_new_session_replaces_an_expired_bearer_even_with_a_shorter_one() {
+        let expired = jwt_with_exp(Some(now_secs().saturating_sub(60)));
+        let fresh_short = jwt_with_exp(Some(now_secs() + 18_000));
+        let cred = signer_credential(&expired);
+        cred.on_new_session(&fresh_short).await;
+        assert_eq!(bearer_of(&cred).await, fresh_short);
+    }
+
+    #[tokio::test]
+    async fn on_new_session_replaces_an_unreadable_bearer() {
+        let cred = signer_credential("garbage");
+        let fresh = jwt_with_exp(Some(now_secs() + 18_000));
+        cred.on_new_session(&fresh).await;
+        assert_eq!(bearer_of(&cred).await, fresh);
+    }
+
+    #[tokio::test]
+    async fn on_new_session_keeps_a_valid_bearer_over_an_unreadable_incoming() {
+        let valid = jwt_with_exp(Some(now_secs() + 90_000));
+        let cred = signer_credential(&valid);
+        cred.on_new_session("garbage").await;
+        assert_eq!(bearer_of(&cred).await, valid);
+    }
 
     // ── #563: the SSE frame parser is pure — split boundaries anywhere ──────
     #[test]
