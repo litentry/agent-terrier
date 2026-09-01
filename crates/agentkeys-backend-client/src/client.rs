@@ -237,11 +237,26 @@ impl BackendClient {
                 );
                 Ok(None)
             }
-            // Exactly one set → inconsistent config; fail loud BEFORE the worker
-            // call rather than silently dropping per-actor isolation.
-            _ => Err(BackendError::NotConfigured(
-                "STS relay partially configured — need BOTH --agent-session-bearer and the \
-                 per-data-class role ARN (--memory-role-arn / --vault-role-arn), got only one",
+            // Bearer without a role ARN = a deployment with NO per-actor AWS
+            // relay at all (the VE stack: workers mint their own TOS creds via
+            // signer custody — no role ARNs exist). NOT a misconfig: proceed
+            // with no X-Aws-* headers, like the neither-configured arm. The
+            // old hard error here made the checkpoint RESTORE permanently
+            // fail on VE while saves (whose client sets no bearer field)
+            // sailed through the (None, None) arm — issue #657.
+            (Some(_), None) => {
+                tracing::debug!(
+                    "no per-data-class role ARN configured — STS relay skipped (no-AWS \
+                     posture); the worker uses its own credentials"
+                );
+                Ok(None)
+            }
+            // A role ARN without the bearer can never mint — the one genuinely
+            // inconsistent shape; fail loud BEFORE the worker call rather than
+            // silently dropping per-actor isolation (issue #90).
+            (None, Some(_)) => Err(BackendError::NotConfigured(
+                "STS relay partially configured — a per-data-class role ARN is set but \
+                 --agent-session-bearer is missing; the relay cannot mint",
             )),
         }
     }
@@ -830,5 +845,49 @@ impl BackendClient {
             ok: parsed.ok,
             envelope_hash: parsed.envelope_hash,
         })
+    }
+}
+
+#[cfg(test)]
+mod sts_relay_tests {
+    use super::*;
+
+    fn client(bearer: Option<&str>, role: Option<&str>) -> BackendClient {
+        BackendClient::new(
+            Some("http://127.0.0.1:1".into()),
+            None,
+            None,
+            None,
+            bearer.map(String::from),
+            role.map(String::from),
+            None,
+            "us-east-1".into(),
+        )
+    }
+
+    /// #657 — a bearer WITHOUT a role ARN is the no-AWS (VE) posture, not a
+    /// misconfig: the relay is skipped and the worker uses its own creds.
+    /// The old hard error here made every VE checkpoint RESTORE give up
+    /// while saves (bearer-less client) passed the (None, None) arm.
+    #[tokio::test]
+    async fn bearer_without_role_skips_the_relay() {
+        let c = client(Some("jwt"), None);
+        let out = c.sts_headers(c.memory_role_arn.as_ref()).await.unwrap();
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn neither_configured_skips_the_relay() {
+        let c = client(None, None);
+        assert!(c.sts_headers(None).await.unwrap().is_none());
+    }
+
+    /// A role ARN without the bearer can never mint — the one genuinely
+    /// inconsistent shape stays a loud pre-flight error (issue #90).
+    #[tokio::test]
+    async fn role_without_bearer_fails_loud() {
+        let c = client(None, Some("arn:aws:iam::1:role/x"));
+        let err = c.sts_headers(c.memory_role_arn.as_ref()).await.unwrap_err();
+        assert!(matches!(err, BackendError::NotConfigured(_)));
     }
 }

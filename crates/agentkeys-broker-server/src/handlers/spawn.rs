@@ -265,15 +265,20 @@ pub(crate) async fn call_agent_slots(
 }
 
 /// THE spawn template (#425 S2) — the ONLY grants a spawn ever mints: the
-/// delegate's duplex operator-chat channel pair + its memory namespace.
-/// Presets are content, never authority (#428): nothing a preset suggests is
-/// added here; suggestions become grants only via a later explicit ceremony.
-/// The template pin test below is the #428 nothing-auto-granted negative.
+/// delegate's duplex operator-chat channel pair + its memory namespace +
+/// (owner decision, 2026-09-01, #653 follow-up) `tool:web` — web search/fetch
+/// is a product-default capability for new delegates; the owner unticks it in
+/// the permission editor like any other grant. Presets are content, never
+/// authority (#428): nothing a preset suggests is added here; suggestions
+/// become grants only via a later explicit ceremony. The template pin test
+/// below is the #428 nothing-auto-granted negative — widening this set is a
+/// DELIBERATE policy edit, made loud by that test.
 pub(crate) fn spawn_template_services(chat_channel_id: &str, memory_ns: &str) -> Vec<String> {
     vec![
         agentkeys_protocol::service_channel_pub(chat_channel_id),
         agentkeys_protocol::service_channel_sub(chat_channel_id),
         agentkeys_protocol::service_memory(memory_ns),
+        agentkeys_protocol::service_tool("web"),
     ]
 }
 
@@ -1030,9 +1035,10 @@ mod tests {
     }
 
     #[test]
-    fn spawn_template_is_exactly_chat_pair_plus_memory_ns() {
+    fn spawn_template_is_exactly_chat_pair_plus_memory_ns_plus_web() {
         // #428 nothing-auto-granted negative: the template is EXACTLY the
-        // duplex opchat pair + the memory namespace — a preset (or any other
+        // duplex opchat pair + the memory namespace + the default `tool:web`
+        // capability (owner decision 2026-09-01) — a preset (or any other
         // input) can never widen it without changing this pinned set.
         assert_eq!(
             spawn_template_services("opchat-watchdog", "watchdog"),
@@ -1040,6 +1046,7 @@ mod tests {
                 "channel-pub:opchat-watchdog".to_string(),
                 "channel-sub:opchat-watchdog".to_string(),
                 "memory:watchdog".to_string(),
+                "tool:web".to_string(),
             ]
         );
     }

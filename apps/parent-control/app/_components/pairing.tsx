@@ -41,6 +41,11 @@ function scopeOptions(
     // A bare NON-memory token can't compile to an on-chain service — surfaced
     // separately in the card, never silently dropped into a grant.
   }
+  // Product default (owner decision 2026-09-01, #653 follow-up): every NEW
+  // agent gets web search/fetch offered PRE-SELECTED — the same `tool:web` the
+  // spawn template now mints — so search works out of the box; the operator
+  // unticks it here to opt out. `push` dedupes when the agent also requested it.
+  push('tool:web', 'web search & fetch (product default — untick to withhold)', true);
   namespaces.forEach((ns) => push(`memory:${ns}`, 'available namespace — not requested', false));
   return opts;
 }
