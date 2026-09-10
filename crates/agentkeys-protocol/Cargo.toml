@@ -12,3 +12,7 @@ serde_json = { workspace = true }
 # generated from these structs. ts-rs is wasm-safe (no native deps — the wasm32
 # CI gate proves the browser build still compiles).
 ts-rs = { version = "10", features = ["no-serde-warnings"] }
+# #662 — the resource item's sensitivity tier (`Safe`/`Sensitive`, the floor
+# rule) is the catalog's enum: ONE owner, re-exported here for the manifest +
+# registry types. Pure Rust (p256/sha2/base64), so the wasm32 gate still passes.
+agentkeys-catalog = { path = "../agentkeys-catalog" }

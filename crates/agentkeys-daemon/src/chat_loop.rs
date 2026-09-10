@@ -22,11 +22,17 @@
 //! that arrive after boot get replies. Every failure is loud + backed off,
 //! never a crash — chat degrades, the sandbox (and its jobs) keep running.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-use agentkeys_backend_client::protocol::{CapMintOp, CapMintRequest};
+use agentkeys_backend_client::protocol::{
+    CapMintOp, CapMintRequest, ChannelEvent, ChannelEventKind,
+};
 use agentkeys_backend_client::BackendClient;
 use serde::Deserialize;
+
+use crate::app_runtime::{AppRuntimeConfig, FeedSpec, OPCHAT_SLOT};
 
 /// Everything the loop needs, from the sandbox env (injected by the broker's
 /// spawn finalize, #427/#430). `None` = not a chat-configured sandbox — the
@@ -411,6 +417,89 @@ pub(crate) async fn build_credential(cfg: &ChatLoopConfig) -> Option<DelegateCre
     Some(credential)
 }
 
+/// The delegate's rotating `J1_agent` — ONE session shared by every feed
+/// poller, the publisher, the scheduler and the perception adapter (#665:
+/// N feeds, one identity). A 401 from any leg invalidates it; the next leg
+/// re-resolves (serialized — no resolve stampede across N pollers).
+pub(crate) struct SessionHandle {
+    http: reqwest::Client,
+    cfg: Arc<ChatLoopConfig>,
+    credential: Arc<DelegateCredential>,
+    jwt: tokio::sync::RwLock<Option<String>>,
+    refresh: tokio::sync::Mutex<()>,
+}
+
+impl SessionHandle {
+    pub(crate) fn new(
+        http: reqwest::Client,
+        cfg: Arc<ChatLoopConfig>,
+        credential: Arc<DelegateCredential>,
+    ) -> Self {
+        Self {
+            http,
+            cfg,
+            credential,
+            jwt: tokio::sync::RwLock::new(None),
+            refresh: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// The current bearer, resolving one when none is held.
+    pub(crate) async fn bearer(&self) -> Result<String, String> {
+        if let Some(j) = self.jwt.read().await.clone() {
+            return Ok(j);
+        }
+        self.refresh().await
+    }
+
+    /// Re-resolve (serialized). A concurrent caller that finds a fresh bearer
+    /// already stored takes it instead of resolving again.
+    pub(crate) async fn refresh(&self) -> Result<String, String> {
+        let _guard = self.refresh.lock().await;
+        if let Some(j) = self.jwt.read().await.clone() {
+            return Ok(j);
+        }
+        let jwt = resolve_session(&self.http, &self.cfg, &self.credential).await?;
+        self.credential.on_new_session(&jwt).await;
+        *self.jwt.write().await = Some(jwt.clone());
+        Ok(jwt)
+    }
+
+    /// Drop `stale` (a bearer a worker/broker just refused) so the next leg
+    /// re-resolves; a bearer rotated since is kept.
+    pub(crate) async fn invalidate(&self, stale: &str) {
+        let mut cur = self.jwt.write().await;
+        if cur.as_deref() == Some(stale) {
+            *cur = None;
+        }
+    }
+
+    pub(crate) fn client(&self, bearer: &str) -> BackendClient {
+        let client = BackendClient::new(
+            Some(self.cfg.broker_url.clone()),
+            None,
+            None,
+            None,
+            Some(bearer.to_string()),
+            None,
+            None,
+            std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
+        );
+        self.credential.configure_client(client)
+    }
+}
+
+/// #665/#669 — the loop's shared runtime: config, session, publisher, the app
+/// template's bundle (perception prompt), and the perception cache.
+pub(crate) struct LoopRuntime {
+    pub http: reqwest::Client,
+    pub cfg: Arc<ChatLoopConfig>,
+    pub publisher: Arc<Publisher>,
+    pub perception_prompt: Option<String>,
+    pub min_confidence: f32,
+    pub perception_cache: tokio::sync::Mutex<crate::perception::PerceptionCache>,
+}
+
 async fn run(cfg: ChatLoopConfig) {
     let Some(credential) = build_credential(&cfg).await else {
         return;
@@ -430,49 +519,111 @@ async fn run(cfg: ChatLoopConfig) {
         .timeout(Duration::from_secs(40))
         .build()
         .expect("reqwest client");
+    let cfg = Arc::new(cfg);
+    let app = Arc::new(AppRuntimeConfig::from_env());
+    let session = Arc::new(SessionHandle::new(
+        http.clone(),
+        cfg.clone(),
+        credential.clone(),
+    ));
+    let publisher = Arc::new(Publisher::new(http.clone(), cfg.clone(), session.clone()));
 
+    // #660 — the app template's bundle: the perception prompt (R2) + the
+    // schedule (R4). A role preset has none; loud when the catalog is down.
+    let bundle =
+        crate::app_runtime::fetch_template_bundle(&http, &cfg.broker_url, &app.template_id).await;
+    let perception_prompt = bundle
+        .as_ref()
+        .and_then(|b| b.perception_prompt().map(str::to_string));
+    if !app.template_id.is_empty() {
+        tracing::info!(
+            template = %app.template_id,
+            bound_feeds = app.bound_channels.len(),
+            availability = %app.availability.as_str(),
+            perception_prompt = perception_prompt.is_some(),
+            schedule_entries = bundle.as_ref().map(|b| b.manifest.schedule.len()).unwrap_or(0),
+            "#660 app runtime: template facts loaded"
+        );
+    }
+    // R4 — the clock: schedule ticks as agent turns, guard-gated in-loop.
+    if let Some(b) = &bundle {
+        if !b.manifest.schedule.is_empty() {
+            let rt = crate::schedule::ScheduleRuntime {
+                schedule: b.manifest.schedule.clone(),
+                tz_offset_minutes: app.tz_offset_minutes,
+                bridge_url: cfg.bridge_url.clone(),
+                bridge_token: cfg.bridge_token.clone(),
+                self_grants_url: app.self_grants_url.clone(),
+                chat_channel_id: cfg.chat_channel_id.clone(),
+                http: http.clone(),
+                publisher: publisher.clone(),
+            };
+            tokio::spawn(crate::schedule::run(rt));
+        }
+    }
+
+    // R1 — one poller per readable feed, all feeding ONE dispatcher queue.
+    let feeds = app.feeds(&cfg.chat_channel_id);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(FeedSpec, ChannelEvent)>(256);
+    for feed in feeds.iter().filter(|f| f.direction.reads()) {
+        tracing::info!(slot = %feed.slot, channel = %feed.channel_id, kind = %feed.kind.as_str(), "#665 chat loop: polling feed");
+        tokio::spawn(poll_feed(
+            feed.clone(),
+            session.clone(),
+            cfg.clone(),
+            credential.clone(),
+            http.clone(),
+            tx.clone(),
+        ));
+    }
+    drop(tx);
+
+    let runtime = LoopRuntime {
+        http: http.clone(),
+        cfg: cfg.clone(),
+        publisher: publisher.clone(),
+        perception_prompt,
+        min_confidence: crate::perception::min_confidence_from(|k| std::env::var(k).ok()),
+        perception_cache: tokio::sync::Mutex::new(crate::perception::PerceptionCache::new(256)),
+    };
+    while let Some((feed, event)) = rx.recv().await {
+        handle_event(&runtime, &feed, &event).await;
+    }
+    tracing::warn!("#665 chat loop: every feed poller stopped — loop ending");
+}
+
+/// One feed's long-poll loop (R1): its own subscribe-cap cache + cursor +
+/// boot fast-forward; the shared session. Every event is tagged with the
+/// feed's slot before it enters the dispatcher queue.
+async fn poll_feed(
+    feed: FeedSpec,
+    session: Arc<SessionHandle>,
+    cfg: Arc<ChatLoopConfig>,
+    credential: Arc<DelegateCredential>,
+    http: reqwest::Client,
+    tx: tokio::sync::mpsc::Sender<(FeedSpec, ChannelEvent)>,
+) {
     let mut cursor = String::new();
     let mut fast_forwarded = false;
-    let mut session: Option<String> = None;
     let mut backoff = Duration::from_secs(2);
     // #563 — cap reuse: caps carry a 300 s TTL yet were re-minted every poll
-    // round AND every publish, which under #552 remote-PoP custody meant one
-    // signer round-trip per delegate per ~26 s poll (and per reply event —
-    // streaming would multiply that). Reuse until the refresh margin; any
-    // worker refusal invalidates, so revocation/epoch rotation degrade to one
-    // extra mint, never a silent stale-cap loop.
+    // round, which under #552 remote-PoP custody meant one signer round-trip
+    // per delegate per ~26 s poll. Reuse until the refresh margin; any worker
+    // refusal invalidates, so revocation / epoch rotation degrade to one extra
+    // mint, never a silent stale-cap loop.
     let mut sub_caps = CapCache::default();
-    let pub_caps = tokio::sync::Mutex::new(CapCache::default());
-
     loop {
-        // 1. A valid J1_agent (fresh per boot / re-resolved on expiry).
-        if session.is_none() {
-            match resolve_session(&http, &cfg, &credential).await {
-                Ok(jwt) => {
-                    credential.on_new_session(&jwt).await;
-                    session = Some(jwt);
-                    backoff = Duration::from_secs(2);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "#430 chat loop: resolve failed — retrying");
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(120));
-                    continue;
-                }
+        // 1. A valid J1_agent (shared; re-resolved on refusal).
+        let bearer = match session.bearer().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, slot = %feed.slot, "#430 chat loop: resolve failed — retrying");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(120));
+                continue;
             }
-        }
-        let bearer = session.clone().unwrap();
-        let client = BackendClient::new(
-            Some(cfg.broker_url.clone()),
-            None,
-            None,
-            None,
-            Some(bearer.clone()),
-            None,
-            None,
-            std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
-        );
-        let client = credential.configure_client(client);
+        };
+        let client = session.client(&bearer);
 
         // 2. Subscribe cap (cached, #563) + one long-poll round.
         let sub_cap = match sub_caps.fresh() {
@@ -483,7 +634,7 @@ async fn run(cfg: ChatLoopConfig) {
                     CapMintRequest {
                         operator_omni: cfg.operator_omni.clone(),
                         actor_omni: cfg.actor_omni.clone(),
-                        service: format!("channel-sub:{}", cfg.chat_channel_id),
+                        service: format!("channel-sub:{}", feed.channel_id),
                         device_key_hash: credential.device_key_hash(),
                         ttl_seconds: 300,
                     },
@@ -494,9 +645,9 @@ async fn run(cfg: ChatLoopConfig) {
                 Ok(c) => sub_caps.store(c),
                 Err(e) => {
                     let msg = e.to_string();
-                    tracing::warn!(error = %msg, "#430 chat loop: channel-sub mint failed");
+                    tracing::warn!(error = %msg, slot = %feed.slot, channel = %feed.channel_id, "#430 chat loop: channel-sub mint failed");
                     if msg.contains("401") || msg.contains("expired") {
-                        session = None; // re-resolve
+                        session.invalidate(&bearer).await;
                     }
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(120));
@@ -523,22 +674,25 @@ async fn run(cfg: ChatLoopConfig) {
             Ok(resp) if resp.status().is_success() => match resp.json().await {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(error = %e, "#430 chat loop: poll parse failed");
+                    tracing::warn!(error = %e, slot = %feed.slot, "#430 chat loop: poll parse failed");
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
             },
             Ok(resp) => {
-                tracing::warn!(status = %resp.status(), "#430 chat loop: poll refused");
+                tracing::warn!(status = %resp.status(), slot = %feed.slot, "#430 chat loop: poll refused");
                 // The cached cap may be revoked / epoch-rotated — next round
                 // re-mints instead of replaying a refused token (#563).
                 sub_caps.invalidate();
+                if resp.status().as_u16() == 401 {
+                    session.invalidate(&bearer).await;
+                }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(120));
                 continue;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "#430 chat loop: poll transport failed");
+                tracing::warn!(error = %e, slot = %feed.slot, "#430 chat loop: poll transport failed");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(120));
                 continue;
@@ -555,163 +709,204 @@ async fn run(cfg: ChatLoopConfig) {
             if !poll.events.is_empty() {
                 tracing::info!(
                     skipped = poll.events.len(),
+                    slot = %feed.slot,
                     "#430 chat loop: fast-forwarded past existing history at boot"
                 );
             }
             continue;
         }
-
-        // 3. Reply to inbound operator turns.
-        let device_key_hash = credential.device_key_hash();
-        let publish_ctx = PublishCtx {
-            http: &http,
-            cfg: &cfg,
-            client: &client,
-            bearer: &bearer,
-            device_key_hash: &device_key_hash,
-            pub_caps: &pub_caps,
-        };
-        for event in &poll.events {
-            if !matches!(
-                event.direction,
-                agentkeys_backend_client::protocol::ChannelDirection::In
-            ) {
-                continue; // our own replies (direction: out) come back on the feed
+        for event in poll.events {
+            if tx.send((feed.clone(), event)).await.is_err() {
+                return;
             }
-            // #519 — voice turn: a device published an `audio-clip`. Pipeline
-            // runs HERE (agent-side, in the sandbox) but every credentialed
-            // leg goes through the gate: ASR → bridge chat → TTS. The reply is
-            // published twice, correlated: a `text` event (the transcript-
-            // visible reply) and an `audio-clip` event (the spoken reply).
-            if matches!(
-                event.kind,
-                agentkeys_backend_client::protocol::ChannelEventKind::AudioClip
-            ) {
-                let Some(audio_b64) = event.body.as_deref() else {
-                    tracing::warn!(
-                        event = %event.event_id,
-                        "#519 chat loop: audio-clip with body_ref only — by-reference \
-                         audio is a follow-up; turn skipped"
-                    );
-                    continue;
-                };
-                match voice_turn(&http, &cfg, audio_b64, event.audio.as_ref()).await {
-                    Ok(turn) => {
-                        if let Err(e) = publish_event(
-                            &publish_ctx,
-                            "text",
-                            base64_of(turn.reply_text.as_bytes()),
-                            &event.event_id,
-                        )
+        }
+    }
+}
+
+/// Decode an inline body as UTF-8 text (`""` when absent / not text).
+fn inline_text(event: &ChannelEvent) -> String {
+    event
+        .body
+        .as_deref()
+        .and_then(|b64| {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            STANDARD.decode(b64).ok()
+        })
+        .and_then(|b| String::from_utf8(b).ok())
+        .unwrap_or_default()
+}
+
+/// The event's bytes: the inline body, else the `body_ref` blob fetched from
+/// the feed (#667 — originals ride by reference, never downscaled).
+async fn event_bytes(
+    rt: &LoopRuntime,
+    feed: &FeedSpec,
+    event: &ChannelEvent,
+) -> Result<(Vec<u8>, String), String> {
+    if let Some(b64) = event.body.as_deref() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let bytes = STANDARD
+            .decode(b64)
+            .map_err(|e| format!("inline body is not valid base64: {e}"))?;
+        return Ok((bytes, event.content_type.clone().unwrap_or_default()));
+    }
+    if let Some(r) = event.body_ref.as_deref() {
+        return rt.publisher.fetch_blob(&feed.channel_id, r).await;
+    }
+    Err("event carries neither body nor body_ref".into())
+}
+
+/// The dispatcher (the four verbs' "perceive → act" hop): one inbound event
+/// from one feed → the right per-kind path → the reply on the SAME feed.
+async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
+    if !matches!(
+        event.direction,
+        agentkeys_backend_client::protocol::ChannelDirection::In
+    ) {
+        return; // our own replies (direction: out) come back on the feed
+    }
+    let cfg = &rt.cfg;
+    let http = &rt.http;
+    let publisher = &rt.publisher;
+    let channel = feed.channel_id.as_str();
+    let contact_tier = event.contact.as_ref().map(|c| c.tier.as_str());
+    match event.kind {
+        // #519 — a voice turn on the OPERATOR chat feed (a device conversation):
+        // ASR → bridge chat → TTS, published twice (text + audio-clip). On any
+        // other feed a clip is a PERCEIVED input (R2) answered in text.
+        ChannelEventKind::AudioClip if feed.slot == OPCHAT_SLOT => {
+            let (bytes, _ct) = match event_bytes(rt, feed, event).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(event = %event.event_id, error = %e, "#519 chat loop: audio-clip bytes unavailable — turn skipped");
+                    return;
+                }
+            };
+            let audio_b64 = base64_of(&bytes);
+            match voice_turn(http, cfg, &audio_b64, event.audio.as_ref()).await {
+                Ok(turn) => {
+                    if let Err(e) = publisher
+                        .publish_text_out(channel, &turn.reply_text, &event.event_id)
                         .await
-                        {
-                            tracing::warn!(error = %e, "#519 chat loop: voice text-reply publish failed");
-                        }
-                        if let Err(e) = publish_event(
-                            &publish_ctx,
+                    {
+                        tracing::warn!(error = %e, "#519 chat loop: voice text-reply publish failed");
+                    }
+                    if let Err(e) = publisher
+                        .publish(
+                            channel,
                             "audio-clip",
                             turn.reply_audio_b64,
                             &event.event_id,
+                            None,
+                            None,
                         )
                         .await
-                        {
-                            tracing::warn!(error = %e, "#519 chat loop: voice audio-reply publish failed");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "#519 chat loop: voice turn failed");
-                        let _ = publish_event(
-                            &publish_ctx,
-                            "text",
-                            base64_of(format!("(voice error: {e})").as_bytes()),
-                            &event.event_id,
-                        )
-                        .await;
+                    {
+                        tracing::warn!(error = %e, "#519 chat loop: voice audio-reply publish failed");
                     }
                 }
-                continue;
+                Err(e) => {
+                    tracing::warn!(error = %e, "#519 chat loop: voice turn failed");
+                    let _ = publisher
+                        .publish_text_out(channel, &format!("(voice error: {e})"), &event.event_id)
+                        .await;
+                }
             }
-            // #525 — a device asked for the background-task list (kind=command,
-            // body "jobs"). The device holds no bridge credential, so the list
-            // rides the channel: answer from the bridge GET /v1/jobs as a `doc`
-            // event (correlated). Other commands are ignored (logged).
-            if matches!(
-                event.kind,
-                agentkeys_backend_client::protocol::ChannelEventKind::Command
-            ) {
-                let cmd = event
-                    .body
-                    .as_deref()
-                    .and_then(|b64| {
-                        use base64::{engine::general_purpose::STANDARD, Engine};
-                        STANDARD.decode(b64).ok()
-                    })
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .unwrap_or_default();
-                if cmd.trim() == "jobs" {
-                    let doc = bridge_jobs(&http, &cfg)
-                        .await
-                        .unwrap_or_else(|e| format!("(jobs error: {e})"));
-                    if let Err(e) = publish_event(
-                        &publish_ctx,
+        }
+        // #668 (R2) — a media event becomes a PRE-TURN on the full-resolution
+        // original, then the agent's turn; low confidence asks for a closer look.
+        ChannelEventKind::Image | ChannelEventKind::Frame | ChannelEventKind::AudioClip => {
+            perceive_and_turn(rt, feed, event, contact_tier).await;
+        }
+        // #525 — a device asked for the background-task list (kind=command,
+        // body "jobs"); #670 — a card action tap is a `CardCommand` JSON body
+        // handed to the agent as a turn. Other commands are ignored (logged).
+        ChannelEventKind::Command => {
+            let cmd = inline_text(event);
+            if cmd.trim() == "jobs" {
+                let doc = bridge_jobs(http, cfg)
+                    .await
+                    .unwrap_or_else(|e| format!("(jobs error: {e})"));
+                if let Err(e) = publisher
+                    .publish(
+                        channel,
                         "doc",
                         base64_of(doc.as_bytes()),
                         &event.event_id,
+                        None,
+                        None,
                     )
                     .await
-                    {
-                        tracing::warn!(error = %e, "#525 chat loop: jobs doc publish failed");
-                    }
-                } else {
-                    tracing::info!(cmd = %cmd, "#525 chat loop: unknown command — ignored");
-                }
-                continue;
-            }
-            // #528 (Phase 2) — a device published an `image` (a photo/frame).
-            // ARK is OpenAI-compatible, so vision rides the EXISTING gate
-            // /v1/chat/completions with an `image_url` content part — no new
-            // gate surface. Reply is published as a correlated `text` event.
-            if matches!(
-                event.kind,
-                agentkeys_backend_client::protocol::ChannelEventKind::Image
-            ) {
-                let Some(image_b64) = event.body.as_deref() else {
-                    tracing::warn!(event = %event.event_id, "#528 chat loop: image with body_ref only — by-reference is a follow-up; skipped");
-                    continue;
-                };
-                let reply = vision_turn(&http, &cfg, image_b64)
-                    .await
-                    .unwrap_or_else(|e| format!("(vision error: {e})"));
-                if let Err(e) = publish_event(
-                    &publish_ctx,
-                    "text",
-                    base64_of(reply.as_bytes()),
-                    &event.event_id,
-                )
-                .await
                 {
-                    tracing::warn!(error = %e, "#528 chat loop: vision reply publish failed");
+                    tracing::warn!(error = %e, "#525 chat loop: jobs doc publish failed");
                 }
-                continue;
+                return;
             }
-            let text = event
-                .body
-                .as_deref()
-                .and_then(|b64| {
-                    use base64::{engine::general_purpose::STANDARD, Engine};
-                    STANDARD.decode(b64).ok()
-                })
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_default();
+            match agentkeys_backend_client::protocol::parse_card_command(cmd.as_bytes()) {
+                Ok(card_cmd) => {
+                    let actor = match &event.producer {
+                        agentkeys_backend_client::protocol::ChannelProducer::Actor {
+                            actor_omni,
+                        } => actor_omni.clone(),
+                        agentkeys_backend_client::protocol::ChannelProducer::Contact {
+                            contact_id,
+                            ..
+                        } => contact_id.clone(),
+                    };
+                    let text = format!(
+                        "[command · slot {} · action {} · from actor {}]\n{}{}",
+                        feed.slot,
+                        card_cmd.action,
+                        actor,
+                        card_cmd.command,
+                        if card_cmd.args.is_null() {
+                            String::new()
+                        } else {
+                            format!("\nargs: {}", card_cmd.args)
+                        }
+                    );
+                    let reply = match bridge_chat(http, cfg, &text).await {
+                        Ok(r) => r,
+                        Err(e) => format!("(agent error: {e})"),
+                    };
+                    if let Err(e) = publisher
+                        .publish_text_out(channel, &reply, &event.event_id)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "#670 chat loop: command reply publish failed");
+                    }
+                }
+                Err(_) => tracing::info!(cmd = %cmd, "#525 chat loop: unknown command — ignored"),
+            }
+        }
+        ChannelEventKind::Text | ChannelEventKind::Doc => {
+            let mut text = inline_text(event);
             if text.trim().is_empty() {
-                continue;
+                return;
+            }
+            // #667 — a caption relayed beside a photo (relay_of = the media
+            // event id) is a turn about that photo, not a standalone message.
+            if let Some(media) = event.relay_of.as_deref() {
+                text = format!("[caption for the perceived input {media}]\n{text}");
+            }
+            if feed.slot != OPCHAT_SLOT {
+                text = format!(
+                    "[from slot {} ({}){}]\n{text}",
+                    feed.slot,
+                    feed.kind.as_str(),
+                    contact_tier
+                        .map(|t| format!(" · a {t} contact"))
+                        .unwrap_or_default()
+                );
             }
             // #563 — stream ONLY when the inbound turn carries the consumer's
             // explicit hint: a consumer that never sends it (old web app,
             // fleet TUI, devices) gets today's single-shot reply, so partials
             // can never fragment-spam a UI that doesn't merge them.
             let reply = if event.stream == Some(true) {
-                match bridge_chat_stream(&http, &cfg, &text, &publish_ctx, &event.event_id).await {
+                match bridge_chat_stream(http, cfg, &text, publisher, channel, &event.event_id)
+                    .await
+                {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(error = %e, "#563 chat loop: streamed bridge turn failed");
@@ -719,7 +914,7 @@ async fn run(cfg: ChatLoopConfig) {
                     }
                 }
             } else {
-                match bridge_chat(&http, &cfg, &text).await {
+                match bridge_chat(http, cfg, &text).await {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(error = %e, "#430 chat loop: bridge /v1/chat failed");
@@ -727,13 +922,9 @@ async fn run(cfg: ChatLoopConfig) {
                     }
                 }
             };
-            if let Err(e) = publish_event(
-                &publish_ctx,
-                "text",
-                base64_of(reply.as_bytes()),
-                &event.event_id,
-            )
-            .await
+            if let Err(e) = publisher
+                .publish_text_out(channel, &reply, &event.event_id)
+                .await
             {
                 tracing::warn!(error = %e, "#430 chat loop: reply publish failed — the turn is LOST from the transcript");
             }
@@ -745,11 +936,11 @@ async fn run(cfg: ChatLoopConfig) {
                 match (&cfg.speech_url, &cfg.speech_bearer) {
                     (Some(url), Some(bearer)) => {
                         let base = url.trim_end_matches('/');
-                        match tts_synthesize(&http, base, bearer, &reply, Some(params)).await {
+                        match tts_synthesize(http, base, bearer, &reply, Some(params)).await {
                             Ok(audio) => {
-                                if let Err(e) =
-                                    publish_event(&publish_ctx, "audio-clip", audio, &event.event_id)
-                                        .await
+                                if let Err(e) = publisher
+                                    .publish(channel, "audio-clip", audio, &event.event_id, None, None)
+                                    .await
                                 {
                                     tracing::warn!(error = %e, "#537 chat loop: voiced text-reply publish failed");
                                 }
@@ -766,6 +957,160 @@ async fn run(cfg: ChatLoopConfig) {
             }
         }
     }
+}
+
+/// #668 — the R2 pre-turn + hand-off for one media event.
+async fn perceive_and_turn(
+    rt: &LoopRuntime,
+    feed: &FeedSpec,
+    event: &ChannelEvent,
+    contact_tier: Option<&str>,
+) {
+    let kind = event.kind.as_str();
+    let channel = feed.channel_id.as_str();
+    let (bytes, content_type) = match event_bytes(rt, feed, event).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(event = %event.event_id, error = %e, "#668 chat loop: media bytes unavailable — turn skipped");
+            return;
+        }
+    };
+    let sha = crate::perception::sha256_hex(&bytes);
+    let cached = rt.perception_cache.lock().await.get(&sha).cloned();
+    let result = match cached {
+        Some(r) => {
+            tracing::info!(sha = %sha[..12], "#668 perception: cache hit — decoded once");
+            r
+        }
+        None => {
+            let prompt = rt
+                .perception_prompt
+                .clone()
+                .unwrap_or_else(|| crate::perception::DEFAULT_PERCEPTION_PROMPT.to_string());
+            let outcome = match event.kind {
+                ChannelEventKind::AudioClip => {
+                    let format = event
+                        .audio
+                        .as_ref()
+                        .and_then(|a| a.format.clone())
+                        .unwrap_or_else(|| sniff_audio_format(&bytes).to_string());
+                    match gate_transcribe(&rt.http, &rt.cfg, &base64_of(&bytes), &format).await {
+                        Ok(transcript) => {
+                            gate_completion(
+                                &rt.http,
+                                &rt.cfg,
+                                crate::perception::transcript_request_body(&prompt, &transcript),
+                            )
+                            .await
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                _ => {
+                    gate_completion(
+                        &rt.http,
+                        &rt.cfg,
+                        crate::perception::image_request_body(
+                            &prompt,
+                            &content_type,
+                            &base64_of(&bytes),
+                        ),
+                    )
+                    .await
+                }
+            };
+            match outcome {
+                Ok(reply) => {
+                    let r = crate::perception::parse_result(&reply, &sha);
+                    rt.perception_cache.lock().await.put(sha.clone(), r.clone());
+                    r
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, kind, "#668 perception: pre-turn failed");
+                    let _ = rt
+                        .publisher
+                        .publish_text_out(
+                            channel,
+                            &format!("(perception error: {e})"),
+                            &event.event_id,
+                        )
+                        .await;
+                    return;
+                }
+            }
+        }
+    };
+    if crate::perception::needs_closer_look(&result, rt.min_confidence) {
+        tracing::info!(
+            confidence = result.confidence,
+            kind,
+            "#668 perception: low confidence — asking for a closer look"
+        );
+        let _ = rt
+            .publisher
+            .publish_text_out(
+                channel,
+                &crate::perception::closer_look_reply(kind),
+                &event.event_id,
+            )
+            .await;
+        return;
+    }
+    let turn = crate::perception::agent_turn_text(&feed.slot, kind, contact_tier, None, &result);
+    let reply = match bridge_chat(&rt.http, &rt.cfg, &turn).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "#668 chat loop: agent turn after perception failed");
+            format!("(agent error: {e})")
+        }
+    };
+    if let Err(e) = rt
+        .publisher
+        .publish_text_out(channel, &reply, &event.event_id)
+        .await
+    {
+        tracing::warn!(error = %e, "#668 chat loop: perception reply publish failed");
+    }
+}
+
+/// One gate `/v1/chat/completions` call (the OpenAI-compatible relay) → the
+/// assistant's text. Refused loudly when the sandbox has no gate wiring.
+async fn gate_completion(
+    http: &reqwest::Client,
+    cfg: &ChatLoopConfig,
+    body: serde_json::Value,
+) -> Result<String, String> {
+    let (Some(gate_url), Some(bearer)) = (&cfg.speech_url, &cfg.speech_bearer) else {
+        return Err(
+            "perception turns need the gate (AGENTKEYS_GATE_SPEECH_URL + gk_ key from a \
+             gate-provisioned spawn) — this sandbox has none"
+                .into(),
+        );
+    };
+    let base = gate_url.trim_end_matches('/');
+    let resp = http
+        .post(format!("{base}/v1/chat/completions"))
+        .timeout(Duration::from_secs(120))
+        .bearer_auth(bearer)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("gate completion send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("gate completion HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("gate completion parse: {e}"))?;
+    let reply = v["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    if reply.trim().is_empty() {
+        return Err("gate completion returned an empty reply".into());
+    }
+    Ok(reply)
 }
 
 fn base64_of(bytes: &[u8]) -> String {
@@ -824,6 +1169,31 @@ async fn voice_turn(
     let format = declared_format.unwrap_or_else(|| sniff_audio_format(&decoded).to_string());
     let base = speech_url.trim_end_matches('/');
 
+    let transcript = gate_transcribe(http, cfg, audio_b64, &format).await?;
+    let reply_text = bridge_chat(http, cfg, &transcript).await?;
+    let reply_audio_b64 = tts_synthesize(http, base, bearer, &reply_text, params).await?;
+    Ok(VoiceTurn {
+        reply_text,
+        reply_audio_b64,
+    })
+}
+
+/// The gate ASR leg (`/v1/audio/transcriptions`, #519) — shared by the opchat
+/// voice turn and the #668 perception adapter.
+async fn gate_transcribe(
+    http: &reqwest::Client,
+    cfg: &ChatLoopConfig,
+    audio_b64: &str,
+    format: &str,
+) -> Result<String, String> {
+    let (Some(speech_url), Some(bearer)) = (&cfg.speech_url, &cfg.speech_bearer) else {
+        return Err(
+            "voice turns need the gate speech relay (AGENTKEYS_GATE_SPEECH_URL + gk_ key \
+             from a gate-provisioned spawn) — this sandbox has none"
+                .into(),
+        );
+    };
+    let base = speech_url.trim_end_matches('/');
     let resp = http
         .post(format!("{base}/v1/audio/transcriptions"))
         .timeout(Duration::from_secs(120))
@@ -847,13 +1217,7 @@ async fn voice_turn(
     if transcript.trim().is_empty() {
         return Err("gate asr returned an empty transcript".into());
     }
-
-    let reply_text = bridge_chat(http, cfg, &transcript).await?;
-    let reply_audio_b64 = tts_synthesize(http, base, bearer, &reply_text, params).await?;
-    Ok(VoiceTurn {
-        reply_text,
-        reply_audio_b64,
-    })
+    Ok(transcript)
 }
 
 /// #522 — synthesize `text` into a base64 audio clip via the gate TTS relay,
@@ -909,67 +1273,6 @@ async fn tts_synthesize(
     Ok(audio)
 }
 
-/// #528 — the OpenAI-compatible vision request for one image (a JPEG data URI +
-/// a describe prompt). Split out so the wire shape is unit-tested without a live
-/// call. ARK/Doubao accept the standard `image_url` content part.
-fn vision_request_body(image_b64: &str) -> serde_json::Value {
-    serde_json::json!({
-        "messages": [{
-            "role": "user",
-            "content": [
-                { "type": "image_url",
-                  "image_url": { "url": format!("data:image/jpeg;base64,{image_b64}") } },
-                { "type": "text",
-                  "text": "Describe what you see in this image in one or two sentences." }
-            ]
-        }],
-        "stream": false
-    })
-}
-
-/// #528 (Phase 2) — one vision turn: POST the image to the gate's
-/// OpenAI-compatible `/v1/chat/completions` (same base + gk_ key as the voice
-/// legs) and return the text description. ARK is OpenAI-compatible, so this
-/// needs no new gate surface. Refused loudly when the sandbox has no gate
-/// wiring (direct-ark boots), exactly like `voice_turn`.
-async fn vision_turn(
-    http: &reqwest::Client,
-    cfg: &ChatLoopConfig,
-    image_b64: &str,
-) -> Result<String, String> {
-    let (Some(gate_url), Some(bearer)) = (&cfg.speech_url, &cfg.speech_bearer) else {
-        return Err(
-            "vision turns need the gate (AGENTKEYS_GATE_SPEECH_URL + gk_ key from a \
-             gate-provisioned spawn) — this sandbox has none"
-                .into(),
-        );
-    };
-    let base = gate_url.trim_end_matches('/');
-    let resp = http
-        .post(format!("{base}/v1/chat/completions"))
-        .timeout(Duration::from_secs(120))
-        .bearer_auth(bearer)
-        .json(&vision_request_body(image_b64))
-        .send()
-        .await
-        .map_err(|e| format!("gate vision send: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("gate vision HTTP {}", resp.status()));
-    }
-    let v: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("gate vision parse: {e}"))?;
-    let reply = v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    if reply.trim().is_empty() {
-        return Err("gate vision returned an empty description".into());
-    }
-    Ok(reply)
-}
-
 pub(crate) async fn resolve_session(
     http: &reqwest::Client,
     cfg: &ChatLoopConfig,
@@ -1002,11 +1305,22 @@ async fn bridge_chat(
     cfg: &ChatLoopConfig,
     text: &str,
 ) -> Result<String, String> {
+    bridge_chat_at(http, &cfg.bridge_url, cfg.bridge_token.as_deref(), text).await
+}
+
+/// One non-streamed bridge `/v1/chat` turn at an explicit bridge base — the
+/// #669 scheduler's entry (it holds the url/token, not a `ChatLoopConfig`).
+pub(crate) async fn bridge_chat_at(
+    http: &reqwest::Client,
+    bridge_url: &str,
+    bridge_token: Option<&str>,
+    text: &str,
+) -> Result<String, String> {
     let mut req = http
-        .post(format!("{}/v1/chat", cfg.bridge_url.trim_end_matches('/')))
+        .post(format!("{}/v1/chat", bridge_url.trim_end_matches('/')))
         .timeout(Duration::from_secs(180))
         .json(&serde_json::json!({ "text": text, "stream": false }));
-    if let Some(token) = &cfg.bridge_token {
+    if let Some(token) = bridge_token {
         req = req.bearer_auth(token);
     }
     let resp = req.send().await.map_err(|e| format!("bridge send: {e}"))?;
@@ -1038,27 +1352,48 @@ async fn bridge_jobs(http: &reqwest::Client, cfg: &ChatLoopConfig) -> Result<Str
     if !resp.status().is_success() {
         return Err(format!("bridge HTTP {}", resp.status()));
     }
-    let jobs: Vec<serde_json::Value> = resp
+    let v: serde_json::Value = resp
         .json()
         .await
         .map_err(|e| format!("bridge parse: {e}"))?;
+    Ok(render_jobs_doc(&v))
+}
+
+/// Render the bridge's job list as a compact device-friendly doc. Accepts
+/// BOTH wire shapes — the bare array the #525 daemon expected and the
+/// `{jobs: [...]}` object the dsh bridge serves (the #631 "daemon parse bug
+/// guard"); a #669 scheduled entry renders with its cron + armed/denied
+/// status, a #340 process job with its pgid + command.
+fn render_jobs_doc(v: &serde_json::Value) -> String {
+    let jobs: Vec<serde_json::Value> = match v {
+        serde_json::Value::Array(a) => a.clone(),
+        serde_json::Value::Object(o) => o
+            .get("jobs")
+            .and_then(|j| j.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     if jobs.is_empty() {
-        return Ok("No background tasks running.".to_string());
+        return "No background tasks running.".to_string();
     }
     let mut out = format!("{} background task(s):\n", jobs.len());
     for j in &jobs {
+        if let Some(cron) = j.get("cron").and_then(|c| c.as_str()) {
+            let label = j.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+            let status = j.get("status").and_then(|s| s.as_str()).unwrap_or("armed");
+            out.push_str(&format!("• ⏰ {label} ({cron}) — {status}\n"));
+            continue;
+        }
         let pgid = j.get("pgid").and_then(|v| v.as_i64()).unwrap_or(0);
         let cmd = j.get("cmd").and_then(|v| v.as_str()).unwrap_or("?");
         // Truncate long command lines so a small device screen stays readable.
         let cmd: String = cmd.chars().take(60).collect();
         out.push_str(&format!("• [{pgid}] {cmd}\n"));
     }
-    Ok(out)
+    out
 }
 
-/// The per-poll invariants every publish shares — bundled so the reply
-/// helpers stay under clippy's argument ceiling instead of re-threading five
-/// context handles per call.
 /// #563 — one minted cap, reused until near-expiry (mint TTL 300 s, refresh
 /// margin 60 s). `fresh()` clones (a cap is a small serde_json::Value);
 /// `invalidate()` on any worker refusal so revocation / K3-epoch rotation
@@ -1168,102 +1503,310 @@ impl DeltaCoalescer {
     }
 }
 
-struct PublishCtx<'a> {
-    http: &'a reqwest::Client,
-    cfg: &'a ChatLoopConfig,
-    client: &'a BackendClient,
-    bearer: &'a str,
-    device_key_hash: &'a str,
-    /// #563 — the publish-cap cache (async-shared: replies, voice legs and
-    /// streamed deltas all publish through one reused cap).
-    pub_caps: &'a tokio::sync::Mutex<CapCache>,
+/// #665/#669 (R3) — the ONE publisher: any event kind to any bound pub feed
+/// (or a reply on the feed a turn arrived on), with a per-channel publish-cap
+/// cache (#563 reuse until near-expiry, invalidated on refusal) and the
+/// #667 blob legs (a media original beside the feed, fetched by ref).
+pub struct Publisher {
+    http: reqwest::Client,
+    cfg: Arc<ChatLoopConfig>,
+    session: Arc<SessionHandle>,
+    pub_caps: tokio::sync::Mutex<HashMap<String, CapCache>>,
+    sub_caps: tokio::sync::Mutex<HashMap<String, CapCache>>,
 }
 
-async fn publish_event(
-    ctx: &PublishCtx<'_>,
-    kind: &str,
-    body_b64: String,
-    correlation: &str,
-) -> Result<(), String> {
-    publish_with(ctx, kind, body_b64, correlation, None).await
-}
-
-/// #563 — one streamed-reply DELTA (`partial: true`, ordered by `seq`); the
-/// turn's FINAL event goes through [`publish_event`] and is byte-identical to
-/// the pre-#563 single-shot reply.
-async fn publish_delta(
-    ctx: &PublishCtx<'_>,
-    body_b64: String,
-    correlation: &str,
-    seq: u32,
-) -> Result<(), String> {
-    publish_with(ctx, "text", body_b64, correlation, Some(seq)).await
-}
-
-async fn publish_with(
-    ctx: &PublishCtx<'_>,
-    kind: &str,
-    body_b64: String,
-    correlation: &str,
-    partial_seq: Option<u32>,
-) -> Result<(), String> {
-    // #563 — reuse the publish cap until near-expiry; mint only on a miss.
-    let cached = ctx.pub_caps.lock().await.fresh();
-    let pub_cap = match cached {
-        Some(c) => c,
-        None => {
-            let minted = ctx
-                .client
-                .cap_mint(
-                    CapMintOp::ChannelPublish,
-                    CapMintRequest {
-                        operator_omni: ctx.cfg.operator_omni.clone(),
-                        actor_omni: ctx.cfg.actor_omni.clone(),
-                        service: format!("channel-pub:{}", ctx.cfg.chat_channel_id),
-                        device_key_hash: ctx.device_key_hash.to_string(),
-                        ttl_seconds: 300,
-                    },
-                    ctx.bearer,
-                )
-                .await
-                .map_err(|e| format!("channel-pub mint: {e}"))?;
-            ctx.pub_caps.lock().await.store(minted)
+impl Publisher {
+    pub(crate) fn new(
+        http: reqwest::Client,
+        cfg: Arc<ChatLoopConfig>,
+        session: Arc<SessionHandle>,
+    ) -> Self {
+        Self {
+            http,
+            cfg,
+            session,
+            pub_caps: tokio::sync::Mutex::new(HashMap::new()),
+            sub_caps: tokio::sync::Mutex::new(HashMap::new()),
         }
-    };
-    // @backend-fixture: channel_publish_body — the protocol-shaped publish.
-    // The #563 delta markers are OPTIONAL additive keys (absent on the final
-    // reply, so the canonical fixture shape is untouched).
-    let mut body = serde_json::json!({
-        "cap": pub_cap,
-        "kind": kind,
-        "direction": "out",
-        "body_b64": body_b64,
-        "correlation": correlation,
-    });
-    if let Some(seq) = partial_seq {
-        body["partial"] = serde_json::json!(true);
-        body["seq"] = serde_json::json!(seq);
     }
-    let resp = ctx
-        .http
-        .post(format!(
-            "{}/v1/channel/publish",
-            ctx.cfg.channel_worker_url.trim_end_matches('/')
-        ))
-        .json(&body)
-        .send()
+
+    async fn cap_for(
+        &self,
+        channel_id: &str,
+        publish: bool,
+    ) -> Result<(agentkeys_backend_client::protocol::CapToken, String), String> {
+        let caches = if publish {
+            &self.pub_caps
+        } else {
+            &self.sub_caps
+        };
+        if let Some(c) = caches.lock().await.get(channel_id).and_then(|c| c.fresh()) {
+            return Ok((c, String::new()));
+        }
+        let bearer = self.session.bearer().await?;
+        let client = self.session.client(&bearer);
+        let (op, service) = if publish {
+            (
+                CapMintOp::ChannelPublish,
+                format!("channel-pub:{channel_id}"),
+            )
+        } else {
+            (
+                CapMintOp::ChannelSubscribe,
+                format!("channel-sub:{channel_id}"),
+            )
+        };
+        let minted = client
+            .cap_mint(
+                op,
+                CapMintRequest {
+                    operator_omni: self.cfg.operator_omni.clone(),
+                    actor_omni: self.cfg.actor_omni.clone(),
+                    service: service.clone(),
+                    device_key_hash: self.session.credential.device_key_hash(),
+                    ttl_seconds: 300,
+                },
+                &bearer,
+            )
+            .await
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("401") || msg.contains("expired") {
+                    let session = self.session.clone();
+                    let stale = bearer.clone();
+                    tokio::spawn(async move { session.invalidate(&stale).await });
+                }
+                format!("{service} mint: {msg}")
+            })?;
+        let cap = caches
+            .lock()
+            .await
+            .entry(channel_id.to_string())
+            .or_default()
+            .store(minted);
+        Ok((cap, bearer))
+    }
+
+    async fn invalidate_cap(&self, channel_id: &str, publish: bool) {
+        let caches = if publish {
+            &self.pub_caps
+        } else {
+            &self.sub_caps
+        };
+        if let Some(c) = caches.lock().await.get_mut(channel_id) {
+            c.invalidate();
+        }
+    }
+
+    /// Publish one `direction: out` event on `channel_id`.
+    pub async fn publish(
+        &self,
+        channel_id: &str,
+        kind: &str,
+        body_b64: String,
+        correlation: &str,
+        partial_seq: Option<u32>,
+        content_type: Option<&str>,
+    ) -> Result<(), String> {
+        let (pub_cap, _) = self.cap_for(channel_id, true).await?;
+        // @backend-fixture: channel_publish_body — the protocol-shaped publish.
+        // The #563 delta markers + the #667 content type are OPTIONAL additive
+        // keys (absent on the plain reply, so the canonical fixture shape is
+        // untouched).
+        let mut body = serde_json::json!({
+            "cap": pub_cap,
+            "kind": kind,
+            "direction": "out",
+            "body_b64": body_b64,
+            "correlation": correlation,
+        });
+        if let Some(seq) = partial_seq {
+            body["partial"] = serde_json::json!(true);
+            body["seq"] = serde_json::json!(seq);
+        }
+        if let Some(ct) = content_type.filter(|c| !c.is_empty()) {
+            body["content_type"] = serde_json::json!(ct);
+        }
+        let resp = self
+            .http
+            .post(format!(
+                "{}/v1/channel/publish",
+                self.cfg.channel_worker_url.trim_end_matches('/')
+            ))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("publish send: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                // Revoked / rotated — drop the cached cap so the next publish
+                // re-mints instead of replaying a refused token (#563).
+                self.invalidate_cap(channel_id, true).await;
+            }
+            return Err(format!("publish HTTP {status}"));
+        }
+        Ok(())
+    }
+
+    /// A `text` reply (`direction: out`).
+    pub async fn publish_text_out(
+        &self,
+        channel_id: &str,
+        text: &str,
+        correlation: &str,
+    ) -> Result<(), String> {
+        self.publish(
+            channel_id,
+            "text",
+            base64_of(text.as_bytes()),
+            correlation,
+            None,
+            None,
+        )
         .await
-        .map_err(|e| format!("publish send: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            // Revoked / rotated — drop the cached cap so the next publish
-            // re-mints instead of replaying a refused token (#563).
-            ctx.pub_caps.lock().await.invalidate();
-        }
-        return Err(format!("publish HTTP {status}"));
     }
-    Ok(())
+
+    /// #563 — one streamed-reply DELTA (`partial: true`, ordered by `seq`).
+    pub async fn publish_delta(
+        &self,
+        channel_id: &str,
+        body_b64: String,
+        correlation: &str,
+        seq: u32,
+    ) -> Result<(), String> {
+        self.publish(channel_id, "text", body_b64, correlation, Some(seq), None)
+            .await
+    }
+
+    /// Publish a body of any size on `channel_id`: inline when it fits the
+    /// worker's inline ceiling, else stored beside the feed by ref (#667).
+    pub async fn publish_bytes(
+        &self,
+        channel_id: &str,
+        kind: &str,
+        bytes: &[u8],
+        content_type: &str,
+        correlation: &str,
+        inline_max: usize,
+    ) -> Result<Option<String>, String> {
+        if bytes.len() <= inline_max {
+            self.publish(
+                channel_id,
+                kind,
+                base64_of(bytes),
+                correlation,
+                None,
+                Some(content_type),
+            )
+            .await?;
+            return Ok(None);
+        }
+        let body_ref = self.put_blob(channel_id, content_type, bytes).await?;
+        let (pub_cap, _) = self.cap_for(channel_id, true).await?;
+        let body = serde_json::json!({
+            "cap": pub_cap,
+            "kind": kind,
+            "direction": "out",
+            "body_ref": body_ref,
+            "correlation": correlation,
+            "content_type": content_type,
+        });
+        let resp = self
+            .http
+            .post(format!(
+                "{}/v1/channel/publish",
+                self.cfg.channel_worker_url.trim_end_matches('/')
+            ))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("publish send: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("publish HTTP {}", resp.status()));
+        }
+        Ok(Some(body_ref))
+    }
+
+    /// #667 — store a media original UNCHANGED beside the feed; returns the
+    /// `body_ref` an event names.
+    pub async fn put_blob(
+        &self,
+        channel_id: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> Result<String, String> {
+        let (pub_cap, _) = self.cap_for(channel_id, true).await?;
+        let body = agentkeys_backend_client::protocol::ChannelBlobPutBody {
+            cap: pub_cap,
+            content_type: content_type.to_string(),
+            bytes_b64: base64_of(bytes),
+        };
+        let resp = self
+            .http
+            .post(format!(
+                "{}/v1/channel/blob-put",
+                self.cfg.channel_worker_url.trim_end_matches('/')
+            ))
+            .timeout(Duration::from_secs(120))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("blob-put send: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                self.invalidate_cap(channel_id, true).await;
+            }
+            return Err(format!("blob-put HTTP {status}"));
+        }
+        let put: agentkeys_backend_client::protocol::ChannelBlobPutResp = resp
+            .json()
+            .await
+            .map_err(|e| format!("blob-put parse: {e}"))?;
+        Ok(put.body_ref)
+    }
+
+    /// #667 — fetch a media original by `body_ref` under the feed's subscribe
+    /// cap → `(content_type, bytes)`.
+    pub async fn fetch_blob(
+        &self,
+        channel_id: &str,
+        body_ref: &str,
+    ) -> Result<(Vec<u8>, String), String> {
+        let (sub_cap, _) = self.cap_for(channel_id, false).await?;
+        let body = agentkeys_backend_client::protocol::ChannelBlobGetBody {
+            cap: sub_cap,
+            body_ref: body_ref.to_string(),
+        };
+        let resp = self
+            .http
+            .post(format!(
+                "{}/v1/channel/blob-get",
+                self.cfg.channel_worker_url.trim_end_matches('/')
+            ))
+            .timeout(Duration::from_secs(120))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("blob-get send: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                self.invalidate_cap(channel_id, false).await;
+            }
+            return Err(format!("blob-get HTTP {status}"));
+        }
+        let got: agentkeys_backend_client::protocol::ChannelBlobGetResp = resp
+            .json()
+            .await
+            .map_err(|e| format!("blob-get parse: {e}"))?;
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let bytes = STANDARD
+            .decode(&got.bytes_b64)
+            .map_err(|e| format!("blob-get body is not valid base64: {e}"))?;
+        Ok((bytes, got.content_type))
+    }
 }
 
 /// #563 — one STREAMED bridge turn: consumes the bridge's `/v1/chat` SSE
@@ -1275,7 +1818,8 @@ async fn bridge_chat_stream(
     http: &reqwest::Client,
     cfg: &ChatLoopConfig,
     text: &str,
-    ctx: &PublishCtx<'_>,
+    publisher: &Publisher,
+    channel_id: &str,
     correlation: &str,
 ) -> Result<String, String> {
     let mut req = http
@@ -1312,8 +1856,14 @@ async fn bridge_chat_stream(
                         continue;
                     }
                     if let Some(delta) = coalescer.push(t, std::time::Instant::now()) {
-                        if let Err(e) =
-                            publish_delta(ctx, base64_of(delta.as_bytes()), correlation, seq).await
+                        if let Err(e) = publisher
+                            .publish_delta(
+                                channel_id,
+                                base64_of(delta.as_bytes()),
+                                correlation,
+                                seq,
+                            )
+                            .await
                         {
                             // Loud downgrade, not a lost turn: stop streaming
                             // deltas and let the final single-shot carry it all.
@@ -1349,7 +1899,10 @@ async fn bridge_chat_stream(
     }
     if !deltas_dead {
         if let Some(rest) = coalescer.drain() {
-            if let Err(e) = publish_delta(ctx, base64_of(rest.as_bytes()), correlation, seq).await {
+            if let Err(e) = publisher
+                .publish_delta(channel_id, base64_of(rest.as_bytes()), correlation, seq)
+                .await
+            {
                 tracing::warn!(error = %e, "#563 chat loop: tail delta publish failed — final event still carries the full reply");
             }
         }
@@ -1534,25 +2087,33 @@ mod tests {
         assert_eq!(body["speech_rate"], 20);
     }
 
+    /// #669 — the jobs doc reads BOTH bridge shapes and renders scheduled
+    /// entries with their cron + status.
+    #[test]
+    fn jobs_doc_reads_array_and_object_shapes() {
+        assert_eq!(
+            render_jobs_doc(&serde_json::json!([])),
+            "No background tasks running."
+        );
+        assert_eq!(
+            render_jobs_doc(&serde_json::json!({ "jobs": [] })),
+            "No background tasks running."
+        );
+        let doc = render_jobs_doc(&serde_json::json!({ "jobs": [
+            { "pgid": 42, "pid": 42, "cmd": "python3 long-running-thing.py --flag", "procs": 1 },
+            { "id": "schedule-0-morning", "cron": "0 7 * * *", "label": "morning plan", "status": "armed" }
+        ] }));
+        assert!(doc.starts_with("2 background task(s):\n"));
+        assert!(doc.contains("• [42] python3 long-running-thing.py --flag"));
+        assert!(doc.contains("• ⏰ morning plan (0 7 * * *) — armed"));
+    }
+
     #[test]
     fn partial_env_is_none_and_loud_not_a_panic() {
         // from_env reads process env; in the test harness none of the chat
         // vars are set, so the loop must be OFF (None) — the common daemon
         // boot outside a sandbox.
         assert!(ChatLoopConfig::from_env().is_none());
-    }
-
-    #[test]
-    fn vision_request_carries_an_image_url_data_uri_and_prompt() {
-        let body = vision_request_body("AAAA");
-        let content = &body["messages"][0]["content"];
-        assert_eq!(content[0]["type"], "image_url");
-        assert_eq!(
-            content[0]["image_url"]["url"],
-            "data:image/jpeg;base64,AAAA"
-        );
-        assert_eq!(content[1]["type"], "text");
-        assert_eq!(body["stream"], false);
     }
 
     #[test]

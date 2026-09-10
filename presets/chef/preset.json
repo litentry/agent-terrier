@@ -1,0 +1,79 @@
+{
+  "id": "chef",
+  "version": "1.0.0",
+  "schema": 1,
+  "publisher": "agentkeys",
+  "name": "Chef",
+  "name_zh": "家庭厨师",
+  "description": "Logs what the family eats from the photos they send, watches the fridge, and plans today's meals around everyone's preferences and targets.",
+  "description_zh": "从家人发来的照片记录吃了什么，盯着冰箱，按每个人的偏好和目标安排今天的饭。",
+  "slots": [
+    {
+      "slot": "family_chat",
+      "kind": "messaging",
+      "direction": "duplex",
+      "required": true,
+      "event_kinds": ["text", "image", "audio-clip"],
+      "audience": ["owner", "partner", "elder", "helper"],
+      "reason": "Meal and fridge photos arrive here; the plan and replies go back the same way.",
+      "reason_zh": "饭菜和冰箱的照片从这里发来；计划与回复也从这里回去。"
+    },
+    {
+      "slot": "kitchen_screen",
+      "kind": "display",
+      "direction": "pub",
+      "required": false,
+      "event_kinds": ["doc"],
+      "reason": "Shows today's summary and what to cook; the card's buttons come back as commands.",
+      "reason_zh": "显示今天的饮食小结和建议做什么；卡片上的按钮会作为指令回传。"
+    }
+  ],
+  "resources": [
+    {
+      "name": "food-preferences",
+      "kind": "profile",
+      "tags": ["food", "preferences", "allergies", "diet"],
+      "required": true,
+      "reason": "Likes, dislikes, allergies — every suggestion respects them.",
+      "reason_zh": "喜好、忌口、过敏——每条建议都会遵守。"
+    },
+    {
+      "name": "gene-report",
+      "kind": "document",
+      "tags": ["gene", "nutrition", "health", "genetics"],
+      "required": false,
+      "sensitivity_floor": "sensitive",
+      "reason": "Per-person nutrition targets are derived from it. Optional.",
+      "reason_zh": "按人推导营养目标。可选。"
+    }
+  ],
+  "tools": ["schedule", "web"],
+  "availability": "scheduled",
+  "budgets": { "gate_tokens_per_day": 300000, "gate_turns_per_hour": 60, "feed_events_per_day": 400 },
+  "schedule": [
+    {
+      "cron": "0 7 * * *",
+      "label": "Morning plan",
+      "label_zh": "早间计划",
+      "prompt": "Compose today's meal plan from the food preferences, yesterday's diary, and what the fridge holds. Publish the plan card to the kitchen screen and a short text version to the family chat."
+    },
+    {
+      "cron": "0 16 * * *",
+      "label": "Dinner plan",
+      "label_zh": "晚餐计划",
+      "prompt": "Decide tonight's dinner from what is in the fridge and what the family already ate today. Publish the updated card to the kitchen screen and tell the family chat what to cook and what is missing."
+    }
+  ],
+  "disclosure": [
+    { "data": "Meal and fridge photos", "data_zh": "饭菜与冰箱照片", "path": "gate → vision model", "path_zh": "网关 → 视觉模型" },
+    { "data": "Food preferences and gene-derived targets", "data_zh": "饮食偏好与基因推导的目标", "path": "gate → model", "path_zh": "网关 → 模型" },
+    { "data": "Recipe queries", "data_zh": "食谱查询", "path": "gate → web search provider", "path_zh": "网关 → 网络搜索" }
+  ],
+  "context": {
+    "persona": "SOUL.md",
+    "skills": ["perception.md", "diary.md", "fridge.md", "plan.md"],
+    "knowledge": ["nutrition-basics.md"]
+  },
+  "suggested_channels": [],
+  "suggested_context": []
+}

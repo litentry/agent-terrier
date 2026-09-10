@@ -9,18 +9,24 @@ use anyhow::Context;
 use clap::Parser;
 use tracing::info;
 
+mod app_runtime;
+mod apps;
 mod audit_decode;
 mod chat_loop;
 mod checkpoint;
 mod companion;
+mod console_device;
+mod gateway_device;
 mod hardening;
 mod master_session;
 mod memory_mirror;
 mod pairing;
+mod perception;
 mod persona;
 mod presets;
 mod propose;
 mod proxy;
+mod schedule;
 mod self_backend;
 mod session;
 mod ui_bridge;
@@ -76,6 +82,36 @@ struct Args {
     /// inbox-adoptable and is refused with the reason).
     #[arg(long, default_value = "knowledge")]
     propose_kind: String,
+
+    /// #669 (R3) — publish ONE event to a bound pub slot (or any feed the
+    /// delegate holds a `channel-pub` grant for). Reads the body from stdin
+    /// (or `--publish-file` for binary media), rides the same chat env
+    /// contract as `--propose-once`, prints a JSON receipt. The in-sandbox
+    /// `publish-to-slot` wrapper is the agent-facing tool over this verb.
+    #[arg(long)]
+    publish_once: bool,
+
+    /// The slot NAME (`kitchen_screen`, `opchat`) or raw channel id for
+    /// `--publish-once`.
+    #[arg(long)]
+    publish_slot: Option<String>,
+
+    /// Event kind for `--publish-once`: text|doc|image|audio-clip|command.
+    #[arg(long, default_value = "text")]
+    publish_kind: String,
+
+    /// Optional correlation id for `--publish-once` (a reply threads to a
+    /// prompt's event id).
+    #[arg(long)]
+    publish_correlation: Option<String>,
+
+    /// Media content type for `--publish-once` (`image/jpeg`, …).
+    #[arg(long)]
+    publish_content_type: Option<String>,
+
+    /// Read the body from this file instead of stdin (binary-safe).
+    #[arg(long)]
+    publish_file: Option<String>,
 
     /// Bind address for ui-bridge mode. Default 127.0.0.1:3114.
     #[arg(
@@ -460,6 +496,107 @@ async fn run_propose_once(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #669 `--publish-once` — see the Args doc. Resolves the slot name against
+/// `AGENTKEYS_BOUND_CHANNELS` (opchat always resolves), mints the publish cap
+/// as the delegate (an ungranted feed is refused at cap-mint — the worker's
+/// verdict, never a local rule), publishes `direction: out`, prints a receipt.
+/// A body over the worker's inline ceiling rides by reference (#667).
+async fn run_publish_once(args: Args) -> anyhow::Result<()> {
+    let cfg = chat_loop::ChatLoopConfig::from_env().ok_or_else(|| {
+        anyhow::anyhow!(
+            "publish-once: incomplete chat env contract (broker/channel/actor/operator \
+             + one credential) — see the warning above for the missing keys"
+        )
+    })?;
+    let slot = args
+        .publish_slot
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("publish-once: --publish-slot <slot|channel-id> is required")
+        })?;
+    let kind = args.publish_kind.trim().to_string();
+    if agentkeys_backend_client::protocol::ChannelEventKind::parse(&kind).is_none() {
+        anyhow::bail!("publish-once: --publish-kind must be one of text|image|audio-clip|frame|command|doc (got `{kind}`)");
+    }
+    let bytes: Vec<u8> = match &args.publish_file {
+        Some(path) => {
+            std::fs::read(path).with_context(|| format!("publish-once: reading {path}"))?
+        }
+        None => {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
+                .context("publish-once: reading the body from stdin")?;
+            buf
+        }
+    };
+    if bytes.is_empty() {
+        anyhow::bail!("publish-once: the body is empty");
+    }
+    let app = app_runtime::AppRuntimeConfig::from_env();
+    let channel_id = app.resolve_publish_target(&slot, &cfg.chat_channel_id);
+    let credential = chat_loop::build_credential(&cfg)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("publish-once: credential bootstrap failed"))?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let cfg = std::sync::Arc::new(cfg);
+    let credential = std::sync::Arc::new(credential);
+    let session = std::sync::Arc::new(chat_loop::SessionHandle::new(
+        http.clone(),
+        cfg.clone(),
+        credential,
+    ));
+    let publisher = chat_loop::Publisher::new(http, cfg.clone(), session);
+    let correlation = args.publish_correlation.clone().unwrap_or_else(|| {
+        format!(
+            "publish-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        )
+    });
+    let content_type = args
+        .publish_content_type
+        .clone()
+        .unwrap_or_else(|| match kind.as_str() {
+            "image" | "frame" => "image/jpeg".to_string(),
+            "audio-clip" => "audio/wav".to_string(),
+            "doc" => agentkeys_backend_client::protocol::CARD_CONTENT_TYPE.to_string(),
+            _ => "text/plain".to_string(),
+        });
+    let inline_max = std::env::var("AGENTKEYS_CHANNEL_INLINE_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1 << 20);
+    let body_ref = publisher
+        .publish_bytes(
+            &channel_id,
+            &kind,
+            &bytes,
+            &content_type,
+            &correlation,
+            inline_max,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("publish-once: {e}"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "outcome": "published",
+            "slot": slot,
+            "channel_id": channel_id,
+            "kind": kind,
+            "bytes": bytes.len(),
+            "correlation": correlation,
+            "body_ref": body_ref,
+        }))?
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -490,6 +627,10 @@ async fn main() -> anyhow::Result<()> {
 
     if args.propose_once {
         return run_propose_once(args).await;
+    }
+
+    if args.publish_once {
+        return run_publish_once(args).await;
     }
 
     // Issue #144 §10.2 (method A) one-shot pairing. Two synchronous steps mirror

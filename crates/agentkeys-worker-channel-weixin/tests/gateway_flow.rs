@@ -65,6 +65,7 @@ fn config(registry_file: String) -> WeixinGatewayConfig {
         admin_token: Some("admin-secret".into()),
         // The mock transport can't sign like WeChat; the bypass IS the mock path.
         allow_unsigned: true,
+        device: Default::default(),
     }
 }
 

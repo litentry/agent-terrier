@@ -30,7 +30,7 @@ choices:
   the agent falls back to its built-in memory and chat keeps working.
 
 Operators: enabling semantic search requires an explicit embedding model
-(the embed key/base default through the metered gate relay on gate-provisioned
+(the embed key/base default through the model gate relay on gate-provisioned
 stacks) — see the OpenViking operator runbook (`operator-docs/`, not in
 the OSS mirror).
 
@@ -436,7 +436,7 @@ accept card won't let you (a device with no channel is inert). Pairing a device
   a channel silently — the devices page *selects* from this registry (its
   inline "new channel" button is the same explicit create). Deleting a
   channel is refused while any device/agent still holds a grant on it.
-- **contacts** — the WeChat gateway + your family (tiers, reach, invites).
+- **contacts** — the WeChat contact gate + your family (tiers, reach, invites).
 
 If you claim a device and then look on the delegates page, you'll find a
 banner pointing you to devices — device claims never render there. Every
@@ -449,12 +449,12 @@ device's channel *names* from the on-chain grant hashes even after a daemon
 restart — a device only reads "grants on chain (names pending)" if its ids
 were never registered here.
 
-**The WeChat gateway lets your family reach agents by chat.** One household bot
+**The WeChat contact gate (called the "gateway" until 2026-09-09) lets your family reach agents by chat.** One household bot
 (a WeChat 公众号, or a spare personal account connected as a bot) is the front
 door: each family member is a **contact** you add in parent-control with a
 **tier** (`owner / partner / elder / kid / helper / guest`) and a **reach**
 (which agents they may talk to). To route, they either type `/<agent> …` (e.g.
-`/chef 今晚吃什么`) or just ask — the gateway's advisory router picks an agent
+`/chef 今晚吃什么`) or just ask — the contact gate's advisory router picks an agent
 **only from that contact's reach**, and if it's unsure it asks them to name one.
 It **can never** reach an agent you didn't grant them, no matter how a message
 is phrased.
@@ -469,7 +469,7 @@ joins the family without your approval, and their WeChat identity is never
 shown to you or anyone (you manage them by the name and tier you chose). A
 stranger messaging the bot without a valid code still gets silence.
 
-Three things the gateway will not do, by design:
+Three things the contact gate will not do, by design:
 
 - A **stranger's** message (an openid you haven't added) is silently dropped.
 - A **kid** (or any contact) asking an agent outside their reach is refused.
@@ -484,17 +484,17 @@ home?" → the doorkeeper answers). **All** of the chat log, every contact, and
 every routing decision live **only in parent-control** — you have full
 visibility; contacts have none. There is no in-chat "this was logged" notice.
 
-**Your contact list survives a gateway rebuild (#424).** Every contact change
+**Your contact list survives a contact gate rebuild (#424).** Every contact change
 you make in parent-control (invite / approve / rename / revoke) is also saved
-into your encrypted config store; if the gateway host is ever rebuilt, opening
+into your encrypted config store; if the contact gate host is ever rebuilt, opening
 the contacts page restores the whole list automatically. Only an **unapproved**
 claim (someone sent the bind code but you hadn't approved yet) is lost — they
 just send the code again. The message history and activity views read the
-gateway's own log files, so a host rebuild starts them fresh (their durable home
+contact gate's own log files, so a host rebuild starts them fresh (their durable home
 is a follow-up); the bind/approve/revoke *actions* themselves anchor on-chain in
-your audit trail once the operator arms the gateway's audit identity — if the
-audit section shows no gateway rows, that arming is the missing step (ask your
-operator; the gateway status card shows whether on-chain audit is armed).
+your audit trail once the operator arms the contact gate's audit identity — if the
+audit section shows no contact gate rows, that arming is the missing step (ask your
+operator; the contact gate status card shows whether on-chain audit is armed).
 
 ## Migrating an older device-rooted delegate (#369 → channels)
 
@@ -505,3 +505,57 @@ sandbox. After your household finishes migrating, the operator may retire the ol
 delegation path; a stale device still on it gets a **loud, actionable error**
 ("delegation is retired — re-bind this device") rather than a silent failure, so
 you know to re-pair it.
+
+## Applications — install a household app with one Touch ID (parent-control, #660)
+
+An **application** is a household use case packaged as content — a manifest, a
+persona, skills and reference docs — that runs as its own delegate with exactly
+the permissions you approve. parent-control → **applications**:
+
+- **Install.** Pick a template from the catalog, bind each slot the app needs
+  to one of your registered channels (the family chat goes through the
+  WeChat / Telegram contact gate; a display is a paired screen), bind any curated
+  resources it may read, confirm who in the household may talk to it, then
+  review the **sheet** — every grant the app gets, compiled by the broker from
+  the template and your choices — and approve with **one Touch ID**. Nothing
+  is granted before that tap; an install always creates a fresh delegate.
+- **The family sees it as an alias.** Each allowed household member's reach
+  gains the app's name, so `/chef 今晚吃什么` (or a photo with that caption)
+  reaches the app through the contact gate. A photo sent without a caption goes to
+  the assistant the sender can reach — the last one they used, or the only
+  one — never to an assistant outside their reach.
+- **Photos and voice.** The contact gate keeps the original bytes beside the
+  app's feed; the app looks at the full-resolution photo before it answers
+  and may ask for a closer picture instead of guessing.
+- **The card.** An app with a display slot publishes a card (today's
+  summary, what to cook, alerts, buttons). The console shows the same card
+  the kitchen screen shows; tapping a button publishes a command from **this
+  console's own device actor** — the first install that binds a display slot
+  enrolls the console in the same Touch ID as the install (a console never
+  enrolled publishes taps as you, the master).
+- **Endpoints — one Touch ID, never a second prompt.** The first install that
+  binds the family chat enrolls the WeChat / Telegram contact gate as a device
+  actor in the SAME Touch ID as the install, and the first install that binds
+  a display slot enrolls this console the same way; the install sheet lists
+  them under "also enrolled by this Touch ID". The endpoints tab shows both
+  and is the standalone way to enroll either ahead of time; the contact gate's
+  status card says whether the "feed hop" is armed and why not.
+- **WeChat is the household's iLink bot.** The family talks to an app
+  through the same WeChat bot the assistants already use (the iLink
+  personal-bot API): text, photos and voice clips all relay, and a voice
+  clip carries WeChat's own transcript. The contact gate's receipt
+  ("已转达给 chef 📷 [photo]") comes back at once; the app's own answer comes
+  back through the same bot.
+- **Resources.** The resources tab curates read-only documents (allergies,
+  a nutrition report). An app can read a resource you bound, never change it,
+  and a `sensitive` item is flagged on the sheet with the model path it
+  transits.
+- **Uninstall** revokes every permission (the delegate's, and the contact gate's
+  and console's on the app's feeds), returns the agent slot, and tears the
+  sandbox down. Keeping the app's memory lets a reinstall inherit it.
+
+What is not there yet: an app cannot send a picture back to the family chat
+(text replies only); the 公众号 (OA) transport has no async reply path — use
+iLink or Telegram for an app's family chat; a scheduled app runs its timed
+turns only while the "Scheduled reports" capability (`tool:schedule`) is on
+its sheet.

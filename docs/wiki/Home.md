@@ -25,6 +25,7 @@ Every spec and every service on top of AgentKeys preserves these four invariants
 - **[Master Recovery and Guardians](master-recovery-and-guardians)** — M-of-N guardian social recovery executed on-chain (`P256Account.recover`); control vs. secrets; why spend caps stay off-chain
 - **[Open-Source Frontend Security](open-source-frontend-security)** — why the keyless web frontend is safe to open-source; malicious-clone + magic-link-phishing analysis (keys never touch the browser)
 - **[Data Classification](data-classification)** — data classes, where each lives, retention policy
+- **[Family Application Templates](family-application-templates)** — authoring an installable household app (manifest · persona · skills · knowledge), the compiled sheet, the perception + card contracts, conformance testing
 - **[Threat Model: Key Custody](https://github.com/litentry/agentKeys/blob/main/docs/spec/threat-model-key-custody.md)** *(spec)* — why nothing sensitive lives on chain or persistently in TEE; off-chain ciphertext + forward-secret epoch rotation (Stage 8)
 
 ### Credential lifecycle (canonical, published wiki)

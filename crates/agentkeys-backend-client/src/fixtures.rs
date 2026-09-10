@@ -188,12 +188,19 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         preset_id: "<preset_id>".into(),
         memory_ns: Some("<namespace>".into()),
         memory_inherited: false,
+        // #663 app-install bindings + endpoint scopes are optional + skip-
+        // serializing — absent here so the canonical role-preset spawn (and
+        // its frozen key set) stays byte-stable.
+        bindings: None,
+        endpoint_scopes: Vec::new(),
+        endpoint_enrollments: Vec::new(),
     };
     let build_archive = BuildArchiveUserOpRequest {
         operator_omni: "0x<operator_omni>".into(),
         device_key_hash: "0x<device_key_hash>".into(),
         resources_kept: false,
         memory_ns: None,
+        endpoint_scopes: Vec::new(),
     };
     // #406 channels: the canonical publish body carries an inline base64 payload
     // (body_ref None + skip_serializing_if, so it stays out of the fixture); poll
@@ -213,6 +220,11 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         partial: None,
         seq: None,
         stream: None,
+        // #667 relay stamps: optional + skip-serializing, absent on the
+        // canonical publish.
+        contact: None,
+        content_type: None,
+        relay_of: None,
     };
     let channel_poll = ChannelPollBody {
         cap: json!("<cap-token>"),

@@ -205,7 +205,7 @@ async fn read_line(prompt: &str) -> anyhow::Result<String> {
 /// The post-login "bring the bot online" instruction. Login only mints + saves
 /// the token; WeChat shows the bot as "connected" ONLY once the gateway PROCESS
 /// runs (it sends `notifystart` + long-polls `getupdates`) — exactly like the
-/// upstream plugin's "restart the gateway after login" step. systemd drives it
+/// upstream plugin's "restart the contact gate after login" step. systemd drives it
 /// on the broker host; a laptop has no `systemctl`, so it's a direct run there.
 pub fn next_step_hint(secrets_path: &Path) -> String {
     let systemd = Path::new("/run/systemd/system").exists();

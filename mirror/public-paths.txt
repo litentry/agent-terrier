@@ -30,6 +30,11 @@ packages/
 # ─── Firmware (hardware integrators) ──────────────────────────────────────────
 firmware/
 
+# ─── Application templates (epic #660): content bundles the PUBLIC broker
+#     crate compiles in (include_str!) — the mirror cannot build without them;
+#     they hold no operator values (F0/F1: content, never framework code).
+presets/
+
 # ─── Web app (reference parent-control UI; no secrets; it's the ts-rs codegen
 #     target, so the public crates depend on it shipping) ─────────────────────
 apps/parent-control/

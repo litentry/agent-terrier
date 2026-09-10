@@ -34,6 +34,57 @@ pub struct TgMessage {
     pub chat: TgChat,
     #[serde(default)]
     pub text: Option<String>,
+    /// #667 — a photo message: the available sizes (largest relayed).
+    #[serde(default)]
+    pub photo: Option<Vec<TgPhotoSize>>,
+    /// #667 — a voice message.
+    #[serde(default)]
+    pub voice: Option<TgVoice>,
+    /// The caption of a media message (relayed as the correlated text).
+    #[serde(default)]
+    pub caption: Option<String>,
+}
+
+/// Bot API `PhotoSize` (https://core.telegram.org/bots/api#photosize).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TgPhotoSize {
+    pub file_id: String,
+    #[serde(default)]
+    pub width: u64,
+    #[serde(default)]
+    pub height: u64,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+}
+
+/// Bot API `Voice` (https://core.telegram.org/bots/api#voice).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TgVoice {
+    pub file_id: String,
+    #[serde(default)]
+    pub duration: Option<u64>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+}
+
+/// Bot API `File` (https://core.telegram.org/bots/api#getfile): `file_path`
+/// is fetched from `https://api.telegram.org/file/bot<token>/<file_path>`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TgFile {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+}
+
+/// The largest photo size (by pixel area).
+pub fn largest_photo(sizes: &[TgPhotoSize]) -> Option<&TgPhotoSize> {
+    sizes
+        .iter()
+        .max_by_key(|p| p.width.saturating_mul(p.height))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -133,6 +184,57 @@ impl TelegramClient {
             .context("getUpdates decode")
     }
 
+    /// `getFile` — resolve a `file_id` to a downloadable `file_path`
+    /// (https://core.telegram.org/bots/api#getfile).
+    pub async fn get_file(&self, file_id: &str) -> anyhow::Result<TgFile> {
+        let resp = self
+            .http
+            .get(self.method_url("getFile"))
+            .query(&[("file_id", file_id)])
+            .send()
+            .await
+            .context("getFile request")?;
+        let body: TgResponse<TgFile> = resp.json().await.context("getFile decode")?;
+        if !body.ok {
+            anyhow::bail!(
+                "getFile refused: error_code={} description={}",
+                body.error_code.unwrap_or_default(),
+                body.description.as_deref().unwrap_or("")
+            );
+        }
+        body.result
+            .ok_or_else(|| anyhow::anyhow!("getFile returned no result"))
+    }
+
+    /// Download a file by its `file_path` (`<base>/file/bot<token>/<path>`,
+    /// per the getFile reference). Capped at `max_bytes`.
+    pub async fn download_file(
+        &self,
+        file_path: &str,
+        max_bytes: usize,
+    ) -> anyhow::Result<Vec<u8>> {
+        let url = format!(
+            "{}/file/bot{}/{}",
+            self.base_url,
+            self.token,
+            file_path.trim_start_matches('/')
+        );
+        let resp = self.http.get(&url).send().await.context("file download")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("file download HTTP {}", resp.status());
+        }
+        if let Some(len) = resp.content_length() {
+            if len as usize > max_bytes {
+                anyhow::bail!("file is {len} bytes (max {max_bytes})");
+            }
+        }
+        let bytes = resp.bytes().await.context("file body")?.to_vec();
+        if bytes.len() > max_bytes {
+            anyhow::bail!("file is {} bytes (max {max_bytes})", bytes.len());
+        }
+        Ok(bytes)
+    }
+
     /// Send one text reply into a chat. Errors are the caller's to log — a
     /// failed reply must never block the relay (the turn is already routed).
     pub async fn send_text(&self, chat_id: i64, text: &str) -> anyhow::Result<()> {
@@ -156,9 +258,85 @@ impl TelegramClient {
     }
 }
 
+/// #667 — the first media original of a Telegram message: the largest photo
+/// size (`image/jpeg` — the Bot API serves photos as JPEG) or the voice clip
+/// (its declared `mime_type`, else `audio/ogg`). Failures are LOUD and yield
+/// `None` (the caption still relays).
+pub async fn first_telegram_media(
+    client: &TelegramClient,
+    msg: &TgMessage,
+    max_bytes: usize,
+) -> Option<crate::media::InboundMedia> {
+    use agentkeys_protocol::ChannelEventKind;
+    let (file_id, kind, content_type) =
+        if let Some(p) = msg.photo.as_deref().and_then(largest_photo) {
+            (
+                p.file_id.clone(),
+                ChannelEventKind::Image,
+                "image/jpeg".to_string(),
+            )
+        } else if let Some(v) = msg.voice.as_ref() {
+            (
+                v.file_id.clone(),
+                ChannelEventKind::AudioClip,
+                v.mime_type
+                    .clone()
+                    .unwrap_or_else(|| "audio/ogg".to_string()),
+            )
+        } else {
+            return None;
+        };
+    let file = match client.get_file(&file_id).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(error = %e, "#667 telegram getFile failed — relaying the caption only");
+            return None;
+        }
+    };
+    let Some(path) = file.file_path.filter(|p| !p.is_empty()) else {
+        tracing::warn!("#667 telegram getFile returned no file_path");
+        return None;
+    };
+    match client.download_file(&path, max_bytes).await {
+        Ok(bytes) => Some(crate::media::InboundMedia {
+            kind,
+            content_type,
+            bytes,
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "#667 telegram file download failed — relaying the caption only");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photo_message_decodes_and_largest_size_wins() {
+        let raw = r#"{"ok":true,"result":[{"update_id":8,"message":{
+            "message_id":2,"from":{"id":42,"is_bot":false},
+            "chat":{"id":42,"type":"private"},"date":1,"caption":"/chef 冰箱",
+            "photo":[{"file_id":"small","file_unique_id":"u1","width":90,"height":67,"file_size":1200},
+                     {"file_id":"big","file_unique_id":"u2","width":800,"height":600,"file_size":64000}]}}]}"#;
+        let r: TgResponse<Vec<TgUpdate>> = serde_json::from_str(raw).unwrap();
+        let msg = r.result.unwrap().remove(0).message.unwrap();
+        assert_eq!(msg.caption.as_deref(), Some("/chef 冰箱"));
+        assert!(msg.text.is_none());
+        assert_eq!(
+            largest_photo(msg.photo.as_deref().unwrap())
+                .unwrap()
+                .file_id,
+            "big"
+        );
+        let voice: TgMessage = serde_json::from_str(
+            r#"{"chat":{"id":1,"type":"private"},"voice":{"file_id":"v1","duration":3,"mime_type":"audio/ogg"}}"#,
+        )
+        .unwrap();
+        assert_eq!(voice.voice.unwrap().mime_type.as_deref(), Some("audio/ogg"));
+    }
 
     #[test]
     fn getupdates_shape_decodes_and_flags_map() {

@@ -470,6 +470,10 @@ pub struct GatewayRelayBody {
     /// `keccak256(message bytes)` — proves what was relayed without storing the
     /// third-party personal text (D13).
     pub message_hash: String,
+    /// #667 — a media original (photo / voice) rode the turn (stored by ref
+    /// beside the feed; the hash above covers the text only).
+    #[serde(default)]
+    pub media: bool,
 }
 
 /// #407 — a contact bind write (pending → bound / declined) AFTER the master's
@@ -626,6 +630,7 @@ mod tests {
             target_alias: "chef".into(),
             decision: "ok".into(),
             message_hash: format!("0x{}", "cd".repeat(32)),
+            media: false,
         };
         let env = envelope_for(
             [0x22; 32],

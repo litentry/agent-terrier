@@ -222,7 +222,7 @@ fn channel_session_policy(owner_bare: &str, channel_id: &str) -> String {
 
 /// Constant-time string equality (length is not secret — the token is a fixed
 /// 64-hex host secret; content comparison must not early-exit).
-fn constant_time_str_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_str_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }

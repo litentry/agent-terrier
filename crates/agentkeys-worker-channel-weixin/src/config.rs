@@ -21,6 +21,15 @@ const DEFAULT_TELEGRAM_STATE_FILE: &str = "/var/lib/agentkeys/telegram-state.jso
 const DEFAULT_HISTORY_FILE: &str = "/var/lib/agentkeys/weixin-history.jsonl";
 /// Durable control-action audit log — the writable state dir (#419).
 const DEFAULT_ACTIVITY_FILE: &str = "/var/lib/agentkeys/weixin-activity.jsonl";
+/// #667 — this host's K10 for the gateway's OWN device actor (generated on the
+/// first enrollment; override with `AGENTKEYS_WEIXIN_DEVICE_KEY_FILE`).
+const DEFAULT_DEVICE_KEY_FILE: &str = "/var/lib/agentkeys/weixin-device.key";
+/// #667 — the device actor's coordinates + relay bookkeeping (cursors,
+/// correlations; override with `AGENTKEYS_WEIXIN_DEVICE_STATE_FILE`).
+const DEFAULT_DEVICE_STATE_FILE: &str = "/var/lib/agentkeys/weixin-device-state.json";
+/// #667 — the largest media original relayed onto a feed (a phone photo is a
+/// few MB; override with `AGENTKEYS_WEIXIN_MEDIA_MAX_BYTES`).
+const DEFAULT_MEDIA_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Which chat transport this gateway instance drives. ONE gateway process =
 /// ONE transport; the relay core (L3/registry/router/audit) is shared. (The
@@ -56,6 +65,27 @@ impl WeixinTransport {
 /// threat 3): at most N messages per window seconds.
 const DEFAULT_RATE_MAX: u32 = 30;
 const DEFAULT_RATE_WINDOW_SECS: u64 = 60;
+
+/// #667 — the gateway's OWN device actor + the feed hop (see [`crate::device`]).
+/// `Default` = unconfigured (unit tests / a decision-only gateway); `from_env`
+/// fills the deployed defaults.
+#[derive(Debug, Clone, Default)]
+pub struct DeviceConfig {
+    /// The broker to enroll against + mint channel caps at (`AGENTKEYS_BROKER_URL`).
+    pub broker_url: Option<String>,
+    /// This host's K10 (`AGENTKEYS_WEIXIN_DEVICE_KEY_FILE`, 0600, generated on
+    /// the first enrollment, never leaves the host — D3).
+    pub key_file: String,
+    /// Coordinates + relay bookkeeping (`AGENTKEYS_WEIXIN_DEVICE_STATE_FILE`).
+    pub state_file: String,
+    /// iLink CDN base for media without a server `full_url`
+    /// (`AGENTKEYS_WEIXIN_ILINK_CDN_BASE_URL`; absent = `full_url` only).
+    pub ilink_cdn_base_url: Option<String>,
+    /// Largest media original relayed (`AGENTKEYS_WEIXIN_MEDIA_MAX_BYTES`).
+    pub media_max_bytes: usize,
+    /// The outbound feed-delivery loop (`AGENTKEYS_WEIXIN_FEED_OUTBOUND`, default on).
+    pub outbound_enabled: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct WeixinGatewayConfig {
@@ -149,13 +179,26 @@ pub struct WeixinGatewayConfig {
     /// verification so the mock e2e can drive `/wechat/callback` without the
     /// token. Refused in prod by leaving it unset (the CLI prints a WARN when on).
     pub allow_unsigned: bool,
+    /// #667 — the device actor + feed hop settings.
+    pub device: DeviceConfig,
 }
 
 impl WeixinGatewayConfig {
+    /// The process-env reader — `from_lookup` over `std::env::var`.
     pub fn from_env() -> anyhow::Result<Self> {
-        let bind = std::env::var("WORKER_BIND").unwrap_or_else(|_| "127.0.0.1:9100".to_string());
+        Self::from_lookup(&|k| std::env::var(k).ok())
+    }
 
-        let transport = match std::env::var("AGENTKEYS_WEIXIN_TRANSPORT")
+    /// Build the config from an injectable variable reader (the one parse
+    /// path; tests feed a map — crates/ never mutate process env). A missing
+    /// key reads as `Err(VarError::NotPresent)`, exactly like `std::env::var`.
+    pub fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
+        let var = |k: &str| -> Result<String, std::env::VarError> {
+            lookup(k).ok_or(std::env::VarError::NotPresent)
+        };
+        let bind = var("WORKER_BIND").unwrap_or_else(|_| "127.0.0.1:9100".to_string());
+
+        let transport = match var("AGENTKEYS_WEIXIN_TRANSPORT")
             .unwrap_or_else(|_| "oa".to_string())
             .trim()
             .to_lowercase()
@@ -174,21 +217,21 @@ impl WeixinGatewayConfig {
         // OA credentials — REQUIRED under `oa`, ignored under the long-poll transports.
         let (weixin_token, weixin_app_id) = match transport {
             WeixinTransport::Oa => (
-                std::env::var("AGENTKEYS_WEIXIN_TOKEN").context(
+                var("AGENTKEYS_WEIXIN_TOKEN").context(
                     "AGENTKEYS_WEIXIN_TOKEN must be set (the 公众号 callback verification token)",
                 )?,
-                std::env::var("AGENTKEYS_WEIXIN_APP_ID")
-                    .context("AGENTKEYS_WEIXIN_APP_ID must be set")?,
+                var("AGENTKEYS_WEIXIN_APP_ID").context("AGENTKEYS_WEIXIN_APP_ID must be set")?,
             ),
             WeixinTransport::Ilink | WeixinTransport::Telegram => (
-                std::env::var("AGENTKEYS_WEIXIN_TOKEN").unwrap_or_default(),
-                std::env::var("AGENTKEYS_WEIXIN_APP_ID").unwrap_or_default(),
+                var("AGENTKEYS_WEIXIN_TOKEN").unwrap_or_default(),
+                var("AGENTKEYS_WEIXIN_APP_ID").unwrap_or_default(),
             ),
         };
 
         // The app-secret (the OA SENDING credential) — env or 0600 file, the
         // #384 custody shape. Absent = inbound-relay-only.
-        let weixin_app_secret = secret_from_env(
+        let weixin_app_secret = secret_from(
+            lookup,
             "AGENTKEYS_WEIXIN_APP_SECRET",
             "AGENTKEYS_WEIXIN_APP_SECRET_FILE",
         )?;
@@ -199,7 +242,8 @@ impl WeixinGatewayConfig {
         // the operator completes the in-app login (which mints the token, writes
         // the secrets file, and hot-starts the loop) — but it warns LOUDLY so an
         // unconfigured prod box is visible, never a silent no-op.
-        let ilink_bot_token = secret_from_env(
+        let ilink_bot_token = secret_from(
+            lookup,
             "AGENTKEYS_WEIXIN_ILINK_BOT_TOKEN",
             "AGENTKEYS_WEIXIN_ILINK_BOT_TOKEN_FILE",
         )?;
@@ -210,41 +254,42 @@ impl WeixinGatewayConfig {
                  连接, or `agentkeys-worker-channel-weixin --login`). healthz shows online=false."
             );
         }
-        let ilink_base_url = std::env::var("AGENTKEYS_WEIXIN_ILINK_BASE_URL")
+        let ilink_base_url = var("AGENTKEYS_WEIXIN_ILINK_BASE_URL")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::ilink::ILINK_BOOTSTRAP_BASE_URL.to_string());
-        let ilink_state_file = std::env::var("AGENTKEYS_WEIXIN_ILINK_STATE_FILE")
+        let ilink_state_file = var("AGENTKEYS_WEIXIN_ILINK_STATE_FILE")
             .unwrap_or_else(|_| DEFAULT_ILINK_STATE_FILE.to_string());
-        let history_file = std::env::var("AGENTKEYS_WEIXIN_HISTORY_FILE")
+        let history_file = var("AGENTKEYS_WEIXIN_HISTORY_FILE")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_HISTORY_FILE.to_string());
-        let activity_file = std::env::var("AGENTKEYS_WEIXIN_ACTIVITY_FILE")
+        let activity_file = var("AGENTKEYS_WEIXIN_ACTIVITY_FILE")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_ACTIVITY_FILE.to_string());
-        let secrets_file = std::env::var("AGENTKEYS_WEIXIN_SECRETS_FILE")
+        let secrets_file = var("AGENTKEYS_WEIXIN_SECRETS_FILE")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::ilink_login::DEFAULT_SECRETS_FILE.to_string());
-        let ilink_bootstrap_url = std::env::var("AGENTKEYS_WEIXIN_ILINK_BOOTSTRAP_URL")
+        let ilink_bootstrap_url = var("AGENTKEYS_WEIXIN_ILINK_BOOTSTRAP_URL")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::ilink::ILINK_BOOTSTRAP_BASE_URL.to_string());
-        let bot_agent = std::env::var("AGENTKEYS_WEIXIN_BOT_AGENT")
+        let bot_agent = var("AGENTKEYS_WEIXIN_BOT_AGENT")
             .unwrap_or_else(|_| concat!("AgentKeys/", env!("CARGO_PKG_VERSION")).to_string());
 
         // The Telegram bot token (#444, #384 custody — minted once via
         // BotFather). Absent under `telegram` is NOT fatal (the #418 posture):
         // the worker boots OFFLINE and idles until the operator fills the
         // secrets file and restarts the unit — but it warns LOUDLY.
-        let telegram_bot_token = secret_from_env(
+        let telegram_bot_token = secret_from(
+            lookup,
             "AGENTKEYS_TELEGRAM_BOT_TOKEN",
             "AGENTKEYS_TELEGRAM_BOT_TOKEN_FILE",
         )?;
@@ -252,16 +297,16 @@ impl WeixinGatewayConfig {
             eprintln!(
                 "==> agentkeys-worker-channel-weixin: telegram transport with NO bot token — the \
                  bot is OFFLINE until the operator sets AGENTKEYS_TELEGRAM_BOT_TOKEN in the \
-                 gateway secrets file (mint one via @BotFather) and restarts the unit. healthz \
+                 contact gate secrets file (mint one via @BotFather) and restarts the unit. healthz \
                  shows outbound_enabled=false."
             );
         }
-        let telegram_api_base = std::env::var("AGENTKEYS_TELEGRAM_API_BASE")
+        let telegram_api_base = var("AGENTKEYS_TELEGRAM_API_BASE")
             .ok()
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::telegram::TELEGRAM_API_BASE.to_string());
-        let telegram_state_file = std::env::var("AGENTKEYS_TELEGRAM_STATE_FILE")
+        let telegram_state_file = var("AGENTKEYS_TELEGRAM_STATE_FILE")
             .unwrap_or_else(|_| DEFAULT_TELEGRAM_STATE_FILE.to_string());
 
         match transport {
@@ -284,16 +329,16 @@ impl WeixinGatewayConfig {
             ),
         }
 
-        let registry_file = std::env::var("AGENTKEYS_WEIXIN_CONTACT_REGISTRY_FILE").context(
+        let registry_file = var("AGENTKEYS_WEIXIN_CONTACT_REGISTRY_FILE").context(
             "AGENTKEYS_WEIXIN_CONTACT_REGISTRY_FILE must be set (the master-authored contact \
              registry JSON — policy data class, §14.5)",
         )?;
 
-        let channel_worker_url = std::env::var("AGENTKEYS_WORKER_CHANNEL_URL")
+        let channel_worker_url = var("AGENTKEYS_WORKER_CHANNEL_URL")
             .ok()
             .filter(|s| !s.trim().is_empty());
 
-        let operator_omni = std::env::var("AGENTKEYS_WEIXIN_OPERATOR_OMNI")
+        let operator_omni = var("AGENTKEYS_WEIXIN_OPERATOR_OMNI")
             .context("AGENTKEYS_WEIXIN_OPERATOR_OMNI must be set (the household operator omni)")?;
         // #424 §3 — a template placeholder / malformed omni silently DISARMED
         // the on-chain contact audit (#419's silent-skip). Boot must be LOUD:
@@ -310,47 +355,47 @@ impl WeixinGatewayConfig {
             );
         }
 
-        let audit_worker_url = std::env::var("AGENTKEYS_AUDIT_WORKER_URL")
+        let audit_worker_url = var("AGENTKEYS_AUDIT_WORKER_URL")
             .ok()
             .filter(|s| !s.trim().is_empty());
         if audit_worker_url.is_none() {
             eprintln!(
-                "==> agentkeys-worker-channel-weixin: AGENTKEYS_AUDIT_WORKER_URL unset — gateway \
+                "==> agentkeys-worker-channel-weixin: AGENTKEYS_AUDIT_WORKER_URL unset — contact gate \
                  relay/bind audit rows DISABLED (set it to durably audit each turn, #229)."
             );
         }
 
-        let operator_grade_aliases = std::env::var("AGENTKEYS_WEIXIN_OPERATOR_GRADE_ALIASES")
+        let operator_grade_aliases = var("AGENTKEYS_WEIXIN_OPERATOR_GRADE_ALIASES")
             .unwrap_or_else(|_| DEFAULT_OPERATOR_GRADE_ALIASES.to_string())
             .split(',')
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
 
-        let parent_control_deeplink = std::env::var("AGENTKEYS_WEIXIN_PARENT_CONTROL_DEEPLINK")
+        let parent_control_deeplink = var("AGENTKEYS_WEIXIN_PARENT_CONTROL_DEEPLINK")
             .unwrap_or_else(|_| "https://parent-control.agentkeys.local/".to_string());
 
-        let rate_max = std::env::var("AGENTKEYS_WEIXIN_RATE_MAX")
+        let rate_max = var("AGENTKEYS_WEIXIN_RATE_MAX")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_RATE_MAX);
-        let rate_window_secs = std::env::var("AGENTKEYS_WEIXIN_RATE_WINDOW_SECS")
+        let rate_window_secs = var("AGENTKEYS_WEIXIN_RATE_WINDOW_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_RATE_WINDOW_SECS);
 
         // Advisory router (#410) — default ON; only an explicit falsy value disables.
         let router_enabled = !matches!(
-            std::env::var("AGENTKEYS_WEIXIN_ROUTER").as_deref(),
+            var("AGENTKEYS_WEIXIN_ROUTER").as_deref(),
             Ok("0") | Ok("false") | Ok("no")
         );
 
-        let admin_token = std::env::var("AGENTKEYS_WEIXIN_ADMIN_TOKEN")
+        let admin_token = var("AGENTKEYS_WEIXIN_ADMIN_TOKEN")
             .ok()
             .filter(|s| !s.trim().is_empty());
 
         let allow_unsigned = matches!(
-            std::env::var("AGENTKEYS_WEIXIN_ALLOW_UNSIGNED").as_deref(),
+            var("AGENTKEYS_WEIXIN_ALLOW_UNSIGNED").as_deref(),
             Ok("1") | Ok("true") | Ok("yes")
         );
         if allow_unsigned {
@@ -363,6 +408,34 @@ impl WeixinGatewayConfig {
         if transport == WeixinTransport::Oa && weixin_token.trim().is_empty() {
             return Err(anyhow!("AGENTKEYS_WEIXIN_TOKEN must be non-empty"));
         }
+
+        let device = DeviceConfig {
+            broker_url: var("AGENTKEYS_BROKER_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            key_file: var("AGENTKEYS_WEIXIN_DEVICE_KEY_FILE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_DEVICE_KEY_FILE.to_string()),
+            state_file: var("AGENTKEYS_WEIXIN_DEVICE_STATE_FILE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_DEVICE_STATE_FILE.to_string()),
+            ilink_cdn_base_url: var("AGENTKEYS_WEIXIN_ILINK_CDN_BASE_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            media_max_bytes: var("AGENTKEYS_WEIXIN_MEDIA_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(DEFAULT_MEDIA_MAX_BYTES),
+            outbound_enabled: !matches!(
+                var("AGENTKEYS_WEIXIN_FEED_OUTBOUND").as_deref(),
+                Ok("0") | Ok("false") | Ok("off")
+            ),
+        };
 
         Ok(WeixinGatewayConfig {
             bind,
@@ -392,6 +465,7 @@ impl WeixinGatewayConfig {
             router_enabled,
             admin_token,
             allow_unsigned,
+            device,
         })
     }
 
@@ -412,7 +486,11 @@ impl WeixinGatewayConfig {
 
 /// Read a secret from `<VAR>` or, failing that, a `0600` file named by
 /// `<VAR>_FILE` (the #384 custody shape). Empty values count as absent.
-fn secret_from_env(var: &str, file_var: &str) -> anyhow::Result<Option<String>> {
+fn secret_from(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    var: &str,
+    file_var: &str,
+) -> anyhow::Result<Option<String>> {
     // A `REPLACE_ME…` template placeholder is UNSET, not a value — the broker
     // secrets template ships placeholders, and the #418 offline-boot gateway
     // must idle on them (never long-poll Tencent with placeholder garbage).
@@ -424,10 +502,10 @@ fn secret_from_env(var: &str, file_var: &str) -> anyhow::Result<Option<String>> 
             Some(s)
         }
     };
-    match std::env::var(var) {
-        Ok(v) if !v.trim().is_empty() => Ok(not_placeholder(v.trim().to_string())),
-        _ => match std::env::var(file_var) {
-            Ok(p) if !p.trim().is_empty() => {
+    match lookup(var) {
+        Some(v) if !v.trim().is_empty() => Ok(not_placeholder(v.trim().to_string())),
+        _ => match lookup(file_var) {
+            Some(p) if !p.trim().is_empty() => {
                 let s = std::fs::read_to_string(&p)
                     .with_context(|| format!("reading {file_var} {p}"))?;
                 let s = s.trim().to_string();
@@ -439,5 +517,148 @@ fn secret_from_env(var: &str, file_var: &str) -> anyhow::Result<Option<String>> 
             }
             _ => Ok(None),
         },
+    }
+}
+
+#[cfg(test)]
+mod from_lookup_tests {
+    use super::*;
+
+    fn cfg(pairs: &[(&str, &str)]) -> anyhow::Result<WeixinGatewayConfig> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        WeixinGatewayConfig::from_lookup(&|k| map.get(k).cloned())
+    }
+
+    const BASE: &[(&str, &str)] = &[
+        ("AGENTKEYS_WEIXIN_CONTACT_REGISTRY_FILE", "/tmp/ak-reg.json"),
+        (
+            "AGENTKEYS_WEIXIN_OPERATOR_OMNI",
+            "0xabababababababababababababababababababababababababababababababab",
+        ),
+    ];
+
+    fn with_base(extra: &[(&str, &str)]) -> Vec<(&'static str, &'static str)> {
+        let mut v: Vec<(&str, &str)> = BASE.to_vec();
+        for (k, val) in extra {
+            v.push((k, val));
+        }
+        // leak so the test helper can hand out 'static pairs without ceremony
+        v.into_iter()
+            .map(|(k, val)| {
+                (
+                    Box::leak(k.to_string().into_boxed_str()) as &'static str,
+                    Box::leak(val.to_string().into_boxed_str()) as &'static str,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn oa_needs_token_and_app_id_and_defaults_the_rest() {
+        let c = cfg(&with_base(&[
+            ("AGENTKEYS_WEIXIN_TOKEN", "tok"),
+            ("AGENTKEYS_WEIXIN_APP_ID", "wx1"),
+        ]))
+        .expect("oa config");
+        assert_eq!(c.transport, WeixinTransport::Oa);
+        assert_eq!(c.bind, "127.0.0.1:9100");
+        assert_eq!(c.weixin_token, "tok");
+        assert_eq!(c.weixin_app_id, "wx1");
+        assert!(c.weixin_app_secret.is_none());
+        assert!(!c.outbound_enabled(), "no app secret ⇒ inbound-relay-only");
+        assert!(c.router_enabled);
+        assert!(!c.allow_unsigned);
+        assert!(c.admin_token.is_none());
+        assert_eq!(c.rate_max, 30);
+        assert!(c.rate_window_secs > 0);
+        assert_eq!(c.registry_file, "/tmp/ak-reg.json");
+        assert!(c.channel_worker_url.is_none());
+        assert!(c.audit_worker_url.is_none());
+        assert_eq!(c.telegram_api_base, crate::telegram::TELEGRAM_API_BASE);
+        assert!(c.device.key_file.ends_with("weixin-device.key"));
+        assert_eq!(c.device.media_max_bytes, DEFAULT_MEDIA_MAX_BYTES);
+        assert!(c.device.ilink_cdn_base_url.is_none());
+        // The OA token is required — its absence is the loud error.
+        let err = cfg(&with_base(&[("AGENTKEYS_WEIXIN_APP_ID", "wx1")])).unwrap_err();
+        assert!(format!("{err:#}").contains("AGENTKEYS_WEIXIN_TOKEN"));
+    }
+
+    #[test]
+    fn ilink_and_telegram_custody_their_bot_tokens_and_placeholders_are_unset() {
+        let c = cfg(&with_base(&[
+            ("AGENTKEYS_WEIXIN_TRANSPORT", "ilink"),
+            ("AGENTKEYS_WEIXIN_ILINK_BOT_TOKEN", "ilink-secret"),
+            ("AGENTKEYS_WEIXIN_ADMIN_TOKEN", "admin-1"),
+            ("AGENTKEYS_WEIXIN_ALLOW_UNSIGNED", "1"),
+            ("AGENTKEYS_WEIXIN_RATE_MAX", "7"),
+            ("AGENTKEYS_WEIXIN_RATE_WINDOW_SECS", "9"),
+            ("AGENTKEYS_WEIXIN_ROUTER", "0"),
+            ("AGENTKEYS_WEIXIN_OPERATOR_GRADE_ALIASES", "spend, usage ,"),
+            ("AGENTKEYS_WORKER_CHANNEL_URL", "https://channel.example/"),
+            ("AGENTKEYS_BROKER_URL", "https://broker.example"),
+            ("AGENTKEYS_WEIXIN_DEVICE_KEY_FILE", "/tmp/k10.key"),
+            ("AGENTKEYS_WEIXIN_MEDIA_MAX_BYTES", "1024"),
+        ]))
+        .expect("ilink config");
+        assert_eq!(c.transport, WeixinTransport::Ilink);
+        assert_eq!(c.ilink_bot_token.as_deref(), Some("ilink-secret"));
+        assert!(c.outbound_enabled());
+        assert_eq!(c.admin_token.as_deref(), Some("admin-1"));
+        assert!(c.allow_unsigned);
+        assert_eq!(c.rate_max, 7);
+        assert_eq!(c.rate_window_secs, 9);
+        assert!(!c.router_enabled);
+        assert_eq!(
+            c.operator_grade_aliases,
+            vec!["spend".to_string(), "usage".to_string()]
+        );
+        assert_eq!(
+            c.device.broker_url.as_deref(),
+            Some("https://broker.example")
+        );
+        assert_eq!(c.device.key_file, "/tmp/k10.key");
+        assert_eq!(c.device.media_max_bytes, 1024);
+
+        // A REPLACE_ME placeholder is UNSET, not a token (#418 offline boot).
+        let c = cfg(&with_base(&[
+            ("AGENTKEYS_WEIXIN_TRANSPORT", "telegram"),
+            ("AGENTKEYS_TELEGRAM_BOT_TOKEN", "REPLACE_ME_bot_token"),
+        ]))
+        .expect("telegram config");
+        assert_eq!(c.transport, WeixinTransport::Telegram);
+        assert!(c.telegram_bot_token.is_none());
+        assert!(!c.outbound_enabled());
+
+        // The `_FILE` custody shape reads the secret from a 0600 file.
+        let f = std::env::temp_dir().join(format!("ak-weixin-secret-{}.txt", std::process::id()));
+        std::fs::write(&f, "  from-file  \n").unwrap();
+        let path = f.to_string_lossy().to_string();
+        let c = cfg(&with_base(&[
+            ("AGENTKEYS_WEIXIN_TRANSPORT", "tg"),
+            ("AGENTKEYS_TELEGRAM_BOT_TOKEN_FILE", &path),
+        ]))
+        .expect("telegram config from file");
+        assert_eq!(c.telegram_bot_token.as_deref(), Some("from-file"));
+        std::fs::remove_file(&f).ok();
+    }
+
+    #[test]
+    fn unknown_transport_and_missing_registry_are_loud() {
+        let err = cfg(&with_base(&[(
+            "AGENTKEYS_WEIXIN_TRANSPORT",
+            "carrier-pigeon",
+        )]))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not a transport"));
+        let err = cfg(&[
+            ("AGENTKEYS_WEIXIN_TOKEN", "tok"),
+            ("AGENTKEYS_WEIXIN_APP_ID", "wx1"),
+            ("AGENTKEYS_WEIXIN_OPERATOR_OMNI", "0xab"),
+        ])
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("AGENTKEYS_WEIXIN_CONTACT_REGISTRY_FILE"));
     }
 }

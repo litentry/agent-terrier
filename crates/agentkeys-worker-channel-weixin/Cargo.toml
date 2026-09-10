@@ -19,6 +19,9 @@ path = "src/lib.rs"
 agentkeys-core = { workspace = true }
 agentkeys-protocol = { workspace = true }
 agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+# #667 — the gateway is a DEVICE ACTOR: channel caps minted as its own K10 (the
+# one shared cap-mint client; PoP-signed).
+agentkeys-backend-client = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -32,6 +35,8 @@ hex = "0.4"
 base64 = "0.22"
 sha1 = "0.10"
 sha3 = "0.10"
+# #667 — iLink media originals are AES-128-ECB encrypted on the CDN.
+aes = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 # Terminal QR render for the iLink `--login` ceremony (no image features).
 qrcode = { version = "0.14", default-features = false }

@@ -135,6 +135,28 @@ pub struct UiBridgeState {
     /// matching submit proxy on a CONFIRMED ceremony to write the binding-
     /// manifest row. In-memory only, same posture as the accept stash above.
     pub ceremony_context_by_dkh: RwLock<HashMap<String, serde_json::Value>>,
+    /// #664 — the app registry (config-class `app-registry`), write-through
+    /// cache like the channel registry.
+    pub app_registry: RwLock<Option<agentkeys_backend_client::protocol::AppRegistryDoc>>,
+    /// #664 — the resource registry (config-class `resource-registry`).
+    pub resource_registry: RwLock<Option<agentkeys_backend_client::protocol::ResourceRegistryDoc>>,
+    /// #664 — the install ceremony stash (build → submit), keyed by the
+    /// delegate's `device_key_hash`; RAM only like the #427 stash.
+    pub app_install_by_dkh: RwLock<HashMap<String, crate::apps::AppInstallStash>>,
+    /// #664 — the uninstall ceremony stash, keyed by label.
+    pub app_uninstall_by_label: RwLock<HashMap<String, crate::apps::AppUninstallStash>>,
+    /// #541 — this console's OWN device actor once enrolled (loaded from the
+    /// persisted coordinates at boot).
+    pub console_device: RwLock<Option<crate::console_device::ConsoleDevice>>,
+    /// #541 — the console actor's cached device J1 + its expiry.
+    pub console_session: RwLock<Option<(String, u64)>>,
+    /// #541 — the console enrollment in flight (build → submit).
+    pub console_enroll_pending: RwLock<Option<crate::console_device::ConsoleEnrollPending>>,
+    /// #667 — the gateway device enrollment in flight (build → submit).
+    pub gateway_enroll_pending: RwLock<Option<crate::gateway_device::GatewayEnrollPending>>,
+    /// #667 — when the messaging endpoint row was last synced from the
+    /// gateway's device status (unix secs; throttles the status-proxy hook).
+    pub gateway_endpoint_synced_at: std::sync::atomic::AtomicU64,
     /// #424 — the scope-commit stash: `user_op_hash` (from `/v1/scope/build`) →
     /// `(actor_omni, services)`, consumed by `scope_submit_proxy` on a confirmed
     /// commit to upsert the binding manifest with the NAMES the set-replace
@@ -325,7 +347,7 @@ pub use agentkeys_backend_client::protocol::{
 /// AND the durable-merge identity (codex finding 1). A free function so the
 /// merge can recompute it for durable `StoredMemoryEntry`s (which don't carry
 /// the hash) using the same scheme as `ApiMemoryEntry::compute_hash`.
-fn content_hash_for(ns: &str, key: &str, body: &str) -> String {
+pub(crate) fn content_hash_for(ns: &str, key: &str, body: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(ns.as_bytes());
@@ -457,6 +479,18 @@ pub struct ApiChannel {
     pub note: Option<String>,
     #[ts(type = "number")]
     pub created_at: u64,
+    /// #664 — the channel's endpoint KIND (the closed vocabulary an app slot
+    /// binds by: messaging · chat · display · camera · …). Additive; absent on
+    /// pre-#664 rows (the wizard then offers the row for any kind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<agentkeys_backend_client::protocol::ChannelEndpointKind>,
+    /// #664 — the endpoint's OWN device actor when it has one (`0x`-omni): the
+    /// gateway behind a messaging row, a paired display. An install grants that
+    /// actor the feed's mirror direction in the same Touch ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub endpoint_actor_omni: Option<String>,
 }
 
 /// The durable registry doc (config-class, master-only). Version field for
@@ -464,9 +498,9 @@ pub struct ApiChannel {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChannelRegistry {
     #[serde(default)]
-    version: u32,
+    pub(crate) version: u32,
     #[serde(default)]
-    channels: Vec<ApiChannel>,
+    pub(crate) channels: Vec<ApiChannel>,
 }
 
 /// The signed `service` of the Config-class BINDING MANIFEST object (→ S3 key
@@ -642,7 +676,7 @@ impl BindingManifest {
 /// Channel-id shape: the on-chain anchor must be stable + lowercase (service
 /// ids are keccak'd over the LOWERCASED string on every path), and short enough
 /// to read on a device card. Mirrors the label discipline elsewhere.
-fn valid_channel_id(id: &str) -> bool {
+pub(crate) fn valid_channel_id(id: &str) -> bool {
     let n = id.len();
     (1..=48).contains(&n)
         && id
@@ -1304,6 +1338,46 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             "/v1/agent/inheritable-namespaces",
             get(list_inheritable_namespaces),
         )
+        // #664 / #682 — the applications surface (epic #660): the two
+        // policy-class registries, the install / uninstall ceremonies over
+        // the #427 spawn / archive proxies, the dashboard, card-action
+        // commands, resource curation, and the console's own device actor.
+        .route("/v1/master/apps", get(crate::apps::list_apps))
+        .route(
+            "/v1/master/apps/install/build",
+            post(crate::apps::app_install_build),
+        )
+        .route(
+            "/v1/master/apps/install/submit",
+            post(crate::apps::app_install_submit),
+        )
+        .route("/v1/master/apps/:label", get(crate::apps::app_dashboard))
+        .route(
+            "/v1/master/apps/:label/uninstall/build",
+            post(crate::apps::app_uninstall_build),
+        )
+        .route(
+            "/v1/master/apps/:label/uninstall/submit",
+            post(crate::apps::app_uninstall_submit),
+        )
+        .route(
+            "/v1/master/apps/:label/command",
+            post(crate::apps::app_command),
+        )
+        .route("/v1/master/resources", get(crate::apps::list_resources))
+        .route("/v1/master/resources/add", post(crate::apps::add_resource))
+        .route(
+            "/v1/master/console/device",
+            get(crate::console_device::console_device_status),
+        )
+        .route(
+            "/v1/master/console/device/enroll/build",
+            post(crate::console_device::console_enroll_build),
+        )
+        .route(
+            "/v1/master/console/device/enroll/submit",
+            post(crate::console_device::console_enroll_submit),
+        )
         // #430 — the operator chat surface over the delegate's opchat feed
         // (D8 operator-owned; D13: operator session only):
         .route("/v1/master/agent/chat/send", post(master_chat_send))
@@ -1312,6 +1386,20 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         // gateway's admin surface through the daemon; the admin bearer is
         // injected server-side, never in the browser):
         .route("/v1/master/gateway/status", get(gateway_status_proxy))
+        // #667 — the gateway's OWN device actor (enrolled by the master through
+        // the ordinary §10.2 pairing; ONE Touch ID).
+        .route(
+            "/v1/master/gateway/device",
+            get(crate::gateway_device::gateway_device_status),
+        )
+        .route(
+            "/v1/master/gateway/device/enroll/build",
+            post(crate::gateway_device::gateway_enroll_build),
+        )
+        .route(
+            "/v1/master/gateway/device/enroll/submit",
+            post(crate::gateway_device::gateway_enroll_submit),
+        )
         .route("/v1/master/gateway/monitor", get(gateway_monitor_proxy))
         .route("/v1/master/gateway/history", get(gateway_history_proxy))
         .route("/v1/master/gateway/activity", get(gateway_activity_proxy))
@@ -1382,7 +1470,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 /// Stack → suffix (from the broker host's first DNS label):
 /// - `broker.<zone>`        → `""`        (prod)
 /// - `test-broker.<zone>`   → `"-test"`   (#265 slot 1 — grandfathered `test-` prefix)
-/// - `broker-test-2.<zone>` → `"-test-2"` (test-fleet slot N)
+/// - `broker-<x>.<zone>`     → `"-<x>"`     (a further test-fleet slot, e.g. `broker-test-3`)
 /// - `broker-base.<zone>`   → `"-base"`   (#282 Base stack)
 pub(crate) fn derive_worker_url(broker_url: &str, worker: &str) -> Option<String> {
     let host = broker_url
@@ -1513,6 +1601,15 @@ pub fn build_state(
         ceremony_context_by_dkh: RwLock::new(HashMap::new()),
         channel_registry: RwLock::new(None),
         binding_manifest: RwLock::new(None),
+        app_registry: RwLock::new(None),
+        resource_registry: RwLock::new(None),
+        app_install_by_dkh: RwLock::new(HashMap::new()),
+        app_uninstall_by_label: RwLock::new(HashMap::new()),
+        console_device: RwLock::new(crate::console_device::load_persisted(broker_url.as_deref())),
+        console_session: RwLock::new(None),
+        console_enroll_pending: RwLock::new(None),
+        gateway_enroll_pending: RwLock::new(None),
+        gateway_endpoint_synced_at: std::sync::atomic::AtomicU64::new(0),
         scope_services_by_op_hash: RwLock::new(HashMap::new()),
         gateway_registry_synced: std::sync::atomic::AtomicBool::new(false),
         stacks: parse_stacks_json(std::env::var("AGENTKEYS_STACKS_JSON").ok().as_deref()),
@@ -3519,7 +3616,7 @@ fn base64url_encode(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -4569,7 +4666,7 @@ async fn reconcile_actors_from_chain(
 /// reconcile already in flight when this fires only marks itself synced up to
 /// the OLDER generation it observed, so this newer invalidation still forces a
 /// re-sync (the empty-actor-page TOCTOU fix).
-fn invalidate_fleet_sync(state: &UiBridgeState) {
+pub(crate) fn invalidate_fleet_sync(state: &UiBridgeState) {
     state
         .fleet_gen
         .fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -6442,7 +6539,7 @@ async fn claim_pairing(
     }
 }
 
-fn pairing_err(status: StatusCode, msg: &str) -> axum::response::Response {
+pub(crate) fn pairing_err(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
@@ -6655,17 +6752,36 @@ async fn spawn_submit_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    spawn_submit_core(&state, body).await.0
+}
+
+/// The spawn submit's core (shared with the #664 app install submit): forward
+/// the signed op, and on a CONFIRMED ceremony write the manifest row, name the
+/// opchat feed, distribute the preset. Returns the broker response + its parsed
+/// body (the app route reads the ceremony from it).
+pub(crate) async fn spawn_submit_core(
+    state: &SharedUiBridgeState,
+    body: serde_json::Value,
+) -> (axum::response::Response, Option<serde_json::Value>) {
     let Some(broker) = state.broker_url.clone() else {
-        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+        return (
+            pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured"),
+            None,
+        );
     };
     let j1 = match state.onboarding_session.read().await.as_ref() {
         Some(s) if !s.j1.is_empty() => s.j1.clone(),
-        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+        _ => {
+            return (
+                pairing_err(StatusCode::FORBIDDEN, "no master session"),
+                None,
+            )
+        }
     };
     let (resp, parsed) =
         forward_to_broker_value(&broker, "/v1/agent/spawn/submit", &j1, &body).await;
     if resp.status().is_success() {
-        invalidate_fleet_sync(&state);
+        invalidate_fleet_sync(state);
         for spawned in parsed
             .as_ref()
             .and_then(|v| v.pointer("/ceremony/spawned"))
@@ -6717,7 +6833,7 @@ async fn spawn_submit_proxy(
                         .map(str::to_string),
                 });
             upsert_binding_manifest_entry(
-                &state,
+                state,
                 BindingManifestEntry {
                     actor_omni: sfield(ctx, "actor_omni"),
                     device_key_hash: dkh,
@@ -6745,7 +6861,7 @@ async fn spawn_submit_proxy(
                         l
                     }
                 };
-                ensure_channel_named(&state, &chat_id, &format!("Chat · {display}")).await;
+                ensure_channel_named(state, &chat_id, &format!("Chat · {display}")).await;
             }
             // #428 — distribute the preset content into the fresh delegate
             // (persona canonical + sandbox apply + skills docs). Best-effort
@@ -6765,7 +6881,7 @@ async fn spawn_submit_proxy(
                 .map(str::to_string);
             if !preset_id.is_empty() && !delegate_omni.is_empty() {
                 apply_preset_at_spawn(
-                    &state,
+                    state,
                     &broker,
                     &preset_id,
                     &delegate_omni,
@@ -6776,7 +6892,7 @@ async fn spawn_submit_proxy(
             }
         }
     }
-    resp
+    (resp, parsed)
 }
 
 /// #427 — the archive ceremony, daemon half.
@@ -6821,17 +6937,33 @@ async fn archive_submit_proxy(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    archive_submit_core(&state, body).await.0
+}
+
+/// The archive submit's core (shared with the #664 app uninstall submit).
+pub(crate) async fn archive_submit_core(
+    state: &SharedUiBridgeState,
+    body: serde_json::Value,
+) -> (axum::response::Response, Option<serde_json::Value>) {
     let Some(broker) = state.broker_url.clone() else {
-        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+        return (
+            pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured"),
+            None,
+        );
     };
     let j1 = match state.onboarding_session.read().await.as_ref() {
         Some(s) if !s.j1.is_empty() => s.j1.clone(),
-        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+        _ => {
+            return (
+                pairing_err(StatusCode::FORBIDDEN, "no master session"),
+                None,
+            )
+        }
     };
     let (resp, parsed) =
         forward_to_broker_value(&broker, "/v1/agent/archive/submit", &j1, &body).await;
     if resp.status().is_success() {
-        invalidate_fleet_sync(&state);
+        invalidate_fleet_sync(state);
         for archived in parsed
             .as_ref()
             .and_then(|v| v.pointer("/ceremony/archived"))
@@ -6851,15 +6983,15 @@ async fn archive_submit_proxy(
                 .get("memory_ns")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            mark_binding_archived(&state, dkh, kept, ns).await;
+            mark_binding_archived(state, dkh, kept, ns).await;
         }
     }
-    resp
+    (resp, parsed)
 }
 
 /// Mark a manifest row archived in place (retained, never deleted — the row is
 /// the O2 inheritance-discovery record). Missing row = WARN, not an error.
-async fn mark_binding_archived(
+pub(crate) async fn mark_binding_archived(
     state: &UiBridgeState,
     device_key_hash: &str,
     resources_kept: bool,
@@ -7214,7 +7346,7 @@ async fn list_inheritable_namespaces(
 /// its grants render with a NAME after daemon restarts (the registry is the
 /// id→name dictionary; the keccak re-name map alone yields a raw-id chip).
 /// Insert-if-absent; best-effort loud.
-async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: &str) {
+pub(crate) async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: &str) {
     if !valid_channel_id(id) {
         return;
     }
@@ -7236,10 +7368,70 @@ async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: &str) {
         name: name.to_string(),
         note: Some("auto-registered at spawn (#430 operator chat)".to_string()),
         created_at: now_unix(),
+        kind: None,
+        endpoint_actor_omni: None,
     });
     match persist_channel_registry(state, registry).await {
         Ok(storage) => tracing::info!(id, storage, "opchat channel auto-named"),
         Err(e) => tracing::warn!(id, "opchat auto-name persist FAILED — {e}"),
+    }
+}
+
+/// #667 — upsert a channel-registry row for an ENDPOINT (the gateway's
+/// transport, a paired display): its kind + its device actor. A new row is
+/// created named `name`; an existing one only gains/updates the two fields.
+/// Best-effort, loud (the registry is the install wizard's endpoint list).
+pub(crate) async fn ensure_channel_endpoint_row(
+    state: &UiBridgeState,
+    id: &str,
+    name: &str,
+    kind: agentkeys_backend_client::protocol::ChannelEndpointKind,
+    actor_omni: &str,
+) {
+    if !valid_channel_id(id) || actor_omni.trim().is_empty() {
+        return;
+    }
+    let mut registry = match ensure_channel_registry(state).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(id, "channel registry LOAD failed for endpoint row — {e}");
+            return;
+        }
+    };
+    let mut changed = false;
+    match registry.channels.iter_mut().find(|c| c.id == id) {
+        Some(row) => {
+            if row.kind != Some(kind) {
+                row.kind = Some(kind);
+                changed = true;
+            }
+            if row.endpoint_actor_omni.as_deref() != Some(actor_omni) {
+                row.endpoint_actor_omni = Some(actor_omni.to_string());
+                changed = true;
+            }
+        }
+        None => {
+            registry.channels.push(ApiChannel {
+                id: id.to_string(),
+                name: name.to_string(),
+                note: Some(
+                    "auto-registered endpoint (#667 — the contact gate's device actor)".to_string(),
+                ),
+                created_at: now_unix(),
+                kind: Some(kind),
+                endpoint_actor_omni: Some(actor_omni.to_string()),
+            });
+            changed = true;
+        }
+    }
+    if !changed {
+        return;
+    }
+    match persist_channel_registry(state, registry).await {
+        Ok(storage) => {
+            tracing::info!(id, storage, actor = %actor_omni, "endpoint channel row upserted")
+        }
+        Err(e) => tracing::warn!(id, "endpoint channel row persist FAILED — {e}"),
     }
 }
 
@@ -7319,7 +7511,7 @@ pub struct ChatPollRequest {
 /// derivation is the correct default. Unlike memory/config, channel publish is
 /// cap-only from the daemon (no client-side STS/role), so the URL is all it
 /// needs — nothing to keep paired with a per-stack role ARN.
-fn channel_worker_url(broker: &str) -> Result<String, String> {
+pub(crate) fn channel_worker_url(broker: &str) -> Result<String, String> {
     if let Some(u) = std::env::var("AGENTKEYS_WORKER_CHANNEL_URL")
         .ok()
         .map(|u| u.trim().trim_end_matches('/').to_string())
@@ -7338,7 +7530,7 @@ fn channel_worker_url(broker: &str) -> Result<String, String> {
 /// Master-self channel cap (operator == actor — the session-authenticated
 /// operator path of the channel-kind matrix; no operator K10 involved beyond
 /// the daemon's own device key for the #76 PoP when configured).
-async fn master_channel_cap(
+pub(crate) async fn master_channel_cap(
     state: &UiBridgeState,
     direction_service: String,
     op: agentkeys_backend_client::protocol::CapMintOp,
@@ -8033,7 +8225,7 @@ async fn broker_post_json(
     Ok((st, v))
 }
 
-async fn forward_to_broker_value(
+pub(crate) async fn forward_to_broker_value(
     broker: &str,
     path: &str,
     j1: &str,
@@ -8116,7 +8308,7 @@ async fn forward_to_gateway(
     let Some(gw) = state.weixin_gateway_url.clone() else {
         return pairing_err(
             StatusCode::SERVICE_UNAVAILABLE,
-            "gateway-not-configured — the daemon derives the gateway URL from its broker \
+            "gateway-not-configured — the daemon derives the contact gate URL from its broker \
              (weixin.<zone>); point it at a deployed broker, or set AGENTKEYS_WORKER_WEIXIN_URL",
         );
     };
@@ -8152,21 +8344,34 @@ async fn forward_to_gateway(
             )
                 .into_response()
         }
-        Err(e) => pairing_err(StatusCode::BAD_GATEWAY, &format!("gateway {sub_path}: {e}")),
+        Err(e) => pairing_err(
+            StatusCode::BAD_GATEWAY,
+            &format!("contact gate {sub_path}: {e}"),
+        ),
     }
 }
 
 async fn gateway_status_proxy(
     State(state): State<SharedUiBridgeState>,
 ) -> axum::response::Response {
-    forward_to_gateway(
+    let resp = forward_to_gateway(
         &state,
         reqwest::Method::GET,
         "/v1/gateway/admin/status",
         None,
         None,
     )
-    .await
+    .await;
+    // #667 — keep the messaging endpoint row (kind + the gateway's device
+    // actor) current with the gateway; throttled, best-effort, off the
+    // request path.
+    if resp.status().is_success() {
+        let st = state.clone();
+        tokio::spawn(async move {
+            crate::gateway_device::sync_endpoint_row(&st).await;
+        });
+    }
+    resp
 }
 
 async fn gateway_login_start_proxy(
@@ -8363,7 +8568,7 @@ async fn gateway_contacts_revoke_proxy(
 
 /// Raw admin-bearer JSON call to the gateway (the sync/reconcile plumbing —
 /// distinct from [`forward_to_gateway`], which proxies a browser request).
-async fn gateway_admin_call(
+pub(crate) async fn gateway_admin_call(
     state: &UiBridgeState,
     method: reqwest::Method,
     sub_path: &str,
@@ -8388,13 +8593,13 @@ async fn gateway_admin_call(
     let resp = req
         .send()
         .await
-        .map_err(|e| format!("gateway {sub_path}: {e}"))?;
+        .map_err(|e| format!("contact gate {sub_path}: {e}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("gateway {sub_path} {status}: {text}"));
+        return Err(format!("contact gate {sub_path} {status}: {text}"));
     }
-    serde_json::from_str(&text).map_err(|e| format!("gateway {sub_path} parse: {e}"))
+    serde_json::from_str(&text).map_err(|e| format!("contact gate {sub_path} parse: {e}"))
 }
 
 /// A gateway `ContactRegistry` JSON with no bound contacts, no open invites and
@@ -8411,7 +8616,7 @@ fn gateway_registry_is_empty(reg: &serde_json::Value) -> bool {
 /// Export the gateway's full registry and store it as the Config-class doc.
 /// Best-effort at every call site (the gateway mutation already landed): a
 /// failure WARNS loudly; the next successful mutation re-syncs the snapshot.
-async fn sync_gateway_registry_to_config(state: &UiBridgeState) {
+pub(crate) async fn sync_gateway_registry_to_config(state: &UiBridgeState) {
     let reg = match gateway_admin_call(
         state,
         reqwest::Method::GET,
@@ -8424,7 +8629,7 @@ async fn sync_gateway_registry_to_config(state: &UiBridgeState) {
         Err(e) => {
             tracing::warn!(
                 target: "agentkeys.daemon.ui_bridge",
-                "gateway registry export failed — contact registry NOT synced to the \
+                "contact gate registry export failed — contact registry NOT synced to the \
                  durable config doc ({e}); next successful contact mutation retries"
             );
             return;
@@ -8437,7 +8642,7 @@ async fn sync_gateway_registry_to_config(state: &UiBridgeState) {
                 Err(e) => {
                     tracing::warn!(
                         target: "agentkeys.daemon.ui_bridge",
-                        "gateway registry serialize failed: {e}"
+                        "contact gate registry serialize failed: {e}"
                     );
                     return;
                 }
@@ -8446,22 +8651,22 @@ async fn sync_gateway_registry_to_config(state: &UiBridgeState) {
             match config_store_doc(&client, &ctx, GATEWAY_CONTACTS_SERVICE, &bytes).await {
                 Ok(()) => tracing::info!(
                     target: "agentkeys.daemon.ui_bridge",
-                    "gateway contact registry synced to the durable config doc"
+                    "contact gate contact registry synced to the durable config doc"
                 ),
                 Err(e) => tracing::warn!(
                     target: "agentkeys.daemon.ui_bridge",
-                    "gateway contact registry config store failed — NOT durable ({e}); \
+                    "contact gate contact registry config store failed — NOT durable ({e}); \
                      next successful contact mutation retries"
                 ),
             }
         }
         Ok(None) => tracing::debug!(
             target: "agentkeys.daemon.ui_bridge",
-            "Config unconfigured (dev/no-infra) — gateway registry stays gateway-local"
+            "Config unconfigured (dev/no-infra) — contact gate registry stays gateway-local"
         ),
         Err(e) => tracing::warn!(
             target: "agentkeys.daemon.ui_bridge",
-            "config ctx unavailable — gateway contact registry NOT synced ({e})"
+            "config ctx unavailable — contact gate contact registry NOT synced ({e})"
         ),
     }
 }
@@ -8495,7 +8700,7 @@ async fn reconcile_gateway_registry(state: &UiBridgeState) {
         Err(e) => {
             tracing::debug!(
                 target: "agentkeys.daemon.ui_bridge",
-                "gateway registry reconcile skipped (export: {e})"
+                "contact gate registry reconcile skipped (export: {e})"
             );
             unlatch();
             return;
@@ -8514,7 +8719,7 @@ async fn reconcile_gateway_registry(state: &UiBridgeState) {
                 Err(e) => {
                     tracing::warn!(
                         target: "agentkeys.daemon.ui_bridge",
-                        "gateway registry restore skipped (config fetch: {e})"
+                        "contact gate registry restore skipped (config fetch: {e})"
                     );
                     unlatch();
                     return;
@@ -8525,7 +8730,7 @@ async fn reconcile_gateway_registry(state: &UiBridgeState) {
         Err(e) => {
             tracing::debug!(
                 target: "agentkeys.daemon.ui_bridge",
-                "gateway registry reconcile skipped (config ctx: {e})"
+                "contact gate registry reconcile skipped (config ctx: {e})"
             );
             unlatch();
             return;
@@ -8539,7 +8744,7 @@ async fn reconcile_gateway_registry(state: &UiBridgeState) {
         Err(e) => {
             tracing::warn!(
                 target: "agentkeys.daemon.ui_bridge",
-                "durable gateway registry doc unparsable — restore skipped ({e})"
+                "durable contact gate registry doc unparsable — restore skipped ({e})"
             );
             return;
         }
@@ -8557,12 +8762,12 @@ async fn reconcile_gateway_registry(state: &UiBridgeState) {
     {
         Ok(counts) => tracing::info!(
             target: "agentkeys.daemon.ui_bridge",
-            "gateway contact registry RESTORED from the durable config doc: {counts}"
+            "contact gate contact registry RESTORED from the durable config doc: {counts}"
         ),
         Err(e) => {
             tracing::warn!(
                 target: "agentkeys.daemon.ui_bridge",
-                "gateway contact registry restore FAILED ({e})"
+                "contact gate contact registry restore FAILED ({e})"
             );
             unlatch();
         }
@@ -9180,18 +9385,18 @@ async fn get_master_memory_entry_inner(
 /// (memory + config): the broker, the master J1, the (normalized) master omni,
 /// the on-chain device hash, and the region. Resolved once; the per-data-class
 /// contexts add the worker URL + IAM role on top.
-struct SessionCoords {
-    broker: String,
-    region: String,
-    j1: String,
-    omni: String,
-    device_key_hash: String,
+pub(crate) struct SessionCoords {
+    pub(crate) broker: String,
+    pub(crate) region: String,
+    pub(crate) j1: String,
+    pub(crate) omni: String,
+    pub(crate) device_key_hash: String,
 }
 
 /// Resolve the master session coordinates or fail loud (issue #90 discipline):
 /// a missing broker / unregistered device / absent session is an `Err`, never a
 /// silent degrade. Shared by `real_memory_ctx` + `real_config_ctx`.
-async fn resolve_session_coords(state: &UiBridgeState) -> Result<SessionCoords, String> {
+pub(crate) async fn resolve_session_coords(state: &UiBridgeState) -> Result<SessionCoords, String> {
     let broker = state
         .broker_url
         .clone()
@@ -9319,7 +9524,7 @@ impl RealMemoryCtx {
     }
 }
 
-struct RealConfigCtx {
+pub(crate) struct RealConfigCtx {
     broker: String,
     config_url: String,
     role_arn: String,
@@ -9339,7 +9544,9 @@ struct RealConfigCtx {
 /// Same `Ok(None)`/`Ok(Some)`/`Err` contract as `real_memory_ctx`, gated on
 /// `config_url` (#201 Config data class). When `None`, the taxonomy lives only
 /// in the in-memory fallback and the list derives categories from the cache.
-async fn real_config_ctx(state: &UiBridgeState) -> Result<Option<RealConfigCtx>, String> {
+pub(crate) async fn real_config_ctx(
+    state: &UiBridgeState,
+) -> Result<Option<RealConfigCtx>, String> {
     let Some(config_url) = state.config_url.clone() else {
         return Ok(None);
     };
@@ -9731,7 +9938,7 @@ async fn config_store_taxonomy(
 /// client-side v3 encrypt under the signer-derived per-(actor, service) KEK →
 /// config worker `/v1/config/put`. Used by the taxonomy (`memory-taxonomy`)
 /// and the #404 channel registry (`channel-registry`).
-async fn config_store_doc(
+pub(crate) async fn config_store_doc(
     client: &reqwest::Client,
     ctx: &RealConfigCtx,
     service: &str,
@@ -9799,7 +10006,7 @@ async fn config_fetch_taxonomy(
 /// Generic Config-class doc FETCH (service-parameterized twin of
 /// [`config_store_doc`]). `Ok(None)` ONLY on confirmed-missing (404); any other
 /// failure is an `Err` the caller must surface (never silently downgrade).
-async fn config_fetch_doc(
+pub(crate) async fn config_fetch_doc(
     client: &reqwest::Client,
     ctx: &RealConfigCtx,
     service: &str,
@@ -9876,7 +10083,9 @@ async fn config_fetch_doc(
 /// Load the registry through the taxonomy-style cache: in-memory if present,
 /// else config-fetch (`Ok(None)` = never created → empty), else — Config
 /// UNCONFIGURED (dev / no-infra) — an empty cached-only registry.
-async fn ensure_channel_registry(state: &UiBridgeState) -> Result<ChannelRegistry, String> {
+pub(crate) async fn ensure_channel_registry(
+    state: &UiBridgeState,
+) -> Result<ChannelRegistry, String> {
     if let Some(r) = state.channel_registry.read().await.clone() {
         return Ok(r);
     }
@@ -9923,7 +10132,9 @@ async fn persist_channel_registry(
 /// Load the binding manifest through the taxonomy-style cache: in-memory if
 /// present, else config-fetch (`Ok(None)` = never created → empty), else —
 /// Config UNCONFIGURED (dev / no-infra) — an empty cached-only manifest.
-async fn ensure_binding_manifest(state: &UiBridgeState) -> Result<BindingManifest, String> {
+pub(crate) async fn ensure_binding_manifest(
+    state: &UiBridgeState,
+) -> Result<BindingManifest, String> {
     if let Some(m) = state.binding_manifest.read().await.clone() {
         return Ok(m);
     }
@@ -9967,7 +10178,10 @@ async fn persist_binding_manifest(
 /// caller's perspective — the on-chain bind already landed, so a store failure
 /// must WARN loudly (the actor's kind + names would not survive a restart) but
 /// never fail the ceremony that triggered it.
-async fn upsert_binding_manifest_entry(state: &UiBridgeState, entry: BindingManifestEntry) {
+pub(crate) async fn upsert_binding_manifest_entry(
+    state: &UiBridgeState,
+    entry: BindingManifestEntry,
+) {
     let label = entry.label.clone();
     let mut manifest = match ensure_binding_manifest(state).await {
         Ok(m) => m,
@@ -10053,13 +10267,13 @@ fn channel_holders(actors: &HashMap<String, ApiActor>, id: &str) -> Vec<String> 
     holders
 }
 
-fn registry_err(status: StatusCode, msg: &str) -> axum::response::Response {
+pub(crate) fn registry_err(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
 /// The `storage` flag every registry response carries: `"ok"` = durable
 /// Config-class doc; `"cached"` = Config unconfigured (dev-only, in-memory).
-fn registry_storage_label(state: &UiBridgeState) -> &'static str {
+pub(crate) fn registry_storage_label(state: &UiBridgeState) -> &'static str {
     if state.config_url.is_some() {
         "ok"
     } else {
@@ -10067,7 +10281,9 @@ fn registry_storage_label(state: &UiBridgeState) -> &'static str {
     }
 }
 
-async fn require_master_session(state: &UiBridgeState) -> Result<(), axum::response::Response> {
+pub(crate) async fn require_master_session(
+    state: &UiBridgeState,
+) -> Result<(), axum::response::Response> {
     match state.onboarding_session.read().await.as_ref() {
         Some(s) if !s.j1.is_empty() => Ok(()),
         _ => Err(registry_err(
@@ -10101,6 +10317,10 @@ struct CreateChannelRequest {
     name: String,
     #[serde(default)]
     note: Option<String>,
+    #[serde(default)]
+    kind: Option<agentkeys_backend_client::protocol::ChannelEndpointKind>,
+    #[serde(default)]
+    endpoint_actor_omni: Option<String>,
 }
 
 /// POST /v1/channels — create a channel definition. The id is validated +
@@ -10145,6 +10365,11 @@ async fn create_channel(
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty()),
         created_at,
+        kind: req.kind,
+        endpoint_actor_omni: req
+            .endpoint_actor_omni
+            .map(|o| o.trim().to_string())
+            .filter(|o| !o.is_empty()),
     };
     reg.channels.push(channel.clone());
     match persist_channel_registry(&state, reg).await {
@@ -10166,6 +10391,10 @@ struct UpdateChannelRequest {
     name: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    #[serde(default)]
+    kind: Option<agentkeys_backend_client::protocol::ChannelEndpointKind>,
+    #[serde(default)]
+    endpoint_actor_omni: Option<String>,
 }
 
 /// POST /v1/channels/:id — edit DISPLAY fields (name/note). The id is the
@@ -10197,6 +10426,13 @@ async fn update_channel(
     if let Some(note) = req.note {
         let note = note.trim().to_string();
         ch.note = (!note.is_empty()).then_some(note);
+    }
+    if let Some(kind) = req.kind {
+        ch.kind = Some(kind);
+    }
+    if let Some(actor) = req.endpoint_actor_omni {
+        let actor = actor.trim().to_string();
+        ch.endpoint_actor_omni = (!actor.is_empty()).then_some(actor);
     }
     let updated = reg.channels.iter().find(|c| c.id == idl).cloned();
     match persist_channel_registry(&state, reg).await {
@@ -10523,6 +10759,15 @@ fn curate_gate(
             axum::http::StatusCode::FORBIDDEN,
             "persona_not_inbox_adoptable: persona is master-authored only — reject this \
              proposal and edit the delegate's persona in parent-control (#390)"
+                .to_string(),
+        )),
+        // #666 — a resource item is master-curated only: an app reads it under a
+        // read-only grant and proposes corrections as KNOWLEDGE through its own
+        // inbox; the item itself never enters canonical from a delegate.
+        ContextKind::Resource => Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "resource_not_inbox_adoptable: a resource item is master-curated only — reject \
+             this proposal and edit the item via `agentkeys resource add` (#666)"
                 .to_string(),
         )),
         ContextKind::Skill => {
@@ -11429,7 +11674,7 @@ async fn plant_master_memory(
 /// fallback) or an `(HTTP status, reason)` for partial-config / not-logged-in
 /// (409) and real-worker-failure (502). The handler maps it to a response; tests
 /// call this directly to assert the typed counts.
-async fn plant_master_memory_inner(
+pub(crate) async fn plant_master_memory_inner(
     state: &SharedUiBridgeState,
     req: MasterMemoryPlantRequest,
 ) -> Result<MasterMemoryPlantResponse, (axum::http::StatusCode, String)> {
@@ -12608,8 +12853,8 @@ mod tests {
                 "https://weixin-test.litentry.org",
             ),
             (
-                "https://broker-test-2.litentry.org",
-                "https://weixin-test-2.litentry.org",
+                "https://test-broker.agentterrier.cn",
+                "https://weixin-test.agentterrier.cn",
             ),
             (
                 "https://broker-base.litentry.org",
@@ -12897,6 +13142,8 @@ mod tests {
                 name: "Front door camera".into(),
                 note: None,
                 created_at: 0,
+                kind: None,
+                endpoint_actor_omni: None,
             }],
         };
         let cand = channel_service_candidates(&reg);

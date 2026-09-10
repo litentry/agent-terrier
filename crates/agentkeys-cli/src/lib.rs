@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod agent_admin;
+pub mod app_admin;
 pub mod cred_admin;
 pub mod delegation_admin;
 pub mod device_session;

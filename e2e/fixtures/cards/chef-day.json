@@ -1,0 +1,45 @@
+{
+  "card": 1,
+  "title": "Chef · today",
+  "title_zh": "家庭厨师 · 今天",
+  "subtitle": "Tue 9 Sep · the family ate 3 meals",
+  "subtitle_zh": "9月9日 周二 · 全家吃了 3 餐",
+  "metrics": [
+    { "label": "Protein", "label_zh": "蛋白质", "value": "62", "unit": "g / 90", "progress": 0.69 },
+    { "label": "Veg servings", "label_zh": "蔬菜份数", "value": "3", "unit": "/ 5", "progress": 0.6 }
+  ],
+  "sections": [
+    {
+      "title": "Eaten today",
+      "title_zh": "今天吃了",
+      "items": [
+        { "text": "Congee + egg", "text_zh": "白粥配鸡蛋", "detail": "07:40 · 妈妈", "tag": "done" },
+        { "text": "Tomato beef noodles", "text_zh": "番茄牛肉面", "detail": "12:30 · everyone", "tag": "done" }
+      ]
+    },
+    {
+      "title": "Fridge",
+      "title_zh": "冰箱",
+      "items": [
+        { "text": "Milk", "text_zh": "牛奶", "detail": "last seen 2 days ago", "detail_zh": "两天前见过", "tag": "low" },
+        { "text": "Tofu", "text_zh": "豆腐", "tag": "new" }
+      ]
+    },
+    {
+      "title": "Tonight",
+      "title_zh": "今晚",
+      "items": [
+        { "text": "Steamed fish with ginger", "text_zh": "姜丝蒸鱼", "detail": "18:30 · 25 min", "detail_zh": "18:30 · 25 分钟" }
+      ]
+    }
+  ],
+  "alerts": [
+    { "level": "warn", "text": "Milk is running low — add to the shopping list?", "text_zh": "牛奶快没了——加到购物清单？" }
+  ],
+  "actions": [
+    { "id": "dinner.cooked", "label": "Cooked ✓", "label_zh": "做好了 ✓", "command": "dinner.cooked" },
+    { "id": "dinner.swap", "label": "Swap dinner", "label_zh": "换个晚餐", "command": "dinner.swap", "args": { "reason": "tap" } },
+    { "id": "fridge.request-photo", "label": "Ask for a fridge photo", "label_zh": "要一张冰箱照片", "command": "fridge.request-photo" }
+  ],
+  "updated_at": 1788976800
+}

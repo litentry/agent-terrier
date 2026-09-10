@@ -7,4 +7,9 @@ import type { PresetSummary } from "./PresetSummary";
  * `soul_md` is the persona LAYER only (the #390 locked base layer is appended
  * by the system at apply time, never stored in a bundle).
  */
-export type PresetBundle = { manifest: PresetSummary, soul_md: string, skills: Array<PresetSkillDoc>, };
+export type PresetBundle = { manifest: PresetSummary, soul_md: string, skills: Array<PresetSkillDoc>, 
+/**
+ * #662 — knowledge docs (`presets/<id>/knowledge/*.md`), distributed as
+ * `knowledge`-kind context alongside the skills.
+ */
+knowledge: Array<PresetSkillDoc>, };

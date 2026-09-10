@@ -49,6 +49,10 @@ reqwest = { version = "0.12", features = ["json"] }
 # Parse `Retry-After` HTTP-date form (RFC 7231) for the §10.2 pairing poll
 # backoff; tiny, zero-dep, the same parser hyper uses internally.
 httpdate = "1"
+# #669 — the R4 scheduler's local wall-clock fields for cron matching (the
+# household tz offset shifts a UTC instant); the broker's sweeper uses the same
+# crate for the same reason.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Advisory file lock to serialize same-device `--request-pairing` (no unsafe;
 # flock on unix / LockFileEx on windows; released when the File is dropped).
 fs2 = "0.4"

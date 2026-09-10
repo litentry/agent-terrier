@@ -120,8 +120,114 @@ pub(crate) async fn admin_status(
         pending_binds,
         ilink_last_ok_ms: state.ilink_last_ok_ms(),
         audit_on_chain: state.audit_on_chain(),
+        actor_omni: state.device.actor_omni(),
+        device_key_hash: state.device.device_key_hash(),
+        feed_hop: state.device.hop_blocker().is_none(),
+        feeds: crate::outbound::feeds_for_transport(
+            &reg,
+            transport_namespace(state.config.transport),
+        ),
     };
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// The registry-facing identity namespace of a transport (`weixin` for the
+/// OA + iLink family, `telegram`) — the feed id prefix.
+fn transport_namespace(t: WeixinTransport) -> &'static str {
+    match t {
+        WeixinTransport::Telegram => "telegram",
+        WeixinTransport::Oa | WeixinTransport::Ilink => "weixin",
+    }
+}
+
+// ── #667 — the gateway's OWN device actor ────────────────────────────────────
+
+/// `GET /v1/gateway/admin/device/status`
+pub(crate) async fn device_status(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let reg = state.registry.snapshot();
+    let d = &state.device;
+    let body = agentkeys_protocol::GatewayDeviceStatus {
+        ok: true,
+        configured: d.configured(),
+        enrolled: d.enrolled(),
+        actor_omni: d.actor_omni(),
+        device_key_hash: d.device_key_hash(),
+        broker_url: d.broker_url(),
+        transport: transport_namespace(state.config.transport).to_string(),
+        feed_hop: d.hop_blocker().is_none(),
+        blocker: d.hop_blocker().map(str::to_string),
+        feeds: crate::outbound::feeds_for_transport(
+            &reg,
+            transport_namespace(state.config.transport),
+        ),
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// `POST /v1/gateway/admin/device/pairing-request` — step 1 of the gateway's
+/// §10.2 enrollment: this host's K10 mints the pairing code at the broker; the
+/// daemon (master) claims it and builds the accept for the ONE Touch ID.
+pub(crate) async fn device_pairing_request(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    if state.device.enrolled() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "reason": "device_already_enrolled",
+                "actor_omni": state.device.actor_omni(),
+            })),
+        )
+            .into_response();
+    }
+    match state.device.pairing_request().await {
+        Ok(start) => (StatusCode::OK, Json(start)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "ok": false, "reason": "pairing_request_failed", "detail": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/gateway/admin/device/pairing-complete` — step 2, after the
+/// master's accept CONFIRMED: prove the binding from this side, record the
+/// actor omni, arm the feed hop.
+pub(crate) async fn device_pairing_complete(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_protocol::GatewayDevicePairingCompleteRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    match state.device.pairing_complete(&req.request_id).await {
+        Ok(done) => {
+            state.push_activity(
+                "device_enrolled",
+                "gateway",
+                &format!("actor {} (feed hop armed)", done.actor_omni),
+                false,
+            );
+            (StatusCode::OK, Json(done)).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "ok": false, "reason": "pairing_complete_failed", "detail": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
 }
 
 // ── login ceremony over HTTP ──────────────────────────────────────────────────
@@ -154,7 +260,7 @@ pub(crate) async fn login_start(
             Json(json!({
                 "ok": false,
                 "reason": "transport_not_ilink",
-                "detail": "the QR login ceremony is the iLink transport's; this gateway runs `oa`"
+                "detail": "the QR login ceremony is the iLink transport's; this contact gate runs `oa`"
             })),
         )
             .into_response();
@@ -989,8 +1095,8 @@ pub(crate) async fn registry_import(
             Json(json!({
                 "ok": false,
                 "reason": "registry_not_empty",
-                "detail": "this gateway already has contacts/invites — import only restores an \
-                           EMPTY (rebuilt) gateway; pass force:true to overwrite deliberately",
+                "detail": "this contact gate already has contacts/invites — import only restores an \
+                           EMPTY (rebuilt) contact gate; pass force:true to overwrite deliberately",
                 "bound": local.bound.len(),
                 "invites": local.invites.len(),
                 "pending": local.pending.len(),

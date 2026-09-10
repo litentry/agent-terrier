@@ -208,6 +208,45 @@ pub(crate) fn delegate_identity_envs(
     envs
 }
 
+/// #660 stage 1 — the app-runtime env set a CREATE injects beside the
+/// identity envs, from the durable spawn context (#663/#665/#666/#669): the
+/// template id, the bound feeds, the availability policy, the mirror's
+/// namespace list and the household tz offset. Every value is OPTIONAL to the
+/// consumer (a role-preset delegate injects none of them) and provisioning
+/// data only — the chain already grants every feed / namespace named here.
+pub(crate) fn app_runtime_envs(ctx: &crate::storage::SpawnContext) -> Vec<(String, String)> {
+    use agentkeys_protocol::sandbox_env as env_names;
+    let mut envs = Vec::new();
+    if !ctx.preset_id.trim().is_empty() {
+        envs.push((env_names::APP_TEMPLATE.to_string(), ctx.preset_id.clone()));
+    }
+    if !ctx.bound_channels_json.trim().is_empty() {
+        envs.push((
+            env_names::BOUND_CHANNELS.to_string(),
+            ctx.bound_channels_json.clone(),
+        ));
+    }
+    if !ctx.availability.trim().is_empty() {
+        envs.push((
+            env_names::APP_AVAILABILITY.to_string(),
+            ctx.availability.clone(),
+        ));
+    }
+    if !ctx.memory_namespaces.trim().is_empty() {
+        envs.push((
+            env_names::MEMORY_NAMESPACES.to_string(),
+            ctx.memory_namespaces.clone(),
+        ));
+    }
+    if ctx.tz_offset_minutes != 0 {
+        envs.push((
+            env_names::APP_TZ_OFFSET_MINUTES.to_string(),
+            ctx.tz_offset_minutes.to_string(),
+        ));
+    }
+    envs
+}
+
 /// #577 — the per-delegate sandbox-management bearer: DERIVED from the
 /// broker's session signing key + the delegate's `device_key_hash`, so the
 /// broker can re-compute it at any later update call and NOTHING new sits at
@@ -338,20 +377,21 @@ pub async fn ensure_for_delegate(
             } else {
                 None
             };
-            (
-                delegate_identity_envs(
-                    actor_omni,
-                    operator_omni,
-                    Some(&c.k10_secret_hex),
-                    session_jwt.as_deref(),
-                    &c.chat_channel_id,
-                    issuer.as_deref(),
-                    worker_override.as_deref(),
-                    Some(&sandbox_mgmt_token(&state.session_keypair, device_key_hash)),
-                    Some(&c.memory_ns),
-                ),
-                c.label.clone(),
-            )
+            let mut envs = delegate_identity_envs(
+                actor_omni,
+                operator_omni,
+                Some(&c.k10_secret_hex),
+                session_jwt.as_deref(),
+                &c.chat_channel_id,
+                issuer.as_deref(),
+                worker_override.as_deref(),
+                Some(&sandbox_mgmt_token(&state.session_keypair, device_key_hash)),
+                Some(&c.memory_ns),
+            );
+            // #660 — the app-runtime set rides every re-create too (a
+            // re-created Chef must poll its WeChat feed, not just opchat).
+            envs.extend(app_runtime_envs(c));
+            (envs, c.label.clone())
         }
         None => (Vec::new(), String::new()),
     };

@@ -35,4 +35,18 @@ ilink_last_ok_ms?: number,
  * anchored on-chain; the operator must set AGENTKEYS_WEIXIN_OPERATOR_OMNI.
  * (Surfaced so the skip is LOUD, never a silent drop.)
  */
-audit_on_chain: boolean, };
+audit_on_chain: boolean, 
+/**
+ * #667 — the gateway's OWN device actor (`0x`-omni) once enrolled: the
+ * identity the feed hop mints channel caps as. Absent = decision-only.
+ */
+actor_omni?: string, device_key_hash?: string, 
+/**
+ * #667 — an allowed turn LANDS on the app's feed (device enrolled +
+ * channel worker configured); false = the turn is decided + audited only.
+ */
+feed_hop: boolean, 
+/**
+ * #667 — the messaging feeds this gateway delivers from (reach-derived).
+ */
+feeds: Array<string>, };

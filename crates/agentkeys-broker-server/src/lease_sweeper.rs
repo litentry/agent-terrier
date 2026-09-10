@@ -111,6 +111,68 @@ pub(crate) fn parse_expire_at(raw: &str) -> Option<i64> {
         .ok()
 }
 
+/// #669 — whether the `scheduled` policy has a tick due within `window`
+/// seconds of `now` (UTC seconds; `tz_offset_minutes` shifts the wall clock
+/// the cron is written against). Walks the window minute by minute — the
+/// sweep interval is ≤ 3600 s, so at most ~60 `cron_matches` per entry.
+pub(crate) fn schedule_tick_due_within(
+    schedule: &[agentkeys_protocol::PresetSchedule],
+    tz_offset_minutes: i64,
+    now_unix: i64,
+    window_secs: i64,
+) -> bool {
+    if schedule.is_empty() || window_secs <= 0 {
+        return false;
+    }
+    let start_min = now_unix.div_euclid(60);
+    let end_min = (now_unix + window_secs).div_euclid(60);
+    for m in start_min..=end_min {
+        let local = m * 60 + tz_offset_minutes * 60;
+        let Some(dt) = chrono::DateTime::from_timestamp(local, 0) else {
+            continue;
+        };
+        use chrono::{Datelike, Timelike};
+        let (minute, hour, dom, month, dow) = (
+            dt.minute(),
+            dt.hour(),
+            dt.day(),
+            dt.month(),
+            dt.weekday().num_days_from_sunday(),
+        );
+        if schedule
+            .iter()
+            .any(|s| agentkeys_protocol::cron_matches(&s.cron, minute, hour, dom, month, dow))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// #669 — the `availability` policy applied to a sweep decision: an
+/// `always-on` app keeps today's behavior; a `wake-on-event` app is left
+/// asleep (a feed event wakes it via `/v1/sandbox/wake`, its checkpoint
+/// restores in-sandbox); a `scheduled` app is created / rotated only when a
+/// schedule tick is due within the lookahead, else left asleep.
+pub(crate) fn apply_availability(
+    action: SweepAction,
+    availability: agentkeys_protocol::Availability,
+    tick_due: bool,
+) -> SweepAction {
+    use agentkeys_protocol::Availability;
+    match availability {
+        Availability::AlwaysOn => action,
+        Availability::WakeOnEvent => SweepAction::None,
+        Availability::Scheduled => {
+            if tick_due {
+                action
+            } else {
+                SweepAction::None
+            }
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SweepAction {
     /// Live and not near its lease end (or lease unknowable) — leave it.
@@ -267,7 +329,32 @@ async fn sweep_once(state: &SharedState, cfg: &SweeperConfig) {
             })
             .collect();
 
-        match decide(now_unix(), &expiries, cfg.rotate_margin, cfg.force_margin) {
+        // #669 — the app's availability policy gates the action.
+        let availability = row.availability();
+        let tick_due = if availability == agentkeys_protocol::Availability::Scheduled {
+            schedule_tick_due_within(
+                &crate::handlers::presets::template_schedule(&row.preset_id),
+                row.tz_offset_minutes,
+                now_unix(),
+                (cfg.interval + cfg.rotate_margin).as_secs() as i64,
+            )
+        } else {
+            false
+        };
+        let action = apply_availability(
+            decide(now_unix(), &expiries, cfg.rotate_margin, cfg.force_margin),
+            availability,
+            tick_due,
+        );
+        if action != SweepAction::None && availability.may_hibernate() {
+            tracing::info!(
+                device_key_hash = %row.device_key_hash,
+                label = %row.label,
+                availability = %availability.as_str(),
+                "#669 lease sweeper: schedule tick due — waking a scheduled app"
+            );
+        }
+        match action {
             SweepAction::None => {}
             SweepAction::ColdCreate => {
                 tracing::info!(
@@ -384,6 +471,57 @@ mod tests {
             decide(now, &[Some(now + 7200), Some(now + 60)], m30, m10),
             SweepAction::Rotate { force: true }
         );
+    }
+
+    /// #669 — the availability policy over the sweep decision.
+    #[test]
+    fn availability_policy_gates_the_sweep_action() {
+        use agentkeys_protocol::Availability;
+        let rot = SweepAction::Rotate { force: false };
+        assert_eq!(
+            apply_availability(SweepAction::ColdCreate, Availability::AlwaysOn, false),
+            SweepAction::ColdCreate
+        );
+        assert_eq!(
+            apply_availability(SweepAction::ColdCreate, Availability::WakeOnEvent, true),
+            SweepAction::None
+        );
+        assert_eq!(
+            apply_availability(
+                SweepAction::Rotate { force: false },
+                Availability::Scheduled,
+                false
+            ),
+            SweepAction::None
+        );
+        assert_eq!(
+            apply_availability(
+                SweepAction::Rotate { force: false },
+                Availability::Scheduled,
+                true
+            ),
+            rot
+        );
+    }
+
+    /// #669 — a schedule tick inside the lookahead (in the household's tz).
+    #[test]
+    fn schedule_tick_lookahead_honors_the_tz_offset() {
+        let sched = vec![agentkeys_protocol::PresetSchedule {
+            cron: "0 7 * * *".into(),
+            label: "morning".into(),
+            label_zh: String::new(),
+            prompt: "plan".into(),
+        }];
+        // 2026-09-09 06:50 UTC+8 = 2026-09-08 22:50 UTC.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-08T22:50:00Z")
+            .unwrap()
+            .timestamp();
+        assert!(schedule_tick_due_within(&sched, 480, now, 15 * 60));
+        assert!(!schedule_tick_due_within(&sched, 480, now, 5 * 60));
+        // In UTC the same instant is 22:50 — the 07:00 tick is 8 h away.
+        assert!(!schedule_tick_due_within(&sched, 0, now, 15 * 60));
+        assert!(!schedule_tick_due_within(&[], 480, now, 3600));
     }
 
     #[test]

@@ -185,6 +185,7 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
         router_enabled: true,
         admin_token: Some(ADMIN.into()),
         allow_unsigned: false,
+        device: Default::default(),
     };
     let state = Arc::new(WeixinGatewayState::build(cfg).unwrap());
 

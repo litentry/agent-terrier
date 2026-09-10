@@ -43,6 +43,18 @@ use crate::chat_loop::{ChatLoopConfig, DelegateCredential};
 /// it as "nothing authorized here".
 pub const DEFAULT_NAMESPACES: &str = "personal,family,work,travel";
 
+#[cfg(test)]
+#[test]
+fn default_namespaces_match_the_protocol_owner() {
+    // #666 — ONE owner (agentkeys-protocol::DEFAULT_MIRROR_NAMESPACES); the
+    // broker composes an app install's `AGENTKEYS_MEMORY_NAMESPACES` from the
+    // same list, so the two can never disagree.
+    assert_eq!(
+        DEFAULT_NAMESPACES,
+        agentkeys_backend_client::protocol::DEFAULT_MIRROR_NAMESPACES.join(",")
+    );
+}
+
 pub struct MirrorConfig {
     /// The engine base URL, captured at construction — logged, never re-read
     /// from env (the client already holds the value it actually dials).

@@ -95,7 +95,7 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
     let Some(token) = cfg.telegram_bot_token.clone() else {
         info!(
             "telegram loop idle — no bot token (fill AGENTKEYS_TELEGRAM_BOT_TOKEN in the \
-             gateway secrets file and restart the unit)"
+             contact gate secrets file and restart the unit)"
         );
         let _ = shutdown.changed().await;
         return;
@@ -151,8 +151,8 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
         }
         if resp.is_conflict() {
             error!(
-                "getUpdates CONFLICT (409) — another consumer (a second gateway instance or a \
-                 leftover webhook) is polling this bot token; fix the deployment (one gateway \
+                "getUpdates CONFLICT (409) — another consumer (a second contact gate instance or a \
+                 leftover webhook) is polling this bot token; fix the deployment (one contact gate \
                  per bot). Backing off 60 min instead of stealing updates back and forth"
             );
             consecutive_failures = 0;
@@ -214,13 +214,25 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
                 persist.chat_ids.insert(from_id.clone(), msg.chat.id);
                 dirty = true;
             }
-            let text = msg.text.clone().unwrap_or_default();
-            if text.trim().is_empty() {
-                debug!(from = %from_id, "inbound without relayable text (media?) — skipped");
+            // #667 — a photo's caption (or a voice clip's) is the turn's text;
+            // the original rides beside it as a media event.
+            let text = msg
+                .text
+                .clone()
+                .or_else(|| msg.caption.clone())
+                .unwrap_or_default();
+            let media = crate::telegram::first_telegram_media(
+                &client,
+                &msg,
+                state.config.device.media_max_bytes,
+            )
+            .await;
+            if text.trim().is_empty() && media.is_none() {
+                debug!(from = %from_id, "inbound without relayable text or media — skipped");
                 continue;
             }
 
-            let outcome = relay::process_inbound_for(&state, "telegram", &from_id, &text).await;
+            let outcome = relay::process_turn(&state, "telegram", &from_id, &text, media).await;
             info!(
                 from = %from_id,
                 contact = %outcome.contact_id,
@@ -230,14 +242,15 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
                 target = outcome.decision.target_alias.as_deref().unwrap_or(""),
                 "telegram inbound relayed"
             );
-            if let Some(event) = outcome.event.as_ref() {
-                debug!(channel = %event.channel_id, "routed event built (feed hop pending)");
+            if let Some(f) = outcome.feed.as_ref() {
+                info!(channel = %f.channel_id, event = %f.event_id, media = f.media_event_id.is_some(), "feed hop landed");
+            } else if let Some(e) = outcome.feed_error.as_deref() {
+                warn!(reason = %e, "allowed turn did NOT reach a feed");
             }
 
-            let reply = outcome
-                .claim_ack
-                .clone()
-                .or_else(|| relay::reply_text_for_en(&outcome.decision));
+            let reply = outcome.claim_ack.clone().or_else(|| {
+                relay::reply_text_for_turn(&outcome.decision, outcome.media_marker, true)
+            });
             if let Some(reply) = reply {
                 if let Err(e) = client.send_text(msg.chat.id, &reply).await {
                     warn!(to = %from_id, error = %e, "reply send failed");
@@ -270,6 +283,9 @@ mod tests {
                     r#type: "private".into(),
                 },
                 text: Some("hi".into()),
+                photo: None,
+                voice: None,
+                caption: None,
             }),
         }
     }

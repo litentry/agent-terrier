@@ -49,6 +49,7 @@ fn config_for(registry_file: &str) -> WeixinGatewayConfig {
         router_enabled: true,
         admin_token: Some(ADMIN.into()),
         allow_unsigned: false,
+        device: Default::default(),
     }
 }
 

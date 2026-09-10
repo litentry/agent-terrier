@@ -121,6 +121,63 @@ pub fn assemble_spawn_userop(
     assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
 }
 
+/// **The #663 install sibling** — [`assemble_spawn_userop`] plus one extra
+/// `setScope` per endpoint actor (gateway / console mirror grants), all under
+/// the ONE Touch ID. Empty `extra` = byte-identical to the plain spawn.
+pub fn assemble_spawn_userop_with_scopes(
+    p: &AcceptUserOpParams,
+    extra: &[agentkeys_core::erc4337::ExtraScope],
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = agentkeys_core::erc4337::spawn_batch_calldata_with_scopes(
+        &p.registry,
+        &p.scope,
+        p.register,
+        p.grant,
+        extra,
+    );
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
+/// **The #663 install batch WITH endpoint enrollments** — the spawn batch
+/// preceded by one `registerAgentDevice` per not-yet-enrolled endpoint actor
+/// (the channel gateway, the console), so the ONE Touch ID enrolls and grants
+/// them beside the delegate.
+pub fn assemble_spawn_userop_with_endpoints(
+    p: &AcceptUserOpParams,
+    extra: &[agentkeys_core::erc4337::ExtraScope],
+    enrollments: &[agentkeys_core::erc4337::AgentRegister],
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = agentkeys_core::erc4337::spawn_batch_calldata_with_endpoints(
+        &p.registry,
+        &p.scope,
+        p.register,
+        p.grant,
+        extra,
+        enrollments,
+    );
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
+/// **The #663 uninstall sibling** — [`assemble_revoke_userop`] plus one extra
+/// `setScope` per endpoint actor (its set minus the archived app's feeds).
+pub fn assemble_revoke_userop_with_scopes(
+    p: &AcceptUserOpParams,
+    device_key_hashes: &[[u8; 32]],
+    extra: &[agentkeys_core::erc4337::ExtraScope],
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = agentkeys_core::erc4337::revoke_batch_calldata_with_scopes(
+        &p.registry,
+        &p.scope,
+        &p.register.operator_omni,
+        device_key_hashes,
+        extra,
+    );
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
 /// **The #248 sibling** — assemble the scope-only re-grant UserOp
 /// (`executeBatch([setScope])`, no register; the device binding already exists).
 /// `p.register` supplies only the omni pair (`operator_omni` + `actor_omni`);

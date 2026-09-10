@@ -55,6 +55,9 @@ pub struct WeixinGatewayState {
     pub http: reqwest::Client,
     /// `None` when `AGENTKEYS_AUDIT_WORKER_URL` is unset (audit disabled).
     pub audit: Option<AuditClient>,
+    /// #667 — the gateway's OWN device actor (the feed hop identity): caps,
+    /// blobs, polls, the correlation ring. Unenrolled = decision-only.
+    pub device: Arc<crate::device::GatewayDevice>,
     /// Millis of the iLink loop's last successful poll (0 = never / OA-only) —
     /// surfaced on `/healthz` so the fleet board can see a stale-token stall.
     ilink_last_ok_ms: AtomicU64,
@@ -91,12 +94,17 @@ impl WeixinGatewayState {
         let (ilink_restart_tx, _) = watch::channel(0u64);
         let ilink_token = RwLock::new(config.ilink_bot_token.clone());
         let ilink_base_url = RwLock::new(config.ilink_base_url.clone());
+        let device = Arc::new(crate::device::GatewayDevice::load(
+            config.device.clone(),
+            config.channel_worker_url.clone(),
+        ));
         Ok(WeixinGatewayState {
             config,
             registry,
             rate,
             http: reqwest::Client::new(),
             audit,
+            device,
             ilink_last_ok_ms: AtomicU64::new(0),
             telegram_last_ok_ms: AtomicU64::new(0),
             runtime_operator_omni: RwLock::new(None),

@@ -40,6 +40,11 @@ use agentkeys_core::audit::{
 };
 use agentkeys_core::device_crypto::{agent_pop_payload, eip191_sign, evm_address, keccak256};
 use agentkeys_core::erc4337::decode_execute_batch;
+use agentkeys_core::erc4337::{ExtraScope, ScopeGrant};
+use agentkeys_protocol::{
+    compile_app, AppInstallBindings, Availability, BoundChannel, EndpointScope, ServiceAnnotation,
+    SlotAudience,
+};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -52,9 +57,12 @@ use crate::handlers::accept::{
 };
 use crate::handlers::revoke::parse_device_probe;
 use crate::sponsored_accept::{
-    assemble_revoke_userop, assemble_spawn_userop, AcceptUserOpParams, BuildAcceptResponse,
+    assemble_revoke_userop_with_scopes, assemble_spawn_userop_with_endpoints, AcceptUserOpParams,
+    BuildAcceptResponse,
 };
 use crate::state::SharedState;
+use agentkeys_core::erc4337::AgentRegister;
+use agentkeys_protocol::EndpointEnrollment;
 
 /// Build→Touch-ID→submit window. Past it the pending row is swept and the
 /// submit's finalize hook degrades to the no-row WARN path.
@@ -122,7 +130,41 @@ pub struct PendingSpawn {
     /// injected into the sandbox at confirm, dropped with the row. EMPTY under
     /// #552 signer custody — no secret ever exists broker-side.
     pub k10_secret_hex: String,
+    /// #660 — the app-runtime facts the durable spawn context persists at
+    /// confirm (template, bound feeds, availability, mirror namespaces, tz).
+    pub app: AppRuntimeFacts,
     created_at: Instant,
+}
+
+/// #660 stage 1 — what an app install carries from build to the durable spawn
+/// context (and from there into every sandbox create). All-default for a
+/// role-preset spawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppRuntimeFacts {
+    pub template_version: String,
+    pub bound_channels: Vec<BoundChannel>,
+    pub availability: Availability,
+    /// Comma-separated — the mirror's probe list (`""` = its defaults).
+    pub memory_namespaces: String,
+    pub tz_offset_minutes: i64,
+}
+
+impl AppRuntimeFacts {
+    pub fn bound_channels_json(&self) -> String {
+        if self.bound_channels.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(&self.bound_channels).unwrap_or_default()
+        }
+    }
+
+    pub fn availability_str(&self) -> String {
+        if self.availability == Availability::AlwaysOn {
+            String::new()
+        } else {
+            self.availability.as_str().to_string()
+        }
+    }
 }
 
 pub struct PendingArchive {
@@ -190,6 +232,19 @@ pub struct SpawnBuildRequest {
     pub memory_ns: Option<String>,
     #[serde(default)]
     pub memory_inherited: bool,
+    /// #663 — the install wizard's choices (slots → channels, resources →
+    /// items, audience). Present ⇒ `preset_id` names an app template the
+    /// broker compiles into `services[]`; absent ⇒ a role-preset spawn.
+    #[serde(default)]
+    pub bindings: Option<AppInstallBindings>,
+    /// #663 — the endpoint actors (gateway / console) whose FULL grant set the
+    /// same Touch ID also (re)writes.
+    #[serde(default)]
+    pub endpoint_scopes: Vec<EndpointScope>,
+    /// #663 — endpoint device actors to REGISTER in the same batch (not yet
+    /// enrolled); verified for lineage + PoP before the batch is composed.
+    #[serde(default)]
+    pub endpoint_enrollments: Vec<EndpointEnrollment>,
 }
 
 /// `POST /v1/agent/spawn/build` response: the sponsored-UserOp build envelope
@@ -209,6 +264,242 @@ pub struct SpawnBuildResponse {
     /// Allowance state at build time (pre-consume) — for the UI quota meter.
     pub slots_used: u16,
     pub slots_total: u16,
+    /// #663 — the sheet's per-line facts (empty on a role-preset spawn).
+    pub annotations: Vec<ServiceAnnotation>,
+    pub bound_channels: Vec<BoundChannel>,
+    pub audience: Vec<SlotAudience>,
+    pub availability: Availability,
+    pub template_id: String,
+    pub template_version: String,
+    pub endpoint_scopes: Vec<EndpointScope>,
+    pub endpoint_enrollments: Vec<EndpointEnrollment>,
+}
+
+/// #663 — what ONE spawn mints, resolved before the UserOp is assembled: the
+/// template compile (an app install) or today's fixed template (a blank /
+/// role-preset spawn). PURE over the compiled-in catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnPlan {
+    pub services: Vec<String>,
+    pub memory_ns: String,
+    pub chat_channel_id: String,
+    pub annotations: Vec<ServiceAnnotation>,
+    pub bound_channels: Vec<BoundChannel>,
+    pub audience: Vec<SlotAudience>,
+    pub availability: Availability,
+    pub template_id: String,
+    pub template_version: String,
+    pub resource_namespaces: Vec<String>,
+}
+
+impl SpawnPlan {
+    /// The mirror's probe list for this install: the bound resource
+    /// namespaces + the household defaults (`""` = the mirror's own defaults,
+    /// i.e. a role-preset delegate's posture today).
+    pub fn memory_namespaces(&self) -> String {
+        if self.resource_namespaces.is_empty() {
+            return String::new();
+        }
+        let mut list: Vec<String> = self.resource_namespaces.clone();
+        for d in agentkeys_protocol::DEFAULT_MIRROR_NAMESPACES {
+            if !list.iter().any(|n| n == d) {
+                list.push(d.to_string());
+            }
+        }
+        list.join(",")
+    }
+}
+
+fn template_refused(
+    code: &str,
+    template_id: &str,
+    rows: Vec<agentkeys_protocol::TemplateError>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": code,
+            "template_id": template_id,
+            "rows": rows,
+            "message": format!(
+                "template '{template_id}' refused: {}",
+                rows.iter()
+                    .map(|r| format!("{} — {}", r.row, r.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        })),
+    )
+}
+
+/// Resolve the spawn plan for a build request (see [`SpawnPlan`]). Fail-closed
+/// for an app install: an unknown template with bindings, a template that fails
+/// the validator, or bindings that fail the compiler all refuse with the rows.
+/// A blank spawn (`preset_id == ""`) or an unknown role-preset id without
+/// bindings keeps today's fixed template (the preset is applied daemon-side).
+pub(crate) fn plan_spawn(
+    req: &SpawnBuildRequest,
+) -> Result<SpawnPlan, (StatusCode, Json<serde_json::Value>)> {
+    let chat_channel_id = agentkeys_protocol::opchat_channel_id(&req.label);
+    let fixed = |memory_ns: String| SpawnPlan {
+        services: spawn_template_services(&chat_channel_id, &memory_ns),
+        memory_ns,
+        chat_channel_id: chat_channel_id.clone(),
+        annotations: Vec::new(),
+        bound_channels: Vec::new(),
+        audience: Vec::new(),
+        availability: Availability::AlwaysOn,
+        template_id: req.preset_id.clone(),
+        template_version: String::new(),
+        resource_namespaces: Vec::new(),
+    };
+    let label_ns = req.memory_ns.clone().unwrap_or_else(|| req.label.clone());
+    if req.preset_id.trim().is_empty() {
+        return Ok(fixed(label_ns));
+    }
+    let Some((summary, bundle)) = crate::handlers::presets::find_template(&req.preset_id) else {
+        if req.bindings.is_some() {
+            return Err(template_refused(
+                "unknown_template",
+                &req.preset_id,
+                vec![agentkeys_protocol::TemplateError {
+                    row: "preset_id".into(),
+                    code: "unknown_template".into(),
+                    message: format!(
+                        "'{}' is not in the catalog — GET /v1/presets lists it",
+                        req.preset_id
+                    ),
+                }],
+            ));
+        }
+        tracing::warn!(
+            preset_id = %req.preset_id,
+            "#663 spawn-build: preset id not in the compiled-in catalog — spawning the fixed template (the daemon-side apply will report the unknown preset)"
+        );
+        return Ok(fixed(label_ns));
+    };
+    if let Err(rows) = crate::handlers::presets::validate_builtin(&bundle) {
+        return Err(template_refused("template_invalid", &req.preset_id, rows));
+    }
+    let bindings = req.bindings.clone().unwrap_or_default();
+    let compiled = compile_app(&summary, &req.label, req.memory_ns.as_deref(), &bindings)
+        .map_err(|rows| template_refused("template_bindings_invalid", &req.preset_id, rows))?;
+    Ok(SpawnPlan {
+        services: compiled.services,
+        memory_ns: compiled.memory_ns,
+        chat_channel_id: compiled.chat_channel_id,
+        annotations: compiled.annotations,
+        bound_channels: compiled.bound_channels,
+        audience: compiled.audience,
+        availability: compiled.availability,
+        template_id: summary.id.clone(),
+        template_version: summary.version.clone(),
+        resource_namespaces: compiled.resource_namespaces,
+    })
+}
+
+/// #663 — the endpoint actors' `setScope` calls: names keccak'd exactly like
+/// the delegate's (`service_ids`), preserved ids passed through, deduped;
+/// template caps (channel grants meter no spend).
+/// #663 — the endpoint enrollments an install batch registers: each must be
+/// the session master's own HDKD child for its label (the claim's lineage)
+/// and carry a PoP that recovers to the device key whose hash it names —
+/// exactly what the accept ceremony checks, re-done here because the batch
+/// never passes through `/v1/accept/build`.
+pub(crate) fn parse_endpoint_enrollments(
+    list: &[EndpointEnrollment],
+    session_omni: &str,
+) -> Result<Vec<AgentRegister>, String> {
+    let h32 = |s: &str, name: &str| -> Result<[u8; 32], String> {
+        let b = hex::decode(norm_omni(s)).map_err(|e| format!("{name} hex: {e}"))?;
+        b.try_into().map_err(|_| format!("{name} must be 32 bytes"))
+    };
+    let operator = h32(session_omni, "session omni")?;
+    let mut out = Vec::with_capacity(list.len());
+    let mut seen: Vec<[u8; 32]> = Vec::new();
+    for (i, e) in list.iter().enumerate() {
+        agentkeys_core::actor_omni::validate_label(&e.label)
+            .map_err(|err| format!("endpoint_enrollments[{i}].label: {err}"))?;
+        let expected = agentkeys_core::actor_omni::child_omni_hex(session_omni, &e.label)
+            .map_err(|err| format!("endpoint_enrollments[{i}]: child omni: {err}"))?;
+        if norm_omni(&expected) != norm_omni(&e.actor_omni) {
+            return Err(format!(
+                "endpoint_enrollments[{i}]: actor_omni is not this master's child for label `{}`",
+                e.label
+            ));
+        }
+        let dkh_hex = format!("0x{}", norm_omni(&e.device_key_hash));
+        let payload = agent_pop_payload(&dkh_hex);
+        let recovered = agentkeys_core::device_crypto::ecrecover_eip191(&payload, &e.pop_sig)
+            .map_err(|err| format!("endpoint_enrollments[{i}].pop_sig: {err}"))?;
+        let recomputed = agentkeys_core::device_crypto::device_key_hash(&recovered)
+            .map_err(|err| format!("endpoint_enrollments[{i}]: device_key_hash: {err}"))?;
+        if norm_omni(&recomputed) != norm_omni(&e.device_key_hash) {
+            return Err(format!(
+                "endpoint_enrollments[{i}]: pop_sig does not prove device_key_hash"
+            ));
+        }
+        let actor = h32(
+            &e.actor_omni,
+            &format!("endpoint_enrollments[{i}].actor_omni"),
+        )?;
+        if seen.contains(&actor) {
+            return Err(format!(
+                "endpoint_enrollments[{i}]: actor {} listed twice",
+                e.actor_omni
+            ));
+        }
+        seen.push(actor);
+        out.push(AgentRegister {
+            device_key_hash: h32(&e.device_key_hash, "device_key_hash")?,
+            operator_omni: operator,
+            actor_omni: actor,
+            link_code_redemption: Vec::new(),
+            agent_pop_sig: hex::decode(e.pop_sig.trim_start_matches("0x"))
+                .map_err(|err| format!("endpoint_enrollments[{i}].pop_sig hex: {err}"))?,
+        });
+    }
+    Ok(out)
+}
+
+pub(crate) fn parse_endpoint_scopes(scopes: &[EndpointScope]) -> Result<Vec<ExtraScope>, String> {
+    let h32 = |s: &str, name: &str| -> Result<[u8; 32], String> {
+        let b = hex::decode(s.trim().trim_start_matches("0x"))
+            .map_err(|e| format!("{name} hex: {e}"))?;
+        b.try_into().map_err(|_| format!("{name} must be 32 bytes"))
+    };
+    let mut out = Vec::with_capacity(scopes.len());
+    for (i, s) in scopes.iter().enumerate() {
+        let actor_omni = h32(&s.actor_omni, &format!("endpoint_scopes[{i}].actor_omni"))?;
+        if out.iter().any(|e: &ExtraScope| e.actor_omni == actor_omni) {
+            return Err(format!(
+                "endpoint_scopes[{i}]: actor {} listed twice",
+                s.actor_omni
+            ));
+        }
+        let mut services = crate::handlers::accept::service_ids(&s.services);
+        for (j, id) in s.preserve_service_ids.iter().enumerate() {
+            let h = h32(
+                id,
+                &format!("endpoint_scopes[{i}].preserve_service_ids[{j}]"),
+            )?;
+            if !services.contains(&h) {
+                services.push(h);
+            }
+        }
+        out.push(ExtraScope {
+            actor_omni,
+            grant: ScopeGrant {
+                services,
+                read_only: false,
+                max_per_call: 0,
+                max_per_period: 0,
+                max_total: 0,
+                period_seconds: 0,
+            },
+        });
+    }
+    Ok(out)
 }
 
 /// `POST /v1/agent/archive/build` body (J1_master-gated).
@@ -230,6 +521,9 @@ pub struct ArchiveBuildRequest {
     /// kept namespace is discoverable for #425 O2 inheritance.
     #[serde(default)]
     pub memory_ns: Option<String>,
+    /// #663 — the endpoint actors' FULL sets after the app's feeds are dropped.
+    #[serde(default)]
+    pub endpoint_scopes: Vec<EndpointScope>,
 }
 
 #[derive(Debug, Serialize)]
@@ -441,11 +735,17 @@ pub async fn spawn_build(
         }
     };
 
-    // The S2 template grants: the delegate's duplex operator-chat channel
-    // (both directions) + its memory namespace (fresh or inherited, #425 O2).
-    let chat_channel_id = format!("opchat-{}", req.label);
-    let memory_ns = req.memory_ns.clone().unwrap_or_else(|| req.label.clone());
-    let services = spawn_template_services(&chat_channel_id, &memory_ns);
+    // The grant set: today's S2 template for a blank / role-preset spawn, or
+    // the #663 manifest compile for an app install (fail-closed on any
+    // refused row — the user never Touch-IDs a doomed or mis-bound install).
+    let plan = plan_spawn(&req)?;
+    let chat_channel_id = plan.chat_channel_id.clone();
+    let memory_ns = plan.memory_ns.clone();
+    let services = plan.services.clone();
+    let extra_scopes = parse_endpoint_scopes(&req.endpoint_scopes)
+        .map_err(|e| aerr(StatusCode::BAD_REQUEST, e))?;
+    let enrollments = parse_endpoint_enrollments(&req.endpoint_enrollments, &session_omni)
+        .map_err(|e| aerr(StatusCode::BAD_REQUEST, e))?;
 
     let build_req = BuildAcceptRequest {
         operator_omni: req.operator_omni.clone(),
@@ -491,21 +791,33 @@ pub async fn spawn_build(
         register: &register,
         grant: &grant,
     };
-    let assembled = assemble_spawn_userop(&params, &broker_sk)
-        .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let assembled =
+        assemble_spawn_userop_with_endpoints(&params, &extra_scopes, &enrollments, &broker_sk)
+            .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     state.pending_ceremonies.put_spawn(PendingSpawn {
         operator_omni: session_omni,
         actor_omni: actor_omni.clone(),
         device_key_hash: device_key_hash.clone(),
         label: req.label.clone(),
-        preset_id: req.preset_id.clone(),
+        preset_id: plan.template_id.clone(),
         memory_ns: memory_ns.clone(),
         memory_inherited: req.memory_inherited,
         chat_channel_id: chat_channel_id.clone(),
         services: services.clone(),
         k10_address: k10_address.clone(),
         k10_secret_hex,
+        app: AppRuntimeFacts {
+            template_version: plan.template_version.clone(),
+            bound_channels: plan.bound_channels.clone(),
+            availability: plan.availability,
+            memory_namespaces: plan.memory_namespaces(),
+            tz_offset_minutes: req
+                .bindings
+                .as_ref()
+                .map(|b| b.tz_offset_minutes as i64)
+                .unwrap_or(0),
+        },
         created_at: Instant::now(),
     });
 
@@ -519,6 +831,14 @@ pub async fn spawn_build(
         services,
         slots_used: used,
         slots_total: total,
+        annotations: plan.annotations,
+        bound_channels: plan.bound_channels,
+        audience: plan.audience,
+        availability: plan.availability,
+        template_id: plan.template_id,
+        template_version: plan.template_version,
+        endpoint_scopes: req.endpoint_scopes.clone(),
+        endpoint_enrollments: req.endpoint_enrollments.clone(),
     }))
 }
 
@@ -621,7 +941,11 @@ pub async fn archive_build(
         register: &register,
         grant: &grant,
     };
-    let assembled = assemble_revoke_userop(&params, &[hash], &broker_sk)
+    // #663 — the endpoint actors' sets minus this app's feeds ride the same
+    // Touch ID (the install's mirror).
+    let extra_scopes = parse_endpoint_scopes(&req.endpoint_scopes)
+        .map_err(|e| aerr(StatusCode::BAD_REQUEST, e))?;
+    let assembled = assemble_revoke_userop_with_scopes(&params, &[hash], &extra_scopes, &broker_sk)
         .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     state.pending_ceremonies.put_archive(PendingArchive {
@@ -658,6 +982,7 @@ pub async fn finalize_for_confirmed_batch(
     let calls = decode_execute_batch(call_data).ok()?;
     let mut spawned = Vec::new();
     let mut archived = Vec::new();
+    let mut enrolled = Vec::new();
     for call in &calls {
         let Ok(decoded) = agentkeys_core::audit::calldata::decode_calldata(&call.calldata) else {
             continue;
@@ -675,6 +1000,17 @@ pub async fn finalize_for_confirmed_batch(
                 };
                 spawned.push(finalize_spawn(state, session_omni, dkh, actor).await);
             }
+            // #663 — an endpoint device actor registered in the install batch
+            // (the daemon completes its pairing + registry rows on this echo).
+            "registerAgentDevice" => {
+                let (Some(dkh), Some(actor)) = (
+                    decoded.args.first().and_then(|a| a.value.as_str()),
+                    decoded.args.get(2).and_then(|a| a.value.as_str()),
+                ) else {
+                    continue;
+                };
+                enrolled.push(serde_json::json!({ "device_key_hash": dkh, "actor_omni": actor }));
+            }
             "revokeAgentDevice" => {
                 let Some(dkh) = decoded.args.first().and_then(|a| a.value.as_str()) else {
                     continue;
@@ -686,10 +1022,10 @@ pub async fn finalize_for_confirmed_batch(
             _ => {}
         }
     }
-    if spawned.is_empty() && archived.is_empty() {
+    if spawned.is_empty() && archived.is_empty() && enrolled.is_empty() {
         return None;
     }
-    Some(serde_json::json!({ "spawned": spawned, "archived": archived }))
+    Some(serde_json::json!({ "spawned": spawned, "archived": archived, "enrolled": enrolled }))
 }
 
 async fn finalize_spawn(
@@ -742,24 +1078,31 @@ async fn finalize_spawn(
     //    binding (deleted on confirmed revoke — custody note in
     //    `storage::spawn_contexts`). Best-effort + loud: a write failure
     //    costs future re-create chat, never the spawn itself.
-    if let Some(r) = &row {
+    let ctx_row = row.as_ref().map(|r| {
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let persist = state
-            .spawn_context_store
-            .upsert(&crate::storage::SpawnContext {
-                device_key_hash: device_key_hash.to_string(),
-                label: r.label.clone(),
-                chat_channel_id: r.chat_channel_id.clone(),
-                k10_address: r.k10_address.clone(),
-                k10_secret_hex: r.k10_secret_hex.clone(),
-                // #594 — the RESOLVED namespace (label-defaulted or #425 O2
-                // inherited): what every re-create injects for the checkpoint.
-                memory_ns: r.memory_ns.clone(),
-                created_at,
-            });
+        crate::storage::SpawnContext {
+            device_key_hash: device_key_hash.to_string(),
+            label: r.label.clone(),
+            chat_channel_id: r.chat_channel_id.clone(),
+            k10_address: r.k10_address.clone(),
+            k10_secret_hex: r.k10_secret_hex.clone(),
+            // #594 — the RESOLVED namespace (label-defaulted or #425 O2
+            // inherited): what every re-create injects for the checkpoint.
+            memory_ns: r.memory_ns.clone(),
+            created_at,
+            // #660 — the app-runtime facts every re-create re-injects.
+            preset_id: r.preset_id.clone(),
+            bound_channels_json: r.app.bound_channels_json(),
+            availability: r.app.availability_str(),
+            memory_namespaces: r.app.memory_namespaces.clone(),
+            tz_offset_minutes: r.app.tz_offset_minutes,
+        }
+    });
+    if let Some(ctx) = &ctx_row {
+        let persist = state.spawn_context_store.upsert(ctx);
         if let Err(e) = persist {
             tracing::warn!(
                 device_key_hash = %device_key_hash,
@@ -826,6 +1169,11 @@ async fn finalize_spawn(
         // #594 — the checkpoint loop's namespace (empty on the no-row path).
         Some(&memory_ns),
     ));
+    // #660 — the app-runtime set (template, bound feeds, availability, mirror
+    // namespaces, tz): the same values every re-create injects from the row.
+    if let Some(ctx) = &ctx_row {
+        extra_envs.extend(crate::handlers::sandbox::app_runtime_envs(ctx));
+    }
     let sandbox = crate::handlers::sandbox::ensure_for_delegate_with_envs(
         state,
         device_key_hash,
@@ -989,6 +1337,7 @@ mod tests {
             chat_channel_id: "opchat-watchdog".into(),
             services: vec!["memory:watchdog".into()],
             k10_secret_hex: "0xdead".into(),
+            app: AppRuntimeFacts::default(),
             created_at: Instant::now(),
         });
         // 0x-prefix and case are normalized on both sides.
@@ -1051,6 +1400,132 @@ mod tests {
         );
     }
 
+    fn build_req(preset_id: &str, bindings: Option<AppInstallBindings>) -> SpawnBuildRequest {
+        SpawnBuildRequest {
+            operator_omni: format!("0x{}", "22".repeat(32)),
+            label: "chef".into(),
+            preset_id: preset_id.into(),
+            memory_ns: None,
+            memory_inherited: false,
+            bindings,
+            endpoint_scopes: Vec::new(),
+            endpoint_enrollments: Vec::new(),
+        }
+    }
+
+    /// #663 — an enrollment folded into the install batch is verified like
+    /// an accept: lineage (the session master's child for the label) + the
+    /// PoP over the device key hash; a wrong label or a tampered hash refuses.
+    #[test]
+    fn endpoint_enrollments_verify_lineage_and_pop() {
+        let session = format!("0x{}", "22".repeat(32));
+        let sk = k256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+        let addr = evm_address(sk.verifying_key());
+        let dkh = agentkeys_core::device_crypto::device_key_hash(&addr).unwrap();
+        let pop = eip191_sign(&sk, &agent_pop_payload(&dkh)).unwrap();
+        let child = agentkeys_core::actor_omni::child_omni_hex(&session, "gateway-weixin").unwrap();
+        let good = EndpointEnrollment {
+            actor_omni: child.clone(),
+            device_key_hash: dkh.clone(),
+            pop_sig: pop.clone(),
+            label: "gateway-weixin".into(),
+            kind: "gateway".into(),
+            transport: "weixin".into(),
+        };
+        let parsed = parse_endpoint_enrollments(std::slice::from_ref(&good), &session).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].agent_pop_sig,
+            hex::decode(pop.trim_start_matches("0x")).unwrap()
+        );
+        assert!(parsed[0].link_code_redemption.is_empty());
+        let wrong_label = EndpointEnrollment {
+            label: "console-mac".into(),
+            ..good.clone()
+        };
+        let err = parse_endpoint_enrollments(&[wrong_label], &session).unwrap_err();
+        assert!(err.contains("not this master's child"), "{err}");
+        let tampered = EndpointEnrollment {
+            device_key_hash: format!("0x{}", "ab".repeat(32)),
+            ..good.clone()
+        };
+        let err = parse_endpoint_enrollments(&[tampered], &session).unwrap_err();
+        assert!(err.contains("pop_sig"), "{err}");
+        let dup = parse_endpoint_enrollments(&[good.clone(), good], &session).unwrap_err();
+        assert!(dup.contains("listed twice"), "{dup}");
+    }
+
+    /// #663 — a blank spawn and a role-preset spawn (bindings absent) plan
+    /// EXACTLY today's fixed template; the template id rides through.
+    #[test]
+    fn plan_spawn_keeps_todays_template_for_blank_and_role_presets() {
+        let blank = plan_spawn(&build_req("", None)).unwrap();
+        assert_eq!(
+            blank.services,
+            spawn_template_services("opchat-chef", "chef")
+        );
+        assert_eq!(blank.memory_ns, "chef");
+        assert!(blank.bound_channels.is_empty());
+        assert_eq!(blank.memory_namespaces(), "");
+        // A compiled-in role preset (zero slots) — byte-identical set, id kept.
+        let role = plan_spawn(&build_req("watchdog", None)).unwrap();
+        assert_eq!(role.services, blank.services);
+        assert_eq!(role.template_id, "watchdog");
+        assert_eq!(role.template_version, "1.0.0");
+        // An unknown preset id WITHOUT bindings is tolerated (daemon-side
+        // apply reports it); WITH bindings it is an install and refuses.
+        assert!(plan_spawn(&build_req("nope", None)).is_ok());
+        let err = plan_spawn(&build_req("nope", Some(AppInstallBindings::default()))).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1 .0["error"], "unknown_template");
+    }
+
+    /// #663 — the endpoint actors' setScope inputs: names keccak'd like the
+    /// delegate's, preserved ids passed through + deduped, a repeated actor
+    /// refused.
+    #[test]
+    fn endpoint_scopes_parse_dedup_and_refuse_repeats() {
+        let gw = format!("0x{}", "aa".repeat(32));
+        let kept = format!("0x{}", "cc".repeat(32));
+        let parsed = parse_endpoint_scopes(&[EndpointScope {
+            actor_omni: gw.clone(),
+            services: vec![
+                "channel-pub:weixin-chef".into(),
+                "channel-sub:weixin-chef".into(),
+            ],
+            preserve_service_ids: vec![kept.clone(), kept.clone()],
+        }])
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].actor_omni, [0xaa; 32]);
+        assert_eq!(parsed[0].grant.services.len(), 3);
+        assert_eq!(
+            parsed[0].grant.services[0],
+            agentkeys_core::device_crypto::keccak256(b"channel-pub:weixin-chef")
+        );
+        assert_eq!(parsed[0].grant.services[2], [0xcc; 32]);
+        assert_eq!(parsed[0].grant.max_total, 0);
+        let dup = parse_endpoint_scopes(&[
+            EndpointScope {
+                actor_omni: gw.clone(),
+                services: vec![],
+                preserve_service_ids: vec![],
+            },
+            EndpointScope {
+                actor_omni: gw,
+                services: vec![],
+                preserve_service_ids: vec![],
+            },
+        ]);
+        assert!(dup.unwrap_err().contains("listed twice"));
+        assert!(parse_endpoint_scopes(&[EndpointScope {
+            actor_omni: "0x12".into(),
+            services: vec![],
+            preserve_service_ids: vec![],
+        }])
+        .is_err());
+    }
+
     #[test]
     fn finalize_hook_ignores_non_ceremony_batches() {
         // Pure decode check: a scope-only batch has no registerDelegate /
@@ -1076,5 +1551,92 @@ mod tests {
                 .unwrap_or(false)
         });
         assert!(!ceremony);
+    }
+
+    /// #663 — a bound application manifest compiles into the sheet: the chef
+    /// template with its family chat, kitchen screen and a food-preferences
+    /// resource yields the documented services, annotations, bound channels
+    /// and resource namespaces; a binding the manifest does not declare or a
+    /// missing required slot is refused with `template_bindings_invalid`.
+    #[test]
+    fn plan_spawn_compiles_a_bound_application_manifest() {
+        use agentkeys_protocol::{
+            AppInstallBindings, ContactTier, ResourceBinding, ResourceKind, Sensitivity,
+            SlotAudience, SlotBinding,
+        };
+        let bindings = AppInstallBindings {
+            slots: vec![
+                SlotBinding {
+                    slot: "family_chat".into(),
+                    channel_id: "weixin".into(),
+                    endpoint_actor_omni: None,
+                },
+                SlotBinding {
+                    slot: "kitchen_screen".into(),
+                    channel_id: "kitchen-display".into(),
+                    endpoint_actor_omni: None,
+                },
+            ],
+            resources: vec![ResourceBinding {
+                name: "food-preferences".into(),
+                item_id: "food-preferences-1".into(),
+                ns: "food-prefs".into(),
+                kind: ResourceKind::Profile,
+                sensitivity: Sensitivity::Safe,
+            }],
+            audience: vec![SlotAudience {
+                slot: "family_chat".into(),
+                tiers: vec![ContactTier::Owner, ContactTier::Partner],
+            }],
+            tz_offset_minutes: 480,
+        };
+        let plan = plan_spawn(&build_req("chef", Some(bindings.clone()))).unwrap();
+        assert_eq!(plan.template_id, "chef");
+        assert!(!plan.template_version.is_empty());
+        for s in [
+            "channel-pub:opchat-chef",
+            "channel-sub:opchat-chef",
+            "memory:app-chef",
+            "inbox:app-chef",
+            "channel-sub:weixin-chef",
+            "channel-pub:weixin-chef",
+            "channel-pub:kitchen-display",
+            "memory:food-prefs",
+            "tool:schedule",
+            "plugin:openviking",
+        ] {
+            assert!(
+                plan.services.iter().any(|x| x == s),
+                "missing {s}: {:?}",
+                plan.services
+            );
+        }
+        assert!(
+            !plan.services.iter().any(|x| x == "inbox:food-prefs"),
+            "a resource is read-only — never an inbox on its namespace"
+        );
+        assert_eq!(plan.bound_channels.len(), 2);
+        assert!(!plan.annotations.is_empty());
+        assert_eq!(plan.resource_namespaces, vec!["food-prefs".to_string()]);
+        assert_eq!(plan.audience.len(), 1);
+        assert_eq!(plan.chat_channel_id, "opchat-chef");
+
+        // A slot the manifest does not declare is refused before any sheet.
+        let mut bad = bindings.clone();
+        bad.slots.push(SlotBinding {
+            slot: "no_such_slot".into(),
+            channel_id: "x".into(),
+            endpoint_actor_omni: None,
+        });
+        let (status, body) = plan_spawn(&build_req("chef", Some(bad))).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["error"], "template_bindings_invalid");
+
+        // A required slot left unbound is refused too.
+        let mut unbound = bindings;
+        unbound.slots.retain(|b| b.slot != "family_chat");
+        let (status, body) = plan_spawn(&build_req("chef", Some(unbound))).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["error"], "template_bindings_invalid");
     }
 }

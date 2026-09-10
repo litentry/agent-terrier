@@ -63,11 +63,23 @@ async fn storage_s3(
 }
 
 pub fn build_router(state: SharedChannelWorkerState) -> Router {
+    // #667 — a blob body is base64 JSON of up to `blob_max_bytes` decoded
+    // bytes: lift axum's default ~2 MB limit on the two blob routes only
+    // (4/3 for base64 + headroom for the cap + JSON framing).
+    let blob_body_limit = state.config.blob_max_bytes / 3 * 4 + (256 << 10);
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/channel/publish", post(channel_publish))
         .route("/v1/channel/poll", post(channel_poll))
         .route("/v1/channel/teardown", post(channel_teardown))
+        .route(
+            "/v1/channel/blob-put",
+            post(channel_blob_put).layer(axum::extract::DefaultBodyLimit::max(blob_body_limit)),
+        )
+        .route(
+            "/v1/channel/blob-get",
+            post(channel_blob_get).layer(axum::extract::DefaultBodyLimit::max(blob_body_limit)),
+        )
         .with_state(state)
 }
 
@@ -117,6 +129,15 @@ pub struct PublishRequest {
     pub seq: Option<u32>,
     #[serde(default)]
     pub stream: Option<bool>,
+    /// #667 — a RELAYING actor's declaration of the contact it relayed for
+    /// (the gateway), copied verbatim like `correlation`; `producer` stays the
+    /// cap-signed actor, so this never changes WHO published.
+    #[serde(default)]
+    pub contact: Option<agentkeys_protocol::ContactStamp>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub relay_of: Option<String>,
 }
 
 fn direction_in() -> ChannelDirection {
@@ -206,6 +227,22 @@ async fn channel_publish(
     // NRT write-through wakeup (§14.12): the durable write is done; wake any
     // held consumer long-poll on this channel so it returns immediately.
     state.wakeup.signal(&channel_id);
+    // #669 — an INBOUND event (toward the app) may also need to wake a
+    // hibernating application bound to this feed: tell the broker,
+    // fire-and-forget (the durable feed already holds the event).
+    if matches!(req.direction, ChannelDirection::In) {
+        if let Some(minter) = state.sts_minter.as_ref() {
+            let owner = normalize_omni(&req.cap.payload.operator_omni);
+            let state2 = state.clone();
+            let channel = channel_id.clone();
+            let _ = minter;
+            tokio::spawn(async move {
+                if let Some(m) = state2.sts_minter.as_ref() {
+                    m.wake(&owner, &channel).await;
+                }
+            });
+        }
+    }
     Ok(Json(PublishResponse {
         ok: true,
         event_id,
@@ -288,6 +325,9 @@ async fn channel_publish_inner(
         partial: req.partial,
         seq: req.seq,
         stream: req.stream,
+        contact: req.contact.clone(),
+        content_type: req.content_type.clone(),
+        relay_of: req.relay_of.clone(),
     };
     let plaintext =
         serde_json::to_vec(&event).map_err(|e| err_500(e.to_string(), "channel_event_encode"))?;
@@ -310,6 +350,253 @@ async fn channel_publish_inner(
         .await
         .map_err(|e| err_502(format!("s3 PutObject: {}", s3_error_summary(&e)), "s3_put"))?;
     Ok((event_id, key, env_bytes))
+}
+
+// ── blobs (#667 — media originals beside the feed) ──────────────────────────
+
+/// Worker-side mirror of `agentkeys_protocol::ChannelBlobPutBody` (the typed
+/// cap, like [`PublishRequest`]).
+#[derive(Debug, Deserialize)]
+pub struct BlobPutRequest {
+    pub cap: CapToken,
+    pub content_type: String,
+    pub bytes_b64: String,
+}
+
+/// Worker-side mirror of `agentkeys_protocol::ChannelBlobGetBody`.
+#[derive(Debug, Deserialize)]
+pub struct BlobGetRequest {
+    pub cap: CapToken,
+    pub body_ref: String,
+}
+
+/// Blob S3 key: `bots/<owner>/channel/<channel_id>.blob/<blob_id>.enc` — a
+/// SIBLING of the feed prefix (`…/channel/<channel_id>/`), so the poll listing
+/// never sees it and the feed cursor stays an event-only ordering.
+fn blob_key(owner: &str, channel_id: &str, blob_id: &str) -> String {
+    format!("bots/{owner}/channel/{channel_id}.blob/{blob_id}.enc")
+}
+
+/// Parse a `body_ref` back into `(owner, channel_id, blob_id)` — the consumer's
+/// cap must name the SAME owner + channel, or the ref is refused (a subscribe
+/// cap on one feed can never read another feed's blobs).
+fn parse_blob_ref(body_ref: &str) -> Option<(String, String, String)> {
+    let rest = body_ref.strip_prefix("bots/")?;
+    let (owner, rest) = rest.split_once("/channel/")?;
+    let (channel_with_blob, blob_file) = rest.rsplit_once('/')?;
+    let channel_id = channel_with_blob.strip_suffix(".blob")?;
+    let blob_id = blob_file.strip_suffix(".enc")?;
+    if owner.is_empty()
+        || channel_id.is_empty()
+        || blob_id.is_empty()
+        || channel_id.contains('/')
+        || blob_id.contains('/')
+    {
+        return None;
+    }
+    Some((
+        owner.to_string(),
+        channel_id.to_string(),
+        blob_id.to_string(),
+    ))
+}
+
+/// The encrypted blob plaintext layout: `u16-BE content-type length ‖
+/// content type (UTF-8) ‖ the ORIGINAL bytes, unchanged`.
+fn encode_blob_plaintext(content_type: &str, bytes: &[u8]) -> Vec<u8> {
+    let ct = content_type.as_bytes();
+    let ct_len = ct.len().min(u16::MAX as usize);
+    let mut out = Vec::with_capacity(2 + ct_len + bytes.len());
+    out.extend_from_slice(&(ct_len as u16).to_be_bytes());
+    out.extend_from_slice(&ct[..ct_len]);
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn decode_blob_plaintext(plaintext: &[u8]) -> Option<(String, &[u8])> {
+    if plaintext.len() < 2 {
+        return None;
+    }
+    let ct_len = u16::from_be_bytes([plaintext[0], plaintext[1]]) as usize;
+    let rest = &plaintext[2..];
+    if rest.len() < ct_len {
+        return None;
+    }
+    let content_type = String::from_utf8(rest[..ct_len].to_vec()).ok()?;
+    Some((content_type, &rest[ct_len..]))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// `POST /v1/channel/blob-put` — store one media original UNCHANGED beside the
+/// feed under the caller's PUBLISH cap (the same authority as publishing the
+/// event that will reference it). Returns the `body_ref`. Audited as a
+/// `ChannelPublish` row (key = the blob key, event_id = the blob id, hash =
+/// keccak of the stored envelope) — a blob store IS a publish-class write.
+async fn channel_blob_put(
+    State(state): State<SharedChannelWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
+    Json(req): Json<BlobPutRequest>,
+) -> Result<Json<agentkeys_protocol::ChannelBlobPutResp>, ApiError> {
+    verify_cap(&state, &req.cap, CapOp::ChannelPublish).await?;
+    let channel_id = channel_id_from_service(&req.cap.payload.service)?;
+    let owner = normalize_omni(&req.cap.payload.operator_omni);
+    let bytes = STANDARD
+        .decode(&req.bytes_b64)
+        .map_err(|e| err_400(e.to_string(), "channel_blob_b64_decode"))?;
+    let max = state.config.blob_max_bytes;
+    if bytes.is_empty() {
+        return Err(err_400("blob is empty", "channel_blob_empty"));
+    }
+    if bytes.len() > max {
+        return Err(err_413(
+            format!(
+                "blob is {} bytes decoded (max {max}, AGENTKEYS_CHANNEL_BLOB_MAX_BYTES)",
+                bytes.len()
+            ),
+            "channel_blob_too_large",
+        ));
+    }
+    let content_type = req.content_type.trim();
+    if content_type.is_empty() || content_type.len() > 200 || content_type.contains('\n') {
+        return Err(err_400(
+            "content_type must be a non-empty media type",
+            "channel_blob_content_type",
+        ));
+    }
+    let sha256 = sha256_hex(&bytes);
+    let now_millis = unix_millis();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let blob_id = format!("{now_millis:013}-{seq:016x}");
+    let key = blob_key(&owner, &channel_id, &blob_id);
+    let aad = envelope::aad("", &owner, &channel_id, 0);
+    let plaintext = encode_blob_plaintext(content_type, &bytes);
+    let env_bytes = envelope::encrypt(&state.config.kek_hex, &plaintext, &aad)
+        .map_err(|e| err_500(e.to_string(), "channel_envelope_encrypt"))?;
+    let outcome: Result<(), ApiError> = async {
+        let s3 = storage_s3(&state, creds.as_ref(), &req.cap, &owner, &channel_id).await?;
+        s3.put_object()
+            .bucket(&state.config.channel_bucket)
+            .key(&key)
+            .body(env_bytes.clone().into())
+            .send()
+            .await
+            .map_err(|e| err_502(format!("s3 PutObject: {}", s3_error_summary(&e)), "s3_put"))?;
+        Ok(())
+    }
+    .await;
+    let audit_body = ChannelPublishBody {
+        key: key.clone(),
+        channel_id: channel_id.clone(),
+        event_id: blob_id.clone(),
+        payload_hash: if outcome.is_ok() {
+            keccak_hex(&env_bytes)
+        } else {
+            zero_hash()
+        },
+    };
+    let audited = state
+        .audit
+        .emit(
+            &req.cap,
+            AuditOpKind::ChannelPublish,
+            audit_body,
+            if outcome.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .await;
+    outcome?;
+    audited?;
+    Ok(Json(agentkeys_protocol::ChannelBlobPutResp {
+        ok: true,
+        body_ref: key,
+        bytes: bytes.len() as u64,
+        sha256,
+    }))
+}
+
+/// `POST /v1/channel/blob-get` — fetch a blob by `body_ref` under the feed's
+/// SUBSCRIBE cap. The ref's owner + channel MUST match the cap's (403
+/// `blob_ref_out_of_feed` otherwise). Audited as a `ChannelSubscribe` row
+/// (cursor = the ref).
+async fn channel_blob_get(
+    State(state): State<SharedChannelWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
+    Json(req): Json<BlobGetRequest>,
+) -> Result<Json<agentkeys_protocol::ChannelBlobGetResp>, ApiError> {
+    verify_cap(&state, &req.cap, CapOp::ChannelSubscribe).await?;
+    let channel_id = channel_id_from_service(&req.cap.payload.service)?;
+    let owner = normalize_omni(&req.cap.payload.operator_omni);
+    let Some((ref_owner, ref_channel, _blob_id)) = parse_blob_ref(&req.body_ref) else {
+        return Err(err_400(
+            "body_ref is not a blob reference of this worker",
+            "channel_blob_ref_shape",
+        ));
+    };
+    if ref_owner != owner || ref_channel != channel_id {
+        return Err(err_403(
+            format!(
+                "body_ref names feed {ref_channel} of {ref_owner}; the cap authorizes {channel_id}"
+            ),
+            "blob_ref_out_of_feed",
+        ));
+    }
+    let aad = envelope::aad("", &owner, &channel_id, 0);
+    let fetched: Result<(String, Vec<u8>), ApiError> = async {
+        let s3 = storage_s3(&state, creds.as_ref(), &req.cap, &owner, &channel_id).await?;
+        let got = s3
+            .get_object()
+            .bucket(&state.config.channel_bucket)
+            .key(&req.body_ref)
+            .send()
+            .await
+            .map_err(|e| err_502(format!("s3 GetObject: {}", s3_error_summary(&e)), "s3_get"))?;
+        let bytes = got
+            .body
+            .collect()
+            .await
+            .map_err(|e| err_502(e.to_string(), "s3_body"))?
+            .into_bytes();
+        let plaintext = envelope::decrypt(&state.config.kek_hex, &bytes, &aad)
+            .map_err(|e| err_500(e.to_string(), "channel_envelope_decrypt"))?;
+        let (content_type, raw) = decode_blob_plaintext(&plaintext)
+            .ok_or_else(|| err_500("blob plaintext layout invalid", "channel_blob_decode"))?;
+        Ok((content_type, raw.to_vec()))
+    }
+    .await;
+    let audit_body = ChannelSubscribeBody {
+        channel_id: channel_id.clone(),
+        cursor: req.body_ref.clone(),
+        event_count: u64::from(fetched.is_ok()),
+        cap_hash: cap_hash(&req.cap),
+    };
+    let audited = state
+        .audit
+        .emit(
+            &req.cap,
+            AuditOpKind::ChannelSubscribe,
+            audit_body,
+            if fetched.is_ok() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+        )
+        .await;
+    let (content_type, raw) = fetched?;
+    audited?;
+    Ok(Json(agentkeys_protocol::ChannelBlobGetResp {
+        ok: true,
+        content_type,
+        sha256: sha256_hex(&raw),
+        bytes_b64: STANDARD.encode(raw),
+    }))
 }
 
 // ── poll (the NRT long-poll) ─────────────────────────────────────────────────
@@ -651,6 +938,45 @@ mod tests {
         // Path/wildcard injection into the feed key is rejected.
         assert!(channel_id_from_service("channel-pub:../escape").is_err());
         assert!(channel_id_from_service("channel-pub:a/b").is_err());
+    }
+
+    /// #667 — blob keys live in a SIBLING prefix of the feed (never listed by
+    /// a poll), and a ref only ever resolves back to its own feed.
+    #[test]
+    fn blob_key_is_a_sibling_of_the_feed_prefix_and_refs_parse_back() {
+        let key = blob_key("abcdef", "weixin-chef", "0000000001-0000000000000001");
+        assert_eq!(
+            key,
+            "bots/abcdef/channel/weixin-chef.blob/0000000001-0000000000000001.enc"
+        );
+        assert!(!key.starts_with(&feed_prefix("abcdef", "weixin-chef")));
+        assert_eq!(
+            parse_blob_ref(&key),
+            Some((
+                "abcdef".to_string(),
+                "weixin-chef".to_string(),
+                "0000000001-0000000000000001".to_string()
+            ))
+        );
+        // An event key is NOT a blob ref; a traversal is not either.
+        assert!(parse_blob_ref(&feed_key("abcdef", "weixin-chef", "x")).is_none());
+        assert!(parse_blob_ref("bots/a/channel/c.blob/../x.enc").is_none());
+        assert!(parse_blob_ref("memory/a/b.blob/c.enc").is_none());
+    }
+
+    #[test]
+    fn blob_plaintext_layout_round_trips_the_original_bytes() {
+        let raw = [0xffu8, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F'];
+        let pt = encode_blob_plaintext("image/jpeg", &raw);
+        let (ct, bytes) = decode_blob_plaintext(&pt).unwrap();
+        assert_eq!(ct, "image/jpeg");
+        assert_eq!(bytes, &raw);
+        assert!(decode_blob_plaintext(&[0x00]).is_none());
+        assert!(decode_blob_plaintext(&[0x00, 0x09, b'a']).is_none());
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

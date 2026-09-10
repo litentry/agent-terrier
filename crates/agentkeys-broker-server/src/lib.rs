@@ -179,6 +179,10 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/agent/image-status",
             post(handlers::update::agent_image_status),
         )
+        // #669 — the channel worker's write-through wake for a hibernating
+        // application (availability wake-on-event / scheduled): worker-bearer
+        // gated, chain-probed per row, cold-creates through the #546 path.
+        .route("/v1/sandbox/wake", post(handlers::wake::sandbox_wake))
         // #278 D6 — the ONE sponsored master-register UserOp (initCode +
         // executeBatch([registerFirstMasterDevice])). submit reuses the accept
         // relay verbatim, exactly as scope/revoke do.

@@ -315,6 +315,18 @@ enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// #664 — family applications (epic #660): install / list / show /
+    /// uninstall / command, the headless twins of the console's Applications
+    /// page, driven through the master daemon's ui-bridge.
+    App {
+        #[command(subcommand)]
+        action: AppAction,
+    },
+    /// #664 — resource items (master-curated, read-only for apps).
+    Resource {
+        #[command(subcommand)]
+        action: ResourceAction,
+    },
     /// Credential fetch (#216) — the agent pulls its authorized `cred:<service>`
     /// from the vault to *use* it (e.g. its LLM key) at wire time.
     Cred {
@@ -947,6 +959,121 @@ enum MemoryAction {
         #[arg(long)]
         s3_key: String,
         #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppAction {
+    /// Install an application from the catalog (ONE software-passkey signature).
+    #[command(about = "Master (headless/CI): install an app template — compile + ONE signature")]
+    Install {
+        #[arg(long, help = "Template id from the catalog")]
+        template: String,
+        #[arg(
+            long,
+            help = "The delegate label (^[a-z0-9-]{1,32}$); defaults to the template id"
+        )]
+        label: Option<String>,
+        #[arg(long, default_value = "", help = "slot=channel-id[,slot=channel-id…]")]
+        bind: String,
+        #[arg(long, default_value = "", help = "name=item-id[,name=item-id…]")]
+        resource: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "slot=tier|tier[;slot=…] audience overrides"
+        )]
+        audience: String,
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "Household UTC offset in minutes for schedules"
+        )]
+        tz_offset_minutes: i32,
+        #[arg(
+            long,
+            help = "Do NOT fold the contact gate's / this machine's device-actor enrollment into the install signature (headless CI: a throwaway runner must not register itself)"
+        )]
+        skip_endpoint_enrollment: bool,
+        #[arg(
+            long,
+            env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE",
+            help = "Software P-256 passkey PEM"
+        )]
+        k11_key_file: String,
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// The installed applications.
+    List {
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// One application's dashboard (activity, card, permissions).
+    Show {
+        #[arg(long)]
+        label: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// Uninstall (the archive ceremony: slot returns, grants revoked).
+    #[command(about = "Master (headless/CI): uninstall an app — ONE signature")]
+    Uninstall {
+        #[arg(long)]
+        label: String,
+        #[arg(long, help = "Keep the app's memory namespace inheritable")]
+        keep_memory: bool,
+        #[arg(long, env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE")]
+        k11_key_file: String,
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// Tap a card action headlessly (publishes a `command` event).
+    Command {
+        #[arg(long)]
+        label: String,
+        #[arg(long, help = "The card action id")]
+        action: String,
+        #[arg(long, help = "The command name")]
+        command: String,
+        #[arg(long, default_value = "", help = "JSON args")]
+        args: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResourceAction {
+    /// Curate one resource item (planted as `resource`-kind canonical memory).
+    Add {
+        #[arg(long, help = "Item id (^[a-z0-9-]{1,48}$)")]
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "")]
+        name_zh: String,
+        #[arg(long, help = "document|profile|dataset|gallery")]
+        kind: String,
+        #[arg(long, default_value = "", help = "comma-separated tags")]
+        tags: String,
+        #[arg(long, default_value = "safe", help = "safe|sensitive")]
+        sensitivity: String,
+        #[arg(long, help = "The canonical memory namespace the item lives in")]
+        ns: String,
+        #[arg(long, help = "Read the body from this file (else stdin)")]
+        file: Option<String>,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// The curated items.
+    List {
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
         daemon_url: String,
     },
 }
@@ -1913,6 +2040,118 @@ async fn main() {
                     session_bearer,
                 )
                 .await
+            }
+        },
+        Commands::App { action } => match action {
+            AppAction::Install {
+                template,
+                label,
+                bind,
+                resource,
+                audience,
+                tz_offset_minutes,
+                skip_endpoint_enrollment,
+                k11_key_file,
+                rp_id,
+                daemon_url,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless app install signs with the SOFTWARE P-256 passkey on \
+                     disk — CI / headless / throwaway-TEST masters ONLY. A real owner installs \
+                     from parent-control (Touch ID)."
+                );
+                let label = label.clone().unwrap_or_else(|| template.clone());
+                agentkeys_cli::app_admin::app_install(
+                    daemon_url,
+                    template,
+                    &label,
+                    bind,
+                    resource,
+                    audience,
+                    *tz_offset_minutes,
+                    !*skip_endpoint_enrollment,
+                    k11_key_file,
+                    rp_id,
+                )
+                .await
+            }
+            AppAction::List { daemon_url } => agentkeys_cli::app_admin::app_list(daemon_url).await,
+            AppAction::Show { label, daemon_url } => {
+                agentkeys_cli::app_admin::app_show(daemon_url, label).await
+            }
+            AppAction::Uninstall {
+                label,
+                keep_memory,
+                k11_key_file,
+                rp_id,
+                daemon_url,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless app uninstall signs with the SOFTWARE P-256 passkey \
+                     on disk — CI / headless / throwaway-TEST masters ONLY."
+                );
+                agentkeys_cli::app_admin::app_uninstall(
+                    daemon_url,
+                    label,
+                    *keep_memory,
+                    k11_key_file,
+                    rp_id,
+                )
+                .await
+            }
+            AppAction::Command {
+                label,
+                action,
+                command,
+                args,
+                daemon_url,
+            } => {
+                agentkeys_cli::app_admin::app_command(daemon_url, label, action, command, args)
+                    .await
+            }
+        },
+        Commands::Resource { action } => match action {
+            ResourceAction::Add {
+                id,
+                name,
+                name_zh,
+                kind,
+                tags,
+                sensitivity,
+                ns,
+                file,
+                daemon_url,
+            } => {
+                let body: anyhow::Result<String> = match file {
+                    Some(path) => std::fs::read_to_string(path)
+                        .map_err(|e| anyhow::anyhow!("read {path}: {e}")),
+                    None => {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                            .map(|_| buf)
+                            .map_err(|e| anyhow::anyhow!("read stdin: {e}"))
+                    }
+                };
+                match body {
+                    Ok(body) => {
+                        agentkeys_cli::app_admin::resource_add(
+                            daemon_url,
+                            id,
+                            name,
+                            name_zh,
+                            kind,
+                            tags,
+                            sensitivity,
+                            ns,
+                            body,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            ResourceAction::List { daemon_url } => {
+                agentkeys_cli::app_admin::resource_list(daemon_url).await
             }
         },
         Commands::Cred { action } => match action {

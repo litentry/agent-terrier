@@ -29,5 +29,17 @@ means new bundles server-side under the same wire shapes).
 
 Wire shapes are owned by `agentkeys-protocol` (`PresetSummary`,
 `PresetBundle` — the one-owner rule, #203). Adding a bundle: create the
-folder, register it in the broker's `handlers/presets.rs` `BUILTIN_PRESETS`,
+folder, register it in the broker's `handlers/presets.rs` `BUILTINS`,
 done — the registry test pins id-uniqueness + manifest parseability.
+
+## Application templates (epic #660)
+
+Since #662 a preset can also be an **application template**: the same
+`preset.json` gains slots · resources · tools · availability · budgets ·
+disclosure · context pointers (all additive — a role preset parses unchanged),
+and the bundle may carry `knowledge/*.md`. Installing one from the console
+compiles exactly the sheet the owner signs. Authoring guide:
+[`docs/wiki/family-application-templates.md`](../docs/wiki/family-application-templates.md).
+`chef/` is the reference application; `conformance/` is the hidden synthetic
+template the framework suite installs. `scripts/utils/check-template-content-only.sh`
+gates that a template is content only (F0/F1).

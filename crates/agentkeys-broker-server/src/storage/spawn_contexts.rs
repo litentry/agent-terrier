@@ -63,6 +63,50 @@ pub struct SpawnContext {
     /// ns from the `opchat-<label>` channel id (the ceremony's default rule).
     pub memory_ns: String,
     pub created_at: i64,
+    /// #663 — the app template the delegate was installed from (`""` = a
+    /// blank / role-preset spawn). Injected as `AGENTKEYS_APP_TEMPLATE` so
+    /// the in-sandbox daemon can fetch its schedule + perception prompt from
+    /// the broker catalog; the sweeper reads the template's schedule for the
+    /// `scheduled` availability policy.
+    pub preset_id: String,
+    /// #665 — the feeds the sandbox polls / publishes beyond opchat: the
+    /// compiler's `bound_channels` as JSON (`""` = none). Provisioning
+    /// pointers — feed ids the chain already grants — never authority
+    /// (arch.md §1a E2, amended for #660).
+    pub bound_channels_json: String,
+    /// #669 — the app's `availability` wire spelling (`""` = always-on).
+    pub availability: String,
+    /// #666 — the comma-separated namespace list the distribution mirror
+    /// probes (own ns + bound resource namespaces); `""` = the mirror's
+    /// defaults.
+    pub memory_namespaces: String,
+    /// #669 — the household's UTC offset in minutes for cron evaluation.
+    pub tz_offset_minutes: i64,
+}
+
+impl SpawnContext {
+    /// The parsed `bound_channels` (an unparseable / empty column = none —
+    /// loud in the log, never a crash).
+    pub fn bound_channels(&self) -> Vec<agentkeys_protocol::BoundChannel> {
+        if self.bound_channels_json.trim().is_empty() {
+            return Vec::new();
+        }
+        match serde_json::from_str(&self.bound_channels_json) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    device_key_hash = %self.device_key_hash,
+                    error = %e,
+                    "#665 spawn-context bound_channels column is not valid JSON — treated as none"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn availability(&self) -> agentkeys_protocol::Availability {
+        agentkeys_protocol::Availability::parse(&self.availability).unwrap_or_default()
+    }
 }
 
 /// SQLite-backed durable spawn-context store (#546).
@@ -120,7 +164,12 @@ impl SpawnContextStore {
                     k10_address     TEXT NOT NULL DEFAULT '',
                     k10_secret_hex  TEXT NOT NULL,
                     memory_ns       TEXT NOT NULL DEFAULT '',
-                    created_at      INTEGER NOT NULL
+                    created_at      INTEGER NOT NULL,
+                    preset_id       TEXT NOT NULL DEFAULT '',
+                    bound_channels  TEXT NOT NULL DEFAULT '',
+                    availability    TEXT NOT NULL DEFAULT '',
+                    memory_namespaces TEXT NOT NULL DEFAULT '',
+                    tz_offset_minutes INTEGER NOT NULL DEFAULT 0
                  );",
             )
             .map_err(|e| BrokerError::Internal(format!("init spawn-contexts schema: {e}")))?;
@@ -135,6 +184,27 @@ impl SpawnContextStore {
             (
                 "memory_ns",
                 "ALTER TABLE spawn_contexts ADD COLUMN memory_ns TEXT NOT NULL DEFAULT ''",
+            ),
+            // #660 stage 1 — the app-runtime columns (#663/#665/#666/#669).
+            (
+                "preset_id",
+                "ALTER TABLE spawn_contexts ADD COLUMN preset_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "bound_channels",
+                "ALTER TABLE spawn_contexts ADD COLUMN bound_channels TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "availability",
+                "ALTER TABLE spawn_contexts ADD COLUMN availability TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "memory_namespaces",
+                "ALTER TABLE spawn_contexts ADD COLUMN memory_namespaces TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "tz_offset_minutes",
+                "ALTER TABLE spawn_contexts ADD COLUMN tz_offset_minutes INTEGER NOT NULL DEFAULT 0",
             ),
         ] {
             match self.lock()?.execute(ddl, []) {
@@ -158,8 +228,9 @@ impl SpawnContextStore {
             .execute(
                 "INSERT OR REPLACE INTO spawn_contexts
                  (device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
-                  memory_ns, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                  memory_ns, created_at, preset_id, bound_channels, availability,
+                  memory_namespaces, tz_offset_minutes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     norm(&ctx.device_key_hash),
                     ctx.label,
@@ -168,6 +239,11 @@ impl SpawnContextStore {
                     ctx.k10_secret_hex,
                     ctx.memory_ns,
                     ctx.created_at,
+                    ctx.preset_id,
+                    ctx.bound_channels_json,
+                    ctx.availability,
+                    ctx.memory_namespaces,
+                    ctx.tz_offset_minutes,
                 ],
             )
             .map_err(|e| BrokerError::Internal(format!("upsert spawn context: {e}")))?;
@@ -178,20 +254,11 @@ impl SpawnContextStore {
         self.lock()?
             .query_row(
                 "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
-                        memory_ns, created_at
+                        memory_ns, created_at, preset_id, bound_channels, availability,
+                        memory_namespaces, tz_offset_minutes
                  FROM spawn_contexts WHERE device_key_hash = ?1",
                 params![norm(device_key_hash)],
-                |row| {
-                    Ok(SpawnContext {
-                        device_key_hash: row.get(0)?,
-                        label: row.get(1)?,
-                        chat_channel_id: row.get(2)?,
-                        k10_address: row.get(3)?,
-                        k10_secret_hex: row.get(4)?,
-                        memory_ns: row.get(5)?,
-                        created_at: row.get(6)?,
-                    })
-                },
+                row_to_ctx,
             )
             .optional()
             .map_err(|e| BrokerError::Internal(format!("get spawn context: {e}")))
@@ -205,22 +272,13 @@ impl SpawnContextStore {
         let mut stmt = conn
             .prepare(
                 "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
-                        memory_ns, created_at
+                        memory_ns, created_at, preset_id, bound_channels, availability,
+                        memory_namespaces, tz_offset_minutes
                  FROM spawn_contexts ORDER BY created_at",
             )
             .map_err(|e| BrokerError::Internal(format!("list spawn contexts: {e}")))?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(SpawnContext {
-                    device_key_hash: row.get(0)?,
-                    label: row.get(1)?,
-                    chat_channel_id: row.get(2)?,
-                    k10_address: row.get(3)?,
-                    k10_secret_hex: row.get(4)?,
-                    memory_ns: row.get(5)?,
-                    created_at: row.get(6)?,
-                })
-            })
+            .query_map([], row_to_ctx)
             .map_err(|e| BrokerError::Internal(format!("list spawn contexts: {e}")))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| BrokerError::Internal(format!("list spawn contexts: {e}")))
@@ -241,6 +299,25 @@ impl SpawnContextStore {
     }
 }
 
+/// The ONE column → struct mapping (get + list share it so a new column can
+/// never land in one query and not the other).
+fn row_to_ctx(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpawnContext> {
+    Ok(SpawnContext {
+        device_key_hash: row.get(0)?,
+        label: row.get(1)?,
+        chat_channel_id: row.get(2)?,
+        k10_address: row.get(3)?,
+        k10_secret_hex: row.get(4)?,
+        memory_ns: row.get(5)?,
+        created_at: row.get(6)?,
+        preset_id: row.get(7)?,
+        bound_channels_json: row.get(8)?,
+        availability: row.get(9)?,
+        memory_namespaces: row.get(10)?,
+        tz_offset_minutes: row.get(11)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +331,57 @@ mod tests {
             k10_secret_hex: "0xdead".into(),
             memory_ns: "watchdog".into(),
             created_at: 1_700_000_000,
+            preset_id: String::new(),
+            bound_channels_json: String::new(),
+            availability: String::new(),
+            memory_namespaces: String::new(),
+            tz_offset_minutes: 0,
         }
+    }
+
+    /// #660 — the app-runtime columns round-trip, the JSON accessor parses,
+    /// and a pre-#660 row (no columns) reads back as a role-preset delegate.
+    #[test]
+    fn app_runtime_columns_round_trip_and_default_for_legacy_rows() {
+        let store = SpawnContextStore::open_in_memory().unwrap();
+        let mut c = ctx(&"33".repeat(32));
+        c.preset_id = "chef".into();
+        c.bound_channels_json = serde_json::to_string(&vec![agentkeys_protocol::BoundChannel {
+            slot: "family_chat".into(),
+            kind: agentkeys_protocol::ChannelEndpointKind::Messaging,
+            direction: agentkeys_protocol::SlotDirection::Sub,
+            channel_id: "weixin-chef".into(),
+            event_kinds: vec![agentkeys_protocol::ChannelEventKind::Text],
+            endpoint_actor_omni: Some("0xgw".into()),
+        }])
+        .unwrap();
+        c.availability = "wake-on-event".into();
+        c.memory_namespaces = "app-chef,household-health".into();
+        c.tz_offset_minutes = 480;
+        store.upsert(&c).unwrap();
+        let got = store.get(&"33".repeat(32)).unwrap().unwrap();
+        assert_eq!(got.preset_id, "chef");
+        assert_eq!(got.bound_channels().len(), 1);
+        assert_eq!(got.bound_channels()[0].channel_id, "weixin-chef");
+        assert_eq!(
+            got.availability(),
+            agentkeys_protocol::Availability::WakeOnEvent
+        );
+        assert_eq!(got.memory_namespaces, "app-chef,household-health");
+        assert_eq!(got.tz_offset_minutes, 480);
+        let legacy = ctx(&"44".repeat(32));
+        store.upsert(&legacy).unwrap();
+        let got = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.label == "watchdog" && r.preset_id.is_empty())
+            .unwrap();
+        assert!(got.bound_channels().is_empty());
+        assert_eq!(
+            got.availability(),
+            agentkeys_protocol::Availability::AlwaysOn
+        );
     }
 
     /// #552 — a pre-#546-schema DB (no k10_address column) migrates in place

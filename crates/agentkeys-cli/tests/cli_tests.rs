@@ -1654,3 +1654,77 @@ async fn inbox_list_accumulates_multiple_provisions() {
     let lines: Vec<&str> = listed.lines().collect();
     assert_eq!(lines.len(), 3, "expected 3 inboxes, got: {listed}");
 }
+
+/// #664 — the `app` and `resource` verbs parse with their documented flags and
+/// refuse a missing required argument at the clap layer (exit 2, usage on
+/// stderr), before any network or key file is touched.
+#[test]
+fn app_and_resource_verbs_parse_and_refuse_missing_args() {
+    let bin = env!("CARGO_BIN_EXE_agentkeys");
+    for args in [
+        vec!["app", "--help"],
+        vec!["app", "install", "--help"],
+        vec!["app", "list", "--help"],
+        vec!["app", "show", "--help"],
+        vec!["app", "uninstall", "--help"],
+        vec!["app", "command", "--help"],
+        vec!["resource", "--help"],
+        vec!["resource", "add", "--help"],
+        vec!["resource", "list", "--help"],
+    ] {
+        let out = std::process::Command::new(bin)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("Usage"), "{args:?}: {text}");
+    }
+    let out = std::process::Command::new(bin)
+        .args(["app", "install", "--help"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--template",
+        "--label",
+        "--bind",
+        "--resource",
+        "--audience",
+        "--tz-offset-minutes",
+        "--skip-endpoint-enrollment",
+        "--k11-key-file",
+        "--rp-id",
+        "--daemon-url",
+    ] {
+        assert!(
+            text.contains(flag),
+            "app install --help lacks {flag}: {text}"
+        );
+    }
+    // A required argument missing ⇒ clap's usage error (exit 2), nothing runs.
+    let out = std::process::Command::new(bin)
+        .args(["app", "install", "--label", "x"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new(bin)
+        .args(["resource", "add"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let out = std::process::Command::new(bin)
+        .args(["app", "show"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

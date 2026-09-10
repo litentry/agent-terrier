@@ -32,6 +32,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// #662 / #670 / #664 (epic #660) — the family-applications framework's wire
+// contracts: the app template manifest (schema, kind enums, validator,
+// compiler), the card document, and the two policy-class registry docs.
+mod app_template;
+mod card;
+mod registries;
+pub use app_template::*;
+pub use card::*;
+pub use registries::*;
+
 /// Op discriminator that maps onto the four broker cap-mint endpoints. The
 /// route is the source of truth for the cap's `data_class` — the broker
 /// statically derives the `DataClass` variant from which endpoint was hit, so
@@ -463,8 +473,9 @@ pub enum ChannelProducer {
 /// The payload kind of a [`ChannelEvent`]. Continuous media (realtime
 /// speech/video) is deliberately NOT here — it stays on the §22d.3a gate path;
 /// channels carry text, commands, docs, discrete frames, and `audio-clip`s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub enum ChannelEventKind {
     Text,
     Image,
@@ -472,6 +483,48 @@ pub enum ChannelEventKind {
     Frame,
     Command,
     Doc,
+}
+
+impl ChannelEventKind {
+    pub const ALL: [ChannelEventKind; 6] = [
+        ChannelEventKind::Text,
+        ChannelEventKind::Image,
+        ChannelEventKind::AudioClip,
+        ChannelEventKind::Frame,
+        ChannelEventKind::Command,
+        ChannelEventKind::Doc,
+    ];
+
+    /// The wire spelling (matches the serde rename) — for hand-built bodies
+    /// and log lines, so nobody re-types the kebab-case word.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChannelEventKind::Text => "text",
+            ChannelEventKind::Image => "image",
+            ChannelEventKind::AudioClip => "audio-clip",
+            ChannelEventKind::Frame => "frame",
+            ChannelEventKind::Command => "command",
+            ChannelEventKind::Doc => "doc",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == s)
+    }
+}
+
+/// #667 — the external principal a RELAYING actor (the gateway) declares an
+/// event was relayed for. Additive and copied verbatim from the publish body
+/// like `correlation`: the worker still stamps `producer` from the cap-signed
+/// actor (the gateway's own omni), so attribution of WHO PUBLISHED is never
+/// payload-supplied; consumers trust the stamp by the producer's identity (an
+/// app's `bound_channels` names the feed's relay actor). Carries the registry
+/// contact id + tier only — never the transport id (D13).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ContactStamp {
+    pub contact_id: String,
+    pub tier: String,
 }
 
 /// #519/#522 — declared audio parameters riding an `audio-clip` turn. All
@@ -539,6 +592,18 @@ pub struct ChannelEvent {
     /// to single-shot rather than fragment-spamming an old UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// #667 — the contact a relaying actor declares this event was relayed
+    /// for (see [`ContactStamp`]). Absent on every non-gateway event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactStamp>,
+    /// #667 — the media's content type when the body (inline or by ref) is
+    /// not text (`image/jpeg`, `audio/ogg`); absent = the kind's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// #667 — the source slot / feed the event was RELAYED from when a relay
+    /// re-publishes (a caption's `text` beside its `image`) — informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_of: Option<String>,
 }
 
 /// Broker `POST /v1/cap/channel-sts` response (#541) — short-lived, owner-scoped
@@ -588,6 +653,56 @@ pub struct ChannelPublishBody {
     /// #563 — inbound stream hint (see [`ChannelEvent::stream`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// #667 — the relayed-for contact (see [`ChannelEvent::contact`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactStamp>,
+    /// #667 — media content type (see [`ChannelEvent::content_type`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// #667 — see [`ChannelEvent::relay_of`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_of: Option<String>,
+}
+
+/// #667 — channel-worker `POST /v1/channel/blob-put`: store one media
+/// original UNCHANGED beside the feed (`bots/<owner>/channel/<id>.blob/<blob>`)
+/// under the same publish cap, returning the `body_ref` a later
+/// `/v1/channel/publish` names. Kept out of the feed's own prefix so the poll
+/// listing never sees it. Bytes ride base64 (JSON body; the worker caps the
+/// decoded size at `AGENTKEYS_CHANNEL_BLOB_MAX_BYTES`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBlobPutBody {
+    pub cap: CapToken,
+    pub content_type: String,
+    pub bytes_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBlobPutResp {
+    pub ok: bool,
+    /// The `body_ref` to put on the event that references this blob.
+    pub body_ref: String,
+    pub bytes: u64,
+    /// `sha256` hex of the stored bytes — the consumer's dedup / "bytes
+    /// unchanged" proof.
+    pub sha256: String,
+}
+
+/// #667 — channel-worker `POST /v1/channel/blob-get`: fetch a blob by
+/// `body_ref` under the feed's SUBSCRIBE cap (the ref's channel must match the
+/// cap's).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBlobGetBody {
+    pub cap: CapToken,
+    pub body_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBlobGetResp {
+    pub ok: bool,
+    pub content_type: String,
+    pub bytes_b64: String,
+    pub sha256: String,
 }
 
 fn channel_direction_in() -> ChannelDirection {
@@ -882,6 +997,84 @@ pub struct GatewayStatusView {
     /// (Surfaced so the skip is LOUD, never a silent drop.)
     #[serde(default)]
     pub audit_on_chain: bool,
+    /// #667 — the gateway's OWN device actor (`0x`-omni) once enrolled: the
+    /// identity the feed hop mints channel caps as. Absent = decision-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor_omni: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub device_key_hash: Option<String>,
+    /// #667 — an allowed turn LANDS on the app's feed (device enrolled +
+    /// channel worker configured); false = the turn is decided + audited only.
+    #[serde(default)]
+    pub feed_hop: bool,
+    /// #667 — the messaging feeds this gateway delivers from (reach-derived).
+    #[serde(default)]
+    pub feeds: Vec<String>,
+}
+
+/// #667 — `GET /v1/gateway/admin/device/status`: the gateway's OWN device
+/// actor (arch.md §6.4 — one machine ↔ one device actor).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayDeviceStatus {
+    pub ok: bool,
+    /// A broker + key file are configured (the enrollment can run).
+    pub configured: bool,
+    pub enrolled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor_omni: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub device_key_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub broker_url: Option<String>,
+    /// The registry-facing transport namespace (`weixin` | `telegram`) — the
+    /// feed id prefix and the channel-registry row id.
+    #[serde(default)]
+    pub transport: String,
+    pub feed_hop: bool,
+    /// Why the feed hop is idle (`None` = armed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub blocker: Option<String>,
+    #[serde(default)]
+    pub feeds: Vec<String>,
+}
+
+/// #667 — `POST /v1/gateway/admin/device/pairing-request` response: the
+/// gateway's K10 minted a §10.2 pairing code; the daemon (master) claims it
+/// and builds the accept (`is_device`) for the ONE Touch ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayDevicePairingStart {
+    pub ok: bool,
+    pub request_id: String,
+    pub pairing_code: String,
+    /// The K10 EVM address (`0x` + 40 hex).
+    pub device_pubkey: String,
+    pub device_key_hash: String,
+    /// The device's PoP (the accept build's `agent_pop_sig`).
+    pub pop_sig: String,
+}
+
+/// #667 — `POST /v1/gateway/admin/device/pairing-complete` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayDevicePairingCompleteRequest {
+    pub request_id: String,
+}
+
+/// #667 — `POST /v1/gateway/admin/device/pairing-complete` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayDevicePairingDone {
+    pub ok: bool,
+    pub actor_omni: String,
+    pub device_key_hash: String,
+    pub device_pubkey: String,
+    /// The device-side poll returned a session (proven from this side).
+    pub session_proven: bool,
 }
 
 /// `POST /v1/gateway/admin/login/start` request (#502, plan T9 first step).
@@ -1371,9 +1564,11 @@ pub struct SignStsResult {
 /// `knowledge` = light curation, recalled/injected per turn (the original
 /// "memory"); `skill` = strict diff-review curation, delivered as files;
 /// `persona` = master-authored only (never inbox-adoptable), applied fresh each
-/// turn (`SOUL.md`). Wire spelling is the lowercase word; absent = `knowledge`
-/// (full back-compat — every pre-#390 object is knowledge). `resource` joins
-/// the enum when its gate policy is implemented, not before.
+/// turn (`SOUL.md`); `resource` (#666, the fourth kind — arch.md §5
+/// `resource item`) = master-curated ONLY, distributed read-only by the
+/// mirror under an ordinary `memory:<ns>` grant (no inbox on that namespace),
+/// never inbox-adoptable. Wire spelling is the lowercase word; absent =
+/// `knowledge` (full back-compat — every pre-#390 object is knowledge).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
@@ -1382,6 +1577,7 @@ pub enum ContextKind {
     Knowledge,
     Skill,
     Persona,
+    Resource,
 }
 
 impl ContextKind {
@@ -1392,6 +1588,7 @@ impl ContextKind {
             ContextKind::Knowledge => "knowledge",
             ContextKind::Skill => "skill",
             ContextKind::Persona => "persona",
+            ContextKind::Resource => "resource",
         }
     }
 
@@ -1401,8 +1598,15 @@ impl ContextKind {
             "knowledge" => Some(ContextKind::Knowledge),
             "skill" => Some(ContextKind::Skill),
             "persona" => Some(ContextKind::Persona),
+            "resource" => Some(ContextKind::Resource),
             _ => None,
         }
+    }
+
+    /// Whether a delegate proposal of this kind may ever be adopted from the
+    /// inbox: persona and resources are master-authored only.
+    pub fn inbox_adoptable(&self) -> bool {
+        !matches!(self, ContextKind::Persona | ContextKind::Resource)
     }
 }
 
@@ -1647,7 +1851,7 @@ pub struct BuildAcceptUserOpRequest {
     pub is_device: bool,
 }
 
-fn is_false(b: &bool) -> bool {
+pub(crate) fn is_false(b: &bool) -> bool {
     !*b
 }
 
@@ -1884,6 +2088,59 @@ pub struct BuildSpawnUserOpRequest {
     pub memory_ns: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub memory_inherited: bool,
+    /// #663 — the install wizard's choices for an app template (slots →
+    /// channels, resources → items, audience). Absent = a role-preset spawn
+    /// (today's fixed template). The broker compiles `preset_id` + bindings
+    /// into the sheet's `services[]` — always a FRESH delegate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<AppInstallBindings>,
+    /// #663 — the OTHER actors whose scope this ONE Touch ID also (re)writes:
+    /// the gateway that relays a messaging feed, the console that renders a
+    /// display feed. Each entry is that actor's FULL resulting set (set-replace
+    /// `setScope`), computed by the daemon from the compiler's endpoint deltas
+    /// + the actor's current grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_scopes: Vec<EndpointScope>,
+    /// #663 — device actors REGISTERED in the same batch (`registerAgentDevice`
+    /// ahead of the delegate's `registerDelegate`): the channel gateway / the
+    /// console an install binds when not yet enrolled — the ONE Touch ID
+    /// enrolls them too (their grants ride `endpoint_scopes`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_enrollments: Vec<EndpointEnrollment>,
+}
+
+/// #663 — one extra `setScope` the install / uninstall batch carries for an
+/// endpoint actor (gateway, console). `services` are NAMES (the broker
+/// keccaks them); `preserve_service_ids` are on-chain hashes the caller could
+/// not name (kept verbatim, like `/v1/scope/build`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct EndpointScope {
+    pub actor_omni: String,
+    pub services: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserve_service_ids: Vec<String>,
+}
+
+/// #663 — one device actor an install batch REGISTERS beside the delegate:
+/// the master's claim of the endpoint's §10.2 pairing produced `actor_omni`
+/// (the HDKD child for `label`) and the endpoint's K10 coordinates + PoP. The
+/// broker re-verifies lineage (child of the session omni) and the PoP before
+/// composing `registerAgentDevice` into the batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct EndpointEnrollment {
+    pub actor_omni: String,
+    pub device_key_hash: String,
+    pub pop_sig: String,
+    /// The HDKD label (`gateway-<transport>` / `console-<host>`).
+    pub label: String,
+    /// `gateway` · `console` — for the sheet.
+    #[serde(default)]
+    pub kind: String,
+    /// The gateway's transport namespace (`weixin` / `telegram`), when a gateway.
+    #[serde(default)]
+    pub transport: String,
 }
 
 /// Broker → daemon response to `/v1/agent/spawn/build`: the sponsored-UserOp
@@ -1911,6 +2168,29 @@ pub struct BuildSpawnUserOpResponse {
     pub slots_used: u16,
     #[ts(type = "number")]
     pub slots_total: u16,
+    /// #663 — what each compiled grant line IS (the sheet's sections + the
+    /// Sensitive tier on resource lines). Empty on a role-preset spawn.
+    #[serde(default)]
+    pub annotations: Vec<ServiceAnnotation>,
+    /// #663 — the feeds the sandbox will poll / publish (R1 / R3).
+    #[serde(default)]
+    pub bound_channels: Vec<BoundChannel>,
+    /// #663 — the confirmed audience per messaging slot (→ contact `reach`).
+    #[serde(default)]
+    pub audience: Vec<SlotAudience>,
+    #[serde(default)]
+    pub availability: Availability,
+    /// #663 — the template the install compiled (empty for a blank spawn).
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub template_version: String,
+    /// #663 — the endpoint actors this batch also re-scopes (echoed).
+    #[serde(default)]
+    pub endpoint_scopes: Vec<EndpointScope>,
+    /// #663 — the enrollments this batch registers (echoed for the sheet).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_enrollments: Vec<EndpointEnrollment>,
 }
 
 /// Daemon → broker `POST /v1/agent/archive/build` — archive ONE delegate
@@ -1928,6 +2208,11 @@ pub struct BuildArchiveUserOpRequest {
     /// keccak ids on-chain) — recorded for #425 O2 inheritance discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_ns: Option<String>,
+    /// #663 — the endpoint actors' FULL resulting sets after this app's feed
+    /// grants are dropped (the install's mirror: the gateway / console stop
+    /// relaying + rendering a feed nobody serves).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_scopes: Vec<EndpointScope>,
 }
 
 /// Broker → daemon response to `/v1/agent/archive/build`.
@@ -1980,7 +2265,7 @@ pub struct PresetSuggestedContext {
 /// A preset's suggested schedule entry. Phase-2 renders it in the panel; the
 /// execution substrate (the #340 in-sandbox job harness) wires up later —
 /// the field is DATA, not a live cron.
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct PresetSchedule {
     pub cron: String,
@@ -2010,6 +2295,13 @@ pub struct PresetSummary {
     pub suggested_context: Vec<PresetSuggestedContext>,
     #[serde(default)]
     pub schedule: Vec<PresetSchedule>,
+    /// #662 — the app template manifest half (schema, slots, resources,
+    /// tools, availability, budgets, disclosure, context pointers), flattened
+    /// into the same `preset.json`. Every field defaults, so a pre-#662 role
+    /// preset parses unchanged as a zero-slot template.
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub app: AppManifest,
 }
 
 /// One skills doc of a bundle (`presets/<id>/skills/<filename>`).
@@ -2030,6 +2322,29 @@ pub struct PresetBundle {
     pub soul_md: String,
     #[serde(default)]
     pub skills: Vec<PresetSkillDoc>,
+    /// #662 — knowledge docs (`presets/<id>/knowledge/*.md`), distributed as
+    /// `knowledge`-kind context alongside the skills.
+    #[serde(default)]
+    pub knowledge: Vec<PresetSkillDoc>,
+}
+
+impl PresetBundle {
+    pub fn skill_filenames(&self) -> Vec<String> {
+        self.skills.iter().map(|d| d.filename.clone()).collect()
+    }
+
+    pub fn knowledge_filenames(&self) -> Vec<String> {
+        self.knowledge.iter().map(|d| d.filename.clone()).collect()
+    }
+
+    /// The R2 perception prompt (`skills/perception.md`) when the template
+    /// ships one — template content, never framework code.
+    pub fn perception_prompt(&self) -> Option<&str> {
+        self.skills
+            .iter()
+            .find(|d| d.filename == PERCEPTION_SKILL_FILE)
+            .map(|d| d.content.as_str())
+    }
 }
 
 /// `GET /v1/presets` — the catalog. `catalog_version` is the deployed ref the
@@ -2234,6 +2549,25 @@ pub mod sandbox_env {
     /// `opchat-<label>` channel id (the ceremony's ns-defaults-to-label rule).
     /// NOT a chat-contract env.
     pub const MEMORY_NS: &str = "AGENTKEYS_MEMORY_NS";
+    /// #665 (R1/R3) — the feeds the sandbox polls / publishes beyond opchat:
+    /// a JSON array of `BoundChannel` (the compiler's `bound_channels`),
+    /// injected at CREATE from the durable spawn context. OPTIONAL — absent
+    /// = a role-preset delegate with only its opchat feed.
+    pub const BOUND_CHANNELS: &str = "AGENTKEYS_BOUND_CHANNELS";
+    /// #669 (R4) / #668 (R2) — the app template id the delegate was installed
+    /// from; the in-sandbox daemon fetches the bundle from the broker catalog
+    /// for its `schedule[]` + `skills/perception.md`. OPTIONAL.
+    pub const APP_TEMPLATE: &str = "AGENTKEYS_APP_TEMPLATE";
+    /// #669 — the app's `availability` policy wire spelling (informational
+    /// in-sandbox; the broker's sweeper is the enforcer). OPTIONAL.
+    pub const APP_AVAILABILITY: &str = "AGENTKEYS_APP_AVAILABILITY";
+    /// #666 (R6) — the comma-separated namespace list the distribution mirror
+    /// probes (the app's own namespace + every bound resource namespace + the
+    /// household defaults). OPTIONAL — absent, the mirror probes its defaults.
+    pub const MEMORY_NAMESPACES: &str = "AGENTKEYS_MEMORY_NAMESPACES";
+    /// #669 (R4) — the household's UTC offset in minutes for `schedule[]`
+    /// cron evaluation. OPTIONAL — absent = UTC.
+    pub const APP_TZ_OFFSET_MINUTES: &str = "AGENTKEYS_APP_TZ_OFFSET_MINUTES";
 
     /// The in-sandbox bridge port — where the #577 management surface
     /// (session export/import, job status) lives, reached through the veFaaS
@@ -2335,6 +2669,25 @@ mod tests {
         // loop) pin the same name; optional, so NOT in CHAT_COMMON/REQUIRED.
         assert_eq!(sandbox_env::MEMORY_NS, "AGENTKEYS_MEMORY_NS");
         assert!(!sandbox_env::CHAT_REQUIRED.contains(&sandbox_env::MEMORY_NS));
+        // #660 stage 1 — the app-runtime envs, equally pinned + optional.
+        assert_eq!(sandbox_env::BOUND_CHANNELS, "AGENTKEYS_BOUND_CHANNELS");
+        assert_eq!(sandbox_env::APP_TEMPLATE, "AGENTKEYS_APP_TEMPLATE");
+        assert_eq!(sandbox_env::APP_AVAILABILITY, "AGENTKEYS_APP_AVAILABILITY");
+        assert_eq!(
+            sandbox_env::MEMORY_NAMESPACES,
+            "AGENTKEYS_MEMORY_NAMESPACES"
+        );
+        assert_eq!(
+            sandbox_env::APP_TZ_OFFSET_MINUTES,
+            "AGENTKEYS_APP_TZ_OFFSET_MINUTES"
+        );
+        for k in [
+            sandbox_env::BOUND_CHANNELS,
+            sandbox_env::APP_TEMPLATE,
+            sandbox_env::MEMORY_NAMESPACES,
+        ] {
+            assert!(!sandbox_env::CHAT_REQUIRED.contains(&k));
+        }
     }
 
     /// #594 — `object_key` is additive: an absent key keeps the pre-#594 wire
@@ -2662,6 +3015,9 @@ mod tests {
             partial: None,
             seq: None,
             stream: None,
+            contact: None,
+            content_type: None,
+            relay_of: None,
         };
         let json = serde_json::to_value(&actor).unwrap();
         assert_eq!(json["producer"]["actor"]["actor_omni"], "0xcam");
@@ -2743,8 +3099,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.kind, ContextKind::Knowledge);
-        let bad: Result<ContextKind, _> = serde_json::from_str("\"resource\"");
-        assert!(bad.is_err(), "resource is not in the wire enum yet (§16.2)");
+        // #666 — the fourth kind joined the enum with its gate policy
+        // (master-authored only, never inbox-adoptable).
+        let res: ContextKind = serde_json::from_str("\"resource\"").unwrap();
+        assert_eq!(res, ContextKind::Resource);
+        assert_eq!(res.as_str(), "resource");
+        assert!(!ContextKind::Resource.inbox_adoptable());
+        assert!(!ContextKind::Persona.inbox_adoptable());
+        assert!(ContextKind::Knowledge.inbox_adoptable());
+        assert!(ContextKind::Skill.inbox_adoptable());
+        let bad: Result<ContextKind, _> = serde_json::from_str("\"resources\"");
+        assert!(bad.is_err(), "the plural is not a wire spelling");
     }
 
     #[test]

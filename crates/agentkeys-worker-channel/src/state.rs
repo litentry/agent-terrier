@@ -16,6 +16,11 @@ const DEFAULT_MAX_POLL_SECONDS: u64 = 25;
 /// (a 20 s wav ≈ 640 KB); anything bigger belongs in `body_ref`. Override:
 /// `AGENTKEYS_CHANNEL_INLINE_MAX_BYTES`.
 const DEFAULT_INLINE_MAX_BYTES: usize = 1 << 20;
+/// #667 — media ORIGINALS stored beside the feed by `/v1/channel/blob-put`
+/// (DECODED bytes). A phone photo is 2–8 MB; originals are never downscaled
+/// (owner decision 2026-09-07), so the ceiling sits above that. Override:
+/// `AGENTKEYS_CHANNEL_BLOB_MAX_BYTES`.
+const DEFAULT_BLOB_MAX_BYTES: usize = 16 << 20;
 
 #[derive(Debug, Clone)]
 pub struct ChannelWorkerConfig {
@@ -41,6 +46,8 @@ pub struct ChannelWorkerConfig {
     /// must ride `body_ref` (413 `channel_body_too_large` otherwise — there was
     /// previously NO size validation at all, only axum's implicit ~2 MB).
     pub inline_max_bytes: usize,
+    /// #667 — max DECODED bytes one blob (a media original) may carry.
+    pub blob_max_bytes: usize,
 }
 
 impl ChannelWorkerConfig {
@@ -79,6 +86,10 @@ impl ChannelWorkerConfig {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_INLINE_MAX_BYTES);
+        let blob_max_bytes = std::env::var("AGENTKEYS_CHANNEL_BLOB_MAX_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_BLOB_MAX_BYTES);
 
         Ok(ChannelWorkerConfig {
             channel_bucket,
@@ -92,6 +103,7 @@ impl ChannelWorkerConfig {
             kek_hex,
             max_poll_seconds,
             inline_max_bytes,
+            blob_max_bytes,
         })
     }
 }

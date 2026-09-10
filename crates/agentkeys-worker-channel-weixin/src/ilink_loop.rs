@@ -250,12 +250,14 @@ pub async fn run_with_token(
                 dirty = true;
             }
             let text = ilink::message_body_text(&msg);
-            if text.trim().is_empty() {
-                debug!(from = %from, "inbound without relayable text (media?) — skipped");
+            // #667 — a photo / voice clip rides the turn as a media original.
+            let media = crate::media::first_ilink_media(&state, &msg).await;
+            if text.trim().is_empty() && media.is_none() {
+                debug!(from = %from, "inbound without relayable text or media — skipped");
                 continue;
             }
 
-            let outcome = relay::process_inbound(&state, &from, &text).await;
+            let outcome = relay::process_turn(&state, "weixin", &from, &text, media).await;
             info!(
                 from = %from,
                 contact = %outcome.contact_id,
@@ -265,16 +267,15 @@ pub async fn run_with_token(
                 target = outcome.decision.target_alias.as_deref().unwrap_or(""),
                 "ilink inbound relayed"
             );
-            if let Some(event) = outcome.event.as_ref() {
-                // Feed delivery is the transport-neutral follow-up (same as the
-                // OA path) — the routed event is built + audited; log it here.
-                debug!(channel = %event.channel_id, "routed event built (feed hop pending)");
+            if let Some(f) = outcome.feed.as_ref() {
+                info!(channel = %f.channel_id, event = %f.event_id, media = f.media_event_id.is_some(), "feed hop landed");
+            } else if let Some(e) = outcome.feed_error.as_deref() {
+                warn!(reason = %e, "allowed turn did NOT reach a feed");
             }
 
-            let reply = outcome
-                .claim_ack
-                .clone()
-                .or_else(|| relay::reply_text_for(&outcome.decision));
+            let reply = outcome.claim_ack.clone().or_else(|| {
+                relay::reply_text_for_turn(&outcome.decision, outcome.media_marker, false)
+            });
             if let Some(reply) = reply {
                 let ct = persist.context_tokens.get(&from).map(|s| s.as_str());
                 if let Err(e) = client.send_text(&from, &reply, ct).await {

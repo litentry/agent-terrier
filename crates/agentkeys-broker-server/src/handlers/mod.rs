@@ -17,6 +17,7 @@ pub mod scope;
 pub mod spawn;
 pub mod speech_sts;
 pub mod update;
+pub mod wake;
 pub mod wallet;
 
 use axum::http::HeaderMap;

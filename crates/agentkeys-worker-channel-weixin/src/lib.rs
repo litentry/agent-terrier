@@ -29,11 +29,14 @@
 
 pub mod admin;
 pub mod config;
+pub mod device;
 pub mod handlers;
 pub mod ilink;
 pub mod ilink_login;
 pub mod ilink_loop;
 pub mod l3;
+pub mod media;
+pub mod outbound;
 pub mod registry;
 pub mod relay;
 pub mod router;

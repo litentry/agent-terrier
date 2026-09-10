@@ -1,3 +1,12 @@
+import type { AppDashboard } from '@/lib/generated/AppDashboard';
+import type { AppInstallBindings } from '@/lib/generated/AppInstallBindings';
+import type { AppInstallBuildResponse } from '@/lib/generated/AppInstallBuildResponse';
+import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
+import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
+import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
+import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
+import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
+import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
 import type { ApiAgentUpdateResult } from '@/lib/generated/ApiAgentUpdateResult';
 import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
@@ -784,9 +793,61 @@ export interface AgentKeysClient {
   // (only `name`/`note` are editable; delete is refused while grants hold it).
   // Optional: only the daemon backend serves the registry.
   listChannels?(): Promise<Result<{ channels: ChannelDef[]; storage: string }>>;
-  createChannel?(input: { id: string; name: string; note?: string }): Promise<Result<ChannelDef>>;
-  updateChannel?(id: string, input: { name?: string; note?: string }): Promise<Result<ChannelDef>>;
+  createChannel?(input: { id: string; name: string; note?: string; kind?: ChannelEndpointKind; endpoint_actor_omni?: string }): Promise<Result<ChannelDef>>;
+  updateChannel?(id: string, input: { name?: string; note?: string; kind?: ChannelEndpointKind; endpoint_actor_omni?: string }): Promise<Result<ChannelDef>>;
   deleteChannel?(id: string): Promise<Result<void>>;
+
+  // #664 / #682 — family APPLICATIONS (epic #660): the two policy-class
+  // registries + the install / uninstall ceremonies (ONE Touch ID each, over
+  // the #427 spawn / archive proxies), the per-app dashboard (activity + the
+  // #670 card on its display feed + the minted sheet), a card-action command
+  // (published from the console's OWN device actor once enrolled, #541), and
+  // resource curation. Daemon backend only.
+  listApps?(): Promise<Result<{ apps: AppInstanceRow[]; storage: string; console_device?: string | null }>>;
+  appDashboard?(label: string): Promise<Result<AppDashboard>>;
+  appInstallBuild?(input: {
+    template_id: string;
+    label: string;
+    bindings: AppInstallBindings;
+    memory_ns?: string;
+    memory_inherited?: boolean;
+  }): Promise<Result<AppInstallBuildResponse>>;
+  appInstallSubmit?(body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { installed?: unknown[] }>>;
+  appUninstallBuild?(label: string, input: { resources_kept: boolean }): Promise<Result<BuildArchiveUserOpResponse>>;
+  appUninstallSubmit?(label: string, body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { uninstalled?: unknown }>>;
+  appCommand?(
+    label: string,
+    input: { channel_id?: string; action: string; command: string; args?: unknown; card_updated_at?: number },
+  ): Promise<Result<unknown>>;
+  listResources?(): Promise<Result<{ items: ResourceItemRow[]; storage: string }>>;
+  resourceAdd?(input: {
+    id: string;
+    name: string;
+    name_zh: string;
+    kind: ResourceKind;
+    tags: string[];
+    sensitivity: Sensitivity;
+    ns: string;
+    body: string;
+  }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string }>>;
+  // #541 / #667 — the two device-actor enrollments the console drives (this
+  // console itself, and the channel gateway): build → ONE Touch ID → submit.
+  consoleDeviceStatus?(): Promise<Result<ConsoleDeviceStatus>>;
+  consoleEnrollBuild?(input: { label?: string }): Promise<Result<DeviceEnrollBuild>>;
+  consoleEnrollSubmit?(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; label: string }>>;
+  gatewayDeviceStatus?(): Promise<Result<GatewayDeviceStatus>>;
+  gatewayEnrollBuild?(input: Record<string, never>): Promise<Result<DeviceEnrollBuild>>;
+  gatewayEnrollSubmit?(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; transport: string; channel_id: string }>>;
+}
+
+/** The broker's accept envelope for a device-actor enrollment (+ the daemon's
+ *  label / actor annotations) — the ONE Touch ID signs `user_op_hash`. */
+export interface DeviceEnrollBuild {
+  user_op: unknown;
+  user_op_hash: string;
+  label: string;
+  actor_omni: string;
+  transport?: string;
 }
 
 /** #404 — one channel definition (mirror of the generated ApiChannel). */
@@ -795,4 +856,8 @@ export interface ChannelDef {
   name: string;
   note?: string;
   createdAt: number;
+  /** #664 — the endpoint kind an app slot binds by (absent on pre-#664 rows). */
+  kind?: ChannelEndpointKind;
+  /** #664 — the endpoint's own device actor (`0x`-omni), when it has one. */
+  endpointActorOmni?: string;
 }

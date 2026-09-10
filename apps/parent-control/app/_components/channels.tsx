@@ -12,7 +12,7 @@
 //     from the devices/actor pages first) — the daemon returns the holders.
 //
 // The registry is a master-only, signer-encrypted Config-class doc
-// (`config/channel-registry.enc`); the WeChat gateway + family live on the
+// (`config/channel-registry.enc`); the WeChat contact gate + family live on the
 // Contacts page.
 import { useState, type CSSProperties } from 'react';
 
@@ -60,7 +60,7 @@ export function ChannelRegistryPage({ registry }: { registry: ChannelRegistryPro
       <PageHead
         crumb="household / channels"
         title="Channels"
-        desc="The conduits your agents and devices meet through. Create channels here, then attach them when pairing a device — the id is the immutable anchor (it is what the on-chain grants hash; display names can change, ids never do). The WeChat gateway and family contacts live on the Contacts page."
+        desc="The conduits your agents and devices meet through. Create channels here, then attach them when pairing a device — the id is the immutable anchor (it is what the on-chain grants hash; display names can change, ids never do). The WeChat contact gate and family contacts live on the Contacts page."
         actions={<button className="btn sm" onClick={registry.onRefresh}>↻ refresh</button>}
       />
       {registry.storage === 'cached' && (

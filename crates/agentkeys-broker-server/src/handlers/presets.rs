@@ -19,17 +19,23 @@
 
 use std::sync::OnceLock;
 
-use agentkeys_protocol::{PresetBundle, PresetCatalogResponse, PresetSkillDoc, PresetSummary};
+use agentkeys_protocol::{
+    validate_template, PresetBundle, PresetCatalogResponse, PresetSchedule, PresetSkillDoc,
+    PresetSummary, TemplateError,
+};
 use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::Json;
 
-/// One compiled-in bundle: the manifest JSON + persona + skills docs.
-struct BuiltinPreset {
+/// One compiled-in bundle: the manifest JSON + persona + skills docs (+ the
+/// #662 knowledge docs under `presets/<id>/knowledge/`).
+pub(crate) struct BuiltinPreset {
     manifest_json: &'static str,
     soul_md: &'static str,
     /// `(filename, content)` — the docs under `presets/<id>/skills/`.
     skills: &'static [(&'static str, &'static str)],
+    /// `(filename, content)` — the docs under `presets/<id>/knowledge/`.
+    knowledge: &'static [(&'static str, &'static str)],
 }
 
 /// The v1 built-in catalog (#428 acceptance: the four household presets).
@@ -41,6 +47,7 @@ const BUILTINS: &[BuiltinPreset] = &[
             "TOOLS.md",
             include_str!("../../../../presets/default-assistant/skills/TOOLS.md"),
         )],
+        knowledge: &[],
     },
     BuiltinPreset {
         manifest_json: include_str!("../../../../presets/health-master/preset.json"),
@@ -49,6 +56,7 @@ const BUILTINS: &[BuiltinPreset] = &[
             "TOOLS.md",
             include_str!("../../../../presets/health-master/skills/TOOLS.md"),
         )],
+        knowledge: &[],
     },
     BuiltinPreset {
         manifest_json: include_str!("../../../../presets/kid-bestie/preset.json"),
@@ -57,6 +65,7 @@ const BUILTINS: &[BuiltinPreset] = &[
             "TOOLS.md",
             include_str!("../../../../presets/kid-bestie/skills/TOOLS.md"),
         )],
+        knowledge: &[],
     },
     BuiltinPreset {
         manifest_json: include_str!("../../../../presets/watchdog/preset.json"),
@@ -65,8 +74,60 @@ const BUILTINS: &[BuiltinPreset] = &[
             "TOOLS.md",
             include_str!("../../../../presets/watchdog/skills/TOOLS.md"),
         )],
+        knowledge: &[],
+    },
+    // #673 — Chef, the first APPLICATION template (epic #660). Content over
+    // the contract: slots, resources, tools, schedule, disclosure in the
+    // manifest; the four skills docs + one knowledge doc are template
+    // content the framework never reads (F0/F1).
+    BuiltinPreset {
+        manifest_json: include_str!("../../../../presets/chef/preset.json"),
+        soul_md: include_str!("../../../../presets/chef/SOUL.md"),
+        skills: &[
+            (
+                "perception.md",
+                include_str!("../../../../presets/chef/skills/perception.md"),
+            ),
+            (
+                "diary.md",
+                include_str!("../../../../presets/chef/skills/diary.md"),
+            ),
+            (
+                "fridge.md",
+                include_str!("../../../../presets/chef/skills/fridge.md"),
+            ),
+            (
+                "plan.md",
+                include_str!("../../../../presets/chef/skills/plan.md"),
+            ),
+        ],
+        knowledge: &[(
+            "nutrition-basics.md",
+            include_str!("../../../../presets/chef/knowledge/nutrition-basics.md"),
+        )],
+    },
+    // #671 — the synthetic CONFORMANCE template the framework suite installs
+    // (hidden: listed only with AGENTKEYS_CATALOG_INCLUDE_HIDDEN=1 on a test
+    // stack; always fetchable by id). Exercises every slot kind the suite
+    // asserts + a resource + tools + a schedule with no household meaning.
+    BuiltinPreset {
+        manifest_json: include_str!("../../../../presets/conformance/preset.json"),
+        soul_md: include_str!("../../../../presets/conformance/SOUL.md"),
+        skills: &[(
+            "perception.md",
+            include_str!("../../../../presets/conformance/skills/perception.md"),
+        )],
+        knowledge: &[(
+            "probe.md",
+            include_str!("../../../../presets/conformance/knowledge/probe.md"),
+        )],
     },
 ];
+
+/// #663 — the env that lists HIDDEN templates (the synthetic conformance
+/// template, #671) in `GET /v1/presets`. Set on a test stack only; a hidden
+/// template is always fetchable by id (a household never sees it listed).
+pub const CATALOG_INCLUDE_HIDDEN_ENV: &str = "AGENTKEYS_CATALOG_INCLUDE_HIDDEN";
 
 /// The deployed ref the bundles were compiled from: an explicit build-time
 /// `AGENTKEYS_BUILD_REF` (set by the host build when available) else the crate
@@ -93,28 +154,73 @@ fn registry() -> &'static Result<Vec<(PresetSummary, &'static BuiltinPreset)>, S
     })
 }
 
+fn docs_of(list: &'static [(&'static str, &'static str)]) -> Vec<PresetSkillDoc> {
+    list.iter()
+        .map(|(filename, content)| PresetSkillDoc {
+            filename: (*filename).to_string(),
+            content: (*content).to_string(),
+        })
+        .collect()
+}
+
 fn bundle_for(summary: &PresetSummary, b: &BuiltinPreset) -> PresetBundle {
     PresetBundle {
         manifest: summary.clone(),
         soul_md: b.soul_md.to_string(),
-        skills: b
-            .skills
-            .iter()
-            .map(|(filename, content)| PresetSkillDoc {
-                filename: (*filename).to_string(),
-                content: (*content).to_string(),
-            })
-            .collect(),
+        skills: docs_of(b.skills),
+        knowledge: docs_of(b.knowledge),
     }
+}
+
+/// The catalog rows a household may list: hidden (synthetic / conformance)
+/// templates only when the stack opts in. PURE — the handler reads the env.
+pub(crate) fn visible_presets(
+    rows: &[(PresetSummary, &BuiltinPreset)],
+    include_hidden: bool,
+) -> Vec<PresetSummary> {
+    rows.iter()
+        .filter(|(s, _)| include_hidden || !s.app.hidden)
+        .map(|(s, _)| s.clone())
+        .collect()
+}
+
+/// #663 — resolve a template by id for the spawn compiler: the parsed
+/// manifest + its bundle (the compiler validates `context` pointers against
+/// the bundle's filenames). `None` = unknown id.
+pub(crate) fn find_template(id: &str) -> Option<(PresetSummary, PresetBundle)> {
+    let rows = registry().as_ref().ok()?;
+    rows.iter()
+        .find(|(s, _)| s.id == id)
+        .map(|(s, b)| (s.clone(), bundle_for(s, b)))
+}
+
+/// #663 — validate a template against its own bundle (the install refuses a
+/// template that fails any row, before the sheet renders).
+pub(crate) fn validate_builtin(bundle: &PresetBundle) -> Result<(), Vec<TemplateError>> {
+    validate_template(
+        &bundle.manifest,
+        &bundle.skill_filenames(),
+        &bundle.knowledge_filenames(),
+    )
+}
+
+/// #669 — a template's `schedule[]` (the sweeper's `scheduled` policy input).
+pub(crate) fn template_schedule(id: &str) -> Vec<PresetSchedule> {
+    find_template(id)
+        .map(|(s, _)| s.schedule)
+        .unwrap_or_default()
 }
 
 /// `GET /v1/presets` — the catalog summaries.
 pub async fn list_presets(
 ) -> Result<Json<PresetCatalogResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let include_hidden = std::env::var(CATALOG_INCLUDE_HIDDEN_ENV)
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
     match registry() {
         Ok(rows) => Ok(Json(PresetCatalogResponse {
             catalog_version: catalog_version().to_string(),
-            presets: rows.iter().map(|(s, _)| s.clone()).collect(),
+            presets: visible_presets(rows, include_hidden),
         })),
         Err(e) => Err(crate::handlers::accept::aerr(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -193,10 +299,49 @@ mod tests {
         }
     }
 
+    /// #662 — every compiled-in template passes the manifest validator against
+    /// its own bundle (a template that fails a row can never be installed, so
+    /// it must never ship).
+    #[test]
+    fn every_builtin_template_validates_against_its_bundle() {
+        for (summary, b) in registry().as_ref().unwrap() {
+            let bundle = bundle_for(summary, b);
+            if let Err(rows) = validate_builtin(&bundle) {
+                panic!("{}: manifest refused: {rows:?}", summary.id);
+            }
+        }
+    }
+
+    /// #663 — hidden templates stay out of the household's listing unless the
+    /// stack opts in; a lookup by id always works.
+    #[test]
+    fn hidden_templates_are_listed_only_when_opted_in() {
+        let rows = registry().as_ref().unwrap();
+        let listed = visible_presets(rows, false);
+        assert!(listed.iter().all(|s| !s.app.hidden));
+        let all = visible_presets(rows, true);
+        assert_eq!(all.len(), rows.len());
+        assert!(find_template("watchdog").is_some());
+        assert!(find_template("nope").is_none());
+        assert!(!template_schedule("watchdog").is_empty());
+        assert!(template_schedule("nope").is_empty());
+    }
+
     #[tokio::test]
     async fn catalog_lists_and_fetch_roundtrips_unknown_404s() {
         let catalog = list_presets().await.expect("catalog").0;
-        assert_eq!(catalog.presets.len(), BUILTINS.len());
+        // The household listing hides the #671 conformance template (opt-in
+        // via AGENTKEYS_CATALOG_INCLUDE_HIDDEN on a test stack — never set in
+        // a unit test).
+        let visible = registry()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|(s, _)| !s.app.hidden)
+            .count();
+        assert_eq!(catalog.presets.len(), visible);
+        assert!(catalog.presets.iter().any(|p| p.id == "chef"));
+        assert!(catalog.presets.iter().all(|p| p.id != "conformance"));
         assert!(!catalog.catalog_version.is_empty());
 
         let bundle = get_preset(Path("watchdog".to_string()))

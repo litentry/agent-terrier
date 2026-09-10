@@ -4,16 +4,21 @@
  * speak (daemon chat loop, broker update handler, parent-control, ESP32
  * firmware, dev tooling — spec §3.2), driving a dsh agent instead of Hermes.
  *
- * This PR lands the CORE surface — `/v1/chat` (SSE + non-stream), `/healthz`,
- * `/v1/jobs` — bind-first on :8090. The `/v1/context/*` (persona, #390) and
- * `/v1/sandbox/mgmt/*` (#577/#594) surfaces land with the UI (#617) and
- * checkpoint (#616) work respectively; until then those paths 404, which the
- * daemon already treats as "pre-#428/pre-#577 image" (graceful).
+ * The surface: `/v1/chat` (SSE + non-stream), `/healthz`, `/v1/jobs` (GET the
+ * registry, POST to register — #669 schedule entries), `/v1/context/apply`
+ * (#428/#390/#662: persona + skills + knowledge, written under the runtime
+ * cwd AND registered as dsh system-prompt sections so the next model step
+ * reads them), `/v1/context/files` (the #390 view leg), `/v1/agent/restart`
+ * (the explicit re-source: a fresh session), and the `/v1/sandbox/mgmt/*`
+ * checkpoint surface (#577/#594) — bind-first on :8090.
  *
  * Byte-exactness of the wire lives in bridge-frames.ts + bridge-stream.ts
  * (pure, unit-tested). NO default export (dsh postmortem 0001).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { SessionId } from '@deepseek-ai/dsh-session';
@@ -73,6 +78,108 @@ function currentSelection(ctx: Context, config: Config): ModelSelection | undefi
 
 const SESSION_ID = 'agentkeys-bridge-session';
 
+/** A context file / skill / knowledge name the bridge will write: one path
+ *  segment, no traversal, no hidden files. */
+const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** The dsh system-prompt section names + orders the bridge owns. The
+ *  deployment persona slot (`deployment:persona`, order 0) stays the
+ *  profile's; ours render right after it (persona) and with the tool
+ *  guidance band (skills, knowledge) — unique names, so a re-apply never
+ *  collides with a base-layer registration. */
+const SECTION_PERSONA = { name: 'agentkeys:persona', order: 1 };
+const SECTION_SKILLS = { name: 'agentkeys:skills', order: 110 };
+const SECTION_KNOWLEDGE = { name: 'agentkeys:knowledge', order: 120 };
+
+interface ContextStore {
+  /** `<cwd>/SOUL.md` */
+  soul?: string;
+  /** `<cwd>/AGENTS.md` (owner-editable) */
+  agents?: string;
+  /** `<cwd>/skills/<name>` */
+  skills: Record<string, string>;
+  /** `<cwd>/knowledge/<name>` */
+  knowledge: Record<string, string>;
+}
+
+/** One registered background/scheduled job (#669: the daemon's schedule
+ *  entries register here so the device `jobs` command lists them). */
+export interface RegisteredJob {
+  id: string;
+  cron?: string;
+  label?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+const BASE64 = /^[A-Za-z0-9+/\s]*={0,2}\s*$/;
+
+function decodeB64(value: unknown, what: string): string {
+  if (typeof value !== 'string') throw Object.assign(new Error(`${what} must be a base64 string`), { code: 400 });
+  // Node decodes leniently (drops invalid characters) — a garbage body would
+  // silently become garbage bytes, so validate the alphabet first.
+  if (!BASE64.test(value)) throw Object.assign(new Error(`${what} is not valid base64`), { code: 400 });
+  return Buffer.from(value, 'base64').toString('utf8');
+}
+
+function readDirDocs(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const n of names) {
+    if (!SAFE_NAME.test(n)) continue;
+    try {
+      const p = join(dir, n);
+      if (statSync(p).isFile()) out[n] = readFileSync(p, 'utf8');
+    } catch {
+      /* unreadable entry — skipped */
+    }
+  }
+  return out;
+}
+
+function readOptional(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/** Load whatever an earlier apply persisted under `cwd` (a bridge restart
+ *  re-registers the sections from disk). */
+function loadContext(cwd: string): ContextStore {
+  return {
+    soul: readOptional(join(cwd, 'SOUL.md')),
+    agents: readOptional(join(cwd, 'AGENTS.md')),
+    skills: readDirDocs(join(cwd, 'skills')),
+    knowledge: readDirDocs(join(cwd, 'knowledge')),
+  };
+}
+
+/** The rendered prompt sections (persona · skills · knowledge). Empty text
+ *  = the section contributes nothing (dsh drops empty sections). */
+export function renderContextSections(store: ContextStore): { persona: string; skills: string; knowledge: string } {
+  const persona = (store.soul ?? '').trim();
+  const skillNames = Object.keys(store.skills).sort();
+  const skills = skillNames.length
+    ? ['# Skills', ...skillNames.map((n) => `## ${n}\n\n${store.skills[n].trim()}`)].join('\n\n')
+    : '';
+  const knowledgeNames = Object.keys(store.knowledge).sort();
+  const knowledge = knowledgeNames.length
+    ? ['# Knowledge', ...knowledgeNames.map((n) => `## ${n}\n\n${store.knowledge[n].trim()}`)].join('\n\n')
+    : '';
+  return { persona, skills, knowledge };
+}
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
@@ -94,6 +201,46 @@ export function apply(ctx: Context, config: Config): void {
   let starting = false;
   const engine = config.engine ?? 'dsh';
   let version = '0.1';
+  const cwd = () => config.cwd ?? '/opt/agentkeys';
+  // The applied context (persona / skills / knowledge) + the registered
+  // system-prompt section disposers (re-registered on every apply).
+  let context: ContextStore = loadContext(cwd());
+  const sectionDisposers: Array<() => void> = [];
+  // #669 — the registered background/scheduled jobs (`POST /v1/jobs`).
+  let jobs: RegisteredJob[] = [];
+
+  /** Push the current context into dsh's system prompt (when the service is
+   *  up — the #631 test harness has none, and the files alone still serve
+   *  the view leg). Sections are re-registered wholesale: dispose, then add. */
+  function registerContextSections(): boolean {
+    const service = (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt') as
+      | { section(s: { name: string; order: number; text: string }): () => void }
+      | undefined;
+    for (const off of sectionDisposers.splice(0)) {
+      try {
+        off();
+      } catch {
+        /* already disposed */
+      }
+    }
+    if (!service) return false;
+    const rendered = renderContextSections(context);
+    const pairs: Array<[{ name: string; order: number }, string]> = [
+      [SECTION_PERSONA, rendered.persona],
+      [SECTION_SKILLS, rendered.skills],
+      [SECTION_KNOWLEDGE, rendered.knowledge],
+    ];
+    for (const [meta, text] of pairs) {
+      if (!text) continue;
+      try {
+        sectionDisposers.push(service.section({ ...meta, text }));
+      } catch (e) {
+        console.error(`agentkeys-bridge: system-prompt section ${meta.name} failed: ${(e as Error).message}`);
+      }
+    }
+    return true;
+  }
+  registerContextSections();
   // One turn at a time (the resident single-session bridge, like hermes): a
   // second /v1/chat waits behind the first.
   let turnLock: Promise<unknown> = Promise.resolve();
@@ -249,6 +396,16 @@ export function apply(ctx: Context, config: Config): void {
 
   const home = () => config.homeDir ?? process.env.DSH_HOME ?? '/root/.dsh';
 
+  /** Dispose the live session so the next turn creates a fresh one (the
+   *  explicit re-source verb; also resets the conversation). */
+  async function restartAgent(): Promise<boolean> {
+    if (!handle) return false;
+    await handle.dispose().catch(() => {});
+    handle = undefined;
+    void ensureAgent();
+    return true;
+  }
+
   const routes: WebRoute[] = [
     {
       kind: 'exact',
@@ -308,7 +465,132 @@ export function apply(ctx: Context, config: Config): void {
     {
       kind: 'exact',
       path: '/v1/jobs',
-      handler: (_req, res) => sendJson(res, 200, { jobs: [] }),
+      handler: async (req, res) => {
+        if (req.method === 'POST') {
+          let body: { jobs?: unknown };
+          try {
+            body = (await readBody(req)) as typeof body;
+          } catch (e) {
+            sendJson(res, 400, { error: `bad request: ${(e as Error).message}` });
+            return;
+          }
+          if (!Array.isArray(body.jobs)) {
+            sendJson(res, 400, { error: 'jobs must be an array' });
+            return;
+          }
+          const next: RegisteredJob[] = [];
+          for (const j of body.jobs as unknown[]) {
+            if (!j || typeof j !== 'object' || typeof (j as RegisteredJob).id !== 'string') {
+              sendJson(res, 400, { error: 'each job needs a string id' });
+              return;
+            }
+            next.push(j as RegisteredJob);
+          }
+          jobs = next;
+          sendJson(res, 200, { ok: true, jobs });
+          return;
+        }
+        sendJson(res, 200, { jobs });
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/v1/agent/restart',
+      handler: async (_req, res) => {
+        const restarted = await restartAgent();
+        sendJson(res, 200, { restarted, ok: true });
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/v1/context/files',
+      handler: (_req, res) => {
+        const root = cwd();
+        const file = (id: string, name: string, content: string | undefined, editable: boolean) => ({
+          id,
+          path: join(root, name),
+          editable,
+          present: content !== undefined,
+          ...(content !== undefined ? { content, sha256: sha256Hex(content) } : {}),
+        });
+        sendJson(res, 200, {
+          files: [file('soul', 'SOUL.md', context.soul, true), file('agents', 'AGENTS.md', context.agents, true)],
+          skills: Object.keys(context.skills).sort(),
+          knowledge: Object.keys(context.knowledge).sort(),
+          cwd: root,
+        });
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/v1/context/apply',
+      handler: async (req, res) => {
+        let body: { files?: unknown; skills?: unknown; knowledge?: unknown; restart?: unknown };
+        try {
+          body = (await readBody(req)) as typeof body;
+        } catch (e) {
+          sendJson(res, 400, { error: `bad request: ${(e as Error).message}` });
+          return;
+        }
+        const files = body.files as Record<string, unknown> | undefined;
+        const skills = body.skills as Record<string, unknown> | undefined;
+        const knowledge = body.knowledge as Record<string, unknown> | undefined;
+        const isDoc = (v: unknown) => v && typeof v === 'object' && !Array.isArray(v);
+        if (!isDoc(files) && !isDoc(skills) && !isDoc(knowledge)) {
+          sendJson(res, 400, { error: 'files and/or skills/knowledge required (objects of name → base64 content)' });
+          return;
+        }
+        const root = cwd();
+        const filesWritten: string[] = [];
+        const skillsWritten: string[] = [];
+        const knowledgeWritten: string[] = [];
+        try {
+          mkdirSync(root, { recursive: true });
+          if (isDoc(files)) {
+            for (const [key, value] of Object.entries(files as Record<string, unknown>)) {
+              const name = key === 'soul' ? 'SOUL.md' : key === 'agents' ? 'AGENTS.md' : undefined;
+              if (!name) {
+                sendJson(res, 400, { error: `files must be soul and/or agents (got ${key})` });
+                return;
+              }
+              const text = decodeB64(value, `files.${key}`);
+              writeFileSync(join(root, name), text, 'utf8');
+              if (key === 'soul') context.soul = text;
+              else context.agents = text;
+              filesWritten.push(name);
+            }
+          }
+          const writeDocs = (docs: Record<string, unknown> | undefined, dir: string, into: Record<string, string>, written: string[]) => {
+            if (!isDoc(docs)) return;
+            mkdirSync(join(root, dir), { recursive: true });
+            for (const [name, value] of Object.entries(docs as Record<string, unknown>)) {
+              if (!SAFE_NAME.test(name)) {
+                throw Object.assign(new Error(`${dir} name "${name}" is not a plain file name`), { code: 400 });
+              }
+              const text = decodeB64(value, `${dir}.${name}`);
+              writeFileSync(join(root, dir, name), text, 'utf8');
+              into[name] = text;
+              written.push(name);
+            }
+          };
+          writeDocs(skills, 'skills', context.skills, skillsWritten);
+          writeDocs(knowledge, 'knowledge', context.knowledge, knowledgeWritten);
+        } catch (e) {
+          const err = e as Error & { code?: number };
+          sendJson(res, err.code === 400 ? 400 : 500, { error: err.code === 400 ? err.message : `context write failed: ${err.message}` });
+          return;
+        }
+        const promptRegistered = registerContextSections();
+        const restarted = body.restart === true ? await restartAgent() : false;
+        sendJson(res, 200, {
+          ok: true,
+          files_written: filesWritten,
+          skills_written: skillsWritten,
+          knowledge_written: knowledgeWritten,
+          prompt_registered: promptRegistered,
+          restarted,
+        });
+      },
     },
     {
       kind: 'exact',

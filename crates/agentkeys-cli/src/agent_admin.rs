@@ -298,19 +298,17 @@ pub async fn agent_accept(
 /// Shared headless tail of every build/submit ceremony: sign `user_op_hash`
 /// with the SOFTWARE P-256 passkey (#164 headless/CI stand-in for the hardware
 /// K11) and relay to the given submit route. Returns the broker's submit JSON.
-async fn software_sign_and_submit(
-    base: &str,
-    bearer: &str,
+/// The SOFTWARE passkey assertion over a `user_op_hash` (#164 headless/CI —
+/// an on-disk P-256 key, never a hardware K11). Shared by the broker-direct
+/// ceremonies here and the daemon-routed `agentkeys app` verbs (#664).
+pub fn software_assertion(
     k11_key_file: &str,
-    rp_id: &str,
-    user_op: agentkeys_backend_client::protocol::WireUserOp,
     user_op_hash: &str,
-    submit_path: &str,
-) -> Result<Value> {
-    use agentkeys_backend_client::protocol::{AcceptAssertion, SubmitAcceptUserOpRequest};
+    rp_id: &str,
+) -> Result<agentkeys_backend_client::protocol::AcceptAssertion> {
+    use agentkeys_backend_client::protocol::AcceptAssertion;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-
+    use base64::Engine;
     let (auth_hex, cdj_hex, _loc, r_hex, s_hex) =
         crate::k11_webauthn::software_webauthn_sign(k11_key_file, user_op_hash, rp_id)
             .map_err(|e| anyhow!("software-sign: {e}"))?;
@@ -321,13 +319,25 @@ async fn software_sign_and_submit(
         *p256::FieldBytes::from_slice(&s),
     )
     .map_err(|e| anyhow!("(r,s) → signature: {e}"))?;
-    let assertion = AcceptAssertion {
-        authenticator_data: URL_SAFE_NO_PAD.encode(hex::decode(&auth_hex).context("authData hex")?),
-        client_data_json: URL_SAFE_NO_PAD
-            .encode(hex::decode(&cdj_hex).context("clientDataJSON hex")?),
+    Ok(AcceptAssertion {
+        authenticator_data: URL_SAFE_NO_PAD.encode(hex::decode(&auth_hex)?),
+        client_data_json: URL_SAFE_NO_PAD.encode(hex::decode(&cdj_hex)?),
         signature: URL_SAFE_NO_PAD.encode(sig.to_der().as_bytes()),
         credential_id: URL_SAFE_NO_PAD.encode(b"software-passkey"),
-    };
+    })
+}
+
+async fn software_sign_and_submit(
+    base: &str,
+    bearer: &str,
+    k11_key_file: &str,
+    rp_id: &str,
+    user_op: agentkeys_backend_client::protocol::WireUserOp,
+    user_op_hash: &str,
+    submit_path: &str,
+) -> Result<Value> {
+    use agentkeys_backend_client::protocol::SubmitAcceptUserOpRequest;
+    let assertion = software_assertion(k11_key_file, user_op_hash, rp_id)?;
     let submit_body = SubmitAcceptUserOpRequest { user_op, assertion };
     let resp = client()?
         .post(format!("{base}{submit_path}"))
@@ -378,6 +388,9 @@ pub async fn agent_spawn(
             Some(memory_ns.trim().to_string())
         },
         memory_inherited,
+        bindings: None,
+        endpoint_scopes: Vec::new(),
+        endpoint_enrollments: Vec::new(),
     };
     let resp = client()?
         .post(format!("{base}/v1/agent/spawn/build"))
@@ -459,6 +472,7 @@ pub async fn agent_archive(
         } else {
             Some(memory_ns.trim().to_string())
         },
+        endpoint_scopes: Vec::new(),
     };
     let resp = client()?
         .post(format!("{base}/v1/agent/archive/build"))

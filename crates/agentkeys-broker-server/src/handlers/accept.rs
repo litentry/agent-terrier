@@ -162,13 +162,26 @@ pub(crate) fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20], String> {
 /// Profile-aware env read: `BASE_<CHAIN>` (e.g. `SIDECAR_REGISTRY_ADDRESS_HEIMA`),
 /// falling back to the bare `BASE` — the same convention the operator env uses.
 pub(crate) fn env_profile(base: &str) -> Result<String, String> {
-    let p = std::env::var("AGENTKEYS_CHAIN")
-        .unwrap_or_else(|_| "heima".into())
-        .to_uppercase()
-        .replace('-', "_");
-    std::env::var(format!("{base}_{p}"))
-        .or_else(|_| std::env::var(base))
-        .map_err(|_| format!("env {base}[_{p}] not set"))
+    let profile = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+    resolve_profile_var(base, &profile, |k| std::env::var(k).ok())
+}
+
+/// The lookup behind [`env_profile`], injectable so it can be tested without
+/// touching process env. An EMPTY (or whitespace) value counts as UNSET: the
+/// test stacks pin `PAYMASTER_ADDRESS_<CHAIN>=` deliberately (`host-common.sh`
+/// — the unsponsored #230 posture) and a unit's `Environment=K=` sets K to "",
+/// so reading "" as a value turned every sponsored build on the VE test broker
+/// into `PAYMASTER_ADDRESS must be a 20-byte address` (2026-09-10).
+pub(crate) fn resolve_profile_var(
+    base: &str,
+    profile: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    let p = profile.to_uppercase().replace('-', "_");
+    let non_empty = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    non_empty(lookup(&format!("{base}_{p}")))
+        .or_else(|| non_empty(lookup(base)))
+        .ok_or_else(|| format!("env {base}[_{p}] not set"))
 }
 
 /// #231 drift guard — the accept-env vs compiled-chain-profile cross-check
@@ -1365,5 +1378,61 @@ mod tests {
             false,
         )
         .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod env_profile_tests {
+    use super::resolve_profile_var;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn profiled_var_wins_then_bare_then_unset() {
+        let e = env(&[
+            ("PAYMASTER_ADDRESS_HEIMA", "0xaa"),
+            ("PAYMASTER_ADDRESS", "0xbb"),
+        ]);
+        assert_eq!(
+            resolve_profile_var("PAYMASTER_ADDRESS", "heima", &e).unwrap(),
+            "0xaa"
+        );
+        let e = env(&[("PAYMASTER_ADDRESS", "0xbb")]);
+        assert_eq!(
+            resolve_profile_var("PAYMASTER_ADDRESS", "heima-paseo", &e).unwrap(),
+            "0xbb"
+        );
+        let e = env(&[]);
+        assert_eq!(
+            resolve_profile_var("PAYMASTER_ADDRESS", "heima", &e).unwrap_err(),
+            "env PAYMASTER_ADDRESS[_HEIMA] not set"
+        );
+    }
+
+    #[test]
+    fn an_empty_value_is_unset_not_an_invalid_address() {
+        // The VE renderer pins the test stack's paymaster EMPTY (no paymaster
+        // on the test set); the broker must read that as "unsponsored".
+        let e = env(&[
+            ("PAYMASTER_ADDRESS_HEIMA", ""),
+            ("PAYMASTER_ADDRESS", "   "),
+        ]);
+        assert!(resolve_profile_var("PAYMASTER_ADDRESS", "heima", &e).is_err());
+        // …while an empty profiled value still lets a bare value through.
+        let e = env(&[
+            ("PAYMASTER_ADDRESS_HEIMA", ""),
+            ("PAYMASTER_ADDRESS", "0xcc"),
+        ]);
+        assert_eq!(
+            resolve_profile_var("PAYMASTER_ADDRESS", "heima", &e).unwrap(),
+            "0xcc"
+        );
     }
 }

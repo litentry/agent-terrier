@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentkeys_worker_channel_weixin::{
-    handlers, ilink, ilink_login, ilink_loop, telegram_loop, WeixinGatewayConfig,
+    handlers, ilink, ilink_login, ilink_loop, outbound, telegram_loop, WeixinGatewayConfig,
     WeixinGatewayState, WeixinTransport,
 };
 use clap::Parser;
@@ -41,7 +41,7 @@ use tracing::info;
 #[derive(Parser)]
 #[command(
     name = "agentkeys-worker-channel-weixin",
-    about = "AgentKeys WeChat gateway worker (OA webhook / iLink personal-bot transports)"
+    about = "AgentKeys WeChat contact gate worker (OA webhook / iLink personal-bot transports)"
 )]
 struct Cli {
     /// Run the interactive iLink QR login ceremony (scan with the spare
@@ -132,13 +132,18 @@ async fn main() -> anyhow::Result<()> {
     let ilink_task = match state.config.transport {
         WeixinTransport::Ilink => Some(tokio::spawn(ilink_loop::supervise(
             state.clone(),
-            shutdown_rx,
+            shutdown_rx.clone(),
         ))),
-        WeixinTransport::Telegram => {
-            Some(tokio::spawn(telegram_loop::run(state.clone(), shutdown_rx)))
-        }
+        WeixinTransport::Telegram => Some(tokio::spawn(telegram_loop::run(
+            state.clone(),
+            shutdown_rx.clone(),
+        ))),
         WeixinTransport::Oa => None,
     };
+    // #667 — the OUTBOUND half of the feed hop: app replies + publishes on the
+    // granted messaging feeds go back through the transport. Idles until the
+    // gateway's device actor is enrolled.
+    let outbound_task = tokio::spawn(outbound::run(state.clone(), shutdown_rx));
 
     let app = handlers::build_router(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -152,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(task) = ilink_task {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
     }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), outbound_task).await;
     Ok(())
 }
 

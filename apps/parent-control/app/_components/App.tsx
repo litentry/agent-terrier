@@ -29,6 +29,7 @@ import { ArchiveAgentDialog, SpawnAgentModal } from './spawn';
 import { DevicesPage } from './devices';
 import { ChannelRegistryPage } from './channels';
 import { ContactsPage } from './gateway';
+import { ApplicationsPage } from './applications';
 import { getAssertionOverHash } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
@@ -46,9 +47,9 @@ const looksSessionExpired = (detail?: string): boolean =>
   !!detail && /session expired|re-?authenticate/i.test(detail);
 
 // #404 IA: household = delegates (sandbox agents) / devices (channel endpoints)
-// / channels (the id-anchored registry) / contacts (WeChat gateway + family).
+// / channels (the id-anchored registry) / contacts (the WeChat contact gate + family).
 // The former top-level 'pairing' page became 'delegates'.
-type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'contacts' | 'audit' | 'decode' | 'chain' | 'logo';
+type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'contacts' | 'applications' | 'audit' | 'decode' | 'chain' | 'logo';
 
 type PendingAction =
   | { kind: 'revoke-device'; actor: Actor; intent: Intent }
@@ -1212,6 +1213,7 @@ export function App() {
   const sectionAttr = page === 'decode' ? 'audit'
     : page === 'delegates' ? 'pairing'
     : page === 'devices' ? 'channels'
+    : page === 'applications' ? 'pairing'
     : ((['audit', 'memory', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
 
   // ─── Onboarding gate (workflow 1) ──────────────────────────────
@@ -1296,7 +1298,7 @@ export function App() {
 
         {/* #404 IA — household: delegates (sandbox agents) · devices (channel
             endpoints) · channels (the id-anchored registry) · contacts (WeChat
-            gateway + family). The former top-level pairing page is retired. */}
+            contact gate + family). The former top-level pairing page is retired. */}
         <div className="nav-section">household</div>
         <button className={`nav-item ${page === 'delegates' ? 'active' : ''}`} onClick={() => go('delegates')}>
           <span className="marker">[⇄]</span> delegates
@@ -1311,6 +1313,9 @@ export function App() {
         </button>
         <button className={`nav-item ${page === 'contacts' ? 'active' : ''}`} onClick={() => go('contacts')}>
           <span className="marker">[◑]</span> contacts
+        </button>
+        <button className={`nav-item ${page === 'applications' ? 'active' : ''}`} onClick={() => go('applications')}>
+          <span className="marker">[▣]</span> applications
         </button>
 
         <div className="nav-section">telemetry</div>
@@ -1439,6 +1444,11 @@ export function App() {
           // Reach = agents a contact may TALK to — sandbox delegates only; a
           // channel-endpoint device (camera/display) is never a conversation target.
           <ContactsPage deeplinkReach={actors.filter((a) => a.role === 'agent' && !actorIsChannelEndpoint(a)).map((a) => a.label.replace(' (revoked)', ''))} />
+        )}
+        {page === 'applications' && (
+          // #682 — install / inspect / uninstall against the real registries
+          // (epic #660 stage 1). Channels feed the wizard's slot options.
+          <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}

@@ -57,13 +57,13 @@ function Field({ label, children }: { label: ReactNode; children: ReactNode }) {
 // Human-readable, non-alarming reason text for the reason codes the gateway/
 // daemon return. Anything unmapped shows the raw reason + detail (never a blank).
 const REASON_TEXT: Record<string, string> = {
-  gateway_not_configured: 'No gateway URL — the daemon derives it from its broker; point the daemon at a deployed broker (or set AGENTKEYS_WORKER_WEIXIN_URL to override).',
-  'gateway-not-configured': 'No gateway URL — the daemon derives it from its broker; point the daemon at a deployed broker (or set AGENTKEYS_WORKER_WEIXIN_URL to override).',
+  gateway_not_configured: 'No contact gate URL — the daemon derives it from its broker; point the daemon at a deployed broker (or set AGENTKEYS_WORKER_WEIXIN_URL to override).',
+  'gateway-not-configured': 'No contact gate URL — the daemon derives it from its broker; point the daemon at a deployed broker (or set AGENTKEYS_WORKER_WEIXIN_URL to override).',
   'gateway-admin-not-configured':
-    'The gateway admin token isn’t set on the daemon — copy AGENTKEYS_WEIXIN_ADMIN_TOKEN from the broker’s weixin-secrets.env into the daemon env.',
-  admin_disabled: 'The gateway has no admin token configured — set AGENTKEYS_WEIXIN_ADMIN_TOKEN on the broker.',
-  admin_unauthorized: 'The daemon’s admin token doesn’t match the gateway’s — re-copy it from the broker.',
-  transport_not_ilink: 'This gateway runs the 公众号 (oa) transport — the QR connect flow is for the personal-bot (ilink) transport.',
+    'The contact gate admin token isn’t set on the daemon — copy AGENTKEYS_WEIXIN_ADMIN_TOKEN from the broker’s weixin-secrets.env into the daemon env.',
+  admin_disabled: 'The contact gate has no admin token configured — set AGENTKEYS_WEIXIN_ADMIN_TOKEN on the broker.',
+  admin_unauthorized: 'The daemon’s admin token doesn’t match the contact gate’s — re-copy it from the broker.',
+  transport_not_ilink: 'This contact gate runs the 公众号 (oa) transport — the QR connect flow is for the personal-bot (ilink) transport.',
   daemon_unreachable: 'The local daemon isn’t reachable — is it running?',
   no_active_login: 'The login session expired — start again.',
   bind_not_claimed: 'No one has sent this code to the bot yet — it can’t be approved until they do.',
@@ -309,7 +309,7 @@ function ActivityPanel({ auditOff }: { auditOff: boolean }) {
           <span className="lbl">⚠</span>
           <span>
             On-chain audit is <strong>off</strong> — actions are recorded durably here but NOT anchored
-            on-chain. Set <code>AGENTKEYS_WEIXIN_OPERATOR_OMNI</code> on the broker + restart the gateway.
+            on-chain. Set <code>AGENTKEYS_WEIXIN_OPERATOR_OMNI</code> on the broker + restart the contact gate.
           </span>
         </div>
       )}
@@ -347,7 +347,7 @@ function ActivityPanel({ auditOff }: { auditOff: boolean }) {
 
 // A persisted toggle for the gateway request/response console trace. OFF by
 // default — this page polls status/contacts/monitor on a timer, so the
-// `[gateway]` logs flood DevTools; flip it on only when diagnosing a
+// `[contact gate]` logs flood DevTools; flip it on only when diagnosing a
 // connect/bind issue. The preference lives in localStorage (survives reloads)
 // and gates gwlog() app-wide (see gatewayClient.ts).
 function GatewayDebugToggle() {
@@ -367,8 +367,8 @@ function GatewayDebugToggle() {
       aria-pressed={on}
       title={
         on
-          ? 'Gateway request/response logs are ON — click to silence the console'
-          : 'Log every gateway request/response to the console (connect/bind diagnostics)'
+          ? 'Contact gate request/response logs are ON — click to silence the console'
+          : 'Log every contact gate request/response to the console (connect/bind diagnostics)'
       }
     >
       {on ? '● debug logs' : '○ debug logs'}
@@ -583,8 +583,8 @@ function ConnectPanel({
       {statusErr ? (
         notConfigured ? (
           <div style={{ lineHeight: 1.7, fontSize: 12.5 }}>
-            <div style={{ marginBottom: 6 }}>No WeChat gateway reachable for this daemon yet — expected until it points at a deployed gateway.</div>
-            <div className="muted">The gateway URL is derived from your broker automatically; you only need the admin bearer — set <code>AGENTKEYS_WEIXIN_ADMIN_TOKEN</code> (retrieve it from the broker&apos;s <code>weixin-secrets.env</code>, #418) in the daemon env, then reload.</div>
+            <div style={{ marginBottom: 6 }}>No WeChat contact gate reachable for this daemon yet — expected until it points at a deployed contact gate.</div>
+            <div className="muted">The contact gate URL is derived from your broker automatically; you only need the admin bearer — set <code>AGENTKEYS_WEIXIN_ADMIN_TOKEN</code> (retrieve it from the broker&apos;s <code>weixin-secrets.env</code>, #418) in the daemon env, then reload.</div>
             <div className="muted" style={{ marginTop: 6, opacity: 0.7 }}>{statusErr}</div>
           </div>
         ) : (

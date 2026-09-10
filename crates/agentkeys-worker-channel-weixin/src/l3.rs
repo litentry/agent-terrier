@@ -1,5 +1,5 @@
 //! L3 — the audience PEP (§5). Answers "may THIS contact reach THAT agent
-//! through this gateway, and at what grain?" — computed BEFORE anything reaches
+//! through this contact gate, and at what grain?" — computed BEFORE anything reaches
 //! an agent. The decision is data (a routing verdict), never an authorization:
 //! grants stay master-signed + chain-verified; this only gates whether the
 //! gateway relays a keyless contact's message at all.
@@ -161,6 +161,7 @@ mod tests {
             router_enabled: true,
             admin_token: None,
             allow_unsigned: false,
+            device: Default::default(),
         }
     }
 

@@ -75,6 +75,18 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
             "/v1/gateway/admin/registry/import",
             post(admin::registry_import),
         )
+        // #667 — the gateway's OWN device actor: the daemon drives the §10.2
+        // enrollment through these (pairing-request → the master's claim +
+        // ONE Touch ID → pairing-complete).
+        .route("/v1/gateway/admin/device/status", get(admin::device_status))
+        .route(
+            "/v1/gateway/admin/device/pairing-request",
+            post(admin::device_pairing_request),
+        )
+        .route(
+            "/v1/gateway/admin/device/pairing-complete",
+            post(admin::device_pairing_complete),
+        )
         .with_state(state)
 }
 
@@ -92,6 +104,12 @@ pub struct HealthBody {
     /// the same stall signal (bad token / 409 conflict) for stack ②.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub telegram_last_ok_ms: Option<u64>,
+    /// #667 — the gateway's own device actor is enrolled (the feed hop can
+    /// mint caps as it).
+    pub device_enrolled: bool,
+    /// #667 — an allowed turn will LAND on the app's feed (device enrolled +
+    /// channel worker configured); false = decision-only.
+    pub feed_hop: bool,
     pub version: &'static str,
 }
 
@@ -103,6 +121,8 @@ async fn healthz(State(state): State<SharedWeixinGatewayState>) -> Json<HealthBo
         outbound_enabled: state.outbound_enabled(),
         ilink_last_ok_ms: state.ilink_last_ok_ms(),
         telegram_last_ok_ms: state.telegram_last_ok_ms(),
+        device_enrolled: state.device.enrolled(),
+        feed_hop: state.device.hop_blocker().is_none(),
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -203,7 +223,7 @@ async fn callback_relay(
         .map(|c| c.contains("application/json"))
         .unwrap_or(false)
         || body.trim_start().starts_with('{');
-    let (openid, text) = if is_json {
+    let (openid, text, media) = if is_json {
         match serde_json::from_str::<serde_json::Value>(&body) {
             Ok(v) => (
                 v.get("from")
@@ -214,6 +234,7 @@ async fn callback_relay(
                     .and_then(|x| x.as_str())
                     .unwrap_or_default()
                     .to_string(),
+                mock_media(&v),
             ),
             Err(_) => return (StatusCode::BAD_REQUEST, "bad json").into_response(),
         }
@@ -221,12 +242,13 @@ async fn callback_relay(
         (
             extract_xml_tag(&body, "FromUserName").unwrap_or_default(),
             extract_xml_tag(&body, "Content").unwrap_or_default(),
+            None,
         )
     };
 
-    // 3-5. The shared relay core (L3 → routed event → audit) — the SAME path the
-    //      iLink loop drives (`relay::process_inbound`).
-    let outcome = relay::process_inbound(&state, &openid, &text).await;
+    // 3-5. The shared relay core (L3 → feed hop → audit) — the SAME path the
+    //      iLink loop drives (`relay::process_turn`).
+    let outcome = relay::process_turn(&state, "weixin", &openid, &text, media).await;
 
     // 6. Reply. Real WeChat wants the plain "success" ack (the agent's reply
     //    comes back async via the outbound send path, which needs the app-secret
@@ -240,6 +262,8 @@ async fn callback_relay(
                 "contact_id": outcome.contact_id,
                 "tier": outcome.tier,
                 "routed_event": outcome.event,
+                "feed": outcome.feed,
+                "feed_error": outcome.feed_error,
             })),
         )
             .into_response()
@@ -264,7 +288,7 @@ async fn telegram_mock_inbound(
         return (
             StatusCode::FORBIDDEN,
             "mock driver disabled (prod posture — set AGENTKEYS_WEIXIN_ALLOW_UNSIGNED=1 on a \
-             TEST gateway only)",
+             TEST contact gate only)",
         )
             .into_response();
     }
@@ -281,11 +305,12 @@ async fn telegram_mock_inbound(
         .and_then(|x| x.as_str())
         .unwrap_or_default()
         .to_string();
-    let outcome = relay::process_inbound_for(&state, "telegram", &from, &text).await;
+    let media = mock_media(&v);
+    let outcome = relay::process_turn(&state, "telegram", &from, &text, media).await;
     let reply = outcome
         .claim_ack
         .clone()
-        .or_else(|| relay::reply_text_for_en(&outcome.decision));
+        .or_else(|| relay::reply_text_for_turn(&outcome.decision, outcome.media_marker, true));
     (
         StatusCode::OK,
         Json(json!({
@@ -295,9 +320,39 @@ async fn telegram_mock_inbound(
             "tier": outcome.tier,
             "routed_event": outcome.event,
             "reply": reply,
+            "feed": outcome.feed,
+            "feed_error": outcome.feed_error,
         })),
     )
         .into_response()
+}
+
+/// #667 — the mock drivers' media leg: `image_b64` (+ optional `content_type`,
+/// default `image/jpeg`) or `audio_b64` (+ `content_type`, default `audio/ogg`)
+/// becomes the turn's media original, exactly like a real photo / voice clip.
+fn mock_media(v: &serde_json::Value) -> Option<relay::InboundMedia> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let ct = v
+        .get("content_type")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    if let Some(b64) = v.get("image_b64").and_then(|x| x.as_str()) {
+        let bytes = STANDARD.decode(b64).ok()?;
+        return Some(relay::InboundMedia {
+            kind: agentkeys_protocol::ChannelEventKind::Image,
+            content_type: ct.unwrap_or_else(|| "image/jpeg".to_string()),
+            bytes,
+        });
+    }
+    if let Some(b64) = v.get("audio_b64").and_then(|x| x.as_str()) {
+        let bytes = STANDARD.decode(b64).ok()?;
+        return Some(relay::InboundMedia {
+            kind: agentkeys_protocol::ChannelEventKind::AudioClip,
+            content_type: ct.unwrap_or_else(|| "audio/ogg".to_string()),
+            bytes,
+        });
+    }
+    None
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

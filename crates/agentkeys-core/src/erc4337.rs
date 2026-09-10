@@ -430,6 +430,105 @@ pub fn scope_batch_calldata(
     execute_batch_calldata(&[*scope], &[0u128], &[scope_cd])
 }
 
+/// One extra `setScope` an install / uninstall batch carries for an ENDPOINT
+/// actor (#663 — the gateway that relays a messaging feed, the console that
+/// renders a display feed): `(actor_omni, the actor's FULL replacement grant)`.
+#[derive(Clone, Debug)]
+pub struct ExtraScope {
+    pub actor_omni: [u8; 32],
+    pub grant: ScopeGrant,
+}
+
+/// **The #663 install batch** — [`spawn_batch_calldata`] plus one `setScope`
+/// per endpoint actor: `executeBatch([registerDelegate, setScope(delegate),
+/// setScope(endpoint_1), …])`. ONE Touch ID authorizes the delegate's grant AND
+/// the mirror grants the endpoints need to serve its feeds; every call targets
+/// the same `AgentKeysScope` under the same operator.
+pub fn spawn_batch_calldata_with_scopes(
+    registry: &[u8; 20],
+    scope: &[u8; 20],
+    reg: &AgentRegister,
+    grant: &ScopeGrant,
+    extra: &[ExtraScope],
+) -> Vec<u8> {
+    spawn_batch_calldata_with_endpoints(registry, scope, reg, grant, extra, &[])
+}
+
+/// **The #663 install batch with endpoint ENROLLMENTS** — one Touch ID:
+/// `executeBatch([registerAgentDevice(endpoint_1)…, registerDelegate,
+/// setScope(delegate), setScope(endpoint_1)…])`. An endpoint device actor
+/// (the channel gateway, the console) that is not yet bound is registered
+/// FIRST in the same batch, then granted like any already-enrolled one — the
+/// owner never signs a separate enrollment. Every register call targets the
+/// registry, every grant the scope contract, all under the same operator.
+pub fn spawn_batch_calldata_with_endpoints(
+    registry: &[u8; 20],
+    scope: &[u8; 20],
+    reg: &AgentRegister,
+    grant: &ScopeGrant,
+    extra: &[ExtraScope],
+    enrollments: &[AgentRegister],
+) -> Vec<u8> {
+    if extra.is_empty() && enrollments.is_empty() {
+        return spawn_batch_calldata(registry, scope, reg, grant);
+    }
+    let mut dests = Vec::with_capacity(2 + extra.len() + enrollments.len());
+    let mut values = Vec::with_capacity(dests.capacity());
+    let mut calls = Vec::with_capacity(dests.capacity());
+    for e in enrollments {
+        dests.push(*registry);
+        values.push(0u128);
+        calls.push(register_agent_device_calldata(e));
+    }
+    dests.push(*registry);
+    values.push(0u128);
+    calls.push(register_delegate_calldata(reg));
+    dests.push(*scope);
+    values.push(0u128);
+    calls.push(set_scope_calldata(
+        &reg.operator_omni,
+        &reg.actor_omni,
+        grant,
+    ));
+    for e in extra {
+        dests.push(*scope);
+        values.push(0u128);
+        calls.push(set_scope_calldata(
+            &reg.operator_omni,
+            &e.actor_omni,
+            &e.grant,
+        ));
+    }
+    execute_batch_calldata(&dests, &values, &calls)
+}
+
+/// **The #663 uninstall batch** — [`revoke_batch_calldata`] plus one `setScope`
+/// per endpoint actor (its grant set MINUS the archived app's feeds), so the
+/// relay / render grants die with the app in the same Touch ID.
+pub fn revoke_batch_calldata_with_scopes(
+    registry: &[u8; 20],
+    scope: &[u8; 20],
+    operator_omni: &[u8; 32],
+    device_key_hashes: &[[u8; 32]],
+    extra: &[ExtraScope],
+) -> Vec<u8> {
+    if extra.is_empty() {
+        return revoke_batch_calldata(registry, device_key_hashes);
+    }
+    let mut dests = vec![*registry; device_key_hashes.len()];
+    let mut values = vec![0u128; device_key_hashes.len()];
+    let mut calls: Vec<Vec<u8>> = device_key_hashes
+        .iter()
+        .map(revoke_agent_device_calldata)
+        .collect();
+    for e in extra {
+        dests.push(*scope);
+        values.push(0u128);
+        calls.push(set_scope_calldata(operator_omni, &e.actor_omni, &e.grant));
+    }
+    execute_batch_calldata(&dests, &values, &calls)
+}
+
 /// `revokeAgentDevice(bytes32)` calldata — the unpair.
 pub fn revoke_agent_device_calldata(device_key_hash: &[u8; 32]) -> Vec<u8> {
     let sel = selector("revokeAgentDevice(bytes32)");

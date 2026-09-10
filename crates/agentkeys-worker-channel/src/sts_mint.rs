@@ -102,6 +102,47 @@ impl ChannelStsMinter {
     }
 }
 
+impl ChannelStsMinter {
+    /// #669 — the write-through wake: tell the broker a feed event landed so a
+    /// hibernating application bound to the feed is cold-created
+    /// (`POST /v1/sandbox/wake`, the same worker bearer). Best-effort and
+    /// fire-and-forget from the publish path: a wake failure is logged, never
+    /// surfaced to the publisher (the durable feed already holds the event;
+    /// the broker's sweeper / the next event retries).
+    pub async fn wake(&self, owner_omni: &str, channel_id: &str) {
+        let url = format!("{}/v1/sandbox/wake", self.broker_url);
+        let body = serde_json::json!({
+            "owner_omni": format!("0x{}", owner_omni.trim_start_matches("0x")),
+            "channel_id": channel_id,
+        });
+        match self
+            .http
+            .post(&url)
+            .bearer_auth(&self.bearer)
+            .timeout(std::time::Duration::from_secs(20))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    if let Some(woken) = v.get("woken").and_then(|w| w.as_array()) {
+                        if !woken.is_empty() {
+                            tracing::info!(channel = %channel_id, woken = woken.len(), "#669 wake: hibernating app(s) cold-created");
+                        }
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(channel = %channel_id, status = %resp.status(), "#669 wake refused by the broker (best-effort)")
+            }
+            Err(e) => {
+                tracing::warn!(channel = %channel_id, error = %e, "#669 wake unreachable (best-effort)")
+            }
+        }
+    }
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -5,6 +5,7 @@ import type {
   ChainInfo,
   ChannelDef,
   Classification,
+  DeviceEnrollBuild,
   ConfigPresetList,
   AgentContextView,
   ConnectionStatus,
@@ -52,6 +53,16 @@ import type {
 // regenerates the .ts and the mappers below stop compiling (rung-3 drift gate;
 // CI also git-diffs the generated dir after `cargo test` regenerates it).
 import type { ApiActor } from '@/lib/generated/ApiActor';
+import type { AppDashboard } from '@/lib/generated/AppDashboard';
+import type { AppInstallBindings } from '@/lib/generated/AppInstallBindings';
+import type { AppInstallBuildResponse } from '@/lib/generated/AppInstallBuildResponse';
+import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
+import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
+import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
+import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
+import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
+import type { ResourceKind } from '@/lib/generated/ResourceKind';
+import type { Sensitivity } from '@/lib/generated/Sensitivity';
 import type { ApiChannel } from '@/lib/generated/ApiChannel';
 import type { ApiAnchorStatus } from '@/lib/generated/ApiAnchorStatus';
 import type { ApiAuditEvent } from '@/lib/generated/ApiAuditEvent';
@@ -922,13 +933,13 @@ export class DaemonBackend implements AgentKeysClient {
     };
   }
 
-  async createChannel(input: { id: string; name: string; note?: string }): Promise<Result<ChannelDef>> {
+  async createChannel(input: { id: string; name: string; note?: string; kind?: ChannelEndpointKind; endpoint_actor_omni?: string }): Promise<Result<ChannelDef>> {
     const r = await this.postJson<{ channel: ApiChannel }>('/v1/channels', input);
     if (!r.ok) return r;
     return { ok: true, data: apiToChannelDef(r.data.channel) };
   }
 
-  async updateChannel(id: string, input: { name?: string; note?: string }): Promise<Result<ChannelDef>> {
+  async updateChannel(id: string, input: { name?: string; note?: string; kind?: ChannelEndpointKind; endpoint_actor_omni?: string }): Promise<Result<ChannelDef>> {
     const r = await this.postJson<{ channel: ApiChannel }>(`/v1/channels/${encodeURIComponent(id)}`, input);
     if (!r.ok) return r;
     return { ok: true, data: apiToChannelDef(r.data.channel) };
@@ -939,10 +950,103 @@ export class DaemonBackend implements AgentKeysClient {
     if (!r.ok) return r;
     return { ok: true, data: undefined };
   }
+
+  // ── #664 / #682 — family applications (epic #660) ───────────────────────
+  //   GET  /v1/master/apps                          → listApps
+  //   GET  /v1/master/apps/:label                   → appDashboard
+  //   POST /v1/master/apps/install/build|submit     → appInstallBuild / appInstallSubmit
+  //   POST /v1/master/apps/:label/uninstall/build|submit → appUninstallBuild / appUninstallSubmit
+  //   POST /v1/master/apps/:label/command           → appCommand
+  //   GET  /v1/master/resources · POST …/resources/add → listResources / resourceAdd
+  //   GET  /v1/master/console/device (+ enroll/build|submit) · GET /v1/master/gateway/device (+ enroll/build|submit)
+  async listApps(): Promise<Result<{ apps: AppInstanceRow[]; storage: string; console_device?: string | null }>> {
+    return this.getJson('/v1/master/apps');
+  }
+
+  async appDashboard(label: string): Promise<Result<AppDashboard>> {
+    return this.getJson(`/v1/master/apps/${encodeURIComponent(label)}`);
+  }
+
+  async appInstallBuild(input: {
+    template_id: string;
+    label: string;
+    bindings: AppInstallBindings;
+    memory_ns?: string;
+    memory_inherited?: boolean;
+  }): Promise<Result<AppInstallBuildResponse>> {
+    return this.postJson('/v1/master/apps/install/build', input);
+  }
+
+  async appInstallSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { installed?: unknown[] }>> {
+    return this.postJson('/v1/master/apps/install/submit', body);
+  }
+
+  async appUninstallBuild(label: string, input: { resources_kept: boolean }): Promise<Result<BuildArchiveUserOpResponse>> {
+    return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/uninstall/build`, input);
+  }
+
+  async appUninstallSubmit(label: string, body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { uninstalled?: unknown }>> {
+    return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/uninstall/submit`, body);
+  }
+
+  async appCommand(
+    label: string,
+    input: { channel_id?: string; action: string; command: string; args?: unknown; card_updated_at?: number },
+  ): Promise<Result<unknown>> {
+    return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/command`, input);
+  }
+
+  async listResources(): Promise<Result<{ items: ResourceItemRow[]; storage: string }>> {
+    return this.getJson('/v1/master/resources');
+  }
+
+  async resourceAdd(input: {
+    id: string;
+    name: string;
+    name_zh: string;
+    kind: ResourceKind;
+    tags: string[];
+    sensitivity: Sensitivity;
+    ns: string;
+    body: string;
+  }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string }>> {
+    return this.postJson('/v1/master/resources/add', input);
+  }
+
+  async consoleDeviceStatus(): Promise<Result<ConsoleDeviceStatus>> {
+    return this.getJson('/v1/master/console/device');
+  }
+
+  async consoleEnrollBuild(input: { label?: string }): Promise<Result<DeviceEnrollBuild>> {
+    return this.postJson('/v1/master/console/device/enroll/build', input);
+  }
+
+  async consoleEnrollSubmit(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; label: string }>> {
+    return this.postJson('/v1/master/console/device/enroll/submit', body);
+  }
+
+  async gatewayDeviceStatus(): Promise<Result<GatewayDeviceStatus>> {
+    return this.getJson('/v1/master/gateway/device');
+  }
+
+  async gatewayEnrollBuild(_input: Record<string, never>): Promise<Result<DeviceEnrollBuild>> {
+    return this.postJson('/v1/master/gateway/device/enroll/build', {});
+  }
+
+  async gatewayEnrollSubmit(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; transport: string; channel_id: string }>> {
+    return this.postJson('/v1/master/gateway/device/enroll/submit', body);
+  }
 }
 
 function apiToChannelDef(c: ApiChannel): ChannelDef {
-  return { id: c.id, name: c.name, note: c.note ?? undefined, createdAt: c.created_at };
+  return {
+    id: c.id,
+    name: c.name,
+    note: c.note ?? undefined,
+    createdAt: c.created_at,
+    kind: c.kind ?? undefined,
+    endpointActorOmni: c.endpoint_actor_omni ?? undefined,
+  };
 }
 
 // ─── Wire types are imported from @/lib/generated (ts-rs, generated from the

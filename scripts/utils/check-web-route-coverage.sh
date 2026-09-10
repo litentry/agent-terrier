@@ -97,6 +97,14 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/master/gateway/monitor	same gateway-admin forward — live message monitor; behavior proven by the crate's gateway_flow tests; live daemon-side coverage needs a deployed gateway + admin token (same as gateway/status)
 /v1/master/gateway/history	same gateway-admin forward — durable message history; append/read proven by gateway_flow::durable_history; same deployed-gateway limitation
 /v1/master/gateway/activity	same gateway-admin forward — durable contact-audit trail; append/read proven by gateway_flow::durable_activity; same deployed-gateway limitation
+/v1/master/apps/install/submit	#664 the install ceremony's SUBMIT half (ONE Touch ID → registerDelegate + setScope batch) — phase 8 runs it only with a software passkey (`--allow-skip=app-install-needs-passkey` in CI); the build half + registries are live gates in suite-8 steps 4-6
+/v1/master/apps/:label/uninstall/build	#664 uninstall build — needs an INSTALLED app (the ceremony above); phase 8 runs the whole install→inspect→uninstall cycle under the same passkey gate
+/v1/master/apps/:label/uninstall/submit	#664 uninstall submit — same passkey gate as the install submit
+/v1/master/apps/:label/command	#670 a card-action tap publishes a `command` event from the console's device actor — needs an installed app with a display slot + a granted console actor; the card contract is pinned by the protocol + CardView golden tests, the publish path by the channel demo; retire with the passkey-gated phase-8 cycle running in CI
+/v1/master/console/device/enroll/build	#541 the console's own device-actor enrollment (pairing request → claim → accept build) — ONE Touch ID; the shared master halves are exercised by the gateway enrollment's unit tests + the §10.2 pairing e2e (suite-1); retire with a software-passkey phase-8 step
+/v1/master/console/device/enroll/submit	#541 console enrollment submit — same gate
+/v1/master/gateway/device/enroll/build	#667 the gateway's device-actor enrollment — needs a DEPLOYED gateway with AGENTKEYS_BROKER_URL + a K10 file (setup-broker-host.sh converge) in the test env, then ONE Touch ID; the gateway-side halves are unit-tested (device.rs), the daemon halves shared with the console's
+/v1/master/gateway/device/enroll/submit	#667 gateway enrollment submit — same deployed-gateway + passkey gate
 EOF
 
 # ── 1. extract served routes ────────────────────────────────────────────────

@@ -20,3 +20,11 @@ ts-rs = { version = "10", features = ["no-serde-warnings"] }
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 base64 = "0.22"
 sha2 = "0.10"
+
+# #662 — `Sensitivity` rides in `agentkeys-protocol` (the app-template manifest +
+# the resource registry), so this crate now enters the browser build through
+# agentkeys-web-core. p256's rand_core pulls getrandom 0.2, which refuses
+# wasm32-unknown-unknown unless its `js` backend (crypto.getRandomValues) is
+# enabled — the documented remedy (https://docs.rs/getrandom/0.2/#webassembly-support).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

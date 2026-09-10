@@ -39,7 +39,10 @@ pub const MSG_TYPE_USER: u32 = 1;
 pub const MSG_TYPE_BOT: u32 = 2;
 pub const MSG_STATE_FINISH: u32 = 2;
 pub const ITEM_TYPE_TEXT: u32 = 1;
+pub const ITEM_TYPE_IMAGE: u32 = 2;
 pub const ITEM_TYPE_VOICE: u32 = 3;
+pub const ITEM_TYPE_FILE: u32 = 4;
+pub const ITEM_TYPE_VIDEO: u32 = 5;
 
 /// Default server-held long-poll window for `getupdates` (the server may
 /// suggest a different one via `longpolling_timeout_ms`).
@@ -64,11 +67,53 @@ pub struct TextItem {
     pub text: Option<String>,
 }
 
-/// Voice inbound — the platform attaches a server-side transcript in `text`.
+/// #667 — a CDN media descriptor (plugin `CDNMedia`, types.ts): the server
+/// returns `full_url` (a complete download URL), else the client composes
+/// `<cdn_base>/download?encrypted_query_param=…`; `aes_key` (base64) keys the
+/// AES-128-ECB payload. See [`crate::media`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CdnMedia {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypt_query_param: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aes_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypt_type: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_url: Option<String>,
+}
+
+/// #667 — an inbound photo (plugin `ImageItem`): the full-size `media`, a
+/// `thumb_media`, and the image key as a HEX string (`aeskey`) beside the
+/// descriptor's own base64 `aes_key`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImageItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<CdnMedia>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb_media: Option<CdnMedia>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeskey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hd_size: Option<u64>,
+}
+
+/// Voice inbound — the platform attaches a server-side transcript in `text`;
+/// #667 relays the clip itself too (`media`, the plugin `VoiceItem`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VoiceItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<CdnMedia>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encode_type: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playtime: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +122,8 @@ pub struct MessageItem {
     pub item_type: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_item: Option<TextItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_item: Option<ImageItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_item: Option<VoiceItem>,
 }
@@ -223,6 +270,17 @@ pub fn message_body_text(msg: &WeixinMessage) -> String {
     String::new()
 }
 
+/// #667 — the first relayable media item (a photo or a voice clip that carries
+/// a CDN descriptor). One original per turn; extras are logged, not relayed.
+pub fn first_media_item(msg: &WeixinMessage) -> Option<&MessageItem> {
+    msg.item_list.as_ref()?.iter().find(|item| {
+        (item.item_type == Some(ITEM_TYPE_IMAGE)
+            && item.image_item.as_ref().is_some_and(|i| i.media.is_some()))
+            || (item.item_type == Some(ITEM_TYPE_VOICE)
+                && item.voice_item.as_ref().is_some_and(|v| v.media.is_some()))
+    })
+}
+
 /// Build the outbound text `WeixinMessage` (send-side shape, mirrors send.ts:
 /// `from_user_id` empty, BOT type, FINISH state, one TEXT item, context echo).
 pub fn build_text_send(to: &str, text: &str, context_token: Option<&str>) -> WeixinMessage {
@@ -237,6 +295,7 @@ pub fn build_text_send(to: &str, text: &str, context_token: Option<&str>) -> Wei
             text_item: Some(TextItem {
                 text: Some(text.to_string()),
             }),
+            image_item: None,
             voice_item: None,
         }]),
         context_token: context_token.map(|s| s.to_string()),
