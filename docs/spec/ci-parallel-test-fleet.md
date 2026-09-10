@@ -1,6 +1,6 @@
 # Parallel CI test fleet — multi-broker architecture (issue #265)
 
-**Status:** phase 2 shipped (slot parameterization, PR #277); AWS slot 2 lived 2026-06-11 → 2026-07-23 and was sunset 2026-09-10 — the second test slot is now the **VE test broker** (`ve-test`: the same TEST contract set, the inherited slot-2 wallet as deployer + submitter); phases 1, 3–6 designed below, not yet landed.
+**Status:** phase 2 shipped (slot parameterization, PR #277); AWS slot 2 lived 2026-06-11 → 2026-07-23 and was sunset 2026-09-10 — the second test slot is now the **VE test broker** (`ve-test`: the same TEST contract set, the inherited slot-2 wallet as deployer + submitter); phases 1, 3–6 designed below, not yet landed. Since 2026-09-10 the AWS slot path is **opt-in** in CI (`ci/aws-suite` label / `aws_suite` dispatch input) — the VE test stack's `ve-e2e` job is the default e2e gate (`AGENTS.ops.md` "Dual-cloud CI").
 **Scope:** the design for running N concurrent, fully isolated CI test environments ("multi-thread CI") — one EC2 broker stack per slot — so harness pipelines stop serializing globally. Covers what is shared vs replicated, why the chain layer is shared, slot identity + lifecycle, and the per-phase delivery plan.
 **Audience:** developers + CI maintainers. The operator-facing bring-up (naming matrix, add-a-slot checklist, live inventory) is the internal cloud-bootstrap operator runbook §0.3 (`operator-docs/`, not in the OSS mirror); current single-slot CI activation is the internal CI-setup operator runbook.
 
