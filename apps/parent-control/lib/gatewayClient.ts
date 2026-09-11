@@ -133,7 +133,10 @@ export const gatewayClient = {
 
   // Login ceremony (the operator scans with the SPARE account). `loginStatus`
   // is ONE server-held poll step (~35 s) — the UI loops until a terminal status.
-  loginStart: () => call<GatewayLoginStartResponse>('POST', '/v1/master/gateway/login/start'),
+  // One bot per member (2026-09-11): `contactId` names the invite the QR is minted
+  // for — the scan binds that contact. Absent = the legacy owner login.
+  loginStart: (contactId?: string) =>
+    call<GatewayLoginStartResponse>('POST', '/v1/master/gateway/login/start', contactId ? { contact_id: contactId } : undefined),
   loginStatus: (loginId: string) =>
     call<GatewayLoginStatusResponse>(
       'GET',

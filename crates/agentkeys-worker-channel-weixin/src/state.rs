@@ -46,6 +46,10 @@ pub struct AdminLogin {
     /// the tenant identity arrives from the session, never an env stamp.
     /// `None` = old daemon / CLI ceremony → the env-stamp path stays.
     pub operator_omni: Option<String>,
+    /// A MEMBER login (2026-09-11): the QR was minted for this contact's open
+    /// invite — the scan binds that contact and custodies its own bot token.
+    /// `None` = the legacy owner login (secrets-file token).
+    pub contact_id: Option<String>,
 }
 
 pub struct WeixinGatewayState {
@@ -72,9 +76,9 @@ pub struct WeixinGatewayState {
     runtime_operator_omni: RwLock<Option<String>>,
     /// The RUNTIME iLink identity — initialized from config, swapped by the
     /// admin login ceremony. The supervisor reads these on every (re)spawn.
-    ilink_token: RwLock<Option<String>>,
-    ilink_base_url: RwLock<String>,
-    ilink_bot_id: RwLock<Option<String>>,
+    /// Per-member iLink bots, keyed by contact id (`self-owner` = the owner's; the
+    /// legacy secrets-file token seeds it) — see `bots.rs`.
+    bots: RwLock<std::collections::BTreeMap<String, crate::bots::MemberBot>>,
     /// Bumped to make the supervisor stop the current loop and respawn with the
     /// state's CURRENT token/base-url.
     ilink_restart_tx: watch::Sender<u64>,
@@ -92,8 +96,22 @@ impl WeixinGatewayState {
         let rate = RateLimiter::new(config.rate_max, config.rate_window_secs);
         let audit = config.audit_worker_url.as_ref().map(AuditClient::new);
         let (ilink_restart_tx, _) = watch::channel(0u64);
-        let ilink_token = RwLock::new(config.ilink_bot_token.clone());
-        let ilink_base_url = RwLock::new(config.ilink_base_url.clone());
+        let mut bots = crate::bots::BotStore::load(&config.ilink_tokens_file).bots;
+        if let Some(tok) = config
+            .ilink_bot_token
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+        {
+            bots.entry(crate::bots::OWNER_CONTACT_ID.to_string())
+                .or_insert(crate::bots::MemberBot {
+                    token: tok,
+                    base_url: config.ilink_base_url.clone(),
+                    bot_id: String::new(),
+                    user_id: String::new(),
+                    connected_at_secs: 0,
+                });
+        }
+        let bots = RwLock::new(bots);
         let device = Arc::new(crate::device::GatewayDevice::load(
             config.device.clone(),
             config.channel_worker_url.clone(),
@@ -108,9 +126,7 @@ impl WeixinGatewayState {
             ilink_last_ok_ms: AtomicU64::new(0),
             telegram_last_ok_ms: AtomicU64::new(0),
             runtime_operator_omni: RwLock::new(None),
-            ilink_token,
-            ilink_base_url,
-            ilink_bot_id: RwLock::new(None),
+            bots,
             ilink_restart_tx,
             admin_login: tokio::sync::Mutex::new(None),
             monitor: Mutex::new(MonitorRing::default()),
@@ -343,25 +359,30 @@ impl WeixinGatewayState {
     // ── runtime iLink identity (#418 hot-swap) ───────────────────────────────
 
     pub fn current_ilink_token(&self) -> Option<String> {
-        self.ilink_token.read().expect("token lock").clone()
+        self.owner_or_first_bot().map(|b| b.token)
     }
 
     pub fn current_ilink_base_url(&self) -> String {
-        self.ilink_base_url.read().expect("base lock").clone()
+        self.owner_or_first_bot()
+            .map(|b| b.base_url)
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| self.config.ilink_base_url.clone())
     }
 
     pub fn current_ilink_bot_id(&self) -> Option<String> {
-        self.ilink_bot_id.read().expect("bot lock").clone()
+        self.owner_or_first_bot()
+            .map(|b| b.bot_id)
+            .filter(|b| !b.is_empty())
     }
 
     /// True when a token is loaded (the loop runs / will run) — the `online`
     /// bit the status card shows.
     pub fn ilink_online(&self) -> bool {
-        self.ilink_token
+        self.bots
             .read()
-            .expect("token lock")
-            .as_deref()
-            .is_some_and(|t| !t.trim().is_empty())
+            .expect("bots lock")
+            .values()
+            .any(|b| !b.token.trim().is_empty())
     }
 
     /// True when THIS transport can send a reply RIGHT NOW — the honest healthz
@@ -377,10 +398,72 @@ impl WeixinGatewayState {
     /// Swap the runtime identity (a confirmed admin login) and signal the
     /// supervisor to restart the inbound loop on it.
     pub fn set_ilink_identity(&self, token: String, base_url: String, bot_id: String) {
-        *self.ilink_token.write().expect("token lock") = Some(token);
-        *self.ilink_base_url.write().expect("base lock") = base_url;
-        *self.ilink_bot_id.write().expect("bot lock") = Some(bot_id);
+        self.set_member_bot(
+            crate::bots::OWNER_CONTACT_ID,
+            crate::bots::MemberBot {
+                token,
+                base_url,
+                bot_id,
+                user_id: String::new(),
+                connected_at_secs: crate::relay::unix_secs(),
+            },
+        );
+    }
+    // ── per-member bots (2026-09-11) ─────────────────────────────────────────
+    fn owner_or_first_bot(&self) -> Option<crate::bots::MemberBot> {
+        let bots = self.bots.read().expect("bots lock");
+        bots.get(crate::bots::OWNER_CONTACT_ID)
+            .or_else(|| bots.values().next())
+            .cloned()
+    }
+    pub fn bots_snapshot(&self) -> std::collections::BTreeMap<String, crate::bots::MemberBot> {
+        self.bots.read().expect("bots lock").clone()
+    }
+    pub fn bot_for_contact(&self, contact_id: &str) -> Option<crate::bots::MemberBot> {
+        self.bots
+            .read()
+            .expect("bots lock")
+            .get(contact_id)
+            .cloned()
+    }
+    /// Every live token — what the login QR mint passes as `local_token_list`.
+    pub fn all_ilink_tokens(&self) -> Vec<String> {
+        self.bots
+            .read()
+            .expect("bots lock")
+            .values()
+            .map(|b| b.token.clone())
+            .filter(|t| !t.trim().is_empty())
+            .collect()
+    }
+    /// Insert or replace a member's bot, persist the store, restart the loops.
+    pub fn set_member_bot(&self, contact_id: &str, bot: crate::bots::MemberBot) {
+        self.bots
+            .write()
+            .expect("bots lock")
+            .insert(contact_id.to_string(), bot);
+        self.persist_bots();
         self.ilink_restart_tx.send_modify(|n| *n += 1);
+    }
+    pub fn remove_member_bot(&self, contact_id: &str) -> Option<crate::bots::MemberBot> {
+        let removed = self.bots.write().expect("bots lock").remove(contact_id);
+        if removed.is_some() {
+            self.persist_bots();
+            self.ilink_restart_tx.send_modify(|n| *n += 1);
+        }
+        removed
+    }
+    fn persist_bots(&self) {
+        let store = crate::bots::BotStore {
+            bots: self.bots_snapshot(),
+        };
+        if let Err(e) = store.save(&self.config.ilink_tokens_file) {
+            tracing::warn!(
+                path = %self.config.ilink_tokens_file,
+                error = %e,
+                "member bot tokens NOT persisted — live for THIS process only (a restart loses them)"
+            );
+        }
     }
 
     /// Clear the runtime identity (operator disconnect) — the supervisor stops
@@ -388,9 +471,7 @@ impl WeixinGatewayState {
     /// the persisted secrets token ([`crate::ilink_login::clear_secrets_file`])
     /// so a restart stays offline until the next login.
     pub fn clear_ilink_identity(&self) {
-        *self.ilink_token.write().expect("token lock") = None;
-        *self.ilink_bot_id.write().expect("bot lock") = None;
-        self.ilink_restart_tx.send_modify(|n| *n += 1);
+        self.remove_member_bot(crate::bots::OWNER_CONTACT_ID);
     }
 
     /// Subscribe to loop-restart signals (the supervisor holds one).

@@ -94,15 +94,37 @@ pub(crate) async fn deliver(
     let cfg = &state.config;
     match cfg.transport {
         WeixinTransport::Ilink => {
-            let token = state
-                .current_ilink_token()
+            // Per-member bots: the contact's OWN bot carries the send (its token,
+            // its host, its context tokens); the owner's bot is the legacy
+            // fallback for an id no member bot owns.
+            let reg = state.registry.snapshot();
+            let owner_id = reg
+                .bound
+                .iter()
+                .find(|c| c.transport == "weixin" && c.transport_id == transport_id)
+                .map(|c| c.contact_id.clone());
+            let (bot_contact, bot) = owner_id
+                .as_deref()
+                .and_then(|cid| state.bot_for_contact(cid).map(|b| (cid.to_string(), b)))
+                .or_else(|| {
+                    state
+                        .bot_for_contact(crate::bots::OWNER_CONTACT_ID)
+                        .map(|b| (crate::bots::OWNER_CONTACT_ID.to_string(), b))
+                })
                 .ok_or_else(|| anyhow::anyhow!("iLink offline (no bot token)"))?;
-            let client = crate::ilink::IlinkClient::new(
-                &state.current_ilink_base_url(),
-                Some(token),
-                &cfg.bot_agent,
-            );
-            let persist = crate::ilink_loop::IlinkPersist::load(&cfg.ilink_state_file);
+            let base_url = if bot.base_url.is_empty() {
+                cfg.ilink_base_url.clone()
+            } else {
+                bot.base_url.clone()
+            };
+            let client =
+                crate::ilink::IlinkClient::new(&base_url, Some(bot.token.clone()), &cfg.bot_agent);
+            let state_file = if bot_contact == crate::bots::OWNER_CONTACT_ID {
+                cfg.ilink_state_file.clone()
+            } else {
+                crate::bots::member_state_file(&cfg.ilink_state_file, &bot_contact)
+            };
+            let persist = crate::ilink_loop::IlinkPersist::load(&state_file);
             let ct = persist.context_tokens.get(transport_id).map(String::as_str);
             client.send_text(transport_id, text, ct).await
         }

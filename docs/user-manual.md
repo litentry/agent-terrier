@@ -449,25 +449,9 @@ device's channel *names* from the on-chain grant hashes even after a daemon
 restart — a device only reads "grants on chain (names pending)" if its ids
 were never registered here.
 
-**The WeChat contact gate (called the "gateway" until 2026-09-09) lets your family reach agents by chat.** One household bot
-(a WeChat 公众号, or a spare personal account connected as a bot) is the front
-door: each family member is a **contact** you add in parent-control with a
-**tier** (`owner / partner / elder / kid / helper / guest`) and a **reach**
-(which agents they may talk to). To route, they either type `/<agent> …` (e.g.
-`/chef 今晚吃什么`) or just ask — the contact gate's advisory router picks an agent
-**only from that contact's reach**, and if it's unsure it asks them to name one.
-It **can never** reach an agent you didn't grant them, no matter how a message
-is phrased.
+**The WeChat contact gate (called the "gateway" until 2026-09-09) lets your family reach agents by chat — one clawbot per family member.** A clawbot is a special contact that lives only in the WeChat account that scanned its QR, so each member gets their own: you first, then everyone you invite. Each family member is a **contact** you add in parent-control with a **tier** (`owner / partner / elder / kid / helper / guest`) and a **reach** (which agents they may talk to; pre-filled per tier, and every app you install later adds itself to the tiers it admits). To route, they either type `/<agent> …` (e.g. `/chef 今晚吃什么`) or just ask — the contact gate's advisory router picks an agent **only from that contact's reach**, and if it's unsure it asks them to name one. It **can never** reach an agent you didn't grant them, no matter how a message is phrased.
 
-**Connecting the bot and adding family are both in-app.** In parent-control's
-微信网关 card, *you* scan the connect QR once with the **spare** account (that
-account becomes the bot; it stays connected across restarts). To add a family
-member: **邀请家人** mints a one-time bind code (shown as a QR + text like
-`绑定 AK-7Q2M9X`); they send that text to the bot from their own WeChat, the bot
-acks it, and the bind waits for **your confirm** in parent-control — nothing
-joins the family without your approval, and their WeChat identity is never
-shown to you or anyone (you manage them by the name and tier you chose). A
-stranger messaging the bot without a valid code still gets silence.
+**Connecting is a scan, and the invite is the approval.** In parent-control's Contacts page, step 2 is *you*: mint your code and scan the connect QR with your **own** WeChat — your clawbot appears and you are bound as the owner. Step 3 is the family: mint an invite (name, tier, reach), then open their connect QR when they are with you; they scan it with **their own** WeChat, their clawbot appears, and they are bound with the tier and reach you chose — nothing else to confirm, and they get «✅ 绑定成功…» in the new chat. Their WeChat identity is never shown to you or anyone (you manage them by the name and tier you chose). On the code-based transports (a 公众号 or Telegram) the older flow applies instead: the member texts a 6-digit code to the shared bot and you approve the claim. One thing to know: each member's own WeChat account hosts their bot, and Tencent's policy for personal accounts on this API is undocumented.
 
 Three things the contact gate will not do, by design:
 
@@ -540,9 +524,9 @@ the permissions you approve. parent-control → **applications**:
   them under "also enrolled by this Touch ID". The endpoints tab shows both
   and is the standalone way to enroll either ahead of time; the contact gate's
   status card says whether the "feed hop" is armed and why not.
-- **WeChat is the household's iLink bot.** The family talks to an app
-  through the same WeChat bot the assistants already use (the iLink
-  personal-bot API): text, photos and voice clips all relay, and a voice
+- **WeChat is each member's own iLink clawbot.** The family talks to an app
+  through their own clawbot, the one the assistants already use (the iLink
+  personal-bot API, one bot per member): text, photos and voice clips all relay, and a voice
   clip carries WeChat's own transcript. The contact gate's receipt
   ("已转达给 chef 📷 [photo]") comes back at once; the app's own answer comes
   back through the same bot.

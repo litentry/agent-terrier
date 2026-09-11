@@ -28,6 +28,7 @@
 //! household channel gateway.)
 
 pub mod admin;
+pub mod bots;
 pub mod config;
 pub mod device;
 pub mod handlers;

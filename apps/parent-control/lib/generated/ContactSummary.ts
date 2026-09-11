@@ -8,4 +8,9 @@ import type { ContactTier } from "./ContactTier";
  * the gateway/registry. This is `(contact_id, display_name, tier, reach)` only:
  * the routing policy the operator manages, not the third-party PII.
  */
-export type ContactSummary = { contact_id: string, display_name: string, tier: ContactTier, reach: Array<string>, };
+export type ContactSummary = { contact_id: string, display_name: string, tier: ContactTier, reach: Array<string>, 
+/**
+ * This contact's own iLink bot holds a live token on the gate (one bot per
+ * member, 2026-09-11) — false for code-bound contacts on other transports.
+ */
+connected: boolean, };

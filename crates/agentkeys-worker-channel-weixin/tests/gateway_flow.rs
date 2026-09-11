@@ -36,6 +36,7 @@ fn write_registry() -> String {
 
 fn config(registry_file: String) -> WeixinGatewayConfig {
     WeixinGatewayConfig {
+        ilink_tokens_file: String::new(),
         unknown_sender_hint: true,
         bind: "127.0.0.1:0".into(),
         transport: agentkeys_worker_channel_weixin::WeixinTransport::Oa,

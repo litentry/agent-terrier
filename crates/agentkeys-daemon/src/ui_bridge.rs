@@ -8390,6 +8390,7 @@ async fn gateway_status_proxy(
 
 async fn gateway_login_start_proxy(
     State(state): State<SharedUiBridgeState>,
+    body: Option<Json<serde_json::Value>>,
 ) -> axum::response::Response {
     // #502 (plan T9): the daemon fills the connecting master's omni from the
     // authenticated session, SERVER-SIDE — the browser sends an empty body and
@@ -8401,13 +8402,26 @@ async fn gateway_login_start_proxy(
         .await
         .as_ref()
         .map(|s| s.omni.clone());
+    // One bot per member (2026-09-11): the console names the invite the QR is
+    // minted for; the gate binds that contact on the scan. Absent = the owner's
+    // own login.
+    let contact_id = body
+        .and_then(|Json(v)| {
+            v.get("contact_id")
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+        })
+        .filter(|c| !c.is_empty());
     forward_to_gateway(
         &state,
         reqwest::Method::POST,
         "/v1/gateway/admin/login/start",
         None,
         Some(serde_json::json!(
-            agentkeys_backend_client::protocol::GatewayLoginStartRequest { operator_omni }
+            agentkeys_backend_client::protocol::GatewayLoginStartRequest {
+                operator_omni,
+                contact_id
+            }
         )),
     )
     .await

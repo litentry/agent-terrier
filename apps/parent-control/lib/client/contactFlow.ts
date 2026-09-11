@@ -52,6 +52,13 @@ export function suggestedReach(tier: ContactTier, agents: string[], apps: Instal
   return Array.from(new Set(apps.filter((a) => a.tiers.includes(tier)).map((a) => a.label)));
 }
 
+/** iLink bots are per member and bound by SCAN (one clawbot per WeChat account);
+ *  the other transports bind by the texted code. */
+/** Does this transport bind by scan (one clawbot per WeChat account)? iLink does; 公众号 (`oa`)
+ *  and Telegram bind by the 6-digit code. An UNKNOWN transport (no status — the gate is
+ *  unreachable) reads as the household default, iLink — never as the code ceremony. */
+export const scanTransport = (transport: string | null | undefined): boolean => !transport || transport === 'ilink';
+
 export type InviteState = 'minted' | 'claimed';
 export const inviteState = (p: GatewayPendingBindView): InviteState => (p.claimed ? 'claimed' : 'minted');
 

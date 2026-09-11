@@ -128,6 +128,7 @@ fn write_registry() -> String {
 
 fn config(base_url: String, registry_file: String, state_file: String) -> WeixinGatewayConfig {
     WeixinGatewayConfig {
+        ilink_tokens_file: String::new(),
         unknown_sender_hint: false,
         bind: "127.0.0.1:0".into(),
         transport: WeixinTransport::Ilink,

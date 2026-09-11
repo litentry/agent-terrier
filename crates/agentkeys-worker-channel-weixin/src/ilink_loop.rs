@@ -86,77 +86,103 @@ async fn sleep_or_shutdown(d: Duration, shutdown: &mut watch::Receiver<bool>) ->
 /// signal) it stops the old loop and respawns on the new one — no process
 /// restart. With no token it idles (the bot is OFFLINE until the operator
 /// connects it from parent-control or the CLI).
+/// One inbound loop PER BOT (2026-09-11: one bot per member). Re-diffs the live
+/// bot set on every identity change (a member connects, a revoke drops a bot,
+/// the owner re-logs in): loops for gone or re-minted bots stop, missing ones
+/// start; each keeps its own cursor + context tokens.
 pub async fn supervise(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<bool>) {
     let mut restart_rx = state.subscribe_ilink_restart();
+    let mut running: HashMap<
+        String,
+        (
+            crate::bots::MemberBot,
+            watch::Sender<bool>,
+            tokio::task::JoinHandle<()>,
+        ),
+    > = HashMap::new();
     loop {
         if *shutdown.borrow() {
-            return;
+            break;
         }
-        match state.current_ilink_token() {
-            None => {
-                info!(
-                    "iLink loop idle — no bot token yet (connect via parent-control 微信网关 → \
-                     连接, or the `--login` CLI)"
-                );
-                tokio::select! {
-                    _ = restart_rx.changed() => continue,
-                    _ = shutdown.changed() => return,
-                }
+        let desired = state.bots_snapshot();
+        let mut stale = Vec::new();
+        for (id, (bot, _, _)) in running.iter() {
+            let keep = desired
+                .get(id)
+                .is_some_and(|d| d.token == bot.token && d.base_url == bot.base_url);
+            if !keep {
+                stale.push(id.clone());
             }
-            Some(token) => {
-                let base_url = state.current_ilink_base_url();
-                let (loop_tx, loop_rx) = watch::channel(false);
-                let mut task =
-                    tokio::spawn(run_with_token(state.clone(), token, base_url, loop_rx));
-                tokio::select! {
-                    _ = restart_rx.changed() => {
-                        info!("iLink identity swapped — restarting the inbound loop");
-                        let _ = loop_tx.send(true);
-                        let _ = (&mut task).await;
-                    }
-                    _ = shutdown.changed() => {
-                        let _ = loop_tx.send(true);
-                        let _ = (&mut task).await;
-                        return;
-                    }
-                    _ = &mut task => {
-                        // The loop exited on its own (it only does on shutdown —
-                        // errors are handled inside); wait for a swap or shutdown.
-                        tokio::select! {
-                            _ = restart_rx.changed() => {}
-                            _ = shutdown.changed() => return,
-                        }
-                    }
-                }
+        }
+        for id in stale {
+            if let Some((_, tx, task)) = running.remove(&id) {
+                info!(contact = %id, "iLink bot changed or removed — stopping its inbound loop");
+                let _ = tx.send(true);
+                let _ = task.await;
             }
+        }
+        for (id, bot) in desired.iter() {
+            if bot.token.trim().is_empty() || running.contains_key(id) {
+                continue;
+            }
+            let (tx, rx) = watch::channel(false);
+            let task = tokio::spawn(run_with_token(
+                state.clone(),
+                id.clone(),
+                bot.token.clone(),
+                bot.base_url.clone(),
+                rx,
+            ));
+            running.insert(id.clone(), (bot.clone(), tx, task));
+        }
+        if running.is_empty() {
+            info!("no iLink bot token — inbound loop idle until a login (parent-control 连接 / --login)");
+        }
+        tokio::select! {
+            _ = restart_rx.changed() => continue,
+            _ = shutdown.changed() => break,
         }
     }
+    for (_, (_, tx, task)) in running.drain() {
+        let _ = tx.send(true);
+        let _ = task.await;
+    }
 }
-
-/// Back-compat single-shot entry (the integration tests drive this): run the
-/// loop on the state's current identity; no token → return immediately.
 pub async fn run(state: SharedWeixinGatewayState, shutdown: watch::Receiver<bool>) {
     let Some(token) = state.current_ilink_token() else {
         error!("ilink loop asked to run with no bot token — not started");
         return;
     };
     let base_url = state.current_ilink_base_url();
-    run_with_token(state, token, base_url, shutdown).await;
+    run_with_token(
+        state,
+        crate::bots::OWNER_CONTACT_ID.to_string(),
+        token,
+        base_url,
+        shutdown,
+    )
+    .await;
 }
 
 /// Run the inbound loop on an EXPLICIT identity until `shutdown` flips.
 pub async fn run_with_token(
     state: SharedWeixinGatewayState,
+    contact_id: String,
     token: String,
     base_url: String,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let cfg = &state.config;
     let client = IlinkClient::new(&base_url, Some(token), &cfg.bot_agent);
-    let state_file = cfg.ilink_state_file.clone();
+    let state_file = if contact_id == crate::bots::OWNER_CONTACT_ID {
+        cfg.ilink_state_file.clone()
+    } else {
+        crate::bots::member_state_file(&cfg.ilink_state_file, &contact_id)
+    };
     let mut persist = IlinkPersist::load(&state_file);
 
     info!(
+        contact = %contact_id,
         base_url = %base_url,
         resumed_cursor = !persist.get_updates_buf.is_empty(),
         known_reply_tokens = persist.context_tokens.len(),
@@ -260,6 +286,7 @@ pub async fn run_with_token(
                 continue;
             }
 
+            crate::bots::learn_transport_id(&state, &contact_id, &from);
             let outcome = relay::process_turn(&state, "weixin", &from, &text, media).await;
             info!(
                 from = %from,

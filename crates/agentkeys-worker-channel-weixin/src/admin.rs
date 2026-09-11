@@ -118,6 +118,11 @@ pub(crate) async fn admin_status(
         bound_contacts: reg.bound.len() as u32,
         open_invites,
         pending_binds,
+        bots_online: state
+            .bots_snapshot()
+            .values()
+            .filter(|b| !b.token.trim().is_empty())
+            .count() as u32,
         ilink_last_ok_ms: state.ilink_last_ok_ms(),
         audit_on_chain: state.audit_on_chain(),
         actor_omni: state.device.actor_omni(),
@@ -245,13 +250,20 @@ pub(crate) async fn login_start(
     // #502 (plan T9): the daemon proxy fills the connecting master's omni from
     // the authenticated session — captured here, recorded on `connected`. A
     // malformed value is dropped LOUDLY (the env-stamp path then still applies).
-    let session_omni = body.and_then(|Json(b)| b.operator_omni).filter(|omni| {
-        match crate::relay::decode_omni_32(omni) {
-            Some(_) => true,
-            None => {
-                warn!(omni = %omni, "login/start carried a NON-0x64hex operator omni — ignored");
-                false
-            }
+    let (session_omni, member_contact_id) = match body {
+        Some(Json(b)) => (
+            b.operator_omni,
+            b.contact_id
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty()),
+        ),
+        None => (None, None),
+    };
+    let session_omni = session_omni.filter(|omni| match crate::relay::decode_omni_32(omni) {
+        Some(_) => true,
+        None => {
+            warn!(omni = %omni, "login/start carried a NON-0x64hex operator omni — ignored");
+            false
         }
     });
     if state.config.transport != WeixinTransport::Ilink {
@@ -268,7 +280,28 @@ pub(crate) async fn login_start(
     // Present the current token so an already-bound account reports
     // `binded_redirect` instead of double-binding. The QR always boots from the
     // FIXED bootstrap host (config; env-overridable for the headless e2e).
-    let local_tokens: Vec<String> = state.current_ilink_token().into_iter().collect();
+    // A MEMBER login (2026-09-11): the QR is minted FOR an open invite — the scan
+    // binds that contact (tier/reach from the invite) and custodies its own bot
+    // token. The owner's own id is always allowed (the console mints its invite
+    // anyway so the reach is recorded).
+    if let Some(cid) = member_contact_id.as_deref() {
+        let reg = state.registry.snapshot();
+        let known = cid == crate::bots::OWNER_CONTACT_ID
+            || reg.invites.iter().any(|i| i.contact_id == cid)
+            || reg.bound.iter().any(|c| c.contact_id == cid);
+        if !known {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "ok": false,
+                    "reason": "invite_unknown",
+                    "detail": format!("no open invite for contact `{cid}` — mint one first")
+                })),
+            )
+                .into_response();
+        }
+    }
+    let local_tokens: Vec<String> = state.all_ilink_tokens();
     let bootstrap = state.config.ilink_bootstrap_url.clone();
     let client = IlinkClient::new(&bootstrap, None, &state.config.bot_agent);
     match client.get_bot_qrcode(&local_tokens).await {
@@ -280,6 +313,7 @@ pub(crate) async fn login_start(
                 base_url: bootstrap,
                 pending_verify: None,
                 operator_omni: session_omni,
+                contact_id: member_contact_id.clone(),
             };
             let resp = GatewayLoginStartResponse {
                 ok: true,
@@ -443,6 +477,37 @@ pub(crate) async fn login_status(
                 bot_id: bot_id.clone(),
                 scanned_by: scanned_by.clone(),
             };
+            if let Some(cid) = login.contact_id.clone() {
+                // Member login: bind by scan, custody the member's own bot.
+                if let Some(omni) = login.operator_omni.clone() {
+                    state.set_runtime_operator_omni(&omni);
+                    if let Err(e) = ilink_login::upsert_operator_omni(
+                        std::path::Path::new(&state.config.secrets_file),
+                        &omni,
+                    ) {
+                        warn!(error = %e, "connect-recorded operator omni NOT persisted");
+                    }
+                }
+                let bound = bind_member_by_scan(&state, &cid, &outcome).await;
+                *state.admin_login.lock().await = None;
+                return match bound {
+                    Ok(contact) => {
+                        info!(contact_id = %cid, bot_id = %bot_id, "member bot connected — contact bound by scan");
+                        reply(
+                            "connected",
+                            Some(bot_id),
+                            Some(scanned_by),
+                            Some(format!("bound:{}", contact.display_name)),
+                        )
+                    }
+                    Err(e) => reply(
+                        "failed",
+                        Some(bot_id),
+                        Some(scanned_by),
+                        Some(format!("member_bind_failed: {e}")),
+                    ),
+                };
+            }
             let mut detail = None;
             let secrets_path = std::path::Path::new(&state.config.secrets_file);
             match ilink_login::write_secrets_file(secrets_path, &outcome) {
@@ -863,7 +928,15 @@ pub(crate) async fn admin_contacts(
     let reg = state.registry.snapshot();
     let body = GatewayContactsResponse {
         ok: true,
-        contacts: reg.bound.iter().map(Into::into).collect(),
+        contacts: reg
+            .bound
+            .iter()
+            .map(|c| {
+                let mut s: agentkeys_protocol::ContactSummary = c.into();
+                s.connected = state.bot_for_contact(&c.contact_id).is_some();
+                s
+            })
+            .collect(),
     };
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -1038,6 +1111,9 @@ pub(crate) async fn contacts_revoke(
         Ok(found) => {
             let removed = found.is_some();
             if let Some(contact) = found.as_ref() {
+                if state.remove_member_bot(&req.contact_id).is_some() {
+                    info!(contact = %req.contact_id, "member bot token dropped with the revoke");
+                }
                 emit_contact_bind_audit(&state, contact, "revoked").await;
                 state.push_activity(
                     "revoked",
@@ -1376,4 +1452,81 @@ mod bound_notice_tests {
             "{e}"
         );
     }
+}
+
+/// The scan IS the bind (2026-09-11, per-member bots): the invite carried the
+/// master's intent (name, tier, reach), the confirmed login proves the member
+/// holds the WeChat that scanned — so the contact is bound here, its bot token
+/// custodied under its contact id, the invite consumed. The transport id is the
+/// scan's `ilink_user_id`; the first inbound on the member's bot re-learns it
+/// if the transport spells it differently (`bots::learn_transport_id`).
+async fn bind_member_by_scan(
+    state: &SharedWeixinGatewayState,
+    contact_id: &str,
+    outcome: &LoginOutcome,
+) -> anyhow::Result<Contact> {
+    let transport_id = if outcome.scanned_by.is_empty() {
+        format!("bot:{}", outcome.bot_id)
+    } else {
+        outcome.scanned_by.clone()
+    };
+    let contact = state.registry.mutate(|reg| {
+        let invite = reg
+            .invites
+            .iter()
+            .find(|i| i.contact_id == contact_id)
+            .cloned();
+        let existing = reg
+            .bound
+            .iter()
+            .find(|c| c.contact_id == contact_id)
+            .cloned();
+        let (display_name, tier, reach) = match (&invite, &existing) {
+            (Some(i), _) => (i.display_name.clone(), i.tier, i.reach.clone()),
+            (None, Some(c)) => (c.display_name.clone(), c.tier, c.reach.clone()),
+            (None, None) => anyhow::bail!("invite_unknown"),
+        };
+        let contact = Contact {
+            contact_id: contact_id.to_string(),
+            transport: "weixin".into(),
+            transport_id: transport_id.clone(),
+            display_name,
+            tier,
+            reach,
+        };
+        reg.bound.retain(|c| {
+            c.contact_id != contact_id
+                && !(c.transport == "weixin" && c.transport_id == transport_id)
+        });
+        reg.bound.push(contact.clone());
+        reg.invites.retain(|i| i.contact_id != contact_id);
+        reg.pending.retain(|p| p.transport_id != transport_id);
+        Ok(contact)
+    })?;
+    state.set_member_bot(
+        contact_id,
+        crate::bots::MemberBot {
+            token: outcome.bot_token.clone(),
+            base_url: outcome.base_url.clone(),
+            bot_id: outcome.bot_id.clone(),
+            user_id: outcome.scanned_by.clone(),
+            connected_at_secs: crate::relay::unix_secs(),
+        },
+    );
+    emit_contact_bind_audit(state, &contact, "bound").await;
+    state.push_activity(
+        "bound",
+        &contact.display_name,
+        &format!(
+            "{} · {} agent(s) · by scan",
+            contact.tier.as_str(),
+            contact.reach.len()
+        ),
+        state.audit_on_chain(),
+    );
+    let notice = bound_notice(&contact);
+    if let Err(e) = crate::outbound::deliver(state, &contact.transport_id, &notice).await {
+        warn!(contact_id, error = %e, "bound notice NOT delivered after the scan (the bind stands)");
+    }
+    Ok(contact)
 }

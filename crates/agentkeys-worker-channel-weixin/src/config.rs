@@ -118,6 +118,11 @@ pub struct WeixinGatewayConfig {
     /// (`AGENTKEYS_WEIXIN_SECRETS_FILE`, default the canonical broker path).
     /// The #384 custody home — the worker upserts the managed keys in place.
     pub secrets_file: String,
+    /// Per-member iLink bot tokens (2026-09-11): one custodied token per family
+    /// member, JSON, 0600, next to the secrets file by default
+    /// (`AGENTKEYS_WEIXIN_ILINK_TOKENS_FILE` overrides). The legacy single token in
+    /// the secrets file stays the owner's bot.
+    pub ilink_tokens_file: String,
     /// The FIXED QR-login bootstrap host (`AGENTKEYS_WEIXIN_ILINK_BOOTSTRAP_URL`,
     /// default the upstream constant). Distinct from `ilink_base_url` — after a
     /// login the bot's own IDC host lands in the secrets file as the BASE url,
@@ -281,6 +286,11 @@ impl WeixinGatewayConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::ilink_login::DEFAULT_SECRETS_FILE.to_string());
+        let ilink_tokens_file = var("AGENTKEYS_WEIXIN_ILINK_TOKENS_FILE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| crate::bots::default_tokens_file(&secrets_file));
         let ilink_bootstrap_url = var("AGENTKEYS_WEIXIN_ILINK_BOOTSTRAP_URL")
             .ok()
             .map(|s| s.trim().to_string())
@@ -460,6 +470,7 @@ impl WeixinGatewayConfig {
             history_file,
             activity_file,
             secrets_file,
+            ilink_tokens_file,
             ilink_bootstrap_url,
             bot_agent,
             telegram_bot_token,

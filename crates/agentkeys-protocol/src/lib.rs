@@ -935,6 +935,10 @@ pub struct ContactSummary {
     pub display_name: String,
     pub tier: ContactTier,
     pub reach: Vec<String>,
+    /// This contact's own iLink bot holds a live token on the gate (one bot per
+    /// member, 2026-09-11) — false for code-bound contacts on other transports.
+    #[serde(default)]
+    pub connected: bool,
 }
 
 impl From<&Contact> for ContactSummary {
@@ -944,6 +948,7 @@ impl From<&Contact> for ContactSummary {
             display_name: c.display_name.clone(),
             tier: c.tier,
             reach: c.reach.clone(),
+            connected: false,
         }
     }
 }
@@ -988,6 +993,9 @@ pub struct GatewayStatusView {
     pub open_invites: u32,
     /// Claimed binds awaiting the master's approve.
     pub pending_binds: u32,
+    /// Live iLink bots (one per connected member, 2026-09-11; the owner's counts).
+    #[serde(default)]
+    pub bots_online: u32,
     /// Millis of the iLink loop's last successful poll (`null` = never / OA).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
@@ -1089,6 +1097,11 @@ pub struct GatewayDevicePairingDone {
 pub struct GatewayLoginStartRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_omni: Option<String>,
+    /// A MEMBER login (2026-09-11, one bot per member): mint the QR for this
+    /// contact's open invite — the scan binds the contact and custodies its own
+    /// bot token. Absent = the legacy owner login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_id: Option<String>,
 }
 
 /// `POST /v1/gateway/admin/login/start` response — render `qrcode_url` as a QR

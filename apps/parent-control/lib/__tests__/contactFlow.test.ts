@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ContactSummary } from '../generated/ContactSummary';
 import type { GatewayPendingBindView } from '../generated/GatewayPendingBindView';
-import { SELF_CONTACT_ID, appAudiences, flowStep, inviteState, selfState, sendText, suggestedReach } from '../client/contactFlow';
+import { SELF_CONTACT_ID, appAudiences, flowStep, inviteState, scanTransport, selfState, sendText, suggestedReach } from '../client/contactFlow';
 
 const pend = (contact_id: string, tier: GatewayPendingBindView['tier'], claimed: boolean): GatewayPendingBindView => ({
   bind_code: '123456', contact_id, display_name: contact_id, tier, reach: [], claimed,
 });
-const bound = (contact_id: string, tier: ContactSummary['tier']): ContactSummary => ({ contact_id, display_name: contact_id, tier, reach: [] });
+const bound = (contact_id: string, tier: ContactSummary['tier']): ContactSummary => ({ contact_id, display_name: contact_id, tier, reach: [], connected: false });
 
 describe('contacts flow', () => {
   const apps = appAudiences([
@@ -38,6 +38,12 @@ describe('contacts flow', () => {
     expect(flowStep(false, 'bound')).toBe(1);
     expect(flowStep(true, 'minted')).toBe(2);
     expect(flowStep(true, 'bound')).toBe(3);
+  });
+
+  it('iLink binds by scan; 公众号/Telegram by code; unknown (gate unreachable) reads as the household default', () => {
+    expect(scanTransport('ilink')).toBe(true);
+    for (const t of ['oa', 'telegram']) expect(scanTransport(t)).toBe(false);
+    for (const t of ['', null, undefined]) expect(scanTransport(t)).toBe(true);
   });
 
   it('invite rows and the send grammar', () => {

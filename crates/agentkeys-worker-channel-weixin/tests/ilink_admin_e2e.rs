@@ -14,6 +14,7 @@
 //! Boots the REAL router + supervisor against an in-process mock iLink API the
 //! test scripts (a shared inbox the test pushes messages into).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -41,6 +42,11 @@ struct MockIlink {
     /// (auth, body) per sendmessage.
     sends: Mutex<Vec<(String, Value)>>,
     getupdates_auth: Mutex<Vec<String>>,
+    /// Per-member bots: a confirmed-login payload the NEXT status poll returns
+    /// (a member's own token / bot / user), and per-bearer inboxes so each
+    /// bot's loop drains only its own messages.
+    next_confirm: Mutex<Option<Value>>,
+    inbox_by_auth: Mutex<HashMap<String, Vec<Value>>>,
 }
 
 async fn mock_qrcode() -> Json<Value> {
@@ -48,6 +54,9 @@ async fn mock_qrcode() -> Json<Value> {
 }
 
 async fn mock_status(State(m): State<Arc<MockIlink>>) -> Json<Value> {
+    if let Some(v) = m.next_confirm.lock().unwrap().take() {
+        return Json(v);
+    }
     let n = m.status_calls.fetch_add(1, Ordering::SeqCst);
     if n == 0 {
         return Json(json!({ "status": "wait" }));
@@ -70,8 +79,11 @@ async fn mock_getupdates(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    m.getupdates_auth.lock().unwrap().push(auth);
-    let msgs: Vec<Value> = m.inbox.lock().unwrap().drain(..).collect();
+    m.getupdates_auth.lock().unwrap().push(auth.clone());
+    let msgs: Vec<Value> = match m.inbox_by_auth.lock().unwrap().get_mut(&auth) {
+        Some(own) => std::mem::take(own),
+        None => m.inbox.lock().unwrap().drain(..).collect(),
+    };
     if msgs.is_empty() {
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
@@ -155,6 +167,7 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     std::fs::remove_file(&state_file).ok();
 
     let cfg = WeixinGatewayConfig {
+        ilink_tokens_file: String::new(),
         unknown_sender_hint: true,
         bind: "127.0.0.1:0".into(),
         transport: WeixinTransport::Ilink,
@@ -430,5 +443,273 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), supervisor).await;
     for f in [registry_file, secrets_file, state_file] {
         std::fs::remove_file(f).ok();
+    }
+}
+
+const WIFE_TOKEN: &str = "wife@im.bot:e2e-secret-2";
+const WIFE_BOT_ID: &str = "wife@im.bot";
+const WIFE_USER: &str = "wife@im.wechat";
+
+/// One bot per member (2026-09-11): the owner connects, mints an invite for
+/// 太太, starts a login FOR that invite; her scan (the mock's confirmed status
+/// with HER token) binds her with the invite's tier + reach, custodies her token
+/// in the tokens file, starts her own inbound loop, and her `/chef` turn is
+/// routed and acked ON HER OWN BOT; the revoke drops the bot again.
+#[tokio::test]
+async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
+    let mock = Arc::new(MockIlink::default());
+    let ilink_base = spawn_mock(mock.clone()).await;
+    let registry_file = temp("m-registry.json");
+    std::fs::write(&registry_file, r#"{"bound":[],"pending":[]}"#).unwrap();
+    let secrets_file = temp("m-secrets.env");
+    std::fs::write(&secrets_file, "AGENTKEYS_WEIXIN_OPERATOR_OMNI=0xfeed\n").unwrap();
+    let state_file = temp("m-state.json");
+    let tokens_file = temp("m-tokens.json");
+    for f in [&state_file, &tokens_file] {
+        std::fs::remove_file(f).ok();
+    }
+    let cfg = WeixinGatewayConfig {
+        ilink_tokens_file: tokens_file.clone(),
+        unknown_sender_hint: true,
+        bind: "127.0.0.1:0".into(),
+        transport: WeixinTransport::Ilink,
+        weixin_token: String::new(),
+        weixin_app_id: String::new(),
+        weixin_app_secret: None,
+        ilink_bot_token: None,
+        ilink_base_url: ilink_base.clone(),
+        ilink_state_file: state_file.clone(),
+        history_file: String::new(),
+        activity_file: String::new(),
+        secrets_file: secrets_file.clone(),
+        ilink_bootstrap_url: ilink_base.clone(),
+        bot_agent: "AgentKeys/test".into(),
+        telegram_bot_token: None,
+        telegram_api_base: agentkeys_worker_channel_weixin::telegram::TELEGRAM_API_BASE.into(),
+        telegram_state_file: "/dev/null".into(),
+        registry_file: registry_file.clone(),
+        channel_worker_url: None,
+        operator_omni: format!("0x{}", "ab".repeat(32)),
+        audit_worker_url: None,
+        operator_grade_aliases: vec!["spend".into()],
+        parent_control_deeplink: "https://pc.local/".into(),
+        rate_max: 100,
+        rate_window_secs: 60,
+        router_enabled: true,
+        admin_token: Some(ADMIN.into()),
+        allow_unsigned: false,
+        device: Default::default(),
+    };
+    let state = Arc::new(WeixinGatewayState::build(cfg).unwrap());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let supervisor = tokio::spawn(ilink_loop::supervise(state.clone(), shutdown_rx));
+    let app = handlers::build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let http = reqwest::Client::new();
+    let bearer = |r: reqwest::RequestBuilder| r.header("authorization", format!("Bearer {ADMIN}"));
+    let poll_login = |login_id: String| {
+        let http = http.clone();
+        let gw = gw.clone();
+        async move {
+            for _ in 0..40 {
+                let s: Value = http
+                    .get(format!(
+                        "{gw}/v1/gateway/admin/login/status?login_id={login_id}"
+                    ))
+                    .header("authorization", format!("Bearer {ADMIN}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if s["status"] != "wait" && s["status"] != "scaned" {
+                    return s;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+            panic!("login never left wait");
+        }
+    };
+
+    // ① the owner's own bot (the legacy login path — no contact id).
+    let start: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/login/start")))
+        .json(&json!({ "operator_omni": format!("0x{}", "cd".repeat(32)) }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let owner = poll_login(start["login_id"].as_str().unwrap().to_string()).await;
+    assert_eq!(owner["status"], "connected", "{owner}");
+
+    // ② a login for an invite nobody minted is refused loudly.
+    let unknown = bearer(http.post(format!("{gw}/v1/gateway/admin/login/start")))
+        .json(&json!({ "contact_id": "c-nobody" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 422);
+
+    // ③ invite 太太 (partner, reach chef), then a login FOR that invite.
+    let inv: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/bind/invite")))
+        .json(&json!({ "contact_id": "c-wife", "display_name": "太太", "tier": "partner", "reach": ["chef"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(inv["ok"], true);
+    *mock.next_confirm.lock().unwrap() = Some(json!({
+        "status": "confirmed",
+        "bot_token": WIFE_TOKEN,
+        "ilink_bot_id": WIFE_BOT_ID,
+        "baseurl": ilink_base.clone(),
+        "ilink_user_id": WIFE_USER
+    }));
+    mock.inbox_by_auth
+        .lock()
+        .unwrap()
+        .insert(format!("Bearer {WIFE_TOKEN}"), Vec::new());
+    let start: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/login/start")))
+        .json(&json!({ "contact_id": "c-wife" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(start["ok"], true, "{start}");
+    let wife = poll_login(start["login_id"].as_str().unwrap().to_string()).await;
+    assert_eq!(wife["status"], "connected", "{wife}");
+    assert_eq!(wife["bot_id"], WIFE_BOT_ID);
+    assert!(
+        wife["detail"].as_str().unwrap().contains("bound:太太"),
+        "{wife}"
+    );
+
+    // ④ the scan WAS the bind: tier + reach from the invite, her own bot live.
+    let contacts: Value = bearer(http.get(format!("{gw}/v1/gateway/admin/contacts")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = contacts["contacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["contact_id"] == "c-wife")
+        .expect("wife bound");
+    assert_eq!(row["tier"], "partner");
+    assert_eq!(row["reach"], json!(["chef"]));
+    assert_eq!(row["connected"], true);
+    assert!(
+        !contacts.to_string().contains(WIFE_USER),
+        "D13: no transport id in the contacts view"
+    );
+    let st: Value = bearer(http.get(format!("{gw}/v1/gateway/admin/status")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(st["bots_online"], 2, "{st}");
+    assert_eq!(
+        st["open_invites"], 0,
+        "the invite is consumed by the scan: {st}"
+    );
+    let tokens_raw = std::fs::read_to_string(&tokens_file).unwrap();
+    assert!(
+        tokens_raw.contains("c-wife")
+            && tokens_raw.contains(WIFE_USER)
+            && tokens_raw.contains(WIFE_TOKEN),
+        "{tokens_raw}"
+    );
+    assert!(
+        std::fs::read_to_string(&registry_file)
+            .unwrap()
+            .contains(WIFE_USER),
+        "the registry row carries her transport id"
+    );
+    // her own loop polls with HER token; the bound notice went out on it
+    wait_until("wife loop polling with her token", || {
+        mock.getupdates_auth
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| a == &format!("Bearer {WIFE_TOKEN}"))
+    })
+    .await;
+    wait_until("bound notice on the wife's bot", || {
+        mock.sends.lock().unwrap().iter().any(|(auth, b)| {
+            auth == &format!("Bearer {WIFE_TOKEN}")
+                && b["msg"]["to_user_id"] == WIFE_USER
+                && b["msg"]["item_list"][0]["text_item"]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("绑定成功") && t.contains("/chef"))
+        })
+    })
+    .await;
+
+    // ⑤ her turn arrives on her bot and is routed + acked on her bot.
+    mock.inbox_by_auth
+        .lock()
+        .unwrap()
+        .get_mut(&format!("Bearer {WIFE_TOKEN}"))
+        .unwrap()
+        .push(user_msg(WIFE_USER, "/chef 今晚吃什么", "ctx-w1"));
+    wait_until("routed ack on the wife's bot", || {
+        mock.sends.lock().unwrap().iter().any(|(auth, b)| {
+            auth == &format!("Bearer {WIFE_TOKEN}")
+                && b["msg"]["to_user_id"] == WIFE_USER
+                && b["msg"]["item_list"][0]["text_item"]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("已转达给 chef"))
+        })
+    })
+    .await;
+    assert!(
+        mock.sends.lock().unwrap().iter().all(|(auth, b)| {
+            !(auth == &format!("Bearer {MINTED_TOKEN}") && b["msg"]["to_user_id"] == WIFE_USER)
+        }),
+        "nothing to the wife ever rides the owner's bot"
+    );
+
+    // ⑥ revoke drops her bot with the contact.
+    let rev: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/contacts/revoke")))
+        .json(&json!({ "contact_id": "c-wife" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rev["removed"], true);
+    let st: Value = bearer(http.get(format!("{gw}/v1/gateway/admin/status")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(st["bots_online"], 1, "{st}");
+    assert!(!std::fs::read_to_string(&tokens_file)
+        .unwrap()
+        .contains("c-wife"));
+
+    let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), supervisor).await;
+    for f in [registry_file, secrets_file, state_file, tokens_file] {
+        std::fs::remove_file(&f).ok();
+        std::fs::remove_file(format!("{f}.c-wife")).ok();
     }
 }

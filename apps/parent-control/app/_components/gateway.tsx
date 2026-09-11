@@ -40,6 +40,7 @@ import {
   appAudiences,
   flowStep,
   inviteState,
+  scanTransport,
   selfState,
   sendText,
   suggestedReach,
@@ -74,9 +75,10 @@ const REASON_TEXT: Record<string, string> = {
   gateway_not_configured: 'No contact gate URL — the daemon derives it from its broker; point the daemon at a deployed broker (or set AGENTKEYS_WORKER_WEIXIN_URL to override).',
   'gateway-not-configured': 'No contact gate URL — the daemon derives it from its broker; point the daemon at a deployed broker (or set AGENTKEYS_WORKER_WEIXIN_URL to override).',
   'gateway-admin-not-configured':
-    'The contact gate admin token isn’t set on the daemon — copy AGENTKEYS_WEIXIN_ADMIN_TOKEN from the broker’s weixin-secrets.env into the daemon env.',
+    'The contact gate admin token isn’t set on the daemon — put this stack’s AGENTKEYS_WEIXIN_ADMIN_TOKEN (from the broker’s weixin-secrets.env) in scripts/operator-workstation.<stack>.secrets.env of the MAIN checkout, then restart the local web app.',
   admin_disabled: 'The contact gate has no admin token configured — set AGENTKEYS_WEIXIN_ADMIN_TOKEN on the broker.',
-  admin_unauthorized: 'The daemon’s admin token doesn’t match the contact gate’s — re-copy it from the broker.',
+  admin_unauthorized:
+    'The daemon’s admin token doesn’t match the contact gate’s — probably another stack’s bearer or an ambient ~/.zshenv export. Put this stack’s bearer in scripts/operator-workstation.<stack>.secrets.env of the MAIN checkout (dev.sh reads the checkout it runs from, then the main checkout) and restart the local web app.',
   transport_not_ilink: 'This contact gate runs the 公众号 (oa) transport — the QR connect flow is for the personal-bot (ilink) transport.',
   daemon_unreachable: 'The local daemon isn’t reachable — is it running?',
   no_active_login: 'The login session expired — start again.',
@@ -427,6 +429,10 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
     return () => window.clearInterval(id);
   }, [inFlight, refresh]);
   const online = !!status?.online;
+  // No status = the gate is unreachable (401/offline): the steps still read as the
+  // household default (iLink, scan) and every mint is held until step 1 is fixed.
+  const reachable = status !== null;
+  const scan = scanTransport(status?.transport);
   const agents = deeplinkReach ?? [];
   const self = selfState(pending, contacts);
   const step = flowStep(online, self);
@@ -436,7 +442,7 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
       <PageHead
         crumb="household / contacts"
         title="Contacts"
-        desc="One WeChat bot per household, connected once. Every family member — you first — binds by texting an invite code to that bot from their own WeChat, and you approve each bind. Nothing binds without your approval, and no one's WeChat identity is ever shown (D13)."
+        desc="Every family member — you first — gets their own clawbot: a connect QR minted here, scanned with their own WeChat. Nothing binds without an invite you minted, and no one's WeChat identity is ever shown (D13)."
         actions={
           <>
             <GatewayDebugToggle />
@@ -447,15 +453,22 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
       <Toast toast={toast} />
       <StepPanel
         n={1}
-        title="the household bot"
+        title={scan ? 'your clawbot' : 'the household bot'}
         active={step === 1}
         done={online}
         state={notConfigured ? 'no contact gate' : online ? `connected · ${status?.bot_id ?? 'bot'}` : 'offline'}
       >
-        <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
-          Scan the QR <strong>once</strong> with the household's <strong>spare</strong> WeChat account — that account becomes the bot.
-          Family members never scan it; each gets a code in step 3.
-        </p>
+        {scan ? (
+          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
+            A clawbot lives only in the WeChat account that scanned its QR — there is no sharing. So every member, you first, connects their <strong>own</strong> WeChat (step 2 for you, step 3 for the family); each bot is linked to this household and routes to the same agents.
+            WeChat's policy for personal accounts on this API is undocumented.
+          </p>
+        ) : (
+          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
+            This contact gate runs a <strong>shared</strong> bot (a 公众号 or a Telegram bot) that anyone can message. Connect it once here;
+            family members never scan anything — each gets a 6-digit code in step 3.
+          </p>
+        )}
         <ConnectPanel status={status} statusErr={statusErr} notConfigured={notConfigured} onChange={() => void refresh()} onFlash={flash} />
       </StepPanel>
       <StepPanel
@@ -463,9 +476,9 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
         title="you — the owner"
         active={step === 2}
         done={self === 'bound'}
-        state={self === 'bound' ? 'bound' : self === 'claimed' ? 'code received — approve' : self === 'minted' ? 'code minted — text it to the bot' : online ? 'not bound yet' : 'after step 1'}
+        state={self === 'bound' ? 'bound' : self === 'claimed' ? 'code received — approve' : self === 'minted' ? (scan ? 'invite minted — scan your connect QR' : 'code minted — text it to the bot') : online ? 'not bound yet' : 'after step 1'}
       >
-        <SelfBindCard self={self} pending={pending} contacts={contacts} agents={agents} apps={apps} online={online} onChange={() => void refresh()} onFlash={flash} />
+        <SelfBindCard self={self} pending={pending} contacts={contacts} agents={agents} apps={apps} online={online} reachable={reachable} scan={scan} onChange={() => void refresh()} onFlash={flash} />
       </StepPanel>
       <StepPanel
         n={3}
@@ -474,12 +487,18 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
         done={contacts.some((c) => c.tier !== 'owner')}
         state={`${contacts.filter((c) => c.tier !== 'owner').length} bound · ${familyPending.length} invite${familyPending.length === 1 ? '' : 's'} open`}
       >
-        <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
-          Members don't scan or connect anything. Once, from the spare phone, share the bot's <strong>name card (名片)</strong> to them or into the family group so the bot is in their WeChat.
-          Then mint an invite, they text the code to the bot in a <strong>private</strong> chat from <strong>their own</strong> WeChat (groups are ignored, and the bot cannot message first), you approve. Each invite below shows where it stands.
-        </p>
-        <InvitePanel agents={agents} apps={apps} online={online} onInvited={() => void refresh()} onFlash={flash} />
-        <InvitesTable pending={familyPending} onChange={() => void refresh()} onFlash={flash} />
+        {scan ? (
+          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
+            Mint an invite (name, tier, reach), then open their connect QR from the row when they are with you — they scan it with <strong>their own</strong> WeChat and their clawbot appears, bound with the tier and reach you chose. The mint is your approval; nothing else to confirm.
+          </p>
+        ) : (
+          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
+            Members don't scan or connect anything: they open the shared bot themselves (follow the 公众号, or open the Telegram bot), you mint an invite,
+            they text the code to it in a <strong>private</strong> chat from <strong>their own</strong> account (groups are ignored, and the bot cannot message first), you approve. Each invite below shows where it stands.
+          </p>
+        )}
+        <InvitePanel agents={agents} apps={apps} online={scan ? reachable : online} scan={scan} onInvited={() => void refresh()} onFlash={flash} />
+        <InvitesTable pending={familyPending} scan={scan} onChange={() => void refresh()} onFlash={flash} />
       </StepPanel>
       <ContactsPanel contacts={contacts} onChange={() => void refresh()} onFlash={flash} />
       <details style={{ marginTop: 18 }}>
@@ -524,8 +543,9 @@ function StepPanel({
 }
 
 // ── step 2: the owner's own bind ──────────────────────────────────────────────
-// The owner binds like everyone else — a code texted from the DAILY WeChat
-// (the spare account is the bot). The card is the state machine in one place:
+// The owner binds like everyone else — on iLink a scan with their own WeChat (their
+// own clawbot), on 公众号/Telegram a code texted to the shared bot. The card is the
+// state machine in one place:
 // mint → the code, right here, with the send text → the bot received it →
 // approve → bound (with the reach that was granted).
 function SelfBindCard({
@@ -535,6 +555,8 @@ function SelfBindCard({
   agents,
   apps,
   online,
+  reachable,
+  scan,
   onChange,
   onFlash,
 }: {
@@ -544,10 +566,13 @@ function SelfBindCard({
   agents: string[];
   apps: InstalledAppAudience[];
   online: boolean;
+  reachable: boolean;
+  scan: boolean;
   onChange: () => void;
   onFlash: (m: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
   const mine = pending.find((p) => p.contact_id === SELF_CONTACT_ID) ?? pending.find((p) => p.tier === 'owner');
   const me = contacts.find((c) => c.tier === 'owner');
   const reach = suggestedReach('owner', agents, apps);
@@ -577,14 +602,52 @@ function SelfBindCard({
     return (
       <div style={{ fontSize: 13, lineHeight: 1.7 }}>
         ✓ Bound as <strong>{me.display_name}</strong> · owner · reach: {me.reach.length ? me.reach.join(', ') : '—'}
+        {scan && (me.connected ? <span> · your clawbot is connected</span> : <span style={{ color: 'var(--danger)' }}> · your clawbot is offline — reconnect in the card above</span>)}
         <div className="muted" style={{ fontSize: 12 }}>Apps you install later add themselves here automatically.</div>
+      </div>
+    );
+  }
+  if (scan && self !== 'bound') {
+    return (
+      <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
+        <div>
+          Scan a connect QR with <strong>your own</strong> WeChat — your clawbot appears as a contact there, linked to this household, and you are bound as the owner
+          {reach.length ? ` reaching ${reach.length} agent${reach.length === 1 ? '' : 's'}` : ''}.
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button
+            className="btn primary"
+            disabled={busy || !reachable}
+            onClick={() =>
+              void (async () => {
+                if (self === 'none') await mint();
+                setScanOpen(true);
+              })()
+            }
+          >
+            {busy ? 'minting…' : self === 'none' ? '⊕ connect my WeChat' : '▣ show my connect QR'}
+          </button>
+          {self === 'minted' && <button className="btn sm" disabled={busy || !reachable} onClick={() => void mint()}>re-mint</button>}
+          {!reachable && <span className="muted" style={{ fontSize: 12 }}>the contact gate is unreachable — fix step 1 first</span>}
+        </div>
+        {scanOpen && (
+          <ConnectModal
+            contactId={SELF_CONTACT_ID}
+            onClose={() => setScanOpen(false)}
+            onConnected={(botId) => {
+              setScanOpen(false);
+              onFlash(`Connected · ${botId} — you are bound as the owner`);
+              onChange();
+            }}
+          />
+        )}
       </div>
     );
   }
   if (self === 'none') {
     return (
       <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
-        <div>Mint your own code, then text it to the bot from your <strong>daily</strong> WeChat (not the spare one).</div>
+        <div>Mint your own code, then text it to the shared bot in a private chat from your <strong>own</strong> account.</div>
         <div>
           <button className="btn primary" disabled={busy || !online} onClick={() => void mint()}>
             {busy ? 'minting…' : `⊕ mint my code · owner · ${reach.length ? `${reach.length} agent${reach.length === 1 ? '' : 's'}` : 'no agents yet'}`}
@@ -642,10 +705,12 @@ function CodeLine({ code, onCopied }: { code: string; onCopied: () => void }) {
 // ── step 3: the family invites, each with its state ───────────────────────────
 function InvitesTable({
   pending,
+  scan,
   onChange,
   onFlash,
 }: {
   pending: GatewayPendingBindView[];
+  scan: boolean;
   onChange: () => void;
   onFlash: (m: string) => void;
 }) {
@@ -659,16 +724,27 @@ function InvitesTable({
         <span className="summary">{claimed.length > 0 ? `${claimed.length} to approve` : `${minted.length} waiting`}</span>
       </div>
       <div style={{ display: 'grid', gap: 6 }}>
-        {claimed.map((p) => <InviteRow key={p.bind_code} p={p} onChange={onChange} onFlash={onFlash} />)}
-        {minted.map((p) => <InviteRow key={p.bind_code} p={p} onChange={onChange} onFlash={onFlash} />)}
+        {claimed.map((p) => <InviteRow key={p.bind_code} p={p} scan={scan} onChange={onChange} onFlash={onFlash} />)}
+        {minted.map((p) => <InviteRow key={p.bind_code} p={p} scan={scan} onChange={onChange} onFlash={onFlash} />)}
       </div>
     </div>
   );
 }
 
-function InviteRow({ p, onChange, onFlash }: { p: GatewayPendingBindView; onChange: () => void; onFlash: (m: string) => void }) {
+function InviteRow({
+  p,
+  scan,
+  onChange,
+  onFlash,
+}: {
+  p: GatewayPendingBindView;
+  scan: boolean;
+  onChange: () => void;
+  onFlash: (m: string) => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [scanOpen, setScanOpen] = useState(false);
   const state = inviteState(p);
   const approve = async () => {
     setBusy(true);
@@ -697,9 +773,27 @@ function InviteRow({ p, onChange, onFlash }: { p: GatewayPendingBindView; onChan
           <strong>{p.display_name}</strong> · <span className="muted">{p.tier} · {tierLabel(p.tier)}</span>
           <span className="muted" style={{ fontSize: 12 }}> · reach: {p.reach.length ? p.reach.join(', ') : '—'}</span>
         </span>
-        <span style={pill}>{state === 'claimed' ? '② code received — approve' : '① code minted — waiting'}</span>
+        <span style={pill}>{state === 'claimed' ? '② code received — approve' : scan ? '① invite minted — scan pending' : '① code minted — waiting'}</span>
       </div>
-      {state === 'minted' ? (
+      {state === 'minted' && scan ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 12.5 }}>
+          <span className="muted">{p.display_name} scans a connect QR with their own WeChat — their clawbot appears there, bound as {p.tier} · {tierLabel(p.tier)}:</span>
+          <button className="btn primary sm" onClick={() => setScanOpen(true)}>▣ show {p.display_name}'s connect QR</button>
+          <RejectButton bindCode={p.bind_code} name={p.display_name} onChange={onChange} onFlash={onFlash} />
+          {scanOpen && (
+            <ConnectModal
+              contactId={p.contact_id}
+              who={p.display_name}
+              onClose={() => setScanOpen(false)}
+              onConnected={(botId) => {
+                setScanOpen(false);
+                onFlash(`${p.display_name} connected · ${botId} — bound as ${p.tier}`);
+                onChange();
+              }}
+            />
+          )}
+        </div>
+      ) : state === 'minted' ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 12.5 }}>
           <span className="muted">{p.display_name} texts this to the bot from their own WeChat:</span>
           <CodeLine code={p.bind_code} onCopied={() => onFlash(`Copied — send it to ${p.display_name}`)} />
@@ -740,9 +834,10 @@ function ConnectPanel({
 }) {
   const online = status?.online ?? false;
   const transport = status?.transport ?? '—';
+  const scan = scanTransport(status?.transport);
   return (
     <Panel
-      title="connection · the bot"
+      title={scan ? 'connection · your clawbot' : 'connection · the bot'}
       right={
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
           <Dot status={online ? 'ok' : notConfigured ? 'muted' : 'warn'} pulse={online} />
@@ -767,9 +862,10 @@ function ConnectPanel({
             <dt>bound contacts</dt><dd>{status?.bound_contacts ?? 0}</dd>
             <dt>open invites</dt><dd>{status?.open_invites ?? 0}</dd>
             <dt>awaiting approve</dt><dd>{status?.pending_binds ?? 0}</dd>
+            <dt>bots online</dt><dd>{status?.bots_online ?? 0}</dd>
           </dl>
           <div>
-            <ConnectButton transport={transport} online={online} onChange={onChange} onFlash={onFlash} />
+            <ConnectButton transport={transport} online={online} scan={scan} onChange={onChange} onFlash={onFlash} />
           </div>
         </div>
       )}
@@ -780,11 +876,13 @@ function ConnectPanel({
 function ConnectButton({
   transport,
   online,
+  scan,
   onChange,
   onFlash,
 }: {
   transport: string;
   online: boolean;
+  scan: boolean;
   onChange: () => void;
   onFlash: (m: string) => void;
 }) {
@@ -803,9 +901,11 @@ function ConnectButton({
   };
   return (
     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-      <button className="btn primary" onClick={() => setOpen(true)}>
-        {online ? '↻ reconnect' : '⊕ connect bot'}
-      </button>
+      {(!scan || online) && (
+        <button className="btn primary" onClick={() => setOpen(true)}>
+          {online ? (scan ? '↻ reconnect my bot' : '↻ reconnect') : '⊕ connect bot'}
+        </button>
+      )}
       {online && (
         <button className="btn" disabled={disconnecting} onClick={() => void disconnect()}>
           {disconnecting ? '…' : '⏻ disconnect'}
@@ -813,6 +913,7 @@ function ConnectButton({
       )}
       {open && (
         <ConnectModal
+          contactId={scan ? SELF_CONTACT_ID : undefined}
           onClose={() => setOpen(false)}
           onConnected={(botId) => {
             setOpen(false);
@@ -832,7 +933,19 @@ type LoginPhase =
   | { kind: 'done'; message: string }
   | { kind: 'error'; message: string };
 
-function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnected: (botId: string) => void }) {
+function ConnectModal({
+  onClose,
+  onConnected,
+  contactId,
+  who,
+}: {
+  onClose: () => void;
+  onConnected: (botId: string) => void;
+  /** One bot per member: the invite this QR is minted for (the scan binds it). */
+  contactId?: string;
+  /** The member's display name — a QR for someone else's phone. */
+  who?: string;
+}) {
   const [phase, setPhase] = useState<LoginPhase>({ kind: 'starting' });
   const [code, setCode] = useState('');
   // A per-run token, NOT a shared bool. React StrictMode (dev) double-mounts the
@@ -898,7 +1011,7 @@ function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnect
   const start = useCallback(async () => {
     const runId = ++runIdRef.current; // supersede any in-flight run
     setPhase({ kind: 'starting' });
-    const r = await gatewayClient.loginStart();
+    const r = await gatewayClient.loginStart(contactId);
     if (runId !== runIdRef.current) return;
     if (!r.ok) {
       setPhase({ kind: 'error', message: reason(r) });
@@ -941,7 +1054,7 @@ function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnect
   };
 
   return (
-    <Modal title="Connect the WeChat bot" onClose={onClose}>
+    <Modal title={who ? `${who} — connect their WeChat` : 'Connect your WeChat'} onClose={onClose}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center', textAlign: 'center' }}>
         {phase.kind === 'starting' && <div className="muted">Minting a login QR…</div>}
 
@@ -951,7 +1064,13 @@ function ConnectModal({ onClose, onConnected }: { onClose: () => void; onConnect
               <QRCodeSVG value={phase.qr} size={220} includeMargin />
             </div>
             <ol style={{ textAlign: 'left', fontSize: 13, lineHeight: 1.7, maxWidth: 340, margin: 0, paddingLeft: 18 }}>
-              <li>Scan with the <strong>spare</strong> WeChat account (never a family member’s daily account — that account becomes the bot).</li>
+              <li>
+                {who ? (
+                  <>Have <strong>{who}</strong> scan this with <strong>their own</strong> WeChat (扫一扫). Their clawbot appears as a contact in their WeChat, linked to this household.</>
+                ) : (
+                  <>Scan with <strong>your own</strong> WeChat (扫一扫). Your clawbot appears as a contact in your WeChat, linked to this household.</>
+                )}
+              </li>
               <li>On the phone, tap <strong>连接 / 授权 (Connect / Authorize)</strong> — that page IS the confirmation step.</li>
             </ol>
           </>
@@ -1010,12 +1129,14 @@ function InvitePanel({
   agents,
   apps,
   online,
+  scan,
   onInvited,
   onFlash,
 }: {
   agents: string[];
   apps: InstalledAppAudience[];
   online: boolean;
+  scan: boolean;
   onInvited: () => void;
   onFlash: (m: string) => void;
 }) {
@@ -1058,7 +1179,8 @@ function InvitePanel({
       setErr(reason(r));
       return;
     }
-    setMinted({ code: r.value.bind_code, sendText: r.value.send_text, name: displayName.trim() });
+    if (scan) onFlash(`Invite for ${displayName.trim()} minted — open their connect QR from the row below when they're ready`);
+    else setMinted({ code: r.value.bind_code, sendText: r.value.send_text, name: displayName.trim() });
     setDisplayName('');
     setReach(new Set());
     setReachText('');
@@ -1100,7 +1222,7 @@ function InvitePanel({
           <button className="btn primary" disabled={busy || !displayName.trim() || !online} onClick={() => void submit()}>
             {busy ? 'minting…' : '⊕ mint invite'}
           </button>
-          {!online && <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>connect the bot first</span>}
+          {!online && <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>{scan ? 'the contact gate is unreachable — fix step 1 first' : 'connect the bot first'}</span>}
         </div>
       </div>
 

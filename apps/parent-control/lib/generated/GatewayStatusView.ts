@@ -25,6 +25,10 @@ open_invites: number,
  */
 pending_binds: number, 
 /**
+ * Live iLink bots (one per connected member, 2026-09-11; the owner's counts).
+ */
+bots_online: number, 
+/**
  * Millis of the iLink loop's last successful poll (`null` = never / OA).
  */
 ilink_last_ok_ms?: number, 
