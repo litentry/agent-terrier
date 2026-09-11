@@ -21,6 +21,8 @@ agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
 agentkeys-core = { workspace = true }
 agentkeys-protocol = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
+# #675 — browser-origin CORS for the device-mode web app (opt-in allowlist; cors.rs).
+tower-http = { version = "0.5", features = ["cors"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,3 +40,4 @@ clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tower = { version = "0.4", features = ["util"] }

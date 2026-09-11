@@ -29,6 +29,8 @@ agentkeys-provisioner = { path = "../agentkeys-provisioner" }
 # family (one loader, no cross-family fallback), resolved per spawn.
 agentkeys-inference-creds = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
+# #675 — browser-origin CORS for the device-mode web app (opt-in allowlist; cors.rs).
+tower-http = { version = "0.5", features = ["cors"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

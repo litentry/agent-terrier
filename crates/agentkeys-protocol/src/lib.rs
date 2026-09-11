@@ -38,9 +38,11 @@ use serde_json::Value;
 mod app_template;
 mod card;
 mod registries;
+mod worker_url;
 pub use app_template::*;
 pub use card::*;
 pub use registries::*;
+pub use worker_url::*;
 
 /// Op discriminator that maps onto the four broker cap-mint endpoints. The
 /// route is the source of truth for the cap's `data_class` — the broker
@@ -709,7 +711,7 @@ fn channel_direction_in() -> ChannelDirection {
     ChannelDirection::In
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPublishResp {
     pub ok: bool,
     /// The worker-assigned event id (feed key tail).
@@ -739,7 +741,7 @@ pub struct ChannelPollBody {
     pub wait_seconds: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPollResp {
     pub ok: bool,
     /// Events after the cursor, oldest-first (each `body` is base64 plaintext).

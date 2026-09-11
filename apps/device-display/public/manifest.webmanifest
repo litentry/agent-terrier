@@ -1,0 +1,13 @@
+{
+  "name": "Agent Terrier · Kitchen display",
+  "short_name": "Kitchen display",
+  "description": "The household app's card on a shared screen — this tablet is its own device.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#15130f",
+  "theme_color": "#15130f",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "name": "@agentkeys/device-display",
+  "private": true,
+  "type": "module",
+  "description": "Agent Terrier · kitchen display — the device-mode web app (#675): a shared tablet as its OWN device actor (browser-held K10 via agentkeys-web-core), rendering the household app's card (the design system's CardView) and publishing its taps as `command` events. Kiosk/PWA; React + TanStack Start.",
+  "imports": {
+    "#/*": "./src/*"
+  },
+  "scripts": {
+    "dev": "vite dev --port 3119",
+    "generate-routes": "tsr generate",
+    "build": "vite build",
+    "preview": "vite preview --port 3119",
+    "start": "PORT=3119 node ../../scripts/web-ssr-server.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agentkeys/design-system": "file:../../design-system",
+    "@tailwindcss/vite": "^4.1.18",
+    "@tanstack/react-router": "latest",
+    "@tanstack/react-router-ssr-query": "latest",
+    "@tanstack/react-start": "latest",
+    "@tanstack/router-plugin": "^1.132.0",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwindcss": "^4.1.18"
+  },
+  "devDependencies": {
+    "@tanstack/router-cli": "^1.132.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.0.1",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.0",
+    "vitest": "^4.1.5",
+    "jsdom": "^28.1.0"
+  }
+}

@@ -67,7 +67,9 @@ pub fn build_router(state: SharedChannelWorkerState) -> Router {
     // bytes: lift axum's default ~2 MB limit on the two blob routes only
     // (4/3 for base64 + headroom for the cap + JSON framing).
     let blob_body_limit = state.config.blob_max_bytes / 3 * 4 + (256 << 10);
-    Router::new()
+    // #675 — browser device origins: an opt-in allowlist; empty = no CORS headers.
+    let browser_origins = state.config.browser_origins.clone();
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/channel/publish", post(channel_publish))
         .route("/v1/channel/poll", post(channel_poll))
@@ -79,8 +81,12 @@ pub fn build_router(state: SharedChannelWorkerState) -> Router {
         .route(
             "/v1/channel/blob-get",
             post(channel_blob_get).layer(axum::extract::DefaultBodyLimit::max(blob_body_limit)),
-        )
-        .with_state(state)
+        );
+    let router = match crate::cors::browser_cors_layer(&browser_origins) {
+        Some(layer) => router.layer(layer),
+        None => router,
+    };
+    router.with_state(state)
 }
 
 #[derive(Debug, Serialize)]

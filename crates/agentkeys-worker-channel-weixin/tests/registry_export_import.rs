@@ -22,6 +22,7 @@ fn temp(name: &str) -> String {
 
 fn config_for(registry_file: &str) -> WeixinGatewayConfig {
     WeixinGatewayConfig {
+        unknown_sender_hint: true,
         bind: "127.0.0.1:0".into(),
         transport: WeixinTransport::Ilink,
         weixin_token: String::new(),

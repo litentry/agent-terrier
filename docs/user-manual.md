@@ -559,3 +559,20 @@ What is not there yet: an app cannot send a picture back to the family chat
 iLink or Telegram for an app's family chat; a scheduled app runs its timed
 turns only while the "Scheduled reports" capability (`tool:schedule`) is on
 its sheet.
+
+## The kitchen display — a shared tablet as its own device (device-display, #675)
+
+A shared screen (a kitchen tablet, an old phone on the fridge) shows your household app's card and lets anyone tap its actions — **without ever holding your master authority**. The display is its own *device* in your family, exactly like an ESP32 screen: it has its own key (made in that browser, never leaving it), it is paired once with one Touch ID, and it can be revoked on its own without touching your console or your phone.
+
+**Setting one up (about a minute):**
+
+1. Open the display app on the tablet (`apps/device-display`, `http://<your-dev-host>:3119`, or the hosted URL your operator gives you; `?broker=…&feed=…&label=…` in the link pre-fills the settings). Enter your family's broker address once. It shows a **pairing code** and a QR.
+2. On your parent-control console go to **Devices → claim a device**: type the code, keep the label (`kitchen-display` by default), attach the display feed of the app you installed (the feed name is on the tablet, `kitchen-display` by default) with **listen + speak**, then approve with **one Touch ID**.
+3. The tablet switches to the card by itself. Taps such as *Cooked ✓* or *Swap dinner* reach the app as commands attributed to **the display** — the console's Applications dashboard lists them under recent commands with that device's identity.
+
+**Good to know:**
+
+- The code is valid for 10 minutes; tap *New code* if it expired. A paired display re-connects on its own after a reboot (no code needed).
+- *Settings* on the tablet changes the broker, feed or label; *Forget this device* wipes its key — pair again afterwards (the old device stays listed until you revoke it in the console).
+- Nothing on the tablet can read your memory, credentials or other feeds: its grants are exactly the two channel attachments you approved.
+- Use the browser's *Add to Home Screen* for a full-screen kiosk; the *Full screen* button also asks the tablet to keep the screen awake.

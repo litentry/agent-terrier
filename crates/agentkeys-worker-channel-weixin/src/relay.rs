@@ -428,6 +428,34 @@ pub fn reply_text_for_en(decision: &L3Decision) -> Option<String> {
 /// reply, plus the relayed-media marker on an allowed turn (`zh` for the
 /// weixin family, `en` for Telegram). Same decision → reply mapping as the
 /// two functions above (the unknown-sender SILENT drop included).
+/// The neutral hint an UNKNOWN sender gets on the private-bot transports
+/// instead of dead silence — once per sender per [`UNKNOWN_HINT_WINDOW_SECS`].
+/// The L3 decision stays a DROP (nothing is routed, nothing about the household
+/// is revealed — D13); this is onboarding copy for the member who added the bot,
+/// said hello, and would otherwise conclude the bot is dead (owner walkthrough
+/// 2026-09-11). `AGENTKEYS_WEIXIN_UNKNOWN_HINT=0` restores the silent drop.
+pub const UNKNOWN_HINT_WINDOW_SECS: u64 = 24 * 60 * 60;
+pub const UNKNOWN_HINT_ZH: &str =
+    "这是家庭助手机器人。请把家长在“家长控制台 › 联系人”里为你生成的 6 位绑定码发给我（例如：绑定 123456）。";
+pub const UNKNOWN_HINT_EN: &str = "This is a family assistant bot. Send me the 6-digit bind code your parent minted in Parent Control › Contacts (e.g. \"bind 123456\").";
+
+pub fn unknown_sender_hint(
+    decision: &L3Decision,
+    last_hint_secs: Option<u64>,
+    now_secs: u64,
+    en: bool,
+) -> Option<&'static str> {
+    if decision.reason != "unknown_contact" {
+        return None;
+    }
+    if let Some(t) = last_hint_secs {
+        if now_secs.saturating_sub(t) < UNKNOWN_HINT_WINDOW_SECS {
+            return None;
+        }
+    }
+    Some(if en { UNKNOWN_HINT_EN } else { UNKNOWN_HINT_ZH })
+}
+
 pub fn reply_text_for_turn(
     decision: &L3Decision,
     media_marker: Option<&str>,
@@ -552,6 +580,32 @@ mod tests {
                 .unwrap()
                 .contains("https://pc.local/")
         );
+    }
+
+    #[test]
+    fn unknown_sender_hint_is_once_per_window_and_only_for_unknowns() {
+        let d = decision(false, "unknown_contact");
+        assert_eq!(
+            unknown_sender_hint(&d, None, 1_000, false),
+            Some(UNKNOWN_HINT_ZH)
+        );
+        assert_eq!(
+            unknown_sender_hint(&d, None, 1_000, true),
+            Some(UNKNOWN_HINT_EN)
+        );
+        assert!(
+            unknown_sender_hint(&d, Some(1_000), 1_000 + UNKNOWN_HINT_WINDOW_SECS - 1, false)
+                .is_none()
+        );
+        assert!(
+            unknown_sender_hint(&d, Some(1_000), 1_000 + UNKNOWN_HINT_WINDOW_SECS, false).is_some()
+        );
+        assert!(
+            unknown_sender_hint(&decision(false, "out_of_reach"), None, 1_000, false).is_none()
+        );
+        assert!(unknown_sender_hint(&decision(true, "ok"), None, 1_000, false).is_none());
+        // the relay's own mapping still drops unknowns — the hint is a separate, once-only layer
+        assert!(reply_text_for(&d).is_none());
     }
 
     #[test]

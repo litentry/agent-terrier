@@ -30,8 +30,11 @@ import type { PresetSummary } from '@/lib/generated/PresetSummary';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ServiceAnnotation } from '@/lib/generated/ServiceAnnotation';
 import { Chip, Dot, Modal, PageHead, Panel } from './shared';
+import { FEED_ID_RE, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
 
 type View = 'apps' | 'resources' | 'endpoints';
+
+type CreateChannelFn = (input: { id: string; name: string; note?: string; kind?: ChannelDef['kind'] }) => Promise<ChannelDef | null>;
 type WizardStep = 'slots' | 'resources' | 'audience' | 'sheet' | 'done';
 
 const LABEL_RE = /^[a-z0-9-]{1,32}$/;
@@ -101,11 +104,14 @@ export function ApplicationsPage({
   showToast,
   onGoChannels,
   onInstalled,
+  onCreateChannel,
 }: {
   client: AgentKeysClient;
   channels: ChannelDef[];
   showToast: (msg: string, sticky?: boolean) => void;
   onGoChannels: () => void;
+  /** Register a fresh feed of a slot's kind from inside the wizard (the shell refreshes `channels`). */
+  onCreateChannel?: CreateChannelFn;
   /** Called after a CONFIRMED install/uninstall so the shell refreshes actors. */
   onInstalled: () => void;
 }) {
@@ -486,6 +492,7 @@ export function ApplicationsPage({
             onInstall={(w) => void install(w, tp)}
             onOpen={(label) => { setWizard(null); setView('apps'); void openApp(label); }}
             onGoChannels={onGoChannels}
+            onCreateChannel={onCreateChannel}
           />
         );
       })()}
@@ -687,6 +694,7 @@ function InstallWizard({
   onInstall,
   onOpen,
   onGoChannels,
+  onCreateChannel,
 }: {
   w: WizardState;
   tp: PresetSummary;
@@ -696,6 +704,7 @@ function InstallWizard({
   onInstall: (w: WizardState) => void;
   onOpen: (label: string) => void;
   onGoChannels: () => void;
+  onCreateChannel?: CreateChannelFn;
 }) {
   const slots = tp.slots ?? [];
   const reqs = tp.resources ?? [];
@@ -721,6 +730,7 @@ function InstallWizard({
   const build = w.built?.build as { services?: string[]; annotations?: ServiceAnnotation[]; bound_channels?: { slot: string; channel_id: string; kind: string; direction: string }[]; slots_used?: number; slots_total?: number } | undefined;
   return (
     <Modal
+      wide
       title={w.step === 'done' ? 'Installed' : `Install ${tp.name} · step ${idx + 1} of ${steps.length} · ${w.step}`}
       onClose={() => setW(null)}
       footer={
@@ -750,22 +760,17 @@ function InstallWizard({
             {!labelOk && <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>lowercase letters, digits and dashes only</div>}
           </div>
           <p className="muted" style={{ fontSize: 12.5 }}>Pick which channel or device fills each slot the app needs. Nothing is granted yet.</p>
-          {slots.map((s) => {
-            const opts = channels.filter((c) => !c.kind || c.kind === s.kind);
-            return (
-              <div key={s.slot} style={{ marginBottom: 14 }}>
-                <div className="perm-section-head"><span className="ttl">{s.slot} · {s.kind} · {s.direction}</span><span className="summary">{s.required ? 'required' : 'optional'}</span></div>
-                <div className="perm-rows">
-                  {opts.map((c) => (
-                    <div key={c.id}>{opt(w.bindings[s.slot] === c.id, () => setW({ ...w, bindings: { ...w.bindings, [s.slot]: c.id } }), <>{c.name} <span className="muted" style={{ fontSize: 11 }}>· <code>{c.id}</code>{c.kind ? ` · ${c.kind}` : ' · unkinded'}{c.endpointActorOmni ? ' · device actor' : ''}</span></>)}</div>
-                  ))}
-                  {opts.length === 0 && <div className="perm-row muted" style={{ padding: '8px 12px' }}>No channel of kind <code>{s.kind}</code> yet — <button className="btn sm" onClick={onGoChannels}>register one</button></div>}
-                  {(!s.required || opts.length === 0) && <div>{opt(w.bindings[s.slot] === null, () => setW({ ...w, bindings: { ...w.bindings, [s.slot]: null } }), <span className="muted">skip for now</span>)}</div>}
-                </div>
-                <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>{s.reason}</div>
-              </div>
-            );
-          })}
+          {slots.map((s) => (
+            <SlotChooser
+              key={s.slot}
+              slot={s}
+              channels={channels}
+              value={w.bindings[s.slot]}
+              onPick={(id) => setW({ ...w, bindings: { ...w.bindings, [s.slot]: id } })}
+              onCreateChannel={onCreateChannel}
+              onGoChannels={onGoChannels}
+            />
+          ))}
         </>
       )}
       {w.step === 'resources' && (
@@ -897,5 +902,123 @@ function AddResourceModal({
       </div>
       <p className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>Re-adding an id bumps its version. Apps read it through the ordinary read-only <code>memory:&lt;ns&gt;</code> grant — never an inbox on that namespace.</p>
     </Modal>
+  );
+}
+
+type SlotSpec = NonNullable<PresetSummary['slots']>[number];
+
+/** One slot's picker: the channels of exactly the slot's kind (sorted by name)
+ *  with a filter once the list is long, everything else folded behind a
+ *  button, single-select rows (a slot binds ONE channel), an inline
+ *  "create + pick" for a fresh feed, and the explicit skip for optional slots. */
+function SlotChooser({
+  slot,
+  channels,
+  value,
+  onPick,
+  onCreateChannel,
+  onGoChannels,
+}: {
+  slot: SlotSpec;
+  channels: ChannelDef[];
+  value: string | null | undefined;
+  onPick: (id: string | null) => void;
+  onCreateChannel?: CreateChannelFn;
+  onGoChannels: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [showOthers, setShowOthers] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [newId, setNewId] = useState(() => suggestedFeedId(slot.slot));
+  const { matching, others } = useMemo(() => partitionSlotOptions(channels, slot.kind, query), [channels, slot.kind, query]);
+  const selectedRow = channels.find((c) => c.id === value);
+  const selectedIsOther = !!selectedRow && selectedRow.kind !== slot.kind;
+  const canCreate = !!onCreateChannel && FEED_ID_RE.test(newId) && !channels.some((c) => c.id === newId);
+  const create = async () => {
+    if (!onCreateChannel || !canCreate) return;
+    setCreating(true);
+    try {
+      const made = await onCreateChannel({ id: newId, name: newId, kind: slot.kind as ChannelDef['kind'] });
+      if (made) onPick(made.id);
+    } finally {
+      setCreating(false);
+    }
+  };
+  const row = (c: ChannelDef) => (
+    <div
+      key={c.id}
+      role="radio"
+      aria-checked={value === c.id}
+      className="perm-row"
+      style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', cursor: 'pointer' }}
+      onClick={() => onPick(c.id)}
+    >
+      <span style={{ flex: 1 }}>
+        {c.name} <span className="muted" style={{ fontSize: 11 }}><code>{c.id}</code> · {c.kind ?? 'unkinded'}</span>
+      </span>
+      <span className={`perm-switch ${value === c.id ? 'on' : ''}`} />
+    </div>
+  );
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div className="perm-section-head">
+        <span className="ttl">{slot.slot} · {slot.kind} · {slot.direction}</span>
+        <span className="summary">{slot.required ? 'required' : 'optional'}{value ? ` · ${value}` : ''}</span>
+      </div>
+      {channels.length > 6 && (
+        <input
+          style={{ ...INPUT, marginBottom: 6 }}
+          placeholder={`filter ${channels.length} channels…`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label={`filter channels for ${slot.slot}`}
+        />
+      )}
+      <div className="perm-rows" role="radiogroup" aria-label={slot.slot}>
+        {matching.map(row)}
+        {matching.length === 0 && (
+          <div className="perm-row muted" style={{ padding: '8px 12px' }}>
+            No <code>{slot.kind}</code> channel{query ? ' matches the filter' : ' registered yet'}
+            {!onCreateChannel && <> — <button className="btn sm" type="button" onClick={onGoChannels}>register one on the channels page</button></>}.
+          </div>
+        )}
+        {others.length > 0 && (
+          <div className="perm-row" style={{ padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button className="btn sm" type="button" onClick={() => setShowOthers((v) => !v)}>
+              {showOthers ? 'hide' : 'show'} {others.length} other channel{others.length === 1 ? '' : 's'} (unkinded or another kind)
+            </button>
+            {selectedIsOther && !showOthers && <span className="muted" style={{ fontSize: 11 }}>selected: <code>{value}</code></span>}
+          </div>
+        )}
+        {showOthers && others.map(row)}
+        {onCreateChannel && (
+          <div className="perm-row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px' }}>
+            <span className="muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>new {slot.kind} feed</span>
+            <input
+              style={{ ...INPUT, width: 220 }}
+              value={newId}
+              onChange={(e) => setNewId(e.target.value.trim().toLowerCase())}
+              aria-label={`new ${slot.kind} feed id for ${slot.slot}`}
+            />
+            <button className="btn sm primary" type="button" disabled={!canCreate || creating} onClick={() => void create()}>
+              {creating ? 'creating…' : 'create + pick'}
+            </button>
+          </div>
+        )}
+        {(!slot.required || matching.length === 0) && (
+          <div
+            role="radio"
+            aria-checked={value === null}
+            className="perm-row"
+            style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', cursor: 'pointer' }}
+            onClick={() => onPick(null)}
+          >
+            <span className="muted" style={{ flex: 1 }}>skip for now</span>
+            <span className={`perm-switch ${value === null ? 'on' : ''}`} />
+          </div>
+        )}
+      </div>
+      {slot.reason && <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>{slot.reason}</div>}
+    </div>
   );
 }

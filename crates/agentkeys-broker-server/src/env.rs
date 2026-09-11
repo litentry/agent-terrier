@@ -86,6 +86,11 @@ pub const BROKER_REFUSE_TO_BOOT_STRICT: &str = "BROKER_REFUSE_TO_BOOT_STRICT";
 pub const BROKER_DATA_DIR: &str = "BROKER_DATA_DIR";
 /// Optional. Maximum HTTP request body size in bytes. Default 1 MiB.
 pub const BROKER_REQUEST_BODY_LIMIT_BYTES: &str = "BROKER_REQUEST_BODY_LIMIT_BYTES";
+/// #675 — comma-separated browser origins (`http(s)://host[:port]`) allowed to
+/// call the broker cross-origin: the device-mode web app (a shared tablet as
+/// its own device actor). Unset/empty = no CORS headers (the default); `*` is
+/// refused. The channel worker reads the same list as `AGENTKEYS_BROWSER_ORIGINS`.
+pub const BROKER_BROWSER_ORIGINS: &str = "BROKER_BROWSER_ORIGINS";
 /// Optional. Maximum tolerated NTP skew in seconds for SIWE timestamps. Default 60.
 pub const BROKER_NTP_MAX_SKEW_SECONDS: &str = "BROKER_NTP_MAX_SKEW_SECONDS";
 /// Optional. Enable Prometheus `/metrics` endpoint. Default `false` (Phase D).
@@ -305,6 +310,11 @@ pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
         (
             BROKER_REQUEST_BODY_LIMIT_BYTES,
             "Maximum HTTP request body size in bytes.",
+            Group::Core,
+        ),
+        (
+            BROKER_BROWSER_ORIGINS,
+            "Comma-separated browser origins allowed cross-origin (CORS) — the device-mode web app (#675). Empty = no CORS headers.",
             Group::Core,
         ),
         (

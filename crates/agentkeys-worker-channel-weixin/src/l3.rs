@@ -134,6 +134,7 @@ mod tests {
 
     fn cfg() -> WeixinGatewayConfig {
         WeixinGatewayConfig {
+            unknown_sender_hint: true,
             bind: "127.0.0.1:0".into(),
             transport: crate::config::WeixinTransport::Oa,
             weixin_token: "t".into(),

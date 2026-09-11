@@ -8,7 +8,9 @@
 //! - a bound contact's `/alias` turn is routed and ACKED in ENGLISH,
 //! - an out-of-reach ask gets the refusal text,
 //! - an operator-grade ask gets the parent-control deep-link, never data,
-//! - an UNKNOWN sender is dropped SILENTLY (no send — §9 threat 1),
+//! - an UNKNOWN sender is dropped SILENTLY (no send — §9 threat 1) when the
+//!   bind hint is OFF (`unknown_sender_hint: false` = AGENTKEYS_WEIXIN_UNKNOWN_HINT=0;
+//!   the default-ON hint is unit-tested in relay.rs and proven end-to-end on iLink),
 //! - bot-authored and NON-PRIVATE (group) messages are skipped entirely,
 //! - the offset cursor + reply chat ids persist to the state file.
 
@@ -112,6 +114,7 @@ fn write_registry() -> String {
 
 fn config(api_base: String, registry_file: String, state_file: String) -> WeixinGatewayConfig {
     WeixinGatewayConfig {
+        unknown_sender_hint: false,
         bind: "127.0.0.1:0".into(),
         transport: WeixinTransport::Telegram,
         weixin_token: String::new(), // OA-only — unused under telegram

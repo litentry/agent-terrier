@@ -1,0 +1,28 @@
+@import "tailwindcss";
+/* design-system color-set tokens (fonts load via <link> in __root.tsx) */
+@import "@agentkeys/design-system/css/tokens.css";
+@import "@agentkeys/design-system/app.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #15130f; /* the card shell's own ground — the kiosk is dark */
+  color: #f3eee3;
+  font-family: 'Hanken Grotesk', 'Noto Sans SC', system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+.dd-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.18em;
+}

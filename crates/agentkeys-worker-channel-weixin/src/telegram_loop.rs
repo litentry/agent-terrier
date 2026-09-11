@@ -38,6 +38,9 @@ pub struct TelegramPersist {
     /// `from_user_id` (decimal string) → the chat to reply into.
     #[serde(default)]
     pub chat_ids: HashMap<String, i64>,
+    /// Unix seconds of the last bind hint sent to an unknown sender (once per window).
+    #[serde(default)]
+    pub hint_sent_secs: HashMap<String, u64>,
 }
 
 impl TelegramPersist {
@@ -248,9 +251,23 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
                 warn!(reason = %e, "allowed turn did NOT reach a feed");
             }
 
-            let reply = outcome.claim_ack.clone().or_else(|| {
+            let mut reply = outcome.claim_ack.clone().or_else(|| {
                 relay::reply_text_for_turn(&outcome.decision, outcome.media_marker, true)
             });
+            if reply.is_none() && state.config.unknown_sender_hint {
+                let now = relay::unix_secs();
+                let from_key = from_id.to_string();
+                if let Some(hint) = relay::unknown_sender_hint(
+                    &outcome.decision,
+                    persist.hint_sent_secs.get(&from_key).copied(),
+                    now,
+                    true,
+                ) {
+                    persist.hint_sent_secs.insert(from_key, now);
+                    dirty = true;
+                    reply = Some(hint.to_string());
+                }
+            }
             if let Some(reply) = reply {
                 if let Err(e) = client.send_text(msg.chat.id, &reply).await {
                     warn!(to = %from_id, error = %e, "reply send failed");
@@ -309,6 +326,7 @@ mod tests {
         let p = TelegramPersist {
             next_offset: 8,
             chat_ids: HashMap::from([("42".to_string(), 42i64)]),
+            hint_sent_secs: HashMap::new(),
         };
         p.save(&path);
 

@@ -164,6 +164,11 @@ pub struct WeixinGatewayConfig {
     pub operator_grade_aliases: Vec<String>,
     /// The parent-control deep-link handed back for operator-grade asks.
     pub parent_control_deeplink: String,
+    /// Answer an UNKNOWN sender's first message on the private-bot transports
+    /// (iLink / Telegram) with the neutral bind hint — once per sender per
+    /// 24 h — instead of dead silence; `AGENTKEYS_WEIXIN_UNKNOWN_HINT=0`
+    /// restores the silent drop. The L3 decision is a DROP either way (D13).
+    pub unknown_sender_hint: bool,
     pub rate_max: u32,
     pub rate_window_secs: u64,
     /// #410 — the advisory router (a no-`/alias` message picks among the contact's
@@ -437,6 +442,12 @@ impl WeixinGatewayConfig {
             ),
         };
 
+        let unknown_sender_hint = !matches!(
+            lookup("AGENTKEYS_WEIXIN_UNKNOWN_HINT")
+                .as_deref()
+                .map(str::trim),
+            Some("0") | Some("false") | Some("off")
+        );
         Ok(WeixinGatewayConfig {
             bind,
             transport,
@@ -460,6 +471,7 @@ impl WeixinGatewayConfig {
             audit_worker_url,
             operator_grade_aliases,
             parent_control_deeplink,
+            unknown_sender_hint,
             rate_max,
             rate_window_secs,
             router_enabled,
@@ -554,6 +566,39 @@ mod from_lookup_tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn unknown_sender_hint_defaults_on_and_turns_off() {
+        assert!(
+            cfg(&with_base(&[
+                ("AGENTKEYS_WEIXIN_TOKEN", "tok"),
+                ("AGENTKEYS_WEIXIN_APP_ID", "wx1")
+            ]))
+            .unwrap()
+            .unknown_sender_hint
+        );
+        assert!(
+            cfg(&with_base(&[
+                ("AGENTKEYS_WEIXIN_TOKEN", "tok"),
+                ("AGENTKEYS_WEIXIN_APP_ID", "wx1"),
+                ("AGENTKEYS_WEIXIN_UNKNOWN_HINT", "1")
+            ]))
+            .unwrap()
+            .unknown_sender_hint
+        );
+        for off in ["0", "false", "off"] {
+            assert!(
+                !cfg(&with_base(&[
+                    ("AGENTKEYS_WEIXIN_TOKEN", "tok"),
+                    ("AGENTKEYS_WEIXIN_APP_ID", "wx1"),
+                    ("AGENTKEYS_WEIXIN_UNKNOWN_HINT", off)
+                ]))
+                .unwrap()
+                .unknown_sender_hint,
+                "{off}"
+            );
+        }
     }
 
     #[test]

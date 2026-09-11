@@ -38,6 +38,7 @@ presets/
 # ─── Web app (reference parent-control UI; no secrets; it's the ts-rs codegen
 #     target, so the public crates depend on it shipping) ─────────────────────
 apps/parent-control/
+apps/device-display/
 
 # ─── Public docs (arch SoT + spec/research/wiki + the no-secrets operator refs) ─
 docs/arch.md

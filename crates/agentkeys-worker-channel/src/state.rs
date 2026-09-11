@@ -48,6 +48,10 @@ pub struct ChannelWorkerConfig {
     pub inline_max_bytes: usize,
     /// #667 — max DECODED bytes one blob (a media original) may carry.
     pub blob_max_bytes: usize,
+    /// #675 — browser origins allowed cross-origin (`AGENTKEYS_BROWSER_ORIGINS`,
+    /// comma-separated; empty = no CORS headers). The device-mode web app polls
+    /// and publishes here directly from a tablet browser.
+    pub browser_origins: String,
 }
 
 impl ChannelWorkerConfig {
@@ -90,6 +94,7 @@ impl ChannelWorkerConfig {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_BLOB_MAX_BYTES);
+        let browser_origins = std::env::var("AGENTKEYS_BROWSER_ORIGINS").unwrap_or_default();
 
         Ok(ChannelWorkerConfig {
             channel_bucket,
@@ -104,6 +109,7 @@ impl ChannelWorkerConfig {
             max_poll_seconds,
             inline_max_bytes,
             blob_max_bytes,
+            browser_origins,
         })
     }
 }

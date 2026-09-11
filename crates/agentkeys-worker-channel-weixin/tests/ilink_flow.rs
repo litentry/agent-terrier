@@ -9,7 +9,9 @@
 //! - a bound contact's `/alias` turn is routed and ACKED with the sender's
 //!   `context_token` echoed (the reply authorization),
 //! - an out-of-reach ask gets the refusal text,
-//! - an UNKNOWN sender is dropped SILENTLY (no send — §9 threat 1),
+//! - an UNKNOWN sender is dropped SILENTLY (no send — §9 threat 1) when the
+//!   bind hint is OFF (`unknown_sender_hint: false` = AGENTKEYS_WEIXIN_UNKNOWN_HINT=0;
+//!   the default-ON hint is proven by ilink_admin_e2e.rs),
 //! - the resumable cursor + reply tokens persist to the state file,
 //! - shutdown stops the loop and fires the best-effort notifystop.
 
@@ -126,6 +128,7 @@ fn write_registry() -> String {
 
 fn config(base_url: String, registry_file: String, state_file: String) -> WeixinGatewayConfig {
     WeixinGatewayConfig {
+        unknown_sender_hint: false,
         bind: "127.0.0.1:0".into(),
         transport: WeixinTransport::Ilink,
         weixin_token: String::new(), // OA-only — unused under ilink

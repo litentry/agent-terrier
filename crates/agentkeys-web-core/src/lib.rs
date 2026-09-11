@@ -12,6 +12,7 @@
 //! `CoreBackend`, the daemon ui-bridge, and the mobile shell share one impl.
 
 pub mod broker;
+pub mod device;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;

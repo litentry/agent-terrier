@@ -18,6 +18,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use agentkeys_protocol::{
+    ChannelPollBody, ChannelPollResp, ChannelPublishBody, ChannelPublishResp,
+};
+
 #[derive(Debug, Error)]
 pub enum BrokerError {
     #[error("transport: {0}")]
@@ -138,16 +142,7 @@ impl BrokerClient {
         bearer: Option<&str>,
         body: &B,
     ) -> R<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let mut rb = self.http.post(&url).json(body);
-        if let Some(b) = bearer {
-            rb = rb.bearer_auth(b);
-        }
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| BrokerError::Transport(format!("POST {path}: {e}")))?;
-        Self::decode(path, resp).await
+        post_json_at(&self.http, &self.base_url, path, bearer, body).await
     }
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str, bearer: Option<&str>) -> R<T> {
@@ -250,6 +245,154 @@ struct AckRequest {
 pub struct AckResponse {
     pub acked: bool,
     pub request_id: String,
+}
+
+/// POST `body` as JSON to `base_url + path` (optional bearer), decoding the
+/// JSON answer — shared by the broker client and the channel-worker client so
+/// the two cannot drift.
+async fn post_json_at<B: Serialize + ?Sized, T: DeserializeOwned>(
+    http: &reqwest::Client,
+    base_url: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: &B,
+) -> R<T> {
+    let url = format!("{base_url}{path}");
+    let mut rb = http.post(&url).json(body);
+    if let Some(b) = bearer {
+        rb = rb.bearer_auth(b);
+    }
+    let resp = rb
+        .send()
+        .await
+        .map_err(|e| BrokerError::Transport(format!("POST {path}: {e}")))?;
+    BrokerClient::decode(path, resp).await
+}
+
+// ── the DEVICE side of §10.2 + the channel worker (#675) ─────────────────────
+//
+// A browser device (apps/device-display) is a full device actor: it opens its
+// own pairing request (PoP-gated, no bearer), polls for the master's claim,
+// re-resolves its session on every boot, mints its channel caps with its own
+// session, and talks to the channel worker directly (the cap rides IN the
+// body — no header, no cloud creds). Same wire the daemon + ESP32 use.
+
+/// `/v1/agent/pairing/request` — opens an UNBOUND request; `pop_sig` proves K10.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingRequestBody {
+    pub device_pubkey: String,
+    pub pop_sig: String,
+}
+
+/// What the device shows (`pairing_code`) and keeps (`request_id`, secret).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingRequested {
+    pub request_id: String,
+    pub pairing_code: String,
+    #[serde(default)]
+    pub expires_at: i64,
+    #[serde(default)]
+    pub device_key_hash: Option<String>,
+}
+
+/// `/v1/agent/pairing/poll` — a fresh `pop_sig` per attempt (§10.2 rule 5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingPollBody {
+    pub request_id: String,
+    pub device_pubkey: String,
+    pub pop_sig: String,
+}
+
+/// `/v1/agent/resolve` — a bound device re-mints its session on every boot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveBody {
+    pub device_pubkey: String,
+    pub pop_sig: String,
+    pub is_device: bool,
+}
+
+/// The device's session as the broker answers it: `status = "pending"` (no
+/// `session_jwt`) while the master has not claimed the code; after the claim
+/// (poll) or on a bound device (resolve) the bearer + the two omnis. The poll
+/// spells the actor `child_omni`, resolve spells it `actor_omni` — one field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceSession {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub session_jwt: Option<String>,
+    #[serde(default, alias = "child_omni")]
+    pub actor_omni: Option<String>,
+    #[serde(default)]
+    pub operator_omni: Option<String>,
+    #[serde(default)]
+    pub device_key_hash: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub agent_url: Option<String>,
+}
+
+impl DeviceSession {
+    pub fn is_pending(&self) -> bool {
+        self.session_jwt.as_deref().unwrap_or("").is_empty()
+    }
+}
+
+impl BrokerClient {
+    pub async fn pairing_request(&self, req: &PairingRequestBody) -> R<PairingRequested> {
+        self.post_json("/v1/agent/pairing/request", None, req).await
+    }
+    pub async fn pairing_poll(&self, req: &PairingPollBody) -> R<DeviceSession> {
+        self.post_json("/v1/agent/pairing/poll", None, req).await
+    }
+    pub async fn agent_resolve(&self, req: &ResolveBody) -> R<DeviceSession> {
+        self.post_json("/v1/agent/resolve", None, req).await
+    }
+    /// Channel caps are OPAQUE here (`serde_json::Value`): the worker verifies
+    /// the broker's signature over the payload and the optional #76 PoP
+    /// fields, so the token must be relayed byte-faithfully, never re-typed.
+    pub async fn cap_channel_sub(&self, bearer: &str, req: &CapRequest) -> R<serde_json::Value> {
+        self.post_json("/v1/cap/channel-sub", Some(bearer), req)
+            .await
+    }
+    pub async fn cap_channel_pub(&self, bearer: &str, req: &CapRequest) -> R<serde_json::Value> {
+        self.post_json("/v1/cap/channel-pub", Some(bearer), req)
+            .await
+    }
+}
+
+/// The channel worker as a device sees it — the URL is DERIVED from the broker
+/// host (`agentkeys_protocol::derive_worker_url(broker, "channel")`), never a
+/// pre-composed env.
+#[derive(Clone)]
+pub struct ChannelWorkerClient {
+    http: reqwest::Client,
+    base_url: String,
+}
+
+impl ChannelWorkerClient {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            http: default_client(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+        }
+    }
+    /// Long-poll the feed after `body.after` (empty = from the feed's start).
+    pub async fn poll(&self, body: &ChannelPollBody) -> R<ChannelPollResp> {
+        post_json_at(&self.http, &self.base_url, "/v1/channel/poll", None, body).await
+    }
+    /// Publish one event (a card `command`, a `text` turn, …) under the pub cap.
+    pub async fn publish(&self, body: &ChannelPublishBody) -> R<ChannelPublishResp> {
+        post_json_at(
+            &self.http,
+            &self.base_url,
+            "/v1/channel/publish",
+            None,
+            body,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -418,5 +561,224 @@ mod tests {
         let ack = c.ack_binding("J1", "req-1").await.unwrap();
         assert!(ack.acked);
         assert_eq!(ack.request_id, "req-1");
+    }
+}
+
+#[cfg(test)]
+mod device_client_tests {
+    use super::*;
+    use agentkeys_protocol::{ChannelDirection, ChannelEventKind};
+    use axum::{
+        extract::Json as AxJson,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+        Router,
+    };
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    async fn stub() -> String {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/v1/agent/pairing/request",
+                post(|AxJson(body): AxJson<serde_json::Value>| async move {
+                    if body["pop_sig"].as_str().unwrap_or("").is_empty() {
+                        return (StatusCode::UNAUTHORIZED, AxJson(json!({"error":"pop"})));
+                    }
+                    (
+                        StatusCode::OK,
+                        AxJson(json!({
+                            "request_id":"req-9","pairing_code":"K7QX-2","expires_at": 1_800_000_000i64,
+                            "device_key_hash":"0xdkh","_echo": body["device_pubkey"]
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/v1/agent/pairing/poll",
+                post({
+                    let polls = polls.clone();
+                    move |AxJson(body): AxJson<serde_json::Value>| async move {
+                        assert_eq!(body["request_id"], "req-9");
+                        if polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            AxJson(json!({"status":"pending"}))
+                        } else {
+                            AxJson(json!({
+                                "status":"bound","session_jwt":"j1.device","child_omni":"0xchild",
+                                "operator_omni":"0xop","device_key_hash":"0xdkh","label":"kitchen","sandbox":null
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/agent/resolve",
+                post(|AxJson(body): AxJson<serde_json::Value>| async move {
+                    assert_eq!(body["is_device"], true);
+                    AxJson(json!({
+                        "status":"ok","session_jwt":"j1.resolved","actor_omni":"0xchild",
+                        "operator_omni":"0xop","device_key_hash":"0xdkh","sandbox":null
+                    }))
+                }),
+            )
+            .route(
+                "/v1/cap/channel-sub",
+                post(|headers: HeaderMap, AxJson(body): AxJson<serde_json::Value>| async move {
+                    if !headers.contains_key("authorization") {
+                        return (StatusCode::UNAUTHORIZED, AxJson(json!({"error":"no-bearer"})));
+                    }
+                    (
+                        StatusCode::OK,
+                        AxJson(json!({
+                            "payload": {"op":"channel_subscribe","data_class":"channel","service": body["service"]},
+                            "broker_sig":"c2ln","client_nonce":"n-77"
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/v1/channel/poll",
+                post(|AxJson(body): AxJson<serde_json::Value>| async move {
+                    assert_eq!(body["cap"]["client_nonce"], "n-77");
+                    assert_eq!(body["after"], "");
+                    AxJson(json!({
+                        "ok": true,
+                        "events": [{
+                            "event_id":"e1","channel_id":"kitchen-display","direction":"out",
+                            "producer": {"actor": {"actor_omni":"0xchef"}},
+                            "kind":"doc","body":"e30=","ts_millis": 1
+                        }],
+                        "cursor":"bots/0xop/channel/kitchen-display/e1"
+                    }))
+                }),
+            )
+            .route(
+                "/v1/channel/publish",
+                post(|AxJson(body): AxJson<serde_json::Value>| async move {
+                    assert_eq!(body["kind"], "command");
+                    assert_eq!(body["direction"], "in");
+                    AxJson(json!({"ok":true,"event_id":"e2","s3_key":"k"}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn the_device_pairs_polls_and_resolves() {
+        let base = stub().await;
+        let c = BrokerClient::new(&base);
+        let requested = c
+            .pairing_request(&PairingRequestBody {
+                device_pubkey: "0xdev".into(),
+                pop_sig: "0xpop".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(requested.pairing_code, "K7QX-2");
+        assert_eq!(requested.request_id, "req-9");
+        let poll = PairingPollBody {
+            request_id: requested.request_id.clone(),
+            device_pubkey: "0xdev".into(),
+            pop_sig: "0xpop".into(),
+        };
+        let first = c.pairing_poll(&poll).await.unwrap();
+        assert!(first.is_pending());
+        assert_eq!(first.status, "pending");
+        let second = c.pairing_poll(&poll).await.unwrap();
+        assert!(!second.is_pending());
+        assert_eq!(second.session_jwt.as_deref(), Some("j1.device"));
+        assert_eq!(second.actor_omni.as_deref(), Some("0xchild"));
+        assert_eq!(second.label.as_deref(), Some("kitchen"));
+        let resolved = c
+            .agent_resolve(&ResolveBody {
+                device_pubkey: "0xdev".into(),
+                pop_sig: "0xpop".into(),
+                is_device: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved.session_jwt.as_deref(), Some("j1.resolved"));
+        assert_eq!(resolved.actor_omni.as_deref(), Some("0xchild"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_pop_is_a_rejection_not_a_decode_error() {
+        let base = stub().await;
+        let c = BrokerClient::new(&base);
+        let err = c
+            .pairing_request(&PairingRequestBody {
+                device_pubkey: "0xdev".into(),
+                pop_sig: String::new(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BrokerError::Rejected { status: 401, .. }),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_caps_relay_opaquely_into_poll_and_publish() {
+        let base = stub().await;
+        let c = BrokerClient::new(&base);
+        let cap = c
+            .cap_channel_sub(
+                "j1.device",
+                &CapRequest {
+                    operator_omni: "0xop".into(),
+                    actor_omni: "0xchild".into(),
+                    service: "channel-sub:kitchen-display".into(),
+                    device_key_hash: "0xdkh".into(),
+                    ttl_seconds: Some(300),
+                    client_sig: None,
+                    client_nonce: None,
+                    client_ts: None,
+                    delegation_path: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cap["client_nonce"], "n-77");
+        assert_eq!(cap["payload"]["service"], "channel-sub:kitchen-display");
+
+        let w = ChannelWorkerClient::new(format!("{base}/"));
+        let polled = w
+            .poll(&ChannelPollBody {
+                cap: cap.clone(),
+                after: String::new(),
+                wait_seconds: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(polled.events.len(), 1);
+        assert_eq!(polled.events[0].kind, ChannelEventKind::Doc);
+        assert_eq!(polled.cursor, "bots/0xop/channel/kitchen-display/e1");
+
+        let published = w
+            .publish(&ChannelPublishBody {
+                cap,
+                kind: ChannelEventKind::Command,
+                direction: ChannelDirection::In,
+                body_b64: Some("e30=".into()),
+                body_ref: None,
+                correlation: None,
+                audio: None,
+                partial: None,
+                seq: None,
+                stream: None,
+                contact: None,
+                content_type: None,
+                relay_of: None,
+            })
+            .await
+            .unwrap();
+        assert!(published.ok);
+        assert_eq!(published.event_id, "e2");
     }
 }

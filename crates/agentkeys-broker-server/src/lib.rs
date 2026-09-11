@@ -4,6 +4,7 @@ pub mod auth;
 pub mod aws_ecs;
 pub mod boot;
 pub mod config;
+pub mod cors;
 pub mod env;
 pub mod error;
 pub mod gate_admin;
@@ -45,7 +46,9 @@ pub fn create_router(state: SharedState) -> Router {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
-    Router::new()
+    // #675 — browser device origins: an opt-in allowlist; unset = no CORS headers.
+    let browser_origins = std::env::var(env::BROKER_BROWSER_ORIGINS).unwrap_or_default();
+    let router = Router::new()
         .route("/healthz", get(handlers::broker_status::healthz))
         .route("/readyz", get(handlers::broker_status::readyz))
         .route("/metrics", get(handlers::metrics::metrics_handler))
@@ -285,8 +288,12 @@ pub fn create_router(state: SharedState) -> Router {
         .pipe(register_oauth2_routes)
         // Phase D-rest US-037: enforce request body size limit per
         // BROKER_REQUEST_BODY_LIMIT_BYTES (Codex P2 R2-F18).
-        .layer(DefaultBodyLimit::max(body_limit))
-        .with_state(state)
+        .layer(DefaultBodyLimit::max(body_limit));
+    let router = match cors::browser_cors_layer(&browser_origins) {
+        Some(layer) => router.layer(layer),
+        None => router,
+    };
+    router.with_state(state)
 }
 
 /// Email-link routes — feature-gated via `auth-email-link`. Defined as

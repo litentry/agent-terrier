@@ -567,9 +567,15 @@ a:hover { text-decoration-color: var(--ink); }
   border: 1px solid var(--rule);
   max-width: 480px;
   width: 100%;
+  /* The body scroll is locked while a modal is open, so the modal itself must
+     stay inside the viewport and scroll its body (a long picker used to grow
+     past the screen with its lower rows unreachable). */
+  max-height: calc(100vh - 40px);
+  display: flex; flex-direction: column;
   animation: pop 0.22s cubic-bezier(.2,.8,.2,1);
 }
 @keyframes pop { from { transform: translateY(8px) scale(0.98); opacity: 0.5; } }
+.modal.wide { max-width: 680px; }
 .modal-head {
   padding: 14px 20px;
   border-bottom: 1px solid var(--rule);
@@ -577,7 +583,7 @@ a:hover { text-decoration-color: var(--ink); }
 }
 .modal-head .ttl { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-dim); }
 .modal-head .x { background: none; border: 0; cursor: pointer; font-family: inherit; font-size: 16px; color: var(--ink-faint); }
-.modal-body { padding: 20px; }
+.modal-body { padding: 20px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .modal-foot { padding: 14px 20px; border-top: 1px solid var(--rule-soft); display: flex; gap: 10px; justify-content: flex-end; background: var(--bg-elev); }
 
 /* ─── WebAuthn dialog ─────────────────────────────────────────── */

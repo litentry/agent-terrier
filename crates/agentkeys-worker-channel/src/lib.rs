@@ -17,6 +17,7 @@
 //! Shares all cryptographic + chain-verification code with the credentials
 //! worker via `agentkeys_worker_creds`.
 
+mod cors;
 pub mod handlers;
 pub mod state;
 pub mod sts_mint;

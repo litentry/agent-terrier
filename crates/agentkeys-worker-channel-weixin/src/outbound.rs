@@ -86,7 +86,7 @@ fn decode_text(ev: &ChannelEvent) -> Option<String> {
 }
 
 /// Send one text to one contact through THIS transport (runtime identity).
-async fn deliver(
+pub(crate) async fn deliver(
     state: &SharedWeixinGatewayState,
     transport_id: &str,
     text: &str,

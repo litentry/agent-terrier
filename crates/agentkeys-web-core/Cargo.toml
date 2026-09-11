@@ -16,6 +16,11 @@ crate-type = ["cdylib", "rlib"]
 # how the two used to drift on `ttl_seconds` (and the #76 K10 PoP fields).
 # #203 / parity-ladder rung 3.
 agentkeys-protocol = { workspace = true }
+# #675 — the browser-held DEVICE identity signs with the SAME no_std K10 core the
+# daemon and the ESP32 link (anti-drift, #367): PoP bytes identical across device kinds.
+agentkeys-device-core = { workspace = true }
+hex = "0.4"
+base64 = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -155,6 +155,7 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     std::fs::remove_file(&state_file).ok();
 
     let cfg = WeixinGatewayConfig {
+        unknown_sender_hint: true,
         bind: "127.0.0.1:0".into(),
         transport: WeixinTransport::Ilink,
         weixin_token: String::new(),
@@ -340,11 +341,22 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     .await;
     {
         let sends = mock.sends.lock().unwrap();
-        assert!(
-            sends
-                .iter()
-                .all(|(_, b)| b["msg"]["to_user_id"] != "wxid-lurker"),
-            "codeless stranger must get SILENCE: {sends:?}"
+        // The codeless stranger is never routed — but is told what the bot is
+        // waiting for, once (the L3 decision stays a drop; D13).
+        let lurker: Vec<_> = sends
+            .iter()
+            .filter(|(_, b)| b["msg"]["to_user_id"] == "wxid-lurker")
+            .collect();
+        assert_eq!(
+            lurker.len(),
+            1,
+            "codeless stranger gets exactly ONE bind hint: {sends:?}"
+        );
+        assert_eq!(
+            lurker[0].1["msg"]["item_list"][0]["text_item"]["text"]
+                .as_str()
+                .unwrap(),
+            agentkeys_worker_channel_weixin::relay::UNKNOWN_HINT_ZH
         );
         let (_, ack) = sends
             .iter()
@@ -384,6 +396,16 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     assert_eq!(approved["ok"], true);
     assert_eq!(approved["contact"]["contact_id"], "c-grandma");
     assert_eq!(approved["contact"]["tier"], "elder");
+    // The member's half of the ceremony: the bound notice lands in her chat.
+    wait_until("bound notice sent to grandma", || {
+        mock.sends.lock().unwrap().iter().any(|(_, b)| {
+            b["msg"]["to_user_id"] == "wxid-grandma"
+                && b["msg"]["item_list"][0]["text_item"]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("绑定成功") && t.contains("/storyteller"))
+        })
+    })
+    .await;
 
     // The NOW-BOUND contact's turn routes + acks (the full multi-user loop).
     mock.inbox

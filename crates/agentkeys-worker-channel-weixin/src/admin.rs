@@ -729,6 +729,19 @@ pub(crate) async fn bind_approve(
                 state.audit_on_chain(),
             );
             info!(contact_id = %contact.contact_id, tier = contact.tier.as_str(), "contact BOUND (master approve)");
+            // The member's half of the ceremony: the claim ack promised "等待管理员
+            // 确认后即可使用" — say so in the chat now, with whom they can talk to.
+            // Best-effort through the stored context token (the same path the
+            // delayed agent replies use); a failed send is a warn — the bind stands.
+            let notice = bound_notice(&contact);
+            match crate::outbound::deliver(&state, &contact.transport_id, &notice).await {
+                Ok(()) => {
+                    info!(contact_id = %contact.contact_id, "bound notice delivered to the member")
+                }
+                Err(e) => {
+                    warn!(contact_id = %contact.contact_id, error = %e, "bound notice NOT delivered (the bind stands)")
+                }
+            }
             let resp = GatewayApproveResponse {
                 ok: true,
                 contact: (&contact).into(),
@@ -1296,5 +1309,71 @@ mod tests {
         assert!(ct_eq("secret", "secret"));
         assert!(!ct_eq("secret", "secreT"));
         assert!(!ct_eq("secret", "secre"));
+    }
+}
+
+/// What the member sees in the chat once the master approves — the other half
+/// of the claim ack. Reach is the alias list they can address; an empty reach
+/// says so instead of implying agents.
+pub(crate) fn bound_notice(c: &agentkeys_protocol::Contact) -> String {
+    let who = format!("{}（{}）", c.display_name, tier_zh(c.tier));
+    if c.reach.is_empty() {
+        return format!("✅ 绑定成功：{who}。管理员还没有为你开通可联系的助手，开通后会自动生效。");
+    }
+    let aliases = c
+        .reach
+        .iter()
+        .map(|a| format!("/{a}"))
+        .collect::<Vec<_>>()
+        .join("、");
+    format!(
+        "✅ 绑定成功：{who}。现在可以直接对话这些助手：{aliases}。发“/{} 你好”试试。",
+        c.reach[0]
+    )
+}
+
+fn tier_zh(t: agentkeys_protocol::ContactTier) -> &'static str {
+    use agentkeys_protocol::ContactTier::*;
+    match t {
+        Owner => "拥有者",
+        Partner => "配偶",
+        Elder => "长辈",
+        Kid => "孩子",
+        Helper => "帮手",
+        Guest => "访客",
+    }
+}
+
+#[cfg(test)]
+mod bound_notice_tests {
+    use super::bound_notice;
+    use agentkeys_protocol::{Contact, ContactTier};
+
+    fn contact(reach: &[&str]) -> Contact {
+        Contact {
+            contact_id: "grandma-1".into(),
+            transport: "weixin".into(),
+            transport_id: "wxid-x".into(),
+            display_name: "奶奶".into(),
+            tier: ContactTier::Elder,
+            reach: reach.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn bound_notice_names_the_reach_or_its_absence() {
+        let n = bound_notice(&contact(&["chef", "storyteller"]));
+        assert!(
+            n.contains("绑定成功")
+                && n.contains("奶奶（长辈）")
+                && n.contains("/chef、/storyteller")
+                && n.contains("/chef 你好"),
+            "{n}"
+        );
+        let e = bound_notice(&contact(&[]));
+        assert!(
+            e.contains("绑定成功") && e.contains("还没有") && !e.contains('/'),
+            "{e}"
+        );
     }
 }

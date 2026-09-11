@@ -67,11 +67,14 @@ export function Modal({
   onClose,
   children,
   footer,
+  wide = false,
 }: {
   title: ReactNode;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** 680px instead of 480px — pickers with long rows (the install wizard). */
+  wide?: boolean;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -86,7 +89,7 @@ export function Modal({
   }, [onClose]);
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className={`modal ${wide ? 'wide' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <span className="ttl">{title}</span>
           <button className="x" onClick={onClose} aria-label="Close">

@@ -32,6 +32,20 @@ import type { ContactSummary } from '@/lib/generated/ContactSummary';
 import type { ContactTier } from '@/lib/generated/ContactTier';
 import type { GatewayMonitorEvent } from '@/lib/generated/GatewayMonitorEvent';
 import type { GatewayActivityEvent } from '@/lib/generated/GatewayActivityEvent';
+import type { AgentKeysClient } from '@/lib/client/types';
+import {
+  SELF_CONTACT_ID,
+  SELF_DISPLAY_NAME,
+  TIER_INFO,
+  appAudiences,
+  flowStep,
+  inviteState,
+  selfState,
+  sendText,
+  suggestedReach,
+  type InstalledAppAudience,
+  type SelfState,
+} from '@/lib/client/contactFlow';
 
 const TIERS: ContactTier[] = ['owner', 'partner', 'elder', 'kid', 'helper', 'guest'];
 
@@ -377,16 +391,14 @@ function GatewayDebugToggle() {
 }
 
 // ── Contacts page (data-section="contacts", hue 330) — the family ──────────────
-export function ContactsPage({ deeplinkReach }: { deeplinkReach?: string[] }) {
+export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string[]; client?: AgentKeysClient }) {
   const { status, statusErr, notConfigured, refreshStatus } = useGatewayStatus(false);
   const { toast, flash } = useToast();
   const [contacts, setContacts] = useState<ContactSummary[]>([]);
   const [pending, setPending] = useState<GatewayPendingBindView[]>([]);
-
+  const [apps, setApps] = useState<InstalledAppAudience[]>([]);
   const refresh = useCallback(async () => {
     const ok = await refreshStatus();
-    // Gateway down / not configured → skip the dependent fetches (they'd only
-    // 503 too, spamming the console). The connect card carries the reason.
     if (!ok) {
       setContacts([]);
       setPending([]);
@@ -395,29 +407,36 @@ export function ContactsPage({ deeplinkReach }: { deeplinkReach?: string[] }) {
     const [c, p] = await Promise.all([gatewayClient.contacts(), gatewayClient.bindPending()]);
     if (c.ok) setContacts(c.value.contacts);
     if (p.ok) setPending(p.value.pending);
-  }, [refreshStatus]);
-
+    if (client?.listApps) {
+      // Installed apps carry their messaging audience (the tiers each admits):
+      // the tier a new invite gets pre-filled from. Best-effort — the page
+      // works without it (the owner still reaches every agent).
+      const a = await client.listApps();
+      if (a.ok) setApps(appAudiences(a.data.apps));
+    }
+  }, [refreshStatus, client]);
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  // While setup is incomplete (no bound contact yet), poll so the guided
-  // stepper advances LIVE — the claim lands (step 2 → 3) without a manual
-  // refresh. Stops the moment the first contact binds.
-  const setupIncomplete = !notConfigured && contacts.length === 0;
+  // The flow advances LIVE (a claim lands, a bind completes) — poll while
+  // anything is still in flight, never when the household is settled.
+  const inFlight = !notConfigured && (contacts.length === 0 || pending.length > 0);
   useEffect(() => {
-    if (!setupIncomplete) return;
+    if (!inFlight) return;
     const id = window.setInterval(() => void refresh(), 4000);
     return () => window.clearInterval(id);
-  }, [setupIncomplete, refresh]);
-
+  }, [inFlight, refresh]);
   const online = !!status?.online;
+  const agents = deeplinkReach ?? [];
+  const self = selfState(pending, contacts);
+  const step = flowStep(online, self);
+  const familyPending = pending.filter((p) => p.contact_id !== SELF_CONTACT_ID);
   return (
     <>
       <PageHead
         crumb="household / contacts"
         title="Contacts"
-        desc="Connect the household WeChat bot, then invite family members — each a contact with a tier + reach (which agents they may talk to). Nothing binds without your approval, and no one’s WeChat identity is ever shown (D13)."
+        desc="One WeChat bot per household, connected once. Every family member — you first — binds by texting an invite code to that bot from their own WeChat, and you approve each bind. Nothing binds without your approval, and no one's WeChat identity is ever shown (D13)."
         actions={
           <>
             <GatewayDebugToggle />
@@ -426,132 +445,283 @@ export function ContactsPage({ deeplinkReach }: { deeplinkReach?: string[] }) {
         }
       />
       <Toast toast={toast} />
-      <SetupStepper
-        online={online}
-        notConfigured={notConfigured}
-        boundCount={contacts.length}
-        claimedCount={pending.filter((p) => p.claimed).length}
-        deeplinkReach={deeplinkReach}
-        onChange={() => void refresh()}
-        onFlash={flash}
-      />
-      <ConnectPanel status={status} statusErr={statusErr} notConfigured={notConfigured} onChange={() => void refresh()} onFlash={flash} />
-      <InvitePanel deeplinkReach={deeplinkReach} online={online} onInvited={() => void refresh()} onFlash={flash} />
-      <PendingPanel pending={pending} onChange={() => void refresh()} onFlash={flash} />
+      <StepPanel
+        n={1}
+        title="the household bot"
+        active={step === 1}
+        done={online}
+        state={notConfigured ? 'no contact gate' : online ? `connected · ${status?.bot_id ?? 'bot'}` : 'offline'}
+      >
+        <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
+          Scan the QR <strong>once</strong> with the household's <strong>spare</strong> WeChat account — that account becomes the bot.
+          Family members never scan it; each gets a code in step 3.
+        </p>
+        <ConnectPanel status={status} statusErr={statusErr} notConfigured={notConfigured} onChange={() => void refresh()} onFlash={flash} />
+      </StepPanel>
+      <StepPanel
+        n={2}
+        title="you — the owner"
+        active={step === 2}
+        done={self === 'bound'}
+        state={self === 'bound' ? 'bound' : self === 'claimed' ? 'code received — approve' : self === 'minted' ? 'code minted — text it to the bot' : online ? 'not bound yet' : 'after step 1'}
+      >
+        <SelfBindCard self={self} pending={pending} contacts={contacts} agents={agents} apps={apps} online={online} onChange={() => void refresh()} onFlash={flash} />
+      </StepPanel>
+      <StepPanel
+        n={3}
+        title="family members"
+        active={step === 3}
+        done={contacts.some((c) => c.tier !== 'owner')}
+        state={`${contacts.filter((c) => c.tier !== 'owner').length} bound · ${familyPending.length} invite${familyPending.length === 1 ? '' : 's'} open`}
+      >
+        <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
+          Members don't scan or connect anything. Once, from the spare phone, share the bot's <strong>name card (名片)</strong> to them or into the family group so the bot is in their WeChat.
+          Then mint an invite, they text the code to the bot in a <strong>private</strong> chat from <strong>their own</strong> WeChat (groups are ignored, and the bot cannot message first), you approve. Each invite below shows where it stands.
+        </p>
+        <InvitePanel agents={agents} apps={apps} online={online} onInvited={() => void refresh()} onFlash={flash} />
+        <InvitesTable pending={familyPending} onChange={() => void refresh()} onFlash={flash} />
+      </StepPanel>
       <ContactsPanel contacts={contacts} onChange={() => void refresh()} onFlash={flash} />
-      <ActivityPanel auditOff={online && status?.audit_on_chain === false} />
-      <MonitorPanel online={online} />
-      <HistoryPanel />
+      <details style={{ marginTop: 18 }}>
+        <summary className="muted" style={{ cursor: 'pointer', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase' }}>diagnostics · activity · monitor · history</summary>
+        <ActivityPanel auditOff={online && status?.audit_on_chain === false} />
+        <MonitorPanel online={online} />
+        <HistoryPanel />
+      </details>
     </>
   );
 }
 
-// ── guided setup (#419) ─────────────────────────────────────────────────────────
-// The two WeChat ceremonies chained into ONE operator flow. They can't literally
-// be one step — the QR logs the BOT in (the spare account, iLink requires the
-// scan) while the 6-digit code binds a MEMBER (their daily account), and the bot
-// can't message first (passive-reply-only) — but the stepper walks you straight
-// through: ① connect → ② invite yourself (one click, owner + all agents) →
-// ③ approve the claim. Hides once the first contact is bound.
-function SetupStepper({
+// ── the step frame ────────────────────────────────────────────────────────────
+// One numbered panel per stage of the flow; the ACTIVE step is drawn in full,
+// the others recede, a done step carries its check. State text on the right
+// is the live truth (bot id, "code received", counts), never a static caption.
+function StepPanel({
+  n,
+  title,
+  active,
+  done,
+  state,
+  children,
+}: {
+  n: number;
+  title: string;
+  active: boolean;
+  done: boolean;
+  state: string;
+  children: ReactNode;
+}) {
+  return (
+    <div style={{ opacity: active || done ? 1 : 0.72, outline: active ? '2px solid var(--accent)' : 'none', outlineOffset: -1, marginBottom: 14 }}>
+      <Panel
+        title={<span>{done ? '✓' : n} · {title}</span>}
+        right={<span className="muted" style={{ fontSize: 12, color: active ? 'var(--accent)' : undefined }}>{state}</span>}
+      >
+        {children}
+      </Panel>
+    </div>
+  );
+}
+
+// ── step 2: the owner's own bind ──────────────────────────────────────────────
+// The owner binds like everyone else — a code texted from the DAILY WeChat
+// (the spare account is the bot). The card is the state machine in one place:
+// mint → the code, right here, with the send text → the bot received it →
+// approve → bound (with the reach that was granted).
+function SelfBindCard({
+  self,
+  pending,
+  contacts,
+  agents,
+  apps,
   online,
-  notConfigured,
-  boundCount,
-  claimedCount,
-  deeplinkReach,
   onChange,
   onFlash,
 }: {
+  self: SelfState;
+  pending: GatewayPendingBindView[];
+  contacts: ContactSummary[];
+  agents: string[];
+  apps: InstalledAppAudience[];
   online: boolean;
-  notConfigured: boolean;
-  boundCount: number;
-  claimedCount: number;
-  deeplinkReach?: string[];
   onChange: () => void;
   onFlash: (m: string) => void;
 }) {
-  const [connectOpen, setConnectOpen] = useState(false);
-  const [minted, setMinted] = useState<{ code: string; sendText: string; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  if (notConfigured || boundCount > 0) return null;
-
-  const step = !online ? 1 : claimedCount > 0 ? 3 : 2;
-
-  const inviteSelf = async () => {
+  const mine = pending.find((p) => p.contact_id === SELF_CONTACT_ID) ?? pending.find((p) => p.tier === 'owner');
+  const me = contacts.find((c) => c.tier === 'owner');
+  const reach = suggestedReach('owner', agents, apps);
+  const mint = async () => {
     setBusy(true);
-    // Fixed contact_id: re-clicking replaces the open self-invite instead of
-    // littering the registry with stale codes.
-    const r = await gatewayClient.bindInvite({
-      contact_id: 'self-owner',
-      display_name: '我自己',
-      tier: 'owner',
-      reach: deeplinkReach ?? [],
-    });
+    const r = await gatewayClient.bindInvite({ contact_id: SELF_CONTACT_ID, display_name: SELF_DISPLAY_NAME, tier: 'owner', reach });
     setBusy(false);
     if (!r.ok) {
-      onFlash(`Self-invite failed — ${reason(r)}`);
+      onFlash(`Minting your code failed — ${reason(r)}`);
       return;
     }
-    setMinted({ code: r.value.bind_code, sendText: r.value.send_text, name: '我自己' });
     onChange();
   };
-
-  const stepStyle = (n: number): CSSProperties => ({
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    opacity: n === step ? 1 : 0.55,
-    fontWeight: n === step ? 600 : 400,
-  });
-  const mark = (n: number) => (n < step ? '✓' : `${n}`);
-
-  return (
-    <Panel title="快速设置 · guided setup">
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
-        <div style={stepStyle(1)}>
-          <span className={step > 1 ? '' : 'muted'}>{mark(1)}</span>
-          <span>Connect the bot — scan the QR with the <strong>spare</strong> WeChat account (it becomes the bot).</span>
-          {step === 1 && (
-            <button className="btn primary sm" onClick={() => setConnectOpen(true)}>⊕ connect</button>
-          )}
-        </div>
-        <div style={stepStyle(2)}>
-          <span className={step > 2 ? '' : 'muted'}>{mark(2)}</span>
-          <span>Bind yourself — text the 6-digit code to the bot from your <strong>daily</strong> WeChat.</span>
-          {step === 2 && (
-            <button className="btn primary sm" disabled={busy} onClick={() => void inviteSelf()}>
-              {busy ? 'minting…' : '⊕ invite myself (owner · all agents)'}
-            </button>
-          )}
-        </div>
-        <div style={stepStyle(3)}>
-          <span className="muted">{mark(3)}</span>
-          <span>Approve the claim below (待确认) — then you’re bound and every message shows your name.</span>
-          {step === 3 && <span style={{ color: 'var(--accent)' }}>↓ approve below</span>}
+  const approve = async () => {
+    if (!mine) return;
+    setBusy(true);
+    const r = await gatewayClient.bindApprove({ bind_code: mine.bind_code, tier: null, reach: null });
+    setBusy(false);
+    if (!r.ok) {
+      onFlash(`Approve failed — ${reason(r)}`);
+      return;
+    }
+    onFlash('You are bound as the owner — every message from your WeChat now carries your name');
+    onChange();
+  };
+  if (self === 'bound' && me) {
+    return (
+      <div style={{ fontSize: 13, lineHeight: 1.7 }}>
+        ✓ Bound as <strong>{me.display_name}</strong> · owner · reach: {me.reach.length ? me.reach.join(', ') : '—'}
+        <div className="muted" style={{ fontSize: 12 }}>Apps you install later add themselves here automatically.</div>
+      </div>
+    );
+  }
+  if (self === 'none') {
+    return (
+      <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
+        <div>Mint your own code, then text it to the bot from your <strong>daily</strong> WeChat (not the spare one).</div>
+        <div>
+          <button className="btn primary" disabled={busy || !online} onClick={() => void mint()}>
+            {busy ? 'minting…' : `⊕ mint my code · owner · ${reach.length ? `${reach.length} agent${reach.length === 1 ? '' : 's'}` : 'no agents yet'}`}
+          </button>
+          {!online && <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>connect the bot first</span>}
         </div>
       </div>
-      {connectOpen && (
-        <ConnectModal
-          onClose={() => setConnectOpen(false)}
-          onConnected={(botId) => {
-            setConnectOpen(false);
-            onChange();
-            onFlash(`Bot connected · ${botId} — now bind yourself (step 2)`);
-          }}
-        />
-      )}
-      {minted && (
-        <InviteModal
-          name={minted.name}
-          code={minted.code}
-          sendText={minted.sendText}
-          onClose={() => setMinted(null)}
-          onCopied={() => onFlash('Code copied — text it to the bot from your daily WeChat')}
-        />
-      )}
-    </Panel>
+    );
+  }
+  if (!mine) return null;
+  if (self === 'minted') {
+    return (
+      <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
+        <div>Text this to the bot from your <strong>daily</strong> WeChat:</div>
+        <CodeLine code={mine.bind_code} onCopied={() => onFlash('Copied — paste it into the chat with the bot')} />
+        <div className="muted" style={{ fontSize: 12 }}>
+          reach when bound: {mine.reach.length ? mine.reach.join(', ') : '—'} · waiting for the bot to receive it (this page refreshes by itself) ·{' '}
+          <button className="btn sm" disabled={busy} onClick={() => void mint()}>re-mint</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
+      <div>The bot received your code. Approving binds <strong>that</strong> WeChat as the owner · reach: {mine.reach.length ? mine.reach.join(', ') : '—'}.</div>
+      <div className="muted" style={{ fontSize: 12 }}>The sender's WeChat identity is never shown (D13). If you did not send this code yourself, reject it.</div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="btn primary" disabled={busy} onClick={() => void approve()}>{busy ? 'approving…' : '✓ approve — bind me'}</button>
+        <RejectButton bindCode={mine.bind_code} name={SELF_DISPLAY_NAME} onChange={onChange} onFlash={onFlash} />
+      </div>
+    </div>
   );
 }
+
+// The code, big, with the exact text to send and a copy button.
+function CodeLine({ code, onCopied }: { code: string; onCopied: () => void }) {
+  const text = sendText(code);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+      <span style={{ fontFamily: 'var(--mono, monospace)', fontSize: 28, fontWeight: 700, letterSpacing: '0.14em' }}>{code}</span>
+      <code style={{ fontSize: 12.5 }}>{text}</code>
+      <button
+        className="btn sm"
+        onClick={() => {
+          void navigator.clipboard?.writeText(text);
+          onCopied();
+        }}
+      >
+        ⧉ copy
+      </button>
+    </div>
+  );
+}
+
+// ── step 3: the family invites, each with its state ───────────────────────────
+function InvitesTable({
+  pending,
+  onChange,
+  onFlash,
+}: {
+  pending: GatewayPendingBindView[];
+  onChange: () => void;
+  onFlash: (m: string) => void;
+}) {
+  if (pending.length === 0) return null;
+  const claimed = pending.filter((p) => p.claimed);
+  const minted = pending.filter((p) => !p.claimed);
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div className="perm-section-head">
+        <span className="ttl">open invites</span>
+        <span className="summary">{claimed.length > 0 ? `${claimed.length} to approve` : `${minted.length} waiting`}</span>
+      </div>
+      <div style={{ display: 'grid', gap: 6 }}>
+        {claimed.map((p) => <InviteRow key={p.bind_code} p={p} onChange={onChange} onFlash={onFlash} />)}
+        {minted.map((p) => <InviteRow key={p.bind_code} p={p} onChange={onChange} onFlash={onFlash} />)}
+      </div>
+    </div>
+  );
+}
+
+function InviteRow({ p, onChange, onFlash }: { p: GatewayPendingBindView; onChange: () => void; onFlash: (m: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const state = inviteState(p);
+  const approve = async () => {
+    setBusy(true);
+    setErr(null);
+    const r = await gatewayClient.bindApprove({ bind_code: p.bind_code, tier: null, reach: null });
+    setBusy(false);
+    if (!r.ok) {
+      setErr(reason(r));
+      return;
+    }
+    onFlash(`${p.display_name} is bound (${p.tier} · ${tierLabel(p.tier)})`);
+    onChange();
+  };
+  const pill: CSSProperties = {
+    fontSize: 11,
+    padding: '2px 8px',
+    borderRadius: 999,
+    border: '1px solid var(--rule)',
+    color: state === 'claimed' ? 'var(--accent)' : 'var(--ink-dim)',
+    whiteSpace: 'nowrap',
+  };
+  return (
+    <div className="row" style={{ display: 'grid', gap: 6, padding: '10px 4px', borderTop: '1px solid var(--rule-soft)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span>
+          <strong>{p.display_name}</strong> · <span className="muted">{p.tier} · {tierLabel(p.tier)}</span>
+          <span className="muted" style={{ fontSize: 12 }}> · reach: {p.reach.length ? p.reach.join(', ') : '—'}</span>
+        </span>
+        <span style={pill}>{state === 'claimed' ? '② code received — approve' : '① code minted — waiting'}</span>
+      </div>
+      {state === 'minted' ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 12.5 }}>
+          <span className="muted">{p.display_name} texts this to the bot from their own WeChat:</span>
+          <CodeLine code={p.bind_code} onCopied={() => onFlash(`Copied — send it to ${p.display_name}`)} />
+          <RejectButton bindCode={p.bind_code} name={p.display_name} onChange={onChange} onFlash={onFlash} />
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 6, fontSize: 12.5 }}>
+          <div>
+            Someone sent {p.display_name}'s code to the bot. Approving binds <strong>that</strong> WeChat to <strong>{p.display_name}</strong> as {p.tier} · {tierLabel(p.tier)}, reaching {p.reach.length ? p.reach.join(', ') : 'no agent yet'}.
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>The sender's WeChat identity is never shown (D13) — if you did not hand this code to {p.display_name}, reject it.</div>
+          {err && <div className="muted" style={{ color: 'var(--danger)', fontSize: 12 }}>⚠ {err}</div>}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn primary sm" disabled={busy} onClick={() => void approve()}>{busy ? 'approving…' : `✓ approve — bind ${p.display_name}`}</button>
+            <RejectButton bindCode={p.bind_code} name={p.display_name} onChange={onChange} onFlash={onFlash} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // ── connect ───────────────────────────────────────────────────────────────────
 
@@ -572,7 +742,7 @@ function ConnectPanel({
   const transport = status?.transport ?? '—';
   return (
     <Panel
-      title="connection"
+      title="connection · the bot"
       right={
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
           <Dot status={online ? 'ok' : notConfigured ? 'muted' : 'warn'} pulse={online} />
@@ -837,17 +1007,19 @@ const CHIP = (on: boolean): CSSProperties => ({
 });
 
 function InvitePanel({
-  deeplinkReach,
+  agents,
+  apps,
   online,
   onInvited,
   onFlash,
 }: {
-  deeplinkReach?: string[];
+  agents: string[];
+  apps: InstalledAppAudience[];
   online: boolean;
   onInvited: () => void;
   onFlash: (m: string) => void;
 }) {
-  const options = deeplinkReach ?? [];
+  const options = agents;
   const [displayName, setDisplayName] = useState('');
   const [tier, setTier] = useState<ContactTier>('kid');
   const [reach, setReach] = useState<Set<string>>(new Set());
@@ -857,6 +1029,12 @@ function InvitePanel({
   const [err, setErr] = useState<string | null>(null);
 
   const allSelected = options.length > 0 && options.every((a) => reach.has(a));
+  // A tier change re-seeds the chips with what that tier usually gets.
+  const optionsKey = options.join(',');
+  useEffect(() => {
+    setReach(new Set(suggestedReach(tier, options, apps)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tier, optionsKey, apps]);
   const toggle = (a: string) =>
     setReach((prev) => {
       const n = new Set(prev);
@@ -888,8 +1066,9 @@ function InvitePanel({
   };
 
   return (
-    <Panel title="invite a family member">
-      <div style={{ display: 'grid', gap: 10, maxWidth: 460 }}>
+    <div>
+      <div className="perm-section-head"><span className="ttl">mint an invite</span></div>
+      <div style={{ display: 'grid', gap: 10, maxWidth: 520 }}>
         <Field label="name">
           <input style={INPUT_STYLE} placeholder="奶奶 / Emma" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </Field>
@@ -897,6 +1076,7 @@ function InvitePanel({
           <select style={INPUT_STYLE} value={tier} onChange={(e) => setTier(e.target.value as ContactTier)}>
             {TIERS.map((t) => <option key={t} value={t}>{t} · {tierLabel(t)}</option>)}
           </select>
+          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{TIER_INFO[tier].blurb}</div>
         </Field>
         <Field label={<>reach <span className="muted">(which agents they may talk to)</span></>}>
           {options.length > 0 ? (
@@ -911,6 +1091,9 @@ function InvitePanel({
           ) : (
             <input style={INPUT_STYLE} placeholder="chef, storyteller" value={reachText} onChange={(e) => setReachText(e.target.value)} />
           )}
+          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+            Pre-filled with what this tier usually gets. Apps you install later add themselves to every contact whose tier they admit, so this only needs today's agents.
+          </div>
         </Field>
         {err && <div className="muted" style={{ color: 'var(--danger)' }}>⚠ {err}</div>}
         <div>
@@ -930,7 +1113,7 @@ function InvitePanel({
           onCopied={() => onFlash('Invite copied — share it with the family member')}
         />
       )}
-    </Panel>
+    </div>
   );
 }
 
@@ -968,74 +1151,6 @@ function InviteModal({
         </div>
       </div>
     </Modal>
-  );
-}
-
-// ── pending (approve) ─────────────────────────────────────────────────────────
-
-function PendingPanel({
-  pending,
-  onChange,
-  onFlash,
-}: {
-  pending: GatewayPendingBindView[];
-  onChange: () => void;
-  onFlash: (m: string) => void;
-}) {
-  const claimed = pending.filter((p) => p.claimed);
-  const open = pending.filter((p) => !p.claimed);
-  return (
-    <Panel
-      title="待确认 · awaiting your approval"
-      right={claimed.length > 0 ? <span className="count" style={{ color: 'var(--accent)' }}>{claimed.length}●</span> : undefined}
-    >
-      {pending.length === 0 ? (
-        <div className="muted" style={{ fontSize: 13 }}>No open invites. Mint one above; when the family member sends the code to the bot, it lands here for your confirm.</div>
-      ) : (
-        <div style={{ display: 'grid', gap: 8 }}>
-          {claimed.map((p) => <PendingRow key={p.bind_code} p={p} onChange={onChange} onFlash={onFlash} />)}
-          {open.map((p) => (
-            <div key={p.bind_code} className="row" style={{ opacity: 0.6, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '8px 4px' }}>
-              <span>{p.display_name} · <span className="muted">{p.tier}</span></span>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="muted" style={{ fontSize: 12 }}>waiting for {p.display_name} to send <code>{`绑定 ${p.bind_code}`}</code></span>
-                <RejectButton bindCode={p.bind_code} name={p.display_name} onChange={onChange} onFlash={onFlash} />
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </Panel>
-  );
-}
-
-function PendingRow({ p, onChange, onFlash }: { p: GatewayPendingBindView; onChange: () => void; onFlash: (m: string) => void }) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const approve = async () => {
-    setBusy(true);
-    setErr(null);
-    const r = await gatewayClient.bindApprove({ bind_code: p.bind_code, tier: null, reach: null });
-    setBusy(false);
-    if (!r.ok) {
-      setErr(reason(r));
-      return;
-    }
-    onFlash(`${p.display_name} is now bound (${p.tier})`);
-    onChange();
-  };
-  return (
-    <div className="row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '8px 4px', borderTop: '1px solid var(--line, #2a2a2a)' }}>
-      <div>
-        <div><strong>{p.display_name}</strong> · <span className="muted">{p.tier} · {tierLabel(p.tier)}</span></div>
-        <div className="muted" style={{ fontSize: 12 }}>reach: {p.reach.length ? p.reach.join(', ') : '—'}</div>
-        {err && <div className="muted" style={{ color: 'var(--danger)', fontSize: 12 }}>⚠ {err}</div>}
-      </div>
-      <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-        <RejectButton bindCode={p.bind_code} name={p.display_name} onChange={onChange} onFlash={onFlash} />
-        <button className="btn primary sm" disabled={busy} onClick={() => void approve()}>{busy ? 'approving…' : '✓ approve'}</button>
-      </span>
-    </div>
   );
 }
 
@@ -1084,7 +1199,7 @@ function ContactsPanel({
   onFlash: (m: string) => void;
 }) {
   return (
-    <Panel title="family" right={<span className="count">{contacts.length}</span>}>
+    <Panel title="4 · family — bound contacts" right={<span className="count">{contacts.length}</span>}>
       {contacts.length === 0 ? (
         <div className="muted" style={{ fontSize: 13 }}>No family members yet. Invite one above.</div>
       ) : (

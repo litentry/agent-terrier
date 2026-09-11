@@ -34,6 +34,9 @@ pub struct IlinkPersist {
     /// `from_user_id` → the user's latest `context_token` (echo on sends).
     #[serde(default)]
     pub context_tokens: HashMap<String, String>,
+    /// Unix seconds of the last bind hint sent to an unknown sender (once per window).
+    #[serde(default)]
+    pub hint_sent_secs: HashMap<String, u64>,
 }
 
 impl IlinkPersist {
@@ -273,9 +276,22 @@ pub async fn run_with_token(
                 warn!(reason = %e, "allowed turn did NOT reach a feed");
             }
 
-            let reply = outcome.claim_ack.clone().or_else(|| {
+            let mut reply = outcome.claim_ack.clone().or_else(|| {
                 relay::reply_text_for_turn(&outcome.decision, outcome.media_marker, false)
             });
+            if reply.is_none() && state.config.unknown_sender_hint {
+                let now = relay::unix_secs();
+                if let Some(hint) = relay::unknown_sender_hint(
+                    &outcome.decision,
+                    persist.hint_sent_secs.get(&from).copied(),
+                    now,
+                    false,
+                ) {
+                    persist.hint_sent_secs.insert(from.clone(), now);
+                    dirty = true;
+                    reply = Some(hint.to_string());
+                }
+            }
             if let Some(reply) = reply {
                 let ct = persist.context_tokens.get(&from).map(|s| s.as_str());
                 if let Err(e) = client.send_text(&from, &reply, ct).await {
@@ -310,6 +326,7 @@ mod tests {
         let p = IlinkPersist {
             get_updates_buf: "cursor-1".into(),
             context_tokens: HashMap::from([("wxid-a".to_string(), "ctx-a".to_string())]),
+            hint_sent_secs: HashMap::new(),
         };
         p.save(&path);
 

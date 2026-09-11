@@ -9,6 +9,7 @@ Do not read folder `docs/archived`
 The browser UI lives in four front-end dirs, **separate from the Rust backend and not needed as context for broker/daemon/chain/cli work** — don't read them unless the task is front-end:
 - [`design-system/`](design-system/) — shared `@agentkeys/design-system`: design tokens (3 themes, bilingual EN/中文, two font sets) + React components, consumed by every app (`tokens.json` is the color source-of-truth → `scripts/generate-tokens.mjs`).
 - TanStack Start apps [`apps/website`](apps/website) (`:3116`), [`apps/mobile-mock`](apps/mobile-mock) (`:3117`), [`apps/design-system`](apps/design-system) (`:3118` — component gallery + theme curator). Run via the fleet `d` menu or `npm --prefix <dir> run dev`.
+- [`apps/device-display`](apps/device-display) (`:3119`, #675) — the **device-mode kitchen display**: a shared tablet as its OWN device actor (browser-held K10 via `agentkeys-web-core`'s `DeviceIdentity`, pairing/resolve/channel caps/worker poll+publish through the same wasm pkg the console uses — dev.sh `build_wasm` copies it into the app). Renders the app's card with the design system's `CardView` (kiosk `big` scale) and publishes taps as `command` events. Talks to the broker + channel worker cross-origin, so the stack must list its origin in `AGENTKEYS_BROWSER_ORIGINS` (env file → `BROKER_BROWSER_ORIGINS` on the broker unit + the channel worker env; empty = no CORS, the default).
 
 node_modules / build output / generated route trees / lockfiles are gitignored — regenerable from `package.json` + source.
 
@@ -51,6 +52,12 @@ When you discover a name divergence while making any change, fix it in the same 
 
 ## Version Control
 Use `jj` (Jujutsu) for all version control. Never use raw `git` commands.
+
+## Command handoff rule (owner, 2026-09-11)
+Every command handed to the operator states WHERE it runs — `local` (laptop,
+which checkout) or `remote` (which host, via which entry: `ssh-agentkeys`,
+`ssh-agentterrier`, `ssh-broker.sh <stack>`) — right before the block. Many
+machines; an unmarked command is a wrong-machine trap.
 
 ## Diagnosis-before-edit policy
 Before changing any file in response to a reported failure, **reproduce the failure locally** and isolate the layer (shell quoting, client tooling, doc command, broker code, network). If the cause is local (shell, copy-paste, env var), respond with the one-line fix and let the user run it — do NOT edit code or docs. Only edit when the cause is in the repo. Keep the response concise: failing command, root cause, fix command — nothing else.

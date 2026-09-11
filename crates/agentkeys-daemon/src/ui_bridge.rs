@@ -1473,29 +1473,45 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 /// - `broker-<x>.<zone>`     → `"-<x>"`     (a further test-fleet slot, e.g. `broker-test-3`)
 /// - `broker-base.<zone>`   → `"-base"`   (#282 Base stack)
 pub(crate) fn derive_worker_url(broker_url: &str, worker: &str) -> Option<String> {
-    let host = broker_url
-        .rsplit("://")
-        .next()
-        .unwrap_or(broker_url)
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("");
-    let (first, zone) = host.split_once('.')?;
-    if zone.is_empty() {
-        return None;
+    // ONE owner (#675): the wasm-safe protocol function, shared with the
+    // browser device client — the daemon must never drift from it.
+    agentkeys_backend_client::protocol::derive_worker_url(broker_url, worker)
+}
+
+/// An explicit `AGENTKEYS_WORKER_<X>_URL` override wins ONLY when it can stand
+/// next to the broker (loopback, or the broker's own zone); a foreign-zone
+/// value is an inherited stack env — the #571 leak class (2026-09-10: an AWS
+/// test-env `weixin-test.litentry.org` inside the VE daemon pinned the
+/// Contacts page onto a host that does not exist) — so it is logged and
+/// IGNORED in favour of the derivation from the broker. Never a silent
+/// override in either direction: the refusal names both hosts.
+pub(crate) fn worker_url_override_or_derive(
+    var: &str,
+    override_value: Option<String>,
+    broker_url: Option<&str>,
+    worker: &str,
+) -> Option<String> {
+    let override_value = override_value
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    match (override_value, broker_url) {
+        (Some(o), Some(b)) => {
+            if agentkeys_backend_client::protocol::worker_override_matches_broker(&o, b) {
+                Some(o)
+            } else {
+                tracing::warn!(
+                    var,
+                    override_url = %o,
+                    broker = %b,
+                    "ui-bridge: IGNORING {var}={o} — its zone is not the broker's ({b}); an inherited stack env (the #571 leak class). Deriving {worker}.<zone> from the broker; unset the variable in the shell that launched this daemon."
+                );
+                derive_worker_url(b, worker)
+            }
+        }
+        (Some(o), None) => Some(o),
+        (None, Some(b)) => derive_worker_url(b, worker),
+        (None, None) => None,
     }
-    let suffix = match first {
-        "broker" => String::new(),
-        "test-broker" => "-test".to_string(),
-        other => match other.strip_prefix("broker-") {
-            Some(rest) if !rest.is_empty() => format!("-{rest}"),
-            _ => return None,
-        },
-    };
-    Some(format!("https://{worker}{suffix}.{zone}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1569,15 +1585,12 @@ pub fn build_state(
     // — an explicit `AGENTKEYS_WORKER_WEIXIN_URL` still overrides. The admin
     // token is a SECRET the operator retrieves from the broker's
     // weixin-secrets.env; the daemon injects it server-side (never the browser).
-    let weixin_gateway_url = std::env::var("AGENTKEYS_WORKER_WEIXIN_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            broker_url
-                .as_deref()
-                .and_then(|b| derive_worker_url(b, "weixin"))
-        });
+    let weixin_gateway_url = worker_url_override_or_derive(
+        "AGENTKEYS_WORKER_WEIXIN_URL",
+        std::env::var("AGENTKEYS_WORKER_WEIXIN_URL").ok(),
+        broker_url.as_deref(),
+        "weixin",
+    );
     let weixin_admin_token = std::env::var("AGENTKEYS_WEIXIN_ADMIN_TOKEN")
         .ok()
         .map(|s| s.trim().to_string())
@@ -7512,11 +7525,12 @@ pub struct ChatPollRequest {
 /// cap-only from the daemon (no client-side STS/role), so the URL is all it
 /// needs — nothing to keep paired with a per-stack role ARN.
 pub(crate) fn channel_worker_url(broker: &str) -> Result<String, String> {
-    if let Some(u) = std::env::var("AGENTKEYS_WORKER_CHANNEL_URL")
-        .ok()
-        .map(|u| u.trim().trim_end_matches('/').to_string())
-        .filter(|u| !u.is_empty())
-    {
+    if let Some(u) = worker_url_override_or_derive(
+        "AGENTKEYS_WORKER_CHANNEL_URL",
+        std::env::var("AGENTKEYS_WORKER_CHANNEL_URL").ok(),
+        Some(broker),
+        "channel",
+    ) {
         return Ok(u);
     }
     derive_worker_url(broker, "channel").ok_or_else(|| {
@@ -12839,6 +12853,51 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("--signer-url"), "must be actionable: {err}");
+    }
+
+    #[test]
+    fn foreign_zone_overrides_are_refused_and_derived() {
+        let ve = Some("https://broker.agentterrier.cn");
+        // the 2026-09-10 leak: an AWS test host next to the VE broker → derived
+        assert_eq!(
+            worker_url_override_or_derive(
+                "X",
+                Some("https://weixin-test.litentry.org".into()),
+                ve,
+                "weixin"
+            )
+            .as_deref(),
+            Some("https://weixin.agentterrier.cn")
+        );
+        // same zone / loopback overrides stand (trailing slash trimmed)
+        assert_eq!(
+            worker_url_override_or_derive(
+                "X",
+                Some("https://weixin.agentterrier.cn/".into()),
+                ve,
+                "weixin"
+            )
+            .as_deref(),
+            Some("https://weixin.agentterrier.cn")
+        );
+        assert_eq!(
+            worker_url_override_or_derive("X", Some("http://127.0.0.1:9101".into()), ve, "weixin")
+                .as_deref(),
+            Some("http://127.0.0.1:9101")
+        );
+        // no override → derived; nothing at all → None; blank override → derived
+        assert_eq!(
+            worker_url_override_or_derive("X", None, ve, "channel").as_deref(),
+            Some("https://channel.agentterrier.cn")
+        );
+        assert_eq!(
+            worker_url_override_or_derive("X", None, None, "channel"),
+            None
+        );
+        assert_eq!(
+            worker_url_override_or_derive("X", Some("  ".into()), ve, "channel").as_deref(),
+            Some("https://channel.agentterrier.cn")
+        );
     }
 
     #[test]

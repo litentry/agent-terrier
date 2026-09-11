@@ -62,7 +62,7 @@ Visual map: [`assets/component-architecture.svg`](assets/component-architecture.
 | Chain | Heima (default) / Base / any EVM | the four contracts (§16) |
 | Provisioner + TS scrapers | sandbox subprocess | per-service API-key signup/mint (Class B) |
 | `agentkeys-protocol` / `agentkeys-backend-client` | shared crates | ONE owner of wire types (wasm-safe) / native client (#203/#215) |
-| Front-ends: `apps/parent-control`, web-core (wasm) | browser | master surfaces; generated types via ts-rs |
+| Front-ends: `apps/parent-control` (the console), `apps/device-display` (#675 — the device-mode kitchen display: a shared tablet as its OWN device actor, browser-held K10 via web-core), web-core (wasm) | browser | master surfaces; the display renders the §22f card contract and publishes `command` events as its own actor; generated types via ts-rs |
 | Firmware `esp32s3-touch-lcd-4b` | device | keyed machine: on-device K10 keygen + signing (#348/#367) |
 
 *Full detail: v2 §2.*

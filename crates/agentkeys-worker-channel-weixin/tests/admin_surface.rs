@@ -32,6 +32,7 @@ fn config(registry_file: String) -> WeixinGatewayConfig {
     let dir = std::env::temp_dir().join(format!("ak-admin-surface-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     WeixinGatewayConfig {
+        unknown_sender_hint: true,
         bind: "127.0.0.1:0".into(),
         transport: agentkeys_worker_channel_weixin::WeixinTransport::Oa,
         weixin_token: "test-token".into(),

@@ -1027,7 +1027,7 @@ export function App() {
       showToast(`Channel registry unavailable — ${r.status?.detail ?? 'check the daemon'}`);
     }
   };
-  const createChannel = async (input: { id: string; name: string; note?: string }): Promise<ChannelDef | null> => {
+  const createChannel = async (input: { id: string; name: string; note?: string; kind?: ChannelDef['kind'] }): Promise<ChannelDef | null> => {
     if (!client.createChannel) {
       showToast('This backend has no channel registry.');
       return null;
@@ -1443,12 +1443,12 @@ export function App() {
         {page === 'contacts' && (
           // Reach = agents a contact may TALK to — sandbox delegates only; a
           // channel-endpoint device (camera/display) is never a conversation target.
-          <ContactsPage deeplinkReach={actors.filter((a) => a.role === 'agent' && !actorIsChannelEndpoint(a)).map((a) => a.label.replace(' (revoked)', ''))} />
+          <ContactsPage client={client} deeplinkReach={actors.filter((a) => a.role === 'agent' && !actorIsChannelEndpoint(a)).map((a) => a.label.replace(' (revoked)', ''))} />
         )}
         {page === 'applications' && (
           // #682 — install / inspect / uninstall against the real registries
           // (epic #660 stage 1). Channels feed the wizard's slot options.
-          <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} />
+          <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
