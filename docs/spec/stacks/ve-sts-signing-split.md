@@ -235,6 +235,8 @@ session JWT, so a compromised broker can still decrypt what it fetches for
 actors that pass rule 3; extending the chain-verify (or a K11-bound proof) to
 KEK derivation is a candidate follow-up that lifts both clouds. Related and
 independent: per-data-class VE roles (M1), memory client-side encryption (M2),
+
+> **Decision 2026-09-13 (owner):** the VE dev console (`dev.sh --cloud ve`) wires the MEMORY plane through the signer like config/cred BEFORE the M2 client-side KEK lands — memory blobs (and the curated resources that ride them, #674) are at rest on TOS under the worker's server-side envelope only. Accepted so resources persist and the sandboxed apps can read them; `dev.sh` prints the trade-off on every run. M2 closes it by encrypting memory client-side without changing the wiring.
 and eliminating the AK/SK entirely via instance-role/IMDS (port-spec follow-up
 6), which would subsume the custody question this decision relocates.
 

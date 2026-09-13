@@ -835,6 +835,22 @@ export interface AgentKeysClient {
     ns: string;
     body: string;
   }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string }>>;
+  /** #674 — curate a resource FROM A FILE: the daemon extracts the text (txt/md/csv/json/pdf; an
+   *  image becomes a gallery caption) and keeps the raw bytes as `files/<id>` on a durable plane. */
+  resourceUpload?(input: {
+    id: string;
+    name: string;
+    name_zh: string;
+    kind: ResourceKind;
+    tags: string[];
+    sensitivity: Sensitivity;
+    ns: string;
+    filename: string;
+    content_type: string;
+    content_b64: string;
+  }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string; extracted_bytes: number; raw_stored: boolean | null }>>;
+  /** #674 — unregister an item and drop its entry; refused (409 resource_in_use) while a live app is bound to it unless `force`. */
+  resourceRemove?(input: { id: string; force?: boolean }): Promise<Result<{ ok: boolean; removed: boolean; item?: ResourceItemRow; apps?: string[] }>>;
   // #541 / #667 — the two device-actor enrollments the console drives (this
   // console itself, and the channel gateway): build → ONE Touch ID → submit.
   consoleDeviceStatus?(): Promise<Result<ConsoleDeviceStatus>>;

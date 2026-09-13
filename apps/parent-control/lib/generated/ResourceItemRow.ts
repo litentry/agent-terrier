@@ -19,4 +19,10 @@ ns: string,
 /**
  * The entry key inside the namespace's canonical blob.
  */
-object_key: string, kind: ResourceKind, tags: Array<string>, sensitivity: Sensitivity, version: number, content_hash: string, bytes: number, created_at: number, updated_at: number, };
+object_key: string, kind: ResourceKind, tags: Array<string>, sensitivity: Sensitivity, version: number, content_hash: string, bytes: number, created_at: number, updated_at: number, 
+/**
+ * Upload provenance (2026-09-13): the source file's name and media type,
+ * and the keyed memory object holding its raw bytes (`files/<id>`) — empty
+ * for a pasted item, or when no durable memory plane held the file.
+ */
+filename: string, content_type: string, raw_object_key: string, raw_bytes: number, };

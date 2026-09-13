@@ -30,8 +30,8 @@ use crate::ui_bridge::{
     config_fetch_doc, config_store_doc, ensure_binding_manifest, ensure_channel_named,
     ensure_channel_registry, gateway_admin_call, invalidate_fleet_sync, master_channel_cap,
     now_unix, pairing_err, plant_master_memory_inner, real_config_ctx, registry_err,
-    registry_storage_label, sync_gateway_registry_to_config, valid_channel_id, SharedUiBridgeState,
-    UiBridgeState,
+    registry_storage_label, resource_entry_remove, resource_object_put,
+    sync_gateway_registry_to_config, valid_channel_id, SharedUiBridgeState, UiBridgeState,
 };
 
 // ── registry docs ───────────────────────────────────────────────────────────
@@ -1557,10 +1557,241 @@ pub struct ResourceAddRequest {
     pub body: String,
 }
 
+/// Upload caps: 5 MiB of file bytes (a curated profile / document / dataset —
+/// the text an app reads is EXTRACTED from it), 8 MiB of JSON body (base64 ×4/3
+/// + framing) on the route's body limit.
+pub(crate) const RESOURCE_UPLOAD_MAX_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const RESOURCE_UPLOAD_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+/// POST /v1/master/resources/upload — curate one resource item FROM A FILE:
+/// the text is extracted (plain text / markdown / CSV / JSON as UTF-8, PDF via
+/// `pdf-extract`, an image as a caption), planted like a pasted item, and the
+/// raw bytes are kept as the keyed object `files/<id>` in the same namespace
+/// (durable planes only). Re-uploading an id bumps its version and REPLACES the
+/// previous text.
+#[derive(Debug, Deserialize)]
+pub struct ResourceUploadRequest {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub name_zh: String,
+    pub kind: ResourceKind,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub sensitivity: Sensitivity,
+    pub ns: String,
+    pub filename: String,
+    #[serde(default)]
+    pub content_type: String,
+    /// The file bytes, standard base64.
+    pub content_b64: String,
+}
+
+/// What an app can read out of an uploaded file: its TEXT. Plain text, markdown,
+/// CSV, TSV, JSON and YAML are the bytes as UTF-8; a PDF goes through
+/// `pdf-extract`; an image carries no text — its entry is a caption pointing
+/// at the raw object (kind `gallery`). Anything else is refused (415) rather
+/// than stored opaque. Returns the text and how it was obtained.
+fn extract_resource_text(
+    filename: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> Result<(String, &'static str), (StatusCode, String)> {
+    let lower = filename.to_ascii_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("").to_string();
+    let ct = content_type.to_ascii_lowercase();
+    let text_like = ct.starts_with("text/")
+        || ct == "application/json"
+        || ct == "application/csv"
+        || ct == "application/x-yaml"
+        || matches!(
+            ext.as_str(),
+            "txt" | "md" | "markdown" | "csv" | "tsv" | "json" | "yaml" | "yml"
+        );
+    if text_like {
+        return Ok((String::from_utf8_lossy(bytes).into_owned(), "text"));
+    }
+    if ct == "application/pdf" || ext == "pdf" {
+        return pdf_extract::extract_text_from_mem(bytes)
+            .map(|t| (t, "pdf"))
+            .map_err(|e| {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("pdf text extraction failed for {filename}: {e}"),
+                )
+            });
+    }
+    if ct.starts_with("image/") || matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        let label = if ct.is_empty() { "image" } else { ct.as_str() };
+        return Ok((
+            format!("[image] {filename} ({} bytes, {label})", bytes.len()),
+            "image",
+        ));
+    }
+    Err((
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        format!(
+            "unsupported file type {ct:?} ({filename}) — text, markdown, CSV, JSON, PDF or an image"
+        ),
+    ))
+}
+
+/// Everything a curated item needs once validated (shared by add + upload).
+struct ResourceCurate {
+    id: String,
+    ns: String,
+    name: String,
+    name_zh: String,
+    kind: ResourceKind,
+    tags: Vec<String>,
+    sensitivity: Sensitivity,
+    body: String,
+    /// `(filename, content_type, raw bytes)` for an upload.
+    provenance: Option<(String, String, Vec<u8>)>,
+}
+
+fn validate_resource_head(
+    id: &str,
+    ns: &str,
+    name: &str,
+) -> Result<(String, String, String), (StatusCode, &'static str)> {
+    let id = id.trim().to_lowercase();
+    if !agentkeys_backend_client::protocol::is_valid_resource_id(&id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "resource id must be 1-48 chars of [a-z0-9-], not starting/ending with '-'",
+        ));
+    }
+    let ns = ns.trim().to_string();
+    if ns.is_empty() || ns.contains(['/', '\\', '*', '?', ' ']) || ns.contains("..") {
+        return Err((StatusCode::BAD_REQUEST, "ns must be a bare namespace name"));
+    }
+    if ns == agentkeys_backend_client::protocol::PERSONA_NAMESPACE {
+        return Err((StatusCode::BAD_REQUEST, "the persona namespace is reserved"));
+    }
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required"));
+    }
+    Ok((id, ns, name))
+}
+
+/// Plant + register one curated item. The previous entry under the same key is
+/// dropped FIRST so the body is replaced, never accumulated; an upload's raw
+/// bytes go to `files/<id>` when a durable memory plane is wired.
+async fn curate_resource(
+    state: &SharedUiBridgeState,
+    c: ResourceCurate,
+) -> axum::response::Response {
+    let today = {
+        let secs = now_unix() as i64;
+        chrono::DateTime::from_timestamp(secs, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    };
+    let bytes = c.body.len() as u64;
+    let preview: String = c.body.chars().take(120).collect();
+    let mut reg = match ensure_resource_registry(state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("resource registry: {e}")),
+    };
+    let next_version = reg.find(&c.id).map(|i| i.version + 1).unwrap_or(1);
+    if let Err((status, reason)) = resource_entry_remove(state, &c.ns, &c.id).await {
+        return (status, Json(serde_json::json!({ "error": reason }))).into_response();
+    }
+    let entry = agentkeys_backend_client::protocol::web_api::ApiMemoryEntry {
+        ns: c.ns.clone(),
+        key: c.id.clone(),
+        title: c.name.clone(),
+        bytes,
+        version: format!("v{next_version}"),
+        updated: today,
+        preview,
+        body: c.body.clone(),
+        content_hash: String::new(),
+        kind: agentkeys_backend_client::protocol::ContextKind::Resource,
+    };
+    let plant = plant_master_memory_inner(
+        state,
+        agentkeys_backend_client::protocol::web_api::MasterMemoryPlantRequest {
+            entries: vec![entry],
+        },
+    )
+    .await;
+    if let Err((status, reason)) = plant {
+        return (status, Json(serde_json::json!({ "error": reason }))).into_response();
+    }
+    let (filename, content_type, raw_object_key, raw_bytes, raw_stored) = match &c.provenance {
+        Some((f, ct, raw)) => {
+            let key = format!("files/{}", c.id);
+            match resource_object_put(state, &c.ns, &key, raw).await {
+                Ok(true) => (f.clone(), ct.clone(), key, raw.len() as u64, Some(true)),
+                Ok(false) => (f.clone(), ct.clone(), String::new(), raw.len() as u64, Some(false)),
+                Err((status, reason)) => {
+                    return (
+                        status,
+                        Json(serde_json::json!({
+                            "error": format!("raw file store failed (the extracted text IS planted in memory:{}): {reason}", c.ns)
+                        })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        None => (String::new(), String::new(), String::new(), 0, None),
+    };
+    let content_hash = crate::ui_bridge::content_hash_for(&c.ns, &c.id, &c.body);
+    let version = reg.upsert(ResourceItemRow {
+        id: c.id.clone(),
+        name: c.name,
+        name_zh: c.name_zh,
+        ns: c.ns.clone(),
+        object_key: c.id.clone(),
+        kind: c.kind,
+        tags: c
+            .tags
+            .iter()
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect(),
+        sensitivity: c.sensitivity,
+        version: 0,
+        content_hash,
+        bytes,
+        created_at: now_unix(),
+        updated_at: now_unix(),
+        filename,
+        content_type,
+        raw_object_key,
+        raw_bytes,
+    });
+    let item = reg.find(&c.id).cloned();
+    match persist_resource_registry(state, reg).await {
+        Ok(storage) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "item": item,
+                "version": version,
+                "storage": storage,
+                "extracted_bytes": bytes,
+                "raw_stored": raw_stored,
+            })),
+        )
+            .into_response(),
+        Err(e) => registry_err(
+            StatusCode::BAD_GATEWAY,
+            &format!(
+                "resource registry store failed (the item IS planted in memory:{}): {e}",
+                c.ns
+            ),
+        ),
+    }
+}
+
 /// POST /v1/master/resources/add — curate one resource item: plant it as a
 /// `resource`-kind canonical memory entry in its namespace (the SAME plant
 /// path knowledge uses — nothing enters canonical except through the master),
-/// then register it. Re-adding an id bumps its version.
+/// then register it. Re-adding an id bumps its version and replaces the body.
 pub async fn add_resource(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<ResourceAddRequest>,
@@ -1568,93 +1799,167 @@ pub async fn add_resource(
     if let Err(r) = crate::ui_bridge::require_master_session(&state).await {
         return r;
     }
-    let id = req.id.trim().to_lowercase();
-    if !agentkeys_backend_client::protocol::is_valid_resource_id(&id) {
-        return registry_err(
-            StatusCode::BAD_REQUEST,
-            "resource id must be 1-48 chars of [a-z0-9-], not starting/ending with '-'",
-        );
-    }
-    let ns = req.ns.trim().to_string();
-    if ns.is_empty() || ns.contains(['/', '\\', '*', '?', ' ']) || ns.contains("..") {
-        return registry_err(StatusCode::BAD_REQUEST, "ns must be a bare namespace name");
-    }
-    if ns == agentkeys_backend_client::protocol::PERSONA_NAMESPACE {
-        return registry_err(StatusCode::BAD_REQUEST, "the persona namespace is reserved");
-    }
+    let (id, ns, name) = match validate_resource_head(&req.id, &req.ns, &req.name) {
+        Ok(v) => v,
+        Err((status, msg)) => return registry_err(status, msg),
+    };
     if req.body.trim().is_empty() {
         return registry_err(StatusCode::BAD_REQUEST, "body is empty");
     }
-    let name = req.name.trim().to_string();
-    if name.is_empty() {
-        return registry_err(StatusCode::BAD_REQUEST, "name is required");
+    curate_resource(
+        &state,
+        ResourceCurate {
+            id,
+            ns,
+            name,
+            name_zh: req.name_zh.trim().to_string(),
+            kind: req.kind,
+            tags: req.tags,
+            sensitivity: req.sensitivity,
+            body: req.body,
+            provenance: None,
+        },
+    )
+    .await
+}
+
+pub async fn upload_resource(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ResourceUploadRequest>,
+) -> axum::response::Response {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    if let Err(r) = crate::ui_bridge::require_master_session(&state).await {
+        return r;
     }
-    let today = {
-        let secs = now_unix() as i64;
-        chrono::DateTime::from_timestamp(secs, 0)
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default()
+    let (id, ns, name) = match validate_resource_head(&req.id, &req.ns, &req.name) {
+        Ok(v) => v,
+        Err((status, msg)) => return registry_err(status, msg),
     };
-    let bytes = req.body.len() as u64;
-    let preview: String = req.body.chars().take(120).collect();
+    let filename = req.filename.trim().to_string();
+    if filename.is_empty() {
+        return registry_err(StatusCode::BAD_REQUEST, "filename is required");
+    }
+    let bytes = match STANDARD.decode(req.content_b64.trim()) {
+        Ok(b) => b,
+        Err(_) => return registry_err(StatusCode::BAD_REQUEST, "content_b64 is not valid base64"),
+    };
+    if bytes.is_empty() {
+        return registry_err(StatusCode::BAD_REQUEST, "the file is empty");
+    }
+    if bytes.len() > RESOURCE_UPLOAD_MAX_BYTES {
+        return registry_err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!(
+                "file too large: {} bytes exceeds the {RESOURCE_UPLOAD_MAX_BYTES}-byte cap",
+                bytes.len()
+            ),
+        );
+    }
+    let (text, how) = match extract_resource_text(&filename, &req.content_type, &bytes) {
+        Ok(v) => v,
+        Err((status, reason)) => return registry_err(status, &reason),
+    };
+    if text.trim().is_empty() {
+        return registry_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("no text could be extracted from {filename} — an app would read nothing"),
+        );
+    }
+    if how == "image" && req.kind != ResourceKind::Gallery {
+        return registry_err(
+            StatusCode::BAD_REQUEST,
+            "an image is a `gallery` item (it carries no text for the other kinds)",
+        );
+    }
+    curate_resource(
+        &state,
+        ResourceCurate {
+            id,
+            ns,
+            name,
+            name_zh: req.name_zh.trim().to_string(),
+            kind: req.kind,
+            tags: req.tags,
+            sensitivity: req.sensitivity,
+            body: text,
+            provenance: Some((filename, req.content_type.trim().to_string(), bytes)),
+        },
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResourceRemoveRequest {
+    pub id: String,
+    /// Remove even while a live app is bound to the item (its `memory:<ns>`
+    /// grant stays; the entry it read is gone).
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// POST /v1/master/resources/remove — unregister a curated item and drop its
+/// entry from `memory:<ns>`. Refused (409 `resource_in_use`) while a live app
+/// is bound to it unless `force`. Idempotent: an unknown id is `ok` with
+/// `removed:false`. A raw file object stays until the namespace is torn down
+/// (the memory worker has no keyed delete).
+pub async fn remove_resource(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ResourceRemoveRequest>,
+) -> axum::response::Response {
+    if let Err(r) = crate::ui_bridge::require_master_session(&state).await {
+        return r;
+    }
+    let id = req.id.trim().to_lowercase();
     let mut reg = match ensure_resource_registry(&state).await {
         Ok(r) => r,
         Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("resource registry: {e}")),
     };
-    let next_version = reg.find(&id).map(|i| i.version + 1).unwrap_or(1);
-    let entry = agentkeys_backend_client::protocol::web_api::ApiMemoryEntry {
-        ns: ns.clone(),
-        key: id.clone(),
-        title: name.clone(),
-        bytes,
-        version: format!("v{next_version}"),
-        updated: today,
-        preview,
-        body: req.body.clone(),
-        content_hash: String::new(),
-        kind: agentkeys_backend_client::protocol::ContextKind::Resource,
+    let Some(row) = reg.find(&id).cloned() else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "removed": false })),
+        )
+            .into_response();
     };
-    let plant = plant_master_memory_inner(
-        &state,
-        agentkeys_backend_client::protocol::web_api::MasterMemoryPlantRequest {
-            entries: vec![entry.clone()],
-        },
-    )
-    .await;
-    if let Err((status, reason)) = plant {
+    if !req.force {
+        if let Ok(apps) = ensure_app_registry(&state).await {
+            let users: Vec<String> = apps
+                .live()
+                .filter(|a| a.bindings.resources.iter().any(|rb| rb.item_id == id))
+                .map(|a| a.label.clone())
+                .collect();
+            if !users.is_empty() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "reason": "resource_in_use",
+                        "detail": format!("bound by {}; uninstall them or pass force", users.join(", ")),
+                        "apps": users,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Err((status, reason)) = resource_entry_remove(&state, &row.ns, &row.id).await {
         return (status, Json(serde_json::json!({ "error": reason }))).into_response();
     }
-    let content_hash = crate::ui_bridge::content_hash_for(&ns, &id, &req.body);
-    let version = reg.upsert(ResourceItemRow {
-        id: id.clone(),
-        name,
-        name_zh: req.name_zh.trim().to_string(),
-        ns: ns.clone(),
-        object_key: id.clone(),
-        kind: req.kind,
-        tags: req
-            .tags
-            .iter()
-            .map(|t| t.trim().to_lowercase())
-            .filter(|t| !t.is_empty())
-            .collect(),
-        sensitivity: req.sensitivity,
-        version: 0,
-        content_hash,
-        bytes,
-        created_at: now_unix(),
-        updated_at: now_unix(),
-    });
-    let item = reg.find(&id).cloned();
+    reg.remove(&id);
     match persist_resource_registry(&state, reg).await {
         Ok(storage) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "item": item, "version": version, "storage": storage })),
+            Json(
+                serde_json::json!({ "ok": true, "removed": true, "item": row, "storage": storage }),
+            ),
         )
             .into_response(),
         Err(e) => registry_err(
             StatusCode::BAD_GATEWAY,
-            &format!("resource registry store failed (the item IS planted in memory:{ns}): {e}"),
+            &format!(
+                "resource registry store failed (the entry IS gone from memory:{}): {e}",
+                row.ns
+            ),
         ),
     }
 }
@@ -2132,6 +2437,161 @@ mod handler_tests {
         let list = items["items"].as_array().unwrap();
         assert_eq!(list.len(), 1, "{items}");
         assert_eq!(list[0]["version"], 2);
+    }
+
+    #[tokio::test]
+    async fn upload_extracts_text_registers_provenance_and_replaces_on_reupload() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let state = state_with_session(None).await;
+        let up = |id: &str, filename: &str, ct: &str, bytes: &[u8]| ResourceUploadRequest {
+            id: id.into(),
+            name: "Food profile".into(),
+            name_zh: String::new(),
+            kind: ResourceKind::Profile,
+            tags: vec!["food".into()],
+            sensitivity: Sensitivity::Sensitive,
+            ns: "household".into(),
+            filename: filename.into(),
+            content_type: ct.into(),
+            content_b64: STANDARD.encode(bytes),
+        };
+        let (status, body) = read(
+            upload_resource(
+                State(state.clone()),
+                Json(up(
+                    "food-prefs",
+                    "prefs.md",
+                    "text/markdown",
+                    b"# Prefs\nno peanuts",
+                )),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["item"]["filename"], "prefs.md");
+        assert_eq!(body["item"]["content_type"], "text/markdown");
+        assert_eq!(body["item"]["raw_bytes"], 18);
+        assert_eq!(body["extracted_bytes"], 18);
+        // no memory plane in this test state: the text is in memory, the file is not
+        assert_eq!(body["raw_stored"], false, "{body}");
+        assert_eq!(body["item"]["raw_object_key"], "");
+        async fn planted(st: &SharedUiBridgeState) -> Vec<String> {
+            st.master_memory
+                .read()
+                .await
+                .values()
+                .filter(|e| e.ns == "household" && e.key == "food-prefs")
+                .map(|e| e.body.clone())
+                .collect()
+        }
+        assert_eq!(
+            planted(&state).await,
+            vec!["# Prefs\nno peanuts".to_string()]
+        );
+        // a re-upload REPLACES the text (one entry under the key, the new body) and bumps the version
+        let (status, again) = read(
+            upload_resource(
+                State(state.clone()),
+                Json(up(
+                    "food-prefs",
+                    "prefs-v2.txt",
+                    "text/plain",
+                    b"no peanuts, no shrimp",
+                )),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200, "{again}");
+        assert_eq!(again["version"], 2);
+        assert_eq!(again["item"]["filename"], "prefs-v2.txt");
+        assert_eq!(
+            planted(&state).await,
+            vec!["no peanuts, no shrimp".to_string()]
+        );
+        // a pasted re-add also replaces, and clears the file provenance
+        let (status, pasted) = read(
+            add_resource(
+                State(state.clone()),
+                Json(ResourceAddRequest {
+                    id: "food-prefs".into(),
+                    name: "Food profile".into(),
+                    name_zh: String::new(),
+                    kind: ResourceKind::Profile,
+                    tags: vec![],
+                    sensitivity: Sensitivity::Safe,
+                    ns: "household".into(),
+                    body: "pasted v3".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200, "{pasted}");
+        assert_eq!(pasted["version"], 3);
+        assert_eq!(pasted["item"]["filename"], "");
+        assert_eq!(planted(&state).await, vec!["pasted v3".to_string()]);
+        // unsupported type → 415; an image must be a gallery item; oversize → 413
+        let (status, b) = read(
+            upload_resource(
+                State(state.clone()),
+                Json(up("zip-1", "x.zip", "application/zip", b"PK")),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 415, "{b}");
+        let (status, b) = read(
+            upload_resource(
+                State(state.clone()),
+                Json(up("pic-1", "x.png", "image/png", b"\x89PNG")),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 400, "{b}");
+        let big = vec![b'a'; RESOURCE_UPLOAD_MAX_BYTES + 1];
+        let (status, b) = read(
+            upload_resource(
+                State(state.clone()),
+                Json(up("big-1", "big.txt", "text/plain", &big)),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 413, "{b}");
+        // remove: the row and the entry go; a second remove is a no-op
+        let (status, rm) = read(
+            remove_resource(
+                State(state.clone()),
+                Json(ResourceRemoveRequest {
+                    id: "food-prefs".into(),
+                    force: false,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200, "{rm}");
+        assert_eq!(rm["removed"], true);
+        assert!(planted(&state).await.is_empty());
+        let (_, items) = read(list_resources(State(state.clone())).await).await;
+        assert_eq!(items["items"].as_array().unwrap().len(), 0, "{items}");
+        let (status, rm2) = read(
+            remove_resource(
+                State(state.clone()),
+                Json(ResourceRemoveRequest {
+                    id: "food-prefs".into(),
+                    force: false,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(rm2["removed"], false, "{rm2}");
     }
 
     #[tokio::test]

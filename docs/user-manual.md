@@ -536,10 +536,16 @@ the permissions you approve. parent-control → **applications**:
   clip carries WeChat's own transcript. The contact gate's receipt
   ("已转达给 chef 📷 [photo]") comes back at once; the app's own answer comes
   back through the same bot.
-- **Resources.** The resources tab curates read-only documents (allergies,
-  a nutrition report). An app can read a resource you bound, never change it,
-  and a `sensitive` item is flagged on the sheet with the model path it
-  transits.
+- **Resources.** The **Resources** page (also the resources tab of
+  Applications) curates the read-only material apps may read: paste text, or
+  upload a file — plain text, markdown, CSV, JSON, a PDF, or an image (up to
+  5 MB). The text is what an app reads (a PDF's text is extracted; an image
+  becomes a gallery caption); the file's bytes are kept beside it. Re-adding
+  an id makes the next version and replaces the previous text; remove drops
+  the item (it refuses while an app is bound to it unless you confirm). An app
+  can read a resource you bound, never change it, and a `sensitive` item is
+  flagged wherever it is bound. An install wizard slot with no matching item
+  offers to add one right there.
 - **Uninstall** revokes every permission (the delegate's, and the contact gate's
   and console's on the app's feeds), returns the agent slot, and tears the
   sandbox down. Keeping the app's memory lets a reinstall inherit it.

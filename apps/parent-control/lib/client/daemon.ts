@@ -1018,6 +1018,25 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson('/v1/master/resources/add', input);
   }
 
+  async resourceUpload(input: {
+    id: string;
+    name: string;
+    name_zh: string;
+    kind: ResourceKind;
+    tags: string[];
+    sensitivity: Sensitivity;
+    ns: string;
+    filename: string;
+    content_type: string;
+    content_b64: string;
+  }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string; extracted_bytes: number; raw_stored: boolean | null }>> {
+    return this.postJson('/v1/master/resources/upload', input);
+  }
+
+  async resourceRemove(input: { id: string; force?: boolean }): Promise<Result<{ ok: boolean; removed: boolean; item?: ResourceItemRow; apps?: string[] }>> {
+    return this.postJson('/v1/master/resources/remove', input);
+  }
+
   async consoleDeviceStatus(): Promise<Result<ConsoleDeviceStatus>> {
     return this.getJson('/v1/master/console/device');
   }

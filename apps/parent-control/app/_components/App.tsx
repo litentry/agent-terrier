@@ -49,7 +49,7 @@ const looksSessionExpired = (detail?: string): boolean =>
 // #404 IA: household = delegates (sandbox agents) / devices (channel endpoints)
 // / channels (the id-anchored registry) / contacts (the WeChat contact gate + family).
 // The former top-level 'pairing' page became 'delegates'.
-type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'contacts' | 'applications' | 'audit' | 'decode' | 'chain' | 'logo';
+type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'contacts' | 'applications' | 'resources' | 'audit' | 'decode' | 'chain' | 'logo';
 
 type PendingAction =
   | { kind: 'revoke-device'; actor: Actor; intent: Intent }
@@ -1235,7 +1235,7 @@ export function App() {
   const sectionAttr = page === 'decode' ? 'audit'
     : page === 'delegates' ? 'pairing'
     : page === 'devices' ? 'channels'
-    : page === 'applications' ? 'pairing'
+    : page === 'applications' || page === 'resources' ? 'pairing'
     : ((['audit', 'memory', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
 
   // ─── Onboarding gate (workflow 1) ──────────────────────────────
@@ -1338,6 +1338,9 @@ export function App() {
         </button>
         <button className={`nav-item ${page === 'applications' ? 'active' : ''}`} onClick={() => go('applications')}>
           <span className="marker">[▣]</span> applications
+        </button>
+        <button className={`nav-item ${page === 'resources' ? 'active' : ''}`} onClick={() => go('resources')}>
+          <span className="marker">[▤]</span> resources
         </button>
 
         <div className="nav-section">telemetry</div>
@@ -1472,6 +1475,10 @@ export function App() {
           // #682 — install / inspect / uninstall against the real registries
           // (epic #660 stage 1). Channels feed the wizard's slot options.
           <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} />
+        )}
+        {page === 'resources' && (
+          // #674 — the curated-resources page is the Applications page opened on its resources view.
+          <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} initialView="resources" />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}

@@ -61,6 +61,7 @@ fs2 = "0.4"
 # binds to a unix socket (and optionally TCP 127.0.0.1:9090 when
 # AGENTKEYS_DAEMON_TCP=1) and serves cap-token mint + cache requests.
 axum = { version = "0.7", features = ["json"] }
+pdf-extract = "0.12" # curated-resource upload: the text an app reads out of a PDF
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors"] }
 hyper = { version = "1", features = ["server", "http1"] }

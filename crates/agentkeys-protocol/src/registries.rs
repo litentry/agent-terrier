@@ -143,6 +143,18 @@ pub struct ResourceItemRow {
     pub created_at: u64,
     #[ts(type = "number")]
     pub updated_at: u64,
+    /// Upload provenance (2026-09-13): the source file's name and media type,
+    /// and the keyed memory object holding its raw bytes (`files/<id>`) — empty
+    /// for a pasted item, or when no durable memory plane held the file.
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub content_type: String,
+    #[serde(default)]
+    pub raw_object_key: String,
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub raw_bytes: u64,
 }
 
 /// The `resource-registry` doc.
@@ -176,6 +188,12 @@ impl ResourceRegistryDoc {
                 v
             }
         }
+    }
+
+    /// Drop an item by id — the row, if it was registered.
+    pub fn remove(&mut self, id: &str) -> Option<ResourceItemRow> {
+        let idx = self.items.iter().position(|i| i.id == id)?;
+        Some(self.items.remove(idx))
     }
 
     /// Items a template request may bind: same kind, and every requested tag
@@ -220,7 +238,22 @@ mod tests {
             bytes: 0,
             created_at: 10,
             updated_at: 10,
+            filename: String::new(),
+            content_type: String::new(),
+            raw_object_key: String::new(),
+            raw_bytes: 0,
         }
+    }
+
+    #[test]
+    fn resource_registry_remove_drops_the_row_once() {
+        let mut reg = ResourceRegistryDoc::default();
+        reg.upsert(item("gene", ResourceKind::Document, &[]));
+        reg.upsert(item("diet", ResourceKind::Profile, &[]));
+        assert_eq!(reg.remove("gene").map(|r| r.id), Some("gene".to_string()));
+        assert!(reg.remove("gene").is_none());
+        assert_eq!(reg.items.len(), 1);
+        assert_eq!(reg.items[0].id, "diet");
     }
 
     #[test]

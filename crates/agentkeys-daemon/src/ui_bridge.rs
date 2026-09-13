@@ -1379,6 +1379,18 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         )
         .route("/v1/master/resources", get(crate::apps::list_resources))
         .route("/v1/master/resources/add", post(crate::apps::add_resource))
+        // #674 — file upload (JSON + base64; axum's 2 MiB default would 413 a
+        // 5 MiB file) and remove.
+        .route(
+            "/v1/master/resources/upload",
+            post(crate::apps::upload_resource).layer(axum::extract::DefaultBodyLimit::max(
+                crate::apps::RESOURCE_UPLOAD_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/v1/master/resources/remove",
+            post(crate::apps::remove_resource),
+        )
         .route(
             "/v1/master/console/device",
             get(crate::console_device::console_device_status),
@@ -9919,6 +9931,119 @@ async fn memory_put_ns_real(
 /// on a real worker/transport/decrypt failure. The `Option` is what lets the
 /// read-modify-write plant tell "new namespace" (write fresh) from "transient
 /// error" (abort — never overwrite durable data) per codex finding 1.
+/// Store one KEYED object in a namespace (#594 objects) — an uploaded
+/// resource's raw bytes (`files/<id>`). Same cap + creds as the namespace put.
+async fn memory_put_object_real(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &DataCreds,
+    ns: &str,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let cap = mint_master_cap(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "memory-put",
+        &format!("memory:{ns}"),
+    )
+    .await?;
+    let put_resp = client
+        .post(format!("{}/v1/memory/put", ctx.memory_url))
+        .header("x-aws-access-key-id", &creds.access_key_id)
+        .header("x-aws-secret-access-key", &creds.secret_access_key)
+        .header("x-aws-session-token", &creds.session_token)
+        .json(&agentkeys_backend_client::MemoryPutBody {
+            cap,
+            plaintext_b64: STANDARD.encode(bytes),
+            namespace: ns.to_string(),
+            object_key: Some(object_key.to_string()),
+        })
+        .send()
+        .await
+        .map_err(|e| format!("worker object put transport: {e}"))?;
+    if !put_resp.status().is_success() {
+        let status = put_resp.status();
+        let body = put_resp.text().await.unwrap_or_default();
+        return Err(format!("worker object put {status}: {body}"));
+    }
+    Ok(())
+}
+
+/// Curated resources (2026-09-13): drop every entry keyed `key` from
+/// `memory:<ns>`, so a re-add or upload REPLACES the body (the plant's merge
+/// dedups by content hash and would keep every version side by side) and a
+/// remove leaves nothing behind. Durable when the memory plane is wired; the
+/// in-memory index is trimmed either way. Returns how many entries went.
+pub(crate) async fn resource_entry_remove(
+    state: &UiBridgeState,
+    ns: &str,
+    key: &str,
+) -> Result<usize, (StatusCode, String)> {
+    let ctx = real_memory_ctx(state)
+        .await
+        .map_err(|reason| (StatusCode::CONFLICT, reason))?;
+    let mut removed_durable = 0usize;
+    if let Some(ctx) = ctx {
+        let client = reqwest::Client::new();
+        let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"])
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
+        let durable = memory_get_ns_real(&client, &ctx, &creds, ns)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("memory:{ns} read: {e}")))?;
+        if let Some(entries) = durable {
+            let before = entries.len();
+            let kept: Vec<StoredMemoryEntry> =
+                entries.into_iter().filter(|e| e.key != key).collect();
+            removed_durable = before - kept.len();
+            if removed_durable > 0 {
+                memory_put_ns_real(&client, &ctx, &creds, ns, &kept)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("memory:{ns} write: {e}")))?;
+            }
+        }
+    }
+    let mut cache = state.master_memory.write().await;
+    let before = cache.len();
+    cache.retain(|_, e| !(e.ns == ns && e.key == key));
+    let removed_cache = before - cache.len();
+    Ok(removed_durable.max(removed_cache))
+}
+
+/// Store an uploaded resource's raw bytes as the keyed object `files/<id>` in
+/// its namespace. `Ok(true)` = durable; `Ok(false)` = no memory plane wired
+/// (the dev fallback keeps the extracted text in memory, not the file).
+pub(crate) async fn resource_object_put(
+    state: &UiBridgeState,
+    ns: &str,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<bool, (StatusCode, String)> {
+    let ctx = real_memory_ctx(state)
+        .await
+        .map_err(|reason| (StatusCode::CONFLICT, reason))?;
+    let Some(ctx) = ctx else {
+        return Ok(false);
+    };
+    let client = reqwest::Client::new();
+    let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["put"])
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
+    memory_put_object_real(&client, &ctx, &creds, ns, object_key, bytes)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("memory:{ns} object {object_key}: {e}"),
+            )
+        })?;
+    Ok(true)
+}
+
 async fn memory_get_ns_real(
     client: &reqwest::Client,
     ctx: &RealMemoryCtx,
