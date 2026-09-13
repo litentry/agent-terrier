@@ -64,6 +64,7 @@ import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { Sensitivity } from '@/lib/generated/Sensitivity';
 import type { ApiChannel } from '@/lib/generated/ApiChannel';
+import type { ApiChannelsClearOrphaned } from '@/lib/generated/ApiChannelsClearOrphaned';
 import type { ApiAnchorStatus } from '@/lib/generated/ApiAnchorStatus';
 import type { ApiAuditEvent } from '@/lib/generated/ApiAuditEvent';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
@@ -949,6 +950,10 @@ export class DaemonBackend implements AgentKeysClient {
     const r = await this.postJson<{ ok: boolean }>(`/v1/channels/${encodeURIComponent(id)}/delete`, {});
     if (!r.ok) return r;
     return { ok: true, data: undefined };
+  }
+
+  async clearOrphanedChannels(): Promise<Result<ApiChannelsClearOrphaned>> {
+    return this.postJson<ApiChannelsClearOrphaned>('/v1/channels/clear-orphaned', {});
   }
 
   // ── #664 / #682 — family applications (epic #660) ───────────────────────

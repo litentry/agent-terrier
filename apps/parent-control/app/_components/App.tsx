@@ -1069,6 +1069,28 @@ export function App() {
     showToast(`Channel ${id} removed from the registry.`);
     return true;
   };
+  // One daemon write drops every registry entry no actor holds a grant on; the
+  // daemon re-derives the set against the chain-reconciled fleet (and refuses
+  // while that fleet is unreconciled), so the page's count is display only.
+  const clearOrphanedChannels = async (): Promise<boolean> => {
+    if (!client.clearOrphanedChannels) {
+      showToast('This backend has no channel registry.');
+      return false;
+    }
+    const r = await client.clearOrphanedChannels();
+    if (!r.ok) {
+      showToast(`Clear orphaned channels failed — ${r.status?.detail ?? 'check master session'}`);
+      return false;
+    }
+    await refreshChannels();
+    const { removed, kept } = r.data;
+    showToast(
+      removed.length === 0
+        ? 'No orphaned channels — every registry entry is held by a device or agent.'
+        : `Cleared ${removed.length} orphaned channel${removed.length === 1 ? '' : 's'}: ${removed.join(', ')}${kept.length ? ` · kept ${kept.length} in use` : ''}.`,
+    );
+    return true;
+  };
 
   const handleRevokeDevice = (actor: Actor) => {
     setPendingAction({
@@ -1435,6 +1457,7 @@ export function App() {
               onCreate: createChannel,
               onUpdate: updateChannel,
               onDelete: deleteChannel,
+              onClearOrphaned: clearOrphanedChannels,
               onRefresh: () => void refreshChannels(),
               onGoDevices: () => go('devices'),
             }}

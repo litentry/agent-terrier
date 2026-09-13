@@ -163,6 +163,25 @@ export interface PairingRequest {
 /** `channel-pub:<id>` / `channel-sub:<id>` — the only grants a device may hold (D6). */
 export const isChannelService = (svc: string): boolean => /^channel-(pub|sub):/i.test(svc.trim());
 
+/** #404 — the actors holding a grant on channel `id`, by NAME: the daemon
+ *  re-names on-chain grant hashes from the registry, so names are the durable view. */
+export const channelHolders = (actors: Actor[], id: string): Actor[] => {
+  const pub = `channel-pub:${id}`.toLowerCase();
+  const sub = `channel-sub:${id}`.toLowerCase();
+  return actors.filter((a) =>
+    (a.services ?? []).some((s) => {
+      const l = s.trim().toLowerCase();
+      return l === pub || l === sub;
+    }),
+  );
+};
+
+/** Registry rows NO actor holds a grant on — what the channels page's
+ *  "clear orphaned" button offers to drop. Display only: the daemon re-derives
+ *  the set against the chain-reconciled fleet and is the authority. */
+export const orphanedChannels = <C extends { id: string }>(channels: C[], actors: Actor[]): C[] =>
+  channels.filter((c) => channelHolders(actors, c.id).length === 0);
+
 /** #614 — capability services (`tool:<class>` / `plugin:<id>`, spec delegate-runtime-dsh §4.2):
  *  grants consumed only by the delegate runtime's tool guard / preset compiler.
  *  Never cap-mintable (the broker + workers reject), so they gate what the model

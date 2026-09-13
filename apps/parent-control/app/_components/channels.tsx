@@ -10,6 +10,8 @@
 //     never created silently as a side effect of pairing.
 //   • Delete is refused while any actor still holds a grant on the id (revoke
 //     from the devices/actor pages first) — the daemon returns the holders.
+//   • "clear orphaned" drops every definition NO actor holds a grant on in ONE
+//     daemon write (`POST /v1/channels/clear-orphaned`); rows in use are kept.
 //
 // The registry is a master-only, signer-encrypted Config-class doc
 // (`config/channel-registry.enc`); the WeChat contact gate + family live on the
@@ -18,7 +20,7 @@ import { useState, type CSSProperties } from 'react';
 
 import { PageHead, Panel } from './shared';
 import type { Actor } from './types';
-import { isChannelService } from './types';
+import { channelHolders, isChannelService, orphanedChannels } from './types';
 import type { ChannelDef } from '@/lib/client/types';
 
 const INPUT: CSSProperties = {
@@ -37,31 +39,42 @@ export interface ChannelRegistryProps {
   onCreate: (input: { id: string; name: string; note?: string }) => Promise<ChannelDef | null>;
   onUpdate: (id: string, input: { name?: string; note?: string }) => Promise<boolean>;
   onDelete: (id: string) => Promise<boolean>;
+  /** Drop every registry entry no actor holds a grant on — one daemon write. */
+  onClearOrphaned: () => Promise<boolean>;
   onRefresh: () => void;
   onGoDevices: () => void;
 }
 
-/** Actors holding a grant on channel `id` — by NAME (the daemon re-names
- *  on-chain hashes from this same registry, so names are the durable view). */
-const holdersOf = (actors: Actor[], id: string): Actor[] => {
-  const pub = `channel-pub:${id}`;
-  const sub = `channel-sub:${id}`;
-  return actors.filter((a) =>
-    (a.services ?? []).some((s) => {
-      const l = s.toLowerCase();
-      return l === pub || l === sub;
-    }),
-  );
-};
-
 export function ChannelRegistryPage({ registry }: { registry: ChannelRegistryProps }) {
+  const [clearing, setClearing] = useState(false);
+  const orphaned = orphanedChannels(registry.channels, registry.actors);
+  const clearOrphaned = async () => {
+    if (clearing || orphaned.length === 0) return;
+    const ids = orphaned.map((c) => c.id);
+    if (!window.confirm(`Clear ${ids.length} orphaned channel${ids.length === 1 ? '' : 's'}?\n\n${ids.join('\n')}\n\nNo device or agent holds a grant on them, so nothing on chain changes — this only removes the registry entries. Channels still in use are kept.`)) return;
+    setClearing(true);
+    await registry.onClearOrphaned();
+    setClearing(false);
+  };
   return (
     <>
       <PageHead
         crumb="household / channels"
         title="Channels"
         desc="The conduits your agents and devices meet through. Create channels here, then attach them when pairing a device — the id is the immutable anchor (it is what the on-chain grants hash; display names can change, ids never do). The WeChat contact gate and family contacts live on the Contacts page."
-        actions={<button className="btn sm" onClick={registry.onRefresh}>↻ refresh</button>}
+        actions={
+          <>
+            <button
+              className="btn sm danger"
+              disabled={clearing || orphaned.length === 0}
+              title={orphaned.length === 0 ? 'nothing orphaned — every entry is held by a device or agent' : `remove ${orphaned.length} entr${orphaned.length === 1 ? 'y' : 'ies'} no device or agent holds a grant on`}
+              onClick={() => void clearOrphaned()}
+            >
+              {clearing ? 'clearing…' : `⌫ clear orphaned${orphaned.length ? ` (${orphaned.length})` : ''}`}
+            </button>
+            <button className="btn sm" onClick={registry.onRefresh}>↻ refresh</button>
+          </>
+        }
       />
       {registry.storage === 'cached' && (
         <div className="banner warn" style={{ marginBottom: 14 }}>
@@ -136,7 +149,7 @@ function ChannelRow({ channel, registry }: { channel: ChannelDef; registry: Chan
   const [name, setName] = useState(channel.name);
   const [note, setNote] = useState(channel.note ?? '');
   const [busy, setBusy] = useState(false);
-  const holders = holdersOf(registry.actors, channel.id);
+  const holders = channelHolders(registry.actors, channel.id);
   const inUse = holders.length > 0;
 
   const save = async () => {
@@ -175,7 +188,7 @@ function ChannelRow({ channel, registry }: { channel: ChannelDef; registry: Chan
               <span key={h.id} className="chip ok" title={`holds a grant on ${channel.id}`}>{h.label.replace(' (revoked)', '')}</span>
             ))
           ) : (
-            <span className="muted" style={{ fontSize: 11 }}>unused</span>
+            <span className="muted" style={{ fontSize: 11 }} title={'no device or agent holds a grant on it — "clear orphaned" removes it'}>orphaned</span>
           )}
           {!editing ? (
             <>

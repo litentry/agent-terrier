@@ -493,6 +493,18 @@ pub struct ApiChannel {
     pub endpoint_actor_omni: Option<String>,
 }
 
+/// The receipt of `POST /v1/channels/clear-orphaned`: `removed` = the registry
+/// rows dropped (no actor held a grant on them, by name or on-chain hash),
+/// `kept` = the rows still in use, `storage` = the registry's durability flag
+/// (`"ok"` durable Config-class doc · `"cached"` dev-only in-memory).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ApiChannelsClearOrphaned {
+    pub removed: Vec<String>,
+    pub kept: Vec<String>,
+    pub storage: String,
+}
+
 /// The durable registry doc (config-class, master-only). Version field for
 /// forward evolution; the vec is small (a household's channel count).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1295,6 +1307,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/channels", post(create_channel))
         .route("/v1/channels/:id", post(update_channel))
         .route("/v1/channels/:id/delete", post(delete_channel))
+        .route("/v1/channels/clear-orphaned", post(clear_orphaned_channels))
         .route("/v1/master/config/presets", get(list_config_presets))
         // #428 — the spawn preset catalog (broker-served, static; proxied so
         // the web app keeps its single daemon origin):
@@ -10306,6 +10319,18 @@ fn channel_holders(actors: &HashMap<String, ApiActor>, id: &str) -> Vec<String> 
     holders
 }
 
+/// The registry rows NO actor holds a grant on (by name or on-chain hash) —
+/// the set the bulk clear drops. Every row `channel_holders` finds a holder for
+/// is kept, so the bulk path can never remove what the single delete refuses.
+/// Pure over the registry + actor map for testability; registry order is kept.
+fn orphaned_channel_ids(reg: &ChannelRegistry, actors: &HashMap<String, ApiActor>) -> Vec<String> {
+    reg.channels
+        .iter()
+        .filter(|c| channel_holders(actors, &c.id).is_empty())
+        .map(|c| c.id.clone())
+        .collect()
+}
+
 pub(crate) fn registry_err(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
@@ -10527,6 +10552,74 @@ async fn delete_channel(
         Err(e) => registry_err(
             StatusCode::BAD_GATEWAY,
             &format!("channel registry store failed — nothing deleted: {e}"),
+        ),
+    }
+}
+
+/// POST /v1/channels/clear-orphaned — drop EVERY registry row no actor holds a
+/// grant on (by name or on-chain hash) in ONE registry write; N single deletes
+/// would be N config-doc round-trips. Each row is judged by the same
+/// `channel_holders` guard the single delete applies, so the bulk path can never
+/// remove what `/v1/channels/:id/delete` would refuse; the rows still in use
+/// come back as `kept` so the page can say what stayed.
+///
+/// FAIL-CLOSED on an unreconciled fleet: right after a daemon restart the
+/// in-memory actor map is empty until the lazy chain sync runs, and an empty map
+/// would present EVERY row as orphaned. The handler runs that sync first and
+/// refuses (503, nothing changed) while the map is still behind the latest fleet
+/// generation — a chain RPC outage must never turn into a wiped registry.
+/// Idempotent: with nothing orphaned it answers without a store.
+async fn clear_orphaned_channels(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    use std::sync::atomic::Ordering;
+    if let Err(r) = require_master_session(&state).await {
+        return r;
+    }
+    maybe_sync_fleet_from_chain(&state).await;
+    if state.fleet_synced_gen.load(Ordering::Acquire) < state.fleet_gen.load(Ordering::Acquire) {
+        return registry_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "actor fleet not yet reconciled from chain — nothing cleared; retry once the chain RPC answers",
+        );
+    }
+    let mut reg = match ensure_channel_registry(&state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("channel registry: {e}")),
+    };
+    let removed = orphaned_channel_ids(&reg, &*state.actors.read().await);
+    let kept: Vec<String> = reg
+        .channels
+        .iter()
+        .filter(|c| !removed.contains(&c.id))
+        .map(|c| c.id.clone())
+        .collect();
+    if removed.is_empty() {
+        let storage = registry_storage_label(&state).to_string();
+        return (
+            StatusCode::OK,
+            Json(ApiChannelsClearOrphaned {
+                removed,
+                kept,
+                storage,
+            }),
+        )
+            .into_response();
+    }
+    reg.channels.retain(|c| !removed.contains(&c.id));
+    match persist_channel_registry(&state, reg).await {
+        Ok(storage) => (
+            StatusCode::OK,
+            Json(ApiChannelsClearOrphaned {
+                removed,
+                kept,
+                storage: storage.to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => registry_err(
+            StatusCode::BAD_GATEWAY,
+            &format!("channel registry store failed — nothing cleared: {e}"),
         ),
     }
 }
@@ -13244,7 +13337,27 @@ mod tests {
         assert_eq!(cand.len(), 2, "pub + sub per registry channel");
 
         // Holders: one actor by NAME, one by on-chain HASH, one unrelated.
-        let mk = |id: &str, label: &str| ApiActor {
+        let mk = blank_actor;
+        let mut actors = HashMap::new();
+        let mut by_name = mk("a1", "cam-by-name");
+        by_name.services = Some(vec!["channel-pub:cam-frontdoor".into()]);
+        actors.insert("a1".into(), by_name);
+        let mut by_hash = mk("a2", "cam-by-hash");
+        by_hash.scope_unknown_service_ids = Some(vec![pub_hash]);
+        actors.insert("a2".into(), by_hash);
+        let mut other = mk("a3", "unrelated");
+        other.services = Some(vec!["memory:travel".into()]);
+        actors.insert("a3".into(), other);
+
+        let holders = channel_holders(&actors, "cam-frontdoor");
+        assert_eq!(holders, vec!["cam-by-hash", "cam-by-name"]);
+        assert!(channel_holders(&actors, "kitchen-display").is_empty());
+    }
+
+    /// A bare non-master actor row — only `services` /
+    /// `scope_unknown_service_ids` matter to the channel-holder tests.
+    fn blank_actor(id: &str, label: &str) -> ApiActor {
+        ApiActor {
             runtime: None,
             kind: None,
             id: id.into(),
@@ -13272,21 +13385,137 @@ mod tests {
             account_type: None,
             preset_id: None,
             memory_ns: None,
+        }
+    }
+
+    /// The bulk clear's set is exactly the rows with NO holder — by name or by
+    /// on-chain hash — never a row the single delete would refuse.
+    #[test]
+    fn orphaned_channel_ids_keeps_every_held_row() {
+        let row = |id: &str| ApiChannel {
+            id: id.into(),
+            name: id.into(),
+            note: None,
+            created_at: 0,
+            kind: None,
+            endpoint_actor_omni: None,
         };
+        let reg = ChannelRegistry {
+            version: 1,
+            channels: vec![row("cam-frontdoor"), row("kitchen-display"), row("probe")],
+        };
+        let sub_hash = format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(
+                b"channel-sub:kitchen-display"
+            ))
+        );
         let mut actors = HashMap::new();
-        let mut by_name = mk("a1", "cam-by-name");
+        let mut by_name = blank_actor("a1", "camera");
         by_name.services = Some(vec!["channel-pub:cam-frontdoor".into()]);
         actors.insert("a1".into(), by_name);
-        let mut by_hash = mk("a2", "cam-by-hash");
-        by_hash.scope_unknown_service_ids = Some(vec![pub_hash]);
+        let mut by_hash = blank_actor("a2", "display");
+        by_hash.scope_unknown_service_ids = Some(vec![sub_hash]);
         actors.insert("a2".into(), by_hash);
-        let mut other = mk("a3", "unrelated");
-        other.services = Some(vec!["memory:travel".into()]);
-        actors.insert("a3".into(), other);
 
-        let holders = channel_holders(&actors, "cam-frontdoor");
-        assert_eq!(holders, vec!["cam-by-hash", "cam-by-name"]);
-        assert!(channel_holders(&actors, "kitchen-display").is_empty());
+        assert_eq!(orphaned_channel_ids(&reg, &actors), vec!["probe"]);
+        assert_eq!(
+            orphaned_channel_ids(&reg, &HashMap::new()).len(),
+            3,
+            "an EMPTY actor map orphans every row — why the handler refuses an unreconciled fleet"
+        );
+    }
+
+    /// `POST /v1/channels/clear-orphaned`: master-gated (403); FAIL-CLOSED while
+    /// the actor map has not been reconciled from chain (503, registry untouched
+    /// — the chain RPC here is a closed local port); with a synced fleet it drops
+    /// the holder-less rows in one write, reports what stayed, and a second call
+    /// is a no-op receipt.
+    #[tokio::test]
+    async fn clear_orphaned_channels_is_gated_fail_closed_then_clears_in_one_write() {
+        use std::sync::atomic::Ordering;
+        let mut state = make_state();
+        set_chain_rpc(&mut state, "http://127.0.0.1:1");
+        assert_eq!(
+            clear_orphaned_channels(State(state.clone())).await.status(),
+            StatusCode::FORBIDDEN,
+            "no master session"
+        );
+
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "op@example.com".into(),
+            omni: "abc".into(),
+            j1: "j1".into(),
+            wallet: String::new(),
+            identity_only_reason: None,
+        });
+        let row = |id: &str| ApiChannel {
+            id: id.into(),
+            name: id.into(),
+            note: None,
+            created_at: 0,
+            kind: None,
+            endpoint_actor_omni: None,
+        };
+        *state.channel_registry.write().await = Some(ChannelRegistry {
+            version: 1,
+            channels: vec![row("cam-frontdoor"), row("probe")],
+        });
+        let mut held = blank_actor("a1", "camera");
+        held.services = Some(vec!["channel-sub:cam-frontdoor".into()]);
+        state.actors.write().await.insert("a1".into(), held);
+
+        // fleet_gen (1) > fleet_synced_gen (0) and the chain is unreachable: refuse.
+        let resp = clear_orphaned_channels(State(state.clone())).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            state
+                .channel_registry
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .channels
+                .len(),
+            2,
+            "nothing cleared while the fleet is unreconciled"
+        );
+
+        state
+            .fleet_synced_gen
+            .store(state.fleet_gen.load(Ordering::Relaxed), Ordering::Relaxed);
+        let resp = clear_orphaned_channels(State(state.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let receipt: ApiChannelsClearOrphaned = serde_json::from_slice(&body).unwrap();
+        assert_eq!(receipt.removed, vec!["probe"]);
+        assert_eq!(receipt.kept, vec!["cam-frontdoor"]);
+        assert_eq!(receipt.storage, "cached", "no config worker in unit tests");
+        let ids: Vec<String> = state
+            .channel_registry
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .channels
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["cam-frontdoor"]);
+
+        let resp = clear_orphaned_channels(State(state.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let receipt: ApiChannelsClearOrphaned = serde_json::from_slice(&body).unwrap();
+        assert!(
+            receipt.removed.is_empty(),
+            "idempotent: second call finds nothing"
+        );
+        assert_eq!(receipt.kept, vec!["cam-frontdoor"]);
     }
 
     /// #214: the pairing routes (poll / claim / register) require a configured

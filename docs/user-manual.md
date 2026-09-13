@@ -436,6 +436,12 @@ accept card won't let you (a device with no channel is inert). Pairing a device
   a channel silently — the devices page *selects* from this registry (its
   inline "new channel" button is the same explicit create). Deleting a
   channel is refused while any device/agent still holds a grant on it.
+  Entries nobody holds any more (an unpaired device's feed, an uninstalled
+  app's chat) show as **orphaned**; the **clear orphaned** button at the
+  top removes all of them in one click and one write — entries still in
+  use are kept, and the toast says which. It is greyed out when nothing is
+  orphaned, and the app refuses (just retry) until it has re-read your
+  fleet from the chain, so a chain hiccup can never wipe the registry.
 - **contacts** — the WeChat contact gate + your family (tiers, reach, invites).
 
 If you claim a device and then look on the delegates page, you'll find a

@@ -2,6 +2,7 @@ import type { AppDashboard } from '@/lib/generated/AppDashboard';
 import type { AppInstallBindings } from '@/lib/generated/AppInstallBindings';
 import type { AppInstallBuildResponse } from '@/lib/generated/AppInstallBuildResponse';
 import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
+import type { ApiChannelsClearOrphaned } from '@/lib/generated/ApiChannelsClearOrphaned';
 import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
 import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
 import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
@@ -796,6 +797,10 @@ export interface AgentKeysClient {
   createChannel?(input: { id: string; name: string; note?: string; kind?: ChannelEndpointKind; endpoint_actor_omni?: string }): Promise<Result<ChannelDef>>;
   updateChannel?(id: string, input: { name?: string; note?: string; kind?: ChannelEndpointKind; endpoint_actor_omni?: string }): Promise<Result<ChannelDef>>;
   deleteChannel?(id: string): Promise<Result<void>>;
+  /** One daemon write: drop every registry row no actor holds a grant on;
+   *  rows in use are kept and reported. The daemon is the authority — it
+   *  re-derives the set against the chain-reconciled fleet. */
+  clearOrphanedChannels?(): Promise<Result<ApiChannelsClearOrphaned>>;
 
   // #664 / #682 — family APPLICATIONS (epic #660): the two policy-class
   // registries + the install / uninstall ceremonies (ONE Touch ID each, over
