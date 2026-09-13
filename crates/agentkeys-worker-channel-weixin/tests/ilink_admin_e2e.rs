@@ -47,6 +47,10 @@ struct MockIlink {
     /// bot's loop drains only its own messages.
     next_confirm: Mutex<Option<Value>>,
     inbox_by_auth: Mutex<HashMap<String, Vec<Value>>>,
+    /// The field-observed shape (VE prod 2026-09-11): a send that carries no
+    /// `context_token` — the only kind possible before the member's first message
+    /// — does not reach them. The mock refuses it so the test proves the retry.
+    reject_without_context: std::sync::atomic::AtomicBool,
 }
 
 async fn mock_qrcode() -> Json<Value> {
@@ -100,6 +104,16 @@ async fn mock_sendmessage(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
+    let has_ctx = body["msg"]["context_token"]
+        .as_str()
+        .is_some_and(|c| !c.is_empty());
+    if m.reject_without_context.load(Ordering::SeqCst) && !has_ctx {
+        m.sends
+            .lock()
+            .unwrap()
+            .push((auth, json!({ "rejected_no_context": body })));
+        return Json(json!({ "ret": -1, "errmsg": "no context token (mock)" }));
+    }
     m.sends.lock().unwrap().push((auth, body));
     Json(json!({ "ret": 0 }))
 }
@@ -398,6 +412,17 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     );
 
     // Master approve → BOUND.
+    // The tokens path is EMPTY in this config: the owner's bot is live but not
+    // persisted — the status view must say so (a silent-until-restart loss).
+    let st0: Value = bearer(http.get(format!("{gw}/v1/gateway/admin/status")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(st0["bots_unpersisted"], 1, "{st0}");
+
     let approved: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/bind/approve")))
         .json(&json!({ "bind_code": code }))
         .send()
@@ -419,6 +444,21 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
         })
     })
     .await;
+    // …and the row records it (the code ceremony's context token made it deliverable now).
+    let contacts: Value = bearer(http.get(format!("{gw}/v1/gateway/admin/contacts")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let grandma = contacts["contacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["contact_id"] == "c-grandma")
+        .expect("grandma bound");
+    assert_eq!(grandma["welcomed"], true, "{grandma}");
 
     // The NOW-BOUND contact's turn routes + acks (the full multi-user loop).
     mock.inbox
@@ -573,6 +613,17 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
         "baseurl": ilink_base.clone(),
         "ilink_user_id": WIFE_USER
     }));
+    // From here every send without a context token is refused — the shape the
+    // field showed: nothing can reach her bot before her first message.
+    mock.reject_without_context.store(true, Ordering::SeqCst);
+    // Her member state file already exists from a PREVIOUS bot (the 23:28 field
+    // case: a re-connect resumed the old bot's file): its cursor and reply token
+    // must never be used by her new bot — else the notice "succeeds" into nowhere.
+    std::fs::write(
+        agentkeys_worker_channel_weixin::bots::member_state_file(&state_file, "c-wife"),
+        r#"{"bot_key":"0000000000000000","get_updates_buf":"old-cursor","context_tokens":{"wife@im.wechat":"stale-ctx"},"hint_sent_secs":{}}"#,
+    )
+    .unwrap();
     mock.inbox_by_auth
         .lock()
         .unwrap()
@@ -611,6 +662,10 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
     assert_eq!(row["tier"], "partner");
     assert_eq!(row["reach"], json!(["chef"]));
     assert_eq!(row["connected"], true);
+    assert_eq!(
+        row["welcomed"], false,
+        "no context token yet — the notice waits for her first message: {row}"
+    );
     assert!(
         !contacts.to_string().contains(WIFE_USER),
         "D13: no transport id in the contacts view"
@@ -623,6 +678,7 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
         .await
         .unwrap();
     assert_eq!(st["bots_online"], 2, "{st}");
+    assert_eq!(st["bots_unpersisted"], 0, "both tokens are on disk: {st}");
     assert_eq!(
         st["open_invites"], 0,
         "the invite is consumed by the scan: {st}"
@@ -649,18 +705,67 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
             .any(|a| a == &format!("Bearer {WIFE_TOKEN}"))
     })
     .await;
-    wait_until("bound notice on the wife's bot", || {
-        mock.sends.lock().unwrap().iter().any(|(auth, b)| {
-            auth == &format!("Bearer {WIFE_TOKEN}")
-                && b["msg"]["to_user_id"] == WIFE_USER
-                && b["msg"]["item_list"][0]["text_item"]["text"]
-                    .as_str()
-                    .is_some_and(|t| t.contains("绑定成功") && t.contains("/chef"))
-        })
-    })
-    .await;
+    // Nothing reaches her before her first message: the post-scan notice is
+    // NOT sent token-less (the gate refuses that path itself — the mock's
+    // rejection tripwire records any such attempt) and NEVER on the previous
+    // bot's stale token. Give the bind's own attempt a beat to (wrongly) fire.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    {
+        let sends = mock.sends.lock().unwrap();
+        assert!(
+            !sends
+                .iter()
+                .any(|(_, b)| b["rejected_no_context"]["msg"]["to_user_id"] == WIFE_USER),
+            "a token-less send was attempted: {sends:?}"
+        );
+        assert!(
+            !sends
+                .iter()
+                .any(|(_, b)| b["msg"]["to_user_id"] == WIFE_USER),
+            "nothing delivered to her before her first message: {sends:?}"
+        );
+        assert!(
+            !sends
+                .iter()
+                .any(|(_, b)| b["msg"]["context_token"] == "stale-ctx"),
+            "the previous bot's reply token was reused: {sends:?}"
+        );
+    }
 
-    // ⑤ her turn arrives on her bot and is routed + acked on her bot.
+    // An operator re-send BEFORE her first message cannot deliver (her bot holds
+    // no reply token yet) — it ARMS the acknowledgement instead, and sends nothing.
+    let armed: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/contacts/welcome")))
+        .json(&json!({ "contact_id": "c-wife" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(armed["ok"], true, "{armed}");
+    assert_eq!(armed["sent"], false, "{armed}");
+    assert!(
+        armed["detail"].as_str().unwrap().contains("no reply token"),
+        "{armed}"
+    );
+    assert!(
+        !mock
+            .sends
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, b)| b["msg"]["to_user_id"] == WIFE_USER),
+        "an armed welcome sends nothing yet"
+    );
+    let unknown = bearer(http.post(format!("{gw}/v1/gateway/admin/contacts/welcome")))
+        .json(&json!({ "contact_id": "nobody" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+
+    // ⑤ her first turn arrives on her bot: the acknowledgement goes out FIRST
+    //    (with this message's context token), then the routed ack.
     mock.inbox_by_auth
         .lock()
         .unwrap()
@@ -675,6 +780,111 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
                     .as_str()
                     .is_some_and(|t| t.contains("已转达给 chef"))
         })
+    })
+    .await;
+    {
+        let sends = mock.sends.lock().unwrap();
+        let hers: Vec<&str> = sends
+            .iter()
+            .filter(|(auth, b)| {
+                auth == &format!("Bearer {WIFE_TOKEN}") && b["msg"]["to_user_id"] == WIFE_USER
+            })
+            .filter_map(|(_, b)| b["msg"]["item_list"][0]["text_item"]["text"].as_str())
+            .collect();
+        assert!(
+            hers.len() == 2
+                && hers[0].contains("绑定成功")
+                && hers[0].contains("/chef")
+                && hers[1].contains("已转达给 chef"),
+            "the acknowledgement rides her first message, before the routed ack: {hers:?}"
+        );
+        assert!(
+            sends
+                .iter()
+                .all(|(_, b)| b["msg"]["to_user_id"] != WIFE_USER
+                    || b["msg"]["context_token"] == "ctx-w1"),
+            "every delivered send to her rides her message's context token (never the stale one)"
+        );
+    }
+    // Her loop dropped the previous bot's cursor: its file is now keyed to HER bot.
+    let her_file = agentkeys_worker_channel_weixin::bots::member_state_file(&state_file, "c-wife");
+    let persisted: Value =
+        serde_json::from_str(&std::fs::read_to_string(&her_file).unwrap()).unwrap();
+    assert_eq!(
+        persisted["bot_key"],
+        agentkeys_worker_channel_weixin::ilink_loop::bot_key(WIFE_TOKEN)
+    );
+    assert_ne!(persisted["get_updates_buf"], "old-cursor");
+    let contacts: Value = bearer(http.get(format!("{gw}/v1/gateway/admin/contacts")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = contacts["contacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["contact_id"] == "c-wife")
+        .expect("wife bound");
+    assert_eq!(row["welcomed"], true, "{row}");
+    // A second message carries no second welcome.
+    mock.inbox_by_auth
+        .lock()
+        .unwrap()
+        .get_mut(&format!("Bearer {WIFE_TOKEN}"))
+        .unwrap()
+        .push(user_msg(WIFE_USER, "你好，你是谁", "ctx-w2"));
+    wait_until("ask-back names HER reach", || {
+        mock.sends.lock().unwrap().iter().any(|(auth, b)| {
+            auth == &format!("Bearer {WIFE_TOKEN}")
+                && b["msg"]["context_token"] == "ctx-w2"
+                && b["msg"]["item_list"][0]["text_item"]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("你可以找：/chef"))
+        })
+    })
+    .await;
+    assert_eq!(
+        mock.sends
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, b)| b["msg"]["to_user_id"] == WIFE_USER
+                && b["msg"]["item_list"][0]["text_item"]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("绑定成功")))
+            .count(),
+        1,
+        "the acknowledgement is sent exactly once"
+    );
+    // An operator re-send AFTER her first message delivers now (her bot holds
+    // her reply token) — the one sanctioned repeat.
+    let resent: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/contacts/welcome")))
+        .json(&json!({ "contact_id": "c-wife" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resent["sent"], true, "{resent}");
+    wait_until("re-sent acknowledgement on her bot with her token", || {
+        mock.sends
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(auth, b)| {
+                auth == &format!("Bearer {WIFE_TOKEN}")
+                    && b["msg"]["to_user_id"] == WIFE_USER
+                    && b["msg"]["context_token"] == "ctx-w2"
+                    && b["msg"]["item_list"][0]["text_item"]["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("绑定成功"))
+            })
+            .count()
+            == 1
     })
     .await;
     assert!(

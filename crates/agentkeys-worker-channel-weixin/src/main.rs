@@ -68,7 +68,15 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // No RUST_LOG on a host ⇒ `fmt::init()` shows ERROR only, which hid the
+    // "tokens NOT persisted" / "notice NOT delivered" warns on VE prod
+    // (2026-09-11). Default to info; RUST_LOG still overrides.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
     let cli = Cli::parse();
 
     if cli.login {

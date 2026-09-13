@@ -1444,6 +1444,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             "/v1/master/gateway/contacts/revoke",
             post(gateway_contacts_revoke_proxy),
         )
+        .route(
+            "/v1/master/gateway/contacts/welcome",
+            post(gateway_contacts_welcome_proxy),
+        )
         .route("/v1/revoke/build", post(revoke_build_proxy))
         .route("/v1/revoke/submit", post(revoke_submit_proxy))
         .route("/v1/dev/seed", post(dev_seed))
@@ -8590,6 +8594,13 @@ async fn gateway_contacts_revoke_proxy(
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
     forward_gateway_mutation(&state, "/v1/gateway/admin/contacts/revoke", body).await
+}
+
+async fn gateway_contacts_welcome_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    forward_gateway_mutation(&state, "/v1/gateway/admin/contacts/welcome", body).await
 }
 
 // ── #424 §2 — gateway contact-registry durability (Config-class doc) ─────────

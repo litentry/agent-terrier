@@ -117,7 +117,7 @@ fn write_registry() -> String {
     let json = r#"{
       "bound": [
         {"contact_id":"c-kid","transport":"weixin","transport_id":"wxid-kid",
-         "display_name":"小明","tier":"kid","reach":["storyteller"]}
+         "display_name":"小明","tier":"kid","reach":["storyteller"],"welcomed":true}
       ],
       "pending": []
     }"#;

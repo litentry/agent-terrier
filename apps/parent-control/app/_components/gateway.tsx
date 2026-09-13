@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 
-import { PageHead, Panel, Modal, Dot } from './shared';
+import { PageHead, Panel, Modal, Dot, Tabs } from './shared';
 import {
   gatewayClient,
   gatewayDebugEnabled,
@@ -38,8 +38,10 @@ import {
   SELF_DISPLAY_NAME,
   TIER_INFO,
   appAudiences,
-  flowStep,
+  defaultTab,
   inviteState,
+  nextStepHint,
+  type ContactsTab,
   scanTransport,
   selfState,
   sendText,
@@ -435,8 +437,30 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
   const scan = scanTransport(status?.transport);
   const agents = deeplinkReach ?? [];
   const self = selfState(pending, contacts);
-  const step = flowStep(online, self);
+  // The owner's connect QR is minted FOR their registry row: the bound owner's own
+  // id when one exists (a code-bound owner re-binds by scan — their own phone
+  // becomes their bot), else the console's `self-owner` invite.
+  const selfContactId = contacts.find((c) => c.tier === 'owner')?.contact_id ?? SELF_CONTACT_ID;
   const familyPending = pending.filter((p) => p.contact_id !== SELF_CONTACT_ID);
+  const me = contacts.find((c) => c.tier === 'owner');
+  const familyBound = contacts.filter((c) => c.tier !== 'owner').length;
+  // Three tabs. The page opens on the one the flow points at; a tab the user
+  // picked stays picked. The "Next:" line names the single thing to do and
+  // jumps to its tab, so the numbered step frames are no longer needed.
+  const suggestedTab = defaultTab(online, self, familyPending.length);
+  const [pickedTab, setPickedTab] = useState<ContactsTab | null>(null);
+  const activeTab: ContactsTab = pickedTab ?? suggestedTab;
+  const hint = nextStepHint(online, self, scan, familyPending.length, familyBound, !!me?.connected);
+  const botsOnline = status?.bots_online ?? 0;
+  const ownerState = self === 'bound'
+    ? (scan ? (me?.connected ? 'bound · your clawbot is connected' : 'bound · no clawbot on your own WeChat yet') : 'bound')
+    : self === 'claimed'
+      ? 'code received — approve'
+      : self === 'minted'
+        ? (scan ? 'invite minted — scan your connect QR' : 'code minted — text it to the bot')
+        : online
+          ? 'not bound yet'
+          : 'connect first';
   return (
     <>
       <PageHead
@@ -451,94 +475,74 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
         }
       />
       <Toast toast={toast} />
-      <StepPanel
-        n={1}
-        title={scan ? 'your clawbot' : 'the household bot'}
-        active={step === 1}
-        done={online}
-        state={notConfigured ? 'no contact gate' : online ? `connected · ${status?.bot_id ?? 'bot'}` : 'offline'}
-      >
-        {scan ? (
-          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
-            A clawbot lives only in the WeChat account that scanned its QR — there is no sharing. So every member, you first, connects their <strong>own</strong> WeChat (step 2 for you, step 3 for the family); each bot is linked to this household and routes to the same agents.
-            WeChat's policy for personal accounts on this API is undocumented.
-          </p>
-        ) : (
-          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
-            This contact gate runs a <strong>shared</strong> bot (a 公众号 or a Telegram bot) that anyone can message. Connect it once here;
-            family members never scan anything — each gets a 6-digit code in step 3.
-          </p>
-        )}
-        <ConnectPanel status={status} statusErr={statusErr} notConfigured={notConfigured} onChange={() => void refresh()} onFlash={flash} />
-      </StepPanel>
-      <StepPanel
-        n={2}
-        title="you — the owner"
-        active={step === 2}
-        done={self === 'bound'}
-        state={self === 'bound' ? 'bound' : self === 'claimed' ? 'code received — approve' : self === 'minted' ? (scan ? 'invite minted — scan your connect QR' : 'code minted — text it to the bot') : online ? 'not bound yet' : 'after step 1'}
-      >
-        <SelfBindCard self={self} pending={pending} contacts={contacts} agents={agents} apps={apps} online={online} reachable={reachable} scan={scan} onChange={() => void refresh()} onFlash={flash} />
-      </StepPanel>
-      <StepPanel
-        n={3}
-        title="family members"
-        active={step === 3}
-        done={contacts.some((c) => c.tier !== 'owner')}
-        state={`${contacts.filter((c) => c.tier !== 'owner').length} bound · ${familyPending.length} invite${familyPending.length === 1 ? '' : 's'} open`}
-      >
-        {scan ? (
-          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
-            Mint an invite (name, tier, reach), then open their connect QR from the row when they are with you — they scan it with <strong>their own</strong> WeChat and their clawbot appears, bound with the tier and reach you chose. The mint is your approval; nothing else to confirm.
-          </p>
-        ) : (
-          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
-            Members don't scan or connect anything: they open the shared bot themselves (follow the 公众号, or open the Telegram bot), you mint an invite,
-            they text the code to it in a <strong>private</strong> chat from <strong>their own</strong> account (groups are ignored, and the bot cannot message first), you approve. Each invite below shows where it stands.
-          </p>
-        )}
-        <InvitePanel agents={agents} apps={apps} online={scan ? reachable : online} scan={scan} onInvited={() => void refresh()} onFlash={flash} />
-        <InvitesTable pending={familyPending} scan={scan} onChange={() => void refresh()} onFlash={flash} />
-      </StepPanel>
-      <ContactsPanel contacts={contacts} onChange={() => void refresh()} onFlash={flash} />
-      <details style={{ marginTop: 18 }}>
-        <summary className="muted" style={{ cursor: 'pointer', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase' }}>diagnostics · activity · monitor · history</summary>
-        <ActivityPanel auditOff={online && status?.audit_on_chain === false} />
-        <MonitorPanel online={online} />
-        <HistoryPanel />
-      </details>
-    </>
-  );
-}
+      <Tabs
+        items={[
+          {
+            key: 'connection',
+            label: 'connection',
+            badge: notConfigured ? 'no gate' : online ? `${botsOnline} bot${botsOnline === 1 ? '' : 's'} online` : 'offline',
+            attention: hint?.tab === 'connection',
+          },
+          { key: 'invitations', label: 'invitations', badge: familyPending.length, attention: hint?.tab === 'invitations' },
+          { key: 'contacts', label: 'contacts', badge: contacts.length },
+        ]}
+        active={activeTab}
+        onChange={setPickedTab}
+      />
+      {hint && (
+        <div className="tab-hint muted">
+          Next: <button type="button" onClick={() => setPickedTab(hint.tab)}>{hint.text}</button>
+        </div>
+      )}
 
-// ── the step frame ────────────────────────────────────────────────────────────
-// One numbered panel per stage of the flow; the ACTIVE step is drawn in full,
-// the others recede, a done step carries its check. State text on the right
-// is the live truth (bot id, "code received", counts), never a static caption.
-function StepPanel({
-  n,
-  title,
-  active,
-  done,
-  state,
-  children,
-}: {
-  n: number;
-  title: string;
-  active: boolean;
-  done: boolean;
-  state: string;
-  children: ReactNode;
-}) {
-  return (
-    <div style={{ opacity: active || done ? 1 : 0.72, outline: active ? '2px solid var(--accent)' : 'none', outlineOffset: -1, marginBottom: 14 }}>
-      <Panel
-        title={<span>{done ? '✓' : n} · {title}</span>}
-        right={<span className="muted" style={{ fontSize: 12, color: active ? 'var(--accent)' : undefined }}>{state}</span>}
-      >
-        {children}
-      </Panel>
-    </div>
+      {activeTab === 'connection' && (
+        <>
+          {scan ? (
+            <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>
+              A clawbot lives only in the WeChat account that scanned its QR — there is no sharing. Every member, you first, connects their <strong>own</strong> WeChat; each bot is linked to this household and routes to the same agents.
+              WeChat's policy for personal accounts on this API is undocumented.
+            </p>
+          ) : (
+            <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>
+              This contact gate runs a <strong>shared</strong> bot (a 公众号 or a Telegram bot) that anyone can message. Connect it once here;
+              family members never scan anything — each gets a 6-digit code from the invitations tab.
+            </p>
+          )}
+          <ConnectPanel status={status} statusErr={statusErr} notConfigured={notConfigured} selfContactId={selfContactId} onChange={() => void refresh()} onFlash={flash} />
+          <Panel
+            title="you — the owner"
+            right={<span className="muted" style={{ fontSize: 12, color: hint?.tab === 'connection' && online ? 'var(--accent)' : undefined }}>{ownerState}</span>}
+          >
+            <SelfBindCard self={self} pending={pending} contacts={contacts} agents={agents} apps={apps} online={online} reachable={reachable} scan={scan} onChange={() => void refresh()} onFlash={flash} />
+          </Panel>
+          <details style={{ marginTop: 4 }}>
+            <summary className="muted" style={{ cursor: 'pointer', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase' }}>diagnostics · activity · monitor · history</summary>
+            <ActivityPanel auditOff={online && status?.audit_on_chain === false} />
+            <MonitorPanel online={online} />
+            <HistoryPanel />
+          </details>
+        </>
+      )}
+
+      {activeTab === 'invitations' && (
+        <>
+          {scan ? (
+            <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>
+              Mint an invite (name, tier, reach), then open their connect QR from the row when they are with you — they scan it with <strong>their own</strong> WeChat and their clawbot appears, bound with the tier and reach you chose. The mint is your approval; nothing else to confirm. They are told in their chat with their first message.
+            </p>
+          ) : (
+            <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>
+              Members don't scan or connect anything: they open the shared bot themselves (follow the 公众号, or open the Telegram bot), you mint an invite,
+              they text the code to it in a <strong>private</strong> chat from <strong>their own</strong> account (groups are ignored, and the bot cannot message first), you approve. Each invite below shows where it stands.
+            </p>
+          )}
+          <InvitePanel agents={agents} apps={apps} online={scan ? reachable : online} scan={scan} onInvited={() => void refresh()} onFlash={flash} />
+          <InvitesTable pending={familyPending} scan={scan} onChange={() => void refresh()} onFlash={flash} />
+        </>
+      )}
+
+      {activeTab === 'contacts' && <ContactsPanel contacts={contacts} onChange={() => void refresh()} onFlash={flash} />}
+    </>
   );
 }
 
@@ -602,7 +606,8 @@ function SelfBindCard({
     return (
       <div style={{ fontSize: 13, lineHeight: 1.7 }}>
         ✓ Bound as <strong>{me.display_name}</strong> · owner · reach: {me.reach.length ? me.reach.join(', ') : '—'}
-        {scan && (me.connected ? <span> · your clawbot is connected</span> : <span style={{ color: 'var(--danger)' }}> · your clawbot is offline — reconnect in the card above</span>)}
+        {scan && (me.connected ? <span> · your clawbot is connected</span> : <span style={{ color: 'var(--danger)' }}> · no clawbot on your own WeChat yet — ⊕ connect in the card above and scan with your own phone</span>)}
+        {!me.welcomed && <div className="muted" style={{ fontSize: 12 }}>The «✅ 绑定成功» acknowledgement reaches you with your first message to the bot.</div>}
         <div className="muted" style={{ fontSize: 12 }}>Apps you install later add themselves here automatically.</div>
       </div>
     );
@@ -823,12 +828,14 @@ function ConnectPanel({
   status,
   statusErr,
   notConfigured,
+  selfContactId = SELF_CONTACT_ID,
   onChange,
   onFlash,
 }: {
   status: GatewayStatusView | null;
   statusErr: string | null;
   notConfigured: boolean;
+  selfContactId?: string;
   onChange: () => void;
   onFlash: (m: string) => void;
 }) {
@@ -864,8 +871,13 @@ function ConnectPanel({
             <dt>awaiting approve</dt><dd>{status?.pending_binds ?? 0}</dd>
             <dt>bots online</dt><dd>{status?.bots_online ?? 0}</dd>
           </dl>
+          {(status?.bots_unpersisted ?? 0) > 0 && (
+            <div style={{ color: 'var(--danger)', fontSize: 12.5, maxWidth: 420 }}>
+              ⚠ {status?.bots_unpersisted} bot token{status?.bots_unpersisted === 1 ? '' : 's'} not saved on the gate — they drop at the next gate restart. The gate cannot write its tokens file; set AGENTKEYS_WEIXIN_ILINK_TOKENS_FILE to a path in its writable state dir and converge.
+            </div>
+          )}
           <div>
-            <ConnectButton transport={transport} online={online} scan={scan} onChange={onChange} onFlash={onFlash} />
+            <ConnectButton transport={transport} online={online} scan={scan} selfContactId={selfContactId} onChange={onChange} onFlash={onFlash} />
           </div>
         </div>
       )}
@@ -877,12 +889,14 @@ function ConnectButton({
   transport,
   online,
   scan,
+  selfContactId = SELF_CONTACT_ID,
   onChange,
   onFlash,
 }: {
   transport: string;
   online: boolean;
   scan: boolean;
+  selfContactId?: string;
   onChange: () => void;
   onFlash: (m: string) => void;
 }) {
@@ -913,7 +927,7 @@ function ConnectButton({
       )}
       {open && (
         <ConnectModal
-          contactId={scan ? SELF_CONTACT_ID : undefined}
+          contactId={scan ? selfContactId : undefined}
           onClose={() => setOpen(false)}
           onConnected={(botId) => {
             setOpen(false);
@@ -1321,7 +1335,7 @@ function ContactsPanel({
   onFlash: (m: string) => void;
 }) {
   return (
-    <Panel title="4 · family — bound contacts" right={<span className="count">{contacts.length}</span>}>
+    <Panel title="bound contacts" right={<span className="count">{contacts.length}</span>}>
       {contacts.length === 0 ? (
         <div className="muted" style={{ fontSize: 13 }}>No family members yet. Invite one above.</div>
       ) : (
@@ -1331,6 +1345,7 @@ function ContactsPanel({
               <th style={{ textAlign: 'left' }}>name</th>
               <th style={{ textAlign: 'left' }}>tier</th>
               <th style={{ textAlign: 'left' }}>reach</th>
+              <th style={{ textAlign: 'left' }}>acknowledged</th>
               <th />
             </tr>
           </thead>
@@ -1379,6 +1394,22 @@ function ContactRow({
     }
   };
 
+  const resendAck = async () => {
+    setBusy(true);
+    const r = await gatewayClient.contactsWelcome(contact.contact_id);
+    setBusy(false);
+    if (!r.ok) {
+      onFlash(`Resend failed: ${reason(r)}`);
+      return;
+    }
+    onChange();
+    onFlash(
+      r.value.sent
+        ? `Acknowledgement sent to ${contact.display_name}'s chat`
+        : `${contact.display_name} gets the acknowledgement with their next message (their bot cannot speak first)`,
+    );
+  };
+
   const revoke = async () => {
     if (!window.confirm(`Unbind ${contact.display_name}? They can no longer reach any agent through the bot.`)) return;
     setBusy(true);
@@ -1411,6 +1442,7 @@ function ContactRow({
             style={{ ...INPUT_STYLE, width: '100%' }}
           />
         </td>
+        <td />
         <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
           <button className="btn sm" disabled={busy} onClick={() => void save()}>save</button>{' '}
           <button
@@ -1434,6 +1466,10 @@ function ContactRow({
       <td>{contact.display_name}</td>
       <td>{contact.tier} · <span className="muted">{tierLabel(contact.tier)}</span></td>
       <td className="muted">{contact.reach.length ? contact.reach.join(', ') : '—'}</td>
+      <td className="muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+        {contact.welcomed ? '✓ told in their chat' : 'with their next message'}{' '}
+        <button className="btn sm" disabled={busy} onClick={() => void resendAck()} title="Send the «✅ 绑定成功» acknowledgement again — now if their bot can, else with their next message">↻ resend</button>
+      </td>
       <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
         <button className="btn sm" disabled={busy} onClick={() => setEditing(true)}>edit</button>{' '}
         <button className="btn sm" disabled={busy} onClick={() => void revoke()} style={{ color: 'var(--danger)' }}>revoke</button>

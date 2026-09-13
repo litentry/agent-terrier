@@ -59,6 +59,14 @@ pub struct RelayOutcome {
     pub feed_error: Option<String>,
     /// The media marker for the reply text, when an original rode along.
     pub media_marker: Option<&'static str>,
+    /// The contact's reach (empty for an unknown sender) — the ask-back names
+    /// THESE aliases, never a generic example the member cannot use.
+    pub reach: Vec<String>,
+    /// The bound notice this contact has NOT yet received («✅ 绑定成功…»): the
+    /// transport loop sends it FIRST on this turn (the first inbound is the first
+    /// moment an iLink bot can answer — no context token exists before it),
+    /// then marks the row welcomed. `None` once delivered.
+    pub welcome: Option<String>,
 }
 
 /// Run one inbound `(transport_id, text)` turn through L3 + audit for the
@@ -146,6 +154,11 @@ pub async fn process_turn(
     let (contact_id, tier) = contact
         .map(|c| (c.contact_id.clone(), c.tier.as_str().to_string()))
         .unwrap_or_default();
+    let reach: Vec<String> = contact.map(|c| c.reach.clone()).unwrap_or_default();
+    // The member's acknowledgement is never missed: a bound contact whose notice
+    // could not be delivered at bind time (an iLink bot cannot send before the
+    // member's first message) gets it with this very turn, before anything else.
+    let welcome = contact.filter(|c| !c.welcomed).map(bound_notice);
 
     // #418 bind ceremony: an unknown sender echoing a LIVE invite code claims
     // it (→ pending, master approves in parent-control). Uses the RAW text —
@@ -280,6 +293,69 @@ pub async fn process_turn(
         feed,
         feed_error,
         media_marker,
+        reach,
+        welcome,
+    }
+}
+
+/// The member's half of the bind ceremony — what they are told in their own
+/// chat once bound: who they are to the household and whom they can talk to.
+pub fn bound_notice(c: &agentkeys_protocol::Contact) -> String {
+    let who = format!("{}（{}）", c.display_name, tier_zh(c.tier));
+    if c.reach.is_empty() {
+        return format!("✅ 绑定成功：{who}。管理员还没有为你开通可联系的助手，开通后会自动生效。");
+    }
+    let aliases = c
+        .reach
+        .iter()
+        .map(|a| format!("/{a}"))
+        .collect::<Vec<_>>()
+        .join("、");
+    format!(
+        "✅ 绑定成功：{who}。现在可以直接对话这些助手：{aliases}。发“/{} 你好”试试。",
+        c.reach[0]
+    )
+}
+
+pub fn tier_zh(t: agentkeys_protocol::ContactTier) -> &'static str {
+    use agentkeys_protocol::ContactTier::*;
+    match t {
+        Owner => "拥有者",
+        Partner => "配偶",
+        Elder => "长辈",
+        Kid => "孩子",
+        Helper => "帮手",
+        Guest => "访客",
+    }
+}
+
+/// The ask-back for a bound contact who named no reachable assistant: it lists
+/// THEIR aliases (a generic `/chef` example is useless to someone who cannot
+/// reach chef). Empty reach = the generic text (the master grants reach later).
+pub fn ask_back_text(reach: &[String], en: bool) -> String {
+    if reach.is_empty() {
+        return if en {
+            "Address an assistant with /alias (e.g. `/chef what's for dinner`), or rephrase."
+                .to_string()
+        } else {
+            "请用 /别名 指定要找的助手（例如 /chef 晚饭吃什么），或换个说法。".to_string()
+        };
+    }
+    let list = reach
+        .iter()
+        .map(|a| format!("/{a}"))
+        .collect::<Vec<_>>()
+        .join(if en { ", " } else { "、" });
+    if en {
+        format!(
+            "Address an assistant with /alias — yours: {list} (e.g. `/{} hello`), or rephrase.",
+            reach[0]
+        )
+    } else {
+        format!(
+            "请用 /别名 指定要找的助手，你可以找：{list}（例如 /{} 你好），或换个说法。",
+            reach[0]
+        )
     }
 }
 
@@ -460,8 +536,11 @@ pub fn reply_text_for_turn(
     decision: &L3Decision,
     media_marker: Option<&str>,
     en: bool,
+    reach: &[String],
 ) -> Option<String> {
-    let base = if en {
+    let base = if !decision.allowed && decision.reason == "no_alias" {
+        ask_back_text(reach, en)
+    } else if en {
         reply_text_for_en(decision)?
     } else {
         reply_text_for(decision)?
@@ -559,6 +638,29 @@ mod tests {
                 .then(|| "https://pc.local/".to_string()),
             routed_by: None,
         }
+    }
+
+    #[test]
+    fn ask_back_names_the_contacts_own_reach() {
+        let reach = vec!["agent".to_string(), "nanny".to_string()];
+        let zh = ask_back_text(&reach, false);
+        assert!(
+            zh.contains("/agent、/nanny") && zh.contains("/agent 你好"),
+            "{zh}"
+        );
+        let en = ask_back_text(&reach, true);
+        assert!(
+            en.contains("/agent, /nanny") && en.contains("/agent hello"),
+            "{en}"
+        );
+        assert!(ask_back_text(&[], false).contains("/chef"));
+        let turn = reply_text_for_turn(&decision(false, "no_alias"), None, false, &reach).unwrap();
+        assert!(turn.contains("/nanny") && !turn.contains("/chef"), "{turn}");
+        assert!(
+            reply_text_for_turn(&decision(true, "ok"), Some("📷"), false, &reach)
+                .unwrap()
+                .ends_with("📷")
+        );
     }
 
     #[test]

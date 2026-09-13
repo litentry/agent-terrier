@@ -119,7 +119,8 @@ pub struct WeixinGatewayConfig {
     /// The #384 custody home — the worker upserts the managed keys in place.
     pub secrets_file: String,
     /// Per-member iLink bot tokens (2026-09-11): one custodied token per family
-    /// member, JSON, 0600, next to the secrets file by default
+    /// member, JSON, 0600, next to the iLink STATE file by default (the writable
+    /// state dir — `/etc` is read-only for the unit, #419; measured 2026-09-11)
     /// (`AGENTKEYS_WEIXIN_ILINK_TOKENS_FILE` overrides). The legacy single token in
     /// the secrets file stays the owner's bot.
     pub ilink_tokens_file: String,
@@ -290,7 +291,7 @@ impl WeixinGatewayConfig {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| crate::bots::default_tokens_file(&secrets_file));
+            .unwrap_or_else(|| crate::bots::default_tokens_file(&ilink_state_file));
         let ilink_bootstrap_url = var("AGENTKEYS_WEIXIN_ILINK_BOOTSTRAP_URL")
             .ok()
             .map(|s| s.trim().to_string())

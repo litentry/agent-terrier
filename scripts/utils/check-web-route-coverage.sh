@@ -93,6 +93,7 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/master/gateway/contacts	same gateway-admin forward (worker route /v1/gateway/contacts also asserted by channel demo step 14)
 /v1/master/gateway/contacts/update	same gateway-admin forward — contact display-name/label edit; surfaced by the 2026-07-14 extraction fix
 /v1/master/gateway/contacts/revoke	same gateway-admin forward — contact revoke (D13-safe, no openid in response); surfaced by the 2026-07-14 extraction fix
+/v1/master/gateway/contacts/welcome	same gateway-admin forward — (re)send a contact's bound acknowledgement, or arm it for their next message; both halves proven headlessly by ilink_admin_e2e (member scan test); same deployed-gateway limitation
 /v1/master/gateway/bind/reject	same gateway-admin forward — withdraw-invite ceremony proven headlessly by gateway_flow::bind_reject
 /v1/master/gateway/monitor	same gateway-admin forward — live message monitor; behavior proven by the crate's gateway_flow tests; live daemon-side coverage needs a deployed gateway + admin token (same as gateway/status)
 /v1/master/gateway/history	same gateway-admin forward — durable message history; append/read proven by gateway_flow::durable_history; same deployed-gateway limitation

@@ -73,6 +73,7 @@ fn seeded_registry() -> ContactRegistry {
             display_name: "奶奶".into(),
             tier: ContactTier::Elder,
             reach: vec!["chef".into()],
+            welcomed: true,
         }],
         pending: vec![],
         invites: vec![BindInvite {

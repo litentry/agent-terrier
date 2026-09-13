@@ -64,6 +64,10 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
             "/v1/gateway/admin/contacts/revoke",
             post(admin::contacts_revoke),
         )
+        .route(
+            "/v1/gateway/admin/contacts/welcome",
+            post(admin::contacts_welcome),
+        )
         // #424 §2 — the durable-copy surface: the daemon exports the FULL
         // registry into the master-only Config-class doc after every mutation,
         // and imports it back onto an EMPTY (rebuilt) gateway host.
@@ -254,6 +258,12 @@ async fn callback_relay(
     //    comes back async via the outbound send path, which needs the app-secret
     //    — the live proof). The mock e2e reads the JSON decision.
     if is_json {
+        // The mock driver IS the delivery surface: a welcome returned here counts
+        // as sent. (The real OA webhook can only answer "success" — it has no
+        // send path, so a real OA member is welcomed by no one yet.)
+        if outcome.welcome.is_some() {
+            state.mark_welcomed(&outcome.contact_id);
+        }
         (
             StatusCode::OK,
             Json(json!({
@@ -262,6 +272,7 @@ async fn callback_relay(
                 "contact_id": outcome.contact_id,
                 "tier": outcome.tier,
                 "routed_event": outcome.event,
+                "welcome": outcome.welcome,
                 "feed": outcome.feed,
                 "feed_error": outcome.feed_error,
             })),
@@ -307,10 +318,18 @@ async fn telegram_mock_inbound(
         .to_string();
     let media = mock_media(&v);
     let outcome = relay::process_turn(&state, "telegram", &from, &text, media).await;
-    let reply = outcome
-        .claim_ack
-        .clone()
-        .or_else(|| relay::reply_text_for_turn(&outcome.decision, outcome.media_marker, true));
+    let reply = outcome.claim_ack.clone().or_else(|| {
+        relay::reply_text_for_turn(
+            &outcome.decision,
+            outcome.media_marker,
+            true,
+            &outcome.reach,
+        )
+    });
+    // The mock driver IS the delivery surface: a welcome returned here counts as sent.
+    if outcome.welcome.is_some() {
+        state.mark_welcomed(&outcome.contact_id);
+    }
     (
         StatusCode::OK,
         Json(json!({
@@ -320,6 +339,7 @@ async fn telegram_mock_inbound(
             "tier": outcome.tier,
             "routed_event": outcome.event,
             "reply": reply,
+            "welcome": outcome.welcome,
             "feed": outcome.feed,
             "feed_error": outcome.feed_error,
         })),

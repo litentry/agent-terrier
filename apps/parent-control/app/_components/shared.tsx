@@ -292,3 +292,40 @@ export function ActorTree({
     </div>
   );
 }
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+// A page's sections as a tab bar (`.tabbar`, not the table class `.tab`). Each
+// item may carry a badge (a count or a short state) and an `attention` flag that
+// tints an inactive tab — the page's "the next thing is in here" signal.
+export type TabItem<K extends string> = { key: K; label: ReactNode; badge?: ReactNode; attention?: boolean };
+
+export function Tabs<K extends string>({
+  items,
+  active,
+  onChange,
+  right,
+}: {
+  items: TabItem<K>[];
+  active: K;
+  onChange: (key: K) => void;
+  right?: ReactNode;
+}) {
+  return (
+    <div className="tabbar" role="tablist">
+      {items.map((it) => (
+        <button
+          key={it.key}
+          type="button"
+          role="tab"
+          aria-selected={it.key === active}
+          className={`tabbar-item${it.key === active ? ' active' : ''}${it.attention ? ' attention' : ''}`}
+          onClick={() => onChange(it.key)}
+        >
+          <span>{it.label}</span>
+          {it.badge !== undefined && it.badge !== null && it.badge !== '' && <span className="badge">{it.badge}</span>}
+        </button>
+      ))}
+      {right && <div className="tabbar-right">{right}</div>}
+    </div>
+  );
+}

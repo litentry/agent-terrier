@@ -397,7 +397,12 @@ impl WeixinGatewayState {
 
     /// Swap the runtime identity (a confirmed admin login) and signal the
     /// supervisor to restart the inbound loop on it.
-    pub fn set_ilink_identity(&self, token: String, base_url: String, bot_id: String) {
+    pub fn set_ilink_identity(
+        &self,
+        token: String,
+        base_url: String,
+        bot_id: String,
+    ) -> anyhow::Result<()> {
         self.set_member_bot(
             crate::bots::OWNER_CONTACT_ID,
             crate::bots::MemberBot {
@@ -407,7 +412,7 @@ impl WeixinGatewayState {
                 user_id: String::new(),
                 connected_at_secs: crate::relay::unix_secs(),
             },
-        );
+        )
     }
     // ── per-member bots (2026-09-11) ─────────────────────────────────────────
     fn owner_or_first_bot(&self) -> Option<crate::bots::MemberBot> {
@@ -437,33 +442,82 @@ impl WeixinGatewayState {
             .collect()
     }
     /// Insert or replace a member's bot, persist the store, restart the loops.
-    pub fn set_member_bot(&self, contact_id: &str, bot: crate::bots::MemberBot) {
+    /// Store (or replace) a member's bot and restart the inbound loops. The bot
+    /// is LIVE either way; `Err` = its token could not be persisted (a restart
+    /// drops it) — the caller surfaces that, never swallows it.
+    pub fn set_member_bot(
+        &self,
+        contact_id: &str,
+        bot: crate::bots::MemberBot,
+    ) -> anyhow::Result<()> {
         self.bots
             .write()
             .expect("bots lock")
             .insert(contact_id.to_string(), bot);
-        self.persist_bots();
+        let persisted = self.persist_bots();
         self.ilink_restart_tx.send_modify(|n| *n += 1);
+        persisted
     }
     pub fn remove_member_bot(&self, contact_id: &str) -> Option<crate::bots::MemberBot> {
         let removed = self.bots.write().expect("bots lock").remove(contact_id);
         if removed.is_some() {
-            self.persist_bots();
+            let _ = self.persist_bots();
             self.ilink_restart_tx.send_modify(|n| *n += 1);
         }
         removed
     }
-    fn persist_bots(&self) {
+    fn persist_bots(&self) -> anyhow::Result<()> {
         let store = crate::bots::BotStore {
             bots: self.bots_snapshot(),
         };
         if let Err(e) = store.save(&self.config.ilink_tokens_file) {
-            tracing::warn!(
+            tracing::error!(
                 path = %self.config.ilink_tokens_file,
                 error = %e,
-                "member bot tokens NOT persisted — live for THIS process only (a restart loses them)"
+                "member bot tokens NOT persisted — live for THIS process only (a restart loses them); \
+                 point AGENTKEYS_WEIXIN_ILINK_TOKENS_FILE at a writable dir (the state dir)"
             );
+            return Err(e);
         }
+        Ok(())
+    }
+    /// Live bots whose token is NOT in the tokens file on disk (the file is
+    /// missing, unwritable, or stale) — surfaced on the status view so a
+    /// silent-until-restart loss is visible while the bots still run.
+    pub fn bots_unpersisted(&self) -> u32 {
+        let on_disk = crate::bots::BotStore::load(&self.config.ilink_tokens_file).bots;
+        self.bots_snapshot()
+            .iter()
+            .filter(|(id, b)| {
+                !b.token.trim().is_empty()
+                    && on_disk.get(*id).map(|d| d.token != b.token).unwrap_or(true)
+            })
+            .count() as u32
+    }
+    /// The bound notice reached this contact — recorded on the registry row so
+    /// it is sent exactly once (at bind when deliverable, else with the first
+    /// inbound). Returns whether a row changed.
+    pub fn mark_welcomed(&self, contact_id: &str) -> bool {
+        self.set_welcomed(contact_id, true)
+    }
+    /// Set the row's `welcomed` flag (false re-arms the acknowledgement for the
+    /// contact's next message). Returns whether a row changed.
+    pub fn set_welcomed(&self, contact_id: &str, welcomed: bool) -> bool {
+        self.registry
+            .mutate(|reg| {
+                let mut changed = false;
+                for c in reg.bound.iter_mut().filter(|c| c.contact_id == contact_id) {
+                    if c.welcomed != welcomed {
+                        c.welcomed = welcomed;
+                        changed = true;
+                    }
+                }
+                Ok(changed)
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(contact_id, welcomed, error = %e, "welcomed flag NOT persisted");
+                false
+            })
     }
 
     /// Clear the runtime identity (operator disconnect) — the supervisor stops

@@ -15,6 +15,8 @@ import type { GatewayApproveResponse } from '@/lib/generated/GatewayApproveRespo
 import type { ContactSummary } from '@/lib/generated/ContactSummary';
 import type { GatewayContactUpdateRequest } from '@/lib/generated/GatewayContactUpdateRequest';
 import type { GatewayContactRevokeRequest } from '@/lib/generated/GatewayContactRevokeRequest';
+import type { GatewayContactWelcomeRequest } from '@/lib/generated/GatewayContactWelcomeRequest';
+import type { GatewayContactWelcomeResponse } from '@/lib/generated/GatewayContactWelcomeResponse';
 import type { GatewayMonitorResponse } from '@/lib/generated/GatewayMonitorResponse';
 import type { GatewayHistoryResponse } from '@/lib/generated/GatewayHistoryResponse';
 import type { GatewayActivityResponse } from '@/lib/generated/GatewayActivityResponse';
@@ -211,6 +213,11 @@ export const gatewayClient = {
     call<{ ok: boolean; removed?: boolean }>('POST', '/v1/master/gateway/contacts/revoke', {
       contact_id: contactId,
     } satisfies GatewayContactRevokeRequest),
+  /** (Re)send a contact's bound acknowledgement — now, or armed for their next message. */
+  contactsWelcome: (contactId: string) =>
+    call<GatewayContactWelcomeResponse>('POST', '/v1/master/gateway/contacts/welcome', {
+      contact_id: contactId,
+    } satisfies GatewayContactWelcomeRequest),
 };
 
 /** The terminal login statuses — the poll loop stops on any of these. */

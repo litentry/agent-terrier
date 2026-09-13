@@ -29,6 +29,12 @@ pending_binds: number,
  */
 bots_online: number, 
 /**
+ * Live bots whose token is NOT in the tokens file on disk — they drop at the
+ * next gate restart (the file's path is unwritable: fix
+ * `AGENTKEYS_WEIXIN_ILINK_TOKENS_FILE`). 0 is the only healthy value.
+ */
+bots_unpersisted: number, 
+/**
  * Millis of the iLink loop's last successful poll (`null` = never / OA).
  */
 ilink_last_ok_ms?: number, 

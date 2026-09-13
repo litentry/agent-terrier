@@ -865,6 +865,15 @@ pub struct Contact {
     /// until the master grants reach (a `guest` default).
     #[serde(default)]
     pub reach: Vec<String>,
+    /// The member has been told, in their own chat, that they are bound and
+    /// whom they can talk to (the «✅ 绑定成功» notice). Set when that send
+    /// succeeds — at bind/approve time when the transport can already reach
+    /// them, else with their FIRST inbound message (the gate replies to it
+    /// with the notice before anything else). Never true without a delivered
+    /// send; `default` keeps older registry rows parseable (they are welcomed
+    /// on their next message, once).
+    #[serde(default)]
+    pub welcomed: bool,
 }
 
 /// The master-curated contact registry (a `policy`/`config`-data-class document,
@@ -939,6 +948,10 @@ pub struct ContactSummary {
     /// member, 2026-09-11) — false for code-bound contacts on other transports.
     #[serde(default)]
     pub connected: bool,
+    /// The bound notice reached them (see `Contact::welcomed`); false = it is
+    /// sent with their first message.
+    #[serde(default)]
+    pub welcomed: bool,
 }
 
 impl From<&Contact> for ContactSummary {
@@ -949,6 +962,7 @@ impl From<&Contact> for ContactSummary {
             tier: c.tier,
             reach: c.reach.clone(),
             connected: false,
+            welcomed: c.welcomed,
         }
     }
 }
@@ -996,6 +1010,11 @@ pub struct GatewayStatusView {
     /// Live iLink bots (one per connected member, 2026-09-11; the owner's counts).
     #[serde(default)]
     pub bots_online: u32,
+    /// Live bots whose token is NOT in the tokens file on disk — they drop at the
+    /// next gate restart (the file's path is unwritable: fix
+    /// `AGENTKEYS_WEIXIN_ILINK_TOKENS_FILE`). 0 is the only healthy value.
+    #[serde(default)]
+    pub bots_unpersisted: u32,
     /// Millis of the iLink loop's last successful poll (`null` = never / OA).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
@@ -1218,6 +1237,27 @@ pub struct GatewayContactUpdateRequest {
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct GatewayContactRevokeRequest {
     pub contact_id: String,
+}
+
+/// `POST /v1/gateway/admin/contacts/welcome` — (re)send a bound contact's
+/// acknowledgement («✅ 绑定成功…»): delivered now when their bot already holds
+/// a reply token for them, else ARMED for their next message.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactWelcomeRequest {
+    pub contact_id: String,
+}
+
+/// The welcome verdict: `sent` = it reached their chat now; false = it goes out
+/// with their next message (`detail` says why it could not go now).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactWelcomeResponse {
+    pub ok: bool,
+    pub sent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
 }
 
 /// `POST /v1/gateway/admin/bind/reject` — the master WITHDRAWS an invite (open
@@ -2972,6 +3012,7 @@ mod tests {
                 display_name: "小明".into(),
                 tier: ContactTier::Kid,
                 reach: vec!["storyteller".into()],
+                welcomed: true,
             }],
             pending: vec![],
             invites: vec![],

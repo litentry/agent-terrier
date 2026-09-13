@@ -25,11 +25,15 @@ export const TIER_INFO: Record<ContactTier, { zh: string; blurb: string }> = {
 /** An installed app's messaging audience: the tiers its manifest admits. */
 export interface InstalledAppAudience {
   label: string;
+  /** The `/alias`es the install wrote into contacts' reach — what a fresh invite
+   *  is pre-filled with (the gate routes on these, never on a display label). */
+  aliases: string[];
   tiers: ContactTier[];
 }
 
 type AppRowLike = {
   label: string;
+  reach_aliases?: string[];
   bindings: { audience: Array<{ slot: string; tiers: ContactTier[] }> };
   bound_channels: Array<{ kind: string }>;
 };
@@ -38,7 +42,11 @@ type AppRowLike = {
 export function appAudiences(rows: AppRowLike[]): InstalledAppAudience[] {
   return rows
     .filter((r) => r.bound_channels.some((b) => b.kind === 'messaging'))
-    .map((r) => ({ label: r.label, tiers: Array.from(new Set(r.bindings.audience.flatMap((a) => a.tiers))) }));
+    .map((r) => ({
+      label: r.label,
+      aliases: r.reach_aliases?.length ? r.reach_aliases : [r.label],
+      tiers: Array.from(new Set(r.bindings.audience.flatMap((a) => a.tiers))),
+    }));
 }
 
 /** The reach a fresh invite starts with: the owner reaches every agent that
@@ -49,7 +57,7 @@ export function appAudiences(rows: AppRowLike[]): InstalledAppAudience[] {
 export function suggestedReach(tier: ContactTier, agents: string[], apps: InstalledAppAudience[]): string[] {
   if (tier === 'owner') return Array.from(new Set(agents));
   if (tier === 'guest') return [];
-  return Array.from(new Set(apps.filter((a) => a.tiers.includes(tier)).map((a) => a.label)));
+  return Array.from(new Set(apps.filter((a) => a.tiers.includes(tier)).flatMap((a) => a.aliases)));
 }
 
 /** iLink bots are per member and bound by SCAN (one clawbot per WeChat account);
@@ -75,9 +83,30 @@ export function selfState(pending: GatewayPendingBindView[], contacts: ContactSu
   return mine.claimed ? 'claimed' : 'minted';
 }
 
-/** The step the page should draw attention to. */
-export function flowStep(online: boolean, self: SelfState): 1 | 2 | 3 {
-  if (!online) return 1;
-  if (self !== 'bound') return 2;
-  return 3;
+export type ContactsTab = 'connection' | 'invitations' | 'contacts';
+
+/** The tab the page opens on: the gate and the owner's own bot come first,
+ *  then open invites, then the bound household. A tab the user picked wins. */
+export function defaultTab(online: boolean, self: SelfState, openInvites: number): ContactsTab {
+  if (!online || self !== 'bound') return 'connection';
+  if (openInvites > 0) return 'invitations';
+  return 'contacts';
+}
+
+/** The ONE thing to do next, naming the tab it lives on — null once the household
+ *  is settled (owner bound with their own bot, no open invites, a member bound). */
+export function nextStepHint(
+  online: boolean,
+  self: SelfState,
+  scan: boolean,
+  openInvites: number,
+  familyBound: number,
+  ownerConnected: boolean,
+): { text: string; tab: ContactsTab } | null {
+  if (!online) return { text: scan ? 'connect your own WeChat — scan the QR from the connection card' : 'connect the household bot', tab: 'connection' };
+  if (self !== 'bound') return { text: scan ? 'bind yourself as the owner — connect my WeChat' : 'bind yourself as the owner — mint your code and text it to the bot', tab: 'connection' };
+  if (scan && !ownerConnected) return { text: 'your own WeChat has no clawbot yet — connect it from the connection card', tab: 'connection' };
+  if (openInvites > 0) return { text: `${openInvites} open invite${openInvites === 1 ? '' : 's'} — ${scan ? 'show the connect QR when they are with you' : 'they text the code, you approve'}`, tab: 'invitations' };
+  if (familyBound === 0) return { text: 'invite your first family member', tab: 'invitations' };
+  return null;
 }

@@ -177,6 +177,7 @@ mod tests {
                     display_name: "妈妈".into(),
                     tier: ContactTier::Owner,
                     reach: vec!["chef".into(), "doorkeeper".into()],
+                    welcomed: true,
                 },
                 Contact {
                     contact_id: "c-kid".into(),
@@ -185,6 +186,7 @@ mod tests {
                     display_name: "小明".into(),
                     tier: ContactTier::Kid,
                     reach: vec!["storyteller".into()],
+                    welcomed: true,
                 },
             ],
             pending: vec![],

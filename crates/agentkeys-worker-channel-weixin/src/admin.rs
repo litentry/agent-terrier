@@ -123,6 +123,7 @@ pub(crate) async fn admin_status(
             .values()
             .filter(|b| !b.token.trim().is_empty())
             .count() as u32,
+        bots_unpersisted: state.bots_unpersisted(),
         ilink_last_ok_ms: state.ilink_last_ok_ms(),
         audit_on_chain: state.audit_on_chain(),
         actor_omni: state.device.actor_omni(),
@@ -491,14 +492,15 @@ pub(crate) async fn login_status(
                 let bound = bind_member_by_scan(&state, &cid, &outcome).await;
                 *state.admin_login.lock().await = None;
                 return match bound {
-                    Ok(contact) => {
-                        info!(contact_id = %cid, bot_id = %bot_id, "member bot connected — contact bound by scan");
-                        reply(
-                            "connected",
-                            Some(bot_id),
-                            Some(scanned_by),
-                            Some(format!("bound:{}", contact.display_name)),
-                        )
+                    Ok((contact, persist_err)) => {
+                        info!(contact_id = %contact.contact_id, bot_id = %bot_id, "member bot connected — contact bound by scan");
+                        let detail = match persist_err {
+                            Some(e) => {
+                                format!("bound:{}; tokens_not_persisted: {e}", contact.display_name)
+                            }
+                            None => format!("bound:{}", contact.display_name),
+                        };
+                        reply("connected", Some(bot_id), Some(scanned_by), Some(detail))
                     }
                     Err(e) => reply(
                         "failed",
@@ -547,7 +549,12 @@ pub(crate) async fn login_status(
             }
 
             // Hot-swap the runtime identity → the supervisor restarts the loop.
-            state.set_ilink_identity(bot_token, base_url, bot_id.clone());
+            if let Err(e) = state.set_ilink_identity(bot_token, base_url, bot_id.clone()) {
+                detail = Some(match detail {
+                    Some(d) => format!("{d}; tokens_not_persisted: {e}"),
+                    None => format!("tokens_not_persisted: {e}"),
+                });
+            }
             *state.admin_login.lock().await = None;
             reply("connected", Some(bot_id), Some(scanned_by), detail)
         }
@@ -765,6 +772,7 @@ pub(crate) async fn bind_approve(
             display_name: invite.display_name.clone(),
             tier,
             reach,
+            welcomed: false,
         };
         // Rebind-safe: replace any bound row with the same contact_id OR the
         // same transport identity.
@@ -801,10 +809,11 @@ pub(crate) async fn bind_approve(
             let notice = bound_notice(&contact);
             match crate::outbound::deliver(&state, &contact.transport_id, &notice).await {
                 Ok(()) => {
+                    state.mark_welcomed(&contact.contact_id);
                     info!(contact_id = %contact.contact_id, "bound notice delivered to the member")
                 }
                 Err(e) => {
-                    warn!(contact_id = %contact.contact_id, error = %e, "bound notice NOT delivered (the bind stands)")
+                    warn!(contact_id = %contact.contact_id, error = %e, "bound notice NOT delivered now — it goes out with the member's next message (the bind stands)")
                 }
             }
             let resp = GatewayApproveResponse {
@@ -865,6 +874,7 @@ pub(crate) async fn bind_reject(
                         display_name: i.display_name.clone(),
                         tier: i.tier,
                         reach: i.reach.clone(),
+                        welcomed: false,
                     })
             });
         let before = reg.invites.len() + reg.pending.len();
@@ -933,7 +943,13 @@ pub(crate) async fn admin_contacts(
             .iter()
             .map(|c| {
                 let mut s: agentkeys_protocol::ContactSummary = c.into();
-                s.connected = state.bot_for_contact(&c.contact_id).is_some();
+                // An owner bound before the per-member model has no bot under their
+                // own id — the legacy owner bot (`self-owner`) still serves them.
+                s.connected = state.bot_for_contact(&c.contact_id).is_some()
+                    || (c.tier == agentkeys_protocol::ContactTier::Owner
+                        && state
+                            .bot_for_contact(crate::bots::OWNER_CONTACT_ID)
+                            .is_some());
                 s
             })
             .collect(),
@@ -1135,6 +1151,70 @@ pub(crate) async fn contacts_revoke(
         )
             .into_response(),
     }
+}
+
+/// `POST /v1/gateway/admin/contacts/welcome` — (re)send a bound contact's
+/// acknowledgement. Delivered NOW when the contact's own bot already holds a
+/// reply token for them (`sent:true`); otherwise the row's `welcomed` flag is
+/// cleared so the relay sends it with their next message (`sent:false`, the
+/// `detail` names why). Never a token-less or another bot's send (`deliver`
+/// refuses those). Unknown id → 404 `contact_unknown`.
+pub(crate) async fn contacts_welcome(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_protocol::GatewayContactWelcomeRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let contact = state
+        .registry
+        .snapshot()
+        .bound
+        .iter()
+        .find(|c| c.contact_id == req.contact_id)
+        .cloned();
+    let Some(contact) = contact else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "reason": "contact_unknown"})),
+        )
+            .into_response();
+    };
+    let notice = bound_notice(&contact);
+    let resp = match crate::outbound::deliver(&state, &contact.transport_id, &notice).await {
+        Ok(()) => {
+            state.set_welcomed(&contact.contact_id, true);
+            state.push_activity(
+                "welcomed",
+                &contact.display_name,
+                "acknowledgement re-sent to their chat",
+                false,
+            );
+            info!(contact = %contact.contact_id, "acknowledgement re-sent by the operator");
+            agentkeys_protocol::GatewayContactWelcomeResponse {
+                ok: true,
+                sent: true,
+                detail: None,
+            }
+        }
+        Err(e) => {
+            state.set_welcomed(&contact.contact_id, false);
+            state.push_activity(
+                "welcome_armed",
+                &contact.display_name,
+                "acknowledgement goes out with their next message",
+                false,
+            );
+            info!(contact = %contact.contact_id, error = %e, "acknowledgement ARMED for the contact's next message");
+            agentkeys_protocol::GatewayContactWelcomeResponse {
+                ok: true,
+                sent: false,
+                detail: Some(e.to_string()),
+            }
+        }
+    };
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 // ── registry export / import (#424 §2 — durable Config-class copy) ───────────
@@ -1392,32 +1472,7 @@ mod tests {
 /// of the claim ack. Reach is the alias list they can address; an empty reach
 /// says so instead of implying agents.
 pub(crate) fn bound_notice(c: &agentkeys_protocol::Contact) -> String {
-    let who = format!("{}（{}）", c.display_name, tier_zh(c.tier));
-    if c.reach.is_empty() {
-        return format!("✅ 绑定成功：{who}。管理员还没有为你开通可联系的助手，开通后会自动生效。");
-    }
-    let aliases = c
-        .reach
-        .iter()
-        .map(|a| format!("/{a}"))
-        .collect::<Vec<_>>()
-        .join("、");
-    format!(
-        "✅ 绑定成功：{who}。现在可以直接对话这些助手：{aliases}。发“/{} 你好”试试。",
-        c.reach[0]
-    )
-}
-
-fn tier_zh(t: agentkeys_protocol::ContactTier) -> &'static str {
-    use agentkeys_protocol::ContactTier::*;
-    match t {
-        Owner => "拥有者",
-        Partner => "配偶",
-        Elder => "长辈",
-        Kid => "孩子",
-        Helper => "帮手",
-        Guest => "访客",
-    }
+    crate::relay::bound_notice(c)
 }
 
 #[cfg(test)]
@@ -1433,6 +1488,7 @@ mod bound_notice_tests {
             display_name: "奶奶".into(),
             tier: ContactTier::Elder,
             reach: reach.iter().map(|s| s.to_string()).collect(),
+            welcomed: true,
         }
     }
 
@@ -1460,16 +1516,36 @@ mod bound_notice_tests {
 /// custodied under its contact id, the invite consumed. The transport id is the
 /// scan's `ilink_user_id`; the first inbound on the member's bot re-learns it
 /// if the transport spells it differently (`bots::learn_transport_id`).
+/// Bind a contact by the member's OWN scan. Returns the bound contact plus the
+/// token-persist failure, if any (the bot is live regardless — the caller says so).
 async fn bind_member_by_scan(
     state: &SharedWeixinGatewayState,
-    contact_id: &str,
+    requested_id: &str,
     outcome: &LoginOutcome,
-) -> anyhow::Result<Contact> {
+) -> anyhow::Result<(Contact, Option<String>)> {
     let transport_id = if outcome.scanned_by.is_empty() {
         format!("bot:{}", outcome.bot_id)
     } else {
         outcome.scanned_by.clone()
     };
+    // `self-owner` is the console's name for the owner: when the owner is already
+    // bound under another id (the pre-scan code ceremony), the scan RE-binds that
+    // row — their own phone becomes their bot — instead of failing invite_unknown.
+    let contact_id: String = {
+        let reg = state.registry.snapshot();
+        let known = reg.invites.iter().any(|i| i.contact_id == requested_id)
+            || reg.bound.iter().any(|c| c.contact_id == requested_id);
+        if !known && requested_id == crate::bots::OWNER_CONTACT_ID {
+            reg.bound
+                .iter()
+                .find(|c| c.tier == agentkeys_protocol::ContactTier::Owner)
+                .map(|c| c.contact_id.clone())
+                .unwrap_or_else(|| requested_id.to_string())
+        } else {
+            requested_id.to_string()
+        }
+    };
+    let contact_id = contact_id.as_str();
     let contact = state.registry.mutate(|reg| {
         let invite = reg
             .invites
@@ -1493,6 +1569,7 @@ async fn bind_member_by_scan(
             display_name,
             tier,
             reach,
+            welcomed: false,
         };
         reg.bound.retain(|c| {
             c.contact_id != contact_id
@@ -1503,16 +1580,27 @@ async fn bind_member_by_scan(
         reg.pending.retain(|p| p.transport_id != transport_id);
         Ok(contact)
     })?;
-    state.set_member_bot(
-        contact_id,
-        crate::bots::MemberBot {
-            token: outcome.bot_token.clone(),
-            base_url: outcome.base_url.clone(),
-            bot_id: outcome.bot_id.clone(),
-            user_id: outcome.scanned_by.clone(),
-            connected_at_secs: crate::relay::unix_secs(),
-        },
-    );
+    let persist_err = state
+        .set_member_bot(
+            contact_id,
+            crate::bots::MemberBot {
+                token: outcome.bot_token.clone(),
+                base_url: outcome.base_url.clone(),
+                bot_id: outcome.bot_id.clone(),
+                user_id: outcome.scanned_by.clone(),
+                connected_at_secs: crate::relay::unix_secs(),
+            },
+        )
+        .err()
+        .map(|e| e.to_string());
+    if let Some(e) = persist_err.as_deref() {
+        state.push_activity(
+            "bot_token_not_saved",
+            &contact.display_name,
+            &format!("her bot is live but its token was NOT saved — it drops at the next gate restart: {e}"),
+            false,
+        );
+    }
     emit_contact_bind_audit(state, &contact, "bound").await;
     state.push_activity(
         "bound",
@@ -1524,9 +1612,19 @@ async fn bind_member_by_scan(
         ),
         state.audit_on_chain(),
     );
+    // The acknowledgement: try now — it lands only when THIS bot already holds
+    // a reply token for the member (a re-login of the same bot); a fresh bot has
+    // none, `deliver` refuses (never a token-less or another bot's token), and
+    // the relay sends it with the member's first message (`RelayOutcome::welcome`).
     let notice = bound_notice(&contact);
-    if let Err(e) = crate::outbound::deliver(state, &contact.transport_id, &notice).await {
-        warn!(contact_id, error = %e, "bound notice NOT delivered after the scan (the bind stands)");
+    match crate::outbound::deliver(state, &contact.transport_id, &notice).await {
+        Ok(()) => {
+            state.mark_welcomed(contact_id);
+            info!(contact_id, "bound notice delivered right after the scan");
+        }
+        Err(e) => {
+            info!(contact_id, error = %e, "bound notice not deliverable yet — it goes out with the member's first message");
+        }
     }
-    Ok(contact)
+    Ok((contact, persist_err))
 }

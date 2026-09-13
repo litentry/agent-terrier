@@ -27,8 +27,19 @@ const BACKOFF_DELAY: Duration = Duration::from_secs(30);
 const STALE_TOKEN_PAUSE: Duration = Duration::from_secs(60 * 60);
 
 /// Durable loop state: the resumable cursor + the per-user reply tokens.
+/// BOTH belong to ONE bot: a `context_token` is issued inside a conversation
+/// with the bot that received the message, and the cursor is that bot's
+/// server-side position. So the file is keyed by `bot_key` — a fingerprint of
+/// the bot token — and a different bot NEVER inherits it (measured 2026-09-11
+/// 23:28 on VE prod: the owner's new bot resumed the old bot's file, the bound
+/// notice rode a stale token, the API answered `ret=0`, nothing reached the
+/// phone, and the row was wrongly marked welcomed).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct IlinkPersist {
+    /// `bot_key(token)` of the bot this file belongs to; empty = a pre-#688 file
+    /// (adopted once by the first bot that loads it).
+    #[serde(default)]
+    pub bot_key: String,
     #[serde(default)]
     pub get_updates_buf: String,
     /// `from_user_id` → the user's latest `context_token` (echo on sends).
@@ -39,7 +50,37 @@ pub struct IlinkPersist {
     pub hint_sent_secs: HashMap<String, u64>,
 }
 
+/// A stable, non-reversible fingerprint of a bot token (sha256, 16 hex chars).
+pub fn bot_key(token: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(token.as_bytes());
+    hex::encode(&digest[..8])
+}
+
 impl IlinkPersist {
+    /// Load the state file FOR a bot: a file another bot wrote is discarded
+    /// (fresh cursor, no reply tokens — the new bot has no conversation yet);
+    /// an unkeyed pre-#688 file is adopted once.
+    pub fn load_for(path: &str, token: &str) -> Self {
+        let key = bot_key(token);
+        let mut p = Self::load(path);
+        if p.bot_key.is_empty() {
+            p.bot_key = key;
+        } else if p.bot_key != key {
+            info!(
+                path,
+                dropped_reply_tokens = p.context_tokens.len(),
+                had_cursor = !p.get_updates_buf.is_empty(),
+                "ilink state file belonged to a PREVIOUS bot — starting fresh (its cursor and reply tokens are not this bot's)"
+            );
+            p = Self {
+                bot_key: key,
+                ..Self::default()
+            };
+        }
+        p
+    }
+
     pub fn load(path: &str) -> Self {
         match std::fs::read_to_string(path) {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
@@ -173,13 +214,13 @@ pub async fn run_with_token(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let cfg = &state.config;
-    let client = IlinkClient::new(&base_url, Some(token), &cfg.bot_agent);
+    let client = IlinkClient::new(&base_url, Some(token.clone()), &cfg.bot_agent);
     let state_file = if contact_id == crate::bots::OWNER_CONTACT_ID {
         cfg.ilink_state_file.clone()
     } else {
         crate::bots::member_state_file(&cfg.ilink_state_file, &contact_id)
     };
-    let mut persist = IlinkPersist::load(&state_file);
+    let mut persist = IlinkPersist::load_for(&state_file, &token);
 
     info!(
         contact = %contact_id,
@@ -303,8 +344,28 @@ pub async fn run_with_token(
                 warn!(reason = %e, "allowed turn did NOT reach a feed");
             }
 
+            // The member's acknowledgement first (this message carries the first
+            // context token her bot can answer with); the row is marked welcomed
+            // only once the send succeeded, so it is never lost and never repeated.
+            if let Some(w) = outcome.welcome.as_deref() {
+                let ct = persist.context_tokens.get(&from).map(|s| s.as_str());
+                match client.send_text(&from, w, ct).await {
+                    Ok(()) => {
+                        state.mark_welcomed(&outcome.contact_id);
+                        info!(contact = %outcome.contact_id, "bound notice delivered with the member's first message");
+                    }
+                    Err(e) => {
+                        warn!(contact = %outcome.contact_id, error = %e, "bound notice send failed — retried on the next message")
+                    }
+                }
+            }
             let mut reply = outcome.claim_ack.clone().or_else(|| {
-                relay::reply_text_for_turn(&outcome.decision, outcome.media_marker, false)
+                relay::reply_text_for_turn(
+                    &outcome.decision,
+                    outcome.media_marker,
+                    false,
+                    &outcome.reach,
+                )
             });
             if reply.is_none() && state.config.unknown_sender_hint {
                 let now = relay::unix_secs();
@@ -351,6 +412,7 @@ mod tests {
         assert!(fresh.get_updates_buf.is_empty() && fresh.context_tokens.is_empty());
 
         let p = IlinkPersist {
+            bot_key: String::new(),
             get_updates_buf: "cursor-1".into(),
             context_tokens: HashMap::from([("wxid-a".to_string(), "ctx-a".to_string())]),
             hint_sent_secs: HashMap::new(),
@@ -363,6 +425,22 @@ mod tests {
             back.context_tokens.get("wxid-a").map(String::as_str),
             Some("ctx-a")
         );
+
+        // An UNKEYED (pre-#688) file is adopted by the first bot that loads it…
+        let adopted = IlinkPersist::load_for(&path, "bot-A:secret");
+        assert_eq!(adopted.bot_key, bot_key("bot-A:secret"));
+        assert_eq!(adopted.get_updates_buf, "cursor-1");
+        adopted.save(&path);
+        // …the SAME bot resumes it…
+        let same = IlinkPersist::load_for(&path, "bot-A:secret");
+        assert_eq!(same.get_updates_buf, "cursor-1");
+        assert_eq!(same.context_tokens.len(), 1);
+        // …and ANOTHER bot never inherits its cursor or reply tokens.
+        let other = IlinkPersist::load_for(&path, "bot-B:secret");
+        assert_eq!(other.bot_key, bot_key("bot-B:secret"));
+        assert!(other.get_updates_buf.is_empty() && other.context_tokens.is_empty());
+        assert_ne!(bot_key("bot-A:secret"), bot_key("bot-B:secret"));
+        assert_eq!(bot_key("x").len(), 16);
 
         std::fs::remove_dir_all(&dir).ok();
     }

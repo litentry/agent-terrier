@@ -13,4 +13,9 @@ export type ContactSummary = { contact_id: string, display_name: string, tier: C
  * This contact's own iLink bot holds a live token on the gate (one bot per
  * member, 2026-09-11) — false for code-bound contacts on other transports.
  */
-connected: boolean, };
+connected: boolean, 
+/**
+ * The bound notice reached them (see `Contact::welcomed`); false = it is
+ * sent with their first message.
+ */
+welcomed: boolean, };

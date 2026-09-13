@@ -73,8 +73,14 @@ impl BotStore {
 }
 
 /// The tokens file lives next to the secrets file.
-pub fn default_tokens_file(secrets_file: &str) -> String {
-    let p = std::path::Path::new(secrets_file);
+/// Default tokens-file path: BESIDE THE ILINK STATE FILE (the writable state dir,
+/// `/var/lib/agentkeys` on a host) — NEVER beside the secrets file. Measured
+/// 2026-09-11 on VE prod: `/etc/agentkeys` is read-only under the unit's
+/// `ProtectSystem=strict` (only the secrets FILE is a `ReadWritePaths` grant, #419),
+/// so a member's scan-bind stored her token in memory only and no file was ever
+/// created; the next restart would have dropped her bot.
+pub fn default_tokens_file(state_file: &str) -> String {
+    let p = std::path::Path::new(state_file);
     match p.parent().filter(|d| !d.as_os_str().is_empty()) {
         Some(dir) => dir
             .join("weixin-ilink-tokens.json")
@@ -179,8 +185,8 @@ mod tests {
             .is_empty());
         assert!(BotStore::default().save("").is_err());
         assert_eq!(
-            default_tokens_file("/etc/agentkeys/weixin-secrets.env"),
-            "/etc/agentkeys/weixin-ilink-tokens.json"
+            default_tokens_file("/var/lib/agentkeys/weixin-ilink-state.json"),
+            "/var/lib/agentkeys/weixin-ilink-tokens.json"
         );
         assert_eq!(
             member_state_file("/var/lib/ak/ilink.json", "c-wife"),

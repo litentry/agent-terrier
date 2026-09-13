@@ -124,9 +124,19 @@ pub(crate) async fn deliver(
             } else {
                 crate::bots::member_state_file(&cfg.ilink_state_file, &bot_contact)
             };
-            let persist = crate::ilink_loop::IlinkPersist::load(&state_file);
-            let ct = persist.context_tokens.get(transport_id).map(String::as_str);
-            client.send_text(transport_id, text, ct).await
+            // Reply tokens are per bot: a token this bot did not receive (a
+            // previous bot's file, or none yet — a fresh bot has no conversation
+            // until the member writes first) is not a delivery path. The API
+            // answers ret=0 to such a send and the phone shows nothing (measured
+            // 2026-09-11), so this is an ERROR, never a silent "delivered".
+            let persist = crate::ilink_loop::IlinkPersist::load_for(&state_file, &bot.token);
+            let Some(ct) = persist.context_tokens.get(transport_id).map(String::as_str) else {
+                anyhow::bail!(
+                    "no reply token for this recipient on bot {} yet — deliverable only after their first message",
+                    if bot.bot_id.is_empty() { "(legacy)" } else { bot.bot_id.as_str() }
+                );
+            };
+            client.send_text(transport_id, text, Some(ct)).await
         }
         WeixinTransport::Telegram => {
             let token = cfg
@@ -327,6 +337,7 @@ mod tests {
                     display_name: "妈妈".into(),
                     tier: ContactTier::Owner,
                     reach: vec!["chef".into(), "Doorkeeper".into()],
+                    welcomed: true,
                 },
                 Contact {
                     contact_id: "c-kid".into(),
@@ -335,6 +346,7 @@ mod tests {
                     display_name: "小明".into(),
                     tier: ContactTier::Kid,
                     reach: vec!["chef".into()],
+                    welcomed: true,
                 },
                 Contact {
                     contact_id: "c-tg".into(),
@@ -343,6 +355,7 @@ mod tests {
                     display_name: "A".into(),
                     tier: ContactTier::Partner,
                     reach: vec!["chef".into()],
+                    welcomed: true,
                 },
             ],
             pending: vec![],

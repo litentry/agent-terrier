@@ -251,8 +251,23 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
                 warn!(reason = %e, "allowed turn did NOT reach a feed");
             }
 
+            if let Some(w) = outcome.welcome.as_deref() {
+                match client.send_text(msg.chat.id, w).await {
+                    Ok(()) => {
+                        state.mark_welcomed(&outcome.contact_id);
+                    }
+                    Err(e) => {
+                        warn!(contact = %outcome.contact_id, error = %e, "bound notice send failed — retried on the next message")
+                    }
+                }
+            }
             let mut reply = outcome.claim_ack.clone().or_else(|| {
-                relay::reply_text_for_turn(&outcome.decision, outcome.media_marker, true)
+                relay::reply_text_for_turn(
+                    &outcome.decision,
+                    outcome.media_marker,
+                    true,
+                    &outcome.reach,
+                )
             });
             if reply.is_none() && state.config.unknown_sender_hint {
                 let now = relay::unix_secs();
