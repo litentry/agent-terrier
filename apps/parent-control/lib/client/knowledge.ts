@@ -46,7 +46,7 @@ export interface KnowledgeItem {
   updated: string;
   bytes: number;
   preview: string;
-  /** The registry row when the item is curated (bindable by apps). */
+  /** The registry row when the item is typed (addressable by the install wizard). */
   curated: ResourceItemRow | null;
   /** The decrypted entry once its namespace has been opened. */
   entry: KnowledgeEntry | null;
@@ -200,10 +200,10 @@ export function editReaches(item: Pick<KnowledgeItem, 'ns' | 'curated'>, apps: A
   return [...r.bound, ...r.namespace].filter((l) => l !== except);
 }
 
-export function filterKnowledge(items: KnowledgeItem[], query: string, bindableOnly: boolean): KnowledgeItem[] {
+export function filterKnowledge(items: KnowledgeItem[], query: string, typedOnly: boolean): KnowledgeItem[] {
   const q = query.trim().toLowerCase();
   return items.filter((it) => {
-    if (bindableOnly && !it.curated) return false;
+    if (typedOnly && !it.curated) return false;
     if (!q) return true;
     const hay = [it.name, it.key, it.ns, it.kind, it.preview, ...it.tags, it.curated?.name_zh ?? '', it.curated?.filename ?? '']
       .join(' ')

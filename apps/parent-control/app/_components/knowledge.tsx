@@ -2,14 +2,15 @@
 
 // The KNOWLEDGE page (owner decision 2026-09-13): ONE surface for everything
 // the household's assistants may know — the master's canonical memory
-// namespaces AND the curated, app-bindable items (arch.md §5 `resource item`)
+// namespaces AND the typed items apps bind (arch.md §5 `resource item`)
 // that used to sit on two pages ("memory" and "resources"). The wire is
 // unchanged: entries live in `knowledge:<ns>`, a curated item is a registry row
 // over one of those entries, and an app reads a namespace through the
 // read-only `knowledge:<ns>` grant its install minted. What changed is the view:
 // by namespace (the grant unit — each namespace names who reads it) or grouped
 // by type / sensitivity / tag; one add-or-upload modal (shared with the
-// install wizard); curate-in-place for a plain note.
+// install wizard); every item is typed (D-K2) — an older untyped note gets its
+// row from "give it a type".
 
 import { Fragment, useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
@@ -58,7 +59,7 @@ type NsEntries = PreservedMemory[] | 'loading' | undefined;
 
 const INPUT: CSSProperties = { padding: '7px 9px', fontSize: 12.5, border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)', width: '100%' };
 const ID_RE = /^[a-z0-9-]{1,48}$/;
-const KINDS: ResourceKind[] = ['document', 'profile', 'dataset', 'gallery'];
+const KINDS: ResourceKind[] = ['note', 'document', 'profile', 'dataset', 'gallery'];
 
 type ItemMeta = { id: string; name: string; name_zh: string; kind: ResourceKind; tags: string[]; sensitivity: 'safe' | 'sensitive'; ns: string };
 export type KnowledgeAddInput = ItemMeta & { body: string };
@@ -127,9 +128,9 @@ export function KnowledgePage({
   const [registry, setRegistry] = useState('ok');
   const [groupBy, setGroupBy] = useState<KnowledgeGroupBy>('namespace');
   const [query, setQuery] = useState('');
-  const [bindableOnly, setBindableOnly] = useState(false);
+  const [typedOnly, setTypedOnly] = useState(false);
   // null = closed; `edit` pre-fills a curated item (saves as the next version);
-  // `curate` promotes a plain note into a typed, bindable item under its own key.
+  // `curate` registers an older untyped note as a typed item under its own key.
   const [modal, setModal] = useState<null | { edit?: ResourceItemRow; curate?: KnowledgeEntry }>(null);
 
   const refresh = useCallback(async () => {
@@ -145,13 +146,15 @@ export function KnowledgePage({
       if (a.ok) setApps(a.data.apps);
     }
   }, [client]);
+  // Re-read the registry on connect, after an install / uninstall, and after a
+  // plant (D-K2: a plant registers note rows for what it planted).
   useEffect(() => {
-    if (connected) void refresh();
-  }, [connected, refresh, reloadKey]);
+    if (connected && !planting) void refresh();
+  }, [connected, planting, refresh, reloadKey]);
 
   const namespaces = useMemo(() => knowledgeNamespaces(categories, resources, entriesByNs, apps, actors), [categories, resources, entriesByNs, apps, actors]);
   const items = useMemo(() => buildKnowledgeItems(resources, entriesByNs), [resources, entriesByNs]);
-  const shown = useMemo(() => filterKnowledge(items, query, bindableOnly), [items, query, bindableOnly]);
+  const shown = useMemo(() => filterKnowledge(items, query, typedOnly), [items, query, typedOnly]);
   const groups = useMemo(() => groupKnowledge(shown, groupBy, namespaces), [shown, groupBy, namespaces]);
   const hasAnything = categories.length > 0 || resources.length > 0;
   const unopened = namespaces.filter((n) => n.notes === null);
@@ -288,7 +291,7 @@ export function KnowledgePage({
         <>
           <div className="stats">
             <div className="stat"><div className="v">{namespaces.length}</div><div className="k">namespaces</div></div>
-            <div className="stat"><div className="v">{resources.length}</div><div className="k">bindable items</div></div>
+            <div className="stat"><div className="v">{resources.length}</div><div className="k">typed items</div></div>
             <div className="stat"><div className="v">{readingApps}</div><div className="k">apps reading</div></div>
           </div>
 
@@ -296,7 +299,7 @@ export function KnowledgePage({
             <span className="lbl">namespace = the grant</span>
             <span>
               Binding one item to an app grants the app <strong>its whole namespace</strong>; the same namespace bound to several apps is stored once, never copied.
-              A plain note is knowledge an app cannot be bound to yet — <strong>curate</strong> it to give it a type and make it bindable.
+              Every item has a type — a plain note by default; an app slot asks for a type, and the install wizard retypes an item when you bind it. An older untyped note gets its row from <strong>give it a type</strong>.
               <button className="btn ghost sm" style={{ marginLeft: 10 }} onClick={onPlant}>＋ plant demo archive</button>
             </span>
           </div>
@@ -314,7 +317,7 @@ export function KnowledgePage({
               <span style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
                 <input style={{ ...INPUT, width: 180, padding: '4px 8px' }} placeholder="filter…" value={query} onChange={(e) => setQuery(e.target.value)} />
                 <label className="muted" style={{ display: 'flex', gap: 5, alignItems: 'center', fontSize: 12 }}>
-                  <input type="checkbox" checked={bindableOnly} onChange={(e) => setBindableOnly(e.target.checked)} /> bindable only
+                  <input type="checkbox" checked={typedOnly} onChange={(e) => setTypedOnly(e.target.checked)} /> typed only
                 </label>
               </span>
             }
@@ -348,13 +351,13 @@ export function KnowledgePage({
                   <div className="muted" style={{ padding: '8px 16px', fontSize: 11.5, display: 'flex', gap: 10, alignItems: 'center' }}>
                     {n.notes === null ? (
                       <>
-                        <span>{n.curated} bindable · notes decrypt on open</span>
+                        <span>{n.curated} typed · notes decrypt on open</span>
                         <button className="btn sm" onClick={() => onLoadCategory(n.ns)}>open notes</button>
                       </>
                     ) : n.notes === 'loading' ? (
                       <span>decrypting knowledge:{n.ns}…</span>
                     ) : (
-                      <span>{n.curated} bindable · {n.notes} note{n.notes === 1 ? '' : 's'}</span>
+                      <span>{n.curated} typed · {n.notes} untyped note{n.notes === 1 ? '' : 's'}</span>
                     )}
                   </div>
                 )}
@@ -414,7 +417,7 @@ function KnowledgeRow({
           <span className="clickable" style={{ cursor: 'pointer' }} onClick={onOpen}>{item.name}</span>
           <Chip kind={row ? 'ok' : 'default'}>{item.kind}</Chip>
           {item.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>}
-          {!row && <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>not bindable yet</span>}
+          {!row && <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>untyped</span>}
         </div>
         <div className="muted" style={{ fontSize: 11 }}>
           <code>{showNs ? `${item.ns}/` : ''}{item.key}</code> · {item.version} · {item.bytes} B · {item.updated}
@@ -435,7 +438,7 @@ function KnowledgeRow({
       </div>
       <div style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
         <button className="btn sm" onClick={onOpen}>open</button>
-        {onEdit && <>{' '}<button className="btn sm" onClick={onEdit}>{row ? 'edit' : 'curate'}</button></>}
+        {onEdit && <>{' '}<button className="btn sm" onClick={onEdit}>{row ? 'edit' : 'give it a type'}</button></>}
         {onRemove && <>{' '}<button className="btn sm" style={{ color: 'var(--danger)' }} onClick={onRemove}>remove</button></>}
       </div>
     </div>
@@ -445,7 +448,7 @@ function KnowledgeRow({
 /** The one add / upload / edit / curate modal — this page's and the install
  *  wizard's (an empty slot opens it pre-set to the slot's kind). A saved item
  *  is planted as read-only canonical memory under `knowledge:<ns>` and registered
- *  as a typed, bindable item. */
+ *  as a typed item. */
 export function KnowledgeItemModal({
   client,
   initialKind,
@@ -470,7 +473,7 @@ export function KnowledgeItemModal({
   const [id, setId] = useState(edit?.id ?? curate?.key ?? '');
   const [name, setName] = useState(edit?.name ?? curate?.title ?? '');
   const [nameZh, setNameZh] = useState(edit?.name_zh ?? '');
-  const [kind, setKind] = useState<ResourceKind>(edit?.kind ?? initialKind ?? 'document');
+  const [kind, setKind] = useState<ResourceKind>(edit?.kind ?? initialKind ?? (curate ? 'note' : 'document'));
   const [tags, setTags] = useState(edit?.tags.join(', ') ?? '');
   const [sensitivity, setSensitivity] = useState<'safe' | 'sensitive'>(edit?.sensitivity ?? 'safe');
   const [ns, setNs] = useState(edit?.ns ?? curate?.ns ?? 'household');
@@ -526,14 +529,14 @@ export function KnowledgeItemModal({
   const title = edit
     ? `Edit ${edit.id} (saves as v${edit.version + 1})`
     : curate
-      ? `Curate ${curate.key} as a bindable item`
+      ? `Give ${curate.key} a type`
       : 'Add knowledge — paste text or upload a file';
   const cta = busy
     ? (mode === 'upload' ? 'uploading…' : 'planting…')
     : edit
       ? 'save as next version'
       : curate
-        ? 'curate'
+        ? 'register'
         : mode === 'upload'
           ? 'upload'
           : 'add';
@@ -607,7 +610,7 @@ export function KnowledgeItemModal({
               : <>No app reads namespace <code>{nsInfo.ns}</code> yet; an install that binds this item is granted the whole namespace.</>
             : <>A new namespace: the first app you bind this item to is granted all of it. Use a namespace of its own for something only one app should read.</>}
         {curate && idOk && id === curate.key && <> Keeping the note&apos;s key as the id replaces the note in place.</>}
-        {curate && idOk && id !== curate.key && <> A different id adds a curated copy beside the note.</>}
+        {curate && idOk && id !== curate.key && <> A different id adds a typed copy beside the note.</>}
         {edit && <> Saving bumps the version and replaces the previous text for every app that reads it.</>}
       </p>
     </Modal>

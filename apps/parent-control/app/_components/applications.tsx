@@ -33,7 +33,7 @@ import type { ServiceAnnotation } from '@/lib/generated/ServiceAnnotation';
 import { Chip, Dot, Modal, PageHead, Panel } from './shared';
 import { KnowledgeItemModal } from './knowledge';
 import { editReaches } from '@/lib/client/knowledge';
-import { FEED_ID_RE, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
+import { FEED_ID_RE, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
 
 type View = 'apps' | 'endpoints';
 
@@ -173,6 +173,20 @@ export function ApplicationsPage({
   }, [refresh]);
 
   // The wizard's empty slot opened the modal: a successful add binds the new item to that slot.
+  // D-K2 — the type is metadata: a slot may bind ANY item; picking one of another
+  // kind retypes it in place (no new version), then the wizard binds it.
+  const retypeResource = async (id: string, kind: ResourceKind): Promise<boolean> => {
+    if (!client.resourceRetype) return false;
+    const r = await client.resourceRetype({ id, kind });
+    if (!r.ok) {
+      showToast(`retype failed — ${r.status?.detail ?? 'error'}`, true);
+      return false;
+    }
+    showToast(`${id} is now a ${kind}`);
+    await refresh();
+    return true;
+  };
+
   const bindNewResourceToSlot = (id: string) => {
     const slot = addingResource?.slot;
     if (!slot) return;
@@ -488,6 +502,7 @@ export function ApplicationsPage({
             onGoChannels={onGoChannels}
             onCreateChannel={onCreateChannel}
             onAddResource={(kind, slot) => setAddingResource({ kind, slot })}
+            onRetypeResource={retypeResource}
           />
         );
       })()}
@@ -729,6 +744,7 @@ function InstallWizard({
   onGoChannels,
   onCreateChannel,
   onAddResource,
+  onRetypeResource,
 }: {
   w: WizardState;
   tp: PresetSummary;
@@ -741,6 +757,8 @@ function InstallWizard({
   onCreateChannel?: CreateChannelFn;
   /** Open the knowledge modal pre-set to the slot's kind; a successful add binds the new item to `slot`. */
   onAddResource?: (kind: ResourceKind, slot: string) => void;
+  /** D-K2 — retype an item of another kind to the slot's kind (metadata only); resolves true when done. */
+  onRetypeResource?: (id: string, kind: ResourceKind) => Promise<boolean>;
 }) {
   const slots = tp.slots ?? [];
   const reqs = tp.resources ?? [];
@@ -813,15 +831,28 @@ function InstallWizard({
         <>
           <p className="muted" style={{ fontSize: 12.5 }}>Choose which knowledge items the app may read. Read-only — an app can never change them, and binding one grants the app the item&apos;s whole namespace.</p>
           {reqs.map((r) => {
-            const opts = resources.filter((it) => it.kind === r.kind);
+            const { matching: opts, others } = partitionResourceOptions(resources, r.kind);
             return (
               <div key={r.name} style={{ marginBottom: 14 }}>
                 <div className="perm-section-head"><span className="ttl">{r.name} · {r.kind}</span><span className="summary">{r.required ? 'required' : 'optional'}{r.sensitivity_floor ? ` · floor ${r.sensitivity_floor}` : ''}</span></div>
                 <div className="perm-rows">
                   {opts.map((it) => <div key={it.id}>{opt(w.resources[r.name] === it.id, () => setW({ ...w, resources: { ...w.resources, [r.name]: it.id } }), <>{it.name} {it.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>} <span className="muted" style={{ fontSize: 11 }}>· <code>{it.ns}</code> · v{it.version}</span></>)}</div>)}
+                  {others.length > 0 && onRetypeResource && (
+                    <details style={{ padding: '6px 12px' }}>
+                      <summary className="muted" style={{ fontSize: 12, cursor: 'pointer' }}>use another item as a {r.kind} · {others.length}</summary>
+                      {others.map((it) => (
+                        <div key={it.id}>
+                          {opt(false, () => {
+                            setW({ ...w, resources: { ...w.resources, [r.name]: it.id } });
+                            void onRetypeResource(it.id, r.kind as ResourceKind);
+                          }, <>{it.name} <Chip>{it.kind}</Chip> {it.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>} <span className="muted" style={{ fontSize: 11 }}>· <code>{it.ns}</code> · becomes a {r.kind}</span></>)}
+                        </div>
+                      ))}
+                    </details>
+                  )}
                   {opts.length === 0 && (
                     <div className="muted" style={{ padding: '10px 12px', fontSize: 12.5, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                      <span>No {r.kind} curated yet.</span>
+                      <span>No {r.kind} yet.</span>
                       {onAddResource && <button className="btn sm" onClick={() => onAddResource(r.kind as ResourceKind, r.name)}>+ add a {r.kind} now</button>}
                       <span style={{ fontSize: 11.5 }}>(paste text or upload a file — it binds to this slot when saved)</span>
                     </div>

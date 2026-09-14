@@ -4,4 +4,4 @@
  * The closed resource-kind vocabulary (plan §4.5): what SHAPE a curated
  * read-only item has, never what it is about.
  */
-export type ResourceKind = "document" | "profile" | "dataset" | "gallery";
+export type ResourceKind = "document" | "profile" | "dataset" | "gallery" | "note";

@@ -538,13 +538,15 @@ the permissions you approve. parent-control → **applications**:
   back through the same bot.
 - **Knowledge.** The **Knowledge** page is the one place for everything your
   household's assistants may know: your canonical memory namespaces and the
-  curated items an app can be bound to (the former memory and resources
-  pages). View it by namespace, or grouped by type, sensitivity or tag; open a
+  typed items an app binds (the former memory and resources pages). View it by namespace, or grouped by type, sensitivity or tag; open a
   namespace to decrypt its plain notes. **+ add knowledge** pastes text or
   uploads a file — plain text, markdown, CSV, JSON, a PDF, or an image (up to
   5 MB); the text is what an app reads (a PDF's text is extracted; an image
   becomes a gallery caption) and the file's bytes are kept beside it.
-  **Curate** turns a plain note into a typed, bindable item under its own key.
+  Every item has a **type** — a plain note by default; an app slot asks for a
+  type, and the install wizard can **retype** an item when you bind it (the
+  type is metadata, so a retype is not a new version). **Give it a type**
+  registers an older, untyped note under its own key.
   Re-adding an id makes the next version and replaces the previous text;
   remove drops the item (it refuses while an app is bound to it unless you
   confirm). **The grant is the namespace**: binding one item grants the app

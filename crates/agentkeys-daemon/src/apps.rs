@@ -2057,6 +2057,110 @@ mod tests {
 /// No config worker, no channel worker, no gateway: those legs degrade the way
 /// the handlers document (cached registry, `reach` skipped) — the CI phase-8
 /// suite proves them live; this pins the compile/stash/submit/list contract.
+/// `POST /v1/master/resources/retype` body (D-K2, `plan/knowledge-repository.md`
+/// §5): the type is metadata, so a retype changes the registry row and nothing
+/// else — no new version, no re-plant. Tags and the tier are optional.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResourceRetypeRequest {
+    pub id: String,
+    pub kind: ResourceKind,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub sensitivity: Option<Sensitivity>,
+}
+
+pub async fn retype_resource(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ResourceRetypeRequest>,
+) -> axum::response::Response {
+    if let Err(r) = crate::ui_bridge::require_master_session(&state).await {
+        return r;
+    }
+    let id = req.id.trim().to_lowercase();
+    let mut reg = match ensure_resource_registry(&state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("resource registry: {e}")),
+    };
+    let tags = req.tags.map(|t| {
+        t.iter()
+            .map(|x| x.trim().to_lowercase())
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let Some(item) = reg
+        .retype(&id, req.kind, tags, req.sensitivity, now_unix())
+        .cloned()
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "resource_not_found", "id": id })),
+        )
+            .into_response();
+    };
+    match persist_resource_registry(&state, reg).await {
+        Ok(storage) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "item": item, "storage": storage })),
+        )
+            .into_response(),
+        Err(e) => registry_err(
+            StatusCode::BAD_GATEWAY,
+            &format!("resource registry store failed: {e}"),
+        ),
+    }
+}
+
+/// D-K2 — every console-created entry is typed: a plain `knowledge`-kind entry
+/// the console plants, or merges from a proposal, gets a `note` row under its
+/// own key, so the install wizard can bind it like any other item (retyping it
+/// on the way). An entry whose key is not a valid item id, or that already has
+/// a row (typed by the owner), is left alone. Returns the rows added.
+pub(crate) async fn register_note_rows(
+    state: &SharedUiBridgeState,
+    entries: &[crate::ui_bridge::ApiMemoryEntry],
+) -> Result<usize, String> {
+    let mut reg = ensure_resource_registry(state).await?;
+    let mut added = 0usize;
+    for e in entries {
+        if e.kind != agentkeys_backend_client::protocol::ContextKind::Knowledge
+            || !agentkeys_backend_client::protocol::is_valid_resource_id(&e.key)
+            || reg.find(&e.key).is_some()
+        {
+            continue;
+        }
+        let now = now_unix();
+        reg.upsert(ResourceItemRow {
+            id: e.key.clone(),
+            name: if e.title.trim().is_empty() {
+                e.key.clone()
+            } else {
+                e.title.clone()
+            },
+            name_zh: String::new(),
+            ns: e.ns.clone(),
+            object_key: e.key.clone(),
+            kind: ResourceKind::Note,
+            tags: Vec::new(),
+            sensitivity: Sensitivity::Safe,
+            version: 0,
+            content_hash: crate::ui_bridge::content_hash_for(&e.ns, &e.key, &e.body),
+            bytes: e.body.len() as u64,
+            created_at: now,
+            updated_at: now,
+            filename: String::new(),
+            content_type: String::new(),
+            raw_object_key: String::new(),
+            raw_bytes: 0,
+        });
+        added += 1;
+    }
+    if added > 0 {
+        persist_resource_registry(state, reg).await?;
+    }
+    Ok(added)
+}
+
 #[cfg(test)]
 mod handler_tests {
     use super::*;
@@ -2450,6 +2554,128 @@ mod handler_tests {
         let list = items["items"].as_array().unwrap();
         assert_eq!(list.len(), 1, "{items}");
         assert_eq!(list[0]["version"], 2);
+    }
+
+    #[tokio::test]
+    async fn retype_changes_the_type_without_a_new_version() {
+        let state = state_with_session(None).await;
+        let (status, added) = read(
+            add_resource(
+                State(state.clone()),
+                Json(ResourceAddRequest {
+                    id: "wifi-note".into(),
+                    name: "Wifi".into(),
+                    name_zh: String::new(),
+                    kind: ResourceKind::Note,
+                    tags: vec![],
+                    sensitivity: Sensitivity::Safe,
+                    ns: "household".into(),
+                    body: "SSID home / pass 1234".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200, "{added}");
+        assert_eq!(added["item"]["kind"], "note");
+        let (status, re) = read(
+            retype_resource(
+                State(state.clone()),
+                Json(ResourceRetypeRequest {
+                    id: "wifi-note".into(),
+                    kind: ResourceKind::Profile,
+                    tags: Some(vec!["Home".into(), " ".into()]),
+                    sensitivity: Some(Sensitivity::Sensitive),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200, "{re}");
+        assert_eq!(re["item"]["kind"], "profile");
+        assert_eq!(
+            re["item"]["version"], 1,
+            "a retype is metadata, not a version"
+        );
+        assert_eq!(re["item"]["tags"][0], "home");
+        assert_eq!(re["item"]["sensitivity"], "sensitive");
+        let (status, missing) = read(
+            retype_resource(
+                State(state.clone()),
+                Json(ResourceRetypeRequest {
+                    id: "nope".into(),
+                    kind: ResourceKind::Document,
+                    tags: None,
+                    sensitivity: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 404, "{missing}");
+    }
+
+    #[tokio::test]
+    async fn planted_notes_get_a_row_under_a_valid_id_and_never_lose_a_type() {
+        let state = state_with_session(None).await;
+        let entry = |key: &str, body: &str| crate::ui_bridge::ApiMemoryEntry {
+            ns: "personal".into(),
+            key: key.into(),
+            title: key.into(),
+            bytes: body.len() as u64,
+            version: "1".into(),
+            updated: String::new(),
+            preview: body.into(),
+            body: body.into(),
+            content_hash: String::new(),
+            kind: agentkeys_backend_client::protocol::ContextKind::Knowledge,
+        };
+        let added = register_note_rows(
+            &state,
+            &[entry("chengdu-trip", "pandas"), entry("Bad Key", "x")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(added, 1, "only a valid id becomes a row");
+        let reg = ensure_resource_registry(&state).await.unwrap();
+        assert_eq!(
+            reg.find("chengdu-trip").map(|r| r.kind),
+            Some(ResourceKind::Note)
+        );
+        assert_eq!(
+            reg.find("chengdu-trip").map(|r| r.object_key.clone()),
+            Some("chengdu-trip".into())
+        );
+        assert!(reg.find("Bad Key").is_none());
+        // the owner types it; a later plant of the same key never downgrades it
+        let (status, _) = read(
+            retype_resource(
+                State(state.clone()),
+                Json(ResourceRetypeRequest {
+                    id: "chengdu-trip".into(),
+                    kind: ResourceKind::Document,
+                    tags: None,
+                    sensitivity: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            register_note_rows(&state, &[entry("chengdu-trip", "pandas v2")])
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            ensure_resource_registry(&state)
+                .await
+                .unwrap()
+                .find("chengdu-trip")
+                .map(|r| r.kind),
+            Some(ResourceKind::Document)
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChannelDef } from '../client/types';
-import { FEED_ID_RE, partitionSlotOptions, suggestedFeedId } from '../client/slotOptions';
+import { FEED_ID_RE, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '../client/slotOptions';
 
 const ch = (id: string, kind?: ChannelDef["kind"], name = id): ChannelDef => ({ id, name, kind, createdAt: 0 });
 
@@ -33,5 +33,26 @@ describe('install wizard slot options', () => {
     expect(suggestedFeedId('  Family Chat!! ')).toBe('family-chat');
     for (const s of ['kitchen_screen', 'family_chat', 'x'.repeat(50)]) expect(FEED_ID_RE.test(suggestedFeedId(s))).toBe(true);
     expect(FEED_ID_RE.test('Kitchen')).toBe(false);
+  });
+});
+
+describe('install wizard item options (D-K2: the type is metadata)', () => {
+  const items = [
+    { id: 'gene-report', name: 'Gene report', kind: 'document' },
+    { id: 'wifi-note', name: 'Wifi', kind: 'note' },
+    { id: 'allergies', name: 'Allergies', kind: 'profile' },
+    { id: 'food-prefs', name: 'Food preferences', kind: 'profile' },
+  ];
+
+  it('lists the slot kind first and folds every other item behind a retype', () => {
+    const { matching, others } = partitionResourceOptions(items, 'profile');
+    expect(matching.map((i) => i.id)).toEqual(['allergies', 'food-prefs']);
+    expect(others.map((i) => i.id)).toEqual(['gene-report', 'wifi-note']);
+  });
+
+  it('offers a plain note to any slot', () => {
+    const { matching, others } = partitionResourceOptions(items, 'dataset');
+    expect(matching).toEqual([]);
+    expect(others).toHaveLength(4);
   });
 });

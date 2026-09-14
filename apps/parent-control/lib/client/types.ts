@@ -853,6 +853,8 @@ export interface AgentKeysClient {
   }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string; extracted_bytes: number; raw_stored: boolean | null }>>;
   /** #674 — unregister an item and drop its entry; refused (409 resource_in_use) while a live app is bound to it unless `force`. */
   resourceRemove?(input: { id: string; force?: boolean }): Promise<Result<{ ok: boolean; removed: boolean; item?: ResourceItemRow; apps?: string[] }>>;
+  /** D-K2 — the type is metadata: change an item's kind (and optionally its tags / tier) in place, no new version. */
+  resourceRetype?(input: { id: string; kind: ResourceKind; tags?: string[]; sensitivity?: 'safe' | 'sensitive' }): Promise<Result<{ ok: boolean; item: ResourceItemRow; storage: string }>>;
   // #541 / #667 — the two device-actor enrollments the console drives (this
   // console itself, and the channel gateway): build → ONE Touch ID → submit.
   consoleDeviceStatus?(): Promise<Result<ConsoleDeviceStatus>>;

@@ -22,6 +22,17 @@ export function partitionSlotOptions(channels: ChannelDef[], kind: string, query
   };
 }
 
+/** The install wizard's item picker for a resource slot (D-K2): items of the
+ *  slot's kind first, then every other item — a pick there retypes the item on
+ *  bind, since the type is metadata. Both halves sorted by name. */
+export function partitionResourceOptions<T extends { id: string; name: string; kind: string }>(items: T[], kind: string): { matching: T[]; others: T[] } {
+  const byName = (a: T, b: T) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+  return {
+    matching: items.filter((i) => i.kind === kind).sort(byName),
+    others: items.filter((i) => i.kind !== kind).sort(byName),
+  };
+}
+
 /** A channel / feed id: lowercase, digits, dashes; 1–32 chars. */
 export const FEED_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 

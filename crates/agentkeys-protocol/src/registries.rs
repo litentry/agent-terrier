@@ -238,6 +238,29 @@ impl ResourceRegistryDoc {
         Some(self.items.remove(idx))
     }
 
+    /// Change an item's TYPE metadata in place (D-K2 — the type is metadata, so
+    /// a retype is not a new version): the kind, and optionally the tags and
+    /// the tier. `None` when no row carries the id.
+    pub fn retype(
+        &mut self,
+        id: &str,
+        kind: ResourceKind,
+        tags: Option<Vec<String>>,
+        sensitivity: Option<Sensitivity>,
+        now: u64,
+    ) -> Option<&ResourceItemRow> {
+        let row = self.items.iter_mut().find(|i| i.id == id)?;
+        row.kind = kind;
+        if let Some(t) = tags {
+            row.tags = t;
+        }
+        if let Some(s) = sensitivity {
+            row.sensitivity = s;
+        }
+        row.updated_at = now;
+        Some(row)
+    }
+
     /// Items a template request may bind: same kind, and every requested tag
     /// present when the request carries tags.
     pub fn matching<'a>(
@@ -314,6 +337,38 @@ mod tests {
         assert_eq!(reg.items[0].id, "diet");
         assert!(reg.opaque.is_empty());
         assert!(ResourceRegistryDoc::from_slice_lenient(b"[]").is_err());
+    }
+
+    #[test]
+    fn resource_registry_retype_changes_only_metadata() {
+        let mut reg = ResourceRegistryDoc::default();
+        reg.upsert(item("wifi", ResourceKind::Note, &[]));
+        reg.upsert(item("wifi", ResourceKind::Note, &[])); // v2
+        let row = reg
+            .retype(
+                "wifi",
+                ResourceKind::Profile,
+                Some(vec!["home".into()]),
+                Some(Sensitivity::Sensitive),
+                99,
+            )
+            .cloned()
+            .expect("row");
+        assert_eq!(row.kind, ResourceKind::Profile);
+        assert_eq!(row.tags, vec!["home".to_string()]);
+        assert_eq!(row.sensitivity, Sensitivity::Sensitive);
+        assert_eq!(row.version, 2, "a retype is metadata, never a version");
+        assert_eq!(row.updated_at, 99);
+        // kind only: tags + tier untouched
+        let row = reg
+            .retype("wifi", ResourceKind::Dataset, None, None, 100)
+            .cloned()
+            .unwrap();
+        assert_eq!(row.tags, vec!["home".to_string()]);
+        assert_eq!(row.sensitivity, Sensitivity::Sensitive);
+        assert!(reg
+            .retype("nope", ResourceKind::Note, None, None, 1)
+            .is_none());
     }
 
     #[test]

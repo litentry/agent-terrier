@@ -1033,6 +1033,10 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson('/v1/master/resources/upload', input);
   }
 
+  async resourceRetype(input: { id: string; kind: ResourceKind; tags?: string[]; sensitivity?: 'safe' | 'sensitive' }): Promise<Result<{ ok: boolean; item: ResourceItemRow; storage: string }>> {
+    return this.postJson('/v1/master/resources/retype', input);
+  }
+
   async resourceRemove(input: { id: string; force?: boolean }): Promise<Result<{ ok: boolean; removed: boolean; item?: ResourceItemRow; apps?: string[] }>> {
     return this.postJson('/v1/master/resources/remove', input);
   }

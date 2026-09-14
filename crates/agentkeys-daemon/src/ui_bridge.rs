@@ -1379,6 +1379,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         )
         .route("/v1/master/resources", get(crate::apps::list_resources))
         .route("/v1/master/resources/add", post(crate::apps::add_resource))
+        .route(
+            "/v1/master/resources/retype",
+            post(crate::apps::retype_resource),
+        )
         // #674 — file upload (JSON + base64; axum's 2 MiB default would 413 a
         // 5 MiB file) and remove.
         .route(
@@ -11188,7 +11192,7 @@ async fn accept_master_inbox(
     let plant = match plant_master_memory_inner(
         &state,
         MasterMemoryPlantRequest {
-            entries: vec![entry],
+            entries: vec![entry.clone()],
         },
     )
     .await
@@ -11202,6 +11206,12 @@ async fn accept_master_inbox(
                 .into_response()
         }
     };
+
+    // D-K2 — a merged plain proposal becomes a typed `note` item (skills and
+    // persona stay outside the registry — their own adoption gates).
+    if let Err(e) = crate::apps::register_note_rows(&state, std::slice::from_ref(&entry)).await {
+        tracing::warn!(error = %e, ns = %ns, key = %key, "merge: note row not registered");
+    }
 
     // 3. GC the inbox object (delete-on-accept).
     if let Err((status, reason)) = inbox_worker_post(
@@ -11924,8 +11934,18 @@ async fn plant_master_memory(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<MasterMemoryPlantRequest>,
 ) -> axum::response::Response {
+    // D-K2 — every console-created entry is typed: the planted plain entries
+    // get a `note` row (the response stays the frozen web-api contract).
+    let entries = req.entries.clone();
     match plant_master_memory_inner(&state, req).await {
-        Ok(resp) => (axum::http::StatusCode::OK, Json(resp)).into_response(),
+        Ok(resp) => {
+            match crate::apps::register_note_rows(&state, &entries).await {
+                Ok(n) if n > 0 => tracing::info!(rows = n, "plant: registered note rows"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "plant: note rows not registered"),
+            }
+            (axum::http::StatusCode::OK, Json(resp)).into_response()
+        }
         Err((status, reason)) => {
             (status, Json(serde_json::json!({ "error": reason }))).into_response()
         }

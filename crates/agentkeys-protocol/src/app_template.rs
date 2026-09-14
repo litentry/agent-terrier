@@ -160,14 +160,19 @@ pub enum ResourceKind {
     Profile,
     Dataset,
     Gallery,
+    /// A plain text entry with no better type (D-K2, `plan/knowledge-repository.md`
+    /// §5: every item is typed, the type is metadata). A manifest never asks for
+    /// a note; the install wizard retypes one when the owner binds it.
+    Note,
 }
 
 impl ResourceKind {
-    pub const ALL: [ResourceKind; 4] = [
+    pub const ALL: [ResourceKind; 5] = [
         ResourceKind::Document,
         ResourceKind::Profile,
         ResourceKind::Dataset,
         ResourceKind::Gallery,
+        ResourceKind::Note,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -176,6 +181,7 @@ impl ResourceKind {
             ResourceKind::Profile => "profile",
             ResourceKind::Dataset => "dataset",
             ResourceKind::Gallery => "gallery",
+            ResourceKind::Note => "note",
         }
     }
 
@@ -1964,6 +1970,7 @@ mod tests {
         assert!(SlotDirection::Sub.reads() && !SlotDirection::Sub.writes());
         assert!(serde_json::from_str::<ChannelEndpointKind>("\"phone\"").is_err());
         assert!(serde_json::from_str::<ResourceKind>("\"timeseries\"").is_err());
+        assert_eq!(ResourceKind::parse("note"), Some(ResourceKind::Note));
     }
 
     #[test]
