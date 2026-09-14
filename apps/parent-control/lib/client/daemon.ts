@@ -1188,5 +1188,6 @@ function apiToMemoryEntry(m: ApiMemoryEntry): MasterMemoryEntry {
     ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
     version: m.version, updated: m.updated, preview: m.preview, body: m.body,
     contentHash: m.content_hash,
+    kind: m.kind,
   };
 }

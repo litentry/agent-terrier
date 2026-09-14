@@ -176,6 +176,8 @@ export interface MasterMemoryEntry {
   preview: string;
   body: string;
   contentHash?: string;
+  /** #390 — the context kind (`knowledge` when absent on older entries). */
+  kind?: ContextKind;
 }
 
 export interface PlantResult {

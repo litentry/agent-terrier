@@ -63,6 +63,8 @@ a:hover { text-decoration-color: var(--ink); }
    design system: channels = 200, contacts = 330). */
 .app-main[data-section="channels"]{ --hue: 200; --section-name: 'channels'; }
 .app-main[data-section="contacts"]{ --hue: 330; --section-name: 'contacts'; }
+/* 2026-09-13 — the Knowledge page (the merged memory + resources surface). */
+.app-main[data-section="knowledge"]{ --hue: 45; --section-name: 'knowledge'; }
 
 .app-main[data-section] {
   --section: oklch(0.5 0.12 var(--hue));

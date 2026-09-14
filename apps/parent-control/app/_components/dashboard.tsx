@@ -169,7 +169,7 @@ function ChannelGrantsPanel({
       <div className="muted" style={{ fontSize: 11, marginBottom: 10 }}>
         {isDevice ? (
           <>
-            A device is a conduit — it holds ONLY channel grants (D6), never memory, credentials,
+            A device is a conduit — it holds ONLY channel grants (D6), never knowledge, credentials,
             or a persona.
           </>
         ) : (
@@ -272,7 +272,7 @@ export function ActorDetail({
       <PageHead
         crumb={<><a onClick={onBack} style={{ cursor: 'pointer' }}>actors</a> <span className="muted">/</span> {actor.derivation}</>}
         title={<><span className="muted serif">/</span> {actor.label}</>}
-        desc={`Bound at ${actor.omni}. Memory scope changes stage locally, then commit on chain with one master Touch ID (setScope · K11).`}
+        desc={`Bound at ${actor.omni}. Knowledge scope changes stage locally, then commit on chain with one master Touch ID (setScope · K11).`}
         actions={
           <>
             <button className="btn" onClick={onBack}>← back</button>
@@ -346,7 +346,7 @@ export function ActorDetail({
       {!isMaster && !isDevice && (
         <Panel title="── permissions · scoped (mobile-style)">
           <div className="muted" style={{ fontSize: 11, marginBottom: 12 }}>
-            Maps to ScopeContract[O_master][{actor.omni}]. Memory toggles stage below; <strong>commit · Touch ID</strong> lands
+            Maps to ScopeContract[O_master][{actor.omni}]. Knowledge toggles stage below; <strong>commit · Touch ID</strong> lands
             them on chain (one setScope, master K11) — until then the chain grant is unchanged.
           </div>
           <StagedPermissionEditor

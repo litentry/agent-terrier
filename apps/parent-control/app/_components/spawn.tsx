@@ -212,7 +212,7 @@ export function SpawnAgentModal({
         )}
       </div>
       <div className="field" style={{ marginTop: 12 }}>
-        <label>Memory</label>
+        <label>Knowledge</label>
         <div style={{ display: 'flex', gap: 12 }}>
           <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <input
@@ -251,13 +251,13 @@ export function SpawnAgentModal({
         )}
         {memoryMode === 'inherit' && inheritable.length === 0 && (
           <div className="muted" style={{ fontSize: 12 }}>
-            No inheritable namespaces — archive an agent with “keep its resources” first.
+            No inheritable namespaces — archive an agent with “keep its knowledge” first.
           </div>
         )}
       </div>
       <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
         One Touch ID binds the agent on chain, consumes one agent slot, grants ONLY its chat
-        channel + memory namespace, provisions its metered LLM key, and boots its sandbox with
+        channel + knowledge namespace, provisions its metered LLM key, and boots its sandbox with
         the preset persona.
       </div>
     </Modal>
@@ -350,14 +350,14 @@ export function ArchiveAgentDialog({
         <label style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
           <input type="radio" checked={keep} onChange={() => setKeep(true)} />
           <span>
-            <strong>Keep its resources</strong> — <code>memory:{ns}</code> stays inheritable by a
+            <strong>Keep its knowledge</strong> — <code>memory:{ns}</code> stays inheritable by a
             future agent (at most one at a time).
           </span>
         </label>
         <label style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginTop: 6 }}>
           <input type="radio" checked={!keep} onChange={() => setKeep(false)} />
           <span>
-            <strong>Delete its resources</strong> — destroys <code>memory:{ns}</code> (every memory
+            <strong>Delete its knowledge</strong> — destroys <code>memory:{ns}</code> (every note
             this agent stored). This cannot be undone; nothing will be inheritable.
           </span>
         </label>

@@ -371,7 +371,7 @@ export function DelegatesPage({
         <div className="banner warn" style={{ marginBottom: 14 }}>
           <span className="lbl">⚠</span>
           <span>
-            {deviceRequestCount} device claim{deviceRequestCount > 1 ? 's are' : ' is'} waiting on the <strong>devices</strong> page (devices attach channels, not memory scopes).
+            {deviceRequestCount} device claim{deviceRequestCount > 1 ? 's are' : ' is'} waiting on the <strong>devices</strong> page (devices attach channels, not knowledge scopes).
           </span>
           {onGoDevices && (
             <button className="btn sm" style={{ marginLeft: 'auto' }} onClick={onGoDevices}>open devices →</button>

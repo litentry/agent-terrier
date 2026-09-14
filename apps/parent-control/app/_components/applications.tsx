@@ -31,9 +31,11 @@ import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { ServiceAnnotation } from '@/lib/generated/ServiceAnnotation';
 import { Chip, Dot, Modal, PageHead, Panel } from './shared';
+import { KnowledgeItemModal } from './knowledge';
+import { editReaches } from '@/lib/client/knowledge';
 import { FEED_ID_RE, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
 
-type View = 'apps' | 'resources' | 'endpoints';
+type View = 'apps' | 'endpoints';
 
 type CreateChannelFn = (input: { id: string; name: string; note?: string; kind?: ChannelDef['kind'] }) => Promise<ChannelDef | null>;
 type WizardStep = 'slots' | 'resources' | 'audience' | 'sheet' | 'done';
@@ -110,7 +112,7 @@ export function ApplicationsPage({
 }: {
   client: AgentKeysClient;
   channels: ChannelDef[];
-  /** The view the page opens on — the sidebar's `resources` item opens the same page on its resources view. */
+  /** The view the page opens on. */
   initialView?: View;
   showToast: (msg: string, sticky?: boolean) => void;
   onGoChannels: () => void;
@@ -175,22 +177,6 @@ export function ApplicationsPage({
     const slot = addingResource?.slot;
     if (!slot) return;
     setWizard((w) => (w ? { ...w, resources: { ...w.resources, [slot]: id } } : w));
-  };
-
-  const removeResource = async (it: ResourceItemRow, users: string[]) => {
-    if (!client.resourceRemove) return;
-    const inUse = users.length > 0;
-    const q = inUse
-      ? `Remove "${it.name}"? ${users.join(', ')} still read it — their memory:${it.ns} grant stays but the item is gone. Remove anyway?`
-      : `Remove "${it.name}" (v${it.version}) from the household's resources?`;
-    if (!window.confirm(q)) return;
-    const r = await client.resourceRemove({ id: it.id, force: inUse });
-    if (!r.ok) {
-      showToast(`remove failed — ${r.status?.detail ?? 'error'}`, true);
-      return;
-    }
-    showToast(r.data.removed ? `removed ${it.id} — its entry is gone from memory:${it.ns}` : `${it.id} was already gone`);
-    await refresh();
   };
 
   const openApp = useCallback(
@@ -287,7 +273,7 @@ export function ApplicationsPage({
         showToast(`Uninstall submit failed — ${submitted.status?.detail ?? 'error'}`, true);
         return;
       }
-      showToast(`${app.label} uninstalled — slot returned, grants revoked${keepMemory ? ', memory kept' : ''}.`);
+      showToast(`${app.label} uninstalled — slot returned, grants revoked${keepMemory ? ', own namespace kept' : ''}.`);
       setUninstalling(null);
       setSelected(null);
       setDashboard(null);
@@ -339,16 +325,14 @@ export function ApplicationsPage({
   return (
     <>
       <PageHead
-        crumb={view === 'resources' ? 'household · resources' : 'household · applications'}
-        title={view === 'resources' ? 'Resources' : 'Applications'}
-        desc={view === 'resources'
-          ? 'The read-only material your apps may read: paste text or upload a file, bind it to an app at install, keep it versioned. Never writable by an app.'
-          : 'Compose channels, devices, a delegate, its memory and read-only resources into one installable app. Install = one Touch ID minting exactly the sheet you see.'}
+        crumb="household · applications"
+        title="Applications"
+        desc="Compose channels, devices, a delegate, its own namespace and read-only knowledge into one installable app. Install = one Touch ID minting exactly the sheet you see."
         actions={
           <>
-            {(['apps', 'resources', 'endpoints'] as View[]).map((v) => (
+            {(['apps', 'endpoints'] as View[]).map((v) => (
               <button key={v} className={`btn ${view === v ? 'primary' : ''}`} onClick={() => setView(v)}>
-                {v === 'apps' ? 'applications' : v === 'resources' ? 'resources' : 'endpoints'}
+                {v === 'apps' ? 'applications' : 'endpoints'}
               </button>
             ))}
             <button className="btn" onClick={() => void refresh()}>refresh</button>
@@ -385,7 +369,7 @@ export function ApplicationsPage({
           <div className="stats">
             <div className="stat"><div className="v">{live.length}</div><div className="k">apps installed</div></div>
             <div className="stat"><div className="v">{(catalog ?? []).length}</div><div className="k">templates in the catalog</div></div>
-            <div className="stat"><div className="v">{resources.length}</div><div className="k">curated resources</div></div>
+            <div className="stat"><div className="v">{resources.length}</div><div className="k">bindable knowledge items</div></div>
             <div className="stat"><div className="v">{console_?.enrolled ? '✓' : '—'}</div><div className="k">console device actor</div></div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: 16, marginTop: 16 }}>
@@ -440,49 +424,12 @@ export function ApplicationsPage({
               onCardAction={(a) => void onCardAction(selectedRow.label, dashboard?.card_channel_id, dashboard?.card?.updated_at, a)}
               onUninstall={() => setUninstalling(selectedRow)}
               onRefresh={() => void openApp(selectedRow.label)}
+              resources={resources}
+              apps={live}
+              onEditResource={(row) => setAddingResource({ edit: row })}
             />
           )}
         </>
-      )}
-
-      {view === 'resources' && (
-        <Panel title="── curated resources — what the apps may read (read-only)" flush>
-          <p className="muted" style={{ fontSize: 12.5, margin: 0, padding: '12px 16px 4px' }}>
-            Paste text or upload a file (txt · markdown · csv · json · pdf · an image as a gallery item, up to 5 MB). The text is what an app reads; an uploaded file's bytes are kept beside it.
-            Re-adding an id makes the next version. An app reads a resource through its read-only <code>memory:&lt;ns&gt;</code> grant; a <strong>sensitive</strong> item shows the stronger tier wherever it is bound. Revoking one app's access is a grant change — uninstall or reinstall that app (the audience editor of #674 will do it in place).
-          </p>
-          {resources.length === 0 && <div className="muted" style={{ padding: 16 }}>No curated resources yet.</div>}
-          {resources.map((it) => {
-            const users = live.filter((a) => a.bindings.resources.some((rb) => rb.item_id === it.id));
-            return (
-              <div key={it.id} className="feed-row" style={{ padding: '12px 16px', display: 'grid', gridTemplateColumns: '1.2fr 2fr 1fr auto', gap: 12, alignItems: 'start' }}>
-                <div>
-                  <div style={{ fontWeight: 600 }}>{it.name} {it.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>}</div>
-                  <div className="muted" style={{ fontSize: 11 }}>{it.kind} · v{it.version} · <code>{it.ns}/{it.object_key}</code> · {it.bytes} B of text</div>
-                  {it.filename && <div className="muted" style={{ fontSize: 11 }}>from <code>{it.filename}</code>{it.content_type ? ` · ${it.content_type}` : ''} · {it.raw_bytes} B{it.raw_object_key ? ' · file kept' : ' · file not kept (no durable memory plane)'}</div>}
-                </div>
-                <div className="muted" style={{ fontSize: 12 }}>{it.name_zh ? `${it.name_zh} · ` : ''}tags: {it.tags.join(', ') || '—'} · updated {fmtTs(it.updated_at)}</div>
-                <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                  {users.length === 0 ? <span className="muted" style={{ fontSize: 12 }}>not used by any app</span> : users.map((a) => <Chip key={a.label} kind="ok">{a.label} · read-only</Chip>)}
-                </div>
-                <div style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
-                  <button className="btn sm" onClick={() => setAddingResource({ edit: it })}>edit</button>{' '}
-                  <button
-                    className="btn sm"
-                    style={{ color: 'var(--danger)' }}
-                    disabled={!client.resourceRemove}
-                    onClick={() => void removeResource(it, users.map((a) => a.label))}
-                  >
-                    remove
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-          <div style={{ padding: 14 }}>
-            <button className="btn" disabled={!client.resourceAdd} onClick={() => setAddingResource({})}>+ add a resource</button>
-          </div>
-        </Panel>
       )}
 
       {view === 'endpoints' && (
@@ -552,19 +499,19 @@ export function ApplicationsPage({
           footer={
             <>
               <button className="btn" onClick={() => setUninstalling(null)} disabled={!!busy}>cancel</button>
-              <button className="btn" onClick={() => void uninstall(uninstalling, true)} disabled={!!busy}>keep its memory (reinstall later) · Touch ID</button>
-              <button className="btn danger" onClick={() => void uninstall(uninstalling, false)} disabled={!!busy}>delete its memory too · Touch ID</button>
+              <button className="btn" onClick={() => void uninstall(uninstalling, true)} disabled={!!busy}>keep its own namespace (reinstall later) · Touch ID</button>
+              <button className="btn danger" onClick={() => void uninstall(uninstalling, false)} disabled={!!busy}>delete its own namespace too · Touch ID</button>
             </>
           }
         >
           <p className="muted" style={{ fontSize: 13 }}>
-            The archive ceremony revokes the delegate&apos;s grants on chain (and the contact gate&apos;s / console&apos;s grants on its feeds), returns the agent slot, and tears the sandbox down. Keeping the memory namespace <code>{uninstalling.memory_ns}</code> lets a reinstall inherit it.
+            The archive ceremony revokes the delegate&apos;s grants on chain (and the contact gate&apos;s / console&apos;s grants on its feeds), returns the agent slot, and tears the sandbox down. Keeping its own namespace <code>{uninstalling.memory_ns}</code> lets a reinstall inherit it.
           </p>
         </Modal>
       )}
 
       {addingResource && (
-        <AddResourceModal
+        <KnowledgeItemModal
           client={client}
           initialKind={addingResource.kind}
           edit={addingResource.edit}
@@ -573,10 +520,10 @@ export function ApplicationsPage({
             if (!client.resourceAdd) return false;
             const r = await client.resourceAdd(input);
             if (!r.ok) {
-              showToast(`resource add failed — ${r.status?.detail ?? 'error'}`, true);
+              showToast(`add failed — ${r.status?.detail ?? 'error'}`, true);
               return false;
             }
-            showToast(`resource ${input.id} v${r.data.version} planted into memory:${input.ns} (${r.data.storage})`);
+            showToast(`${input.id} v${r.data.version} planted into memory:${input.ns} (${r.data.storage})`);
             bindNewResourceToSlot(input.id);
             await refresh();
             return true;
@@ -589,7 +536,7 @@ export function ApplicationsPage({
               return false;
             }
             const kept = r.data.raw_stored === true ? 'file kept' : r.data.raw_stored === false ? 'file not kept — no durable memory plane on this console' : 'no file';
-            showToast(`${input.filename} → resource ${input.id} v${r.data.version}: ${r.data.extracted_bytes} B of text in memory:${input.ns} (${kept})`, r.data.raw_stored === false);
+            showToast(`${input.filename} → ${input.id} v${r.data.version}: ${r.data.extracted_bytes} B of text in memory:${input.ns} (${kept})`, r.data.raw_stored === false);
             bindNewResourceToSlot(input.id);
             await refresh();
             return true;
@@ -631,6 +578,9 @@ function AppDetail({
   onCardAction,
   onUninstall,
   onRefresh,
+  resources,
+  apps,
+  onEditResource,
 }: {
   app: AppInstanceRow;
   template?: PresetSummary;
@@ -639,6 +589,10 @@ function AppDetail({
   onCardAction: (a: CardViewAction) => void;
   onUninstall: () => void;
   onRefresh: () => void;
+  /** The registry rows (to edit a bound item in place) and the live apps (to say who else reads it). */
+  resources: ResourceItemRow[];
+  apps: AppInstanceRow[];
+  onEditResource: (row: ResourceItemRow) => void;
 }) {
   const st = statusOf(app);
   const display = app.bound_channels.find((b) => b.kind === 'display');
@@ -718,10 +672,24 @@ function AppDetail({
               {app.bound_channels.map((b) => (
                 <div key={b.slot} style={{ display: 'contents' }}><dt>{b.slot}</dt><dd><code>{b.channel_id}</code> · {b.kind} · {b.direction}{b.endpoint_actor_omni ? ` · actor ${b.endpoint_actor_omni.slice(0, 10)}…` : ''}</dd></div>
               ))}
-              {app.bindings.resources.map((r) => (
-                <div key={r.name} style={{ display: 'contents' }}><dt>{r.name}</dt><dd>{r.item_id} · <code>memory:{r.ns}</code> · read-only {r.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>}</dd></div>
-              ))}
-              <div style={{ display: 'contents' }}><dt>memory</dt><dd><code>memory:{app.memory_ns}</code> · <code>inbox:{app.memory_ns}</code></dd></div>
+              {app.bindings.resources.map((r) => {
+                const row = resources.find((it) => it.id === r.item_id);
+                // The grant unit is the namespace: an edit reaches every app bound to
+                // the item AND every app granted its namespace — say so before the edit.
+                const others = editReaches({ ns: r.ns, curated: row ?? null }, apps, app.label);
+                return (
+                  <div key={r.name} style={{ display: 'contents' }}>
+                    <dt>{r.name}</dt>
+                    <dd>
+                      {row?.name ?? r.item_id} · <code>memory:{r.ns}</code> · read-only {r.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>}
+                      {row && <>{' '}<button className="btn sm" onClick={() => onEditResource(row)}>edit</button></>}
+                      {!row && <span className="muted" style={{ fontSize: 11 }}> · item no longer in the registry</span>}
+                      {others.length > 0 && <div className="muted" style={{ fontSize: 11 }}>also read by {others.join(', ')} — an edit reaches them at their next refresh</div>}
+                    </dd>
+                  </div>
+                );
+              })}
+              <div style={{ display: 'contents' }}><dt>own namespace</dt><dd><code>memory:{app.memory_ns}</code> · <code>inbox:{app.memory_ns}</code></dd></div>
               <div style={{ display: 'contents' }}><dt>opchat</dt><dd><code>{app.chat_channel_id}</code></dd></div>
               <div style={{ display: 'contents' }}><dt>availability</dt><dd>{app.availability}</dd></div>
             </dl>
@@ -771,7 +739,7 @@ function InstallWizard({
   onOpen: (label: string) => void;
   onGoChannels: () => void;
   onCreateChannel?: CreateChannelFn;
-  /** Open the add-resource modal pre-set to the slot's kind; a successful add binds the new item to `slot`. */
+  /** Open the knowledge modal pre-set to the slot's kind; a successful add binds the new item to `slot`. */
   onAddResource?: (kind: ResourceKind, slot: string) => void;
 }) {
   const slots = tp.slots ?? [];
@@ -799,7 +767,7 @@ function InstallWizard({
   return (
     <Modal
       wide
-      title={w.step === 'done' ? 'Installed' : `Install ${tp.name} · step ${idx + 1} of ${steps.length} · ${w.step}`}
+      title={w.step === 'done' ? 'Installed' : `Install ${tp.name} · step ${idx + 1} of ${steps.length} · ${w.step === 'resources' ? 'knowledge' : w.step}`}
       onClose={() => setW(null)}
       footer={
         w.step === 'done' ? (
@@ -843,7 +811,7 @@ function InstallWizard({
       )}
       {w.step === 'resources' && (
         <>
-          <p className="muted" style={{ fontSize: 12.5 }}>Choose which curated resources the app may read. Read-only — an app can never change a resource.</p>
+          <p className="muted" style={{ fontSize: 12.5 }}>Choose which knowledge items the app may read. Read-only — an app can never change them, and binding one grants the app the item&apos;s whole namespace.</p>
           {reqs.map((r) => {
             const opts = resources.filter((it) => it.kind === r.kind);
             return (
@@ -853,7 +821,7 @@ function InstallWizard({
                   {opts.map((it) => <div key={it.id}>{opt(w.resources[r.name] === it.id, () => setW({ ...w, resources: { ...w.resources, [r.name]: it.id } }), <>{it.name} {it.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>} <span className="muted" style={{ fontSize: 11 }}>· <code>{it.ns}</code> · v{it.version}</span></>)}</div>)}
                   {opts.length === 0 && (
                     <div className="muted" style={{ padding: '10px 12px', fontSize: 12.5, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                      <span>No curated {r.kind} yet.</span>
+                      <span>No {r.kind} curated yet.</span>
                       {onAddResource && <button className="btn sm" onClick={() => onAddResource(r.kind as ResourceKind, r.name)}>+ add a {r.kind} now</button>}
                       <span style={{ fontSize: 11.5 }}>(paste text or upload a file — it binds to this slot when saved)</span>
                     </div>
@@ -912,140 +880,6 @@ function InstallWizard({
           )}
         </>
       )}
-    </Modal>
-  );
-}
-
-function AddResourceModal({
-  client,
-  initialKind,
-  edit,
-  onClose,
-  onAdd,
-  onUpload,
-}: {
-  client: AgentKeysClient;
-  initialKind?: ResourceKind;
-  edit?: ResourceItemRow;
-  onClose: () => void;
-  onAdd: (input: { id: string; name: string; name_zh: string; kind: ResourceKind; tags: string[]; sensitivity: 'safe' | 'sensitive'; ns: string; body: string }) => Promise<boolean>;
-  onUpload: (input: { id: string; name: string; name_zh: string; kind: ResourceKind; tags: string[]; sensitivity: 'safe' | 'sensitive'; ns: string; filename: string; content_type: string; content_b64: string }) => Promise<boolean>;
-}) {
-  const [mode, setMode] = useState<'paste' | 'upload'>('paste');
-  const [id, setId] = useState(edit?.id ?? '');
-  const [name, setName] = useState(edit?.name ?? '');
-  const [nameZh, setNameZh] = useState(edit?.name_zh ?? '');
-  const [kind, setKind] = useState<ResourceKind>(edit?.kind ?? initialKind ?? 'document');
-  const [tags, setTags] = useState(edit?.tags.join(', ') ?? '');
-  const [sensitivity, setSensitivity] = useState<'safe' | 'sensitive'>(edit?.sensitivity ?? 'safe');
-  const [ns, setNs] = useState(edit?.ns ?? 'household');
-  const [body, setBody] = useState('');
-  const [loadingBody, setLoadingBody] = useState(!!edit);
-  const [file, setFile] = useState<{ name: string; type: string; size: number; b64: string } | null>(null);
-  const [fileErr, setFileErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  // Editing: pre-fill the current text from the namespace (the entry keyed by the id).
-  useEffect(() => {
-    if (!edit) return;
-    let alive = true;
-    void (async () => {
-      const r = await client.getMemoryEntries(edit.ns, edit.object_key);
-      if (!alive) return;
-      if (r.ok) {
-        const hit = r.data.find((e) => e.key === edit.object_key) ?? r.data[0];
-        if (hit) setBody(hit.body);
-      }
-      setLoadingBody(false);
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [client, edit]);
-  const MAX = 5 * 1024 * 1024;
-  const pickFile = (f: File | undefined) => {
-    setFileErr(null);
-    setFile(null);
-    if (!f) return;
-    if (f.size > MAX) {
-      setFileErr(`${f.name} is ${(f.size / 1048576).toFixed(1)} MB — the cap is 5 MB`);
-      return;
-    }
-    const reader = new FileReader();
-    reader.onerror = () => setFileErr(`could not read ${f.name}`);
-    reader.onload = () => {
-      const buf = new Uint8Array(reader.result as ArrayBuffer);
-      let bin = '';
-      for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-      setFile({ name: f.name, type: f.type, size: f.size, b64: btoa(bin) });
-      if (!name.trim()) setName(f.name.replace(/\.[^.]+$/, ''));
-      if (!id) setId(f.name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48));
-      if (f.type.startsWith('image/')) setKind('gallery');
-    };
-    reader.readAsArrayBuffer(f);
-  };
-  const idOk = /^[a-z0-9-]{1,48}$/.test(id) && !id.startsWith('-') && !id.endsWith('-');
-  const ok = idOk && name.trim() && ns.trim() && (mode === 'paste' ? body.trim() : !!file);
-  const meta = () => ({ id, name: name.trim(), name_zh: nameZh.trim(), kind, tags: tags.split(',').map((t) => t.trim()).filter(Boolean), sensitivity, ns: ns.trim() });
-  return (
-    <Modal
-      title={edit ? `Edit resource ${edit.id} (saves as v${edit.version + 1})` : 'Add a resource (planted as read-only canonical memory)'}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>cancel</button>
-          <button
-            className="btn primary"
-            disabled={!ok || busy || loadingBody}
-            onClick={async () => {
-              setBusy(true);
-              const done = mode === 'paste' || !file
-                ? await onAdd({ ...meta(), body })
-                : await onUpload({ ...meta(), filename: file.name, content_type: file.type, content_b64: file.b64 });
-              setBusy(false);
-              if (done) onClose();
-            }}
-          >
-            {busy ? (mode === 'upload' ? 'uploading…' : 'planting…') : edit ? 'save as next version' : mode === 'upload' ? 'upload resource' : 'add resource'}
-          </button>
-        </>
-      }
-    >
-      <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-        <button className={`btn sm${mode === 'paste' ? ' primary' : ''}`} onClick={() => setMode('paste')}>paste text</button>
-        <button className={`btn sm${mode === 'upload' ? ' primary' : ''}`} onClick={() => setMode('upload')}>upload a file</button>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-        <label className="muted" style={{ fontSize: 12 }}>id<input style={INPUT} value={id} disabled={!!edit} onChange={(e) => setId(e.target.value.trim().toLowerCase())} placeholder="food-preferences" /></label>
-        <label className="muted" style={{ fontSize: 12 }}>namespace<input style={INPUT} value={ns} disabled={!!edit} onChange={(e) => setNs(e.target.value)} /></label>
-        <label className="muted" style={{ fontSize: 12 }}>name<input style={INPUT} value={name} onChange={(e) => setName(e.target.value)} /></label>
-        <label className="muted" style={{ fontSize: 12 }}>名称 (中文)<input style={INPUT} value={nameZh} onChange={(e) => setNameZh(e.target.value)} /></label>
-        <label className="muted" style={{ fontSize: 12 }}>kind
-          <select style={INPUT} value={kind} onChange={(e) => setKind(e.target.value as ResourceKind)}>
-            {(['document', 'profile', 'dataset', 'gallery'] as const).map((k) => <option key={k} value={k}>{k}</option>)}
-          </select>
-        </label>
-        <label className="muted" style={{ fontSize: 12 }}>sensitivity
-          <select style={INPUT} value={sensitivity} onChange={(e) => setSensitivity(e.target.value as typeof sensitivity)}>
-            <option value="safe">safe</option>
-            <option value="sensitive">sensitive</option>
-          </select>
-        </label>
-        <label className="muted" style={{ fontSize: 12, gridColumn: '1 / -1' }}>tags (comma-separated)<input style={INPUT} value={tags} onChange={(e) => setTags(e.target.value)} placeholder="food, allergies" /></label>
-        {mode === 'paste' ? (
-          <label className="muted" style={{ fontSize: 12, gridColumn: '1 / -1' }}>
-            content{loadingBody ? ' (loading the current text…)' : ''}
-            <textarea style={{ ...INPUT, minHeight: 140, fontFamily: 'inherit' }} value={body} onChange={(e) => setBody(e.target.value)} />
-          </label>
-        ) : (
-          <label className="muted" style={{ fontSize: 12, gridColumn: '1 / -1' }}>
-            file (txt · md · csv · json · pdf · image, up to 5 MB)
-            <input type="file" accept=".txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.pdf,image/*" style={{ ...INPUT, padding: 6 }} onChange={(e) => pickFile(e.target.files?.[0])} />
-            {file && <span style={{ display: 'block', marginTop: 4 }}>{file.name} · {file.type || 'unknown type'} · {(file.size / 1024).toFixed(1)} KB — the text is extracted on save; an image becomes a gallery caption.</span>}
-            {fileErr && <span style={{ display: 'block', marginTop: 4, color: 'var(--danger)' }}>⚠ {fileErr}</span>}
-          </label>
-        )}
-      </div>
-      <p className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>Re-adding an id bumps its version and replaces the previous text. Apps read it through the ordinary read-only <code>memory:&lt;ns&gt;</code> grant — never an inbox on that namespace.</p>
     </Modal>
   );
 }

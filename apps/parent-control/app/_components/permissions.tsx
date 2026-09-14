@@ -214,7 +214,7 @@ export function PermissionList({
         </PermSection>
       )}
       {/* MEMORY */}
-      <PermSection title="Memory access" summary={`${memGranted.length} of ${NAMESPACES.length} namespaces`}>
+      <PermSection title="Knowledge access" summary={`${memGranted.length} of ${NAMESPACES.length} namespaces`}>
         {NAMESPACES.map((ns) => {
           const s = scope[ns] || { read: false, write: false };
           const granted = s.read || s.write;
@@ -241,14 +241,14 @@ export function PermissionList({
                       type="button"
                       className={`perm-tog ${s.read ? 'on' : ''}`}
                       aria-pressed={s.read}
-                      title="READ — let this delegate read your shared memory for this namespace (memory:<ns>)."
+                      title="READ — let this delegate read your shared knowledge for this namespace (memory:<ns>)."
                       onClick={() => onScopeChange && onScopeChange(ns, { read: !s.read, write: s.write })}
                     >read</button>
                     <button
                       type="button"
                       className={`perm-tog ${s.write ? 'on' : ''}`}
                       aria-pressed={s.write}
-                      title="WRITE — let this delegate write/suggest into your inbox for this namespace (inbox:<ns>); you curate each one. The delegate never writes your shared memory directly."
+                      title="WRITE — let this delegate write/suggest into your inbox for this namespace (inbox:<ns>); you curate each one. The delegate never writes your shared knowledge directly."
                       onClick={() => onScopeChange && onScopeChange(ns, { read: s.read, write: !s.write })}
                     >write</button>
                   </div>
@@ -363,7 +363,7 @@ export function AutoDistributePanel({
   return (
     <Panel title="── connect-time auto-distribution">
       <div className="muted" style={{ fontSize: 11, marginBottom: 12 }}>
-        The classifier tags this agent&apos;s surface — the master <strong>memory namespaces</strong> it can inherit and the{' '}
+        The classifier tags this agent&apos;s surface — the master <strong>knowledge namespaces</strong> it can inherit and the{' '}
         <strong>credential services</strong> it uses — into categories and proposes scopes. <strong>Safe</strong> categories
         auto-confirm into your daily review; <strong>sensitive</strong> ones (payments, access-control, health, finance,
         credentials) need an explicit Touch ID per grant — the tier comes from the catalog, so a vendor can&apos;t downgrade it.
@@ -545,7 +545,7 @@ export function StagedPermissionEditor({
           <span className="lbl">staged</span>
           <span style={{ fontSize: 11.5, flex: '1 1 auto' }}>
             {stagedRead.length === 0 && stagedWrite.length === 0
-              ? 'Revokes every memory + inbox grant (credential / email grants are unchanged).'
+              ? 'Revokes every knowledge + inbox grant (credential / email grants are unchanged).'
               : [
                   stagedRead.length > 0
                     ? `Reads ${stagedRead.map((ns) => `memory:${ns}`).join(' · ')}.`

@@ -55,10 +55,10 @@ already-registered master is detected and never re-bound).
 
 Onboarding ends with a **"Set up your categories"** step (right after you bind
 your passkey): pick a starting profile and your taxonomy is authored before you
-connect any agent. You can **skip** it there and do it later — the **memory** page
+connect any agent. You can **skip** it there and do it later — the **Knowledge** page
 offers the same setup whenever your taxonomy is empty. Either way you author your
 **category taxonomy** — the vocabulary agentKeys uses to scope everything an agent
-can touch: the **memory** it reads (`memory:<namespace>`), the **credentials** it
+can touch: the **knowledge** it reads (`memory:<namespace>`), the **credentials** it
 uses, and more data classes (payments, …) as you add them. It seeds your memory
 categories now; credentials are auto-categorized into the same taxonomy when you
 connect an agent. You author it in one of two ways:
@@ -536,16 +536,25 @@ the permissions you approve. parent-control → **applications**:
   clip carries WeChat's own transcript. The contact gate's receipt
   ("已转达给 chef 📷 [photo]") comes back at once; the app's own answer comes
   back through the same bot.
-- **Resources.** The **Resources** page (also the resources tab of
-  Applications) curates the read-only material apps may read: paste text, or
-  upload a file — plain text, markdown, CSV, JSON, a PDF, or an image (up to
-  5 MB). The text is what an app reads (a PDF's text is extracted; an image
-  becomes a gallery caption); the file's bytes are kept beside it. Re-adding
-  an id makes the next version and replaces the previous text; remove drops
-  the item (it refuses while an app is bound to it unless you confirm). An app
-  can read a resource you bound, never change it, and a `sensitive` item is
-  flagged wherever it is bound. An install wizard slot with no matching item
-  offers to add one right there.
+- **Knowledge.** The **Knowledge** page is the one place for everything your
+  household's assistants may know: your canonical memory namespaces and the
+  curated items an app can be bound to (the former memory and resources
+  pages). View it by namespace, or grouped by type, sensitivity or tag; open a
+  namespace to decrypt its plain notes. **+ add knowledge** pastes text or
+  uploads a file — plain text, markdown, CSV, JSON, a PDF, or an image (up to
+  5 MB); the text is what an app reads (a PDF's text is extracted; an image
+  becomes a gallery caption) and the file's bytes are kept beside it.
+  **Curate** turns a plain note into a typed, bindable item under its own key.
+  Re-adding an id makes the next version and replaces the previous text;
+  remove drops the item (it refuses while an app is bound to it unless you
+  confirm). **The grant is the namespace**: binding one item grants the app
+  the whole namespace, the page says who reads each namespace, and a namespace
+  bound to several apps is stored once — each app's sandbox keeps a derived
+  copy that the daemon's mirror refreshes (every 300 s by default) and can
+  never write back. An app's own page lists its bound items with **edit**; the
+  row names the other apps that read the same item, and a saved edit reaches
+  all of them at their next refresh. An install wizard slot with no matching
+  item offers to add one right there.
 - **Uninstall** revokes every permission (the delegate's, and the contact gate's
   and console's on the app's feeds), returns the agent slot, and tears the
   sandbox down. Keeping the app's memory lets a reinstall inherit it.

@@ -138,7 +138,7 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
             <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
               {actor.memoryNs ? (
                 <>
-                  Memory namespace: <code>memory:{actor.memoryNs}</code> ·{' '}
+                  Knowledge namespace: <code>memory:{actor.memoryNs}</code> ·{' '}
                 </>
               ) : null}
               {actor.presetId ? (

@@ -1,3 +1,4 @@
+import type { ContextKind } from '@/lib/generated/ContextKind';
 export type Namespace = 'personal' | 'family' | 'work' | 'travel';
 
 // Two INDEPENDENT per-namespace grants (#339): `read` = `memory:<ns>` (read the
@@ -97,7 +98,9 @@ export interface CeremonyStep {
 }
 
 export interface PreservedMemory {
-  ns: Namespace;
+  /** The entry's real namespace — a taxonomy category OR a namespace a
+   *  curated item was planted into (`household`, …). */
+  ns: string;
   key: string;
   title: string;
   bytes: number;
@@ -105,6 +108,7 @@ export interface PreservedMemory {
   updated: string;
   preview: string;
   body: string;
+  kind?: ContextKind;
 }
 
 // A vaulted credential envelope for an actor (Class-B bearer token). Populated

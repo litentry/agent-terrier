@@ -22,7 +22,7 @@ import { CeremonyRunner, OnboardingScreen } from './ceremony';
 import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
 import { LogoPage } from './logos';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
-import { MemoryPage } from './memory';
+import { KnowledgePage } from './knowledge';
 import { CredentialsPage } from './credentials';
 import { DelegatesPage } from './pairing';
 import { ArchiveAgentDialog, SpawnAgentModal } from './spawn';
@@ -36,7 +36,7 @@ import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import type { ChainInfo, ChainListEntry, ChannelDef, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
-import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
+import type { Actor, AuditEvent, PairingRequest, PreservedMemory } from './types';
 import { actorIsChannelEndpoint, isChannelService, runtimeActivityLine } from './types';
 
 // #242: does a daemon error detail mean the master J1 lapsed (vs a genuine
@@ -49,19 +49,17 @@ const looksSessionExpired = (detail?: string): boolean =>
 // #404 IA: household = delegates (sandbox agents) / devices (channel endpoints)
 // / channels (the id-anchored registry) / contacts (the WeChat contact gate + family).
 // The former top-level 'pairing' page became 'delegates'.
-type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'contacts' | 'applications' | 'resources' | 'audit' | 'decode' | 'chain' | 'logo';
+type Page = 'actors' | 'detail' | 'knowledge' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'contacts' | 'applications' | 'audit' | 'decode' | 'chain' | 'logo';
 
 type PendingAction =
   | { kind: 'revoke-device'; actor: Actor; intent: Intent }
   | { kind: 'pair-accept'; req: PairingRequest; intent: Intent };
 interface Intent { text: string; fields: [string, string][] }
 
-// MasterMemoryEntry (client wire) → PreservedMemory (UI). Daemon ns is a free
-// string; clamp to a known namespace for display grouping.
-const KNOWN_NS = new Set<string>(NAMESPACES);
+// MasterMemoryEntry (client wire) → PreservedMemory (UI). The daemon's ns is
+// kept as-is: a curated item may live in a namespace the taxonomy doesn't name.
 function toPreserved(e: MasterMemoryEntry): PreservedMemory {
-  const ns = (KNOWN_NS.has(e.ns) ? e.ns : 'personal') as Namespace;
-  return { ns, key: e.key, title: e.title, bytes: e.bytes, version: e.version, updated: e.updated, preview: e.preview, body: e.body };
+  return { ns: e.ns, key: e.key, title: e.title, bytes: e.bytes, version: e.version, updated: e.updated, preview: e.preview, body: e.body, kind: e.kind };
 }
 
 export function App() {
@@ -200,7 +198,7 @@ export function App() {
       } else if (cats.status.reason !== 'no-backend-configured') {
         // #201 codex finding 2: a configured-but-broken Config 502s here instead
         // of reporting an empty store — surface it rather than show a bare list.
-        showToast(`Memory categories unavailable — ${cats.status.detail ?? 'config worker error'}.`);
+        showToast(`Knowledge categories unavailable — ${cats.status.detail ?? 'config worker error'}.`);
       }
       if (pre.ok) {
         setPresets(pre.data.presets);
@@ -310,12 +308,18 @@ export function App() {
 
   // §2 lazy detail: decrypt a namespace's entries only when its category opens.
   // Idempotent — a second open while loaded/loading is a no-op.
-  const loadCategory = async (ns: string) => {
-    if (entriesByNs[ns]) return;
+  // (Re)decrypt one namespace. The Knowledge page calls the reload after it
+  // changed a namespace (add / edit / remove / curate) so the cache never shows
+  // the pre-change entry; opening a category loads it once.
+  const reloadCategory = async (ns: string) => {
     setEntriesByNs((prev) => ({ ...prev, [ns]: 'loading' }));
     const r = await client.getMemoryEntries(ns);
     setEntriesByNs((prev) => ({ ...prev, [ns]: r.ok ? r.data.map(toPreserved) : [] }));
     if (!r.ok) showToast(`Couldn't load ${ns} — ${r.status.detail ?? 'reload the page'}.`);
+  };
+  const loadCategory = async (ns: string) => {
+    if (entriesByNs[ns]) return;
+    await reloadCategory(ns);
   };
 
   // Actor tree + recent audit history from the client seam. Real daemon data;
@@ -634,8 +638,8 @@ export function App() {
       // full denial while the request preserved cred grants).
       const preserved = actor.scopeUnknownServiceIds ?? [];
       const msg = preserved.length > 0
-        ? `Revoke ALL memory + inbox grants for ${actor.label}?\n\nIts ${preserved.length} other on-chain grant(s) (credentials, email, …) stay UNCHANGED — revoke those from their own controls, or revoke the device to clear everything.\n\nContinue?`
-        : `Commit ZERO grants for ${actor.label}? This revokes every memory + inbox grant on chain — the agent will be denied everywhere.\n\nRevoke all?`;
+        ? `Revoke ALL knowledge + inbox grants for ${actor.label}?\n\nIts ${preserved.length} other on-chain grant(s) (credentials, email, …) stay UNCHANGED — revoke those from their own controls, or revoke the device to clear everything.\n\nContinue?`
+        : `Commit ZERO grants for ${actor.label}? This revokes every knowledge + inbox grant on chain — the agent will be denied everywhere.\n\nRevoke all?`;
       if (!window.confirm(msg)) return false;
     }
     showToast(`Building setScope for ${actor.label}…`);
@@ -816,7 +820,7 @@ export function App() {
       // EXPLICIT confirmation, because zero grants is exactly the deny-everywhere
       // trap the runbook's pairing story does not expect.
       const proceed = window.confirm(
-        `${req.agent} would be bound with ZERO scope grants — it cannot read any memory or credentials until you grant scopes from its actor page.\n\nBind with zero grants?`,
+        `${req.agent} would be bound with ZERO scope grants — it cannot read any knowledge or credentials until you grant scopes from its actor page.\n\nBind with zero grants?`,
       );
       if (!proceed) return;
       showToast(
@@ -1235,8 +1239,8 @@ export function App() {
   const sectionAttr = page === 'decode' ? 'audit'
     : page === 'delegates' ? 'pairing'
     : page === 'devices' ? 'channels'
-    : page === 'applications' || page === 'resources' ? 'pairing'
-    : ((['audit', 'memory', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
+    : page === 'applications' ? 'pairing'
+    : ((['audit', 'knowledge', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
 
   // ─── Onboarding gate (workflow 1) ──────────────────────────────
   if (!onboarded) {
@@ -1311,8 +1315,8 @@ export function App() {
         <button className={`nav-item ${page === 'actors' ? 'active' : ''}`} onClick={() => go('actors')}>
           <span className="marker">[•]</span> actors<span className="count">{actors.length}</span>
         </button>
-        <button className={`nav-item ${page === 'memory' ? 'active' : ''}`} onClick={() => go('memory')}>
-          <span className="marker">[◇]</span> memory<span className="count">{categories.length || '∅'}</span>
+        <button className={`nav-item ${page === 'knowledge' ? 'active' : ''}`} onClick={() => go('knowledge')}>
+          <span className="marker">[◇]</span> knowledge<span className="count">{categories.length || '∅'}</span>
         </button>
         <button className={`nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
           <span className="marker">[$]</span> credentials<span className="count">{credentials.length || '∅'}</span>
@@ -1338,9 +1342,6 @@ export function App() {
         </button>
         <button className={`nav-item ${page === 'applications' ? 'active' : ''}`} onClick={() => go('applications')}>
           <span className="marker">[▣]</span> applications
-        </button>
-        <button className={`nav-item ${page === 'resources' ? 'active' : ''}`} onClick={() => go('resources')}>
-          <span className="marker">[▤]</span> resources
         </button>
 
         <div className="nav-section">telemetry</div>
@@ -1405,7 +1406,7 @@ export function App() {
           <div className="banner" role="alert" style={{ marginBottom: 14, borderColor: 'var(--danger, #b3261e)' }}>
             <span className="lbl">⚠ session expired</span>
             <span>
-              Your master session lapsed — reading your encrypted memory + credentials is paused (the actor tree
+              Your master session lapsed — reading your encrypted knowledge + credentials is paused (the actor tree
               still loads, since it&apos;s read from chain). You&apos;re still bound, so this is
               <strong> one Touch ID</strong>, not a re-onboarding.
               <button
@@ -1423,8 +1424,10 @@ export function App() {
         {page === 'detail' && currentActor && (
           <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} />
         )}
-        {page === 'memory' && (
-          <MemoryPage categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} inbox={inbox} inboxBusy={inboxBusy} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} onAcceptInbox={acceptInboxItem} onRejectInbox={rejectInboxItem} onRefreshInbox={refreshInbox} onViewInboxBody={viewInboxBody} />
+        {page === 'knowledge' && (
+          // 2026-09-13 — ONE page over canonical memory + the curated, bindable items
+          // (the former memory + resources pages); it reads the app registry itself.
+          <KnowledgePage client={client} showToast={showToast} reloadKey={reloadKey} categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} inbox={inbox} inboxBusy={inboxBusy} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onReloadNamespace={reloadCategory} onView={setMemoryView} onAcceptInbox={acceptInboxItem} onRejectInbox={rejectInboxItem} onRefreshInbox={refreshInbox} onViewInboxBody={viewInboxBody} />
         )}
         {page === 'credentials' && (
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
@@ -1476,10 +1479,6 @@ export function App() {
           // (epic #660 stage 1). Channels feed the wizard's slot options.
           <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} />
         )}
-        {page === 'resources' && (
-          // #674 — the curated-resources page is the Applications page opened on its resources view.
-          <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} initialView="resources" />
-        )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
         {page === 'chain' && <ChainPage />}
@@ -1519,7 +1518,7 @@ export function App() {
 
       {memoryView && (
         <Modal
-          title={`memory · ${memoryView.ns}/${memoryView.title}`}
+          title={`knowledge · ${memoryView.ns}/${memoryView.title}`}
           onClose={() => setMemoryView(null)}
           footer={<button className="btn" onClick={() => setMemoryView(null)}>close</button>}
         >
