@@ -45,6 +45,11 @@ pub fn err_403(msg: impl Into<String>, reason: &'static str) -> ApiError {
 /// the daemon's read-modify-write plant, #201 Phase 4) can tell "never written"
 /// apart from a real S3/transport failure and NOT overwrite durable data on a
 /// transient error.
+/// A write that named a base the store no longer holds (D-K5 compare-and-swap).
+pub fn err_409(msg: impl Into<String>, reason: &'static str) -> ApiError {
+    err(StatusCode::CONFLICT, msg, reason)
+}
+
 pub fn err_404(msg: impl Into<String>, reason: &'static str) -> ApiError {
     err(StatusCode::NOT_FOUND, msg, reason)
 }

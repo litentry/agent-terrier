@@ -988,3 +988,12 @@ input, textarea, select { border-radius: var(--ds-r-field); }
 .worker-card .w-stat .v, .wa-dialog .ttl-big, .fp-ring .glyph {
   font-style: normal;
 }
+
+/* D-K5 — the line diff (a proposal or an edit against the current entry). */
+.diff { border: 1px solid var(--rule); background: var(--bg); }
+.diff-head { padding: 4px 10px; font-size: 11px; border-bottom: 1px solid var(--rule-soft, var(--rule)); }
+.diff-body { margin: 0; padding: 6px 0; overflow: auto; font-size: 12px; line-height: 1.45; }
+.diff-line { padding: 0 10px; white-space: pre-wrap; word-break: break-word; }
+.diff-line.add { background: color-mix(in srgb, var(--ok, #2f7d4a) 14%, transparent); }
+.diff-line.del { background: color-mix(in srgb, var(--danger, #b3261e) 12%, transparent); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger, #b3261e) 50%, transparent); }
+.diff-sign { display: inline-block; width: 14px; color: var(--ink-faint); user-select: none; }

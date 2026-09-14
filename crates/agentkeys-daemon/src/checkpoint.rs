@@ -340,6 +340,7 @@ async fn save_once(
             namespace: service,
             plaintext_b64: STANDARD.encode(&plaintext),
             object_key: Some(cfg.object_key.clone()),
+            expected_content_hash: None,
         })
         .await
         .map_err(|e| classify_save(e, "memory-put"))?;

@@ -532,29 +532,29 @@ export function ApplicationsPage({
           edit={addingResource.edit}
           onClose={() => setAddingResource(null)}
           onAdd={async (input) => {
-            if (!client.resourceAdd) return false;
+            if (!client.resourceAdd) return 'error';
             const r = await client.resourceAdd(input);
             if (!r.ok) {
               showToast(`add failed — ${r.status?.detail ?? 'error'}`, true);
-              return false;
+              return 'error';
             }
             showToast(`${input.id} v${r.data.version} planted into knowledge:${input.ns} (${r.data.storage})`);
             bindNewResourceToSlot(input.id);
             await refresh();
-            return true;
+            return 'ok';
           }}
           onUpload={async (input) => {
-            if (!client.resourceUpload) return false;
+            if (!client.resourceUpload) return 'error';
             const r = await client.resourceUpload(input);
             if (!r.ok) {
               showToast(`upload failed — ${r.status?.detail ?? 'error'}`, true);
-              return false;
+              return 'error';
             }
             const kept = r.data.raw_stored === true ? 'file kept' : r.data.raw_stored === false ? 'file not kept — no durable memory plane on this console' : 'no file';
             showToast(`${input.filename} → ${input.id} v${r.data.version}: ${r.data.extracted_bytes} B of text in knowledge:${input.ns} (${kept})`, r.data.raw_stored === false);
             bindNewResourceToSlot(input.id);
             await refresh();
-            return true;
+            return 'ok';
           }}
         />
       )}

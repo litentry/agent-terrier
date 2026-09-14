@@ -19,7 +19,7 @@ use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::{
-    err_400, err_403, err_404, err_500, err_502, err_502_s3_get, ApiError, S3FetchAttempt,
+    err_400, err_403, err_404, err_409, err_500, err_502, err_502_s3_get, ApiError, S3FetchAttempt,
 };
 use agentkeys_worker_creds::verify::{self, CapOp, CapPayload, CapToken, DataClass};
 
@@ -79,6 +79,11 @@ pub struct PutRequest {
     /// never clobber the namespace's working-memory blob.
     #[serde(default)]
     pub object_key: Option<String>,
+    /// D-K5 compare-and-swap (mirrors `agentkeys_protocol::MemoryPutBody`):
+    /// the keccak-256 hex of the plaintext the writer read, `""` = must not
+    /// exist yet; a different stored plaintext is 409 `stale_base`.
+    #[serde(default)]
+    pub expected_content_hash: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +197,42 @@ async fn memory_put_inner(
         req.object_key.as_deref(),
     );
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
+    // D-K5 compare-and-swap: the writer names the plaintext it read (`""` =
+    // must not exist yet); a different stored plaintext is 409 `stale_base` —
+    // the caller re-reads and re-applies (git's non-fast-forward). One extra
+    // GetObject per guarded put; the window between the check and the put is
+    // the worker's own, never across callers' reads.
+    if let Some(expected) = req.expected_content_hash.as_deref() {
+        let current = match s3
+            .get_object()
+            .bucket(&state.config.memory_bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let body = resp
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| err_502(e.to_string(), "s3_body"))?
+                    .into_bytes();
+                Some(
+                    envelope::decrypt(&state.config.kek_hex_stage1, &body, &aad)
+                        .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))?,
+                )
+            }
+            Err(e)
+                if e.as_service_error()
+                    .map(|se| se.is_no_such_key())
+                    .unwrap_or(false) =>
+            {
+                None
+            }
+            Err(e) => return Err(err_502(e.to_string(), "s3_get_for_cas")),
+        };
+        check_expected_hash(expected, current.as_deref())?;
+    }
     s3.put_object()
         .bucket(&state.config.memory_bucket)
         .key(&key)
@@ -200,6 +241,30 @@ async fn memory_put_inner(
         .await
         .map_err(|e| err_502(e.to_string(), "s3_put"))?;
     Ok((key, env_bytes))
+}
+
+/// D-K5 — the compare-and-swap verdict, pure: `expected` is the keccak-256 hex
+/// of the plaintext the writer read (`""` asserts the object is absent);
+/// `current` is what the store holds now.
+fn check_expected_hash(expected: &str, current: Option<&[u8]>) -> Result<(), ApiError> {
+    let actual = current.map(keccak_hex);
+    let ok = match (expected, actual.as_deref()) {
+        ("", None) => true,
+        ("", Some(_)) => false,
+        (_, None) => false,
+        (e, Some(a)) => a.eq_ignore_ascii_case(e),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(err_409(
+            format!(
+                "stale_base: the stored plaintext is not the one you read (current {})",
+                actual.as_deref().unwrap_or("absent")
+            ),
+            "stale_base",
+        ))
+    }
 }
 
 /// Read the caller's OWN working memory (`bots/<actor>/memory/`). Unchanged
@@ -1151,6 +1216,30 @@ mod tests {
     /// #594 — the AAD binds the object key: a same-service S3 swap between the
     /// working slot and a keyed object (or between two keyed objects) decrypts
     /// under a DIFFERENT AAD and fails, instead of restoring the wrong bytes.
+    #[test]
+    fn compare_and_swap_verdicts() {
+        let stored = b"[{\"key\":\"a\"}]";
+        let h = keccak_hex(stored);
+        assert!(
+            check_expected_hash("", None).is_ok(),
+            "absent + asserted absent"
+        );
+        assert!(
+            check_expected_hash("", Some(stored)).is_err(),
+            "asserted absent but present"
+        );
+        assert!(check_expected_hash(&h, Some(stored)).is_ok());
+        assert!(
+            check_expected_hash(&h.to_uppercase(), Some(stored)).is_ok(),
+            "hex case-insensitive"
+        );
+        assert!(check_expected_hash(&h, None).is_err(), "vanished meanwhile");
+        let (status, body) = check_expected_hash("0xdeadbeef", Some(stored)).unwrap_err();
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(body.0.reason, "stale_base");
+        assert!(body.0.error.contains(&h), "the 409 names the current hash");
+    }
+
     #[test]
     fn aad_service_domain_separates_keyed_objects() {
         let legacy = aad_service("knowledge:watchdog", None);

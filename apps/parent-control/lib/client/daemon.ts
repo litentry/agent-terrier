@@ -659,13 +659,13 @@ export class DaemonBackend implements AgentKeysClient {
   async acceptInbox(
     s3Key: string,
     confirmContentHash?: string,
+    onConflict?: 'replace' | 'keep-both',
   ): Promise<Result<{ planted: number; ns: string; key: string }>> {
-    return this.postJson<{ planted: number; ns: string; key: string }>(
-      '/v1/master/inbox/accept',
-      confirmContentHash
-        ? { s3_key: s3Key, confirm_content_hash: confirmContentHash }
-        : { s3_key: s3Key },
-    );
+    return this.postJson<{ planted: number; ns: string; key: string }>('/v1/master/inbox/accept', {
+      s3_key: s3Key,
+      ...(confirmContentHash ? { confirm_content_hash: confirmContentHash } : {}),
+      ...(onConflict ? { on_conflict: onConflict } : {}),
+    });
   }
 
   async rejectInbox(s3Key: string): Promise<Result<{ deleted: boolean }>> {
@@ -1014,6 +1014,7 @@ export class DaemonBackend implements AgentKeysClient {
     sensitivity: Sensitivity;
     ns: string;
     body: string;
+    base_content_hash?: string;
   }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string }>> {
     return this.postJson('/v1/master/resources/add', input);
   }
@@ -1029,6 +1030,7 @@ export class DaemonBackend implements AgentKeysClient {
     filename: string;
     content_type: string;
     content_b64: string;
+    base_content_hash?: string;
   }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string; extracted_bytes: number; raw_stored: boolean | null }>> {
     return this.postJson('/v1/master/resources/upload', input);
   }

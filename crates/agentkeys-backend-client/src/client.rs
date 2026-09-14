@@ -452,6 +452,7 @@ impl BackendClient {
             plaintext_b64: input.plaintext_b64,
             namespace: input.namespace.clone(),
             object_key: input.object_key.clone(),
+            expected_content_hash: input.expected_content_hash.clone(),
         });
         if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
             for (k, v) in headers {

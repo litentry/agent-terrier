@@ -780,15 +780,44 @@ fn merge_stored_entries(
             out.push(d);
         }
     }
+    // D-K5 (`plan/knowledge-repository.md` §6) — identity = key: the same
+    // content under a key is a no-op (an idempotent re-plant); a DIFFERENT body
+    // under an existing key REPLACES it — a file has one current version.
     let mut newly_added = 0usize;
     for e in incoming {
-        if seen.insert(content_hash_for(ns, &e.key, &e.body)) {
-            out.push(e.to_stored());
-            newly_added += 1;
+        let hash = content_hash_for(ns, &e.key, &e.body);
+        if seen.contains(&hash) {
+            continue;
         }
+        let (keep, replaced): (Vec<StoredMemoryEntry>, Vec<StoredMemoryEntry>) =
+            out.drain(..).partition(|d| d.key != e.key);
+        out = keep;
+        for d in replaced {
+            seen.remove(&content_hash_for(ns, &d.key, &d.body));
+        }
+        seen.insert(hash);
+        out.push(e.to_stored());
+        newly_added += 1;
     }
     out.sort_by(|a, b| a.key.cmp(&b.key));
     (out, newly_added)
+}
+
+/// The first `<key>-N` (N ≥ 2) no durable entry uses — a "keep both" merge.
+fn free_key(durable: &[StoredMemoryEntry], key: &str) -> String {
+    (2..)
+        .map(|n| format!("{key}-{n}"))
+        .find(|k| !durable.iter().any(|d| &d.key == k))
+        .unwrap_or_else(|| format!("{key}-2"))
+}
+
+/// The compare-and-swap base of a namespace blob (D-K5): the keccak-256 of the
+/// plaintext exactly as the worker returned it.
+fn blob_hash(bytes: &[u8]) -> String {
+    format!(
+        "0x{}",
+        hex::encode(agentkeys_core::device_crypto::keccak256(bytes))
+    )
 }
 
 pub type SharedUiBridgeState = Arc<UiBridgeState>;
@@ -9884,6 +9913,7 @@ async fn memory_put_ns_real(
     creds: &DataCreds,
     ns: &str,
     entries: &[StoredMemoryEntry],
+    expected_content_hash: Option<&str>,
 ) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
@@ -9907,6 +9937,7 @@ async fn memory_put_ns_real(
             plaintext_b64: STANDARD.encode(&plaintext),
             namespace: ns.to_string(),
             object_key: None,
+            expected_content_hash: expected_content_hash.map(str::to_string),
         })
         .send()
         .await
@@ -9965,6 +9996,7 @@ async fn memory_put_object_real(
             plaintext_b64: STANDARD.encode(bytes),
             namespace: ns.to_string(),
             object_key: Some(object_key.to_string()),
+            expected_content_hash: None,
         })
         .send()
         .await
@@ -9996,23 +10028,32 @@ pub(crate) async fn resource_entry_remove(
         let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"])
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
-        let durable = memory_get_ns_real(&client, &ctx, &creds, ns)
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("knowledge:{ns} read: {e}")))?;
-        if let Some(entries) = durable {
+        // D-K5: the write names the blob it read; a stale base is re-read once.
+        let mut attempt = 0u8;
+        loop {
+            attempt += 1;
+            let durable = memory_get_ns_hashed_real(&client, &ctx, &creds, ns)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("knowledge:{ns} read: {e}")))?;
+            let Some((entries, base)) = durable else {
+                break;
+            };
             let before = entries.len();
             let kept: Vec<StoredMemoryEntry> =
                 entries.into_iter().filter(|e| e.key != key).collect();
             removed_durable = before - kept.len();
-            if removed_durable > 0 {
-                memory_put_ns_real(&client, &ctx, &creds, ns, &kept)
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            format!("knowledge:{ns} write: {e}"),
-                        )
-                    })?;
+            if removed_durable == 0 {
+                break;
+            }
+            match memory_put_ns_real(&client, &ctx, &creds, ns, &kept, Some(&base)).await {
+                Ok(_) => break,
+                Err(e) if e.contains("stale_base") && attempt < 2 => continue,
+                Err(e) => {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        format!("knowledge:{ns} write: {e}"),
+                    ))
+                }
             }
         }
     }
@@ -10059,6 +10100,19 @@ async fn memory_get_ns_real(
     creds: &DataCreds,
     ns: &str,
 ) -> Result<Option<Vec<StoredMemoryEntry>>, String> {
+    Ok(memory_get_ns_hashed_real(client, ctx, creds, ns)
+        .await?
+        .map(|(entries, _)| entries))
+}
+
+/// [`memory_get_ns_real`] plus the compare-and-swap base (D-K5): the keccak-256
+/// of the stored plaintext, which the write that follows this read names.
+async fn memory_get_ns_hashed_real(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &DataCreds,
+    ns: &str,
+) -> Result<Option<(Vec<StoredMemoryEntry>, String)>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
         &ctx.broker,
@@ -10102,8 +10156,9 @@ async fn memory_get_ns_real(
     let bytes = STANDARD
         .decode(b64)
         .map_err(|e| format!("plaintext_b64 decode: {e}"))?;
+    let base = blob_hash(&bytes);
     let plaintext = String::from_utf8(bytes).map_err(|e| format!("plaintext utf8: {e}"))?;
-    Ok(Some(parse_stored_blob(&plaintext, ns)))
+    Ok(Some((parse_stored_blob(&plaintext, ns), base)))
 }
 
 /// Config-store the master-only memory-types taxonomy (#201): cap-mint
@@ -10802,6 +10857,12 @@ struct InboxCurateRequest {
     /// the body). Ignored for `knowledge`; `persona` is never adoptable.
     #[serde(default)]
     confirm_content_hash: Option<String>,
+    /// D-K5 — when the proposal's key already exists with a different body:
+    /// `"replace"` (the entry becomes the proposal) or `"keep-both"` (the
+    /// proposal lands under the first free `<key>-N`). Absent = refuse with
+    /// 409 `entry_exists` so the console shows the diff first.
+    #[serde(default)]
+    on_conflict: Option<String>,
 }
 
 /// #390 §16.2 — the per-kind skill size cap enforced at the curate gate
@@ -11125,7 +11186,7 @@ async fn accept_master_inbox(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let key = item
+    let mut key = item
         .get("key")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
@@ -11173,6 +11234,36 @@ async fn accept_master_inbox(
         item_hash,
     ) {
         return (status, Json(serde_json::json!({ "error": reason }))).into_response();
+    }
+
+    // D-K5 — identity = key: a proposal under a key that already exists with a
+    // different body would REPLACE it, so the owner chooses after seeing the
+    // diff (`on_conflict`); without a choice the accept is refused with both
+    // hashes and the current body.
+    if let Ok(Some((durable, _))) = memory_get_ns_hashed_real(&http, &ctx, &creds, &ns).await {
+        if let Some(cur) = durable.iter().find(|d| d.key == key) {
+            if cur.body != body {
+                match req.on_conflict.as_deref() {
+                    Some("replace") => {}
+                    Some("keep-both") => key = free_key(&durable, &key),
+                    _ => {
+                        use base64::{engine::general_purpose::STANDARD, Engine};
+                        return (
+                            axum::http::StatusCode::CONFLICT,
+                            Json(serde_json::json!({
+                                "error": "entry_exists",
+                                "ns": ns,
+                                "key": key,
+                                "current_content_hash": content_hash_for(&ns, &key, &cur.body),
+                                "current_body_b64": STANDARD.encode(&cur.body),
+                                "proposed_content_hash": item_hash,
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
     }
 
     // 2. Curate INTO canonical via the existing plant (merge + taxonomy).
@@ -11457,7 +11548,7 @@ async fn persona_store(
     match backend {
         PersonaBackend::Real(ctx, creds) => {
             let client = reqwest::Client::new();
-            memory_put_ns_real(&client, ctx, creds, PERSONA_NAMESPACE, entries)
+            memory_put_ns_real(&client, ctx, creds, PERSONA_NAMESPACE, entries, None)
                 .await
                 .map(|_| ())
                 .map_err(|e| {
@@ -12017,24 +12108,41 @@ pub(crate) async fn plant_master_memory_inner(
             // Read the durable blob FIRST. Ok(None) = brand-new namespace;
             // Err = a real worker/transport error → ABORT this plant rather than
             // overwrite durable data we failed to read (the finding-1 footgun).
-            let durable = match memory_get_ns_real(&client, &ctx, &creds, ns).await {
-                Ok(opt) => opt.unwrap_or_default(),
-                Err(e) => {
-                    return Err((
-                        axum::http::StatusCode::BAD_GATEWAY,
-                        format!(
-                            "plant aborted: durable read of knowledge:{ns} failed ({e}) — not overwriting"
-                        ),
-                    ));
+            // The write names the plaintext it read (D-K5 compare-and-swap); a
+            // concurrent writer's 409 `stale_base` is re-read and re-applied
+            // once — a plant is a merge, so re-applying it is safe.
+            let mut attempt = 0u8;
+            let newly = loop {
+                attempt += 1;
+                let (durable, base) = match memory_get_ns_hashed_real(&client, &ctx, &creds, ns)
+                    .await
+                {
+                    Ok(Some((d, h))) => (d, h),
+                    Ok(None) => (Vec::new(), String::new()),
+                    Err(e) => {
+                        return Err((
+                                axum::http::StatusCode::BAD_GATEWAY,
+                                format!(
+                                    "plant aborted: durable read of knowledge:{ns} failed ({e}) — not overwriting"
+                                ),
+                            ));
+                    }
+                };
+                let (merged, newly) = merge_stored_entries(ns, durable, entries);
+                match memory_put_ns_real(&client, &ctx, &creds, ns, &merged, Some(&base)).await {
+                    Ok(_) => break newly,
+                    Err(e) if e.contains("stale_base") && attempt < 2 => {
+                        tracing::info!(ns = %ns, "plant: stale base — re-reading and re-applying");
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err((
+                            axum::http::StatusCode::BAD_GATEWAY,
+                            format!("plant aborted: write of knowledge:{ns} failed: {e}"),
+                        ));
+                    }
                 }
             };
-            let (merged, newly) = merge_stored_entries(ns, durable, entries);
-            if let Err(e) = memory_put_ns_real(&client, &ctx, &creds, ns, &merged).await {
-                return Err((
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    format!("plant aborted: write of knowledge:{ns} failed: {e}"),
-                ));
-            }
             planted += newly;
             skipped += entries.len().saturating_sub(newly);
             committed.extend(entries.iter().cloned());
@@ -12046,6 +12154,8 @@ pub(crate) async fn plant_master_memory_inner(
         {
             let mut cache = state.master_memory.write().await;
             for e in committed {
+                // identity = key in the cache too (D-K5)
+                cache.retain(|_, x| !(x.ns == e.ns && x.key == e.key));
                 cache.insert(e.content_hash.clone(), e);
             }
         }
@@ -12089,11 +12199,13 @@ pub(crate) async fn plant_master_memory_inner(
                 e.content_hash.clone()
             };
             e.content_hash = hash.clone();
-            if let std::collections::hash_map::Entry::Vacant(slot) = mem.entry(hash) {
-                slot.insert(e);
-                planted += 1;
-            } else {
+            if mem.contains_key(&hash) {
                 skipped += 1;
+            } else {
+                // identity = key (D-K5): a different body under the key replaces it
+                mem.retain(|_, x| !(x.ns == e.ns && x.key == e.key));
+                mem.insert(hash, e);
+                planted += 1;
             }
         }
     }
@@ -16477,7 +16589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plant_changed_body_adds_a_new_entry() {
+    async fn plant_changed_body_replaces_the_entry() {
         let state = make_state();
         let _ = plant_master_memory_inner(
             &state,
@@ -16487,7 +16599,8 @@ mod tests {
         )
         .await
         .unwrap();
-        // Same ns/key but DIFFERENT body → different content_hash → a new entry.
+        // D-K5 — identity = key: the same key with a DIFFERENT body is a real
+        // write (planted 1) that REPLACES the entry, never a second one.
         let r = plant_master_memory_inner(
             &state,
             MasterMemoryPlantRequest {
@@ -16497,7 +16610,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(r.planted, 1);
-        assert_eq!(state.master_memory.read().await.len(), 2);
+        let mem = state.master_memory.read().await;
+        assert_eq!(mem.len(), 1);
+        assert_eq!(
+            mem.values().next().map(|e| e.body.as_str()),
+            Some("v2 body")
+        );
     }
 
     // ─── #201 Phase 4: taxonomy categories + per-ns array + lazy detail ───
@@ -16663,14 +16781,24 @@ mod tests {
     }
 
     #[test]
-    fn merge_same_key_different_body_keeps_both() {
-        // Content-hash identity: editing a key's body adds a 2nd entry (matches
-        // the in-memory model) rather than dropping the original.
+    fn merge_same_key_different_body_replaces() {
+        // D-K5 — identity = key: a different body under an existing key REPLACES
+        // it (one current version per key); re-planting the old body afterwards
+        // is a real write again, never a "seen" no-op.
         let durable = vec![stored("profile", "v1")];
         let incoming = vec![mem_entry("personal", "profile", "v2")];
         let (merged, newly) = merge_stored_entries("personal", durable, &incoming);
         assert_eq!(newly, 1);
-        assert_eq!(merged.len(), 2);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].body, "v2");
+        let back = vec![mem_entry("personal", "profile", "v1")];
+        let (merged, newly) = merge_stored_entries("personal", merged, &back);
+        assert_eq!(newly, 1);
+        assert_eq!(merged[0].body, "v1");
+        assert_eq!(free_key(&merged, "profile"), "profile-2");
+        let mut two = merged.clone();
+        two.push(stored("profile-2", "x"));
+        assert_eq!(free_key(&two, "profile"), "profile-3");
     }
 
     #[tokio::test]

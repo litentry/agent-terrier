@@ -23,6 +23,8 @@ import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
 import { LogoPage } from './logos';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import { KnowledgePage } from './knowledge';
+import { decodeBase64Utf8, errorJson } from '@/lib/client/diff';
+import { DiffView } from './shared';
 import { CredentialsPage } from './credentials';
 import { DelegatesPage } from './pairing';
 import { ArchiveAgentDialog, SpawnAgentModal } from './spawn';
@@ -262,12 +264,38 @@ export function App() {
   // refresh both the queue and the category list (a new namespace may appear).
   // #390 — `confirmContentHash` is the skill viewed-body watermark; the daemon's
   // per-kind gate 428s a skill accept without it and 403s persona outright.
-  const acceptInboxItem = async (s3Key: string, confirmContentHash?: string) => {
+  // D-K5 — a proposal whose key already exists with a different body is not
+  // merged blind: the daemon answers 409 `entry_exists` with the current body,
+  // the console shows the diff, and the owner chooses replace / keep both.
+  const [inboxConflict, setInboxConflict] = useState<{ s3Key: string; confirmContentHash?: string; ns: string; key: string; current: string; proposed: string } | null>(null);
+  const acceptInboxItem = async (s3Key: string, confirmContentHash?: string, onConflict?: 'replace' | 'keep-both') => {
     if (inboxBusy) return;
     setInboxBusy(true);
-    const r = await client.acceptInbox(s3Key, confirmContentHash);
+    const r = await client.acceptInbox(s3Key, confirmContentHash, onConflict);
     setInboxBusy(false);
+    if (!r.ok) {
+      const conflict = errorJson(r.status.detail);
+      if (conflict?.error === 'entry_exists') {
+        let proposed = '';
+        try {
+          proposed = await viewInboxBody(s3Key);
+        } catch (e) {
+          showToast(`Couldn't load the proposal body — ${(e as Error).message}`);
+          return;
+        }
+        setInboxConflict({
+          s3Key,
+          confirmContentHash,
+          ns: String(conflict.ns ?? ''),
+          key: String(conflict.key ?? ''),
+          current: decodeBase64Utf8(String(conflict.current_body_b64 ?? '')),
+          proposed,
+        });
+        return;
+      }
+    }
     if (r.ok) {
+      setInboxConflict(null);
       // Optimistic removal: drop the curated row immediately so the queue
       // reflects the change without waiting on (or silently losing) the
       // post-action refetch. The backend already deleted the inbox object;
@@ -1516,6 +1544,25 @@ export function App() {
         <WebAuthnModal intent={pendingAction.intent} onConfirm={confirmAction} onCancel={() => setPendingAction(null)} />
       )}
 
+      {inboxConflict && (
+        <Modal
+          wide
+          title={`${inboxConflict.ns}/${inboxConflict.key} already exists — replace it, or keep both?`}
+          onClose={() => setInboxConflict(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setInboxConflict(null)} disabled={inboxBusy}>cancel</button>
+              <button className="btn" onClick={() => void acceptInboxItem(inboxConflict.s3Key, inboxConflict.confirmContentHash, 'keep-both')} disabled={inboxBusy}>keep both (as {inboxConflict.key}-2)</button>
+              <button className="btn primary" onClick={() => void acceptInboxItem(inboxConflict.s3Key, inboxConflict.confirmContentHash, 'replace')} disabled={inboxBusy}>replace with the proposal</button>
+            </>
+          }
+        >
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+            The proposal would replace the current entry under this key. Lines it removes are struck through, lines it adds are highlighted. Every app granted this namespace reads the result at its next pull.
+          </p>
+          <DiffView before={inboxConflict.current} after={inboxConflict.proposed} />
+        </Modal>
+      )}
       {memoryView && (
         <Modal
           title={`knowledge · ${memoryView.ns}/${memoryView.title}`}

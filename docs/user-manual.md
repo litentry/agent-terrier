@@ -556,7 +556,12 @@ the permissions you approve. parent-control → **applications**:
   never write back. An app's own page lists its bound items with **edit**; the
   row names the other apps that read the same item, and a saved edit reaches
   all of them at their next refresh. An install wizard slot with no matching
-  item offers to add one right there.
+  item offers to add one right there. **Nothing is overwritten silently:** if
+  an item changed while you were editing it (another tab, another device),
+  the save is refused and the modal shows the difference — load the current
+  text, or overwrite on purpose. A merged proposal that lands on a key that
+  already exists shows the same diff and asks: replace the entry, or keep
+  both.
 - **Uninstall** revokes every permission (the delegate's, and the contact gate's
   and console's on the app's feeds), returns the agent slot, and tears the
   sandbox down. Keeping the app's memory lets a reinstall inherit it.

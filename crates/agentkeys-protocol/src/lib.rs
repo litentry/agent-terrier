@@ -286,6 +286,12 @@ pub struct MemoryPutBody {
     pub namespace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_key: Option<String>,
+    /// Compare-and-swap (D-K5, `plan/knowledge-repository.md` §6): the keccak-256
+    /// hex (`0x…`) of the plaintext the writer READ, or `""` to assert the object
+    /// does not exist yet. The worker refuses the put with 409 `stale_base` when
+    /// the stored plaintext hashes differently — git's "non-fast-forward".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_content_hash: Option<String>,
 }
 
 /// Memory-worker `/v1/memory/get` request body. Mirrors
@@ -1497,6 +1503,12 @@ pub struct MemoryPutInput {
     /// #594 — keyed object under the same grant (see [`MemoryPutBody`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_key: Option<String>,
+    /// Compare-and-swap (D-K5, `plan/knowledge-repository.md` §6): the keccak-256
+    /// hex (`0x…`) of the plaintext the writer READ, or `""` to assert the object
+    /// does not exist yet. The worker refuses the put with 409 `stale_base` when
+    /// the stored plaintext hashes differently — git's "non-fast-forward".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2757,8 +2769,13 @@ mod tests {
             plaintext_b64: "aGk=".into(),
             namespace: "knowledge:watchdog".into(),
             object_key: None,
+            expected_content_hash: None,
         };
         let wire = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            wire.get("expected_content_hash").is_none(),
+            "D-K5 compare-and-swap is additive: absent unless the writer names a base"
+        );
         assert!(
             wire.get("object_key").is_none(),
             "absent object_key must not appear on the wire: {wire}"

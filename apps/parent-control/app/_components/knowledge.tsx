@@ -32,7 +32,8 @@ import {
 } from '@/lib/client/knowledge';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import { CeremonyRunner } from './ceremony';
-import { Chip, EmptyState, Modal, PageHead, Panel, Tabs } from './shared';
+import { Chip, DiffView, EmptyState, Modal, PageHead, Panel, Tabs } from './shared';
+import { errorJson } from '@/lib/client/diff';
 import type { Actor, CeremonyStep, PreservedMemory } from './types';
 
 const PLANT_STEPS: CeremonyStep[] = [
@@ -62,8 +63,11 @@ const ID_RE = /^[a-z0-9-]{1,48}$/;
 const KINDS: ResourceKind[] = ['note', 'document', 'profile', 'dataset', 'gallery'];
 
 type ItemMeta = { id: string; name: string; name_zh: string; kind: ResourceKind; tags: string[]; sensitivity: 'safe' | 'sensitive'; ns: string };
-export type KnowledgeAddInput = ItemMeta & { body: string };
-export type KnowledgeUploadInput = ItemMeta & { filename: string; content_type: string; content_b64: string };
+/** D-K5 — the row's `content_hash` an edit started from rides along; the daemon refuses a changed row. */
+export type KnowledgeAddInput = ItemMeta & { body: string; base_content_hash?: string };
+export type KnowledgeUploadInput = ItemMeta & { filename: string; content_type: string; content_b64: string; base_content_hash?: string };
+/** `stale` = the daemon refused a stale base — the modal shows the diff and lets the owner reload or overwrite. */
+export type KnowledgeSaveOutcome = 'ok' | 'stale' | 'error';
 
 export function KnowledgePage({
   client,
@@ -199,29 +203,31 @@ export function KnowledgePage({
     await settle(row.ns);
   };
 
-  const add = async (input: KnowledgeAddInput): Promise<boolean> => {
-    if (!client.resourceAdd) return false;
+  const add = async (input: KnowledgeAddInput): Promise<KnowledgeSaveOutcome> => {
+    if (!client.resourceAdd) return 'error';
     const r = await client.resourceAdd(input);
     if (!r.ok) {
+      if (errorJson(r.status?.detail)?.error === 'stale_base') return 'stale';
       showToast(`add failed — ${r.status?.detail ?? 'error'}`, true);
-      return false;
+      return 'error';
     }
     showToast(`${input.id} v${r.data.version} planted into knowledge:${input.ns} (${r.data.storage})`);
     await settle(input.ns);
-    return true;
+    return 'ok';
   };
 
-  const upload = async (input: KnowledgeUploadInput): Promise<boolean> => {
-    if (!client.resourceUpload) return false;
+  const upload = async (input: KnowledgeUploadInput): Promise<KnowledgeSaveOutcome> => {
+    if (!client.resourceUpload) return 'error';
     const r = await client.resourceUpload(input);
     if (!r.ok) {
+      if (errorJson(r.status?.detail)?.error === 'stale_base') return 'stale';
       showToast(`upload failed — ${r.status?.detail ?? 'error'}`, true);
-      return false;
+      return 'error';
     }
     const kept = r.data.raw_stored === true ? 'file kept' : r.data.raw_stored === false ? 'file not kept — no durable memory plane on this console' : 'no file';
     showToast(`${input.filename} → ${input.id} v${r.data.version}: ${r.data.extracted_bytes} B of text in knowledge:${input.ns} (${kept})`, r.data.raw_stored === false);
     await settle(input.ns);
-    return true;
+    return 'ok';
   };
 
   return (
@@ -466,8 +472,8 @@ export function KnowledgeItemModal({
   /** For the namespace hint: who already reads the namespace being typed. */
   namespaces?: KnowledgeNamespace[];
   onClose: () => void;
-  onAdd: (input: KnowledgeAddInput) => Promise<boolean>;
-  onUpload: (input: KnowledgeUploadInput) => Promise<boolean>;
+  onAdd: (input: KnowledgeAddInput) => Promise<KnowledgeSaveOutcome>;
+  onUpload: (input: KnowledgeUploadInput) => Promise<KnowledgeSaveOutcome>;
 }) {
   const [mode, setMode] = useState<'paste' | 'upload'>('paste');
   const [id, setId] = useState(edit?.id ?? curate?.key ?? '');
@@ -482,6 +488,10 @@ export function KnowledgeItemModal({
   const [file, setFile] = useState<{ name: string; type: string; size: number; b64: string } | null>(null);
   const [fileErr, setFileErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // D-K5 — the row this edit started from; a save names it so a row that
+  // changed meanwhile is refused, and the modal shows the diff.
+  const [baseHash, setBaseHash] = useState<string | undefined>(edit?.content_hash);
+  const [stale, setStale] = useState<{ current: string; currentHash: string } | null>(null);
   // Editing: pre-fill the current text from the namespace (the entry keyed by the id).
   useEffect(() => {
     if (!edit) return;
@@ -524,6 +534,23 @@ export function KnowledgeItemModal({
   const idOk = ID_RE.test(id) && !id.startsWith('-') && !id.endsWith('-');
   const ok = idOk && name.trim() && ns.trim() && (mode === 'paste' ? body.trim() : !!file);
   const meta = (): ItemMeta => ({ id, name: name.trim(), name_zh: nameZh.trim(), kind, tags: tags.split(',').map((t) => t.trim()).filter(Boolean), sensitivity, ns: ns.trim() });
+  const submit = async (force: boolean) => {
+    setBusy(true);
+    const base = force ? undefined : baseHash;
+    const done = mode === 'paste' || !file
+      ? await onAdd({ ...meta(), body, base_content_hash: base })
+      : await onUpload({ ...meta(), filename: file.name, content_type: file.type, content_b64: file.b64, base_content_hash: base });
+    setBusy(false);
+    if (done === 'ok') onClose();
+    if (done === 'stale') {
+      // the daemon refused: load what is there now and show the difference
+      const r = await client.getMemoryEntries(ns.trim(), id);
+      const hit = r.ok ? (r.data.find((e) => e.key === id) ?? r.data[0]) : undefined;
+      const list = await client.listResources?.();
+      const row = list?.ok ? list.data.items.find((it) => it.id === id) : undefined;
+      setStale({ current: hit?.body ?? '', currentHash: row?.content_hash ?? '' });
+    }
+  };
   const nsInfo = namespaces?.find((n) => n.ns === ns.trim());
   const nsReaders = nsInfo ? [...nsInfo.readers.apps, ...nsInfo.readers.delegates] : [];
   const title = edit
@@ -549,15 +576,8 @@ export function KnowledgeItemModal({
           <button className="btn" onClick={onClose} disabled={busy}>cancel</button>
           <button
             className="btn primary"
-            disabled={!ok || busy || loadingBody}
-            onClick={async () => {
-              setBusy(true);
-              const done = mode === 'paste' || !file
-                ? await onAdd({ ...meta(), body })
-                : await onUpload({ ...meta(), filename: file.name, content_type: file.type, content_b64: file.b64 });
-              setBusy(false);
-              if (done) onClose();
-            }}
+            disabled={!ok || busy || loadingBody || !!stale}
+            onClick={() => void submit(false)}
           >
             {cta}
           </button>
@@ -601,6 +621,19 @@ export function KnowledgeItemModal({
           </label>
         )}
       </div>
+      {stale && (
+        <div style={{ marginTop: 10 }}>
+          <div className="banner warn" style={{ marginBottom: 8 }}>
+            <span className="lbl">changed meanwhile</span>
+            <span>
+              This item was saved by someone else since you opened it. Below: the current text against yours (struck through = current lines your text drops).
+              <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => { setBody(stale.current); setBaseHash(stale.currentHash); setStale(null); }}>load the current text</button>
+              <button className="btn sm" style={{ marginLeft: 6, color: 'var(--danger)' }} onClick={() => { setStale(null); void submit(true); }}>overwrite anyway</button>
+            </span>
+          </div>
+          <DiffView before={stale.current} after={mode === 'paste' ? body : `(the uploaded file ${file?.name ?? ''})`} />
+        </div>
+      )}
       <p className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
         {namespaces === undefined
           ? <>Apps read it through the read-only <code>memory:&lt;ns&gt;</code> grant — the grant covers the whole namespace, never one item.</>

@@ -1568,6 +1568,11 @@ pub struct ResourceAddRequest {
     pub ns: String,
     /// The item's content (UTF-8 text / markdown / JSON).
     pub body: String,
+    /// D-K5 — the `content_hash` of the row this edit started from; a
+    /// different current row is refused with 409 `stale_base` (a diff, never
+    /// a silent overwrite). Absent for a new item or a deliberate overwrite.
+    #[serde(default)]
+    pub base_content_hash: Option<String>,
 }
 
 /// Upload caps: 5 MiB of file bytes (a curated profile / document / dataset —
@@ -1598,6 +1603,9 @@ pub struct ResourceUploadRequest {
     pub content_type: String,
     /// The file bytes, standard base64.
     pub content_b64: String,
+    /// D-K5 — see `ResourceAddRequest::base_content_hash`.
+    #[serde(default)]
+    pub base_content_hash: Option<String>,
 }
 
 /// What an app can read out of an uploaded file: its TEXT. Plain text, markdown,
@@ -1661,6 +1669,7 @@ struct ResourceCurate {
     body: String,
     /// `(filename, content_type, raw bytes)` for an upload.
     provenance: Option<(String, String, Vec<u8>)>,
+    base_content_hash: Option<String>,
 }
 
 fn validate_resource_head(
@@ -1708,6 +1717,24 @@ async fn curate_resource(
         Ok(r) => r,
         Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("resource registry: {e}")),
     };
+    // D-K5 — an edit names the row it started from; if the item changed
+    // meanwhile (another tab, another device) the save is refused with the
+    // current hash so the console shows the diff — never a silent overwrite.
+    if let Some(base) = c.base_content_hash.as_deref() {
+        let current = reg.find(&c.id).map(|r| r.content_hash.clone());
+        if current.as_deref() != Some(base) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "stale_base",
+                    "id": c.id,
+                    "current_content_hash": current,
+                    "current": reg.find(&c.id),
+                })),
+            )
+                .into_response();
+        }
+    }
     let next_version = reg.find(&c.id).map(|i| i.version + 1).unwrap_or(1);
     if let Err((status, reason)) = resource_entry_remove(state, &c.ns, &c.id).await {
         return (status, Json(serde_json::json!({ "error": reason }))).into_response();
@@ -1831,6 +1858,7 @@ pub async fn add_resource(
             sensitivity: req.sensitivity,
             body: req.body,
             provenance: None,
+            base_content_hash: req.base_content_hash.clone(),
         },
     )
     .await
@@ -1896,6 +1924,7 @@ pub async fn upload_resource(
             sensitivity: req.sensitivity,
             body: text,
             provenance: Some((filename, req.content_type.trim().to_string(), bytes)),
+            base_content_hash: req.base_content_hash.clone(),
         },
     )
     .await
@@ -2122,11 +2151,24 @@ pub(crate) async fn register_note_rows(
 ) -> Result<usize, String> {
     let mut reg = ensure_resource_registry(state).await?;
     let mut added = 0usize;
+    let mut refreshed = 0usize;
     for e in entries {
         if e.kind != agentkeys_backend_client::protocol::ContextKind::Knowledge
             || !agentkeys_backend_client::protocol::is_valid_resource_id(&e.key)
-            || reg.find(&e.key).is_some()
         {
+            continue;
+        }
+        let hash = crate::ui_bridge::content_hash_for(&e.ns, &e.key, &e.body);
+        if let Some(row) = reg.items.iter_mut().find(|r| r.id == e.key) {
+            // D-K5 — identity = key: the plant REPLACED this row's entry; the
+            // row keeps its type and follows the content (next version).
+            if row.ns == e.ns && row.content_hash != hash {
+                row.content_hash = hash;
+                row.bytes = e.body.len() as u64;
+                row.updated_at = now_unix();
+                row.version += 1;
+                refreshed += 1;
+            }
             continue;
         }
         let now = now_unix();
@@ -2144,7 +2186,7 @@ pub(crate) async fn register_note_rows(
             tags: Vec::new(),
             sensitivity: Sensitivity::Safe,
             version: 0,
-            content_hash: crate::ui_bridge::content_hash_for(&e.ns, &e.key, &e.body),
+            content_hash: hash,
             bytes: e.body.len() as u64,
             created_at: now,
             updated_at: now,
@@ -2155,10 +2197,10 @@ pub(crate) async fn register_note_rows(
         });
         added += 1;
     }
-    if added > 0 {
+    if added + refreshed > 0 {
         persist_resource_registry(state, reg).await?;
     }
-    Ok(added)
+    Ok(added + refreshed)
 }
 
 #[cfg(test)]
@@ -2507,6 +2549,7 @@ mod handler_tests {
             sensitivity: Sensitivity::Safe,
             ns: ns.into(),
             body: body.into(),
+            base_content_hash: None,
         };
         for (req, why) in [
             (base("Bad Id!", "food-prefs", "Food", "x"), "id"),
@@ -2571,6 +2614,7 @@ mod handler_tests {
                     sensitivity: Sensitivity::Safe,
                     ns: "household".into(),
                     body: "SSID home / pass 1234".into(),
+                    base_content_hash: None,
                 }),
             )
             .await,
@@ -2662,20 +2706,64 @@ mod handler_tests {
         )
         .await;
         assert_eq!(status, 200);
+        // a replacing plant REFRESHES the typed row (hash, bytes, next version) and keeps its type
+        assert_eq!(
+            register_note_rows(&state, &[entry("chengdu-trip", "pandas v2")])
+                .await
+                .unwrap(),
+            1
+        );
+        let row = ensure_resource_registry(&state)
+            .await
+            .unwrap()
+            .find("chengdu-trip")
+            .cloned()
+            .unwrap();
+        assert_eq!(row.kind, ResourceKind::Document);
+        assert_eq!(row.version, 2);
+        assert_eq!(row.bytes, "pandas v2".len() as u64);
+        // same content again: nothing to do
         assert_eq!(
             register_note_rows(&state, &[entry("chengdu-trip", "pandas v2")])
                 .await
                 .unwrap(),
             0
         );
-        assert_eq!(
-            ensure_resource_registry(&state)
-                .await
-                .unwrap()
-                .find("chengdu-trip")
-                .map(|r| r.kind),
-            Some(ResourceKind::Document)
-        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_on_a_stale_base_is_refused_with_the_current_hash() {
+        let state = state_with_session(None).await;
+        let add = |body: &str, base: Option<&str>| ResourceAddRequest {
+            id: "diet".into(),
+            name: "Diet".into(),
+            name_zh: String::new(),
+            kind: ResourceKind::Profile,
+            tags: vec![],
+            sensitivity: Sensitivity::Safe,
+            ns: "household".into(),
+            body: body.into(),
+            base_content_hash: base.map(str::to_string),
+        };
+        let (status, v1) =
+            read(add_resource(State(state.clone()), Json(add("no peanuts", None))).await).await;
+        assert_eq!(status, 200, "{v1}");
+        let h1 = v1["item"]["content_hash"].as_str().unwrap().to_string();
+        let (status, stale) = read(
+            add_resource(
+                State(state.clone()),
+                Json(add("no shrimp", Some("0xstale"))),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 409, "{stale}");
+        assert_eq!(stale["error"], "stale_base");
+        assert_eq!(stale["current_content_hash"], h1);
+        let (status, v2) =
+            read(add_resource(State(state.clone()), Json(add("no shrimp", Some(&h1)))).await).await;
+        assert_eq!(status, 200, "{v2}");
+        assert_eq!(v2["version"], 2);
     }
 
     #[tokio::test]
@@ -2693,6 +2781,7 @@ mod handler_tests {
             filename: filename.into(),
             content_type: ct.into(),
             content_b64: STANDARD.encode(bytes),
+            base_content_hash: None,
         };
         let (status, body) = read(
             upload_resource(
@@ -2763,6 +2852,7 @@ mod handler_tests {
                     sensitivity: Sensitivity::Safe,
                     ns: "household".into(),
                     body: "pasted v3".into(),
+                    base_content_hash: None,
                 }),
             )
             .await,

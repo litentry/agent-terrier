@@ -57,8 +57,9 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         plaintext_b64: "<base64-plaintext>".into(),
         namespace: "<namespace>".into(),
         // None + skip_serializing_if → the fixture (and its frozen key set)
-        // is unchanged by the #594 keyed-object field.
+        // is unchanged by the #594 keyed-object field and the D-K5 base hash.
         object_key: None,
+        expected_content_hash: None,
     };
     let memory_get = MemoryGetBody {
         cap: json!("<cap-token>"),
@@ -73,6 +74,7 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         plaintext_b64: "<base64-plaintext>".into(),
         namespace: "<namespace>".into(),
         object_key: Some(agentkeys_protocol::CHECKPOINT_OBJECT_KEY.into()),
+        expected_content_hash: None,
     };
     let memory_get_keyed = MemoryGetBody {
         cap: json!("<cap-token>"),

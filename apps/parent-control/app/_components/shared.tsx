@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import { CHIP_STYLES } from '@/lib/constants';
+import { diffStats, lineDiff } from '@/lib/client/diff';
 import type { ConnectionStatus } from '@/lib/client/types';
 import type { Actor, ChipKind, StatusKind } from './types';
 
@@ -298,6 +299,28 @@ export function ActorTree({
 // item may carry a badge (a count or a short state) and an `attention` flag that
 // tints an inactive tab — the page's "the next thing is in here" signal.
 export type TabItem<K extends string> = { key: K; label: ReactNode; badge?: ReactNode; attention?: boolean };
+
+/** Two texts, line by line (D-K5): what a proposal or an edit changes against
+ *  what is there now. Read-only; the callers decide. */
+export function DiffView({ before, after, maxHeight = 320 }: { before: string; after: string; maxHeight?: number }) {
+  const lines = lineDiff(before, after);
+  const st = diffStats(lines);
+  return (
+    <div className="diff">
+      <div className="diff-head muted">
+        <span>+{st.added} −{st.removed}</span>
+      </div>
+      <pre className="diff-body" style={{ maxHeight }}>
+        {lines.map((l, i) => (
+          <div key={i} className={`diff-line ${l.kind}`}>
+            <span className="diff-sign">{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' '}</span>
+            {l.text || ' '}
+          </div>
+        ))}
+      </pre>
+    </div>
+  );
+}
 
 export function Tabs<K extends string>({
   items,

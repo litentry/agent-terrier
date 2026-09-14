@@ -627,6 +627,8 @@ export interface AgentKeysClient {
   acceptInbox(
     s3Key: string,
     confirmContentHash?: string,
+    /** D-K5 — the owner's choice when the key already exists with a different body (after seeing the diff). */
+    onConflict?: 'replace' | 'keep-both',
   ): Promise<Result<{ planted: number; ns: string; key: string }>>;
   rejectInbox(s3Key: string): Promise<Result<{ deleted: boolean }>>;
   getInboxItem(s3Key: string): Promise<Result<InboxItemBody>>;
@@ -836,6 +838,8 @@ export interface AgentKeysClient {
     sensitivity: Sensitivity;
     ns: string;
     body: string;
+    /** D-K5 — the row's `content_hash` this edit started from; a changed row is refused (409 `stale_base`). */
+    base_content_hash?: string;
   }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string }>>;
   /** #674 — curate a resource FROM A FILE: the daemon extracts the text (txt/md/csv/json/pdf; an
    *  image becomes a gallery caption) and keeps the raw bytes as `files/<id>` on a durable plane. */
@@ -850,6 +854,7 @@ export interface AgentKeysClient {
     filename: string;
     content_type: string;
     content_b64: string;
+    base_content_hash?: string;
   }): Promise<Result<{ item: ResourceItemRow | null; version: number; storage: string; extracted_bytes: number; raw_stored: boolean | null }>>;
   /** #674 — unregister an item and drop its entry; refused (409 resource_in_use) while a live app is bound to it unless `force`. */
   resourceRemove?(input: { id: string; force?: boolean }): Promise<Result<{ ok: boolean; removed: boolean; item?: ResourceItemRow; apps?: string[] }>>;
