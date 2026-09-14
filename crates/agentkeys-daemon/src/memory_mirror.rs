@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentkeys_backend_client::protocol::{
-    service_memory, CapMintOp, CapMintRequest, MemoryGetInput,
+    service_knowledge, CapMintOp, CapMintRequest, MemoryGetInput,
 };
 use agentkeys_backend_client::{normalize_omni_0x, BackendClient, BackendError};
 use agentkeys_memory_engine::MemoryLine;
@@ -229,12 +229,12 @@ async fn fetch_canonical(
     device_key_hash: &str,
     bearer: &str,
 ) -> Result<String, (&'static str, BackendError)> {
-    // The cap `service` AND the worker `namespace` are the FULL `memory:<ns>`
+    // The cap `service` AND the worker `namespace` are the FULL `knowledge:<ns>`
     // wire id (the on-chain grant hashes that string — the protocol
-    // `service_memory` builder is the one composition site). A bare namespace
+    // `service_knowledge` builder is the one composition site). A bare namespace
     // 403s at cap-mint with `service_not_in_scope` (the first CI runs of
     // suite-7); the delegation demo passes the full id for both fields.
-    let service = service_memory(namespace);
+    let service = service_knowledge(namespace);
     let cap = client
         .cap_mint(
             CapMintOp::MemoryCanonicalGet,

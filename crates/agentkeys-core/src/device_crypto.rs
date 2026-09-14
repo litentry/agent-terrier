@@ -420,7 +420,7 @@ mod tests {
         let (operator, actor, service, op, dc, nonce, ts) = (
             "0xAABB",
             "ccdd",
-            "memory:travel",
+            "knowledge:travel",
             "store",
             "memory",
             "0011223344556677",

@@ -42,7 +42,7 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
     let cap = BrokerCapRequest {
         operator_omni: "0x<operator_omni>".into(),
         actor_omni: "0x<actor_omni>".into(),
-        service: "memory:<namespace>".into(),
+        service: "knowledge:<namespace>".into(),
         device_key_hash: "0x<device_key_hash>".into(),
         ttl_seconds: Some(300),
         client_sig: None,
@@ -125,7 +125,7 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         device_key_hash: "0x<device_key_hash>".into(),
         agent_pop_sig: "0x<agent_pop_sig>".into(),
         link_code_redemption: "0x<link_code_redemption>".into(),
-        services: vec!["memory:<namespace>".into()],
+        services: vec!["knowledge:<namespace>".into()],
         read_only: true,
         max_per_call: "0".into(),
         max_per_period: "0".into(),
@@ -158,7 +158,7 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
     let build_scope = BuildScopeUserOpRequest {
         operator_omni: "0x<operator_omni>".into(),
         actor_omni: "0x<actor_omni>".into(),
-        services: vec!["memory:<namespace>".into()],
+        services: vec!["knowledge:<namespace>".into()],
         preserve_service_ids: vec!["0x<service_id_keccak32>".into()],
         read_only: true,
         max_per_call: "0".into(),

@@ -63,14 +63,14 @@ struct Args {
     /// #573 absorption bridge — propose ONE learning to the owner's inbox.
     /// Reads the proposal TEXT from stdin and the same chat env contract as
     /// `--memory-mirror-once`; signs as the delegate, cap-mints against the
-    /// on-chain `inbox:<ns>` grant, and prints a JSON receipt. The in-sandbox
+    /// on-chain `proposal:<ns>` grant, and prints a JSON receipt. The in-sandbox
     /// `propose-to-owner` wrapper is the agent-facing tool over this verb.
     #[arg(long)]
     propose_once: bool,
 
     /// Namespace for `--propose-once` (default: the first entry of
     /// `AGENTKEYS_MEMORY_NAMESPACES`). The push needs the delegate's on-chain
-    /// `inbox:<ns>` grant — DISTINCT from the `memory:<ns>` read grant.
+    /// `proposal:<ns>` grant — DISTINCT from the `knowledge:<ns>` read grant.
     #[arg(long)]
     propose_ns: Option<String>,
 
@@ -451,7 +451,7 @@ async fn run_memory_mirror_once() -> anyhow::Result<()> {
 /// #573 `--propose-once` — see the Args doc. Reads the proposal text from
 /// stdin, pushes it through the shared inbox-append core as the delegate,
 /// prints the JSON receipt, exit 0. Any refusal (empty/oversized text, rate
-/// limit, missing `inbox:<ns>` grant → cap-mint 403) is a fatal error with
+/// limit, missing `proposal:<ns>` grant → cap-mint 403) is a fatal error with
 /// the reason on stderr — the agent reads it and can tell the owner.
 async fn run_propose_once(args: Args) -> anyhow::Result<()> {
     let cfg = chat_loop::ChatLoopConfig::from_env().ok_or_else(|| {

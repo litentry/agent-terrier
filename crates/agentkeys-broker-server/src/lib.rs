@@ -71,7 +71,7 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/v1/cap/memory-get", post(handlers::cap::cap_memory_get))
         // #295 P1 — delegated canonical-memory READ (the master-hub
         // distribution channel): mints a CanonicalFetch/Memory cap, gated by
-        // the on-chain memory:<ns> grant when operator != actor.
+        // the on-chain knowledge:<ns> grant when operator != actor.
         .route(
             "/v1/cap/memory-canonical-get",
             post(handlers::cap::cap_memory_canonical_get),
@@ -85,8 +85,8 @@ pub fn create_router(state: SharedState) -> Router {
             post(handlers::canonical_sts::mint_canonical_sts),
         )
         // #339 P2 — delegated absorption-inbox APPEND (the master-hub "push"
-        // channel): mints an Append/Memory cap, gated by the on-chain inbox:<ns>
-        // grant (a DISTINCT service-id from the memory:<ns> read grant).
+        // channel): mints an Append/Memory cap, gated by the on-chain proposal:<ns>
+        // grant (a DISTINCT service-id from the knowledge:<ns> read grant).
         .route(
             "/v1/cap/memory-append",
             post(handlers::cap::cap_memory_append),

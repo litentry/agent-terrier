@@ -369,7 +369,7 @@ enum DelegationAction {
     },
     /// DEVICE: discover pending delegation requests for this device and co-sign
     /// each with K10, bounding the sandbox to `--scope`. The per-spawn bound can be
-    /// TIGHTER than the on-chain grant (e.g. omit `memory:travel` on a re-spawn).
+    /// TIGHTER than the on-chain grant (e.g. omit `knowledge:travel` on a re-spawn).
     #[command(about = "Device: co-sign pending sandbox delegation requests with K10")]
     Cosign {
         #[arg(
@@ -387,7 +387,7 @@ enum DelegationAction {
         #[arg(
             long,
             default_value = "memory",
-            help = "Delegation scope to sign (space-delimited data_class / service tokens, e.g. 'memory:travel memory:personal')"
+            help = "Delegation scope to sign (space-delimited data_class / service tokens, e.g. 'knowledge:travel knowledge:personal')"
         )]
         scope: String,
         #[arg(
@@ -847,7 +847,7 @@ enum InboxAction {
 enum MemoryAction {
     /// #295 P1 — delegate-side READ of the MASTER's CANONICAL memory namespace
     /// (the master-hub distribution channel). Gated by the actor's on-chain
-    /// `memory:<ns>` scope grant; prints the decrypted plaintext. This is the
+    /// `knowledge:<ns>` scope grant; prints the decrypted plaintext. This is the
     /// delegated-fetch path the #566 daemon memory mirror also rides —
     /// §7a (A'): the delegate sends ONLY its OWN session + the cap to the memory
     /// worker and gets back plaintext, NEVER S3 creds. The WORKER fetches the
@@ -884,14 +884,14 @@ enum MemoryAction {
     /// #339 P2 — PUSH a learning into the master's absorption inbox (the
     /// master-hub "push" channel): a proposal the master later CURATES into
     /// canonical memory (a pull-request, never a blind write). Gated by the
-    /// DELEGATE's on-chain `inbox:<ns>` grant (DISTINCT from the `memory:<ns>`
+    /// DELEGATE's on-chain `proposal:<ns>` grant (DISTINCT from the `knowledge:<ns>`
     /// read grant) and run under the delegate's OWN session (A', §8): the worker
     /// writes server-side under a broker-minted scoped STS, so the delegate holds
     /// no S3 creds and provenance is worker-stamped. Identity/session from flags or env.
     InboxPush {
         /// The bare memory namespace the proposal targets (e.g. `travel`). Built
-        /// into the cap `service` as `inbox:<ns>`; the master curates it into
-        /// canonical `memory:<ns>`.
+        /// into the cap `service` as `proposal:<ns>`; the master curates it into
+        /// canonical `knowledge:<ns>`.
         #[arg(long)]
         namespace: String,
         /// The proposed memory key within the namespace (e.g. `night-light-rule`).
@@ -1178,7 +1178,7 @@ enum AgentAction {
         #[arg(
             long,
             default_value = "",
-            help = "Granted services, comma/space-separated (e.g. 'memory:travel' or 'channel-pub:cam-1'); empty = zero-grant bind"
+            help = "Granted services, comma/space-separated (e.g. 'knowledge:travel' or 'channel-pub:cam-1'); empty = zero-grant bind"
         )]
         services: String,
         #[arg(
@@ -1239,7 +1239,7 @@ enum AgentAction {
         #[arg(
             long,
             default_value = "",
-            help = "memory:<ns> namespace; empty = fresh, named after the label"
+            help = "knowledge:<ns> namespace; empty = fresh, named after the label"
         )]
         memory_ns: String,
         #[arg(
@@ -1284,13 +1284,13 @@ enum AgentAction {
         device_key_hash: String,
         #[arg(
             long,
-            help = "KEEP the delegate's resources (memory:<ns> stays inheritable); default deletes"
+            help = "KEEP the delegate's resources (knowledge:<ns> stays inheritable); default deletes"
         )]
         keep_resources: bool,
         #[arg(
             long,
             default_value = "",
-            help = "The delegate's memory:<ns> name (recorded for O2 inheritance discovery)"
+            help = "The delegate's knowledge:<ns> name (recorded for O2 inheritance discovery)"
         )]
         memory_ns: String,
         #[arg(

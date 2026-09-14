@@ -965,7 +965,7 @@ export function App() {
   // success, re-poll so the claimed agent appears in the rendezvous (awaiting
   // on-chain register + scope approval).
   //
-  // #249: the claim declares a NAMESPACE-QUALIFIED default scope (`memory:<ns>`
+  // #249: the claim declares a NAMESPACE-QUALIFIED default scope (`knowledge:<ns>`
   // per known namespace) — never a bare `memory`. A bare token can't compile to
   // an on-chain service, which is how an accept silently landed `setScope([])`;
   // with qualified defaults the accept card's picker has the real namespaces
@@ -976,7 +976,7 @@ export function App() {
       return;
     }
     setClaiming(true);
-    const scope = availableNamespaces.map((ns) => `memory:${ns}`).join(',');
+    const scope = availableNamespaces.map((ns) => `knowledge:${ns}`).join(',');
     const r = await client.claimPairing({ ...input, scope });
     setClaiming(false);
     if (!r.ok) {

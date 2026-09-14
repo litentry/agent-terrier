@@ -300,7 +300,10 @@ mod tests {
 
     #[test]
     fn tool_guard_is_case_insensitive_over_the_grant_view() {
-        let g = vec!["memory:app-chef".to_string(), "TOOL:Schedule".to_string()];
+        let g = vec![
+            "knowledge:app-chef".to_string(),
+            "TOOL:Schedule".to_string(),
+        ];
         assert!(tool_granted(&g, "schedule"));
         assert!(!tool_granted(&g, "web"));
         assert!(!tool_granted(&[], "schedule"));

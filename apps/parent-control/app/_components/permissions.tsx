@@ -233,22 +233,22 @@ export function PermissionList({
               control={
                 editable ? (
                   // Two INDEPENDENT grants per namespace (#339), not a deny/read/r+w
-                  // ladder: read = memory:<ns> (read the master's shared memory) ·
-                  // write = inbox:<ns> (write/suggest into the master's inbox, which
+                  // ladder: read = knowledge:<ns> (read the master's shared memory) ·
+                  // write = proposal:<ns> (write/suggest into the master's inbox, which
                   // the master curates — NEVER a direct shared-memory write).
                   <div className="perm-rw">
                     <button
                       type="button"
                       className={`perm-tog ${s.read ? 'on' : ''}`}
                       aria-pressed={s.read}
-                      title="READ — let this delegate read your shared knowledge for this namespace (memory:<ns>)."
+                      title="READ — let this delegate read your shared knowledge for this namespace (knowledge:<ns>)."
                       onClick={() => onScopeChange && onScopeChange(ns, { read: !s.read, write: s.write })}
                     >read</button>
                     <button
                       type="button"
                       className={`perm-tog ${s.write ? 'on' : ''}`}
                       aria-pressed={s.write}
-                      title="WRITE — let this delegate write/suggest into your inbox for this namespace (inbox:<ns>); you curate each one. The delegate never writes your shared knowledge directly."
+                      title="WRITE — let this delegate write/suggest into your inbox for this namespace (proposal:<ns>); you curate each one. The delegate never writes your shared knowledge directly."
                       onClick={() => onScopeChange && onScopeChange(ns, { read: s.read, write: !s.write })}
                     >write</button>
                   </div>
@@ -480,8 +480,8 @@ export function StagedPermissionEditor({
   };
 
   // The staged grant as on-chain services: every namespace with read or write.
-  // #339 — two INDEPENDENT grants per namespace: read → memory:<ns>, write →
-  // inbox:<ns> (suggest into the master's inbox). No direct shared write exists.
+  // #339 — two INDEPENDENT grants per namespace: read → knowledge:<ns>, write →
+  // proposal:<ns> (suggest into the master's inbox). No direct shared write exists.
   const stagedRead = stagedScope ? NAMESPACES.filter((ns) => stagedScope[ns]?.read) : [];
   const stagedWrite = stagedScope ? NAMESPACES.filter((ns) => stagedScope[ns]?.write) : [];
   const memoryDirty =
@@ -505,8 +505,8 @@ export function StagedPermissionEditor({
     // wipe them); the preserve set must SUBTRACT them here or a switch-OFF
     // would be re-added. Memory names come from the STAGED scope.
     const stagedMemoryNames = [
-      ...stagedRead.map((ns) => `memory:${ns}`),
-      ...stagedWrite.map((ns) => `inbox:${ns}`),
+      ...stagedRead.map((ns) => `knowledge:${ns}`),
+      ...stagedWrite.map((ns) => `proposal:${ns}`),
     ];
     const { services: capServices, preserve } = capabilityGrantCommit(
       { ...actor, scope: (stagedScope ?? chainScope) as Actor['scope'] },
@@ -548,10 +548,10 @@ export function StagedPermissionEditor({
               ? 'Revokes every knowledge + inbox grant (credential / email grants are unchanged).'
               : [
                   stagedRead.length > 0
-                    ? `Reads ${stagedRead.map((ns) => `memory:${ns}`).join(' · ')}.`
+                    ? `Reads ${stagedRead.map((ns) => `knowledge:${ns}`).join(' · ')}.`
                     : '',
                   stagedWrite.length > 0
-                    ? `Suggests ${stagedWrite.map((ns) => `inbox:${ns}`).join(' · ')}.`
+                    ? `Suggests ${stagedWrite.map((ns) => `proposal:${ns}`).join(' · ')}.`
                     : '',
                 ].filter(Boolean).join(' ')}
             {' '}One on-chain setScope (master K11).

@@ -1034,7 +1034,7 @@ mod tests {
             device_key_hash: format!("0x{}", "11".repeat(32)),
             agent_pop_sig: format!("0x{}", "55".repeat(65)),
             link_code_redemption: "0xdeadbeef".into(),
-            services: vec!["memory:personal".into()],
+            services: vec!["knowledge:personal".into()],
             is_device: false,
             read_only: true,
             max_per_call: "1000".into(),
@@ -1044,9 +1044,9 @@ mod tests {
         }
     }
 
-    // keccak256("memory:personal") from `cast keccak` — the on-chain service id.
-    const MEMORY_PERSONAL_ID: &str =
-        "0x12f2770c904838cddb30299f5c22cd28df31b34fcdb44c342cd1f96c4a38ab27";
+    // keccak256("knowledge:personal") from `cast keccak` — the on-chain service id.
+    const KNOWLEDGE_PERSONAL_ID: &str =
+        "0x74577172636bd7db2f294f091ed93ae32597890b27de77c16ec5317bbe5e6815";
 
     // ── handle_ops_revert_message (#247) ─────────────────────────────────────
 
@@ -1115,7 +1115,7 @@ mod tests {
         assert_eq!(reg.agent_pop_sig, vec![0x55u8; 65]);
         assert_eq!(
             format!("0x{}", hex::encode(grant.services[0])),
-            MEMORY_PERSONAL_ID
+            KNOWLEDGE_PERSONAL_ID
         );
         assert!(grant.read_only);
         assert_eq!(grant.max_per_call, 1000);
@@ -1125,11 +1125,11 @@ mod tests {
     #[test]
     fn service_ids_are_lowercased_before_hashing() {
         let mut req = sample();
-        req.services = vec!["Memory:Personal".into()];
+        req.services = vec!["Knowledge:Personal".into()];
         let (_, grant) = parse_register_and_grant(&req).unwrap();
         assert_eq!(
             format!("0x{}", hex::encode(grant.services[0])),
-            MEMORY_PERSONAL_ID
+            KNOWLEDGE_PERSONAL_ID
         );
     }
 
@@ -1142,7 +1142,7 @@ mod tests {
             channel_grant_count(&["Channel-Sub:Display".into(), "channel-pub:touch".into()]),
             2
         );
-        assert_eq!(channel_grant_count(&["memory:travel".into()]), 0);
+        assert_eq!(channel_grant_count(&["knowledge:travel".into()]), 0);
         assert_eq!(channel_grant_count(&[]), 0);
     }
 

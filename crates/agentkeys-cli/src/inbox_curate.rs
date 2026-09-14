@@ -101,7 +101,7 @@ pub async fn inbox_list(daemon_url: &str) -> Result<String> {
             _ => "",
         };
         out.push_str(&format!(
-            "\n  [{n}] memory:{ns} / {key} · {kind}{kind_note}\n      \
+            "\n  [{n}] knowledge:{ns} / {key} · {kind}{kind_note}\n      \
              from delegate {from} · {bytes} bytes · ts {ts}\n      \
              s3_key: {s3_key}\n"
         ));
@@ -153,7 +153,7 @@ pub async fn inbox_view(daemon_url: &str, s3_key: &str) -> Result<String> {
         _ => String::new(),
     };
     Ok(format!(
-        "proposal: memory:{ns} / {key} · kind {kind}\n  \
+        "proposal: knowledge:{ns} / {key} · kind {kind}\n  \
          from delegate: {from} (worker-stamped provenance)\n  \
          content_hash: {content_hash}\n  \
          ts: {ts}\n\n\
@@ -193,13 +193,13 @@ pub async fn inbox_accept(
             .and_then(Value::as_str)
             .unwrap_or("(unspecified)");
         return Ok(format!(
-            "curated memory:{ns} / {key} into canonical (planted {planted}), but the inbox \
+            "curated knowledge:{ns} / {key} into canonical (planted {planted}), but the inbox \
              object was NOT GC'd: {err}\n  \
              re-run: agentkeys memory inbox-reject --s3-key {s3_key} to clear it."
         ));
     }
     Ok(format!(
-        "accepted — curated memory:{ns} / {key} into canonical memory (planted {planted}); \
+        "accepted — curated knowledge:{ns} / {key} into canonical memory (planted {planted}); \
          inbox proposal GC'd."
     ))
 }

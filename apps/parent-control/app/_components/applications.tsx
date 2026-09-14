@@ -523,7 +523,7 @@ export function ApplicationsPage({
               showToast(`add failed — ${r.status?.detail ?? 'error'}`, true);
               return false;
             }
-            showToast(`${input.id} v${r.data.version} planted into memory:${input.ns} (${r.data.storage})`);
+            showToast(`${input.id} v${r.data.version} planted into knowledge:${input.ns} (${r.data.storage})`);
             bindNewResourceToSlot(input.id);
             await refresh();
             return true;
@@ -536,7 +536,7 @@ export function ApplicationsPage({
               return false;
             }
             const kept = r.data.raw_stored === true ? 'file kept' : r.data.raw_stored === false ? 'file not kept — no durable memory plane on this console' : 'no file';
-            showToast(`${input.filename} → ${input.id} v${r.data.version}: ${r.data.extracted_bytes} B of text in memory:${input.ns} (${kept})`, r.data.raw_stored === false);
+            showToast(`${input.filename} → ${input.id} v${r.data.version}: ${r.data.extracted_bytes} B of text in knowledge:${input.ns} (${kept})`, r.data.raw_stored === false);
             bindNewResourceToSlot(input.id);
             await refresh();
             return true;
@@ -681,7 +681,7 @@ function AppDetail({
                   <div key={r.name} style={{ display: 'contents' }}>
                     <dt>{r.name}</dt>
                     <dd>
-                      {row?.name ?? r.item_id} · <code>memory:{r.ns}</code> · read-only {r.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>}
+                      {row?.name ?? r.item_id} · <code>knowledge:{r.ns}</code> · read-only {r.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>}
                       {row && <>{' '}<button className="btn sm" onClick={() => onEditResource(row)}>edit</button></>}
                       {!row && <span className="muted" style={{ fontSize: 11 }}> · item no longer in the registry</span>}
                       {others.length > 0 && <div className="muted" style={{ fontSize: 11 }}>also read by {others.join(', ')} — an edit reaches them at their next refresh</div>}
@@ -689,7 +689,7 @@ function AppDetail({
                   </div>
                 );
               })}
-              <div style={{ display: 'contents' }}><dt>own namespace</dt><dd><code>memory:{app.memory_ns}</code> · <code>inbox:{app.memory_ns}</code></dd></div>
+              <div style={{ display: 'contents' }}><dt>own namespace</dt><dd><code>knowledge:{app.memory_ns}</code> · <code>proposal:{app.memory_ns}</code></dd></div>
               <div style={{ display: 'contents' }}><dt>opchat</dt><dd><code>{app.chat_channel_id}</code></dd></div>
               <div style={{ display: 'contents' }}><dt>availability</dt><dd>{app.availability}</dd></div>
             </dl>

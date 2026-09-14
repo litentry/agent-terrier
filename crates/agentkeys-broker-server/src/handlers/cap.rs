@@ -63,7 +63,7 @@ pub enum CapOp {
     /// distinct SIGNED op (not just a route) because an own-read and a
     /// canonical-read carry identical omnis (operator = master, actor =
     /// delegate) — only the resolved prefix differs. `operator != actor` makes
-    /// `mint_cap`'s scope check consult the on-chain `memory:<ns>` grant (the
+    /// `mint_cap`'s scope check consult the on-chain `knowledge:<ns>` grant (the
     /// master-self skip is bypassed). `as_u8` = 4 audits via the tier-1 worker
     /// (reuses `AuditOpKind::MemoryGet`), NOT the on-chain `CredentialAudit.OP_*`
     /// path, so no chain-enum change is needed.
@@ -73,7 +73,7 @@ pub enum CapOp {
     /// distinct SIGNED op so an own-memory `Store` cap can never be redeemed as
     /// an inbox append. Like `CanonicalFetch` the DELEGATE mints it
     /// (`session == actor`); `operator != actor` makes `mint_cap`'s scope check
-    /// consult the on-chain `inbox:<ns>` grant (distinct from the `memory:<ns>`
+    /// consult the on-chain `proposal:<ns>` grant (distinct from the `knowledge:<ns>`
     /// read grant). `as_u8` = 5 audits via the tier-1 worker
     /// (`AuditOpKind::MemoryInboxAppend`), NOT the on-chain `CredentialAudit.OP_*`
     /// path, so no chain-enum change is needed.
@@ -361,7 +361,7 @@ pub async fn cap_memory_get(
 /// Delegated READ of the master's CANONICAL memory (master-hub #295 P1).
 /// Mints a `CanonicalFetch`/`Memory` cap. When the requester is a delegate
 /// (`operator != actor`), `mint_cap`'s scope check consults the on-chain
-/// `memory:<ns>` grant the master set for that delegate (the master-self skip
+/// `knowledge:<ns>` grant the master set for that delegate (the master-self skip
 /// is bypassed). The memory worker keys the read on the OPERATOR prefix for
 /// this op; the caller relays operator-authority STS (the cred-fetch pattern).
 pub async fn cap_memory_canonical_get(
@@ -383,7 +383,7 @@ pub async fn cap_memory_canonical_get(
 /// Delegated APPEND to the master's absorption INBOX (master-hub #339 P2 push).
 /// Mints an `Append`/`Memory` cap. The DELEGATE mints it (`session == actor`);
 /// because `operator != actor`, `mint_cap`'s scope check consults the on-chain
-/// `inbox:<ns>` grant (a DISTINCT service-id from the `memory:<ns>` read grant —
+/// `proposal:<ns>` grant (a DISTINCT service-id from the `knowledge:<ns>` read grant —
 /// granting read never grants push). The delegate then redeems the cap at the
 /// memory worker's `/v1/memory/inbox-append`, which performs the write
 /// server-side under a broker-minted, prefix-scoped operator STS (`/v1/cap/inbox-sts`);
@@ -614,7 +614,7 @@ fn op_requires_actor_session(op: CapOp) -> bool {
 /// any own-namespace memory op). The operator path stays valid (master-self
 /// and daemon flows are untouched); the actor path rides the SAME chain-grant
 /// scope check as `CanonicalFetch`/`Append` (`operator != actor` bypasses the
-/// master-self skip, so the actor's on-chain `memory:<ns>` grant is the
+/// master-self skip, so the actor's on-chain `knowledge:<ns>` grant is the
 /// authorization) and the per-data-class gates below are unaffected
 /// (`enforce_cred_store_master_self` keeps cred-store master-only; config has
 /// no delegate grants). Before this, the sandbox checkpoint could NEVER mint:
@@ -654,9 +654,9 @@ async fn mint_cap(
     }
     // #295 §7a finding 3: a service is interpolated into an S3 key AND (for the
     // canonical-read STS) an IAM Resource ARN. Reject characters that would
-    // become an IAM wildcard or an S3 path traversal — `memory:*` must never be
+    // become an IAM wildcard or an S3 path traversal — `knowledge:*` must never be
     // a wildcard, `../` must never escape the prefix. (No legit service uses
-    // these: memory = `memory:<ns>`, creds = `openrouter`, IoT = `home:r:dev`.)
+    // these: memory = `knowledge:<ns>`, creds = `openrouter`, IoT = `home:r:dev`.)
     if req.service.contains(['*', '?', '/', '\\']) || req.service.contains("..") {
         return Err(CapError::InvalidInput(
             "service must not contain wildcard or path characters (* ? / \\ ..)".into(),
@@ -1429,7 +1429,7 @@ mod tests {
         CapRequest {
             operator_omni: format!("0x{}", "a".repeat(64)),
             actor_omni: format!("0x{}", "b".repeat(64)),
-            service: "memory:travel".into(),
+            service: "knowledge:travel".into(),
             device_key_hash: dkh.to_string(),
             ttl_seconds: 300,
             client_sig: Some(client_sig),
@@ -1454,7 +1454,7 @@ mod tests {
         let (operator, actor, service) = (
             format!("0x{}", "a".repeat(64)),
             format!("0x{}", "b".repeat(64)),
-            "memory:travel",
+            "knowledge:travel",
         );
         let sig = dk
             .cap_pop_sig(&operator, &actor, service, "store", "memory", &nonce, now)
@@ -1523,7 +1523,7 @@ mod tests {
         let (operator, actor, service) = (
             format!("0x{}", "a".repeat(64)),
             format!("0x{}", "b".repeat(64)),
-            "memory:travel",
+            "knowledge:travel",
         );
         // The SANDBOX signs the cap-PoP; the cap carries the DEVICE's bound hash.
         let sig = sandbox
@@ -1543,15 +1543,15 @@ mod tests {
         };
         // In-scope, device-signed → accepted.
         assert!(verify_cap_pop(
-            &mk("memory:travel memory:personal", &device),
+            &mk("knowledge:travel knowledge:personal", &device),
             CapOp::Store,
             DataClass::Memory
         )
         .is_ok());
-        // Out-of-scope (excludes memory:travel) → rejected.
+        // Out-of-scope (excludes knowledge:travel) → rejected.
         assert!(matches!(
             verify_cap_pop(
-                &mk("memory:personal", &device),
+                &mk("knowledge:personal", &device),
                 CapOp::Store,
                 DataClass::Memory
             ),
@@ -1561,7 +1561,7 @@ mod tests {
         // delegation must recover to the bound device).
         assert!(matches!(
             verify_cap_pop(
-                &mk("memory:travel", &sandbox),
+                &mk("knowledge:travel", &sandbox),
                 CapOp::Store,
                 DataClass::Memory
             ),
@@ -1584,7 +1584,7 @@ mod tests {
         let req = CapRequest {
             operator_omni: format!("0x{}", "a".repeat(64)),
             actor_omni: format!("0x{}", "b".repeat(64)),
-            service: "memory:travel".into(),
+            service: "knowledge:travel".into(),
             device_key_hash: format!("0x{}", "c".repeat(64)),
             ttl_seconds: 300,
             client_sig: None,

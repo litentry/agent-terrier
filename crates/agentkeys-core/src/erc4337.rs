@@ -107,7 +107,7 @@ pub struct RegisterFirstMaster {
 
 /// Args for `AgentKeysScope.setScope(bytes32,bytes32,bytes32[],bool,uint128,uint128,uint128,uint32)`
 /// — the P.3 scope grant. `services` are the signed `bytes32` service ids
-/// (`memory:<ns>` / `cred:<service>`); the caps mirror the on-chain `Scope`.
+/// (`knowledge:<ns>` / `cred:<service>`); the caps mirror the on-chain `Scope`.
 #[derive(Clone, Debug)]
 pub struct ScopeGrant {
     pub services: Vec<[u8; 32]>,

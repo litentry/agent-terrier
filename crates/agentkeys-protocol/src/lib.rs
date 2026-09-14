@@ -67,7 +67,7 @@ pub enum CapMintOp {
     /// `/v1/cap/memory-append`; `op_str` is `"append"`. The delegate proposes a
     /// learning into `bots/<operator>/inbox/<delegate>/…` (staging, NOT
     /// canonical); the master curates it into canonical later. Gated by a
-    /// **distinct** on-chain `inbox:<ns>` grant — NEVER the `memory:<ns>` read
+    /// **distinct** on-chain `proposal:<ns>` grant — NEVER the `knowledge:<ns>` read
     /// grant (`readOnly` is a dead flag) — see docs/plan/master-hub-topology.md §6b/§8.
     MemoryAppend,
     /// #201 config data class — master-only taxonomy/config object. A third
@@ -301,7 +301,7 @@ pub struct MemoryGetBody {
 
 /// #594 — the reserved keyed-object slot where a delegate sandbox persists its
 /// runtime CHECKPOINT (the #577 runtime-home export, wrapped in
-/// [`CheckpointEnvelope`]) inside its own `memory:<ns>` grant. ONE name shared
+/// [`CheckpointEnvelope`]) inside its own `knowledge:<ns>` grant. ONE name shared
 /// by the writer (in-sandbox daemon checkpoint loop) and the reader (the
 /// restore-on-boot leg of the SAME daemon in the replacement instance).
 /// Since #621 (Hermes deprecation) there is exactly ONE runtime and ONE slot —
@@ -1606,8 +1606,8 @@ pub struct SignStsResult {
 //
 // The mirror of P1's canonical READ, but for WRITE: a delegate proposes a
 // learning into the master's staging inbox; the master curates it into canonical
-// later. The on-chain authorization is a **distinct** `inbox:<ns>` grant (never
-// the `memory:<ns>` read grant — `readOnly` is a dead flag, master-hub-topology.md
+// later. The on-chain authorization is a **distinct** `proposal:<ns>` grant (never
+// the `knowledge:<ns>` read grant — `readOnly` is a dead flag, master-hub-topology.md
 // §5/§6b). Like P1's A' model, the cross-actor WRITE runs SERVER-SIDE in the
 // worker under a broker-minted, prefix-scoped operator STS — the delegate holds
 // NO AWS creds. Provenance (`source_delegate_omni`) is stamped by the WORKER from
@@ -1621,7 +1621,7 @@ pub struct SignStsResult {
 /// `persona` = master-authored only (never inbox-adoptable), applied fresh each
 /// turn (`SOUL.md`); `resource` (#666, the fourth kind — arch.md §5
 /// `resource item`) = master-curated ONLY, distributed read-only by the
-/// mirror under an ordinary `memory:<ns>` grant (no inbox on that namespace),
+/// mirror under an ordinary `knowledge:<ns>` grant (no inbox on that namespace),
 /// never inbox-adoptable. Wire spelling is the lowercase word; absent =
 /// `knowledge` (full back-compat — every pre-#390 object is knowledge).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -1667,7 +1667,7 @@ impl ContextKind {
 
 /// The RESERVED canonical namespace persona documents live in (#390). Written
 /// ONLY by the daemon's persona editor (master-authored); never granted to a
-/// delegate (`memory:persona` / `inbox:persona` are never offered), never
+/// delegate (`knowledge:persona` / `proposal:persona` are never offered), never
 /// reconciled into the recall taxonomy, and the master-memory plant rejects
 /// direct writes into it — the persona module is the single writer.
 pub const PERSONA_NAMESPACE: &str = "persona";
@@ -1681,7 +1681,7 @@ pub fn persona_soul_key(delegate_omni: &str) -> String {
 }
 
 /// Delegate → worker `POST /v1/memory/inbox-append`. The Append cap carries
-/// `service = inbox:<ns>` (the SIGNED namespace); `key` is the delegate's
+/// `service = proposal:<ns>` (the SIGNED namespace); `key` is the delegate's
 /// proposed memory key within that namespace and `plaintext_b64` the proposed
 /// body. `kind` is the delegate's LABEL for what it proposes (a delegate can
 /// label its proposal's kind, never its authorship — provenance stays
@@ -2125,7 +2125,7 @@ pub struct BuildRegisterUserOpRequest {
 /// Daemon → broker `POST /v1/agent/spawn/build`. The broker derives the child
 /// omni (`HDKD(O_master, label)`), generates the delegate K10, and assembles
 /// the template grants (the delegate's duplex operator-chat channel pair + its
-/// `memory:<ns>`) — the caller supplies only the ceremony choices.
+/// `knowledge:<ns>`) — the caller supplies only the ceremony choices.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildSpawnUserOpRequest {
     pub operator_omni: String,
@@ -2136,7 +2136,7 @@ pub struct BuildSpawnUserOpRequest {
     /// `DelegateSpawn` anchor + the #424 binding manifest.
     #[serde(default)]
     pub preset_id: String,
-    /// The template `memory:<ns>` namespace. `None` ⇒ fresh, named after the
+    /// The template `knowledge:<ns>` namespace. `None` ⇒ fresh, named after the
     /// label; `Some` + `memory_inherited` ⇒ an archived delegate's KEPT
     /// namespace (#425 O2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2259,7 +2259,7 @@ pub struct BuildArchiveUserOpRequest {
     pub device_key_hash: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resources_kept: bool,
-    /// The delegate's `memory:<ns>` name when the caller knows it (grants are
+    /// The delegate's `knowledge:<ns>` name when the caller knows it (grants are
     /// keccak ids on-chain) — recorded for #425 O2 inheritance discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_ns: Option<String>,
@@ -2486,23 +2486,23 @@ pub mod web_api {
 // ── shared protocol helpers (the omni-normalization bug site, centralized) ───
 
 /// Build the signed cap **service** string for a memory namespace —
-/// `memory:<ns>`. The broker binds this into the cap's signed `service` field
+/// `knowledge:<ns>`. The broker binds this into the cap's signed `service` field
 /// (issue #150), so every caller MUST spell it identically; hand-formatting
-/// `format!("memory:{ns}")` in a second place is exactly the per-namespace
+/// `format!("knowledge:{ns}")` in a second place is exactly the per-namespace
 /// drift this crate exists to kill.
-pub fn service_memory(namespace: &str) -> String {
-    format!("memory:{namespace}")
+pub fn service_knowledge(namespace: &str) -> String {
+    format!("knowledge:{namespace}")
 }
 
 /// Build the signed cap **service** string for an absorption-inbox APPEND —
-/// `inbox:<ns>` (#339 P2). This is a **distinct** on-chain service-id from
-/// [`service_memory`]'s `memory:<ns>` read grant: `keccak("inbox:travel") !=
-/// keccak("memory:travel")`, so granting a delegate read of `memory:travel`
-/// does NOT let it push to `inbox:travel` (and vice-versa). The asymmetry that
+/// `proposal:<ns>` (#339 P2). This is a **distinct** on-chain service-id from
+/// [`service_knowledge`]'s `knowledge:<ns>` read grant: `keccak("proposal:travel") !=
+/// keccak("knowledge:travel")`, so granting a delegate read of `knowledge:travel`
+/// does NOT let it push to `proposal:travel` (and vice-versa). The asymmetry that
 /// `readOnly` should carry on-chain but doesn't is carried by this separate
 /// service name instead — see docs/plan/master-hub-topology.md §5/§6b.
-pub fn service_inbox(namespace: &str) -> String {
-    format!("inbox:{namespace}")
+pub fn service_proposal(namespace: &str) -> String {
+    format!("proposal:{namespace}")
 }
 
 /// Build the signed cap **service** string for a channel PUBLISH grant —
@@ -2510,7 +2510,7 @@ pub fn service_inbox(namespace: &str) -> String {
 /// from [`service_channel_sub`]'s `channel-sub:<id>`: `keccak("channel-pub:cam") !=
 /// keccak("channel-sub:cam")`, so a device granted publish on a camera channel
 /// can NEVER subscribe to it (and vice-versa) — the direction-denial isolation
-/// gate lives in the service name, mirroring the #339 `memory:`/`inbox:` split.
+/// gate lives in the service name, mirroring the #339 `knowledge:`/`proposal:` split.
 pub fn service_channel_pub(channel_id: &str) -> String {
     format!("channel-pub:{channel_id}")
 }
@@ -2597,7 +2597,7 @@ pub mod sandbox_env {
     /// `device_key_hash`), so nothing new sits at rest. NOT a chat-contract
     /// env — a sandbox without it simply cannot migrate its runtime home.
     pub const MGMT_TOKEN: &str = "AGENTKEYS_SANDBOX_MGMT_TOKEN";
-    /// #594 — the delegate's OWN `memory:<ns>` namespace name (the spawn
+    /// #594 — the delegate's OWN `knowledge:<ns>` namespace name (the spawn
     /// template grant), injected at CREATE so the in-sandbox checkpoint loop
     /// addresses the right grant even for an INHERITED namespace (#425 O2,
     /// where ns ≠ label). OPTIONAL: absent, the daemon derives it from the
@@ -2755,7 +2755,7 @@ mod tests {
         let legacy = MemoryPutBody {
             cap: serde_json::json!({"t":"cap"}),
             plaintext_b64: "aGk=".into(),
-            namespace: "memory:watchdog".into(),
+            namespace: "knowledge:watchdog".into(),
             object_key: None,
         };
         let wire = serde_json::to_value(&legacy).unwrap();
@@ -2765,14 +2765,14 @@ mod tests {
         );
         // Pre-#594 producers (no field at all) still deserialize.
         let parsed: MemoryPutBody = serde_json::from_value(serde_json::json!({
-            "cap": {"t":"cap"}, "plaintext_b64": "aGk=", "namespace": "memory:watchdog"
+            "cap": {"t":"cap"}, "plaintext_b64": "aGk=", "namespace": "knowledge:watchdog"
         }))
         .unwrap();
         assert_eq!(parsed.object_key, None);
 
         let keyed = MemoryGetBody {
             cap: serde_json::json!({"t":"cap"}),
-            namespace: "memory:watchdog".into(),
+            namespace: "knowledge:watchdog".into(),
             object_key: Some(CHECKPOINT_OBJECT_KEY.into()),
         };
         let round: MemoryGetBody =
@@ -2845,8 +2845,8 @@ mod tests {
             assert!(is_capability_service(cap), "{cap} must be capability");
         }
         for data in [
-            "memory:travel",
-            "inbox:travel",
+            "knowledge:travel",
+            "proposal:travel",
             "channel-pub:cam",
             "channel-sub:cam",
             "cred:openrouter",
@@ -2906,7 +2906,10 @@ mod tests {
             "channel-sub:console".to_string(),
         ];
         assert_eq!(channel_grant_count(&duplex), 2);
-        let delegate = vec!["memory:travel".to_string(), "cred:openrouter".to_string()];
+        let delegate = vec![
+            "knowledge:travel".to_string(),
+            "cred:openrouter".to_string(),
+        ];
         assert_eq!(channel_grant_count(&delegate), 0);
         assert_eq!(channel_grant_count(&[]), 0);
     }
@@ -2922,8 +2925,8 @@ mod tests {
         assert!(scope_is_device_only(
             "channel-sub:display,channel-pub:touch"
         ));
-        assert!(!scope_is_device_only("memory:travel"));
-        assert!(!scope_is_device_only("channel-pub:cam memory:travel")); // mixed = delegate
+        assert!(!scope_is_device_only("knowledge:travel"));
+        assert!(!scope_is_device_only("channel-pub:cam knowledge:travel")); // mixed = delegate
         assert!(!scope_is_device_only("")); // un-scoped delegate claim still spawns
         assert!(!scope_is_device_only("   "));
     }
@@ -3178,17 +3181,17 @@ mod tests {
 
     #[test]
     fn service_memory_is_namespace_prefixed() {
-        assert_eq!(service_memory("travel"), "memory:travel");
-        assert_eq!(service_memory("webparity"), "memory:webparity");
+        assert_eq!(service_knowledge("travel"), "knowledge:travel");
+        assert_eq!(service_knowledge("webparity"), "knowledge:webparity");
     }
 
     #[test]
     fn service_inbox_is_distinct_from_memory_read_grant() {
         // #339 P2 §5/§6b: the append grant is a DISTINCT on-chain service-id from
-        // the read grant, so a `memory:<ns>` read can never authorize an
-        // `inbox:<ns>` push (keccak(inbox:ns) != keccak(memory:ns)).
-        assert_eq!(service_inbox("travel"), "inbox:travel");
-        assert_ne!(service_inbox("travel"), service_memory("travel"));
+        // the read grant, so a `knowledge:<ns>` read can never authorize an
+        // `proposal:<ns>` push (keccak(proposal:ns) != keccak(knowledge:ns)).
+        assert_eq!(service_proposal("travel"), "proposal:travel");
+        assert_ne!(service_proposal("travel"), service_knowledge("travel"));
     }
 
     #[test]
@@ -3207,7 +3210,7 @@ mod tests {
         let base = BrokerCapRequest {
             operator_omni: "0xop".into(),
             actor_omni: "0xactor".into(),
-            service: "memory:travel".into(),
+            service: "knowledge:travel".into(),
             device_key_hash: "0xdkh".into(),
             ttl_seconds: None,
             client_sig: None,

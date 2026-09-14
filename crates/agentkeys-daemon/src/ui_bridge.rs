@@ -95,7 +95,7 @@ pub struct UiBridgeState {
     /// preserved memory" flow + GH plan issue-9step-flow.md.
     pub master_memory: RwLock<HashMap<String, ApiMemoryEntry>>,
     /// Serializes real-chain plants (#201 Phase 4, codex finding 1). The plant is
-    /// a read-modify-write of each `memory:<ns>` blob; two concurrent plants for
+    /// a read-modify-write of each `knowledge:<ns>` blob; two concurrent plants for
     /// the same namespace would otherwise race (both read, both write → last wins,
     /// dropping the other's entries). Held for the whole real-chain plant body.
     pub plant_lock: tokio::sync::Mutex<()>,
@@ -368,7 +368,7 @@ trait ApiMemoryEntryExt: Sized {
     /// The on-disk form stored inside the per-namespace JSON array (#201 Phase 4).
     fn to_stored(&self) -> StoredMemoryEntry;
     /// Rehydrate a UI entry from a stored array element decrypted out of
-    /// `memory:<ns>.enc`. `version`/`preview` are derived (not stored) and
+    /// `knowledge:<ns>.enc`. `version`/`preview` are derived (not stored) and
     /// `content_hash` is left empty (the read path doesn't dedup).
     fn from_stored(ns: &str, s: StoredMemoryEntry) -> Self;
 }
@@ -411,7 +411,7 @@ fn default_stored_version() -> String {
     "v1".to_string()
 }
 
-/// One element of the per-namespace JSON array `memory:<ns>.enc` (#201 Phase 4).
+/// One element of the per-namespace JSON array `knowledge:<ns>.enc` (#201 Phase 4).
 /// Fixes the lossy single-body overwrite: a namespace with several memories
 /// round-trips as one array. The agent reads the same blobs (W4 inheritance
 /// defers the agent WRITE path; the inject already renders this shape).
@@ -550,7 +550,7 @@ pub struct BindingManifestEntry {
     /// `"device"` (channel-endpoint, §14.10) or `"delegate"` (sandbox-resident).
     pub kind: String,
     /// The service NAMES the operator actually granted (`channel-pub:<id>`,
-    /// `memory:<ns>`, `cred:<service>`, …) — the readable twin of the on-chain
+    /// `knowledge:<ns>`, `cred:<service>`, …) — the readable twin of the on-chain
     /// keccak scope set.
     #[serde(default)]
     pub granted_service_names: Vec<String>,
@@ -561,7 +561,7 @@ pub struct BindingManifestEntry {
     /// spawn or a pre-#427 binding). Readable-layer only, like `label`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
-    /// #427 — the delegate's `memory:<ns>` namespace name (the #425 O2
+    /// #427 — the delegate's `knowledge:<ns>` namespace name (the #425 O2
     /// inheritance-discovery key; grants on-chain are keccak ids).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_ns: Option<String>,
@@ -739,7 +739,7 @@ fn merge_categories(
     out
 }
 
-/// Parse a decrypted `memory:<ns>` blob into its entries, tolerating BOTH the
+/// Parse a decrypted `knowledge:<ns>` blob into its entries, tolerating BOTH the
 /// new per-namespace JSON array (#201 Phase 4) and a legacy single-body blob
 /// (pre-#201 / agent-written) — the latter becomes a one-element array keyed by
 /// the namespace, so the read path never breaks on an old blob.
@@ -798,13 +798,13 @@ const AUDIT_BUFFER_CAP: usize = 200;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiScopeBits {
-    /// `memory:<ns>` granted — the delegate may READ the master's shared canonical
+    /// `knowledge:<ns>` granted — the delegate may READ the master's shared canonical
     /// memory for this namespace (#295 distribution). The delegate's OWN local
     /// memory is its own and is not represented here.
     pub read: bool,
-    /// `inbox:<ns>` granted — the delegate may WRITE/suggest into the master's
+    /// `proposal:<ns>` granted — the delegate may WRITE/suggest into the master's
     /// absorption inbox for this namespace (#339), which the master curates. A
-    /// DISTINCT on-chain grant (`keccak("inbox:<ns>") != keccak("memory:<ns>")`), so
+    /// DISTINCT on-chain grant (`keccak("proposal:<ns>") != keccak("knowledge:<ns>")`), so
     /// granting read never grants write — and the delegate NEVER writes the master's
     /// shared memory directly (the only contribution path is the curated inbox).
     pub write: bool,
@@ -867,7 +867,7 @@ pub struct ApiActor {
     #[ts(optional)]
     pub scope: Option<HashMap<String, ApiScopeBits>>,
     /// #248: on-chain scope service ids (0x-hex keccak) that aren't a known
-    /// `memory:<ns>` — e.g. `cred:<service>` granted at accept. The panel's
+    /// `knowledge:<ns>` — e.g. `cred:<service>` granted at accept. The panel's
     /// set-replace commit echoes these back so a memory toggle can't wipe them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -921,7 +921,7 @@ pub struct ApiActor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub preset_id: Option<String>,
-    /// #429 — the delegate's `memory:<ns>` namespace name (manifest layer).
+    /// #429 — the delegate's `knowledge:<ns>` namespace name (manifest layer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub memory_ns: Option<String>,
@@ -3886,10 +3886,10 @@ fn assemble_self_grant_names(
         for ns in namespaces {
             let bits = &map[ns];
             if bits.read {
-                names.push(format!("memory:{ns}"));
+                names.push(format!("knowledge:{ns}"));
             }
             if bits.write {
-                names.push(format!("inbox:{ns}"));
+                names.push(format!("proposal:{ns}"));
             }
         }
     }
@@ -4154,7 +4154,7 @@ fn parse_scope_return(raw: &[u8]) -> Result<(Vec<[u8; 32]>, bool, bool), String>
 }
 
 /// The web UI's core memory namespaces (`apps/parent-control` Namespace type).
-/// Scope hashes are `keccak256("memory:<ns>")` — the SAME encoding the broker
+/// Scope hashes are `keccak256("knowledge:<ns>")` — the SAME encoding the broker
 /// accept + `heima-scope-set.sh` write (the terminology rule at the byte level).
 const SCOPE_NAMESPACES: [&str; 4] = ["personal", "family", "work", "travel"];
 
@@ -4172,7 +4172,7 @@ const CAPABILITY_TOOL_CLASSES: [&str; 3] = ["web", "code", "schedule"];
 /// populated the local map from `AgentKeysScope` (real 2026-06-10 incident).
 ///
 /// Also returns the **unmatched** on-chain service ids (`0x`-hex keccak hashes
-/// that aren't `memory:<known-ns>` — e.g. `cred:openrouter` from the accept, or
+/// that aren't `knowledge:<known-ns>` — e.g. `cred:openrouter` from the accept, or
 /// a custom namespace). The #248 panel commit is a set-REPLACE `setScope`, so
 /// the web must echo these back (`preserve_service_ids`) or a memory-toggle
 /// commit would silently wipe the agent's credential grants.
@@ -4199,8 +4199,8 @@ async fn fetch_actor_scope_from_chain(
 /// Map raw on-chain scope `serviceHash`es into the per-namespace `ApiScopeBits` the
 /// permission panel renders, plus the **unmatched** hashes (`unknown`) the panel must
 /// echo back on a set-replace commit so they aren't wiped. PURE (no chain) so the
-/// shared-read vs inbox-write distinction is unit-testable: a `keccak("memory:<ns>")`
-/// sets `read` (read the master's shared memory), a `keccak("inbox:<ns>")` sets `write`
+/// shared-read vs inbox-write distinction is unit-testable: a `keccak("knowledge:<ns>")`
+/// sets `read` (read the master's shared memory), a `keccak("proposal:<ns>")` sets `write`
 /// (suggest into the master's inbox — the ONLY contribution path, never a direct
 /// shared-memory write), and anything else (e.g. `cred:<service>`) is preserved verbatim.
 fn classify_scope_hashes(
@@ -4210,19 +4210,19 @@ fn classify_scope_hashes(
         .iter()
         .map(|ns| {
             (
-                agentkeys_core::device_crypto::keccak256(format!("memory:{ns}").as_bytes()),
+                agentkeys_core::device_crypto::keccak256(format!("knowledge:{ns}").as_bytes()),
                 *ns,
             )
         })
         .collect();
-    // #339 — the DISTINCT inbox-write grant per namespace (`inbox:<ns>`). A separate
-    // keccak from `memory:<ns>`, so the panel can NAME it (the `write` bit) instead of
+    // #339 — the DISTINCT inbox-write grant per namespace (`proposal:<ns>`). A separate
+    // keccak from `knowledge:<ns>`, so the panel can NAME it (the `write` bit) instead of
     // dumping it into the blind-preserve `unknown` set where the UI can't toggle it.
     let known_inbox: Vec<([u8; 32], &str)> = SCOPE_NAMESPACES
         .iter()
         .map(|ns| {
             (
-                agentkeys_core::device_crypto::keccak256(format!("inbox:{ns}").as_bytes()),
+                agentkeys_core::device_crypto::keccak256(format!("proposal:{ns}").as_bytes()),
                 *ns,
             )
         })
@@ -5094,7 +5094,7 @@ async fn grant_service_scope(
                 write: false,
             },
         );
-        ("memory", format!("memory:{}", req.entity))
+        ("memory", format!("knowledge:{}", req.entity))
     } else {
         // Credential grant (#207 item 7): the service joins the agent's services.
         let services = actor.services.get_or_insert_with(Vec::new);
@@ -5932,8 +5932,8 @@ async fn decode_audit_event(
         decoded["tx_hash"] = serde_json::json!(tx);
     }
 
-    // Decode the scope `serviceHash`es into readable names (`memory:<ns>` /
-    // `inbox:<ns>` / the actors' cred services) so the audit view shows the GRANT
+    // Decode the scope `serviceHash`es into readable names (`knowledge:<ns>` /
+    // `proposal:<ns>` / the actors' cred services) so the audit view shows the GRANT
     // SET, not raw keccak hashes (the "can't read which grants are in the set"
     // gap). Annotates each envelope's `op_body` with a `service_names` array the
     // frontend renders alongside `service_ids`; unknown hashes pass through labeled.
@@ -5951,7 +5951,7 @@ async fn decode_audit_event(
 }
 
 /// Build a `serviceHash` (`0x`-hex keccak) → human-readable service-name map: the
-/// `memory:<ns>` + DISTINCT `inbox:<ns>` grants for every namespace (#339), each
+/// `knowledge:<ns>` + DISTINCT `proposal:<ns>` grants for every namespace (#339), each
 /// actor's cred services (`<svc>` and `cred:<svc>`), and a few well-known worker
 /// services. The reverse of the on-chain keccak the broker/`heima-scope-set` write.
 /// #614: `keccak(tool:<class>)` → name for the enumerable capability classes —
@@ -5973,8 +5973,8 @@ fn capability_service_candidates() -> HashMap<String, String> {
 fn scope_name_map(actor_services: &[String]) -> HashMap<String, String> {
     let mut candidates: Vec<String> = Vec::new();
     for ns in SCOPE_NAMESPACES {
-        candidates.push(format!("memory:{ns}"));
-        candidates.push(format!("inbox:{ns}"));
+        candidates.push(format!("knowledge:{ns}"));
+        candidates.push(format!("proposal:{ns}"));
     }
     for class in CAPABILITY_TOOL_CLASSES {
         candidates.push(agentkeys_backend_client::protocol::service_tool(class));
@@ -8033,7 +8033,7 @@ async fn preset_apply_audit(
 pub struct DaemonScopeBuildRequest {
     /// The agent's actor omni (`ApiActor.omni_hex`).
     pub actor_omni: String,
-    /// FULL replacement service list (`memory:<ns>` canonical encoding);
+    /// FULL replacement service list (`knowledge:<ns>` canonical encoding);
     /// `setScope` is set-replace, so an empty list revokes every grant.
     pub services: Vec<String>,
     /// `ApiActor.scope_unknown_service_ids` echoed back — on-chain grants the
@@ -9383,7 +9383,7 @@ pub struct MemoryEntryQuery {
 
 /// `GET /v1/master/memory/entry?ns=<ns>[&key=<key>]` → the entries in one
 /// namespace, decrypted ON DEMAND (#201 Phase 4 lazy detail). Real chain:
-/// memory-get(`memory:<ns>`) → decrypt → parse the JSON array. Fallback:
+/// memory-get(`knowledge:<ns>`) → decrypt → parse the JSON array. Fallback:
 /// filter the in-memory cache. `&key=` narrows to a single entry.
 async fn get_master_memory_entry(
     State(state): State<SharedUiBridgeState>,
@@ -9871,7 +9871,7 @@ async fn mint_master_cap(
         .map_err(|e| format!("cap-mint({route}): {e}"))
 }
 
-/// Per-namespace memory-put (#201 Phase 4): cap-mint(`memory:<ns>`) → worker
+/// Per-namespace memory-put (#201 Phase 4): cap-mint(`knowledge:<ns>`) → worker
 /// `/v1/memory/put` with the JSON array as plaintext. STS creds are minted once
 /// by the caller and reused across namespaces. Returns the worker's S3 key.
 async fn memory_put_ns_real(
@@ -9888,7 +9888,7 @@ async fn memory_put_ns_real(
         &ctx.omni,
         &ctx.device_key_hash,
         "memory-put",
-        &format!("memory:{ns}"),
+        &format!("knowledge:{ns}"),
     )
     .await?;
     let plaintext = serde_json::to_vec(entries).map_err(|e| format!("ns array serialize: {e}"))?;
@@ -9923,7 +9923,7 @@ async fn memory_put_ns_real(
         .to_string())
 }
 
-/// Per-namespace memory-get (#201 Phase 4 lazy detail): cap-mint(`memory:<ns>`)
+/// Per-namespace memory-get (#201 Phase 4 lazy detail): cap-mint(`knowledge:<ns>`)
 /// → worker `/v1/memory/get` → decrypt → parse the JSON array (tolerant of a
 /// legacy single-body blob). The whole namespace decrypts in one round-trip.
 /// `Ok(Some(entries))` when the namespace blob exists, `Ok(None)` when the
@@ -9948,7 +9948,7 @@ async fn memory_put_object_real(
         &ctx.omni,
         &ctx.device_key_hash,
         "memory-put",
-        &format!("memory:{ns}"),
+        &format!("knowledge:{ns}"),
     )
     .await?;
     let put_resp = client
@@ -9974,7 +9974,7 @@ async fn memory_put_object_real(
 }
 
 /// Curated resources (2026-09-13): drop every entry keyed `key` from
-/// `memory:<ns>`, so a re-add or upload REPLACES the body (the plant's merge
+/// `knowledge:<ns>`, so a re-add or upload REPLACES the body (the plant's merge
 /// dedups by content hash and would keep every version side by side) and a
 /// remove leaves nothing behind. Durable when the memory plane is wired; the
 /// in-memory index is trimmed either way. Returns how many entries went.
@@ -9994,7 +9994,7 @@ pub(crate) async fn resource_entry_remove(
             .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
         let durable = memory_get_ns_real(&client, &ctx, &creds, ns)
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("memory:{ns} read: {e}")))?;
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("knowledge:{ns} read: {e}")))?;
         if let Some(entries) = durable {
             let before = entries.len();
             let kept: Vec<StoredMemoryEntry> =
@@ -10003,7 +10003,12 @@ pub(crate) async fn resource_entry_remove(
             if removed_durable > 0 {
                 memory_put_ns_real(&client, &ctx, &creds, ns, &kept)
                     .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("memory:{ns} write: {e}")))?;
+                    .map_err(|e| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            format!("knowledge:{ns} write: {e}"),
+                        )
+                    })?;
             }
         }
     }
@@ -10038,7 +10043,7 @@ pub(crate) async fn resource_object_put(
         .map_err(|e| {
             (
                 StatusCode::BAD_GATEWAY,
-                format!("memory:{ns} object {object_key}: {e}"),
+                format!("knowledge:{ns} object {object_key}: {e}"),
             )
         })?;
     Ok(true)
@@ -10057,7 +10062,7 @@ async fn memory_get_ns_real(
         &ctx.omni,
         &ctx.device_key_hash,
         "memory-get",
-        &format!("memory:{ns}"),
+        &format!("knowledge:{ns}"),
     )
     .await?;
     let get_resp = client
@@ -11416,7 +11421,7 @@ async fn persona_load(
                 .map_err(|e| {
                     (
                         axum::http::StatusCode::BAD_GATEWAY,
-                        format!("persona read of memory:{PERSONA_NAMESPACE} failed: {e}"),
+                        format!("persona read of knowledge:{PERSONA_NAMESPACE} failed: {e}"),
                     )
                 })
         }
@@ -11448,7 +11453,7 @@ async fn persona_store(
                 .map_err(|e| {
                     (
                         axum::http::StatusCode::BAD_GATEWAY,
-                        format!("persona write of memory:{PERSONA_NAMESPACE} failed: {e}"),
+                        format!("persona write of knowledge:{PERSONA_NAMESPACE} failed: {e}"),
                     )
                 })
         }
@@ -11998,7 +12003,7 @@ pub(crate) async fn plant_master_memory_inner(
                     return Err((
                         axum::http::StatusCode::BAD_GATEWAY,
                         format!(
-                            "plant aborted: durable read of memory:{ns} failed ({e}) — not overwriting"
+                            "plant aborted: durable read of knowledge:{ns} failed ({e}) — not overwriting"
                         ),
                     ));
                 }
@@ -12007,7 +12012,7 @@ pub(crate) async fn plant_master_memory_inner(
             if let Err(e) = memory_put_ns_real(&client, &ctx, &creds, ns, &merged).await {
                 return Err((
                     axum::http::StatusCode::BAD_GATEWAY,
-                    format!("plant aborted: write of memory:{ns} failed: {e}"),
+                    format!("plant aborted: write of knowledge:{ns} failed: {e}"),
                 ));
             }
             planted += newly;
@@ -12308,11 +12313,11 @@ fn gating_for(s: agentkeys_catalog::Sensitivity) -> ScopeGating {
     }
 }
 
-/// The signed `service` string a scope grant would be over: memory → `memory:<ns>`,
+/// The signed `service` string a scope grant would be over: memory → `knowledge:<ns>`,
 /// credentials/other → the lowercased entity (service id). Matches the cap layer.
 fn service_for(data_class: &str, entity: &str) -> String {
     match data_class {
-        "memory" => format!("memory:{}", entity.trim().to_lowercase()),
+        "memory" => format!("knowledge:{}", entity.trim().to_lowercase()),
         _ => entity.trim().to_lowercase(),
     }
 }
@@ -13203,11 +13208,11 @@ mod tests {
         }
     }
 
-    /// #339 — the security distinction the inbox grant rests on: a `memory:<ns>`
+    /// #339 — the security distinction the inbox grant rests on: a `knowledge:<ns>`
     /// grant confers READ (the master's shared canonical memory) but NEVER write,
-    /// and an `inbox:<ns>` grant confers WRITE (suggest into the master's inbox) but
-    /// NEVER read. Granting read never grants write (`keccak("inbox:<ns>") !=
-    /// keccak("memory:<ns>")`) — the delegate never writes the master's shared memory
+    /// and an `proposal:<ns>` grant confers WRITE (suggest into the master's inbox) but
+    /// NEVER read. Granting read never grants write (`keccak("proposal:<ns>") !=
+    /// keccak("knowledge:<ns>")`) — the delegate never writes the master's shared memory
     /// directly. An unknown service (e.g. `cred:<svc>`) is preserved verbatim for the
     /// panel's set-replace commit.
     #[test]
@@ -13241,8 +13246,8 @@ mod tests {
         );
         let (names, unresolved) =
             assemble_self_grant_names(&Some(map), &[web_hash, "0xdead".to_string()]);
-        assert!(names.contains(&"memory:travel".to_string()));
-        assert!(names.contains(&"inbox:travel".to_string()));
+        assert!(names.contains(&"knowledge:travel".to_string()));
+        assert!(names.contains(&"proposal:travel".to_string()));
         assert!(names.contains(&"tool:web".to_string()));
         assert_eq!(unresolved, vec!["0xdead".to_string()]);
     }
@@ -13277,8 +13282,8 @@ mod tests {
     #[test]
     fn classify_scope_hashes_separates_shared_read_from_inbox_write() {
         use agentkeys_core::device_crypto::keccak256;
-        let mem = keccak256(b"memory:travel");
-        let inbox = keccak256(b"inbox:travel");
+        let mem = keccak256(b"knowledge:travel");
+        let inbox = keccak256(b"proposal:travel");
         let cred = keccak256(b"cred:openrouter");
 
         // memory grant → READ (shared canonical), never inbox-write.
@@ -13310,7 +13315,7 @@ mod tests {
     }
 
     /// The audit decode view must show the GRANT SET, not raw keccak hashes:
-    /// `memory:<ns>` / `inbox:<ns>` / cred services decode by name; an unknown hash
+    /// `knowledge:<ns>` / `proposal:<ns>` / cred services decode by name; an unknown hash
     /// passes through labeled (never silently dropped).
     #[test]
     fn annotate_service_names_decodes_the_grant_set() {
@@ -13319,13 +13324,13 @@ mod tests {
         let map = scope_name_map(&["openrouter".to_string()]);
         let mut decoded = serde_json::json!({
             "envelope": { "op_body": { "service_ids": [
-                h("memory:family"), h("inbox:travel"), h("cred:openrouter"), "0xdeadbeef"
+                h("knowledge:family"), h("proposal:travel"), h("cred:openrouter"), "0xdeadbeef"
             ] } }
         });
         annotate_service_names(&mut decoded, &map);
         let names = &decoded["envelope"]["op_body"]["service_names"];
-        assert_eq!(names[0], "memory:family");
-        assert_eq!(names[1], "inbox:travel");
+        assert_eq!(names[0], "knowledge:family");
+        assert_eq!(names[1], "proposal:travel");
         assert_eq!(names[2], "cred:openrouter");
         assert!(names[3]
             .as_str()
@@ -13344,7 +13349,7 @@ mod tests {
             "child_omni": "0xchildomni",
             "operator_omni": "0xmasteromni",
             "label": "demo-agent",
-            "requested_scope": "memory:travel,memory:family",
+            "requested_scope": "knowledge:travel,knowledge:family",
             "device_pubkey": "0x04aabbccddeeff00112233445566778899aabbcc",
             "device_key_hash": "0x6d02e352b9bd71d3aa35677c35492bfdc39bacda89cc7d0506d31e2754abf2a5",
             "pop_sig": "0xsignaturedeadbeef0011223344556677",
@@ -13369,10 +13374,10 @@ mod tests {
         assert_eq!(pr["expiresAt"], 1_700_000_600_i64);
         let requested = pr["requested"].as_array().expect("requested is an array");
         assert_eq!(requested.len(), 2, "two scope tokens");
-        assert_eq!(requested[0]["cap"], "memory");
+        assert_eq!(requested[0]["cap"], "knowledge");
         assert_eq!(requested[0]["ns"][0], "travel");
         assert_eq!(requested[1]["ns"][0], "family");
-        // A memory-scoped claim is a sandbox DELEGATE, never a device.
+        // A knowledge-scoped claim is a sandbox DELEGATE, never a device.
         assert_eq!(pr["isDevice"], false);
         assert_eq!(pr["vendor"], "agent");
         assert_eq!(pr["runtime"], "hermes");
@@ -13413,7 +13418,7 @@ mod tests {
         // Mixed scope (a channel grant + memory) is a DELEGATE (spec: mixed =
         // delegate) — the device flag must not fire.
         let mut mixed = row.clone();
-        mixed["requested_scope"] = serde_json::json!("channel-pub:cam,memory:travel");
+        mixed["requested_scope"] = serde_json::json!("channel-pub:cam,knowledge:travel");
         assert_eq!(pending_binding_to_request(&mixed)["isDevice"], false);
     }
 
@@ -13471,7 +13476,7 @@ mod tests {
         by_hash.scope_unknown_service_ids = Some(vec![pub_hash]);
         actors.insert("a2".into(), by_hash);
         let mut other = mk("a3", "unrelated");
-        other.services = Some(vec!["memory:travel".into()]);
+        other.services = Some(vec!["knowledge:travel".into()]);
         actors.insert("a3".into(), other);
 
         let holders = channel_holders(&actors, "cam-frontdoor");
@@ -14413,7 +14418,7 @@ mod tests {
 
     #[test]
     fn service_for_builds_memory_and_cred_services() {
-        assert_eq!(service_for("memory", "Travel"), "memory:travel");
+        assert_eq!(service_for("memory", "Travel"), "knowledge:travel");
         assert_eq!(service_for("credentials", "OpenRouter"), "openrouter");
     }
 
@@ -15534,11 +15539,12 @@ mod tests {
                 let sel_master = chain_selector("operatorMasterWallet(bytes32)");
                 let sel_scope = chain_selector("getScope(bytes32,bytes32)");
                 let result = if data.starts_with(&format!("0x{sel_scope}")) {
-                    // Scope { services: [keccak("memory:family")], readOnly:
+                    // Scope { services: [keccak("knowledge:family")], readOnly:
                     // false, caps 0, updatedAt 9, exists: true } → the agent
                     // has family read+write on chain.
-                    let fam =
-                        hex::encode(agentkeys_core::device_crypto::keccak256(b"memory:family"));
+                    let fam = hex::encode(agentkeys_core::device_crypto::keccak256(
+                        b"knowledge:family",
+                    ));
                     format!(
                         "0x{:0>64x}{:0>64x}{}{}{}{}{}{:0>64x}{:0>64x}{:0>64x}{fam}",
                         0x20,           // struct offset
@@ -15633,9 +15639,9 @@ mod tests {
             actors_arr[1]["device_key_hash"],
             format!("0x{}", T233_AGENT_HASH.repeat(32))
         );
-        // The on-chain grant (memory:family) is mirrored into the permission panel's
+        // The on-chain grant (knowledge:family) is mirrored into the permission panel's
         // data source as READ (the DENY-everywhere incident). A memory grant is
-        // shared-READ only; inbox-WRITE is the DISTINCT inbox:<ns> grant (#339),
+        // shared-READ only; inbox-WRITE is the DISTINCT proposal:<ns> grant (#339),
         // absent here — so write stays false.
         assert_eq!(actors_arr[1]["scope"]["family"]["read"], true);
         assert_eq!(actors_arr[1]["scope"]["family"]["write"], false);
@@ -16106,7 +16112,7 @@ mod tests {
             device_key_hash: String::new(),
             label: String::new(),
             kind: String::new(),
-            granted_service_names: vec!["memory:travel".into()],
+            granted_service_names: vec!["knowledge:travel".into()],
             updated_at: 3,
             ..Default::default()
         });

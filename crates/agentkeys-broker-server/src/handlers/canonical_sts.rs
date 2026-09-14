@@ -10,8 +10,8 @@
 //!
 //! 1. The delegate authenticates with its OWN session JWT (not the operator's).
 //! 2. It presents the `CanonicalFetch` cap the broker already minted for it
-//!    (operator=master, actor=delegate, service=`memory:<ns>`), which the broker
-//!    only mints AFTER the on-chain `memory:<ns>` grant check.
+//!    (operator=master, actor=delegate, service=`knowledge:<ns>`), which the broker
+//!    only mints AFTER the on-chain `knowledge:<ns>` grant check.
 //! 3. The broker re-verifies the cap (its own `broker_sig`, op, data class,
 //!    freshness, and that the cap's `actor_omni` == the authenticated session —
 //!    so a delegate can only redeem ITS OWN cap), mints an OPERATOR-tagged OIDC
@@ -94,7 +94,7 @@ pub async fn mint_canonical_sts(
     if p.expires_at != 0 && now > p.expires_at {
         return Err(BrokerError::Forbidden("cap expired".into()));
     }
-    // The on-chain `memory:<ns>` grant was checked when the broker MINTED this cap
+    // The on-chain `knowledge:<ns>` grant was checked when the broker MINTED this cap
     // (cap.rs mint_cap), and `broker_sig` proves the broker minted it — so a valid
     // sig + short TTL is the authorization. The worker re-verifies independently
     // (incl. the on-chain scope) when the relayed creds hit /v1/memory/canonical-get.
@@ -173,7 +173,7 @@ pub async fn mint_canonical_sts(
     // 4b. Defense-in-depth (#295 §7a finding 3): the cap's service is interpolated
     //     into the IAM Resource ARN below. cap-mint already rejects wildcard/path
     //     chars and `broker_sig` is verified above, so a valid cap is clean — but
-    //     re-check so a future cap-mint bug can't turn `memory:*` into an IAM
+    //     re-check so a future cap-mint bug can't turn `knowledge:*` into an IAM
     //     wildcard that widens this exact-object read into a prefix read.
     if p.service.contains(['*', '?', '/', '\\']) || p.service.contains("..") {
         return Err(BrokerError::Forbidden(

@@ -247,7 +247,7 @@ mod tests {
             "cam-frontdoor"
         );
         // Not a channel service at all.
-        assert!(channel_id_from_service("memory:family").is_err());
+        assert!(channel_id_from_service("knowledge:family").is_err());
         // IAM metacharacters / path tricks / case / edge dash all refused.
         for bad in ["a*", "a?b", "a/b", "a\\b", "a..b", "A", "-a", "a-", ""] {
             assert!(

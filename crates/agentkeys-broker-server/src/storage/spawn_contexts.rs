@@ -56,7 +56,7 @@ pub struct SpawnContext {
     /// The delegate K10 secret (hex) — LEGACY rows only (§1a E2 plaintext,
     /// pre-#552 spawns); EMPTY for signer-custodied delegates.
     pub k10_secret_hex: String,
-    /// #594 — the delegate's own `memory:<ns>` namespace (bare name). Injected
+    /// #594 — the delegate's own `knowledge:<ns>` namespace (bare name). Injected
     /// as `AGENTKEYS_MEMORY_NS` on every create so the in-sandbox checkpoint
     /// loop addresses the right grant even when the namespace was INHERITED
     /// (#425 O2, ns ≠ label). EMPTY on pre-#594 rows — the daemon then derives

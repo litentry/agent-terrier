@@ -73,7 +73,7 @@ Scope-grant services are strings; the vocabulary gets two families:
 
 | Family | Services | Consumers | Workers mint caps? |
 |---|---|---|---|
-| **Data services** (existing) | `memory:<ns>` · `cred:<service>` · `channel:<id>` · `inbox:<ns>` · `config` | broker cap-mint + the per-class workers | yes |
+| **Data services** (existing) | `knowledge:<ns>` · `cred:<service>` · `channel:<id>` · `proposal:<ns>` · `config` | broker cap-mint + the per-class workers | yes |
 | **Capability services** (new) | `plugin:<id>` — may this capability provider be mounted in the session; `tool:<class>` (`tool:web`, `tool:code`, `tool:schedule`, …) — may this action family run | the preset compiler (mount) and the guard (call class) **only** | never |
 
 With capability services the action plane becomes **`compiled(authority)` everywhere, with no hand-authored remainder**. The projection ladder:
@@ -94,7 +94,7 @@ With capability services the action plane becomes **`compiled(authority)` everyw
 
 ### 4.3 Inter-app references — deferred
 
-**Owner decision 2026-08-23: apps do not reference each other directly, and no app-to-app machinery ships in this migration.** Anything one app produces that another consumes is a memory or resource object under an ordinary data-service grant (`memory:<ns>`, `cred:<service>`) owned by the same household master — no template `exports`/`imports`, no request channels, no per-app dependency semantics, no direction qualifier on memory grants. The sheet therefore has exactly two sections (§4.4). Revisit only if a concrete family app needs an app-to-app intent; the deferred design (memory-grant sharing with a direction qualifier, request channels, inactive-until-installed) is recorded on the closed issue #618.
+**Owner decision 2026-08-23: apps do not reference each other directly, and no app-to-app machinery ships in this migration.** Anything one app produces that another consumes is a memory or resource object under an ordinary data-service grant (`knowledge:<ns>`, `cred:<service>`) owned by the same household master — no template `exports`/`imports`, no request channels, no per-app dependency semantics, no direction qualifier on memory grants. The sheet therefore has exactly two sections (§4.4). Revisit only if a concrete family app needs an app-to-app intent; the deferred design (memory-grant sharing with a direction qualifier, request channels, inactive-until-installed) is recorded on the closed issue #618.
 
 Inside one dsh process, plugin→plugin access is structural (declared `inject`, realms, interception — `vendor/cordis/src/context.ts`), trust-on-mount, curated by the profile we bake; model-driven calls into other plugins or agents go through `ctx.tools` and therefore through the guard. `plugin:<id>` grants are minted with the install batch and surface only as a read-only "Built with" disclosure, never a toggle.
 

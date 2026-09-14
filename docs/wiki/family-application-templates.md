@@ -12,7 +12,7 @@ The four verbs the runtime gives an app:
 |---|---|---|
 | **perceive** | events from every bound slot arrive as turns — text, `image`, `audio-clip`, `command` | `skills/perception.md` (the R2 pre-turn prompt per media kind) |
 | **act** | publish `text` / `doc` / `image` to any bound `pub` slot | the `publish-to-slot <slot> <kind>` helper from a skill |
-| **remember** | keyed objects under `memory:app-<label>`; proposals to the owner via `inbox:app-<label>` | conventions in your skills (keys, shapes) |
+| **remember** | keyed objects under `knowledge:app-<label>`; proposals to the owner via `proposal:app-<label>` | conventions in your skills (keys, shapes) |
 | **may** | every action is gated by the grant set; a denied tool is a denied tool, never a fallback | `tools`, `schedule`, and what you *don't* ask for |
 
 ## Layout
@@ -48,10 +48,10 @@ Every field is additive: a pre-existing role preset (no slots, no resources, no 
 
 What the compiler mints from it (the sheet the owner signs) — for a template installed as label `L`:
 
-- always: `channel-pub:opchat-L` + `channel-sub:opchat-L` (the owner's chat), `memory:app-L`, `inbox:app-L` (an application always has an inbox), `plugin:openviking`;
+- always: `channel-pub:opchat-L` + `channel-sub:opchat-L` (the owner's chat), `knowledge:app-L`, `proposal:app-L` (an application always has an inbox), `plugin:openviking`;
 - per bound messaging slot on transport `T`: `channel-sub:T-L` and/or `channel-pub:T-L` by direction — **and the contact gate's own device actor is granted the mirror direction in the same Touch ID** (and registered in that same Touch ID if it was not enrolled yet), so the family's messages can land on the feed and replies can go back;
 - per bound display slot `D`: `channel-pub:D` (and the console's device actor gets pub+sub to render the card and tap it);
-- per bound resource: `memory:<ns>` (read-only — never an inbox on that namespace);
+- per bound resource: `knowledge:<ns>` (read-only — never an inbox on that namespace);
 - `tool:<class>` for each declared tool class.
 
 ## Perception — `skills/perception.md`

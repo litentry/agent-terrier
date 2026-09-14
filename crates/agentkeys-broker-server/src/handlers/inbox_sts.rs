@@ -9,8 +9,8 @@
 //!
 //! 1. The delegate authenticates with its OWN session JWT (not the operator's).
 //! 2. It presents the `Append` cap the broker already minted (operator=master,
-//!    actor=delegate, service=`inbox:<ns>`), which the broker only mints AFTER the
-//!    on-chain `inbox:<ns>` grant check (a DISTINCT service-id from the read grant).
+//!    actor=delegate, service=`proposal:<ns>`), which the broker only mints AFTER the
+//!    on-chain `proposal:<ns>` grant check (a DISTINCT service-id from the read grant).
 //! 3. The broker re-verifies the cap (`broker_sig`, op, data class, freshness, and
 //!    `actor_omni == session` — a delegate only redeems ITS OWN cap), mints an
 //!    OPERATOR-tagged OIDC JWT **internally** (never handed out), and `AssumeRole`s
@@ -91,7 +91,7 @@ pub async fn mint_inbox_sts(
     if p.expires_at != 0 && now > p.expires_at {
         return Err(BrokerError::Forbidden("cap expired".into()));
     }
-    // The on-chain `inbox:<ns>` grant was checked when the broker MINTED this cap
+    // The on-chain `proposal:<ns>` grant was checked when the broker MINTED this cap
     // (cap.rs mint_cap), and `broker_sig` proves the broker minted it. The worker
     // re-verifies independently (incl. the on-chain scope) when it writes.
     if !verify_cap_payload_sig(

@@ -144,7 +144,7 @@ A sandbox **freezes its image at spawn**, so a completed preheat changes only wh
 - **The #594 lease sweeper** warm-rotates every expiring instance through the SAME core automatically (default ON), so a fleet migrates within one lease cycle even with zero clicks — measured live: the first dsh delegate in production arrived exactly this way (2026-08-25).
 - **What the hand-off preserves — and what it cannot.** The bridge's bearer-gated `/v1/sandbox/mgmt/*` surface (armed per delegate via the broker-derived `AGENTKEYS_SANDBOX_MGMT_TOKEN`) exports **on-disk `DSH_HOME` state** (profile patch, durable session JSONL, skills — the image-owned profile config is excluded both ways; the wire doc's `hermes_home` field name is the frozen shape, predating #621). A **runtime-family switch skips the hand-off entirely** (#640 — a home snapshot is runtime-keyed; the replacement starts from canonical memory). Anything held only in process memory restarts with the instance.
 - **Background jobs (#340) refuse the update** (409 `jobs_running`) unless forced — their output stream dies with the instance; the UI turns the button into "update anyway".
-- The **crash path** is the #594 checkpoint: the in-sandbox daemon periodically persists the same exportable snapshot into its own `memory:<ns>` grant (keyed object `checkpoint/dsh-home`) and restores it at boot (newer-wins `snapshot_at` guard settles the race with a relay import).
+- The **crash path** is the #594 checkpoint: the in-sandbox daemon periodically persists the same exportable snapshot into its own `knowledge:<ns>` grant (keyed object `checkpoint/dsh-home`) and restores it at boot (newer-wins `snapshot_at` guard settles the race with a relay import).
 
 ## Entry points
 

@@ -9,7 +9,7 @@
  * `persona` = master-authored only (never inbox-adoptable), applied fresh each
  * turn (`SOUL.md`); `resource` (#666, the fourth kind — arch.md §5
  * `resource item`) = master-curated ONLY, distributed read-only by the
- * mirror under an ordinary `memory:<ns>` grant (no inbox on that namespace),
+ * mirror under an ordinary `knowledge:<ns>` grant (no inbox on that namespace),
  * never inbox-adoptable. Wire spelling is the lowercase word; absent =
  * `knowledge` (full back-compat — every pre-#390 object is knowledge).
  */

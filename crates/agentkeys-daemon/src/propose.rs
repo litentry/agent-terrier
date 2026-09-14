@@ -4,7 +4,7 @@
 //! In the sandbox the agent runs `propose-to-owner "<text>" [namespace]`
 //! (a thin wrapper over `agentkeys-daemon --propose-once`); the daemon signs
 //! as the delegate and rides the EXISTING inbox-append path — cap-mint against
-//! the on-chain `inbox:<ns>` grant, worker-stamped provenance, master
+//! the on-chain `proposal:<ns>` grant, worker-stamped provenance, master
 //! curation. The inbox stays the ONLY write path toward canonical.
 //!
 //! Deliberately NOT a mirror reverse-leg scan (#573's design choice):

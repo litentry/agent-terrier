@@ -1,6 +1,6 @@
 // The Knowledge page's view logic (owner decision 2026-09-13): the console
 // shows the master's canonical memory AND the curated resource items as ONE
-// "Knowledge" surface — the wire spellings stay `memory:<ns>` / `resource
+// "Knowledge" surface — the wire spellings stay `knowledge:<ns>` / `resource
 // item` (arch.md §5). Everything here is a pure function over the daemon's
 // rows, so the grouping, the reader indexes and the edit-impact notice are
 // unit-tested without React.
@@ -10,7 +10,7 @@ import type { ContextKind } from '../generated/ContextKind';
 import type { ResourceItemRow } from '../generated/ResourceItemRow';
 import type { ResourceKind } from '../generated/ResourceKind';
 import type { Sensitivity } from '../generated/Sensitivity';
-import { memoryService } from '../constants';
+import { knowledgeService } from '../constants';
 
 /** The page's type vocabulary: the registry's closed resource kinds plus the
  *  context kinds a plain canonical entry carries. The `knowledge` context kind
@@ -59,7 +59,7 @@ export interface ActorScopeLike {
 }
 
 export interface NamespaceReaders {
-  /** Installed apps granted `memory:<ns>` — by a binding or by their sheet. */
+  /** Installed apps granted `knowledge:<ns>` — by a binding or by their sheet. */
   apps: string[];
   /** Other delegates whose on-chain scope bit reads the namespace. */
   delegates: string[];
@@ -150,7 +150,7 @@ export function buildKnowledgeItems(resources: ResourceItemRow[], entriesByNs: E
  *  (`services`) or their bindings; delegates from the on-chain scope bit an
  *  app's own delegate is not listed twice. */
 export function readersOfNamespace(ns: string, apps: AppInstanceRow[], actors: ActorScopeLike[]): NamespaceReaders {
-  const service = memoryService(ns);
+  const service = knowledgeService(ns);
   const appLabels = liveApps(apps)
     .filter((a) => a.services.includes(service) || a.bindings.resources.some((rb) => rb.ns === ns))
     .map((a) => a.label);

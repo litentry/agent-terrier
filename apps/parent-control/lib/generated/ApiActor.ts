@@ -28,7 +28,7 @@ device_key_hash?: string,
 kind?: string, scope?: { [key in string]?: ApiScopeBits }, 
 /**
  * #248: on-chain scope service ids (0x-hex keccak) that aren't a known
- * `memory:<ns>` — e.g. `cred:<service>` granted at accept. The panel's
+ * `knowledge:<ns>` — e.g. `cred:<service>` granted at accept. The panel's
  * set-replace commit echoes these back so a memory toggle can't wipe them.
  */
 scope_unknown_service_ids?: Array<string>, 
@@ -73,7 +73,7 @@ account_type?: string,
  */
 preset_id?: string, 
 /**
- * #429 — the delegate's `memory:<ns>` namespace name (manifest layer).
+ * #429 — the delegate's `knowledge:<ns>` namespace name (manifest layer).
  */
 memory_ns?: string, 
 /**

@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    service_channel_pub, service_channel_sub, service_inbox, service_memory, service_plugin,
+    service_channel_pub, service_channel_sub, service_knowledge, service_plugin, service_proposal,
     service_tool, ChannelEventKind, ContactTier, PresetSchedule, PresetSummary,
 };
 pub use agentkeys_catalog::Sensitivity;
@@ -1008,7 +1008,7 @@ pub struct BoundChannel {
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ServiceAnnotation {
     pub service: String,
-    /// `opchat` · `own-memory` · `own-inbox` · `slot` · `resource` · `tool` · `plugin`
+    /// `opchat` · `own-knowledge` · `own-proposals` · `slot` · `resource` · `tool` · `plugin`
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1155,8 +1155,8 @@ pub fn compile_app(
     note(
         &mut services,
         &mut annotations,
-        service_memory(&memory_ns),
-        "own-memory",
+        service_knowledge(&memory_ns),
+        "own-knowledge",
         None,
         None,
         None,
@@ -1346,7 +1346,7 @@ pub fn compile_app(
             note(
                 &mut services,
                 &mut annotations,
-                service_memory(&b.ns),
+                service_knowledge(&b.ns),
                 "resource",
                 None,
                 Some(&req.name),
@@ -1379,8 +1379,8 @@ pub fn compile_app(
         note(
             &mut services,
             &mut annotations,
-            service_inbox(&memory_ns),
-            "own-inbox",
+            service_proposal(&memory_ns),
+            "own-proposals",
             None,
             None,
             None,
@@ -1543,7 +1543,7 @@ mod tests {
             vec![
                 "channel-pub:opchat-watchdog",
                 "channel-sub:opchat-watchdog",
-                "memory:watchdog",
+                "knowledge:watchdog",
                 "tool:web"
             ]
         );
@@ -1564,13 +1564,13 @@ mod tests {
             vec![
                 "channel-pub:opchat-chef",
                 "channel-sub:opchat-chef",
-                "memory:app-chef",
+                "knowledge:app-chef",
                 "channel-sub:weixin-chef",
                 "channel-pub:weixin-chef",
                 "channel-pub:kitchen-display",
-                "memory:household-preferences",
-                "memory:household-health",
-                "inbox:app-chef",
+                "knowledge:household-preferences",
+                "knowledge:household-health",
+                "proposal:app-chef",
                 "tool:schedule",
                 "tool:web",
                 "plugin:openviking",
@@ -1594,7 +1594,7 @@ mod tests {
         let gene = c
             .annotations
             .iter()
-            .find(|a| a.service == "memory:household-health")
+            .find(|a| a.service == "knowledge:household-health")
             .unwrap();
         assert_eq!(gene.role, "resource");
         assert_eq!(gene.sensitivity, Some(Sensitivity::Sensitive));
@@ -1635,8 +1635,8 @@ mod tests {
     fn inherited_namespace_is_honored() {
         let p = preset(CHEF);
         let c = compile_app(&p, "chef", Some("kept-chef"), &chef_bindings()).unwrap();
-        assert!(c.services.contains(&"memory:kept-chef".to_string()));
-        assert!(c.services.contains(&"inbox:kept-chef".to_string()));
+        assert!(c.services.contains(&"knowledge:kept-chef".to_string()));
+        assert!(c.services.contains(&"proposal:kept-chef".to_string()));
         assert_eq!(c.memory_ns, "kept-chef");
     }
 

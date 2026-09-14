@@ -6,7 +6,7 @@ the #390 `skills` kind), and a manifest of *suggestions* (`preset.json`).
 
 **Content, never authority.** A preset may *suggest* channels, context
 namespaces, and schedules — but grants only ever come from the phase-1 spawn
-template (`channel-pub/sub:opchat-<label>` + `memory:<ns>`) or an explicit
+template (`channel-pub/sub:opchat-<label>` + `knowledge:<ns>`) or an explicit
 later ceremony (Touch ID). Installing a preset grants NOTHING beyond the
 template; suggestions render in the agent panel as inert affordances until
 the operator grants them.

@@ -900,8 +900,8 @@ a:hover { text-decoration-color: var(--ink); }
 }
 .perm-readonly.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .perm-readonly.off { color: var(--ink-faint); }
-/* #339 — two INDEPENDENT per-namespace grant toggles: read = memory:<ns> (read the
-   master's shared memory), write = inbox:<ns> (suggest into the master's inbox). Each
+/* #339 — two INDEPENDENT per-namespace grant toggles: read = knowledge:<ns> (read the
+   master's shared memory), write = proposal:<ns> (suggest into the master's inbox). Each
    is a self-contained rounded pill that clips its own focus ring, so nothing overflows
    a parent border the way the old segmented control's square corners + focus square did. */
 .perm-rw { display: inline-flex; gap: 6px; align-items: center; }

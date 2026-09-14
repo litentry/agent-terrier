@@ -190,7 +190,7 @@ impl BrokerClient {
 // #76 K10 cap-PoP fields (`client_sig`/`client_nonce`/`client_ts`; browser
 // callers send `None` — verified-when-present until the worker enforce flag
 // flips). `service` is still the namespace-qualified signed service
-// `memory:<ns>` (arch.md §896) — build it with `memoryService(ns)`, never a
+// `knowledge:<ns>` (arch.md §896) — build it with `knowledgeService(ns)`, never a
 // bare `memory` (→ `service_not_in_scope`). The cap-token *response* shape
 // stays local: a typed convenience view over the same wire bytes the native
 // client keeps opaque (the deliberate B3 non-unification).

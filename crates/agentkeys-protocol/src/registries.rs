@@ -123,7 +123,7 @@ pub struct ResourceItemRow {
     pub name: String,
     #[serde(default)]
     pub name_zh: String,
-    /// The canonical memory namespace the item lives in (`memory:<ns>` is the
+    /// The canonical memory namespace the item lives in (`knowledge:<ns>` is the
     /// read-only grant an app compiles to).
     pub ns: String,
     /// The entry key inside the namespace's canonical blob.
@@ -165,9 +165,51 @@ pub struct ResourceRegistryDoc {
     pub version: u32,
     #[serde(default)]
     pub items: Vec<ResourceItemRow>,
+    /// Rows a reader could not parse — a kind or field shape a NEWER build
+    /// minted (measured 2026-09-13: two stacked branches sharing the VE test
+    /// stack, the older one refusing the whole registry over one `note` row).
+    /// Carried verbatim so an older daemon never erases them on its next
+    /// write, and promoted back into `items` by a build that can read them.
+    /// Never on the wire to the console.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(skip)]
+    pub opaque: Vec<serde_json::Value>,
 }
 
 impl ResourceRegistryDoc {
+    /// Row-by-row load: every row under `items` or `opaque` this build can
+    /// read becomes an item; the rest stay opaque. Returns the doc and the
+    /// number of rows that stayed opaque. A document that is not an object is
+    /// still an error.
+    pub fn from_slice_lenient(bytes: &[u8]) -> Result<(Self, usize), serde_json::Error> {
+        let v: serde_json::Value = serde_json::from_slice(bytes)?;
+        if !v.is_object() {
+            return Err(serde::de::Error::custom("resource-registry: not an object"));
+        }
+        let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+        let mut items = Vec::new();
+        let mut opaque = Vec::new();
+        for key in ["items", "opaque"] {
+            if let Some(rows) = v.get(key).and_then(|x| x.as_array()) {
+                for row in rows {
+                    match serde_json::from_value::<ResourceItemRow>(row.clone()) {
+                        Ok(r) => items.push(r),
+                        Err(_) => opaque.push(row.clone()),
+                    }
+                }
+            }
+        }
+        let skipped = opaque.len();
+        Ok((
+            Self {
+                version,
+                items,
+                opaque,
+            },
+            skipped,
+        ))
+    }
+
     pub fn find(&self, id: &str) -> Option<&ResourceItemRow> {
         self.items.iter().find(|i| i.id == id)
     }
@@ -243,6 +285,35 @@ mod tests {
             raw_object_key: String::new(),
             raw_bytes: 0,
         }
+    }
+
+    #[test]
+    fn resource_registry_loads_row_by_row_and_keeps_what_it_cannot_read() {
+        let good = serde_json::to_value(item("gene", ResourceKind::Document, &[])).unwrap();
+        let mut newer = good.clone();
+        newer["id"] = serde_json::json!("from-the-future");
+        newer["kind"] = serde_json::json!("hologram");
+        let doc = serde_json::json!({ "version": 3, "items": [good, newer] });
+        let (reg, skipped) =
+            ResourceRegistryDoc::from_slice_lenient(doc.to_string().as_bytes()).unwrap();
+        assert_eq!(skipped, 1);
+        assert_eq!(reg.version, 3);
+        assert_eq!(reg.items.len(), 1);
+        assert_eq!(reg.items[0].id, "gene");
+        assert_eq!(reg.opaque[0]["id"], "from-the-future");
+        // written back verbatim — an older build never erases the newer row
+        let written = serde_json::to_string(&reg).unwrap();
+        assert!(written.contains("\"hologram\""));
+        // a build that can read a row parked under `opaque` promotes it
+        let mut parked = serde_json::to_value(item("diet", ResourceKind::Profile, &[])).unwrap();
+        parked["version"] = serde_json::json!(4);
+        let doc = serde_json::json!({ "version": 1, "items": [], "opaque": [parked] });
+        let (reg, skipped) =
+            ResourceRegistryDoc::from_slice_lenient(doc.to_string().as_bytes()).unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(reg.items[0].id, "diet");
+        assert!(reg.opaque.is_empty());
+        assert!(ResourceRegistryDoc::from_slice_lenient(b"[]").is_err());
     }
 
     #[test]

@@ -58,7 +58,7 @@ your passkey): pick a starting profile and your taxonomy is authored before you
 connect any agent. You can **skip** it there and do it later — the **Knowledge** page
 offers the same setup whenever your taxonomy is empty. Either way you author your
 **category taxonomy** — the vocabulary agentKeys uses to scope everything an agent
-can touch: the **knowledge** it reads (`memory:<namespace>`), the **credentials** it
+can touch: the **knowledge** it reads (`knowledge:<namespace>`), the **credentials** it
 uses, and more data classes (payments, …) as you add them. It seeds your memory
 categories now; credentials are auto-categorized into the same taxonomy when you
 connect an agent. You author it in one of two ways:

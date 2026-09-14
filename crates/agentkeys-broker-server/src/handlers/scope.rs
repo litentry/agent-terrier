@@ -200,7 +200,7 @@ mod tests {
         BuildScopeRequest {
             operator_omni: format!("0x{}", "22".repeat(32)),
             actor_omni: format!("0x{}", "33".repeat(32)),
-            services: vec!["memory:personal".into()],
+            services: vec!["knowledge:personal".into()],
             preserve_service_ids: Vec::new(),
             read_only: true,
             max_per_call: "1000".into(),
@@ -210,9 +210,9 @@ mod tests {
         }
     }
 
-    // keccak256("memory:personal") — the on-chain service id (same vector as accept.rs).
-    const MEMORY_PERSONAL_ID: &str =
-        "0x12f2770c904838cddb30299f5c22cd28df31b34fcdb44c342cd1f96c4a38ab27";
+    // keccak256("knowledge:personal") — the on-chain service id (same vector as accept.rs).
+    const KNOWLEDGE_PERSONAL_ID: &str =
+        "0x74577172636bd7db2f294f091ed93ae32597890b27de77c16ec5317bbe5e6815";
 
     #[test]
     fn parses_omnis_and_keccak_service_ids() {
@@ -225,7 +225,7 @@ mod tests {
         assert!(reg.agent_pop_sig.is_empty());
         assert_eq!(
             format!("0x{}", hex::encode(grant.services[0])),
-            MEMORY_PERSONAL_ID
+            KNOWLEDGE_PERSONAL_ID
         );
         assert!(grant.read_only);
         assert_eq!(grant.max_per_call, 1000);
@@ -262,9 +262,9 @@ mod tests {
         // commit; an id that equals a named service doesn't double up.
         let mut req = sample();
         let cred_id = format!("0x{}", "44".repeat(32));
-        req.preserve_service_ids = vec![cred_id.clone(), MEMORY_PERSONAL_ID.into()];
+        req.preserve_service_ids = vec![cred_id.clone(), KNOWLEDGE_PERSONAL_ID.into()];
         let (_, grant) = parse_scope_grant(&req).unwrap();
-        assert_eq!(grant.services.len(), 2); // memory:personal + the cred hash
+        assert_eq!(grant.services.len(), 2); // knowledge:personal + the cred hash
         assert!(grant.services.contains(&[0x44u8; 32]));
         let mut bad = sample();
         bad.preserve_service_ids = vec!["0x1234".into()]; // not 32 bytes

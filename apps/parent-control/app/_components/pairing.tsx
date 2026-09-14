@@ -29,7 +29,7 @@ function scopeOptions(
     if (p.ns.length > 0) {
       p.ns.forEach((ns) => push(`${p.cap}:${ns}`, p.reason, true));
     } else if (p.cap === 'memory') {
-      namespaces.forEach((ns) => push(`memory:${ns}`, `${p.reason} (memory class — pick namespaces)`, true));
+      namespaces.forEach((ns) => push(`knowledge:${ns}`, `${p.reason} (memory class — pick namespaces)`, true));
     }
     // #617 — a requested CAPABILITY token (`tool:<class>`) is grantable as-is:
     // it carries no namespace by design (the class IS the whole grant), so it
@@ -46,7 +46,7 @@ function scopeOptions(
   // spawn template now mints — so search works out of the box; the operator
   // unticks it here to opt out. `push` dedupes when the agent also requested it.
   push('tool:web', 'web search & fetch (product default — untick to withhold)', true);
-  namespaces.forEach((ns) => push(`memory:${ns}`, 'available namespace — not requested', false));
+  namespaces.forEach((ns) => push(`knowledge:${ns}`, 'available namespace — not requested', false));
   return opts;
 }
 

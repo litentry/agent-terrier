@@ -77,7 +77,7 @@ describe('orphanedChannels (page-side display set)', () => {
   const actors = [
     actor({ id: 'cam', services: ['channel-pub:cam-frontdoor'] }),
     actor({ id: 'display', services: [' Channel-Sub:Kitchen-Display '] }),
-    actor({ id: 'chef', services: ['memory:family'] }),
+    actor({ id: 'chef', services: ['knowledge:family'] }),
   ];
 
   it('keeps every row some actor holds by name (case- and space-insensitive) and offers the rest', () => {

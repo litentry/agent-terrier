@@ -7,7 +7,7 @@
 //! delegate's exportable runtime context DURABLE: periodically ask the local
 //! bridge for its runtime-home snapshot (`/v1/sandbox/mgmt/session/export`,
 //! the same #577 surface the broker relay uses) and persist it into the
-//! delegate's OWN `memory:<ns>` grant under the reserved keyed-object slot
+//! delegate's OWN `knowledge:<ns>` grant under the reserved keyed-object slot
 //! `agentkeys_protocol::CHECKPOINT_OBJECT_KEY`. At boot, the replacement
 //! instance runs the mirror image: fetch the checkpoint and import it BEFORE
 //! the first periodic save can overwrite it with a fresh (empty) home.
@@ -26,8 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentkeys_backend_client::protocol::{
-    service_memory, CapMintOp, CapMintRequest, CheckpointEnvelope, MemoryGetInput, MemoryPutInput,
-    CHECKPOINT_OBJECT_KEY,
+    service_knowledge, CapMintOp, CapMintRequest, CheckpointEnvelope, MemoryGetInput,
+    MemoryPutInput, CHECKPOINT_OBJECT_KEY,
 };
 use agentkeys_backend_client::{normalize_omni_0x, BackendClient, BackendError};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -47,7 +47,7 @@ pub struct CheckpointConfig {
     pub chat: ChatLoopConfig,
     pub memory_worker_url: String,
     /// The delegate's own namespace (bare, e.g. `watchdog`) — the cap service
-    /// is `service_memory(namespace)`.
+    /// is `service_knowledge(namespace)`.
     pub namespace: String,
     /// The #577 management bearer — the bridge requires it on the export
     /// surface; both processes read the same instance env, so it never skews.
@@ -319,7 +319,7 @@ async fn save_once(
         serde_json::to_vec(&envelope).map_err(|e| SaveError::Failed(format!("wrap: {e}")))?;
 
     let client = cfg.backend_client(bearer, credential);
-    let service = service_memory(&cfg.namespace);
+    let service = service_knowledge(&cfg.namespace);
     let cap = client
         .cap_mint(
             CapMintOp::MemoryPut,
@@ -449,7 +449,7 @@ async fn restore_once(
     bearer: &str,
 ) -> Result<String, RestoreError> {
     let client = cfg.backend_client(bearer, credential);
-    let service = service_memory(&cfg.namespace);
+    let service = service_knowledge(&cfg.namespace);
     let cap = client
         .cap_mint(
             CapMintOp::MemoryGet,

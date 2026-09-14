@@ -940,7 +940,7 @@ mod tests {
             "family-weixin"
         );
         // A memory service is not a channel service.
-        assert!(channel_id_from_service("memory:travel").is_err());
+        assert!(channel_id_from_service("knowledge:travel").is_err());
         // Path/wildcard injection into the feed key is rejected.
         assert!(channel_id_from_service("channel-pub:../escape").is_err());
         assert!(channel_id_from_service("channel-pub:a/b").is_err());

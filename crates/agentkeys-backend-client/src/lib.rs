@@ -4,7 +4,7 @@
 //! It is the dual of `agentkeys-broker-server` / `agentkeys-worker-*`: where
 //! those crates *serve* the cap-mint + worker endpoints, this crate *calls*
 //! them. Everything the chain serializes — the four cap-mint endpoints, the
-//! STS relay, worker put/get, the `memory:<ns>` service builder, and the
+//! STS relay, worker put/get, the `knowledge:<ns>` service builder, and the
 //! `0x`-omni normalizer — lives here once. The MCP server's `HttpBackend`
 //! delegates to [`BackendClient`]; the daemon's `ui_bridge` real-memory path
 //! calls it directly; the harness diffs its bash bodies against
@@ -17,7 +17,7 @@ pub use agentkeys_protocol as protocol;
 
 pub use client::{BackendClient, BackendError, Delegation, RemoteCapPop};
 pub use protocol::{
-    normalize_omni_0x, service_memory, AuditAppendInput, AuditAppendResult, AuditAppendV2,
+    normalize_omni_0x, service_knowledge, AuditAppendInput, AuditAppendResult, AuditAppendV2,
     AuditAppendV2Resp, BrokerCapRequest, CapMintOp, CapMintRequest, CapToken, ConfigGetBody,
     ConfigGetResp, ConfigPutBody, CredFetchBody, CredFetchInput, CredFetchResp, CredFetchResult,
     CredStoreBody, CredStoreInput, CredStoreResp, CredStoreResult, MemoryGetBody, MemoryGetInput,

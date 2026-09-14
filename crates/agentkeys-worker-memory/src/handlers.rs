@@ -221,7 +221,7 @@ async fn memory_get(
 /// SIGNED cap op is `CanonicalFetch`, so `memory_read_owner` resolves the S3
 /// prefix + envelope AAD to the OPERATOR (the master's canonical), not the
 /// caller's own memory. Because `operator != actor` for a delegate,
-/// `verify_cap`'s `check_chain_scope` consults the on-chain `memory:<ns>`
+/// `verify_cap`'s `check_chain_scope` consults the on-chain `knowledge:<ns>`
 /// grant (the master-self skip is bypassed) — that grant IS the delegate's
 /// authorization. The caller must relay OPERATOR-scoped STS (a session-policy
 /// pinned to this one key — plan §7a); a delegate's own actor-tagged STS gets
@@ -492,10 +492,10 @@ async fn memory_teardown_inner(
 // ── #339 P2 — absorption inbox (master-hub "push" / curated merge) ────────────
 
 /// AAD service context for ALL absorption-inbox objects (#339 P2). Unlike the
-/// per-namespace `memory:<ns>` keying, every inbox item shares ONE AAD service
+/// per-namespace `knowledge:<ns>` keying, every inbox item shares ONE AAD service
 /// ("inbox") so the MASTER — which reads across all namespaces with a single
 /// master-self cap — can decrypt any proposal without a per-namespace cap.
-/// Per-namespace isolation is enforced by the on-chain `inbox:<ns>` grant at
+/// Per-namespace isolation is enforced by the on-chain `proposal:<ns>` grant at
 /// append time + the S3 key path, not by the AAD; the AAD still separates inbox
 /// bytes from memory/cred bytes and binds them to the operator + K3 epoch.
 const INBOX_AAD_SERVICE: &str = "inbox";
@@ -558,7 +558,7 @@ pub struct InboxDeleteResponse {
 }
 
 /// #339 P2 — a delegate APPENDs a proposal to the master's absorption inbox.
-/// The SIGNED cap op is `Append` (gated by the on-chain `inbox:<ns>` grant since
+/// The SIGNED cap op is `Append` (gated by the on-chain `proposal:<ns>` grant since
 /// operator != actor). Like canonical-get the write runs SERVER-SIDE under a
 /// broker-minted, prefix-scoped operator STS (`/v1/cap/inbox-sts`); the delegate
 /// sends only its session bearer + cap and gets back a receipt — no AWS creds.
@@ -917,11 +917,11 @@ fn inbox_prefix(operator: &str) -> String {
     format!("bots/{}/inbox/", strip0x_lc(operator))
 }
 
-/// Bare namespace from an `inbox:<ns>` cap service (for the `InboxItem.ns` the
-/// master curates INTO canonical `memory:<ns>`). Falls back to the whole service
-/// if the prefix is absent (defensive — cap-mint always sets `inbox:<ns>`).
+/// Bare namespace from an `proposal:<ns>` cap service (for the `InboxItem.ns` the
+/// master curates INTO canonical `knowledge:<ns>`). Falls back to the whole service
+/// if the prefix is absent (defensive — cap-mint always sets `proposal:<ns>`).
 fn inbox_ns_from_service(service: &str) -> &str {
-    service.strip_prefix("inbox:").unwrap_or(service)
+    service.strip_prefix("proposal:").unwrap_or(service)
 }
 
 fn strip0x_lc(s: &str) -> String {
@@ -1110,14 +1110,18 @@ mod tests {
     #[test]
     fn storage_key_maps_legacy_slot_and_keyed_objects() {
         assert_eq!(
-            storage_key("0xABCDEF", "memory:watchdog", None),
-            "bots/abcdef/memory/memory:watchdog.enc"
+            storage_key("0xABCDEF", "knowledge:watchdog", None),
+            "bots/abcdef/memory/knowledge:watchdog.enc"
         );
         assert_eq!(
-            storage_key("0xABCDEF", "memory:watchdog", Some("checkpoint/dsh-home")),
-            "bots/abcdef/memory/memory:watchdog.objects/checkpoint/dsh-home.enc"
+            storage_key(
+                "0xABCDEF",
+                "knowledge:watchdog",
+                Some("checkpoint/dsh-home")
+            ),
+            "bots/abcdef/memory/knowledge:watchdog.objects/checkpoint/dsh-home.enc"
         );
-        assert!(storage_key("0xab", "memory:x", Some("k")).starts_with(&s3_prefix("0xab")));
+        assert!(storage_key("0xab", "knowledge:x", Some("k")).starts_with(&s3_prefix("0xab")));
         // The reserved checkpoint slot the daemon writes is a valid key.
         assert!(validate_object_key(agentkeys_protocol::CHECKPOINT_OBJECT_KEY).is_ok());
     }
@@ -1149,10 +1153,10 @@ mod tests {
     /// under a DIFFERENT AAD and fails, instead of restoring the wrong bytes.
     #[test]
     fn aad_service_domain_separates_keyed_objects() {
-        let legacy = aad_service("memory:watchdog", None);
-        let keyed = aad_service("memory:watchdog", Some("checkpoint/dsh-home"));
-        let other = aad_service("memory:watchdog", Some("checkpoint/other"));
-        assert_eq!(legacy, "memory:watchdog");
+        let legacy = aad_service("knowledge:watchdog", None);
+        let keyed = aad_service("knowledge:watchdog", Some("checkpoint/dsh-home"));
+        let other = aad_service("knowledge:watchdog", Some("checkpoint/other"));
+        assert_eq!(legacy, "knowledge:watchdog");
         assert_ne!(legacy, keyed);
         assert_ne!(keyed, other);
         // The separator sits outside both charsets, so no (service, key) pair
@@ -1212,8 +1216,14 @@ mod tests {
         // omnis (and why a route alone would be forgeable).
         let master = "0xAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaa";
         let delegate = "0xBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbb";
-        let canon = sample_payload(CapOp::CanonicalFetch, master, delegate, "memory:project", 7);
-        let own = sample_payload(CapOp::Fetch, master, delegate, "memory:project", 7);
+        let canon = sample_payload(
+            CapOp::CanonicalFetch,
+            master,
+            delegate,
+            "knowledge:project",
+            7,
+        );
+        let own = sample_payload(CapOp::Fetch, master, delegate, "knowledge:project", 7);
         assert_eq!(
             memory_read_owner(&canon),
             master,
@@ -1238,7 +1248,7 @@ mod tests {
         let kek = "0".repeat(64); // 32-byte test KEK
         let master = "0xAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaa";
         let delegate = "0xBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbbBBbb";
-        let service = "memory:project";
+        let service = "knowledge:project";
         let epoch = 7u64;
         let plaintext: &[u8] = b"canonical project memory";
 
@@ -1267,16 +1277,16 @@ mod tests {
     #[test]
     fn namespace_folded_service_segregates_storage() {
         // Issue #147 (approach B): the MCP mints memory caps with
-        // service="memory:<namespace>". Because the worker keys S3 off the
+        // service="knowledge:<namespace>". Because the worker keys S3 off the
         // SIGNED service, two namespaces land at distinct keys — a
-        // `memory:travel` cap physically cannot read/write the
-        // `memory:personal` object. This is the namespace-isolation gate,
+        // `knowledge:travel` cap physically cannot read/write the
+        // `knowledge:personal` object. This is the namespace-isolation gate,
         // enforced by construction (signed service ⇒ key + scope + AAD).
-        let travel = s3_key("0xabc", "memory:travel");
-        let personal = s3_key("0xabc", "memory:personal");
+        let travel = s3_key("0xabc", "knowledge:travel");
+        let personal = s3_key("0xabc", "knowledge:personal");
         assert_ne!(travel, personal);
-        assert_eq!(travel, "bots/abc/memory/memory:travel.enc");
-        assert!(personal.contains("memory:personal"));
+        assert_eq!(travel, "bots/abc/memory/knowledge:travel.enc");
+        assert!(personal.contains("knowledge:personal"));
     }
 
     // ── #339 P2 — absorption inbox ───────────────────────────────────────────
@@ -1299,20 +1309,20 @@ mod tests {
         // lowercased to match the broker's norm()), or the scoped STS denies the PUT.
         let master = "0xAAaa00000000000000000000000000000000aaAA";
         let delegate = "0xBBbb00000000000000000000000000000000bbBB";
-        let key = inbox_s3_key(master, delegate, "inbox:travel", "0xdeadBEEF");
+        let key = inbox_s3_key(master, delegate, "proposal:travel", "0xdeadBEEF");
         assert_eq!(
             key,
-            "bots/aaaa00000000000000000000000000000000aaaa/inbox/bbbb00000000000000000000000000000000bbbb/inbox:travel/deadbeef.enc"
+            "bots/aaaa00000000000000000000000000000000aaaa/inbox/bbbb00000000000000000000000000000000bbbb/proposal:travel/deadbeef.enc"
         );
-        assert!(key.starts_with(&inbox_subprefix(master, delegate, "inbox:travel")));
+        assert!(key.starts_with(&inbox_subprefix(master, delegate, "proposal:travel")));
         assert!(key.starts_with(&inbox_prefix(master)));
     }
 
     #[test]
     fn inbox_ns_strips_the_inbox_prefix_for_curate() {
-        // InboxItem.ns is the bare namespace the master curates INTO `memory:<ns>`.
-        assert_eq!(inbox_ns_from_service("inbox:travel"), "travel");
-        assert_eq!(inbox_ns_from_service("inbox:project:foo"), "project:foo");
+        // InboxItem.ns is the bare namespace the master curates INTO `knowledge:<ns>`.
+        assert_eq!(inbox_ns_from_service("proposal:travel"), "travel");
+        assert_eq!(inbox_ns_from_service("proposal:project:foo"), "project:foo");
         assert_eq!(inbox_ns_from_service("weird"), "weird");
     }
 
@@ -1340,7 +1350,7 @@ mod tests {
         let master = "0xAAaa000000000000000000000000000000000000";
         assert!(validate_inbox_key(master, &format!("{}x/h.enc", inbox_prefix(master))).is_ok());
         // another operator's inbox
-        assert!(validate_inbox_key(master, "bots/ffff/inbox/d/inbox:x/h.enc").is_err());
+        assert!(validate_inbox_key(master, "bots/ffff/inbox/d/proposal:x/h.enc").is_err());
         // the operator's MEMORY (not inbox) prefix
         assert!(validate_inbox_key(
             master,
@@ -1356,7 +1366,7 @@ mod tests {
         // The load-bearing P2 AAD invariant: a delegate APPEND encrypts with
         // aad(operator, operator, "inbox", epoch); the master's master-self READ
         // recomputes the SAME aad (operator == actor) and decrypts. Distinct from
-        // the memory/canonical per-`memory:<ns>` AAD — the master reads across all
+        // the memory/canonical per-`knowledge:<ns>` AAD — the master reads across all
         // namespaces with one cap, so the inbox AAD service is the fixed "inbox".
         let kek = "0".repeat(64);
         let master = "0xAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaa";
@@ -1386,7 +1396,7 @@ mod tests {
         assert_eq!(round.kind, ContextKind::Skill);
 
         // a memory-style per-ns aad must NOT decrypt an inbox blob (data-class sep).
-        let memory_aad = envelope::aad(master, master, "memory:travel", epoch);
+        let memory_aad = envelope::aad(master, master, "knowledge:travel", epoch);
         assert!(envelope::decrypt(&kek, &blob, &memory_aad).is_err());
     }
 }

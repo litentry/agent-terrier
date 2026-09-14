@@ -220,7 +220,7 @@ export function SpawnAgentModal({
               checked={memoryMode === 'fresh'}
               onChange={() => setMemoryMode('fresh')}
             />
-            Fresh empty namespace{label ? ` (memory:${label})` : ''}
+            Fresh empty namespace{label ? ` (knowledge:${label})` : ''}
           </label>
           <label
             style={{
@@ -244,7 +244,7 @@ export function SpawnAgentModal({
             <option value="">choose a kept namespace…</option>
             {inheritable.map((n) => (
               <option key={n.ns} value={n.ns}>
-                memory:{n.ns} — kept from “{n.fromLabel}”
+                knowledge:{n.ns} — kept from “{n.fromLabel}”
               </option>
             ))}
           </select>
@@ -320,8 +320,8 @@ export function ArchiveAgentDialog({
     akLog('archive: confirmed', { txHash: submitted.data.tx_hash, ceremony: submitted.data.ceremony });
     showToast(
       keep
-        ? `${actor.label} archived — its slot is free and memory:${ns} stays inheritable.`
-        : `${actor.label} archived — its slot is free; memory:${ns} is marked deleted.`,
+        ? `${actor.label} archived — its slot is free and knowledge:${ns} stays inheritable.`
+        : `${actor.label} archived — its slot is free; knowledge:${ns} is marked deleted.`,
     );
     onArchived();
     onClose();
@@ -350,14 +350,14 @@ export function ArchiveAgentDialog({
         <label style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
           <input type="radio" checked={keep} onChange={() => setKeep(true)} />
           <span>
-            <strong>Keep its knowledge</strong> — <code>memory:{ns}</code> stays inheritable by a
+            <strong>Keep its knowledge</strong> — <code>knowledge:{ns}</code> stays inheritable by a
             future agent (at most one at a time).
           </span>
         </label>
         <label style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginTop: 6 }}>
           <input type="radio" checked={!keep} onChange={() => setKeep(false)} />
           <span>
-            <strong>Delete its knowledge</strong> — destroys <code>memory:{ns}</code> (every note
+            <strong>Delete its knowledge</strong> — destroys <code>knowledge:{ns}</code> (every note
             this agent stored). This cannot be undone; nothing will be inheritable.
           </span>
         </label>

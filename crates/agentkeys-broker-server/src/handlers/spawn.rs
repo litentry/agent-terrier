@@ -224,7 +224,7 @@ pub struct SpawnBuildRequest {
     /// `""` = blank spawn. Recorded in the DelegateSpawn anchor + manifest.
     #[serde(default)]
     pub preset_id: String,
-    /// The template `memory:<ns>` namespace. Unset ⇒ fresh, named after the
+    /// The template `knowledge:<ns>` namespace. Unset ⇒ fresh, named after the
     /// label. Set + `memory_inherited` ⇒ an archived delegate's KEPT namespace
     /// (#425 O2 — the caller (daemon) validates inheritability against the
     /// #424 manifest; the broker records the choice).
@@ -516,7 +516,7 @@ pub struct ArchiveBuildRequest {
     /// (daemon's) follow-through via the worker teardown flow.
     #[serde(default)]
     pub resources_kept: bool,
-    /// The delegate's `memory:<ns>` namespace name, when the caller knows it
+    /// The delegate's `knowledge:<ns>` namespace name, when the caller knows it
     /// (the broker only sees keccak'd grant ids on-chain) — recorded so the
     /// kept namespace is discoverable for #425 O2 inheritance.
     #[serde(default)]
@@ -571,7 +571,7 @@ pub(crate) fn spawn_template_services(chat_channel_id: &str, memory_ns: &str) ->
     vec![
         agentkeys_protocol::service_channel_pub(chat_channel_id),
         agentkeys_protocol::service_channel_sub(chat_channel_id),
-        agentkeys_protocol::service_memory(memory_ns),
+        agentkeys_protocol::service_knowledge(memory_ns),
         agentkeys_protocol::service_tool("web"),
     ]
 }
@@ -1335,7 +1335,7 @@ mod tests {
             memory_ns: "watchdog".into(),
             memory_inherited: false,
             chat_channel_id: "opchat-watchdog".into(),
-            services: vec!["memory:watchdog".into()],
+            services: vec!["knowledge:watchdog".into()],
             k10_secret_hex: "0xdead".into(),
             app: AppRuntimeFacts::default(),
             created_at: Instant::now(),
@@ -1394,7 +1394,7 @@ mod tests {
             vec![
                 "channel-pub:opchat-watchdog".to_string(),
                 "channel-sub:opchat-watchdog".to_string(),
-                "memory:watchdog".to_string(),
+                "knowledge:watchdog".to_string(),
                 "tool:web".to_string(),
             ]
         );
@@ -1596,12 +1596,12 @@ mod tests {
         for s in [
             "channel-pub:opchat-chef",
             "channel-sub:opchat-chef",
-            "memory:app-chef",
-            "inbox:app-chef",
+            "knowledge:app-chef",
+            "proposal:app-chef",
             "channel-sub:weixin-chef",
             "channel-pub:weixin-chef",
             "channel-pub:kitchen-display",
-            "memory:food-prefs",
+            "knowledge:food-prefs",
             "tool:schedule",
             "plugin:openviking",
         ] {
@@ -1612,7 +1612,7 @@ mod tests {
             );
         }
         assert!(
-            !plan.services.iter().any(|x| x == "inbox:food-prefs"),
+            !plan.services.iter().any(|x| x == "proposal:food-prefs"),
             "a resource is read-only — never an inbox on its namespace"
         );
         assert_eq!(plan.bound_channels.len(), 2);

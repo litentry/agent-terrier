@@ -164,8 +164,8 @@ export interface RevokeIntent {
 
 export interface MasterMemoryEntry {
   /** Namespace (e.g. `travel`). An agent's cap/scope to read this namespace is
-   *  the namespace-qualified signed service `memory:<ns>` — build it with
-   *  `memoryService(ns)` (lib/constants.ts); a bare `memory` fails cap-mint
+   *  the namespace-qualified signed service `knowledge:<ns>` — build it with
+   *  `knowledgeService(ns)` (lib/constants.ts); a bare `memory` fails cap-mint
    *  (arch.md §896, #177). The configured engine ranks injected lines per query. */
   ns: string;
   key: string;
@@ -200,7 +200,7 @@ export interface MemoryCategory {
 
 /** A bundled default taxonomy preset (#207 item 1A, config-init entry point A).
  *  `categories` is the authored category tree the preset writes — the namespaces
- *  become the memory data class's category axis (`memory:<ns>`). These are
+ *  become the memory data class's category axis (`knowledge:<ns>`). These are
  *  shared bundled defaults (catalog ≠ policy: categories, never grants). */
 export interface ConfigPreset {
   id: string;
@@ -614,7 +614,7 @@ export interface AgentKeysClient {
   // durable, master-only Config taxonomy (zero memory decryption, survives daemon
   // restarts); per-namespace ENTRIES decrypt lazily ON DEMAND when a category is
   // opened. PLANT is idempotent (server dedups by content-hash). An agent reads a
-  // namespace only with a `memory:<ns>` scope (memoryService(ns)), and the
+  // namespace only with a `knowledge:<ns>` scope (knowledgeService(ns)), and the
   // configured engine ranks what's injected (#177).
   listMemoryCategories(): Promise<Result<MemoryCategory[]>>;
   getMemoryEntries(ns: string, key?: string): Promise<Result<MasterMemoryEntry[]>>;

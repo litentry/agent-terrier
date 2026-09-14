@@ -1,6 +1,6 @@
 # Fridge — the inventory
 
-One keyed memory object: `fridge/inventory` (`memory:app-chef`).
+One keyed memory object: `fridge/inventory` (`knowledge:app-chef`).
 
 - body: `{ "seen_at": "…", "items": [{ "name": "…", "quantity": "…", "state": "ok" | "low" | "spoiling" | "new", "last_seen": "…" }] }`
 - A fridge photo REPLACES the item list for the shelves it shows and keeps

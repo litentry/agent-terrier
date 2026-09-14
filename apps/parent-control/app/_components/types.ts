@@ -1,8 +1,8 @@
 import type { ContextKind } from '@/lib/generated/ContextKind';
 export type Namespace = 'personal' | 'family' | 'work' | 'travel';
 
-// Two INDEPENDENT per-namespace grants (#339): `read` = `memory:<ns>` (read the
-// master's shared canonical memory); `write` = `inbox:<ns>` (write/suggest into the
+// Two INDEPENDENT per-namespace grants (#339): `read` = `knowledge:<ns>` (read the
+// master's shared canonical memory); `write` = `proposal:<ns>` (write/suggest into the
 // master's inbox, which the master curates). The delegate NEVER writes the master's
 // shared memory directly, and its own local memory is its own — neither is `write`.
 export type ScopeBits = { read: boolean; write: boolean };
@@ -33,7 +33,7 @@ export interface Actor {
   children?: string[];
   scope?: Record<Namespace, ScopeBits>;
   /** #248: on-chain scope service ids (keccak hex) that aren't a known
-   *  `memory:<ns>` (e.g. `cred:<service>` from the accept). The panel's
+   *  `knowledge:<ns>` (e.g. `cred:<service>` from the accept). The panel's
    *  set-replace commit echoes these back so a memory toggle can't wipe them. */
   scopeUnknownServiceIds?: string[];
   /** #541: the subset of `scopeUnknownServiceIds` the daemon resolved to
@@ -56,7 +56,7 @@ export interface Actor {
   services?: string[];
   /** #429 — the preset the delegate was spawned from (#424 manifest layer). */
   presetId?: string;
-  /** #429 — the delegate's memory:<ns> namespace name (manifest layer). */
+  /** #429 — the delegate's knowledge:<ns> namespace name (manifest layer). */
   memoryNs?: string;
   /** #543 — the delegate's spawn-ceremony runtime/metering outcome (manifest
    *  layer). gateStatus 'provisioned' = the metered per-delegate relay-key
@@ -262,8 +262,8 @@ export const capabilityGrantCommit = (
   stagedToolServices: string[],
 ): { services: string[]; preserve: string[] } => {
   const memoryNames = Object.entries(a.scope ?? {}).flatMap(([ns, bits]) => [
-    ...(bits?.read ? [`memory:${ns}`] : []),
-    ...(bits?.write ? [`inbox:${ns}`] : []),
+    ...(bits?.read ? [`knowledge:${ns}`] : []),
+    ...(bits?.write ? [`proposal:${ns}`] : []),
   ]);
   // everything we know by name that this commit does NOT own: channels, creds,
   // and the plugin half of the capability family.
@@ -327,8 +327,8 @@ export const channelGrantCommit = (
   stagedChannelServices: string[],
 ): { services: string[]; preserve: string[] } => {
   const memoryNames = Object.entries(a.scope ?? {}).flatMap(([ns, bits]) => [
-    ...(bits?.read ? [`memory:${ns}`] : []),
-    ...(bits?.write ? [`inbox:${ns}`] : []),
+    ...(bits?.read ? [`knowledge:${ns}`] : []),
+    ...(bits?.write ? [`proposal:${ns}`] : []),
   ]);
   const otherKnown = (a.services ?? []).filter((s) => !isChannelService(s));
   const channelHashes = new Set(

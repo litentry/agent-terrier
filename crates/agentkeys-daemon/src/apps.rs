@@ -83,8 +83,21 @@ pub(crate) async fn ensure_resource_registry(
         Some(ctx) => {
             let client = reqwest::Client::new();
             match config_fetch_doc(&client, &ctx, RESOURCE_REGISTRY_SERVICE).await? {
-                Some(bytes) => serde_json::from_slice::<ResourceRegistryDoc>(&bytes)
-                    .map_err(|e| format!("resource-registry parse: {e}"))?,
+                Some(bytes) => {
+                    // Row by row: a row this build cannot read is kept opaque and
+                    // written back, never dropped and never a 502 for every
+                    // resource operation (a newer build may have minted it).
+                    let (doc, skipped) = ResourceRegistryDoc::from_slice_lenient(&bytes)
+                        .map_err(|e| format!("resource-registry parse: {e}"))?;
+                    if skipped > 0 {
+                        tracing::warn!(
+                            skipped,
+                            kept = doc.items.len(),
+                            "resource-registry: rows this build cannot read were kept opaque"
+                        );
+                    }
+                    doc
+                }
                 None => ResourceRegistryDoc::default(),
             }
         }
@@ -1410,15 +1423,15 @@ fn annotations_for(row: &AppInstanceRow) -> Vec<ServiceAnnotation> {
                     .find(|b| lower.ends_with(&format!(":{}", b.channel_id)))
                 {
                     ("slot", Some(b.slot.clone()), None, None)
-                } else if lower == format!("memory:{}", row.memory_ns) {
-                    ("own-memory", None, None, None)
-                } else if lower == format!("inbox:{}", row.memory_ns) {
-                    ("own-inbox", None, None, None)
+                } else if lower == format!("knowledge:{}", row.memory_ns) {
+                    ("own-knowledge", None, None, None)
+                } else if lower == format!("proposal:{}", row.memory_ns) {
+                    ("own-proposals", None, None, None)
                 } else if let Some(rb) = row
                     .bindings
                     .resources
                     .iter()
-                    .find(|rb| lower == format!("memory:{}", rb.ns))
+                    .find(|rb| lower == format!("knowledge:{}", rb.ns))
                 {
                     (
                         "resource",
@@ -1731,7 +1744,7 @@ async fn curate_resource(
                     return (
                         status,
                         Json(serde_json::json!({
-                            "error": format!("raw file store failed (the extracted text IS planted in memory:{}): {reason}", c.ns)
+                            "error": format!("raw file store failed (the extracted text IS planted in knowledge:{}): {reason}", c.ns)
                         })),
                     )
                         .into_response()
@@ -1781,7 +1794,7 @@ async fn curate_resource(
         Err(e) => registry_err(
             StatusCode::BAD_GATEWAY,
             &format!(
-                "resource registry store failed (the item IS planted in memory:{}): {e}",
+                "resource registry store failed (the item IS planted in knowledge:{}): {e}",
                 c.ns
             ),
         ),
@@ -1891,14 +1904,14 @@ pub async fn upload_resource(
 #[derive(Debug, Deserialize)]
 pub struct ResourceRemoveRequest {
     pub id: String,
-    /// Remove even while a live app is bound to the item (its `memory:<ns>`
+    /// Remove even while a live app is bound to the item (its `knowledge:<ns>`
     /// grant stays; the entry it read is gone).
     #[serde(default)]
     pub force: bool,
 }
 
 /// POST /v1/master/resources/remove — unregister a curated item and drop its
-/// entry from `memory:<ns>`. Refused (409 `resource_in_use`) while a live app
+/// entry from `knowledge:<ns>`. Refused (409 `resource_in_use`) while a live app
 /// is bound to it unless `force`. Idempotent: an unknown id is `ok` with
 /// `removed:false`. A raw file object stays until the namespace is torn down
 /// (the memory worker has no keyed delete).
@@ -1957,7 +1970,7 @@ pub async fn remove_resource(
         Err(e) => registry_err(
             StatusCode::BAD_GATEWAY,
             &format!(
-                "resource registry store failed (the entry IS gone from memory:{}): {e}",
+                "resource registry store failed (the entry IS gone from knowledge:{}): {e}",
                 row.ns
             ),
         ),
@@ -1998,10 +2011,10 @@ mod tests {
             }],
             services: vec![
                 "channel-pub:opchat-chef".into(),
-                "memory:app-chef".into(),
+                "knowledge:app-chef".into(),
                 "channel-pub:kitchen-display".into(),
-                "memory:household-health".into(),
-                "inbox:app-chef".into(),
+                "knowledge:household-health".into(),
+                "proposal:app-chef".into(),
                 "tool:web".into(),
                 "plugin:openviking".into(),
             ],
@@ -2024,14 +2037,14 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(role("channel-pub:opchat-chef"), "opchat");
-        assert_eq!(role("memory:app-chef"), "own-memory");
+        assert_eq!(role("knowledge:app-chef"), "own-knowledge");
         assert_eq!(role("channel-pub:kitchen-display"), "slot");
-        assert_eq!(role("inbox:app-chef"), "own-inbox");
+        assert_eq!(role("proposal:app-chef"), "own-proposals");
         assert_eq!(role("tool:web"), "tool");
         assert_eq!(role("plugin:openviking"), "plugin");
         let gene = a
             .iter()
-            .find(|x| x.service == "memory:household-health")
+            .find(|x| x.service == "knowledge:household-health")
             .unwrap();
         assert_eq!(gene.role, "resource");
         assert_eq!(gene.sensitivity, Some(Sensitivity::Sensitive));

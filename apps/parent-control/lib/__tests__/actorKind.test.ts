@@ -111,7 +111,7 @@ describe('the chat tab warns when the DELEGATE cannot hear a channel', () => {
   // possible. This is the exact live case: the DEVICE held opchat-test1 but
   // the delegate held nothing, so chat looked "sent" with no reply forthcoming.
   it('detects a grant in either direction, exact-match only', () => {
-    const a = actor({ services: ['channel-sub:opchat-test1', 'memory:test1'] });
+    const a = actor({ services: ['channel-sub:opchat-test1', 'knowledge:test1'] });
     expect(actorHoldsChannelGrant(a, 'opchat-test1')).toBe(true);
     expect(actorHoldsChannelGrant(a, 'opchat-test')).toBe(false);
     expect(actorHoldsChannelGrant(a, 'opchat-test12')).toBe(false);
@@ -156,11 +156,11 @@ describe('a channel-grant commit restates the whole set without collateral damag
       scopeChannelServiceIds: [CHAN_HASH],
     });
     const { services } = channelGrantCommit(a, ['channel-sub:opchat-test1']);
-    expect(services).toContain('memory:family');
-    expect(services).toContain('inbox:family');
-    expect(services).toContain('memory:work');
-    expect(services).not.toContain('inbox:work'); // write=false
-    expect(services).not.toContain('memory:personal');
+    expect(services).toContain('knowledge:family');
+    expect(services).toContain('proposal:family');
+    expect(services).toContain('knowledge:work');
+    expect(services).not.toContain('proposal:work'); // write=false
+    expect(services).not.toContain('knowledge:personal');
     expect(services).toContain('channel-sub:opchat-test1');
     expect(services).not.toContain('channel-pub:opchat-test1'); // replaced
   });
@@ -201,7 +201,7 @@ describe('capability services (#614)', () => {
   it('recognizes the family and only the family', () => {
     expect(isCapabilityService('tool:web')).toBe(true);
     expect(isCapabilityService('PLUGIN:openviking')).toBe(true);
-    expect(isCapabilityService('memory:travel')).toBe(false);
+    expect(isCapabilityService('knowledge:travel')).toBe(false);
     expect(isCapabilityService('channel-pub:cam')).toBe(false);
     expect(isCapabilityService('toolbox')).toBe(false);
   });
@@ -216,7 +216,7 @@ describe('capability services (#614)', () => {
     };
     const { services, preserve } = cgc(actor, ['channel-sub:door']);
     expect(services).toContain('tool:web'); // named grant restated
-    expect(services).toContain('memory:travel');
+    expect(services).toContain('knowledge:travel');
     expect(services).not.toContain('channel-pub:cam'); // channels come from staged set
     expect(preserve).toContain('0xcap'); // capability hash preserved
     expect(preserve).toContain('0xcred');

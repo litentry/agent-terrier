@@ -74,7 +74,7 @@ async fn mock_broker(seen: Arc<Seen>) -> String {
                     "user_op": user_op(), "user_op_hash": HASH, "entry_point": "0x0000000000000000000000000000000000000002",
                     "chain_id": 212013, "actor_omni": CHILD, "device_key_hash": DKH,
                     "chat_channel_id": "opchat-probe", "memory_ns": "app-probe", "memory_inherited": false,
-                    "services": ["channel-pub:opchat-probe", "channel-sub:opchat-probe", "memory:app-probe"],
+                    "services": ["channel-pub:opchat-probe", "channel-sub:opchat-probe", "knowledge:app-probe"],
                     "slots_used": 1, "slots_total": 3
                 }))
             }),

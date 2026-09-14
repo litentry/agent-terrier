@@ -2,15 +2,15 @@
 
 export type ApiScopeBits = { 
 /**
- * `memory:<ns>` granted — the delegate may READ the master's shared canonical
+ * `knowledge:<ns>` granted — the delegate may READ the master's shared canonical
  * memory for this namespace (#295 distribution). The delegate's OWN local
  * memory is its own and is not represented here.
  */
 read: boolean, 
 /**
- * `inbox:<ns>` granted — the delegate may WRITE/suggest into the master's
+ * `proposal:<ns>` granted — the delegate may WRITE/suggest into the master's
  * absorption inbox for this namespace (#339), which the master curates. A
- * DISTINCT on-chain grant (`keccak("inbox:<ns>") != keccak("memory:<ns>")`), so
+ * DISTINCT on-chain grant (`keccak("proposal:<ns>") != keccak("knowledge:<ns>")`), so
  * granting read never grants write — and the delegate NEVER writes the master's
  * shared memory directly (the only contribution path is the curated inbox).
  */

@@ -12,7 +12,7 @@ export type ResourceItemRow = {
  */
 id: string, name: string, name_zh: string, 
 /**
- * The canonical memory namespace the item lives in (`memory:<ns>` is the
+ * The canonical memory namespace the item lives in (`knowledge:<ns>` is the
  * read-only grant an app compiles to).
  */
 ns: string, 

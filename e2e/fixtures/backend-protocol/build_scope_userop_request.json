@@ -10,6 +10,6 @@
   ],
   "read_only": true,
   "services": [
-    "memory:<namespace>"
+    "knowledge:<namespace>"
   ]
 }

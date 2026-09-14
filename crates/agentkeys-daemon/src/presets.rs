@@ -20,7 +20,7 @@
 
 /// One bundled default taxonomy preset. `categories` is the authored
 /// `(namespace, display-label)` tree — the namespaces become the memory
-/// data class's category axis (`memory:<ns>`), exactly like a planted namespace,
+/// data class's category axis (`knowledge:<ns>`), exactly like a planted namespace,
 /// but authored up front instead of derived from content.
 pub struct ConfigPreset {
     /// Stable id the onboarding UI POSTs back to apply this preset.

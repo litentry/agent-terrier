@@ -181,7 +181,7 @@ fn norm_scope(scope: &str) -> String {
 /// `keccak256("agentkeys-cap-pop:v1:" || operator || actor || keccak(service)
 ///  || op || data_class || client_nonce || client_ts)`.
 ///
-/// `service` is hashed (it may contain `:`, e.g. `memory:travel`) so the `:`
+/// `service` is hashed (it may contain `:`, e.g. `knowledge:travel`) so the `:`
 /// field separator is unambiguous. `operator`/`actor` are canonicalized (strip
 /// `0x`, lowercase) so the client and worker agree byte-for-byte.
 pub fn cap_pop_payload(
@@ -241,10 +241,10 @@ pub fn delegation_payload(
 
 /// Does a cap for `(data_class, op, service)` fall within a device-signed
 /// delegation `scope`? Tokens are space-delimited; each matches, in precedence:
-///   1. the cap's exact `service` — e.g. `"memory:travel"` authorizes ONLY that
+///   1. the cap's exact `service` — e.g. `"knowledge:travel"` authorizes ONLY that
 ///      namespace (the per-namespace bound the #369 device→sandbox e2e relies on);
 ///   2. a bare `data_class` — e.g. `"memory"` authorizes any op + any namespace;
-///   3. `data_class:op` — e.g. `"memory:canonical_fetch"` or `"memory:*"`.
+///   3. `data_class:op` — e.g. `"knowledge:canonical_fetch"` or `"knowledge:*"`.
 ///
 /// Case-insensitive. This is the ONE owner of the delegation-scope policy (#203):
 /// the broker's fast-fail cap-mint check AND the worker's authoritative re-verify
@@ -380,7 +380,7 @@ mod tests {
             assert!(is_capability_service_token(cap), "{cap} is capability");
         }
         for data in [
-            "memory:travel",
+            "knowledge:travel",
             "cred:openrouter",
             "config",
             "toolbox",
@@ -407,10 +407,10 @@ mod tests {
         ));
         // capability token is inert, the data token beside it still works
         assert!(cap_in_scope(
-            "tool:web memory:travel",
+            "tool:web knowledge:travel",
             "memory",
             "fetch",
-            "memory:travel"
+            "knowledge:travel"
         ));
         // and `tool:web` no longer half-parses as data_class="tool"
         assert!(!cap_in_scope("tool:web", "tool", "web", "anything"));
@@ -479,7 +479,7 @@ mod tests {
         let (operator, actor, service, op, dc, nonce, ts) = (
             "0xAABB",
             "ccdd",
-            "memory:travel",
+            "knowledge:travel",
             "store",
             "memory",
             "0011223344556677",

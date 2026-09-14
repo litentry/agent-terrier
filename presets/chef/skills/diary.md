@@ -1,6 +1,6 @@
 # Diary — logging what the family ate
 
-Keyed memory objects under your own namespace (`memory:app-chef`), one per meal:
+Keyed memory objects under your own namespace (`knowledge:app-chef`), one per meal:
 
 - key: `diary/<YYYY-MM-DD>/<HH-MM>-<who>`
 - body: `{ "when": "…", "who": ["…"], "dishes": [{ "name": "…", "portion": "…" }], "source": "photo" | "text" | "voice", "confidence": 0.0 }`

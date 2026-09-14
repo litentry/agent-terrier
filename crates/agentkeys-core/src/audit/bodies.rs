@@ -231,7 +231,7 @@ pub struct DelegateSpawnBody {
     pub preset_id: String,
     /// `keccak256(label.as_bytes())` — commitment to the household label.
     pub label_hash: String,
-    /// The template `memory:<ns>` namespace granted at spawn.
+    /// The template `knowledge:<ns>` namespace granted at spawn.
     pub memory_ns: String,
     /// #425 O2 — `true` when the namespace was inherited from an archived
     /// delegate; `false` for a fresh empty namespace.
@@ -244,7 +244,7 @@ pub struct DelegateSpawnBody {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DelegateArchiveBody {
     pub device_key_hash: String,
-    /// `true` = delegate-specific resources (its `memory:<ns>`) were kept and
+    /// `true` = delegate-specific resources (its `knowledge:<ns>`) were kept and
     /// become inheritable by a future spawn; `false` = deleted with the archive.
     pub resources_kept: bool,
 }

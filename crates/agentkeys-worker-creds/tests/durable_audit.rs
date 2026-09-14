@@ -115,9 +115,9 @@ async fn cred_fetch_and_memory_get_produce_durable_audit_events() {
     }
 
     // ── memory get — symmetric per-data-class coverage ──────────────────
-    let cap = sample_cap("memory:travel", DataClass::Memory, CapOp::Fetch);
+    let cap = sample_cap("knowledge:travel", DataClass::Memory, CapOp::Fetch);
     let body = MemoryGetBody {
-        key: "bots/bb/memory/memory:travel.enc".into(),
+        key: "bots/bb/memory/knowledge:travel.enc".into(),
         cap_hash: cap_hash(&cap),
     };
     let mem_hash = emitter

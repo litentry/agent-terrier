@@ -31,9 +31,9 @@ const app = (label: string, services: string[], resources: { name: string; item_
 
 const food = row('food-preferences', 'household', 'profile', ['food', 'allergies']);
 const gene = row('gene-report', 'health', 'document', ['health'], 'sensitive');
-const chef = app('chef', ['memory:household', 'memory:health'], [{ name: 'preferences', item_id: 'food-preferences', ns: 'household' }]);
-const tutor = app('tutor', ['memory:household'], []);
-const gone = app('old-chef', ['memory:household'], [{ name: 'preferences', item_id: 'food-preferences', ns: 'household' }], 'uninstalled');
+const chef = app('chef', ['knowledge:household', 'knowledge:health'], [{ name: 'preferences', item_id: 'food-preferences', ns: 'household' }]);
+const tutor = app('tutor', ['knowledge:household'], []);
+const gone = app('old-chef', ['knowledge:household'], [{ name: 'preferences', item_id: 'food-preferences', ns: 'household' }], 'uninstalled');
 
 describe('knowledge items', () => {
   it('lists every curated row, attaches its entry once the namespace is open, and adds the plain notes', () => {

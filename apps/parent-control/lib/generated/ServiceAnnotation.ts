@@ -7,6 +7,6 @@ import type { Sensitivity } from "./Sensitivity";
  */
 export type ServiceAnnotation = { service: string, 
 /**
- * `opchat` · `own-memory` · `own-inbox` · `slot` · `resource` · `tool` · `plugin`
+ * `opchat` · `own-knowledge` · `own-proposals` · `slot` · `resource` · `tool` · `plugin`
  */
 role: string, slot?: string, resource?: string, sensitivity?: Sensitivity, };

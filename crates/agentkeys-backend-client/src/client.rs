@@ -580,7 +580,7 @@ impl BackendClient {
     /// `POST /v1/memory/inbox-append` — a delegate PUSHes a proposal to the
     /// master's absorption inbox (master-hub #339 P2). `cap` is an `Append`/`Memory`
     /// cap (minted via [`Self::cap_mint`] with `CapMintOp::MemoryAppend`, service
-    /// `inbox:<ns>`); `key` is the proposed memory key and `plaintext_b64` the body.
+    /// `proposal:<ns>`); `key` is the proposed memory key and `plaintext_b64` the body.
     ///
     /// §8 (A', mirrors canonical-get): the write runs SERVER-SIDE. This client
     /// sends ONLY the delegate's own session bearer + the cap and gets back a

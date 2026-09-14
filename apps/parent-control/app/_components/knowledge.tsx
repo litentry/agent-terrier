@@ -4,9 +4,9 @@
 // the household's assistants may know — the master's canonical memory
 // namespaces AND the curated, app-bindable items (arch.md §5 `resource item`)
 // that used to sit on two pages ("memory" and "resources"). The wire is
-// unchanged: entries live in `memory:<ns>`, a curated item is a registry row
+// unchanged: entries live in `knowledge:<ns>`, a curated item is a registry row
 // over one of those entries, and an app reads a namespace through the
-// read-only `memory:<ns>` grant its install minted. What changed is the view:
+// read-only `knowledge:<ns>` grant its install minted. What changed is the view:
 // by namespace (the grant unit — each namespace names who reads it) or grouped
 // by type / sensitivity / tag; one add-or-upload modal (shared with the
 // install wizard); curate-in-place for a plain note.
@@ -38,7 +38,7 @@ const PLANT_STEPS: CeremonyStep[] = [
   { label: 'Read prepared archive', sub: `${PREPARED_MEMORY.length} entries · travel / personal / family`, onchain: false },
   { label: 'Dedupe against existing', sub: 'content-hash compare · server-side (re-plant is a no-op)', onchain: false },
   { label: 'Encrypt envelopes', sub: 'AES-256-GCM under K3 epoch v1 KEK · per-namespace JSON array', onchain: false },
-  { label: 'Write memory + taxonomy', sub: 'POST /v1/master/memory/plant → memory:<ns> blobs + config/memory-taxonomy', onchain: false },
+  { label: 'Write memory + taxonomy', sub: 'POST /v1/master/memory/plant → knowledge:<ns> blobs + config/memory-taxonomy', onchain: false },
   { label: 'Index + audit', sub: 'CredentialAudit.append(op=memory.plant) · tier-1 + anchor', onchain: true, fn: 'append(bytes32,bytes32,bytes32)' },
 ];
 
@@ -96,7 +96,7 @@ export function KnowledgePage({
   reloadKey?: number;
   categories: MemoryCategory[];
   entriesByNs: Record<string, NsEntries>;
-  /** All actors — which delegates can READ each namespace (a delegate's `memory:<ns>` grant). */
+  /** All actors — which delegates can READ each namespace (a delegate's `knowledge:<ns>` grant). */
   actors: Actor[];
   status: ConnectionStatus;
   presets: ConfigPreset[];
@@ -192,7 +192,7 @@ export function KnowledgePage({
       showToast(`remove failed — ${r.status?.detail ?? 'error'}`, true);
       return;
     }
-    showToast(r.data.removed ? `removed ${row.id} — its entry is gone from memory:${row.ns}` : `${row.id} was already gone`);
+    showToast(r.data.removed ? `removed ${row.id} — its entry is gone from knowledge:${row.ns}` : `${row.id} was already gone`);
     await settle(row.ns);
   };
 
@@ -203,7 +203,7 @@ export function KnowledgePage({
       showToast(`add failed — ${r.status?.detail ?? 'error'}`, true);
       return false;
     }
-    showToast(`${input.id} v${r.data.version} planted into memory:${input.ns} (${r.data.storage})`);
+    showToast(`${input.id} v${r.data.version} planted into knowledge:${input.ns} (${r.data.storage})`);
     await settle(input.ns);
     return true;
   };
@@ -216,7 +216,7 @@ export function KnowledgePage({
       return false;
     }
     const kept = r.data.raw_stored === true ? 'file kept' : r.data.raw_stored === false ? 'file not kept — no durable memory plane on this console' : 'no file';
-    showToast(`${input.filename} → ${input.id} v${r.data.version}: ${r.data.extracted_bytes} B of text in memory:${input.ns} (${kept})`, r.data.raw_stored === false);
+    showToast(`${input.filename} → ${input.id} v${r.data.version}: ${r.data.extracted_bytes} B of text in knowledge:${input.ns} (${kept})`, r.data.raw_stored === false);
     await settle(input.ns);
     return true;
   };
@@ -352,7 +352,7 @@ export function KnowledgePage({
                         <button className="btn sm" onClick={() => onLoadCategory(n.ns)}>open notes</button>
                       </>
                     ) : n.notes === 'loading' ? (
-                      <span>decrypting memory:{n.ns}…</span>
+                      <span>decrypting knowledge:{n.ns}…</span>
                     ) : (
                       <span>{n.curated} bindable · {n.notes} note{n.notes === 1 ? '' : 's'}</span>
                     )}
@@ -383,7 +383,7 @@ function Readers({ readers }: { readers: NamespaceReaders }) {
   const none = readers.apps.length === 0 && readers.delegates.length === 0;
   return (
     <span style={{ display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center', fontSize: 11 }}>
-      <span className="muted" title="Who reads this namespace: apps through the read-only memory:<ns> grant their install minted, delegates through a scope bit granted on their actor page.">read by</span>
+      <span className="muted" title="Who reads this namespace: apps through the read-only knowledge:<ns> grant their install minted, delegates through a scope bit granted on their actor page.">read by</span>
       {none && <span className="muted" style={{ fontStyle: 'italic' }}>no one yet</span>}
       {readers.apps.map((l) => <Chip key={`a-${l}`} kind="ok">{l}</Chip>)}
       {readers.delegates.map((l) => <Chip key={`d-${l}`}>{l}</Chip>)}
@@ -444,7 +444,7 @@ function KnowledgeRow({
 
 /** The one add / upload / edit / curate modal — this page's and the install
  *  wizard's (an empty slot opens it pre-set to the slot's kind). A saved item
- *  is planted as read-only canonical memory under `memory:<ns>` and registered
+ *  is planted as read-only canonical memory under `knowledge:<ns>` and registered
  *  as a typed, bindable item. */
 export function KnowledgeItemModal({
   client,
@@ -706,7 +706,7 @@ function InboxPanel({
                   <td>
                     <span className="mono" style={{ fontWeight: 500 }}>{it.key}</span>
                     <div className="secondary">
-                      memory:{it.ns}
+                      knowledge:{it.ns}
                       {kind !== 'knowledge' && (
                         <span className="count" style={{ marginLeft: 6, textTransform: 'uppercase' }}>{kind}</span>
                       )}

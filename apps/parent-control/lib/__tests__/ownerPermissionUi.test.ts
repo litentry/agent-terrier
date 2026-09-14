@@ -43,7 +43,7 @@ describe('capabilityGrantCommit (#617)', () => {
 
   it('restates memory, channels, creds and plugin mounts it does not own', () => {
     const { services } = capabilityGrantCommit(actor(), ['tool:web']);
-    expect(services).toContain('memory:travel'); // from scope bits
+    expect(services).toContain('knowledge:travel'); // from scope bits
     expect(services).toContain('channel-pub:cam');
     expect(services).toContain('openrouter');
     expect(services).toContain('plugin:openviking-memory'); // built-with rides along
@@ -52,15 +52,15 @@ describe('capabilityGrantCommit (#617)', () => {
 
   it('adds a newly staged class without disturbing the rest', () => {
     const { services } = capabilityGrantCommit(actor(), ['tool:web', 'tool:schedule']);
-    expect(services).toEqual(expect.arrayContaining(['tool:web', 'tool:schedule', 'memory:travel']));
+    expect(services).toEqual(expect.arrayContaining(['tool:web', 'tool:schedule', 'knowledge:travel']));
   });
 
-  it('writes inbox:<ns> for a write bit, mirroring the memory panel', () => {
+  it('writes proposal:<ns> for a write bit, mirroring the memory panel', () => {
     const { services } = capabilityGrantCommit(
       actor({ scope: { work: { read: true, write: true } } }),
       [],
     );
-    expect(services).toEqual(expect.arrayContaining(['memory:work', 'inbox:work']));
+    expect(services).toEqual(expect.arrayContaining(['knowledge:work', 'proposal:work']));
   });
 });
 

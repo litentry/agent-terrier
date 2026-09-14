@@ -90,7 +90,7 @@ pub async fn cred_fetch(
 /// #295 P1 §7a — delegate-side canonical-memory READ. Pulls a `namespace` of the
 /// MASTER's CANONICAL memory (`bots/<operator>/memory/`) this actor is
 /// authorized for, returning the decrypted plaintext. Gated by the actor's
-/// on-chain `memory:<ns>` scope grant and run under the DELEGATE's OWN session:
+/// on-chain `knowledge:<ns>` scope grant and run under the DELEGATE's OWN session:
 /// the shared client presents the CanonicalFetch cap + this session to the
 /// broker's `/v1/cap/canonical-sts`, which (after verifying the cap) returns
 /// read-only, exact-object STS creds. The delegate NEVER holds the operator
@@ -167,8 +167,8 @@ pub async fn memory_canonical_get(
 /// #339 P2 — delegate-side absorption-inbox PUSH (the master-hub "push" channel).
 /// Proposes a learning (`key` + `body`) into the MASTER's staging inbox
 /// (`bots/<operator>/inbox/<delegate>/…`) for the master to curate into canonical
-/// later — a pull-request, never a blind write into `memory:<ns>`. Gated by the
-/// actor's on-chain `inbox:<ns>` scope grant (DISTINCT from the `memory:<ns>` read
+/// later — a pull-request, never a blind write into `knowledge:<ns>`. Gated by the
+/// actor's on-chain `proposal:<ns>` scope grant (DISTINCT from the `knowledge:<ns>` read
 /// grant — granting read never grants push) and run under the DELEGATE's OWN
 /// session (A', §8): the shared client presents the `Append` cap + this session;
 /// the WORKER writes server-side under a broker-minted, sub-prefix-scoped STS, so
@@ -239,9 +239,9 @@ pub async fn memory_inbox_push_with(
     device_key_hash: &str,
     session_bearer: &str,
 ) -> Result<agentkeys_backend_client::protocol::MemoryInboxAppendResp> {
-    // DISTINCT `inbox:<ns>` grant (never the `memory:<ns>` read grant) — built from
+    // DISTINCT `proposal:<ns>` grant (never the `knowledge:<ns>` read grant) — built from
     // the bare namespace by the single shared helper so the spelling can't drift.
-    let service = agentkeys_backend_client::protocol::service_inbox(namespace);
+    let service = agentkeys_backend_client::protocol::service_proposal(namespace);
     let cap = client
         .cap_mint(
             CapMintOp::MemoryAppend,

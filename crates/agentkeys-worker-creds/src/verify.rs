@@ -39,14 +39,14 @@ pub enum CapOp {
     /// discriminator MUST be the signed op (a route alone is forgeable). The
     /// memory worker resolves the read owner to `operator_omni` for this op;
     /// `operator != actor` makes `check_chain_scope` consult the on-chain
-    /// `memory:<ns>` grant (the master-self skip is bypassed). See
+    /// `knowledge:<ns>` grant (the master-self skip is bypassed). See
     /// docs/plan/master-hub-topology.md §6a/§12.
     CanonicalFetch,
     /// Delegated APPEND to the master's absorption INBOX (master-hub #339 P2
     /// absorption channel / "push"). Distinct from `Store` (own working memory
     /// write) and `CanonicalFetch` (canonical read): authorizes a WRITE to
     /// `bots/<operator>/inbox/<delegate>/…` gated by a distinct on-chain
-    /// `inbox:<ns>` grant (never the `memory:<ns>` read grant). `operator !=
+    /// `proposal:<ns>` grant (never the `knowledge:<ns>` read grant). `operator !=
     /// actor` makes `check_chain_scope` consult that grant (master-self skip
     /// bypassed). The memory worker performs the write SERVER-SIDE under a
     /// broker-minted, prefix-scoped operator STS (A', §8); the delegate holds no
@@ -942,7 +942,7 @@ mod tests {
         ));
         // and a data service still passes the family gate (fails or passes on
         // class alone)
-        token.payload.service = "memory:travel".into();
+        token.payload.service = "knowledge:travel".into();
         assert!(check_data_class(&token, DataClass::Memory).is_ok());
     }
 
@@ -1368,7 +1368,7 @@ mod tests {
     #[test]
     fn delegation_scope_is_namespace_aware() {
         // THE #369 e2e step-4 vs step-6 distinction: a delegation can be scoped to
-        // specific memory NAMESPACES (the cap `service`, e.g. `memory:travel`), not
+        // specific memory NAMESPACES (the cap `service`, e.g. `knowledge:travel`), not
         // just the `memory` data class — so a respawned sandbox whose delegation
         // omits travel is denied a travel recall even though its on-chain grant
         // still covers all of memory.
@@ -1376,9 +1376,9 @@ mod tests {
         let sandbox = fresh_device("ak-deleg-ns-sandbox.key");
         let dkh = device.device_key_hash().unwrap();
 
-        // A canonical-get of memory:travel (service = the namespace).
+        // A canonical-get of knowledge:travel (service = the namespace).
         let mut travel = sample_token_with_class(CapOp::CanonicalFetch, DataClass::Memory);
-        travel.payload.service = "memory:travel".into();
+        travel.payload.service = "knowledge:travel".into();
         sign_pop_as_sandbox(&mut travel, &sandbox, &dkh, now_secs());
 
         // step 4 — scope INCLUDES travel → allowed.
@@ -1387,7 +1387,7 @@ mod tests {
             &mut ok,
             &device,
             sandbox.address(),
-            "memory:travel memory:personal",
+            "knowledge:travel knowledge:personal",
             now_secs() + 3600,
         );
         assert!(check_client_pop(&ok, CAP_POP_MAX_AGE_SECS).is_ok());
@@ -1399,7 +1399,7 @@ mod tests {
             &mut deny,
             &device,
             sandbox.address(),
-            "memory:personal memory:family",
+            "knowledge:personal knowledge:family",
             now_secs() + 3600,
         );
         assert!(matches!(
