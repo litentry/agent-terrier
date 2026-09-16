@@ -3,6 +3,9 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { CHIP_STYLES } from '@/lib/constants';
 import { diffStats, lineDiff } from '@/lib/client/diff';
+import { stageDetail, stageLabel, stageTone } from '@/lib/client/lifecycle';
+import { useClient } from '@/lib/ClientProvider';
+import type { DelegateLifecycle } from '@/lib/generated/DelegateLifecycle';
 import type { ConnectionStatus } from '@/lib/client/types';
 import type { Actor, ChipKind, StatusKind } from './types';
 
@@ -319,6 +322,49 @@ export function DiffView({ before, after, maxHeight = 320 }: { before: string; a
         ))}
       </pre>
     </div>
+  );
+}
+
+/** #693 — a delegate's launch / pull stage, polled from the tail of its chat
+ *  feed every 10 s while mounted: `booting · restoring · syncing k/n · ready ·
+ *  degraded · pulling`, the detail on hover, and — when asked — a "sync now"
+ *  poke (a `command` event the delegate answers with an immediate pull). */
+export function LifecycleChip({ channelId, sync = false }: { channelId: string; sync?: boolean }) {
+  const client = useClient();
+  const [lc, setLc] = useState<DelegateLifecycle | null>(null);
+  const [poked, setPoked] = useState(false);
+  useEffect(() => {
+    if (!client.delegateLifecycle || !channelId) return;
+    let alive = true;
+    const tick = async () => {
+      const r = await client.delegateLifecycle!(channelId);
+      if (alive && r.ok) setLc(r.data.lifecycle);
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 10_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [client, channelId]);
+  if (!lc) return null;
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }} title={stageDetail(lc)}>
+      <Chip kind={stageTone(lc.stage)}>{stageLabel(lc)}</Chip>
+      {sync && lc.stage !== 'syncing' && lc.stage !== 'pulling' && (
+        <button
+          className="btn sm"
+          disabled={poked}
+          onClick={async () => {
+            setPoked(true);
+            await client.chatSend(channelId, 'sync', 'command');
+            setTimeout(() => setPoked(false), 15_000);
+          }}
+        >
+          {poked ? 'pulling…' : 'sync now'}
+        </button>
+      )}
+    </span>
   );
 }
 

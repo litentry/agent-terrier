@@ -16,7 +16,7 @@
 //! - 70-79 K3 family (K3EpochAdvance=70; 71-79 reserved)
 //! - 80-89 config family (ConfigPut=80, ConfigGet=81, ConfigTeardown=82; 83-89 reserved)
 //! - 90-99 gate family (GateTurn=90, SpeechAsr=91, SpeechTts=92, GateEmbed=93, GateSearch=94; 95-99 reserved)
-//! - 100-109 channel family (ChannelPublish=100, ChannelSubscribe=101, ChannelTeardown=102, GatewayRelay=103, ContactBind=104; 105-109 reserved)
+//! - 100-109 channel family (ChannelPublish=100, ChannelSubscribe=101, ChannelTeardown=102, GatewayRelay=103, ContactBind=104, DelegateLifecycle=105; 106-109 reserved)
 //! - 110-255 reserved for future families
 
 /// Canonical op_kind enum. The byte value MUST match the row in arch.md
@@ -93,6 +93,11 @@ pub enum AuditOpKind {
     /// #407 — a contact bind transitioned (pending → bound / declined) after the
     /// master's confirm (the tier proposal is advisory; this row is the write).
     ContactBind = 104,
+    /// #693 — one delegate lifecycle pass, summarized: the boot sequence or a
+    /// knowledge pull (stage, namespaces, lines mirrored / deleted, ms,
+    /// errors). The in-sandbox daemon's own row on the delegate's authority —
+    /// one per pass, never one per line.
+    DelegateLifecycle = 105,
     /// #612 — a delegate-runtime tool outcome (the dsh pipeline's frozen
     /// `tools/result`), teed by the in-sandbox daemon on the delegate's own
     /// authority. `result` carries success/failure; the body names the tool.
@@ -143,6 +148,7 @@ impl AuditOpKind {
             102 => Self::ChannelTeardown,
             103 => Self::GatewayRelay,
             104 => Self::ContactBind,
+            105 => Self::DelegateLifecycle,
             110 => Self::RuntimeToolResult,
             111 => Self::RuntimeApproval,
             _ => return None,
@@ -190,6 +196,7 @@ impl AuditOpKind {
             Self::ChannelTeardown => "channel.teardown",
             Self::GatewayRelay => "gateway.relay",
             Self::ContactBind => "gateway.contact_bind",
+            Self::DelegateLifecycle => "delegate.lifecycle",
             Self::RuntimeToolResult => "runtime.tool_result",
             Self::RuntimeApproval => "runtime.approval",
         }
@@ -260,7 +267,7 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [
-            3u8, 9, 14, 19, 22, 32, 42, 57, 62, 71, 83, 89, 95, 99, 105, 109, 112, 200, 250, 255,
+            3u8, 9, 14, 19, 22, 32, 42, 57, 62, 71, 83, 89, 95, 99, 106, 109, 112, 200, 250, 255,
         ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),

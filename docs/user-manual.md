@@ -562,6 +562,17 @@ the permissions you approve. parent-control → **applications**:
   text, or overwrite on purpose. A merged proposal that lands on a key that
   already exists shows the same diff and asks: replace the entry, or keep
   both.
+- **Launching.** An installed app goes through `booting → restoring →
+  syncing k/n → ready` on its card (and on its delegate's card, and as a
+  status line in its chat), read from the app's own feed. `degraded` means
+  the knowledge engine is down or a pull failed — the app still answers, from
+  what it has, and says so in front of its reply; a family member who writes
+  to it meanwhile gets the receipt "still loading its knowledge". A reply
+  waits for `ready` at most `AGENTKEYS_KNOWLEDGE_READY_WAIT_SECS` (60 s by
+  default). **sync now** on the app's page makes it pull at once. Every pull
+  leaves one audit row (`delegate.lifecycle`: namespaces, lines, ms, errors),
+  never a log stream. A respawned app restores its engine index with its
+  checkpoint, so its first pull is a delta.
 - **Uninstall** revokes every permission (the delegate's, and the contact gate's
   and console's on the app's feeds), returns the agent slot, and tears the
   sandbox down. Keeping the app's memory lets a reinstall inherit it.

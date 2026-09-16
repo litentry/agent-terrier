@@ -232,6 +232,7 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         cap: json!("<cap-token>"),
         after: "<feed-cursor>".into(),
         wait_seconds: 25,
+        tail: None,
     };
     vec![
         Fixture {

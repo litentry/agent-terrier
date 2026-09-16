@@ -18,6 +18,7 @@ mod companion;
 mod console_device;
 mod gateway_device;
 mod hardening;
+mod lifecycle;
 mod master_session;
 mod memory_mirror;
 mod pairing;
@@ -433,6 +434,7 @@ async fn run_memory_mirror_once() -> anyhow::Result<()> {
     let credential = chat_loop::build_credential(&mirror_cfg.chat)
         .await
         .ok_or_else(|| anyhow::anyhow!("memory-mirror-once: credential bootstrap failed"))?;
+    let credential = std::sync::Arc::new(credential);
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(40))
         .build()?;
@@ -440,10 +442,15 @@ async fn run_memory_mirror_once() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("memory-mirror-once: delegate resolve failed: {e}"))?;
     credential.on_new_session(&bearer).await;
-    let outcomes = memory_mirror::mirror_once(&mirror_cfg, &credential, &bearer).await;
+    let started = std::time::Instant::now();
+    let reports = memory_mirror::mirror_once(&mirror_cfg, &credential, &bearer).await;
+    let pass_ms = started.elapsed().as_millis() as u64;
+    // #693 — the one-shot leaves the same durable row a live pass leaves (best
+    // effort; the report says whether it landed).
+    let audit = memory_mirror::audit_pass(&mirror_cfg, &reports, pass_ms, true).await;
     println!(
         "{}",
-        serde_json::to_string_pretty(&memory_mirror::report_json(&outcomes))?
+        serde_json::to_string_pretty(&memory_mirror::report_json(&reports, pass_ms, Some(audit)))?
     );
     Ok(())
 }

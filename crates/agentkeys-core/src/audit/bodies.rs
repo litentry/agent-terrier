@@ -396,6 +396,24 @@ pub struct GateEmbedBody {
     pub total_tokens: u64,
 }
 
+/// #693 — one delegate lifecycle pass (op_kind 105): the boot sequence or a
+/// knowledge pull, summarized. Counts and milliseconds only — never a line of
+/// knowledge, never a namespace's content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegateLifecycleBody {
+    /// The stage the pass ended in: `ready`, `degraded`, `pulling`.
+    pub stage: String,
+    pub namespaces: u32,
+    pub mirrored: u64,
+    pub deleted: u64,
+    pub ms: u64,
+    /// `true` for the first pass after boot.
+    pub boot: bool,
+    pub errors: u32,
+    /// The first error, stage-tagged (`"fetch travel: …"`), empty when none.
+    pub first_error: String,
+}
+
 /// #653 — one web search through the gate's SearXNG relay (op_kind 94).
 /// Query TEXT never lands on-chain-adjacent storage — the body carries the
 /// engine set, the query LENGTH, and the result count only (D13 posture).
@@ -847,6 +865,44 @@ mod tests {
         assert_eq!(AuditOpKind::GateEmbed.label(), "gate.embed");
         match decoded.typed_body().unwrap() {
             TypedAuditBody::GateEmbed(b) => assert_eq!(b, embed),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delegate_lifecycle_row_round_trips() {
+        use crate::audit::{envelope_for, AuditEnvelope, AuditOpKind, AuditResult, TypedAuditBody};
+        // #693 — op_kind 105: one row per pass, counts + ms, the first error only.
+        let body = DelegateLifecycleBody {
+            stage: "ready".into(),
+            namespaces: 3,
+            mirrored: 42,
+            deleted: 1,
+            ms: 1830,
+            boot: true,
+            errors: 0,
+            first_error: String::new(),
+        };
+        let env = envelope_for(
+            [0x55; 32],
+            [0x56; 32],
+            AuditOpKind::DelegateLifecycle,
+            body.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(decoded.op_kind, 105);
+        assert_eq!(
+            AuditOpKind::from_u8(105),
+            Some(AuditOpKind::DelegateLifecycle)
+        );
+        assert_eq!(AuditOpKind::DelegateLifecycle.label(), "delegate.lifecycle");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::DelegateLifecycle(b) => assert_eq!(b, body),
             other => panic!("unexpected typed body: {other:?}"),
         }
     }

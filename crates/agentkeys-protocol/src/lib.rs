@@ -491,16 +491,22 @@ pub enum ChannelEventKind {
     Frame,
     Command,
     Doc,
+    /// #693 — a delegate's launch / pull lifecycle stage on its own feeds
+    /// (`direction: out`, body = JSON [`DelegateLifecycle`]). The console and
+    /// the contact gate READ it; nothing replies to it; a delegate never
+    /// treats it as a turn.
+    Lifecycle,
 }
 
 impl ChannelEventKind {
-    pub const ALL: [ChannelEventKind; 6] = [
+    pub const ALL: [ChannelEventKind; 7] = [
         ChannelEventKind::Text,
         ChannelEventKind::Image,
         ChannelEventKind::AudioClip,
         ChannelEventKind::Frame,
         ChannelEventKind::Command,
         ChannelEventKind::Doc,
+        ChannelEventKind::Lifecycle,
     ];
 
     /// The wire spelling (matches the serde rename) — for hand-built bodies
@@ -513,6 +519,7 @@ impl ChannelEventKind {
             ChannelEventKind::Frame => "frame",
             ChannelEventKind::Command => "command",
             ChannelEventKind::Doc => "doc",
+            ChannelEventKind::Lifecycle => "lifecycle",
         }
     }
 
@@ -520,6 +527,73 @@ impl ChannelEventKind {
         Self::ALL.iter().copied().find(|k| k.as_str() == s)
     }
 }
+
+/// #693 — the launch / pull lifecycle a delegate publishes on its own feeds
+/// (`ChannelEventKind::Lifecycle`, JSON body; `docs/plan/knowledge-repository.md`
+/// §8): `booting` → `restoring` (checkpoint) → `syncing` (k of n namespaces)
+/// → `ready`; `degraded` when the engine is down or a pull failed (chat still
+/// answers — the mirror is never load-bearing); `pulling` while a periodic
+/// pass runs. Counts and milliseconds only — never a line of knowledge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleStage {
+    Booting,
+    Restoring,
+    Syncing,
+    Ready,
+    Degraded,
+    Pulling,
+}
+
+impl LifecycleStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LifecycleStage::Booting => "booting",
+            LifecycleStage::Restoring => "restoring",
+            LifecycleStage::Syncing => "syncing",
+            LifecycleStage::Ready => "ready",
+            LifecycleStage::Degraded => "degraded",
+            LifecycleStage::Pulling => "pulling",
+        }
+    }
+
+    /// A turn may run: the knowledge is there (or a periodic pass is merely
+    /// refreshing it).
+    pub fn answers(&self) -> bool {
+        matches!(self, LifecycleStage::Ready | LifecycleStage::Pulling)
+    }
+}
+
+/// #693 — one lifecycle report (the body of a `lifecycle` event).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct DelegateLifecycle {
+    pub stage: LifecycleStage,
+    /// One human line: `"2 of 3 namespaces"`, `"engine unreachable"`.
+    pub detail: String,
+    /// Namespaces pulled so far / in total (a syncing pass).
+    pub done: u32,
+    pub total: u32,
+    /// Lines mirrored / deleted by the last pass.
+    #[ts(type = "number")]
+    pub mirrored: u64,
+    #[ts(type = "number")]
+    pub deleted: u64,
+    /// Milliseconds the last pass (or stage) took.
+    #[ts(type = "number")]
+    pub ms: u64,
+    /// Stage-tagged errors of the last pass (`"fetch travel: …"`).
+    pub errors: Vec<String>,
+    #[ts(type = "number")]
+    pub ts_millis: u64,
+}
+
+/// #694 — the reserved keyed object holding a checkpoint of the delegate's
+/// engine workspace (the OpenViking index + the mirror's ingest manifest),
+/// beside [`CHECKPOINT_OBJECT_KEY`]: a respawn restores it before the engine
+/// starts, so the first pull is a delta instead of a full re-embed.
+pub const OV_WORKSPACE_OBJECT_KEY: &str = "checkpoint/ov-workspace";
 
 /// #667 — the external principal a RELAYING actor (the gateway) declares an
 /// event was relayed for. Additive and copied verbatim from the publish body
@@ -745,6 +819,11 @@ pub struct ChannelPollBody {
     /// available (0 = return immediately; worker clamps to its ceiling).
     #[serde(default)]
     pub wait_seconds: u64,
+    /// #693 — return only the LAST `tail` events of the window; absent / 0 =
+    /// every event after the cursor. A console reading a delegate's latest
+    /// lifecycle stage tails the feed instead of replaying its history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

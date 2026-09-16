@@ -7,6 +7,7 @@ import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
 import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
 import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
+import type { DelegateLifecycle } from '@/lib/generated/DelegateLifecycle';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
 import type { ApiAgentUpdateResult } from '@/lib/generated/ApiAgentUpdateResult';
@@ -779,7 +780,7 @@ export interface AgentKeysClient {
   // #430 — the operator chat over the delegate's opchat feed (D8 operator-
   // owned; D13 operator-session-only). `chatPoll` doubles as the generic
   // feed-history read for ANY granted channel id (#431 Feeds tab).
-  chatSend(channelId: string, text: string): Promise<Result<{ event_id: string }>>;
+  chatSend(channelId: string, text: string, kind?: 'text' | 'command'): Promise<Result<{ event_id: string }>>;
   chatPoll(
     channelId: string,
     after: string,
@@ -829,6 +830,8 @@ export interface AgentKeysClient {
     input: { channel_id?: string; action: string; command: string; args?: unknown; card_updated_at?: number },
   ): Promise<Result<unknown>>;
   listResources?(): Promise<Result<{ items: ResourceItemRow[]; storage: string }>>;
+  /** #693 — the delegate's latest launch / pull stage, from the tail of its chat feed. */
+  delegateLifecycle?(channelId: string): Promise<Result<{ lifecycle: DelegateLifecycle | null; event_ts_millis: number | null }>>;
   resourceAdd?(input: {
     id: string;
     name: string;

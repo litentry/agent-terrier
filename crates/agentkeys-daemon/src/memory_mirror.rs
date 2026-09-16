@@ -23,10 +23,10 @@
 //! falls back to its built-in memory and chat is unaffected.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agentkeys_backend_client::protocol::{
-    service_knowledge, CapMintOp, CapMintRequest, MemoryGetInput,
+    service_knowledge, CapMintOp, CapMintRequest, LifecycleStage, MemoryGetInput,
 };
 use agentkeys_backend_client::{normalize_omni_0x, BackendClient, BackendError};
 use agentkeys_memory_engine::MemoryLine;
@@ -36,6 +36,7 @@ use agentkeys_memory_openviking::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::chat_loop::{ChatLoopConfig, DelegateCredential};
+use crate::lifecycle::LifecycleHub;
 
 /// The #108 v0 namespace defaults — the candidate set the mirror probes when
 /// `AGENTKEYS_MEMORY_NAMESPACES` is not injected. Probing an ungranted
@@ -55,6 +56,7 @@ fn default_namespaces_match_the_protocol_owner() {
     );
 }
 
+#[derive(Clone)]
 pub struct MirrorConfig {
     /// The engine base URL, captured at construction — logged, never re-read
     /// from env (the client already holds the value it actually dials).
@@ -65,6 +67,18 @@ pub struct MirrorConfig {
     pub interval: Duration,
     pub engine: OpenVikingClient,
     pub manifest: std::path::PathBuf,
+    /// #694 — namespaces of one pass reconcile concurrently, this many at a time
+    /// (`AGENTKEYS_MIRROR_FANOUT`, default 4, 1..=16).
+    pub fanout: usize,
+    /// #693 — the lifecycle hub (stage + "sync now"); `None` for the one-shot.
+    pub hub: Option<Arc<LifecycleHub>>,
+}
+
+/// One namespace's outcome in a pass, with how long it took.
+pub struct NamespaceReport {
+    pub ns: String,
+    pub outcome: NamespaceOutcome,
+    pub ms: u64,
 }
 
 impl MirrorConfig {
@@ -121,6 +135,10 @@ impl MirrorConfig {
             read("OPENVIKING_USER").unwrap_or_else(|| "default".to_string()),
             read("OPENVIKING_AGENT").unwrap_or_else(|| "hermes".to_string()),
         );
+        let fanout = read("AGENTKEYS_MIRROR_FANOUT")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| (1..=16).contains(&n))
+            .unwrap_or(4);
         Some(Self {
             engine_endpoint,
             chat,
@@ -129,6 +147,8 @@ impl MirrorConfig {
             interval: Duration::from_secs(interval),
             engine,
             manifest: ingest_manifest_from_env(),
+            fanout,
+            hub: None,
         })
     }
 }
@@ -159,11 +179,70 @@ pub enum NamespaceOutcome {
 
 /// One full pass over every candidate namespace. Public for the
 /// `--memory-mirror-once` daemon flag and the e2e harness.
+/// One pass over every candidate namespace — concurrently, `fanout` at a time
+/// (#694), each timed (#693). Reports come back in the configured order.
 pub async fn mirror_once(
+    cfg: &MirrorConfig,
+    credential: &Arc<DelegateCredential>,
+    bearer: &str,
+) -> Vec<NamespaceReport> {
+    let cfg = Arc::new(cfg.clone());
+    let sem = Arc::new(tokio::sync::Semaphore::new(cfg.fanout.max(1)));
+    let total = cfg.namespaces.len() as u32;
+    let mut set: tokio::task::JoinSet<(usize, NamespaceReport)> = tokio::task::JoinSet::new();
+    for (i, ns) in cfg.namespaces.iter().cloned().enumerate() {
+        let (cfg, credential, bearer, sem) = (
+            cfg.clone(),
+            credential.clone(),
+            bearer.to_string(),
+            sem.clone(),
+        );
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            let started = Instant::now();
+            let outcome = mirror_namespace(&cfg, &credential, &bearer, &ns).await;
+            (
+                i,
+                NamespaceReport {
+                    ns,
+                    outcome,
+                    ms: started.elapsed().as_millis() as u64,
+                },
+            )
+        });
+    }
+    let mut out: Vec<(usize, NamespaceReport)> = Vec::with_capacity(total as usize);
+    let mut done = 0u32;
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(r) => {
+                done += 1;
+                if let Some(hub) = &cfg.hub {
+                    if hub.first_pass_pending() {
+                        let mut ev = hub.current();
+                        ev.stage = LifecycleStage::Syncing;
+                        ev.detail = format!("{done} of {total} namespaces");
+                        ev.done = done;
+                        ev.total = total;
+                        ev.ts_millis = 0;
+                        hub.set(ev);
+                    }
+                }
+                out.push(r);
+            }
+            Err(e) => tracing::warn!(error = %e, "#566 memory mirror: namespace task failed"),
+        }
+    }
+    out.sort_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, r)| r).collect()
+}
+
+async fn mirror_namespace(
     cfg: &MirrorConfig,
     credential: &DelegateCredential,
     bearer: &str,
-) -> Vec<(String, NamespaceOutcome)> {
+    ns: &str,
+) -> NamespaceOutcome {
     let client = BackendClient::new(
         Some(cfg.chat.broker_url.clone()),
         Some(cfg.memory_worker_url.clone()),
@@ -176,36 +255,111 @@ pub async fn mirror_once(
     );
     let client = credential.configure_client(client);
     let dkh = credential.device_key_hash();
-    let mut out = Vec::with_capacity(cfg.namespaces.len());
-    for ns in &cfg.namespaces {
-        let outcome = match fetch_canonical(&client, cfg, ns, &dkh, bearer).await {
-            Ok(content) => {
-                let lines = mirror_units(&content);
-                NamespaceOutcome::Reconciled(
-                    cfg.engine
-                        .reconcile_ingested(ns, &lines, &cfg.manifest)
-                        .await,
-                )
-            }
-            Err((stage, BackendError::Http { status: 403, body })) => NamespaceOutcome::Denied {
-                stats: cfg.engine.reconcile_ingested(ns, &[], &cfg.manifest).await,
-                denied_at: stage,
-                detail: truncate(&body, 300),
-            },
-            // 404 = the canonical blob is GONE (master deleted the namespace).
-            // Treat it like a revocation: the engine mirrors canonical, so
-            // content whose source no longer exists must not linger until the
-            // next respawn. Distinct label keeps "not authorized" (403)
-            // diagnosable from "no longer exists" (404).
-            Err((_, BackendError::Http { status: 404, .. })) => NamespaceOutcome::Absent(
-                cfg.engine.reconcile_ingested(ns, &[], &cfg.manifest).await,
-            ),
-            Err((_, BackendError::Http { status: 401, .. })) => NamespaceOutcome::SessionExpired,
-            Err((stage, e)) => NamespaceOutcome::FetchError(format!("{stage}: {e}")),
-        };
-        out.push((ns.clone(), outcome));
+    match fetch_canonical(&client, cfg, ns, &dkh, bearer).await {
+        Ok(content) => {
+            let lines = mirror_units(&content);
+            NamespaceOutcome::Reconciled(
+                cfg.engine
+                    .reconcile_ingested(ns, &lines, &cfg.manifest)
+                    .await,
+            )
+        }
+        Err((stage, BackendError::Http { status: 403, body })) => NamespaceOutcome::Denied {
+            stats: cfg.engine.reconcile_ingested(ns, &[], &cfg.manifest).await,
+            denied_at: stage,
+            detail: truncate(&body, 300),
+        },
+        // 404 = the canonical blob is GONE (master deleted the namespace).
+        // Treat it like a revocation: the engine mirrors canonical, so
+        // content whose source no longer exists must not linger until the
+        // next respawn. Distinct label keeps "not authorized" (403)
+        // diagnosable from "no longer exists" (404).
+        Err((_, BackendError::Http { status: 404, .. })) => {
+            NamespaceOutcome::Absent(cfg.engine.reconcile_ingested(ns, &[], &cfg.manifest).await)
+        }
+        Err((_, BackendError::Http { status: 401, .. })) => NamespaceOutcome::SessionExpired,
+        Err((stage, e)) => NamespaceOutcome::FetchError(format!("{stage}: {e}")),
     }
-    out
+}
+
+/// The counts a pass adds up to (the lifecycle report + the audit row).
+pub struct PassSummary {
+    pub namespaces: u32,
+    pub mirrored: u64,
+    pub deleted: u64,
+    pub errors: Vec<String>,
+    pub session_expired: bool,
+}
+
+pub fn summarize(reports: &[NamespaceReport]) -> PassSummary {
+    let mut s = PassSummary {
+        namespaces: reports.len() as u32,
+        mirrored: 0,
+        deleted: 0,
+        errors: Vec::new(),
+        session_expired: false,
+    };
+    for r in reports {
+        match &r.outcome {
+            NamespaceOutcome::Reconciled(st) => {
+                s.mirrored += st.mirrored as u64;
+                s.deleted += st.deleted as u64;
+                if st.write_failed > 0 || st.delete_failed > 0 {
+                    s.errors.push(format!(
+                        "engine {}: {} write(s) / {} delete(s) failed",
+                        r.ns, st.write_failed, st.delete_failed
+                    ));
+                }
+            }
+            NamespaceOutcome::Denied { stats, .. } | NamespaceOutcome::Absent(stats) => {
+                s.deleted += stats.deleted as u64;
+            }
+            NamespaceOutcome::SessionExpired => s.session_expired = true,
+            NamespaceOutcome::FetchError(e) => s.errors.push(format!("fetch {}: {e}", r.ns)),
+        }
+    }
+    s
+}
+
+/// #693 — the ONE durable row per pass (op_kind 105), on the delegate's own
+/// authority, best effort: a missing audit plane is a warn, never a stall.
+pub async fn audit_pass(
+    cfg: &MirrorConfig,
+    reports: &[NamespaceReport],
+    pass_ms: u64,
+    boot: bool,
+) -> Result<(), String> {
+    let s = summarize(reports);
+    let stage = if s.errors.is_empty() {
+        "ready"
+    } else {
+        "degraded"
+    };
+    let body = agentkeys_core::audit::DelegateLifecycleBody {
+        stage: stage.to_string(),
+        namespaces: s.namespaces,
+        mirrored: s.mirrored,
+        deleted: s.deleted,
+        ms: pass_ms,
+        boot,
+        errors: s.errors.len() as u32,
+        first_error: s.errors.first().cloned().unwrap_or_default(),
+    };
+    let result = if s.errors.is_empty() {
+        agentkeys_core::audit::AuditResult::Success as u8
+    } else {
+        agentkeys_core::audit::AuditResult::Failure as u8
+    };
+    let _ = cfg; // the self backend re-reads the same chat env contract
+    let backend = crate::self_backend::acquire().await?;
+    backend
+        .audit_append(
+            agentkeys_core::audit::AuditOpKind::DelegateLifecycle as u8,
+            serde_json::to_value(body).map_err(|e| e.to_string())?,
+            result,
+            None,
+        )
+        .await
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -333,12 +487,18 @@ fn mirror_units(blob: &str) -> Vec<MemoryLine> {
 }
 
 /// Machine-readable report for `--memory-mirror-once` (and the e2e steps that
-/// assert on it).
-pub fn report_json(outcomes: &[(String, NamespaceOutcome)]) -> serde_json::Value {
-    serde_json::json!({
-        "namespaces": outcomes
-            .iter()
-            .map(|(ns, o)| match o {
+/// assert on it): per-namespace outcome + `ms` (#693), the pass wall time, and
+/// whether the lifecycle audit row landed.
+pub fn report_json(
+    reports: &[NamespaceReport],
+    pass_ms: u64,
+    audit: Option<Result<(), String>>,
+) -> serde_json::Value {
+    let namespaces: Vec<serde_json::Value> = reports
+        .iter()
+        .map(|r| {
+            let ns = &r.ns;
+            let mut v = match &r.outcome {
                 NamespaceOutcome::Reconciled(s) => serde_json::json!({
                     "namespace": ns, "outcome": "reconciled",
                     "mirrored": s.mirrored, "deleted": s.deleted,
@@ -363,20 +523,25 @@ pub fn report_json(outcomes: &[(String, NamespaceOutcome)]) -> serde_json::Value
                 NamespaceOutcome::FetchError(e) => serde_json::json!({
                     "namespace": ns, "outcome": "fetch_error", "error": e,
                 }),
-            })
-            .collect::<Vec<_>>(),
+            };
+            v["ms"] = serde_json::json!(r.ms);
+            v
+        })
+        .collect();
+    let summary = summarize(reports);
+    serde_json::json!({
+        "namespaces": namespaces,
+        "pass_ms": pass_ms,
+        "mirrored": summary.mirrored,
+        "deleted": summary.deleted,
+        "errors": summary.errors,
+        "audit": audit.map(|a| match a {
+            Ok(()) => serde_json::json!({ "appended": true }),
+            Err(e) => serde_json::json!({ "appended": false, "error": e }),
+        }),
     })
 }
 
-/// Spawn the mirror as a background task alongside the chat loop. The mirror
-/// maintains its OWN delegate session (same `/v1/agent/resolve` flow), so a
-/// wedged chat loop never stalls distribution and vice versa.
-///
-/// The `DelegateCredential` is SHARED (both loops sign as the same delegate).
-/// Under #552 signer custody both call `on_new_session`, so the signer bearer
-/// is last-writer-wins — intentional and safe: either JWT authenticates the
-/// same delegate to the same signer, and each loop keeps its own bearer for
-/// its own HTTP calls. A stale signer bearer costs at most one retried mint.
 pub fn spawn(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
     tokio::spawn(async move {
         run_loop(cfg, credential).await;
@@ -402,8 +567,15 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
     );
     let mut session: Option<String> = None;
     let mut engine_down_logged = false;
+    let mut first_pass = true;
     loop {
         if !cfg.engine.health().await {
+            // #694 — the engine waits for the workspace restore before its first
+            // start; while that phase runs, an unanswered /health is expected.
+            if cfg.hub.as_ref().is_some_and(|h| h.restore_pending()) {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
             if !engine_down_logged {
                 tracing::info!(
                     "#566 memory mirror: engine unreachable — idle until it answers /health \
@@ -411,7 +583,10 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
                 );
                 engine_down_logged = true;
             }
-            tokio::time::sleep(cfg.interval).await;
+            if let Some(h) = &cfg.hub {
+                h.pass_finished(cfg.namespaces.len() as u32, 0, 0, 0, Vec::new(), true);
+            }
+            wait_interval_or_sync(&cfg).await;
             continue;
         }
         engine_down_logged = false;
@@ -429,9 +604,16 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
             }
         }
         let bearer = session.clone().unwrap_or_default();
-        let outcomes = mirror_once(&cfg, &credential, &bearer).await;
+        if let Some(h) = &cfg.hub {
+            if !first_pass {
+                h.stage(LifecycleStage::Pulling, "periodic pull");
+            }
+        }
+        let started = Instant::now();
+        let reports = mirror_once(&cfg, &credential, &bearer).await;
+        let pass_ms = started.elapsed().as_millis() as u64;
         let mut expired = false;
-        for (ns, outcome) in &outcomes {
+        for NamespaceReport { ns, outcome, .. } in &reports {
             match outcome {
                 NamespaceOutcome::Reconciled(s) if s.is_noop() => {}
                 NamespaceOutcome::Denied { stats, .. } if stats.is_noop() => {}
@@ -462,7 +644,38 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
             session = None;
             continue; // re-resolve immediately, no interval wait
         }
-        tokio::time::sleep(cfg.interval).await;
+        // #693 — the stage the pass ended in + the ONE durable row per pass.
+        let summary = summarize(&reports);
+        if let Some(h) = &cfg.hub {
+            h.pass_finished(
+                summary.namespaces,
+                summary.mirrored,
+                summary.deleted,
+                pass_ms,
+                summary.errors.clone(),
+                false,
+            );
+        }
+        if let Err(e) = audit_pass(&cfg, &reports, pass_ms, first_pass).await {
+            tracing::warn!(error = %e, "#693 lifecycle: audit row not appended (best effort)");
+        }
+        first_pass = false;
+        wait_interval_or_sync(&cfg).await;
+    }
+}
+
+/// The inter-pass wait — cut short by "sync now" (#693).
+async fn wait_interval_or_sync(cfg: &MirrorConfig) {
+    match &cfg.hub {
+        Some(h) => {
+            tokio::select! {
+                _ = tokio::time::sleep(cfg.interval) => {}
+                _ = h.sync_now.notified() => {
+                    tracing::info!("#693 lifecycle: sync now — pulling immediately");
+                }
+            }
+        }
+        None => tokio::time::sleep(cfg.interval).await,
     }
 }
 

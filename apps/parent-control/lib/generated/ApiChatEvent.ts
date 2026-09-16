@@ -21,4 +21,9 @@ partial?: boolean,
 /**
  * #563 — delta order within one streamed reply (0-based).
  */
-seq?: number, };
+seq?: number, 
+/**
+ * #693 — the feed event kind (`text`, `lifecycle`, …); absent on older
+ * daemons = `text`. A `lifecycle` event's `text` is its JSON report.
+ */
+kind?: string, };

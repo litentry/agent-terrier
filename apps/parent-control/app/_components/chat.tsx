@@ -5,6 +5,7 @@
 // the delegate's in-sandbox loop replies `direction: out`; an NRT long-poll
 // keeps the transcript live (§14.12 — sub-second on the awake path).
 
+import { parseLifecycle, stageLabel } from '@/lib/client/lifecycle';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ApiChatEvent } from '@/lib/generated/ApiChatEvent';
 import { useClient } from '@/lib/ClientProvider';
@@ -106,6 +107,18 @@ export function ChatPanel({
     const out: Bubble[] = [];
     const open = new Map<string, number>();
     for (const e of events) {
+      // #693 — a lifecycle report renders as a status line, never a bubble.
+      if (e.kind === 'lifecycle') {
+        const lc = parseLifecycle(e.text);
+        out.push({
+          key: e.event_id,
+          direction: 'status',
+          text: lc ? `● ${stageLabel(lc)}${lc.detail ? ` — ${lc.detail}` : ''}` : e.text,
+          ts_millis: e.ts_millis,
+          streaming: false,
+        });
+        continue;
+      }
       if (e.partial && e.correlation) {
         const i = open.get(e.correlation);
         if (i === undefined) {
@@ -197,14 +210,15 @@ export function ChatPanel({
           <div
             key={b.key}
             style={{
-              alignSelf: b.direction === 'in' ? 'flex-end' : 'flex-start',
+              alignSelf: b.direction === 'in' ? 'flex-end' : b.direction === 'status' ? 'center' : 'flex-start',
+              opacity: b.direction === 'status' ? 0.7 : 1,
               maxWidth: '82%',
               padding: '6px 10px',
               borderRadius: 10,
               background: b.direction === 'in' ? 'var(--accent)' : 'var(--bg)',
-              border: '1px solid var(--rule)',
+              border: b.direction === 'status' ? '1px dashed var(--rule-soft)' : '1px solid var(--rule)',
               whiteSpace: 'pre-wrap',
-              fontSize: 14,
+              fontSize: b.direction === 'status' ? 11.5 : 14,
             }}
             title={`${b.direction === 'in' ? 'you' : 'agent'} · ${new Date(b.ts_millis).toLocaleString()}`}
           >

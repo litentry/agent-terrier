@@ -27,12 +27,13 @@ use std::time::Duration;
 
 use agentkeys_backend_client::protocol::{
     service_knowledge, CapMintOp, CapMintRequest, CheckpointEnvelope, MemoryGetInput,
-    MemoryPutInput, CHECKPOINT_OBJECT_KEY,
+    MemoryPutInput, CHECKPOINT_OBJECT_KEY, OV_WORKSPACE_OBJECT_KEY,
 };
 use agentkeys_backend_client::{normalize_omni_0x, BackendClient, BackendError};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::chat_loop::{ChatLoopConfig, DelegateCredential};
+use crate::lifecycle::LifecycleHub;
 
 /// How long the boot restore keeps retrying while the bridge / broker come up
 /// (the daemon often starts before the bridge finishes its ACP handshake).
@@ -61,6 +62,18 @@ pub struct CheckpointConfig {
     /// reads ONLY this key; hermes-era `checkpoint/hermes-home` objects are
     /// orphaned data, never restored cross-runtime.
     pub object_key: String,
+    /// #694 — the engine workspace to checkpoint beside the home
+    /// (`OPENVIKING_WORKSPACE`); `None` when its parent dir does not exist
+    /// (no engine on this box).
+    pub workspace: Option<std::path::PathBuf>,
+    /// The mirror's ingest manifest — it travels inside the workspace object
+    /// so a restored index is also a restored "already mirrored" set.
+    pub manifest: std::path::PathBuf,
+    /// Touched once the workspace restore ended (restored, nothing, or gave
+    /// up): the engine's start script waits for it (`AGENTKEYS_OV_RESTORE_MARKER`).
+    pub marker: std::path::PathBuf,
+    /// #693 — the lifecycle hub (`restoring` → the restore outcome).
+    pub hub: Option<Arc<LifecycleHub>>,
 }
 
 impl CheckpointConfig {
@@ -132,6 +145,23 @@ impl CheckpointConfig {
             .unwrap_or(8 * 1024 * 1024);
         // #621 — one runtime, one slot: the dsh home key is THE checkpoint key.
         let object_key = CHECKPOINT_OBJECT_KEY.to_string();
+        let workspace_path = std::path::PathBuf::from(
+            read("OPENVIKING_WORKSPACE")
+                .unwrap_or_else(|| "/opt/agentkeys/openviking/workspace".to_string()),
+        );
+        let workspace = workspace_path
+            .parent()
+            .filter(|p| p.is_dir())
+            .map(|_| workspace_path.clone());
+        let marker =
+            std::path::PathBuf::from(read("AGENTKEYS_OV_RESTORE_MARKER").unwrap_or_else(|| {
+                workspace_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/tmp"))
+                    .join(".workspace-restored")
+                    .to_string_lossy()
+                    .into_owned()
+            }));
         Some(Self {
             chat,
             memory_worker_url,
@@ -140,6 +170,10 @@ impl CheckpointConfig {
             interval: Duration::from_secs(interval),
             max_bytes,
             object_key,
+            workspace,
+            manifest: agentkeys_memory_openviking::ingest_manifest_from_env(),
+            marker,
+            hub: None,
         })
     }
 
@@ -185,11 +219,18 @@ async fn run_loop(cfg: CheckpointConfig, credential: Arc<DelegateCredential>) {
     );
 
     let mut session: Option<String> = None;
+    if let Some(h) = &cfg.hub {
+        h.stage(
+            agentkeys_backend_client::protocol::LifecycleStage::Restoring,
+            "restoring the checkpoint",
+        );
+    }
 
     // Phase 1 — restore. MUST complete (or conclusively give up) before the
     // first save: a fresh instance's near-empty home saved first would
     // overwrite the very checkpoint we came to restore.
     let deadline = std::time::Instant::now() + Duration::from_secs(RESTORE_RETRY_WINDOW_SECS);
+    let mut restore_outcome = String::from("restore skipped");
     loop {
         let bearer = match ensure_session(&http, &cfg, &credential, &mut session).await {
             Some(b) => b,
@@ -204,6 +245,7 @@ async fn run_loop(cfg: CheckpointConfig, credential: Arc<DelegateCredential>) {
         match restore_once(&http, &cfg, &credential, &bearer).await {
             Ok(outcome) => {
                 tracing::info!(outcome = %outcome, "#594 checkpoint: restore phase done");
+                restore_outcome = outcome;
                 break;
             }
             Err(RestoreError::SessionExpired) => session = None,
@@ -220,10 +262,44 @@ async fn run_loop(cfg: CheckpointConfig, credential: Arc<DelegateCredential>) {
         tokio::time::sleep(Duration::from_secs(RESTORE_RETRY_INTERVAL_SECS)).await;
     }
 
+    // #694 — the engine workspace (index + manifest) restores BEFORE the engine
+    // starts (its start script waits for the marker), so the first pull is a
+    // delta. Bounded like the home restore; the marker is touched either way.
+    let ws_outcome = match ensure_session(&http, &cfg, &credential, &mut session).await {
+        Some(bearer) => match workspace_restore(&cfg, &credential, &bearer).await {
+            Ok(o) => o,
+            Err(e) => format!("engine workspace not restored: {e}"),
+        },
+        None => "engine workspace not restored: no delegate session".to_string(),
+    };
+    tracing::info!(outcome = %ws_outcome, "#694 checkpoint: engine workspace restore done");
+    touch_marker(&cfg.marker);
+    if let Some(h) = &cfg.hub {
+        h.restore_finished(&format!("{restore_outcome}; {ws_outcome}"));
+    }
+
     // Phase 2 — periodic save.
     let mut last_saved_hash: Option<[u8; 32]> = None;
+    let mut last_workspace_fp: Option<[u8; 32]> = None;
     tokio::time::sleep(Duration::from_secs(FIRST_TICK_DELAY_SECS)).await;
     loop {
+        if let Some(bearer) = ensure_session(&http, &cfg, &credential, &mut session).await {
+            match workspace_save(&cfg, &credential, &bearer, &mut last_workspace_fp).await {
+                Ok(SaveOutcome::Saved { bytes }) => {
+                    tracing::info!(bytes, "#694 checkpoint: engine workspace saved")
+                }
+                Ok(SaveOutcome::Unchanged) => {}
+                Ok(SaveOutcome::TooLarge { bytes }) => tracing::warn!(
+                    bytes,
+                    cap = cfg.max_bytes,
+                    "#694 checkpoint: engine workspace exceeds the size cap — NOT saved"
+                ),
+                Err(SaveError::SessionExpired) => session = None,
+                Err(SaveError::Failed(e)) => {
+                    tracing::warn!(error = %e, "#694 checkpoint: engine workspace save failed — retrying next tick")
+                }
+            }
+        }
         if let Some(bearer) = ensure_session(&http, &cfg, &credential, &mut session).await {
             match save_once(&http, &cfg, &credential, &bearer, &mut last_saved_hash).await {
                 Ok(SaveOutcome::Saved { bytes }) => {
@@ -246,6 +322,228 @@ async fn run_loop(cfg: CheckpointConfig, credential: Arc<DelegateCredential>) {
         }
         tokio::time::sleep(cfg.interval).await;
     }
+}
+
+fn touch_marker(marker: &std::path::Path) {
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(marker, now_unix().to_string()) {
+        tracing::warn!(error = %e, marker = ?marker, "#694 checkpoint: restore marker not written — the engine starts after its own wait");
+    }
+}
+
+/// The manifest's snapshot name inside the workspace archive.
+const MANIFEST_SNAPSHOT: &str = ".agentkeys-ov-ingested.txt";
+
+fn dir_has_entries(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false)
+}
+
+/// A cheap change detector over the workspace: every (path, size, mtime).
+fn dir_fingerprint(dir: &std::path::Path) -> [u8; 32] {
+    fn walk(dir: &std::path::Path, out: &mut String) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.path());
+        for e in entries {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if let Ok(m) = e.metadata() {
+                let mtime = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                out.push_str(&format!("{}\x1f{}\x1f{}\n", p.display(), m.len(), mtime));
+            }
+        }
+    }
+    let mut s = String::new();
+    walk(dir, &mut s);
+    agentkeys_core::device_crypto::keccak256(s.as_bytes())
+}
+
+async fn tar_gz(dir: &std::path::Path) -> Result<Vec<u8>, String> {
+    let out = tokio::process::Command::new("tar")
+        .arg("-C")
+        .arg(dir)
+        .args(["-czf", "-", "."])
+        .output()
+        .await
+        .map_err(|e| format!("tar unavailable: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "tar exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ));
+    }
+    Ok(out.stdout)
+}
+
+async fn untar_gz(dir: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("tar")
+        .arg("-C")
+        .arg(dir)
+        .args(["-xzf", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("tar unavailable: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(bytes)
+            .await
+            .map_err(|e| format!("tar stdin: {e}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("tar wait: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "tar exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ));
+    }
+    Ok(())
+}
+
+/// #694 — fetch the engine workspace object and unpack it into an EMPTY
+/// workspace; a populated one (a live engine) is never clobbered.
+async fn workspace_restore(
+    cfg: &CheckpointConfig,
+    credential: &DelegateCredential,
+    bearer: &str,
+) -> Result<String, String> {
+    let Some(ws) = &cfg.workspace else {
+        return Ok("no engine workspace on this box".into());
+    };
+    if dir_has_entries(ws) {
+        return Ok("engine workspace already populated — left untouched".into());
+    }
+    let client = cfg.backend_client(bearer, credential);
+    let service = service_knowledge(&cfg.namespace);
+    let cap = client
+        .cap_mint(
+            CapMintOp::MemoryGet,
+            CapMintRequest {
+                operator_omni: normalize_omni_0x(&cfg.chat.operator_omni),
+                actor_omni: normalize_omni_0x(&cfg.chat.actor_omni),
+                service: service.clone(),
+                device_key_hash: credential.device_key_hash(),
+                ttl_seconds: 300,
+            },
+            bearer,
+        )
+        .await
+        .map_err(|e| format!("cap-mint: {e}"))?;
+    let got = match client
+        .memory_get(MemoryGetInput {
+            cap,
+            namespace: service,
+            object_key: Some(OV_WORKSPACE_OBJECT_KEY.to_string()),
+        })
+        .await
+    {
+        Ok(g) => g,
+        Err(BackendError::Http { status: 404, .. }) => {
+            return Ok("no engine workspace checkpoint (first spawn?)".into())
+        }
+        Err(e) => return Err(format!("memory-get: {e}")),
+    };
+    let bytes = STANDARD
+        .decode(&got.plaintext_b64)
+        .map_err(|e| format!("workspace b64: {e}"))?;
+    std::fs::create_dir_all(ws).map_err(|e| format!("mkdir {}: {e}", ws.display()))?;
+    untar_gz(ws, &bytes).await?;
+    let snap = ws.join(MANIFEST_SNAPSHOT);
+    if snap.is_file() {
+        if let Some(parent) = cfg.manifest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::copy(&snap, &cfg.manifest) {
+            tracing::warn!(error = %e, "#694 checkpoint: manifest snapshot not restored — the first pull re-mirrors");
+        }
+    }
+    Ok(format!(
+        "engine workspace restored ({} bytes) — the first pull is a delta",
+        bytes.len()
+    ))
+}
+
+/// #694 — archive the engine workspace (with a snapshot of the manifest) into
+/// its keyed object when it changed since the last save.
+async fn workspace_save(
+    cfg: &CheckpointConfig,
+    credential: &DelegateCredential,
+    bearer: &str,
+    last_fp: &mut Option<[u8; 32]>,
+) -> Result<SaveOutcome, SaveError> {
+    let Some(ws) = &cfg.workspace else {
+        return Ok(SaveOutcome::Unchanged);
+    };
+    if !dir_has_entries(ws) {
+        return Ok(SaveOutcome::Unchanged);
+    }
+    if cfg.manifest.is_file() {
+        let _ = std::fs::copy(&cfg.manifest, ws.join(MANIFEST_SNAPSHOT));
+    }
+    let fp = dir_fingerprint(ws);
+    if Some(fp) == *last_fp {
+        return Ok(SaveOutcome::Unchanged);
+    }
+    let bytes = tar_gz(ws).await.map_err(SaveError::Failed)?;
+    if bytes.len() > cfg.max_bytes {
+        return Ok(SaveOutcome::TooLarge { bytes: bytes.len() });
+    }
+    let client = cfg.backend_client(bearer, credential);
+    let service = service_knowledge(&cfg.namespace);
+    let cap = client
+        .cap_mint(
+            CapMintOp::MemoryPut,
+            CapMintRequest {
+                operator_omni: normalize_omni_0x(&cfg.chat.operator_omni),
+                actor_omni: normalize_omni_0x(&cfg.chat.actor_omni),
+                service: service.clone(),
+                device_key_hash: credential.device_key_hash(),
+                ttl_seconds: 300,
+            },
+            bearer,
+        )
+        .await
+        .map_err(|e| classify_save(e, "cap-mint"))?;
+    let put = client
+        .memory_put(MemoryPutInput {
+            cap,
+            namespace: service,
+            plaintext_b64: STANDARD.encode(&bytes),
+            object_key: Some(OV_WORKSPACE_OBJECT_KEY.to_string()),
+            expected_content_hash: None,
+        })
+        .await
+        .map_err(|e| classify_save(e, "memory-put"))?;
+    if !put.ok {
+        return Err(SaveError::Failed("memory-put answered ok=false".into()));
+    }
+    *last_fp = Some(fp);
+    Ok(SaveOutcome::Saved { bytes: bytes.len() })
 }
 
 fn past(deadline: std::time::Instant, reason: &str) -> bool {

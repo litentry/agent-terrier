@@ -56,12 +56,12 @@ use thiserror::Error;
 pub use bodies::{
     ChannelPublishBody, ChannelSubscribeBody, ChannelTeardownBody, ConfigGetBody, ConfigPutBody,
     ConfigTeardownBody, ContactBindBody, CredFetchBody, CredStoreBody, CredTeardownBody,
-    DelegateArchiveBody, DelegateSpawnBody, DeviceAddBody, DeviceRevokeBody, EmailReceiveBody,
-    EmailSendBody, GateEmbedBody, GateSearchBody, GateTurnBody, GatewayRelayBody, K10RotateBody,
-    K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody, MemoryTeardownBody,
-    PaymentDirectBody, PaymentEscrowRedeemBody, RuntimeApprovalBody, RuntimeToolResultBody,
-    SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body,
-    SignEip712Body, SpeechAsrBody, SpeechTtsBody,
+    DelegateArchiveBody, DelegateLifecycleBody, DelegateSpawnBody, DeviceAddBody, DeviceRevokeBody,
+    EmailReceiveBody, EmailSendBody, GateEmbedBody, GateSearchBody, GateTurnBody, GatewayRelayBody,
+    K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody,
+    MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody, RuntimeApprovalBody,
+    RuntimeToolResultBody, SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody,
+    SignEip191Body, SignEip712Body, SpeechAsrBody, SpeechTtsBody,
 };
 pub use op_kind::AuditOpKind;
 
@@ -250,6 +250,8 @@ pub enum TypedAuditBody {
     SpeechAsr(SpeechAsrBody),
     SpeechTts(SpeechTtsBody),
     GateEmbed(GateEmbedBody),
+    /// #693 — a delegate lifecycle pass (op_kind 105).
+    DelegateLifecycle(DelegateLifecycleBody),
     GateSearch(GateSearchBody),
     ChannelPublish(ChannelPublishBody),
     ChannelSubscribe(ChannelSubscribeBody),
@@ -312,6 +314,9 @@ impl TypedAuditBody {
             AuditOpKind::SpeechAsr => Self::SpeechAsr(serde_json::from_value(value).ok()?),
             AuditOpKind::SpeechTts => Self::SpeechTts(serde_json::from_value(value).ok()?),
             AuditOpKind::GateEmbed => Self::GateEmbed(serde_json::from_value(value).ok()?),
+            AuditOpKind::DelegateLifecycle => {
+                Self::DelegateLifecycle(serde_json::from_value(value).ok()?)
+            }
             AuditOpKind::GateSearch => Self::GateSearch(serde_json::from_value(value).ok()?),
             AuditOpKind::ChannelPublish => {
                 Self::ChannelPublish(serde_json::from_value(value).ok()?)

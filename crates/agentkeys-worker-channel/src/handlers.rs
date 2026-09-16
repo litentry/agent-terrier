@@ -165,6 +165,10 @@ pub struct PollRequest {
     pub after: String,
     #[serde(default)]
     pub wait_seconds: u64,
+    /// #693 — only the LAST `tail` events of the window are fetched and
+    /// decrypted (a console tailing a delegate's lifecycle); absent / 0 = all.
+    #[serde(default)]
+    pub tail: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -628,6 +632,7 @@ async fn channel_poll(
         &owner,
         &channel_id,
         &req.after,
+        req.tail,
     )
     .await?;
 
@@ -644,6 +649,7 @@ async fn channel_poll(
             &owner,
             &channel_id,
             &req.after,
+            req.tail,
         )
         .await?;
     }
@@ -687,6 +693,7 @@ async fn channel_list_after(
     owner: &str,
     channel_id: &str,
     after: &str,
+    tail: Option<u32>,
 ) -> Result<Vec<ChannelEvent>, ApiError> {
     let prefix = feed_prefix(owner, channel_id);
     let s3 = storage_s3(state, creds, cap, owner, channel_id).await?;
@@ -705,9 +712,15 @@ async fn channel_list_after(
     })?;
 
     let aad = envelope::aad("", owner, channel_id, 0);
+    // #693 — a tail read decrypts only the last N keys of the window.
+    let mut keys: Vec<&str> = resp.contents().iter().filter_map(|o| o.key()).collect();
+    if let Some(n) = tail.map(|n| n as usize).filter(|n| *n > 0) {
+        if keys.len() > n {
+            keys.drain(..keys.len() - n);
+        }
+    }
     let mut events = Vec::new();
-    for obj in resp.contents() {
-        let Some(key) = obj.key() else { continue };
+    for key in keys {
         let got = s3
             .get_object()
             .bucket(&state.config.channel_bucket)

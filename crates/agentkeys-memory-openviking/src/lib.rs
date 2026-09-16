@@ -348,13 +348,23 @@ fn line_hash(text: &str) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// #694 — namespaces of one pass reconcile concurrently; the manifest is ONE
+/// file, so each read / append / rewrite holds this lock (short, filesystem-only).
+static MANIFEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn manifest_guard() -> std::sync::MutexGuard<'static, ()> {
+    MANIFEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 fn read_manifest(path: &std::path::Path) -> std::collections::HashSet<String> {
+    let _guard = manifest_guard();
     std::fs::read_to_string(path)
         .map(|s| s.lines().map(|l| l.to_string()).collect())
         .unwrap_or_default()
 }
 
 fn append_manifest(path: &std::path::Path, entries: &[String]) {
+    let _guard = manifest_guard();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -373,6 +383,7 @@ fn append_manifest(path: &std::path::Path, entries: &[String]) {
 }
 
 fn rewrite_manifest(path: &std::path::Path, entries: &[String]) {
+    let _guard = manifest_guard();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

@@ -30,7 +30,7 @@ import type { PresetSummary } from '@/lib/generated/PresetSummary';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { ServiceAnnotation } from '@/lib/generated/ServiceAnnotation';
-import { Chip, Dot, Modal, PageHead, Panel } from './shared';
+import { Chip, Dot, LifecycleChip, Modal, PageHead, Panel } from './shared';
 import { KnowledgeItemModal } from './knowledge';
 import { editReaches } from '@/lib/client/knowledge';
 import { FEED_ID_RE, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
@@ -399,7 +399,7 @@ export function ApplicationsPage({
                         <span style={{ width: 34, height: 34, borderRadius: 9, background: 'var(--ink)', color: 'var(--bg)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>{(tp?.name ?? a.template_id).slice(0, 1).toUpperCase()}</span>
                         <div style={{ flex: 1 }}>
                           <div style={{ fontWeight: 600 }}>{tp?.name ?? a.template_id} <span className="muted" style={{ fontSize: 11 }}>· {a.label} · v{a.template_version}</span></div>
-                          <div style={{ fontSize: 12 }}><Dot status={st.dot} /> {st.text} · {a.availability} · {a.bound_channels.length} bound feed(s)</div>
+                          <div style={{ fontSize: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><span><Dot status={st.dot} /> {st.text} · {a.availability} · {a.bound_channels.length} bound feed(s)</span><LifecycleChip channelId={a.chat_channel_id} /></div>
                         </div>
                         <button className="btn sm" onClick={(e) => { e.stopPropagation(); void openApp(a.label); }}>manage →</button>
                       </div>
@@ -615,7 +615,7 @@ function AppDetail({
     <div style={{ marginTop: 18 }}>
       <PageHead
         crumb={`applications · ${app.label}`}
-        title={<>{template?.name ?? app.template_id} <span className="muted" style={{ fontSize: 14 }}>· delegate <code>{app.label}</code> · <Dot status={st.dot} /> {st.text}</span></>}
+        title={<>{template?.name ?? app.template_id} <span className="muted" style={{ fontSize: 14 }}>· delegate <code>{app.label}</code> · <Dot status={st.dot} /> {st.text}</span> <LifecycleChip channelId={app.chat_channel_id} sync /></>}
         desc={template?.description ?? `template ${app.template_id}@${app.template_version}`}
         actions={
           <>

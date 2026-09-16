@@ -537,6 +537,7 @@ pub fn reply_text_for_turn(
     media_marker: Option<&str>,
     en: bool,
     reach: &[String],
+    stage_hint: Option<&str>,
 ) -> Option<String> {
     let base = if !decision.allowed && decision.reason == "no_alias" {
         ask_back_text(reach, en)
@@ -545,10 +546,26 @@ pub fn reply_text_for_turn(
     } else {
         reply_text_for(decision)?
     };
-    match (decision.allowed, media_marker) {
-        (true, Some(m)) => Some(format!("{base} {m}")),
-        _ => Some(base),
+    let mut out = match (decision.allowed, media_marker) {
+        (true, Some(m)) => format!("{base} {m}"),
+        _ => base,
+    };
+    // #693 — the app's launch state rides on an ALLOWED receipt: the member
+    // learns why the answer may take a moment, or come without the knowledge.
+    if decision.allowed {
+        match (stage_hint, en) {
+            (Some("loading"), false) => out.push_str("（它还在加载知识，稍等片刻）"),
+            (Some("loading"), true) => {
+                out.push_str(" (it is still loading its knowledge — one moment)")
+            }
+            (Some("degraded"), false) => out.push_str("（它的知识暂不可用，会先按已有信息回答）"),
+            (Some("degraded"), true) => out.push_str(
+                " (its knowledge is unavailable right now — it answers from what it has)",
+            ),
+            _ => {}
+        }
     }
+    Some(out)
 }
 
 async fn emit_relay_audit(
@@ -654,10 +671,11 @@ mod tests {
             "{en}"
         );
         assert!(ask_back_text(&[], false).contains("/chef"));
-        let turn = reply_text_for_turn(&decision(false, "no_alias"), None, false, &reach).unwrap();
+        let turn =
+            reply_text_for_turn(&decision(false, "no_alias"), None, false, &reach, None).unwrap();
         assert!(turn.contains("/nanny") && !turn.contains("/chef"), "{turn}");
         assert!(
-            reply_text_for_turn(&decision(true, "ok"), Some("📷"), false, &reach)
+            reply_text_for_turn(&decision(true, "ok"), Some("📷"), false, &reach, None)
                 .unwrap()
                 .ends_with("📷")
         );
@@ -681,6 +699,46 @@ mod tests {
             reply_text_for(&decision(false, "operator_grade_requires_session"))
                 .unwrap()
                 .contains("https://pc.local/")
+        );
+    }
+
+    #[test]
+    fn receipt_carries_the_apps_launch_state() {
+        let reach = vec!["chef".to_string()];
+        let zh = reply_text_for_turn(&decision(true, "ok"), None, false, &reach, Some("loading"))
+            .unwrap();
+        assert!(zh.contains("加载知识"), "{zh}");
+        let en = reply_text_for_turn(
+            &decision(true, "ok"),
+            Some("📷"),
+            true,
+            &reach,
+            Some("degraded"),
+        )
+        .unwrap();
+        assert!(en.contains("📷") && en.contains("unavailable"), "{en}");
+        let ready = reply_text_for_turn(&decision(true, "ok"), None, true, &reach, None).unwrap();
+        assert!(!ready.contains("loading"));
+        // a refused turn never carries the app's state (nothing was routed)
+        let refused = reply_text_for_turn(
+            &decision(false, "rate_limited"),
+            None,
+            false,
+            &reach,
+            Some("loading"),
+        )
+        .unwrap();
+        assert!(!refused.contains("加载"));
+        assert_eq!(crate::state::stage_hint("syncing", 1_000), Some("loading"));
+        assert_eq!(
+            crate::state::stage_hint("degraded", 1_000),
+            Some("degraded")
+        );
+        assert_eq!(crate::state::stage_hint("ready", 1_000), None);
+        assert_eq!(
+            crate::state::stage_hint("syncing", crate::state::APP_STAGE_TTL_MS + 1),
+            None,
+            "stale"
         );
     }
 

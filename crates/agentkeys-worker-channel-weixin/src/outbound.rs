@@ -78,6 +78,13 @@ pub fn deliverable(ev: &ChannelEvent) -> bool {
         && ev.body.as_deref().is_some_and(|b| !b.is_empty())
 }
 
+/// The `stage` word of a lifecycle report (its JSON body).
+pub fn lifecycle_stage(ev: &ChannelEvent) -> Option<String> {
+    let text = decode_text(ev)?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("stage")?.as_str().map(str::to_string)
+}
+
 fn decode_text(ev: &ChannelEvent) -> Option<String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let b64 = ev.body.as_deref()?;
@@ -196,6 +203,14 @@ async fn feed_task(
                     continue;
                 }
                 for ev in events {
+                    // #693 — an app's lifecycle report: remember its stage for the
+                    // receipt; never a message to deliver.
+                    if ev.kind == ChannelEventKind::Lifecycle {
+                        if let Some(stage) = lifecycle_stage(&ev) {
+                            state.note_app_stage(&feed, &stage, ev.ts_millis);
+                        }
+                        continue;
+                    }
                     if !deliverable(&ev) {
                         continue;
                     }

@@ -753,6 +753,7 @@ mod device_client_tests {
                 cap: cap.clone(),
                 after: String::new(),
                 wait_seconds: 0,
+                tail: None,
             })
             .await
             .unwrap();

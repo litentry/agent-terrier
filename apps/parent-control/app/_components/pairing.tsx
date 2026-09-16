@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useClient } from '@/lib/ClientProvider';
 import { sandboxExpiryLabel } from '@/lib/client/sandboxExpiry';
 import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
-import { Dot, PageHead } from './shared';
+import { Dot, LifecycleChip, PageHead } from './shared';
 import { PermissionView } from './permissions';
 import type { Actor, PairingRequest } from './types';
 import { isCapabilityService } from './types';
@@ -443,6 +443,8 @@ export function DelegatesPage({
                     update available
                   </span>
                 )}
+                {/* #693 — the launch / pull stage from the delegate's own feed. */}
+                {a.status !== 'bad' && <LifecycleChip channelId={`opchat-${a.label.replace(' (revoked)', '')}`} />}
               </div>
               <dl className="device-kvs">
                 <dt>actor</dt><dd className="mono">{a.omni}</dd>

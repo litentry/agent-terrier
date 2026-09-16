@@ -365,6 +365,12 @@ pub async fn run_with_token(
                     outcome.media_marker,
                     false,
                     &outcome.reach,
+                    outcome.decision.target_alias.as_deref().and_then(|a| {
+                        state.app_stage_hint(
+                            &agentkeys_protocol::messaging_feed_id("weixin", a),
+                            relay::unix_secs() * 1000,
+                        )
+                    }),
                 )
             });
             if reply.is_none() && state.config.unknown_sender_hint {

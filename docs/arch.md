@@ -327,6 +327,7 @@ Worker: `POST /v1/audit/append` → hash; `GET /v1/audit/envelope/<hash>`. On-ch
 | `ChannelTeardown` | 102 | `{channel_id, actor_target}` | channel-service (#406/#229) |
 | `GatewayRelay` | 103 | `{transport, contact_id, tier, target_alias, decision, message_hash}` | WeChat contact gate (#407) — contact provenance, message text NEVER stored (D13) |
 | `ContactBind` | 104 | `{transport, contact_id, outcome, tier, reach_count}` | WeChat contact gate (#407) — the master-confirmed bind write |
+| `DelegateLifecycle` | 105 | `{stage, namespaces, mirrored, deleted, ms, boot, errors, first_error}` | the in-sandbox daemon (#693) — ONE row per boot / knowledge-pull pass on the delegate's own authority; counts + ms only, never a line of knowledge |
 
 Unclaimed bytes in each 10-block + `105-255` are reserved — the device family claimed `53`/`54` for the sandbox lifecycle per #377 and `55`/`56` for the delegate spawn/archive ceremonies per #427, so `57-59` is what remains free there; the gate family claimed `91`/`92` for the speech relay per #519, `93` for the embeddings relay per #572, and `94` for the web-search relay per #653, so `95-99` is what remains there; the channel family claimed `100-104` at §22e phases 1-2 (#406 channel 100-102 + #407 contact gate 103-104), so `105-109` is what remains in that block. `GateTurn`/`Speech*` attribution: envelope omnis both carry the OWNING USER; device/api-key are body-level rollup dimensions (`GET /v1/usage`).
 

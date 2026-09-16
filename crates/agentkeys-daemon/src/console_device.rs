@@ -94,12 +94,15 @@ pub(crate) fn console_key_file() -> String {
 /// Load the persisted coordinates for THIS broker (a console enrolled on one
 /// stack is not enrolled on another — the omni tree is per stack, #464).
 pub(crate) fn load_persisted(broker_url: Option<&str>) -> Option<ConsoleDevice> {
+    // No broker known = no stack to be enrolled on (a persisted enrollment is
+    // per stack, #464) — never adopt one blind.
+    let broker = broker_url?.trim_end_matches('/');
     let raw = std::fs::read_to_string(console_device_file()).ok()?;
     let dev: ConsoleDevice = serde_json::from_str(&raw).ok()?;
-    match broker_url {
-        Some(b) if b.trim_end_matches('/') != dev.broker_url.trim_end_matches('/') => None,
-        _ => Some(dev),
+    if broker != dev.broker_url.trim_end_matches('/') {
+        return None;
     }
+    Some(dev)
 }
 
 fn persist(dev: &ConsoleDevice) -> Result<(), String> {

@@ -495,6 +495,8 @@ pub(crate) struct LoopRuntime {
     pub http: reqwest::Client,
     pub cfg: Arc<ChatLoopConfig>,
     pub publisher: Arc<Publisher>,
+    /// #693 — a turn waits for `ready` here (bounded), and "sync" pokes it.
+    pub hub: Arc<crate::lifecycle::LifecycleHub>,
     pub perception_prompt: Option<String>,
     pub min_confidence: f32,
     pub perception_cache: tokio::sync::Mutex<crate::perception::PerceptionCache>,
@@ -505,15 +507,27 @@ async fn run(cfg: ChatLoopConfig) {
         return;
     };
     let credential = std::sync::Arc::new(credential);
+    // #693 — the launch lifecycle: booting → restoring → syncing → ready.
+    let hub = crate::lifecycle::LifecycleHub::new(crate::lifecycle::ready_wait_from(|k| {
+        std::env::var(k).ok()
+    }));
     // #566 — the distribution mirror shares the credential but keeps its own
     // session + cadence, so neither loop can stall the other.
-    if let Some(mirror_cfg) = crate::memory_mirror::MirrorConfig::from_chat_env(cfg.clone()) {
+    if let Some(mut mirror_cfg) = crate::memory_mirror::MirrorConfig::from_chat_env(cfg.clone()) {
+        mirror_cfg.hub = Some(hub.clone());
         crate::memory_mirror::spawn(mirror_cfg, credential.clone());
+    } else {
+        hub.set_mirror_enabled(false);
     }
     // #594 — the runtime checkpoint (restore-on-boot + periodic durable save),
     // same isolation posture as the mirror: own session, shared credential.
-    if let Some(checkpoint_cfg) = crate::checkpoint::CheckpointConfig::from_chat_env(cfg.clone()) {
+    if let Some(mut checkpoint_cfg) =
+        crate::checkpoint::CheckpointConfig::from_chat_env(cfg.clone())
+    {
+        checkpoint_cfg.hub = Some(hub.clone());
         crate::checkpoint::spawn(checkpoint_cfg, credential.clone());
+    } else {
+        hub.restore_finished("no checkpoint configured");
     }
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(40))
@@ -564,6 +578,8 @@ async fn run(cfg: ChatLoopConfig) {
 
     // R1 — one poller per readable feed, all feeding ONE dispatcher queue.
     let feeds = app.feeds(&cfg.chat_channel_id);
+    // #693 — every stage change lands on every feed this delegate writes.
+    crate::lifecycle::spawn_publisher(hub.clone(), publisher.clone(), feeds.clone());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(FeedSpec, ChannelEvent)>(256);
     for feed in feeds.iter().filter(|f| f.direction.reads()) {
         tracing::info!(slot = %feed.slot, channel = %feed.channel_id, kind = %feed.kind.as_str(), "#665 chat loop: polling feed");
@@ -582,6 +598,7 @@ async fn run(cfg: ChatLoopConfig) {
         http: http.clone(),
         cfg: cfg.clone(),
         publisher: publisher.clone(),
+        hub: hub.clone(),
         perception_prompt,
         min_confidence: crate::perception::min_confidence_from(|k| std::env::var(k).ok()),
         perception_cache: tokio::sync::Mutex::new(crate::perception::PerceptionCache::new(256)),
@@ -770,7 +787,12 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
     let publisher = &rt.publisher;
     let channel = feed.channel_id.as_str();
     let contact_tier = event.contact.as_ref().map(|c| c.tier.as_str());
+    // #693 — a lifecycle report is never a turn (ours or a sibling's).
+    if event.kind == ChannelEventKind::Lifecycle {
+        return;
+    }
     match event.kind {
+        ChannelEventKind::Lifecycle => {} // returned above — never a turn
         // #519 — a voice turn on the OPERATOR chat feed (a device conversation):
         // ASR → bridge chat → TTS, published twice (text + audio-clip). On any
         // other feed a clip is a PERCEIVED input (R2) answered in text.
@@ -823,6 +845,17 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
         // handed to the agent as a turn. Other commands are ignored (logged).
         ChannelEventKind::Command => {
             let cmd = inline_text(event);
+            // #693 — "sync now": the mirror pulls at once; the stage events say the rest.
+            if cmd.trim() == "sync" {
+                rt.hub.sync_now.notify_one();
+                if let Err(e) = publisher
+                    .publish_text_out(channel, "⟳ pulling knowledge now", &event.event_id)
+                    .await
+                {
+                    tracing::warn!(error = %e, "#693 chat loop: sync ack publish failed");
+                }
+                return;
+            }
             if cmd.trim() == "jobs" {
                 let doc = bridge_jobs(http, cfg)
                     .await
@@ -853,6 +886,7 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
                             ..
                         } => contact_id.clone(),
                     };
+                    knowledge_note(rt, channel, &event.event_id).await;
                     let text = format!(
                         "[command · slot {} · action {} · from actor {}]\n{}{}",
                         feed.slot,
@@ -899,6 +933,8 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
                         .unwrap_or_default()
                 );
             }
+            // #693 — wait for the knowledge (bounded); answer anyway, and say so.
+            knowledge_note(rt, channel, &event.event_id).await;
             // #563 — stream ONLY when the inbound turn carries the consumer's
             // explicit hint: a consumer that never sends it (old web app,
             // fleet TUI, devices) gets today's single-shot reply, so partials
@@ -959,6 +995,22 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
     }
 }
 
+/// #693 — wait for `ready` up to the bound; when the knowledge is not there,
+/// say so on the feed (its own `out` event, correlated to the turn) before the
+/// answer — the answer still comes (never load-bearing).
+async fn knowledge_note(rt: &LoopRuntime, channel: &str, correlation: &str) {
+    let readiness = rt.hub.wait_ready().await;
+    if let Some(note) = crate::lifecycle::degraded_note(readiness) {
+        if let Err(e) = rt
+            .publisher
+            .publish_text_out(channel, note, correlation)
+            .await
+        {
+            tracing::warn!(error = %e, "#693 chat loop: knowledge note publish failed");
+        }
+    }
+}
+
 /// #668 — the R2 pre-turn + hand-off for one media event.
 async fn perceive_and_turn(
     rt: &LoopRuntime,
@@ -968,6 +1020,7 @@ async fn perceive_and_turn(
 ) {
     let kind = event.kind.as_str();
     let channel = feed.channel_id.as_str();
+    knowledge_note(rt, channel, &event.event_id).await;
     let (bytes, content_type) = match event_bytes(rt, feed, event).await {
         Ok(b) => b,
         Err(e) => {

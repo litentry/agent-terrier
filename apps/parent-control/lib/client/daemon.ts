@@ -61,6 +61,7 @@ import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
 import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
 import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
+import type { DelegateLifecycle } from '@/lib/generated/DelegateLifecycle';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { Sensitivity } from '@/lib/generated/Sensitivity';
 import type { ApiChannel } from '@/lib/generated/ApiChannel';
@@ -395,11 +396,21 @@ export class DaemonBackend implements AgentKeysClient {
     });
   }
 
-  async chatSend(channelId: string, text: string): Promise<Result<{ event_id: string }>> {
+  async chatSend(channelId: string, text: string, kind?: 'text' | 'command'): Promise<Result<{ event_id: string }>> {
     // #563 — this UI merges streamed deltas (chat.tsx), so it opts the turn
     // into streaming; consumers without the merge simply omit the hint and
-    // the delegate answers single-shot.
-    return this.postJson('/v1/master/agent/chat/send', { channel_id: channelId, text, stream: true });
+    // the delegate answers single-shot. #693 — `command` sends a poke
+    // (`sync` = pull the knowledge now), never a turn.
+    return this.postJson('/v1/master/agent/chat/send', {
+      channel_id: channelId,
+      text,
+      stream: true,
+      ...(kind === 'command' ? { kind: 'command' } : {}),
+    });
+  }
+
+  async delegateLifecycle(channelId: string): Promise<Result<{ lifecycle: DelegateLifecycle | null; event_ts_millis: number | null }>> {
+    return this.getJson(`/v1/master/agent/lifecycle?channel_id=${encodeURIComponent(channelId)}`);
   }
 
   async chatPoll(

@@ -267,6 +267,12 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
                     outcome.media_marker,
                     true,
                     &outcome.reach,
+                    outcome.decision.target_alias.as_deref().and_then(|a| {
+                        state.app_stage_hint(
+                            &agentkeys_protocol::messaging_feed_id("telegram", a),
+                            relay::unix_secs() * 1000,
+                        )
+                    }),
                 )
             });
             if reply.is_none() && state.config.unknown_sender_hint {

@@ -324,6 +324,12 @@ async fn telegram_mock_inbound(
             outcome.media_marker,
             true,
             &outcome.reach,
+            outcome.decision.target_alias.as_deref().and_then(|a| {
+                state.app_stage_hint(
+                    &agentkeys_protocol::messaging_feed_id("telegram", a),
+                    relay::unix_secs() * 1000,
+                )
+            }),
         )
     });
     // The mock driver IS the delivery surface: a welcome returned here counts as sent.

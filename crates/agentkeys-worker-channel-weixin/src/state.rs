@@ -3,7 +3,7 @@
 //! since #418 — the RUNTIME iLink identity (token/base-url/bot-id), which the
 //! parent-control admin login ceremony can swap without a process restart.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,6 +74,10 @@ pub struct WeixinGatewayState {
     /// carrying connect ceremony runs; every audit emit reads the EFFECTIVE
     /// value ([`Self::effective_operator_omni`]).
     runtime_operator_omni: RwLock<Option<String>>,
+    /// #693 — the latest lifecycle stage each app published on a feed this
+    /// gate delivers from (`feed id` → (stage, ts_millis)); the receipt says
+    /// "still loading its knowledge" while the app is not ready.
+    app_stage: RwLock<HashMap<String, (String, u64)>>,
     /// The RUNTIME iLink identity — initialized from config, swapped by the
     /// admin login ceremony. The supervisor reads these on every (re)spawn.
     /// Per-member iLink bots, keyed by contact id (`self-owner` = the owner's; the
@@ -90,7 +94,38 @@ pub struct WeixinGatewayState {
 
 pub type SharedWeixinGatewayState = Arc<WeixinGatewayState>;
 
+/// A stage report older than this is ignored (a delegate that died mid-sync
+/// must not brand every receipt "loading" forever).
+pub const APP_STAGE_TTL_MS: u64 = 15 * 60 * 1000;
+
+/// The receipt hint for a stage: `loading` while the app boots / restores /
+/// syncs, `degraded` when its knowledge is unavailable, `None` when ready or
+/// unknown. Pure over the stage word + age.
+pub fn stage_hint(stage: &str, age_ms: u64) -> Option<&'static str> {
+    if age_ms > APP_STAGE_TTL_MS {
+        return None;
+    }
+    match stage {
+        "booting" | "restoring" | "syncing" => Some("loading"),
+        "degraded" => Some("degraded"),
+        _ => None,
+    }
+}
+
 impl WeixinGatewayState {
+    /// #693 — remember an app's latest lifecycle stage on one of our feeds.
+    pub fn note_app_stage(&self, feed: &str, stage: &str, ts_millis: u64) {
+        if let Ok(mut m) = self.app_stage.write() {
+            m.insert(feed.to_string(), (stage.to_string(), ts_millis));
+        }
+    }
+
+    /// The receipt hint for the app behind `feed` (see [`stage_hint`]).
+    pub fn app_stage_hint(&self, feed: &str, now_millis: u64) -> Option<&'static str> {
+        let (stage, ts) = self.app_stage.read().ok()?.get(feed).cloned()?;
+        stage_hint(&stage, now_millis.saturating_sub(ts))
+    }
+
     pub fn build(config: WeixinGatewayConfig) -> anyhow::Result<Self> {
         let registry = RegistryHandle::load(&config.registry_file)?;
         let rate = RateLimiter::new(config.rate_max, config.rate_window_secs);
@@ -126,6 +161,7 @@ impl WeixinGatewayState {
             ilink_last_ok_ms: AtomicU64::new(0),
             telegram_last_ok_ms: AtomicU64::new(0),
             runtime_operator_omni: RwLock::new(None),
+            app_stage: RwLock::new(HashMap::new()),
             bots,
             ilink_restart_tx,
             admin_login: tokio::sync::Mutex::new(None),

@@ -5,4 +5,4 @@
  * speech/video) is deliberately NOT here — it stays on the §22d.3a gate path;
  * channels carry text, commands, docs, discrete frames, and `audio-clip`s.
  */
-export type ChannelEventKind = "text" | "image" | "audio-clip" | "frame" | "command" | "doc";
+export type ChannelEventKind = "text" | "image" | "audio-clip" | "frame" | "command" | "doc" | "lifecycle";

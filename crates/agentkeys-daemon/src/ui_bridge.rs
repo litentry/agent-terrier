@@ -1440,6 +1440,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         // (D8 operator-owned; D13: operator session only):
         .route("/v1/master/agent/chat/send", post(master_chat_send))
         .route("/v1/master/agent/chat/poll", post(master_chat_poll))
+        .route("/v1/master/agent/lifecycle", get(master_agent_lifecycle))
         // #418 — the WeChat gateway admin proxy (parent-control drives the
         // gateway's admin surface through the daemon; the admin bearer is
         // injected server-side, never in the browser):
@@ -7537,12 +7538,21 @@ pub struct ApiChatEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub seq: Option<u32>,
+    /// #693 — the feed event kind (`text`, `lifecycle`, …); absent on older
+    /// daemons = `text`. A `lifecycle` event's `text` is its JSON report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ChatSendRequest {
     pub channel_id: String,
     pub text: String,
+    /// #693 — `"command"` publishes the text as a command event (`sync` = pull
+    /// the knowledge now); absent / anything else = a text turn.
+    #[serde(default)]
+    pub kind: Option<String>,
     /// #519/#522 — an optional reply voice (Doubao speaker id) + speech rate
     /// (语速 [-50,100]) the operator picked in fleet's converse pane. When a
     /// voice is set, the turn carries `ChannelAudioParams` so the delegate
@@ -7660,6 +7670,7 @@ fn chat_event_from_value(v: &serde_json::Value) -> ApiChatEvent {
             .unwrap_or_default()
             .to_string(),
         text,
+        kind: v.get("kind").and_then(|k| k.as_str()).map(str::to_string),
         producer_omni: v
             .pointer("/producer/actor_omni")
             .and_then(|s| s.as_str())
@@ -7724,7 +7735,7 @@ async fn master_chat_send(
     // @backend-fixture: channel_publish_body
     let mut body = serde_json::json!({
         "cap": cap,
-        "kind": "text",
+        "kind": send_event_kind(&req),
         "direction": "in",
         "body_b64": STANDARD.encode(req.text.as_bytes()),
     });
@@ -7766,6 +7777,135 @@ async fn master_chat_send(
         )
             .into_response(),
     }
+}
+
+/// #693 — only `command` is an alternative send kind (the "sync now" poke).
+fn send_event_kind(req: &ChatSendRequest) -> &'static str {
+    match req.kind.as_deref() {
+        Some("command") => "command",
+        _ => "text",
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LifecycleQuery {
+    pub channel_id: String,
+}
+
+/// `GET /v1/master/agent/lifecycle?channel_id=<opchat>` — the delegate's latest
+/// launch / pull stage (#693), read from the TAIL of its feed with the master's
+/// subscribe cap (no replay of the transcript); `lifecycle: null` until the
+/// delegate has published one.
+async fn master_agent_lifecycle(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::Query(q): axum::extract::Query<LifecycleQuery>,
+) -> axum::response::Response {
+    if let Err(resp) = require_master_session(&state).await {
+        return resp;
+    }
+    if !valid_channel_id(&q.channel_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid channel_id" })),
+        )
+            .into_response();
+    }
+    let (cap, coords) = match master_channel_cap(
+        &state,
+        format!("channel-sub:{}", q.channel_id),
+        agentkeys_backend_client::protocol::CapMintOp::ChannelSubscribe,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    let worker = match channel_worker_url(&coords.broker) {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    // The protocol's poll body with its #693 optional `tail` — the worker
+    // decrypts only the last events of the window.
+    let body = serde_json::json!({
+        "cap": cap,
+        "after": "",
+        "wait_seconds": 0,
+        "tail": 40,
+    });
+    let resp = match reqwest::Client::new()
+        .post(format!("{worker}/v1/channel/poll"))
+        .timeout(std::time::Duration::from_secs(20))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("channel worker poll: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    if !resp.status().is_success() {
+        let st = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let txt = resp.text().await.unwrap_or_default();
+        return (
+            st,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            txt,
+        )
+            .into_response();
+    }
+    let v: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("poll parse: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let latest = v
+        .get("events")
+        .and_then(|e| e.as_array())
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|e| e.get("kind").and_then(|k| k.as_str()) == Some("lifecycle"))
+        })
+        .and_then(|e| {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            let b64 = e.get("body")?.as_str()?;
+            let bytes = STANDARD.decode(b64).ok()?;
+            let report: agentkeys_backend_client::protocol::DelegateLifecycle =
+                serde_json::from_slice(&bytes).ok()?;
+            Some((
+                report,
+                e.get("ts_millis").and_then(|t| t.as_u64()).unwrap_or(0),
+            ))
+        });
+    Json(serde_json::json!({
+        "channel_id": q.channel_id,
+        "lifecycle": latest.as_ref().map(|(r, _)| r),
+        "event_ts_millis": latest.as_ref().map(|(_, t)| t),
+    }))
+    .into_response()
 }
 
 /// `POST /v1/master/agent/chat/poll` — the transcript read (D13: operator
