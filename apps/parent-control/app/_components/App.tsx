@@ -105,6 +105,11 @@ export function App() {
   const [sessionExpired, setSessionExpired] = useState(false);
   const [reauthBusy, setReauthBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  // True while the actor tree is being (re)read — the channels page says
+  // "checking grants…" instead of "orphaned" until the fleet the daemon
+  // reconciled from chain is in hand (an install adds grants the previous
+  // read could not know).
+  const [actorsSyncing, setActorsSyncing] = useState(false);
   // #207 item 1A — config-init entry point A (default-preset bootstrap): the
   // bundled presets, the shipped default id, and the in-flight authoring state.
   const [presets, setPresets] = useState<ConfigPreset[]>([]);
@@ -354,6 +359,7 @@ export function App() {
   useEffect(() => {
     if (!onboarded) return;
     let cancelled = false;
+    setActorsSyncing(true);
     (async () => {
       const [a, e, ch] = await Promise.all([
         client.listActors(),
@@ -362,6 +368,7 @@ export function App() {
         client.listChannels ? client.listChannels() : Promise.resolve(null),
       ]);
       if (cancelled) return;
+      setActorsSyncing(false);
       if (a.ok) setActors(a.data);
       if (e.ok) setEvents(e.data.map((x) => ({ ...x })));
       if (ch?.ok) {
@@ -1061,7 +1068,12 @@ export function App() {
   // is the immutable on-chain anchor; delete is refused while grants hold it.
   const refreshChannels = async () => {
     if (!client.listChannels) return;
-    const r = await client.listChannels();
+    // The holders come from the actor tree: re-read it with the registry so a
+    // grant an install just minted stops reading as "orphaned".
+    setActorsSyncing(true);
+    const [r, a] = await Promise.all([client.listChannels(), client.listActors()]);
+    setActorsSyncing(false);
+    if (a.ok) setActors(a.data);
     if (r.ok) {
       setChannels(r.data.channels);
       setChannelStorage(r.data.storage);
@@ -1490,6 +1502,7 @@ export function App() {
               channels,
               storage: channelStorage,
               actors,
+              actorsSyncing,
               onCreate: createChannel,
               onUpdate: updateChannel,
               onDelete: deleteChannel,

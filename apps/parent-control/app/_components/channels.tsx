@@ -36,6 +36,9 @@ export interface ChannelRegistryProps {
   /** "ok" = durable config-class doc · "cached" = dev-only (no config worker). */
   storage: string;
   actors: Actor[];
+  /** The actor tree is being re-read (after an install, a refresh) — holders
+   *  are not known yet, so nothing reads as orphaned meanwhile. */
+  actorsSyncing?: boolean;
   onCreate: (input: { id: string; name: string; note?: string }) => Promise<ChannelDef | null>;
   onUpdate: (id: string, input: { name?: string; note?: string }) => Promise<boolean>;
   onDelete: (id: string) => Promise<boolean>;
@@ -47,9 +50,10 @@ export interface ChannelRegistryProps {
 
 export function ChannelRegistryPage({ registry }: { registry: ChannelRegistryProps }) {
   const [clearing, setClearing] = useState(false);
-  const orphaned = orphanedChannels(registry.channels, registry.actors);
+  const syncing = registry.actorsSyncing === true;
+  const orphaned = syncing ? [] : orphanedChannels(registry.channels, registry.actors);
   const clearOrphaned = async () => {
-    if (clearing || orphaned.length === 0) return;
+    if (clearing || syncing || orphaned.length === 0) return;
     const ids = orphaned.map((c) => c.id);
     if (!window.confirm(`Clear ${ids.length} orphaned channel${ids.length === 1 ? '' : 's'}?\n\n${ids.join('\n')}\n\nNo device or agent holds a grant on them, so nothing on chain changes — this only removes the registry entries. Channels still in use are kept.`)) return;
     setClearing(true);
@@ -66,13 +70,13 @@ export function ChannelRegistryPage({ registry }: { registry: ChannelRegistryPro
           <>
             <button
               className="btn sm danger"
-              disabled={clearing || orphaned.length === 0}
-              title={orphaned.length === 0 ? 'nothing orphaned — every entry is held by a device or agent' : `remove ${orphaned.length} entr${orphaned.length === 1 ? 'y' : 'ies'} no device or agent holds a grant on`}
+              disabled={clearing || syncing || orphaned.length === 0}
+              title={syncing ? 'checking which device or agent holds each channel…' : orphaned.length === 0 ? 'nothing orphaned — every entry is held by a device or agent' : `remove ${orphaned.length} entr${orphaned.length === 1 ? 'y' : 'ies'} no device or agent holds a grant on`}
               onClick={() => void clearOrphaned()}
             >
               {clearing ? 'clearing…' : `⌫ clear orphaned${orphaned.length ? ` (${orphaned.length})` : ''}`}
             </button>
-            <button className="btn sm" onClick={registry.onRefresh}>↻ refresh</button>
+            <button className="btn sm" onClick={registry.onRefresh} disabled={syncing} title="re-read the registry and the actor tree (who holds a grant on each channel)">{syncing ? 'checking grants…' : '↻ recheck'}</button>
           </>
         }
       />
@@ -187,6 +191,8 @@ function ChannelRow({ channel, registry }: { channel: ChannelDef; registry: Chan
             holders.map((h) => (
               <span key={h.id} className="chip ok" title={`holds a grant on ${channel.id}`}>{h.label.replace(' (revoked)', '')}</span>
             ))
+          ) : registry.actorsSyncing ? (
+            <span className="muted" style={{ fontSize: 11, fontStyle: 'italic' }} title="the actor tree is being re-read — holders show once it lands">checking grants…</span>
           ) : (
             <span className="muted" style={{ fontSize: 11 }} title={'no device or agent holds a grant on it — "clear orphaned" removes it'}>orphaned</span>
           )}
@@ -195,8 +201,8 @@ function ChannelRow({ channel, registry }: { channel: ChannelDef; registry: Chan
               <button className="btn sm" onClick={() => { setEditing(true); setName(channel.name); setNote(channel.note ?? ''); }}>rename</button>
               <button
                 className="btn sm"
-                disabled={inUse || busy}
-                title={inUse ? 'in use — revoke the holders\' grants first (devices page / actor page)' : undefined}
+                disabled={inUse || busy || registry.actorsSyncing === true}
+                title={inUse ? 'in use — revoke the holders\' grants first (devices page / actor page)' : registry.actorsSyncing ? 'checking who holds a grant on it…' : undefined}
                 onClick={() => void del()}
               >
                 delete
