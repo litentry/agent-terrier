@@ -44,7 +44,7 @@ Builds the Dockerfile's **stage 1 (`foreign`)** — the only steps that reach th
 | Env key | What it is |
 |---|---|
 | `VE_BASE_DSH` | the published `foreign` stage — Node + dsh + OV plugin + openviking preinstalled |
-| `VE_BASE_DSH_FLAT` | the #598 ONE-layer republication (`setup-image.sh --flatten-base --family dsh`, on the broker) — builds prefer it once set |
+| `VE_BASE_DSH_FLAT` | the #598 ONE-layer republication (`setup-image.sh --flatten-base --family dsh`, on the broker) — builds prefer it once set. **Discovered, never hand-carried** (2026-09-17): the laptop cycle derives the ref from `VE_BASE_DSH` (`<repo>-flat:<same tag>`), asks the CR (bounded, 90 s), records it in the laptop's env file and pulls it once — the value the flatten writes on the broker never has to be copied |
 | `VE_BASE_AIO` | CR mirror of the AIO sandbox base the Dockerfile builds FROM |
 
 Run this **only on a deliberate pin bump** (the #619 gate files the PR). The published tag ENCODES all three pins (`<dsh>-ovp<plugin>-ov<pip>`), so a bump cannot silently reuse the old base, and the final stage re-asserts the installed dsh version so a stale or wrong base fails the build loudly.
@@ -83,7 +83,7 @@ After the flip, new spawns, the #577 **"update runtime"** clicks and the #594 le
 The refusal counts **every blob operation, existence checks included**: an 84-layer image was 429'd from the Mac with *zero* bytes pending upload. Two structural rules keep every push deterministically under the measured-safe ~18 ops:
 
 1. **Thin final stage** (Dockerfile): the shipped stage adds a handful of `COPY` layers over the base — new files ride an existing COPY, never a new layer without re-checking the budget.
-2. **Flat base** — `setup-image.sh --flatten-base --family dsh` on the **broker**: re-publishes `VE_BASE_DSH` as a **single-layer** image (config metadata re-applied, env-key parity asserted — the `function_exited` class), recorded as `VE_BASE_DSH_FLAT` and preferred by every build once set. Idempotent; re-run after every base re-seed. Its own push is few-op/many-byte (single blob, intra-region; `docker push` resumes per-LAYER).
+2. **Flat base** — `setup-image.sh --flatten-base --family dsh` on the **broker**: re-publishes `VE_BASE_DSH` as a **single-layer** image (config metadata re-applied, env-key parity asserted — the `function_exited` class), recorded as `VE_BASE_DSH_FLAT` and preferred by every build once set. Idempotent; re-run after every base re-seed. Its own push is few-op/many-byte (single blob, intra-region; `docker push` resumes per-LAYER). The record lands on the **broker's** checkout; the laptop cycle does not read it — it derives the same ref and confirms it in the CR, so a flatten run from the fleet's row is enough (the 2026-09-17 trap: the flatten succeeded and the very next laptop build still warned "no VE_BASE_DSH_FLAT").
 
 ### The CR tier is a real ceiling — know it before blaming the pipeline
 
