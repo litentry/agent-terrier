@@ -62,6 +62,8 @@ import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
 import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { DelegateLifecycle } from '@/lib/generated/DelegateLifecycle';
+import type { KnowledgeHistory } from '@/lib/generated/KnowledgeHistory';
+import type { KnowledgeVersionBody } from '@/lib/generated/KnowledgeVersionBody';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { Sensitivity } from '@/lib/generated/Sensitivity';
 import type { ApiChannel } from '@/lib/generated/ApiChannel';
@@ -411,6 +413,16 @@ export class DaemonBackend implements AgentKeysClient {
 
   async delegateLifecycle(channelId: string): Promise<Result<{ lifecycle: DelegateLifecycle | null; event_ts_millis: number | null }>> {
     return this.getJson(`/v1/master/agent/lifecycle?channel_id=${encodeURIComponent(channelId)}`);
+  }
+
+  // #695 step G — GET /v1/master/knowledge/history (+ /version): what an item's
+  // commits replaced, kept on origin as keyed objects.
+  async knowledgeHistory(ns: string, key: string): Promise<Result<KnowledgeHistory>> {
+    return this.getJson(`/v1/master/knowledge/history?ns=${encodeURIComponent(ns)}&key=${encodeURIComponent(key)}`);
+  }
+
+  async knowledgeVersion(ns: string, key: string, n: number): Promise<Result<KnowledgeVersionBody>> {
+    return this.getJson(`/v1/master/knowledge/history/version?ns=${encodeURIComponent(ns)}&key=${encodeURIComponent(key)}&n=${n}`);
   }
 
   async chatPoll(

@@ -1736,7 +1736,7 @@ async fn curate_resource(
         }
     }
     let next_version = reg.find(&c.id).map(|i| i.version + 1).unwrap_or(1);
-    if let Err((status, reason)) = resource_entry_remove(state, &c.ns, &c.id).await {
+    if let Err((status, reason)) = resource_entry_remove(state, &c.ns, &c.id, "edit").await {
         return (status, Json(serde_json::json!({ "error": reason }))).into_response();
     }
     let entry = agentkeys_backend_client::protocol::web_api::ApiMemoryEntry {
@@ -1984,7 +1984,7 @@ pub async fn remove_resource(
             }
         }
     }
-    if let Err((status, reason)) = resource_entry_remove(&state, &row.ns, &row.id).await {
+    if let Err((status, reason)) = resource_entry_remove(&state, &row.ns, &row.id, "remove").await {
         return (status, Json(serde_json::json!({ "error": reason }))).into_response();
     }
     reg.remove(&id);

@@ -8,6 +8,8 @@ import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
 import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { DelegateLifecycle } from '@/lib/generated/DelegateLifecycle';
+import type { KnowledgeHistory } from '@/lib/generated/KnowledgeHistory';
+import type { KnowledgeVersionBody } from '@/lib/generated/KnowledgeVersionBody';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { Actor, AuditEvent, Namespace, PairingRequest, ScopeBits, Worker } from '@/app/_components/types';
 import type { ApiAgentUpdateResult } from '@/lib/generated/ApiAgentUpdateResult';
@@ -832,6 +834,9 @@ export interface AgentKeysClient {
   listResources?(): Promise<Result<{ items: ResourceItemRow[]; storage: string }>>;
   /** #693 — the delegate's latest launch / pull stage, from the tail of its chat feed. */
   delegateLifecycle?(channelId: string): Promise<Result<{ lifecycle: DelegateLifecycle | null; event_ts_millis: number | null }>>;
+  /** #695 step G — an item's stored previous versions (newest first) and one version's text. */
+  knowledgeHistory?(ns: string, key: string): Promise<Result<KnowledgeHistory>>;
+  knowledgeVersion?(ns: string, key: string, n: number): Promise<Result<KnowledgeVersionBody>>;
   resourceAdd?(input: {
     id: string;
     name: string;

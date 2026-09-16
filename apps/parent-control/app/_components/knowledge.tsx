@@ -1,38 +1,48 @@
 'use client';
 
-// The KNOWLEDGE page (owner decision 2026-09-13): ONE surface for everything
-// the household's assistants may know — the master's canonical memory
-// namespaces AND the typed items apps bind (arch.md §5 `resource item`)
-// that used to sit on two pages ("memory" and "resources"). The wire is
-// unchanged: entries live in `knowledge:<ns>`, a curated item is a registry row
-// over one of those entries, and an app reads a namespace through the
-// read-only `knowledge:<ns>` grant its install minted. What changed is the view:
-// by namespace (the grant unit — each namespace names who reads it) or grouped
-// by type / sensitivity / tag; one add-or-upload modal (shared with the
-// install wizard); every item is typed (D-K2) — an older untyped note gets its
-// row from "give it a type".
+// The KNOWLEDGE page, shaped like a code host (#695 step F2, plan §9): every
+// namespace is a REPOSITORY — the grant unit, stored once on origin (the
+// master's canonical memory), cloned read-only into each reader's sandbox.
+// The list page is the repository list (name, visibility = the highest tier
+// inside, who reads it, updated, pending proposals) plus an "all items" view
+// grouped by type / sensitivity / tag and the proposals queue. A repository
+// opens to its tabs: Files (the items — typed items are registry rows over
+// canonical entries, an older untyped note gets its row from "give it a
+// type"), Proposals (what delegates pushed for THIS namespace; accept =
+// merge), History (#695 step G — every text a commit replaced, with diffs and
+// "restore as next version"), Access (who reads it and through which grant),
+// Sync (each clone's launch / pull stage, with "sync now"). The wire is
+// unchanged: entries live in `knowledge:<ns>`, an app reads a namespace only
+// through the read-only grant its install minted.
 
-import { Fragment, useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
+import type { KnowledgeHistory } from '@/lib/generated/KnowledgeHistory';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { AgentKeysClient, ConfigPreset, ConnectionStatus, MemoryCategory } from '@/lib/client/types';
 import {
   buildKnowledgeItems,
   filterKnowledge,
+  filterNamespaces,
   groupKnowledge,
   itemReaders,
   knowledgeNamespaces,
+  liveApps,
+  namespaceSummaries,
+  proposalsIn,
   type KnowledgeEntry,
   type KnowledgeGroupBy,
   type KnowledgeItem,
   type KnowledgeNamespace,
   type NamespaceReaders,
+  type NamespaceSummary,
 } from '@/lib/client/knowledge';
+import { knowledgeService } from '@/lib/constants';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import { CeremonyRunner } from './ceremony';
-import { Chip, DiffView, EmptyState, Modal, PageHead, Panel, Tabs } from './shared';
+import { Chip, DiffView, EmptyState, LifecycleChip, Modal, PageHead, Panel, Tabs } from './shared';
 import { errorJson } from '@/lib/client/diff';
 import type { Actor, CeremonyStep, PreservedMemory } from './types';
 
@@ -69,6 +79,32 @@ export type KnowledgeUploadInput = ItemMeta & { filename: string; content_type: 
 /** `stale` = the daemon refused a stale base — the modal shows the diff and lets the owner reload or overwrite. */
 export type KnowledgeSaveOutcome = 'ok' | 'stale' | 'error';
 
+type ListTab = 'repositories' | 'items' | 'proposals';
+type NsTab = 'files' | 'proposals' | 'history' | 'access' | 'sync';
+type View = { kind: 'list'; tab: ListTab } | { kind: 'ns'; ns: string; tab: NsTab };
+
+/** A stored previous text to save again as the next version (History → restore). */
+type Restore = { body: string; label: string };
+type ModalState = { edit?: ResourceItemRow; curate?: KnowledgeEntry; ns?: string; restore?: Restore };
+
+const ageOf = (ts: number): string => {
+  if (!ts) return '—';
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+};
+
+const shortOmni = (o: string): string => {
+  const h = o.replace(/^0x/, '');
+  return h.length > 12 ? `${h.slice(0, 6)}…${h.slice(-4)}` : h;
+};
+
+/** The delegate chat feed a delegate actor's lifecycle rides (the same id the
+ *  Delegates page polls). */
+const delegateFeed = (label: string): string => `opchat-${label.replace(' (revoked)', '')}`;
+
 export function KnowledgePage({
   client,
   showToast,
@@ -94,6 +130,8 @@ export function KnowledgePage({
   onRejectInbox,
   onRefreshInbox,
   onViewInboxBody,
+  onOpenActor,
+  onOpenApps,
 }: {
   client: AgentKeysClient;
   showToast: (msg: string, sticky?: boolean) => void;
@@ -124,18 +162,25 @@ export function KnowledgePage({
   onRefreshInbox: () => void;
   /** #339 P2 — lazily fetch one proposal's full body for review. */
   onViewInboxBody: (s3Key: string) => Promise<string>;
+  /** Access tab — a delegate's grants are edited on its actor page. */
+  onOpenActor?: (id: string) => void;
+  /** Access tab — an app's grants are its install sheet, on the Applications page. */
+  onOpenApps?: () => void;
 }) {
   const connected = status.kind === 'connected';
   const busy = planting || initializing;
   const [resources, setResources] = useState<ResourceItemRow[]>([]);
   const [apps, setApps] = useState<AppInstanceRow[]>([]);
   const [registry, setRegistry] = useState('ok');
-  const [groupBy, setGroupBy] = useState<KnowledgeGroupBy>('namespace');
+  const [view, setView] = useState<View>({ kind: 'list', tab: 'repositories' });
+  const [groupBy, setGroupBy] = useState<KnowledgeGroupBy>('type');
   const [query, setQuery] = useState('');
+  const [nsQuery, setNsQuery] = useState('');
   const [typedOnly, setTypedOnly] = useState(false);
   // null = closed; `edit` pre-fills a curated item (saves as the next version);
-  // `curate` registers an older untyped note as a typed item under its own key.
-  const [modal, setModal] = useState<null | { edit?: ResourceItemRow; curate?: KnowledgeEntry }>(null);
+  // `curate` registers an older untyped note as a typed item under its own key;
+  // `ns` pre-sets the namespace of a new item; `restore` carries an old text.
+  const [modal, setModal] = useState<null | ModalState>(null);
 
   const refresh = useCallback(async () => {
     if (client.listResources) {
@@ -158,12 +203,25 @@ export function KnowledgePage({
 
   const namespaces = useMemo(() => knowledgeNamespaces(categories, resources, entriesByNs, apps, actors), [categories, resources, entriesByNs, apps, actors]);
   const items = useMemo(() => buildKnowledgeItems(resources, entriesByNs), [resources, entriesByNs]);
+  const summaries = useMemo(() => namespaceSummaries(namespaces, items, inbox), [namespaces, items, inbox]);
   const shown = useMemo(() => filterKnowledge(items, query, typedOnly), [items, query, typedOnly]);
   const groups = useMemo(() => groupKnowledge(shown, groupBy, namespaces), [shown, groupBy, namespaces]);
   const hasAnything = categories.length > 0 || resources.length > 0;
   const unopened = namespaces.filter((n) => n.notes === null);
   const readingApps = new Set(namespaces.flatMap((n) => n.readers.apps)).size;
   const canCurate = !!client.resourceAdd && connected;
+
+  const openNs = view.kind === 'ns' ? summaries.find((n) => n.ns === view.ns) : undefined;
+  const nsItems = useMemo(() => (view.kind === 'ns' ? filterKnowledge(items.filter((it) => it.ns === view.ns), query, typedOnly) : []), [view, items, query, typedOnly]);
+  const nsProposals = view.kind === 'ns' ? proposalsIn(inbox, view.ns) : [];
+
+  // Opening a repository decrypts its notes once (the shell's lazy cache).
+  useEffect(() => {
+    if (view.kind === 'ns' && connected && entriesByNs[view.ns] === undefined) onLoadCategory(view.ns);
+  }, [view, connected, entriesByNs, onLoadCategory]);
+
+  const goList = (tab: ListTab = 'repositories') => setView({ kind: 'list', tab });
+  const goNs = (ns: string, tab: NsTab = 'files') => setView({ kind: 'ns', ns, tab });
 
   // A change to a namespace this page already decrypted must re-decrypt it, or
   // the shell's cache keeps showing the pre-change entry.
@@ -192,14 +250,14 @@ export function KnowledgePage({
     const readers = itemReaders(it, apps);
     const q = readers.bound.length > 0
       ? `Remove "${row.name}"? ${readers.bound.join(', ')} ${readers.bound.length === 1 ? 'is' : 'are'} bound to it — the binding stays, the item is gone. Remove anyway?`
-      : `Remove "${row.name}" (v${row.version}) from the household's knowledge?`;
+      : `Remove "${row.name}" (v${row.version}) from the household's knowledge? Its text stays in History.`;
     if (!window.confirm(q)) return;
     const r = await client.resourceRemove({ id: row.id, force: readers.bound.length > 0 });
     if (!r.ok) {
       showToast(`remove failed — ${r.status?.detail ?? 'error'}`, true);
       return;
     }
-    showToast(r.data.removed ? `removed ${row.id} — its entry is gone from knowledge:${row.ns}` : `${row.id} was already gone`);
+    showToast(r.data.removed ? `removed ${row.id} — its entry is gone from knowledge:${row.ns} (kept in History)` : `${row.id} was already gone`);
     await settle(row.ns);
   };
 
@@ -230,12 +288,29 @@ export function KnowledgePage({
     return 'ok';
   };
 
-  return (
+  const editOf = (it: KnowledgeItem): (() => void) | undefined =>
+    it.curated ? () => setModal({ edit: it.curated! }) : it.entry && canCurate ? () => setModal({ curate: it.entry! }) : undefined;
+
+  const restoreOf = (it: KnowledgeItem, restore: Restore) => {
+    if (it.curated) setModal({ edit: it.curated, restore });
+    else if (it.entry) setModal({ curate: it.entry, restore });
+  };
+
+  const filterBox = (
+    <span style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+      <input style={{ ...INPUT, width: 180, padding: '4px 8px' }} placeholder="filter items…" value={query} onChange={(e) => setQuery(e.target.value)} />
+      <label className="muted" style={{ display: 'flex', gap: 5, alignItems: 'center', fontSize: 12 }}>
+        <input type="checkbox" checked={typedOnly} onChange={(e) => setTypedOnly(e.target.checked)} /> typed only
+      </label>
+    </span>
+  );
+
+  const listBody = (
     <>
       <PageHead
         crumb="household · knowledge"
         title="Knowledge"
-        desc="Everything your household's assistants may know, kept once per namespace. An app reads a namespace only through the read-only grant you sign at install; its sandbox keeps a derived copy the daemon refreshes every few minutes and can never write back here."
+        desc="Every namespace is a repository: kept once on origin, cloned read-only into each app or delegate you grant it to, refreshed every few minutes. Open one for its files, proposals, history, access and sync."
         actions={
           <>
             <button className="btn primary" disabled={!canCurate} onClick={() => setModal({})}>+ add knowledge</button>
@@ -243,19 +318,6 @@ export function KnowledgePage({
           </>
         }
       />
-
-      {/* #339 P2 — absorption-inbox curate queue: delegate proposals (the
-          master-hub "push" channel) awaiting accept-into-canonical or reject. */}
-      {connected && inbox.length > 0 && (
-        <InboxPanel
-          inbox={inbox}
-          busy={inboxBusy}
-          onAccept={onAcceptInbox}
-          onReject={onRejectInbox}
-          onRefresh={onRefreshInbox}
-          onViewBody={onViewInboxBody}
-        />
-      )}
 
       {registry !== 'ok' && connected && (
         <div className="banner warn" style={{ marginBottom: 14 }}>
@@ -282,102 +344,218 @@ export function KnowledgePage({
       )}
 
       {initializing && (
-        <Panel title="── authoring taxonomy">
+        <Panel title="authoring taxonomy">
           <CeremonyRunner steps={INIT_STEPS} onDone={onInitDone} stepMs={560} />
         </Panel>
       )}
 
       {planting && (
-        <Panel title="── planting prepared memory">
+        <Panel title="planting prepared memory">
           <CeremonyRunner steps={PLANT_STEPS} onDone={onPlantDone} stepMs={620} />
         </Panel>
       )}
 
-      {hasAnything && (
+      {hasAnything && view.kind === 'list' && (
         <>
           <div className="stats">
-            <div className="stat"><div className="v">{namespaces.length}</div><div className="k">namespaces</div></div>
+            <div className="stat"><div className="v">{summaries.length}</div><div className="k">repositories</div></div>
             <div className="stat"><div className="v">{resources.length}</div><div className="k">typed items</div></div>
             <div className="stat"><div className="v">{readingApps}</div><div className="k">apps reading</div></div>
+            <div className="stat"><div className="v">{inbox.length}</div><div className="k">proposals pending</div></div>
           </div>
 
-          <div className="banner">
-            <span className="lbl">namespace = the grant</span>
-            <span>
-              Binding one item to an app grants the app <strong>its whole namespace</strong>; the same namespace bound to several apps is stored once, never copied.
-              Every item has a type — a plain note by default; an app slot asks for a type, and the install wizard retypes an item when you bind it. An older untyped note gets its row from <strong>give it a type</strong>.
-              <button className="btn ghost sm" style={{ marginLeft: 10 }} onClick={onPlant}>＋ plant demo archive</button>
-            </span>
-          </div>
-
-          <Tabs<KnowledgeGroupBy>
+          <Tabs<ListTab>
             items={[
-              { key: 'namespace', label: 'by namespace', badge: namespaces.length },
-              { key: 'type', label: 'by type' },
-              { key: 'sensitivity', label: 'by sensitivity' },
-              { key: 'tag', label: 'by tag' },
+              { key: 'repositories', label: 'repositories', badge: summaries.length },
+              { key: 'items', label: 'all items', badge: items.length },
+              { key: 'proposals', label: 'proposals', badge: inbox.length || undefined, attention: inbox.length > 0 },
             ]}
-            active={groupBy}
-            onChange={setGroupBy}
+            active={view.tab}
+            onChange={(t) => goList(t)}
             right={
-              <span style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                <input style={{ ...INPUT, width: 180, padding: '4px 8px' }} placeholder="filter…" value={query} onChange={(e) => setQuery(e.target.value)} />
-                <label className="muted" style={{ display: 'flex', gap: 5, alignItems: 'center', fontSize: 12 }}>
-                  <input type="checkbox" checked={typedOnly} onChange={(e) => setTypedOnly(e.target.checked)} /> typed only
-                </label>
-              </span>
+              view.tab === 'repositories'
+                ? <input style={{ ...INPUT, width: 200, padding: '4px 8px' }} placeholder="find a repository…" value={nsQuery} onChange={(e) => setNsQuery(e.target.value)} />
+                : view.tab === 'items' ? filterBox : undefined
             }
           />
 
-          {groupBy !== 'namespace' && unopened.length > 0 && (
-            <div className="muted" style={{ fontSize: 11.5, margin: '10px 0' }}>
-              {unopened.length} namespace{unopened.length === 1 ? '' : 's'} not opened yet — {unopened.length === 1 ? 'its' : 'their'} notes are not grouped here.{' '}
-              <button className="btn ghost sm" onClick={() => unopened.forEach((n) => onLoadCategory(n.ns))}>open all</button>
-            </div>
+          {view.tab === 'repositories' && (
+            <>
+              <RepoList summaries={filterNamespaces(summaries, nsQuery)} onOpen={(ns) => goNs(ns)} />
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 10, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span>Binding one item to an app grants the app its <strong>whole repository</strong>; the same repository bound to several apps is stored once, never copied.</span>
+                <button className="btn ghost sm" onClick={onPlant}>＋ plant demo archive</button>
+              </div>
+            </>
           )}
 
-          {groups.length === 0 && <div className="muted" style={{ padding: 16 }}>Nothing matches.</div>}
-
-          {groups.map((g) => {
-            const n = groupBy === 'namespace' ? namespaces.find((x) => x.ns === g.key) : undefined;
-            return (
-              <Panel key={g.key} title={`── ${g.label}${n ? '' : ` · ${g.items.length}`}`} flush right={n ? <Readers readers={n.readers} /> : undefined}>
-                {g.items.map((it) => (
-                  <KnowledgeRow
-                    key={`${it.ns}/${it.key}`}
-                    item={it}
-                    showNs={!n}
-                    readers={itemReaders(it, apps)}
-                    onOpen={() => void openItem(it)}
-                    onEdit={it.curated ? () => setModal({ edit: it.curated! }) : it.entry && canCurate ? () => setModal({ curate: it.entry! }) : undefined}
-                    onRemove={it.curated && client.resourceRemove ? () => void removeItem(it) : undefined}
-                  />
+          {view.tab === 'items' && (
+            <>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', margin: '12px 0 10px', flexWrap: 'wrap' }}>
+                <span className="muted" style={{ fontSize: 11.5 }}>group by</span>
+                {(['type', 'sensitivity', 'tag', 'namespace'] as KnowledgeGroupBy[]).map((g) => (
+                  <button key={g} className={`btn sm${groupBy === g ? ' primary' : ''}`} onClick={() => setGroupBy(g)}>{g}</button>
                 ))}
-                {n && (
-                  <div className="muted" style={{ padding: '8px 16px', fontSize: 11.5, display: 'flex', gap: 10, alignItems: 'center' }}>
-                    {n.notes === null ? (
-                      <>
-                        <span>{n.curated} typed · notes decrypt on open</span>
-                        <button className="btn sm" onClick={() => onLoadCategory(n.ns)}>open notes</button>
-                      </>
-                    ) : n.notes === 'loading' ? (
-                      <span>decrypting knowledge:{n.ns}…</span>
-                    ) : (
-                      <span>{n.curated} typed · {n.notes} untyped note{n.notes === 1 ? '' : 's'}</span>
-                    )}
-                  </div>
+                {unopened.length > 0 && (
+                  <span className="muted" style={{ fontSize: 11.5, marginLeft: 8 }}>
+                    {unopened.length} repositor{unopened.length === 1 ? 'y' : 'ies'} not opened yet — {unopened.length === 1 ? 'its' : 'their'} notes are not listed.{' '}
+                    <button className="btn ghost sm" onClick={() => unopened.forEach((n) => onLoadCategory(n.ns))}>open all</button>
+                  </span>
                 )}
-              </Panel>
-            );
-          })}
+              </div>
+              {groups.length === 0 && <div className="muted" style={{ padding: 16 }}>Nothing matches.</div>}
+              {groups.map((g) => (
+                <Panel key={g.key} title={`${g.label} · ${g.items.length}`} flush>
+                  {g.items.map((it) => (
+                    <KnowledgeRow
+                      key={`${it.ns}/${it.key}`}
+                      item={it}
+                      showNs
+                      readers={itemReaders(it, apps)}
+                      onOpen={() => void openItem(it)}
+                      onOpenNs={() => goNs(it.ns)}
+                      onEdit={editOf(it)}
+                      onRemove={it.curated && client.resourceRemove ? () => void removeItem(it) : undefined}
+                    />
+                  ))}
+                </Panel>
+              ))}
+            </>
+          )}
+
+          {view.tab === 'proposals' && (
+            inbox.length > 0 ? (
+              <InboxPanel
+                inbox={inbox}
+                busy={inboxBusy}
+                onAccept={onAcceptInbox}
+                onReject={onRejectInbox}
+                onRefresh={onRefreshInbox}
+                onViewBody={onViewInboxBody}
+                onOpenNs={(ns) => goNs(ns, 'proposals')}
+              />
+            ) : (
+              <div className="muted" style={{ padding: 16, fontSize: 12.5 }}>
+                No proposals pending. A delegate that learns something pushes it here as a proposal for you to merge or reject — nothing enters a repository without you.{' '}
+                <button className="btn ghost sm" onClick={onRefreshInbox} disabled={inboxBusy}>↻ refresh</button>
+              </div>
+            )
+          )}
         </>
       )}
+    </>
+  );
+
+  const nsBody = view.kind === 'ns' && (
+    <>
+      <PageHead
+        crumb={
+          <>
+            <span className="clickable" style={{ cursor: 'pointer', color: 'var(--accent)' }} onClick={() => goList()}>knowledge</span>
+            {' / '}
+            <code>{view.ns}</code>
+          </>
+        }
+        title={openNs?.label ?? view.ns}
+        desc={
+          openNs
+            ? <>
+                <code>knowledge:{openNs.ns}</code> · {openNs.curated} typed · {openNs.notes === null ? 'notes not opened' : openNs.notes === 'loading' ? 'decrypting notes…' : `${openNs.notes} untyped note${openNs.notes === 1 ? '' : 's'}`} · visibility <strong>{openNs.visibility}</strong> · updated {openNs.updated}
+              </>
+            : <>This repository is not in the taxonomy and holds no item — open it from the list once something is planted.</>
+        }
+        actions={
+          <>
+            <button className="btn primary" disabled={!canCurate} onClick={() => setModal({ ns: view.ns })}>+ add to {view.ns}</button>
+            <button className="btn" onClick={() => void refresh()}>refresh</button>
+            <button className="btn" onClick={() => goList()}>← all repositories</button>
+          </>
+        }
+      />
+
+      <Tabs<NsTab>
+        items={[
+          { key: 'files', label: 'files', badge: nsItems.length },
+          { key: 'proposals', label: 'proposals', badge: nsProposals.length || undefined, attention: nsProposals.length > 0 },
+          { key: 'history', label: 'history' },
+          { key: 'access', label: 'access', badge: openNs ? openNs.readers.apps.length + openNs.readers.delegates.length : 0 },
+          { key: 'sync', label: 'sync' },
+        ]}
+        active={view.tab}
+        onChange={(t) => goNs(view.ns, t)}
+        right={view.tab === 'files' ? filterBox : undefined}
+      />
+
+      {view.tab === 'files' && (
+        <Panel flush>
+          {nsItems.map((it) => (
+            <KnowledgeRow
+              key={`${it.ns}/${it.key}`}
+              item={it}
+              showNs={false}
+              readers={itemReaders(it, apps)}
+              onOpen={() => void openItem(it)}
+              onEdit={editOf(it)}
+              onRemove={it.curated && client.resourceRemove ? () => void removeItem(it) : undefined}
+            />
+          ))}
+          {nsItems.length === 0 && (
+            <div className="muted" style={{ padding: 16, fontSize: 12.5 }}>
+              {openNs?.notes === 'loading' ? `decrypting knowledge:${view.ns}…` : query ? 'Nothing matches.' : 'Nothing in this repository yet — add an item, or accept a proposal.'}
+            </div>
+          )}
+          {openNs && openNs.notes === null && (
+            <div className="muted" style={{ padding: '8px 16px', fontSize: 11.5, display: 'flex', gap: 10, alignItems: 'center' }}>
+              <span>{openNs.curated} typed · notes decrypt on open</span>
+              <button className="btn sm" onClick={() => onLoadCategory(view.ns)}>open notes</button>
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {view.tab === 'proposals' && (
+        nsProposals.length > 0 ? (
+          <InboxPanel
+            inbox={nsProposals}
+            busy={inboxBusy}
+            onAccept={onAcceptInbox}
+            onReject={onRejectInbox}
+            onRefresh={onRefreshInbox}
+            onViewBody={onViewInboxBody}
+          />
+        ) : (
+          <div className="muted" style={{ padding: 16, fontSize: 12.5 }}>
+            No proposals for <code>{view.ns}</code>. When a delegate that reads this repository learns something, it lands here for you to merge or reject.{' '}
+            <button className="btn ghost sm" onClick={onRefreshInbox} disabled={inboxBusy}>↻ refresh</button>
+          </div>
+        )
+      )}
+
+      {view.tab === 'history' && (
+        <HistoryTab client={client} ns={view.ns} items={items.filter((it) => it.ns === view.ns)} onRestore={restoreOf} />
+      )}
+
+      {view.tab === 'access' && openNs && (
+        <AccessTab ns={view.ns} apps={apps} actors={actors} onOpenActor={onOpenActor} onOpenApps={onOpenApps} />
+      )}
+
+      {view.tab === 'sync' && (
+        <SyncTab ns={view.ns} apps={apps} actors={actors} />
+      )}
+    </>
+  );
+
+  return (
+    <>
+      {view.kind === 'list' ? listBody : nsBody}
 
       {modal && (
         <KnowledgeItemModal
           client={client}
           edit={modal.edit}
           curate={modal.curate}
+          initialNs={modal.ns}
+          restore={modal.restore}
           namespaces={namespaces}
           onClose={() => setModal(null)}
           onAdd={add}
@@ -385,6 +563,34 @@ export function KnowledgePage({
         />
       )}
     </>
+  );
+}
+
+/** The repository list — one row per namespace, the way a code host lists
+ *  repositories: name, visibility (the highest tier inside), who reads it,
+ *  what is pending, when it last changed. */
+function RepoList({ summaries, onOpen }: { summaries: NamespaceSummary[]; onOpen: (ns: string) => void }) {
+  if (summaries.length === 0) return <div className="muted" style={{ padding: 16 }}>No repository matches.</div>;
+  return (
+    <Panel flush>
+      {summaries.map((n) => (
+        <div key={n.ns} className="feed-row" style={{ padding: '12px 16px', display: 'grid', gridTemplateColumns: 'minmax(0, 1.6fr) minmax(0, 1fr) auto', gap: 12, alignItems: 'start' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span className="clickable" style={{ fontWeight: 600, color: 'var(--accent)', cursor: 'pointer', fontSize: 14 }} onClick={() => onOpen(n.ns)}>{n.label}</span>
+              <code className="muted" style={{ fontSize: 11 }}>knowledge:{n.ns}</code>
+              <Chip kind={n.visibility === 'sensitive' ? 'bad' : n.visibility === 'safe' ? 'ok' : 'default'}>{n.visibility}</Chip>
+              {n.proposals > 0 && <Chip kind="warn">{n.proposals} proposal{n.proposals === 1 ? '' : 's'}</Chip>}
+            </div>
+            <div className="muted" style={{ fontSize: 11.5, marginTop: 3 }}>
+              {n.curated} typed · {n.notes === null ? 'notes not opened' : n.notes === 'loading' ? 'decrypting…' : `${n.notes} untyped note${n.notes === 1 ? '' : 's'}`} · updated {n.updated}
+            </div>
+          </div>
+          <Readers readers={n.readers} />
+          <button className="btn sm" onClick={() => onOpen(n.ns)}>open →</button>
+        </div>
+      ))}
+    </Panel>
   );
 }
 
@@ -405,6 +611,7 @@ function KnowledgeRow({
   showNs,
   readers,
   onOpen,
+  onOpenNs,
   onEdit,
   onRemove,
 }: {
@@ -412,6 +619,7 @@ function KnowledgeRow({
   showNs: boolean;
   readers: { bound: string[]; namespace: string[] };
   onOpen: () => void;
+  onOpenNs?: () => void;
   onEdit?: () => void;
   onRemove?: () => void;
 }) {
@@ -426,7 +634,13 @@ function KnowledgeRow({
           {!row && <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>untyped</span>}
         </div>
         <div className="muted" style={{ fontSize: 11 }}>
-          <code>{showNs ? `${item.ns}/` : ''}{item.key}</code> · {item.version} · {item.bytes} B · {item.updated}
+          {showNs && (
+            <>
+              <span className="clickable" style={{ cursor: onOpenNs ? 'pointer' : undefined, color: onOpenNs ? 'var(--accent)' : undefined }} onClick={onOpenNs}>{item.ns}</span>
+              {' / '}
+            </>
+          )}
+          <code>{item.key}</code> · {item.version} · {item.bytes} B · {item.updated}
           {row?.filename ? <> · from <code>{row.filename}</code>{row.raw_object_key ? ' · file kept' : ' · file not kept'}</> : null}
         </div>
         {(item.tags.length > 0 || row?.name_zh) && (
@@ -451,15 +665,338 @@ function KnowledgeRow({
   );
 }
 
+// ── History (#695 step G) ────────────────────────────────────────────────────
+// Every text a commit replaced — an edit, a merge, a removal, a re-plant — is
+// kept on origin as a keyed object (a ring of N per item); the daemon lists
+// them newest first. A diff is against the CURRENT text; "restore" opens the
+// edit modal with the old text, so the restore is itself a commit (the next
+// version), refused like any edit if the item changed meanwhile (D-K5).
+
+function HistoryTab({
+  client,
+  ns,
+  items,
+  onRestore,
+}: {
+  client: AgentKeysClient;
+  ns: string;
+  items: KnowledgeItem[];
+  onRestore: (item: KnowledgeItem, restore: Restore) => void;
+}) {
+  const [key, setKey] = useState<string>(items[0]?.key ?? '');
+  useEffect(() => {
+    if (!items.some((i) => i.key === key)) setKey(items[0]?.key ?? '');
+  }, [items, key]);
+  const item = items.find((i) => i.key === key);
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 240px) minmax(0, 1fr)', gap: 14, alignItems: 'start' }}>
+      <Panel title="items" flush>
+        {items.map((it) => (
+          <button
+            key={it.key}
+            type="button"
+            onClick={() => setKey(it.key)}
+            style={{
+              display: 'block', width: '100%', textAlign: 'left', background: it.key === key ? 'var(--bg-elev)' : 'none', border: 0,
+              borderBottom: '1px solid var(--rule-hair)', padding: '8px 14px', font: 'inherit', fontSize: 12.5, cursor: 'pointer', color: 'var(--ink)',
+              fontWeight: it.key === key ? 600 : 400,
+            }}
+          >
+            {it.name}
+            <span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>{it.version}</span>
+          </button>
+        ))}
+        {items.length === 0 && <div className="muted" style={{ padding: 14, fontSize: 12 }}>Nothing in this repository yet.</div>}
+      </Panel>
+      {item ? (
+        <HistoryPanel key={item.key} client={client} ns={ns} item={item} onRestore={(restore) => onRestore(item, restore)} />
+      ) : (
+        <div className="muted" style={{ padding: 16, fontSize: 12.5 }}>Pick an item to see the texts it had before.</div>
+      )}
+    </div>
+  );
+}
+
+type Opened = Record<number, string | 'loading' | { error: string }>;
+
+function HistoryPanel({
+  client,
+  ns,
+  item,
+  onRestore,
+}: {
+  client: AgentKeysClient;
+  ns: string;
+  item: KnowledgeItem;
+  onRestore: (restore: Restore) => void;
+}) {
+  const [hist, setHist] = useState<KnowledgeHistory | 'loading' | { error: string }>('loading');
+  const [current, setCurrent] = useState<string | null>(item.entry?.body ?? null);
+  const [opened, setOpened] = useState<Opened>({});
+  const load = useCallback(async () => {
+    if (!client.knowledgeHistory) {
+      setHist({ error: 'this backend keeps no history' });
+      return;
+    }
+    setHist('loading');
+    const r = await client.knowledgeHistory(ns, item.key);
+    setHist(r.ok ? r.data : { error: r.status?.detail ?? 'error' });
+  }, [client, ns, item.key]);
+  useEffect(() => {
+    let alive = true;
+    void load();
+    if (current === null) {
+      void client.getMemoryEntries(ns, item.key).then((r) => {
+        if (alive && r.ok) setCurrent(r.data.find((e) => e.key === item.key)?.body ?? r.data[0]?.body ?? '');
+      });
+    }
+    return () => {
+      alive = false;
+    };
+    // the current text is fetched once per item; `current` is deliberately not a dependency
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, ns, item.key, load]);
+
+  const toggle = async (n: number) => {
+    if (opened[n] !== undefined) {
+      setOpened((p) => {
+        const c = { ...p };
+        delete c[n];
+        return c;
+      });
+      return;
+    }
+    if (!client.knowledgeVersion) return;
+    setOpened((p) => ({ ...p, [n]: 'loading' }));
+    const r = await client.knowledgeVersion(ns, item.key, n);
+    setOpened((p) => ({ ...p, [n]: r.ok ? r.data.body : { error: r.status?.detail ?? 'error' } }));
+  };
+
+  const byLabel = (by: string): ReactNode =>
+    by === 'edit' ? 'you edited it'
+      : by === 'remove' ? 'you removed it'
+        : by === 'plant' ? 'a plant replaced it'
+          : by.startsWith('merge:') ? <>merged a proposal from <code>{by.slice(6)}</code></>
+            : by;
+
+  return (
+    <Panel
+      title={`history · ${item.name}`}
+      right={hist !== 'loading' && !('error' in hist) ? <span className="muted" style={{ fontSize: 11 }}>{hist.versions.length} of at most {hist.keep} kept · current {item.version}</span> : undefined}
+      flush
+    >
+      {hist === 'loading' && <div className="muted" style={{ padding: 14, fontSize: 12 }}>reading history…</div>}
+      {hist !== 'loading' && 'error' in hist && (
+        <div className="banner warn" style={{ margin: 12 }}>
+          <span className="lbl">history</span>
+          <span>couldn&apos;t read it — {hist.error} <button className="btn ghost sm" style={{ marginLeft: 8 }} onClick={() => void load()}>retry</button></span>
+        </div>
+      )}
+      {hist !== 'loading' && !('error' in hist) && hist.storage !== 'durable' && (
+        <div className="banner warn" style={{ margin: 12 }}>
+          <span className="lbl">not kept</span>
+          <span>This daemon has no durable memory plane, so previous versions are not stored.</span>
+        </div>
+      )}
+      {hist !== 'loading' && !('error' in hist) && hist.storage === 'durable' && hist.versions.length === 0 && (
+        <div className="muted" style={{ padding: 14, fontSize: 12.5 }}>
+          No previous versions yet. Every edit, merge or removal that replaces this item&apos;s text keeps the old text here — the last {hist.keep} of them.
+        </div>
+      )}
+      {hist !== 'loading' && !('error' in hist) && hist.versions.length > 0 && (
+        <table className="tab">
+          <thead>
+            <tr>
+              <th>version</th>
+              <th>replaced when</th>
+              <th className="right">bytes</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {hist.versions.map((v) => {
+              const o = opened[v.n];
+              return (
+                <Fragment key={v.n}>
+                  <tr>
+                    <td>
+                      <span style={{ fontWeight: 600 }}>{v.label || `#${v.n}`}</span>
+                      <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>commit {v.n}</span>
+                      <div className="secondary" style={{ fontSize: 11.5 }}>{byLabel(v.by)}</div>
+                    </td>
+                    <td className="muted" title={new Date(v.ts * 1000).toLocaleString()}>{ageOf(v.ts)}</td>
+                    <td className="right mono">{v.bytes}</td>
+                    <td className="right" style={{ whiteSpace: 'nowrap' }}>
+                      <button className="btn sm" onClick={() => void toggle(v.n)}>{o !== undefined ? 'hide' : 'diff'}</button>
+                      {typeof o === 'string' && (
+                        <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => onRestore({ body: o, label: v.label || `#${v.n}` })}>restore as next version</button>
+                      )}
+                    </td>
+                  </tr>
+                  {o !== undefined && (
+                    <tr>
+                      <td colSpan={4} style={{ background: 'var(--bg-elev)' }}>
+                        {o === 'loading' ? (
+                          <span className="muted" style={{ fontSize: 11.5 }}>decrypting the stored text…</span>
+                        ) : typeof o === 'object' ? (
+                          <span className="muted" style={{ fontSize: 11.5, color: 'var(--danger)' }}>couldn&apos;t load it — {o.error}</span>
+                        ) : (
+                          <>
+                            <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>the stored text (−) against the current text (+)</div>
+                            <DiffView before={o} after={current ?? ''} />
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </Panel>
+  );
+}
+
+// ── Access ───────────────────────────────────────────────────────────────────
+// Who reads the repository and through which grant. The grant is the
+// namespace: an app's install sheet (`knowledge:<ns>`, read-only) or a scope
+// bit on a delegate's actor page — both on chain, both edited where they were
+// signed (the audience editor of #674 lands here).
+
+/** An actor's scope bits for a namespace the taxonomy may not name (the scope map is keyed by the known namespaces). */
+const scopeBits = (a: Actor, ns: string): { read?: boolean; write?: boolean } | undefined =>
+  (a.scope as Record<string, { read?: boolean; write?: boolean }> | undefined)?.[ns];
+
+function nsReaders(ns: string, apps: AppInstanceRow[], actors: Actor[]) {
+  const service = knowledgeService(ns);
+  const appRows = liveApps(apps).filter((a) => a.services.includes(service) || a.bindings.resources.some((rb) => rb.ns === ns));
+  const delegates = actors.filter((a) => a.role === 'agent' && scopeBits(a, ns)?.read === true && !appRows.some((x) => x.label === a.label));
+  return { service, appRows, delegates };
+}
+
+function AccessTab({
+  ns,
+  apps,
+  actors,
+  onOpenActor,
+  onOpenApps,
+}: {
+  ns: string;
+  apps: AppInstanceRow[];
+  actors: Actor[];
+  onOpenActor?: (id: string) => void;
+  onOpenApps?: () => void;
+}) {
+  const { service, appRows, delegates } = nsReaders(ns, apps, actors);
+  const none = appRows.length === 0 && delegates.length === 0;
+  return (
+    <Panel title="who reads this repository" flush>
+      {none && (
+        <div className="muted" style={{ padding: 16, fontSize: 12.5 }}>
+          No one yet. A reader is granted the whole repository: bind one of its items in an app install, or set the <code>{service}</code> scope bit on a delegate&apos;s actor page.
+        </div>
+      )}
+      {!none && (
+        <table className="tab">
+          <thead>
+            <tr>
+              <th>reader</th>
+              <th>kind</th>
+              <th>through</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {appRows.map((a) => {
+              const bound = a.bindings.resources.filter((rb) => rb.ns === ns);
+              return (
+                <tr key={`a-${a.label}`}>
+                  <td style={{ fontWeight: 600 }}>{a.label}<div className="secondary">{a.template_id} · {a.status}</div></td>
+                  <td><Chip kind="ok">app</Chip></td>
+                  <td>
+                    {a.services.includes(service)
+                      ? <>install sheet · <code>{service}</code> (read-only)</>
+                      : <>a binding in this namespace</>}
+                    {bound.length > 0 && <div className="secondary">bound: {bound.map((rb) => rb.item_id).join(', ')}</div>}
+                  </td>
+                  <td className="right">{onOpenApps && <button className="btn sm" onClick={onOpenApps}>applications →</button>}</td>
+                </tr>
+              );
+            })}
+            {delegates.map((d) => (
+              <tr key={`d-${d.id}`}>
+                <td style={{ fontWeight: 600 }}>{d.label}<div className="secondary mono">{shortOmni(d.omniHex)}</div></td>
+                <td><Chip>delegate</Chip></td>
+                <td>scope bit on chain · <code>{service}</code>{scopeBits(d, ns)?.write ? ' · write' : ' · read'}</td>
+                <td className="right">{onOpenActor && <button className="btn sm" onClick={() => onOpenActor(d.id)}>actor page →</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="muted" style={{ padding: '10px 16px', fontSize: 11.5, borderTop: '1px solid var(--rule-hair)' }}>
+        Revoking is where the grant was signed: uninstall the app, or clear the scope bit on the actor page — one Touch ID each. A reader&apos;s sandbox keeps a derived copy that the daemon refreshes every few minutes and can never write back here.
+      </div>
+    </Panel>
+  );
+}
+
+// ── Sync ─────────────────────────────────────────────────────────────────────
+// Each reader runs a CLONE of the repository in its sandbox: seeded from the
+// checkpoint, pulled from origin every few minutes (delete-through). The chip
+// is the clone's own launch / pull stage (#693); "sync now" asks for a pull.
+
+function SyncTab({ ns, apps, actors }: { ns: string; apps: AppInstanceRow[]; actors: Actor[] }) {
+  const { appRows, delegates } = nsReaders(ns, apps, actors);
+  const none = appRows.length === 0 && delegates.length === 0;
+  return (
+    <Panel title="clones" flush>
+      {none && <div className="muted" style={{ padding: 16, fontSize: 12.5 }}>No clone — nothing reads this repository yet.</div>}
+      {!none && (
+        <table className="tab">
+          <thead>
+            <tr>
+              <th>clone</th>
+              <th>stage</th>
+            </tr>
+          </thead>
+          <tbody>
+            {appRows.map((a) => (
+              <tr key={`a-${a.label}`}>
+                <td style={{ fontWeight: 600 }}>{a.label}<div className="secondary">app · {a.template_id}</div></td>
+                <td><LifecycleChip channelId={a.chat_channel_id} sync /></td>
+              </tr>
+            ))}
+            {delegates.map((d) => (
+              <tr key={`d-${d.id}`}>
+                <td style={{ fontWeight: 600 }}>{d.label}<div className="secondary">delegate</div></td>
+                <td>{d.status === 'bad' ? <span className="muted">revoked</span> : <LifecycleChip channelId={delegateFeed(d.label)} sync />}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="muted" style={{ padding: '10px 16px', fontSize: 11.5, borderTop: '1px solid var(--rule-hair)' }}>
+        A clone is read-only and derived: what you commit here reaches it on its next pull (every few minutes, or right away with <strong>sync now</strong>); what a clone learns comes back only as a proposal. A chip that stays empty means the clone has not published a stage yet (an older image, or nothing running).
+      </div>
+    </Panel>
+  );
+}
+
 /** The one add / upload / edit / curate modal — this page's and the install
  *  wizard's (an empty slot opens it pre-set to the slot's kind). A saved item
  *  is planted as read-only canonical memory under `knowledge:<ns>` and registered
- *  as a typed item. */
+ *  as a typed item. `restore` pre-fills an older text (History): the save is a
+ *  normal next version, refused like any edit if the item changed meanwhile. */
 export function KnowledgeItemModal({
   client,
   initialKind,
+  initialNs,
   edit,
   curate,
+  restore,
   namespaces,
   onClose,
   onAdd,
@@ -467,8 +1004,10 @@ export function KnowledgeItemModal({
 }: {
   client: AgentKeysClient;
   initialKind?: ResourceKind;
+  initialNs?: string;
   edit?: ResourceItemRow;
   curate?: KnowledgeEntry;
+  restore?: Restore;
   /** For the namespace hint: who already reads the namespace being typed. */
   namespaces?: KnowledgeNamespace[];
   onClose: () => void;
@@ -482,9 +1021,9 @@ export function KnowledgeItemModal({
   const [kind, setKind] = useState<ResourceKind>(edit?.kind ?? initialKind ?? (curate ? 'note' : 'document'));
   const [tags, setTags] = useState(edit?.tags.join(', ') ?? '');
   const [sensitivity, setSensitivity] = useState<'safe' | 'sensitive'>(edit?.sensitivity ?? 'safe');
-  const [ns, setNs] = useState(edit?.ns ?? curate?.ns ?? 'household');
-  const [body, setBody] = useState(curate?.body ?? '');
-  const [loadingBody, setLoadingBody] = useState(!!edit);
+  const [ns, setNs] = useState(edit?.ns ?? curate?.ns ?? initialNs ?? 'household');
+  const [body, setBody] = useState(restore?.body ?? curate?.body ?? '');
+  const [loadingBody, setLoadingBody] = useState(!!edit && !restore);
   const [file, setFile] = useState<{ name: string; type: string; size: number; b64: string } | null>(null);
   const [fileErr, setFileErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -492,9 +1031,10 @@ export function KnowledgeItemModal({
   // changed meanwhile is refused, and the modal shows the diff.
   const [baseHash, setBaseHash] = useState<string | undefined>(edit?.content_hash);
   const [stale, setStale] = useState<{ current: string; currentHash: string } | null>(null);
-  // Editing: pre-fill the current text from the namespace (the entry keyed by the id).
+  // Editing: pre-fill the current text from the namespace (the entry keyed by
+  // the id) — unless an older text is being restored.
   useEffect(() => {
-    if (!edit) return;
+    if (!edit || restore) return;
     let alive = true;
     void (async () => {
       const r = await client.getMemoryEntries(edit.ns, edit.object_key);
@@ -508,7 +1048,7 @@ export function KnowledgeItemModal({
     return () => {
       alive = false;
     };
-  }, [client, edit]);
+  }, [client, edit, restore]);
   const MAX = 5 * 1024 * 1024;
   const pickFile = (f: File | undefined) => {
     setFileErr(null);
@@ -552,21 +1092,27 @@ export function KnowledgeItemModal({
     }
   };
   const nsInfo = namespaces?.find((n) => n.ns === ns.trim());
-  const nsReaders = nsInfo ? [...nsInfo.readers.apps, ...nsInfo.readers.delegates] : [];
-  const title = edit
-    ? `Edit ${edit.id} (saves as v${edit.version + 1})`
-    : curate
-      ? `Give ${curate.key} a type`
-      : 'Add knowledge — paste text or upload a file';
+  const nsReadersList = nsInfo ? [...nsInfo.readers.apps, ...nsInfo.readers.delegates] : [];
+  const title = restore && edit
+    ? `Restore ${edit.id} ${restore.label} (saves as v${edit.version + 1})`
+    : restore && curate
+      ? `Restore ${curate.key} ${restore.label} as a typed item`
+      : edit
+        ? `Edit ${edit.id} (saves as v${edit.version + 1})`
+        : curate
+          ? `Give ${curate.key} a type`
+          : 'Add knowledge — paste text or upload a file';
   const cta = busy
     ? (mode === 'upload' ? 'uploading…' : 'planting…')
-    : edit
-      ? 'save as next version'
-      : curate
-        ? 'register'
-        : mode === 'upload'
-          ? 'upload'
-          : 'add';
+    : restore
+      ? 'restore as next version'
+      : edit
+        ? 'save as next version'
+        : curate
+          ? 'register'
+          : mode === 'upload'
+            ? 'upload'
+            : 'add';
   return (
     <Modal
       title={title}
@@ -609,7 +1155,7 @@ export function KnowledgeItemModal({
         <label className="muted" style={{ fontSize: 12, gridColumn: '1 / -1' }}>tags (comma-separated)<input style={INPUT} value={tags} onChange={(e) => setTags(e.target.value)} placeholder="food, allergies" /></label>
         {mode === 'paste' ? (
           <label className="muted" style={{ fontSize: 12, gridColumn: '1 / -1' }}>
-            content{loadingBody ? ' (loading the current text…)' : ''}
+            content{loadingBody ? ' (loading the current text…)' : restore ? ` (the text of ${restore.label})` : ''}
             <textarea style={{ ...INPUT, minHeight: 140, fontFamily: 'inherit' }} value={body} onChange={(e) => setBody(e.target.value)} />
           </label>
         ) : (
@@ -636,15 +1182,16 @@ export function KnowledgeItemModal({
       )}
       <p className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
         {namespaces === undefined
-          ? <>Apps read it through the read-only <code>memory:&lt;ns&gt;</code> grant — the grant covers the whole namespace, never one item.</>
+          ? <>Apps read it through the read-only <code>knowledge:&lt;ns&gt;</code> grant — the grant covers the whole namespace, never one item.</>
           : nsInfo
-            ? nsReaders.length > 0
-              ? <>Namespace <code>{nsInfo.ns}</code> is already read by <strong>{nsReaders.join(', ')}</strong> — they will read this item too (the grant is the namespace, never one item).</>
-              : <>No app reads namespace <code>{nsInfo.ns}</code> yet; an install that binds this item is granted the whole namespace.</>
-            : <>A new namespace: the first app you bind this item to is granted all of it. Use a namespace of its own for something only one app should read.</>}
+            ? nsReadersList.length > 0
+              ? <>Repository <code>{nsInfo.ns}</code> is already read by <strong>{nsReadersList.join(', ')}</strong> — they will read this item too (the grant is the namespace, never one item).</>
+              : <>No app reads repository <code>{nsInfo.ns}</code> yet; an install that binds this item is granted the whole namespace.</>
+            : <>A new repository: the first app you bind this item to is granted all of it. Use a namespace of its own for something only one app should read.</>}
         {curate && idOk && id === curate.key && <> Keeping the note&apos;s key as the id replaces the note in place.</>}
         {curate && idOk && id !== curate.key && <> A different id adds a typed copy beside the note.</>}
-        {edit && <> Saving bumps the version and replaces the previous text for every app that reads it.</>}
+        {edit && !restore && <> Saving bumps the version and replaces the previous text for every app that reads it — the previous text stays in History.</>}
+        {restore && <> Restoring is a commit: the old text becomes the next version, and the text it replaces is kept in History.</>}
       </p>
     </Modal>
   );
@@ -663,6 +1210,7 @@ function InboxPanel({
   onReject,
   onRefresh,
   onViewBody,
+  onOpenNs,
 }: {
   inbox: ApiInboxItem[];
   busy: boolean;
@@ -671,6 +1219,8 @@ function InboxPanel({
   onReject: (s3Key: string) => void;
   onRefresh: () => void;
   onViewBody: (s3Key: string) => Promise<string>;
+  /** On the list page: the namespace cell opens that repository's proposals. */
+  onOpenNs?: (ns: string) => void;
 }) {
   // Lazy body view: presence in `bodies` = expanded. 'loading' while fetching,
   // the string when decrypted, {error} on failure. The list carries only metadata
@@ -690,27 +1240,15 @@ function InboxPanel({
       .then((body) => setBodies((p) => ({ ...p, [s3Key]: body })))
       .catch((e: Error) => setBodies((p) => ({ ...p, [s3Key]: { error: e.message } })));
   };
-  const shortOmni = (o: string) => {
-    const h = o.replace(/^0x/, '');
-    return h.length > 12 ? `${h.slice(0, 6)}…${h.slice(-4)}` : h;
-  };
-  const age = (ts: number) => {
-    if (!ts) return '—';
-    const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-    if (secs < 60) return `${secs}s ago`;
-    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
-    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
-    return `${Math.floor(secs / 86400)}d ago`;
-  };
 
   return (
-    <Panel title={`── inbox · ${inbox.length} pending`} flush>
+    <Panel title={`proposals · ${inbox.length} pending`} flush>
       <div className="banner" style={{ margin: '8px 12px' }}>
-        <span className="lbl">↦ absorption</span>
+        <span className="lbl">↦ proposals</span>
         <span>
-          Learnings your delegates <strong>pushed</strong> for review (master-hub absorption). Each is staged in your
-          inbox — <strong>not yet canonical</strong>. <strong>Accept</strong> curates it into the named namespace
-          (a content-hash-deduped merge); <strong>reject</strong> discards it. Provenance is stamped by the worker,
+          Learnings your delegates <strong>pushed</strong> for review. Each is staged in your
+          inbox — <strong>not yet in the repository</strong>. <strong>Accept</strong> merges it into the named namespace
+          (a content-hash-deduped merge; a colliding key asks you first); <strong>reject</strong> discards it. Provenance is stamped by the worker,
           so a delegate can&apos;t fake who proposed what.
           <button className="btn ghost sm" style={{ marginLeft: 10 }} onClick={onRefresh} disabled={busy}>↻ refresh</button>
         </span>
@@ -742,14 +1280,16 @@ function InboxPanel({
                   <td>
                     <span className="mono" style={{ fontWeight: 500 }}>{it.key}</span>
                     <div className="secondary">
-                      knowledge:{it.ns}
+                      {onOpenNs
+                        ? <span className="clickable" style={{ cursor: 'pointer', color: 'var(--accent)' }} onClick={() => onOpenNs(it.ns)}>knowledge:{it.ns}</span>
+                        : <>knowledge:{it.ns}</>}
                       {kind !== 'knowledge' && (
                         <span className="count" style={{ marginLeft: 6, textTransform: 'uppercase' }}>{kind}</span>
                       )}
                     </div>
                   </td>
                   <td className="mono muted" title={it.source_delegate_omni}>{shortOmni(it.source_delegate_omni)}</td>
-                  <td className="muted">{age(it.ts)}</td>
+                  <td className="muted">{ageOf(it.ts)}</td>
                   <td className="right mono">{it.bytes}</td>
                   <td className="right" style={{ whiteSpace: 'nowrap' }}>
                     <button className="btn sm" onClick={() => toggleBody(it.s3_key)}>{expanded ? 'hide' : 'view'}</button>

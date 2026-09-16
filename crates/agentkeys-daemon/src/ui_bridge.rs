@@ -1441,6 +1441,15 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/master/agent/chat/send", post(master_chat_send))
         .route("/v1/master/agent/chat/poll", post(master_chat_poll))
         .route("/v1/master/agent/lifecycle", get(master_agent_lifecycle))
+        // #695 step G — an item's stored previous versions + one version's text.
+        .route(
+            "/v1/master/knowledge/history",
+            get(master_knowledge_history),
+        )
+        .route(
+            "/v1/master/knowledge/history/version",
+            get(master_knowledge_version),
+        )
         // #418 — the WeChat gateway admin proxy (parent-control drives the
         // gateway's admin surface through the daemon; the admin bearer is
         // injected server-side, never in the browser):
@@ -7788,6 +7797,199 @@ fn send_event_kind(req: &ChatSendRequest) -> &'static str {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    pub ns: String,
+    pub key: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HistoryVersionQuery {
+    pub ns: String,
+    pub key: String,
+    pub n: u32,
+}
+
+/// A namespace is `[a-z0-9_-]`, an item key `[a-z0-9._-]` (the registry's id
+/// rule plus a legacy note key) — both short.
+fn valid_history_coords(ns: &str, key: &str) -> bool {
+    let ok = |s: &str, extra: &str| {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(c))
+    };
+    ok(ns, "-_") && ok(key, "-_.")
+}
+
+/// `GET /v1/master/knowledge/history?ns=&key=` — an item's stored previous
+/// versions (#695 step G), newest first. Without a durable memory plane the
+/// list is empty and `storage` = `ram` says why.
+async fn master_knowledge_history(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> axum::response::Response {
+    if let Err(resp) = require_master_session(&state).await {
+        return resp;
+    }
+    if !valid_history_coords(&q.ns, &q.key) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid ns/key" })),
+        )
+            .into_response();
+    }
+    let keep = crate::knowledge_history::history_keep();
+    let ctx = match real_memory_ctx(&state).await {
+        Ok(Some(ctx)) => ctx,
+        Ok(None) => {
+            return Json(crate::knowledge_history::KnowledgeHistory {
+                ns: q.ns,
+                key: q.key,
+                keep,
+                storage: "ram".into(),
+                versions: Vec::new(),
+            })
+            .into_response()
+        }
+        Err(reason) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response()
+        }
+    };
+    let creds = match mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"]).await {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let client = reqwest::Client::new();
+    match history_index_read(&client, &ctx, &creds, &q.ns, &q.key).await {
+        Ok(index) => {
+            let mut versions = index.versions;
+            versions.reverse();
+            Json(crate::knowledge_history::KnowledgeHistory {
+                ns: q.ns,
+                key: q.key,
+                keep,
+                storage: "durable".into(),
+                versions,
+            })
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /v1/master/knowledge/history/version?ns=&key=&n=` — one stored
+/// version's text, checked against the hash its index line recorded (a slot
+/// the ring reused answers `version_pruned`, never a wrong body).
+async fn master_knowledge_version(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::Query(q): axum::extract::Query<HistoryVersionQuery>,
+) -> axum::response::Response {
+    if let Err(resp) = require_master_session(&state).await {
+        return resp;
+    }
+    if !valid_history_coords(&q.ns, &q.key) || q.n == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid ns/key/n" })),
+        )
+            .into_response();
+    }
+    let ctx = match real_memory_ctx(&state).await {
+        Ok(Some(ctx)) => ctx,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "no durable memory plane on this daemon — history is not kept" })),
+            )
+                .into_response()
+        }
+        Err(reason) => {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": reason })))
+                .into_response()
+        }
+    };
+    let creds = match mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"]).await {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let client = reqwest::Client::new();
+    let index = match history_index_read(&client, &ctx, &creds, &q.ns, &q.key).await {
+        Ok(i) => i,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    let Some(meta) = index.versions.iter().find(|v| v.n == q.n).cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "version_unknown", "n": q.n })),
+        )
+            .into_response();
+    };
+    let body = match memory_get_object_real(
+        &client,
+        &ctx,
+        &creds,
+        &q.ns,
+        &crate::knowledge_history::slot_key(&q.key, meta.slot),
+    )
+    .await
+    {
+        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "version_pruned", "n": q.n })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    if content_hash_for(&q.ns, &q.key, &body) != meta.content_hash {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "version_pruned", "n": q.n, "detail": "the ring reused this slot" })),
+        )
+            .into_response();
+    }
+    Json(crate::knowledge_history::KnowledgeVersionBody {
+        version: meta,
+        body,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
 pub struct LifecycleQuery {
     pub channel_id: String,
 }
@@ -10149,15 +10351,151 @@ async fn memory_put_object_real(
     Ok(())
 }
 
+/// Read one KEYED object of a namespace (#594 objects) — `Ok(None)` when the
+/// worker has never stored it (404), the decrypted bytes otherwise.
+async fn memory_get_object_real(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &DataCreds,
+    ns: &str,
+    object_key: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let cap = mint_master_cap(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "memory-get",
+        &format!("knowledge:{ns}"),
+    )
+    .await?;
+    let get_resp = client
+        .post(format!("{}/v1/memory/get", ctx.memory_url))
+        .header("x-aws-access-key-id", &creds.access_key_id)
+        .header("x-aws-secret-access-key", &creds.secret_access_key)
+        .header("x-aws-session-token", &creds.session_token)
+        .json(&agentkeys_backend_client::MemoryGetBody {
+            cap,
+            namespace: ns.to_string(),
+            object_key: Some(object_key.to_string()),
+        })
+        .send()
+        .await
+        .map_err(|e| format!("worker object get transport: {e}"))?;
+    if get_resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !get_resp.status().is_success() {
+        let status = get_resp.status();
+        let body = get_resp.text().await.unwrap_or_default();
+        return Err(format!("worker object get {status}: {body}"));
+    }
+    let parsed: serde_json::Value = get_resp
+        .json()
+        .await
+        .map_err(|e| format!("worker object get parse: {e}"))?;
+    let b64 = parsed
+        .get("plaintext_b64")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    STANDARD
+        .decode(b64)
+        .map(Some)
+        .map_err(|e| format!("object plaintext_b64 decode: {e}"))
+}
+
+/// The history index of one item (`versions/<key>/index`); never stored = empty.
+async fn history_index_read(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &DataCreds,
+    ns: &str,
+    key: &str,
+) -> Result<crate::knowledge_history::VersionIndex, String> {
+    match memory_get_object_real(
+        client,
+        ctx,
+        creds,
+        ns,
+        &crate::knowledge_history::index_key(key),
+    )
+    .await?
+    {
+        None => Ok(crate::knowledge_history::VersionIndex::default()),
+        Some(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| format!("history index of {ns}/{key} parse: {e}")),
+    }
+}
+
+/// #695 step G — before an entry's body is replaced or removed on origin, keep
+/// what is there: the body as the keyed object `versions/<key>/<slot>` and one
+/// line in `versions/<key>/index` (a ring of `history_keep()` slots — the newest
+/// overwrites the oldest, a hard bound with no delete). The body lands before
+/// the index names it, so a crash between the two leaves at most an unlisted
+/// slot the next record overwrites. Same content as the newest stored version
+/// (a retried write, a re-plant) = nothing to add. `Ok(None)` = skipped.
+async fn history_stash(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &DataCreds,
+    ns: &str,
+    old: &StoredMemoryEntry,
+    by: &str,
+) -> Result<Option<crate::knowledge_history::KnowledgeVersion>, String> {
+    let keep = crate::knowledge_history::history_keep();
+    let mut index = history_index_read(client, ctx, creds, ns, &old.key).await?;
+    let hash = content_hash_for(ns, &old.key, &old.body);
+    if index
+        .newest()
+        .map(|v| v.content_hash == hash)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let meta = index.record(
+        keep,
+        now_unix(),
+        old.body.len() as u64,
+        hash,
+        by,
+        &old.version,
+    );
+    memory_put_object_real(
+        client,
+        ctx,
+        creds,
+        ns,
+        &crate::knowledge_history::slot_key(&old.key, meta.slot),
+        old.body.as_bytes(),
+    )
+    .await?;
+    let json = serde_json::to_vec(&index).map_err(|e| format!("history index serialize: {e}"))?;
+    memory_put_object_real(
+        client,
+        ctx,
+        creds,
+        ns,
+        &crate::knowledge_history::index_key(&old.key),
+        &json,
+    )
+    .await?;
+    Ok(Some(meta))
+}
+
 /// Curated resources (2026-09-13): drop every entry keyed `key` from
 /// `knowledge:<ns>`, so a re-add or upload REPLACES the body (the plant's merge
 /// dedups by content hash and would keep every version side by side) and a
 /// remove leaves nothing behind. Durable when the memory plane is wired; the
 /// in-memory index is trimmed either way. Returns how many entries went.
+/// `by` names what drops the entry for its history line (`edit` · `remove`):
+/// the body is stored as a previous version BEFORE the blob is rewritten
+/// (#695 step G), so a failed stash aborts the change — nothing is lost silently.
 pub(crate) async fn resource_entry_remove(
     state: &UiBridgeState,
     ns: &str,
     key: &str,
+    by: &str,
 ) -> Result<usize, (StatusCode, String)> {
     let ctx = real_memory_ctx(state)
         .await
@@ -10178,6 +10516,18 @@ pub(crate) async fn resource_entry_remove(
             let Some((entries, base)) = durable else {
                 break;
             };
+            if let Some(old) = entries.iter().find(|e| e.key == key) {
+                history_stash(&client, &ctx, &creds, ns, old, by)
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            format!(
+                                "knowledge:{ns} history of {key} not stored — change aborted: {e}"
+                            ),
+                        )
+                    })?;
+            }
             let before = entries.len();
             let kept: Vec<StoredMemoryEntry> =
                 entries.into_iter().filter(|e| e.key != key).collect();
@@ -11420,11 +11770,24 @@ async fn accept_master_inbox(
         content_hash: String::new(),
         kind,
     };
-    let plant = match plant_master_memory_inner(
+    let merge_by = {
+        let o = item
+            .get("source_delegate_omni")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim_start_matches("0x");
+        if o.len() > 12 {
+            format!("merge:0x{}…{}", &o[..6], &o[o.len() - 4..])
+        } else {
+            format!("merge:{o}")
+        }
+    };
+    let plant = match plant_master_memory_with_history(
         &state,
         MasterMemoryPlantRequest {
             entries: vec![entry.clone()],
         },
+        &merge_by,
     )
     .await
     {
@@ -12191,6 +12554,19 @@ pub(crate) async fn plant_master_memory_inner(
     state: &SharedUiBridgeState,
     req: MasterMemoryPlantRequest,
 ) -> Result<MasterMemoryPlantResponse, (axum::http::StatusCode, String)> {
+    plant_master_memory_with_history(state, req, "plant").await
+}
+
+/// The plant with the name of what drives it for the history lines its merge
+/// writes (#695 step G): a durable entry whose key an incoming entry replaces
+/// with a different body is stored as a previous version first — `plant` for
+/// the demo archive, `merge:<delegate>` for an accepted proposal (an edit
+/// removes its old entry before planting, so it never collides here).
+pub(crate) async fn plant_master_memory_with_history(
+    state: &SharedUiBridgeState,
+    req: MasterMemoryPlantRequest,
+    history_by: &str,
+) -> Result<MasterMemoryPlantResponse, (axum::http::StatusCode, String)> {
     // #390 — the `persona` namespace is RESERVED: its single writer is the
     // daemon persona module (versioned, validated, master-authored). A plant
     // (or an inbox accept riding the plant) into it would bypass the edit-time
@@ -12268,6 +12644,25 @@ pub(crate) async fn plant_master_memory_inner(
                             ));
                     }
                 };
+                // #695 step G — identity = key: what the merge replaces is kept
+                // as a previous version before the blob is rewritten.
+                let replaced: Vec<StoredMemoryEntry> = durable
+                    .iter()
+                    .filter(|d| entries.iter().any(|e| e.key == d.key && e.body != d.body))
+                    .cloned()
+                    .collect();
+                for old in &replaced {
+                    if let Err(e) = history_stash(&client, &ctx, &creds, ns, old, history_by).await
+                    {
+                        return Err((
+                            axum::http::StatusCode::BAD_GATEWAY,
+                            format!(
+                                "plant aborted: history of knowledge:{ns}/{} not stored ({e}) — not overwriting",
+                                old.key
+                            ),
+                        ));
+                    }
+                }
                 let (merged, newly) = merge_stored_entries(ns, durable, entries);
                 match memory_put_ns_real(&client, &ctx, &creds, ns, &merged, Some(&base)).await {
                     Ok(_) => break newly,

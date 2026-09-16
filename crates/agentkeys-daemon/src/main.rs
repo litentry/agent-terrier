@@ -18,6 +18,7 @@ mod companion;
 mod console_device;
 mod gateway_device;
 mod hardening;
+mod knowledge_history;
 mod lifecycle;
 mod master_session;
 mod memory_mirror;

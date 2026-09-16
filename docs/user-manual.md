@@ -538,8 +538,17 @@ the permissions you approve. parent-control → **applications**:
   back through the same bot.
 - **Knowledge.** The **Knowledge** page is the one place for everything your
   household's assistants may know: your canonical memory namespaces and the
-  typed items an app binds (the former memory and resources pages). View it by namespace, or grouped by type, sensitivity or tag; open a
-  namespace to decrypt its plain notes. **+ add knowledge** pastes text or
+  typed items an app binds (the former memory and resources pages). It is
+  shaped like a code host: every namespace is a **repository** — the list
+  shows its visibility (the highest sensitivity inside), who reads it, what
+  is pending and when it last changed; open one for its tabs **Files** (the
+  items; the plain notes decrypt on open), **Proposals** (what delegates
+  pushed for it — accept merges, a colliding key asks you first),
+  **History** (every text a commit replaced — diff it against the current
+  text, or **restore** it as the next version), **Access** (who reads it and
+  through which grant) and **Sync** (each reader's clone with its launch /
+  pull stage and **sync now**). **All items** groups everything by type,
+  sensitivity or tag. **+ add knowledge** pastes text or
   uploads a file — plain text, markdown, CSV, JSON, a PDF, or an image (up to
   5 MB); the text is what an app reads (a PDF's text is extracted; an image
   becomes a gallery caption) and the file's bytes are kept beside it.
@@ -547,7 +556,9 @@ the permissions you approve. parent-control → **applications**:
   type, and the install wizard can **retype** an item when you bind it (the
   type is metadata, so a retype is not a new version). **Give it a type**
   registers an older, untyped note under its own key.
-  Re-adding an id makes the next version and replaces the previous text;
+  Re-adding an id makes the next version and replaces the previous text
+  (the previous text stays in **History** — the last 20 per item; on the
+  console daemon `AGENTKEYS_KNOWLEDGE_HISTORY_KEEP` raises that, up to 100);
   remove drops the item (it refuses while an app is bound to it unless you
   confirm). **The grant is the namespace**: binding one item grants the app
   the whole namespace, the page says who reads each namespace, and a namespace

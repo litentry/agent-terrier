@@ -239,3 +239,45 @@ export function groupKnowledge(items: KnowledgeItem[], by: KnowledgeGroupBy, nam
   }
   return [...groups.values()].sort((a, b) => (a.key === '' ? 1 : b.key === '' ? -1 : a.key.localeCompare(b.key)));
 }
+
+// ── Repositories (#695 step F2) ──────────────────────────────────────────────
+
+/** What a code host calls the repository's visibility: the highest tier inside. */
+export type KnowledgeVisibility = 'sensitive' | 'safe' | 'unrated';
+
+export interface NamespaceSummary extends KnowledgeNamespace {
+  /** Every item the page knows in it: typed rows + the notes of an opened namespace. */
+  items: number;
+  visibility: KnowledgeVisibility;
+  /** The newest `updated` day among its items; '—' when nothing is known yet. */
+  updated: string;
+  /** Proposals waiting for this namespace. */
+  proposals: number;
+}
+
+/** One sensitive item makes the repository sensitive; typed-safe items only =
+ *  safe; nothing typed (untyped notes, or empty) = unrated. */
+export function visibilityOf(items: Pick<KnowledgeItem, 'sensitivity'>[]): KnowledgeVisibility {
+  if (items.some((it) => it.sensitivity === 'sensitive')) return 'sensitive';
+  if (items.some((it) => it.sensitivity === 'safe')) return 'safe';
+  return 'unrated';
+}
+
+export function proposalsIn<T extends { ns: string }>(inbox: T[], ns: string): T[] {
+  return inbox.filter((p) => p.ns === ns);
+}
+
+export function namespaceSummaries(namespaces: KnowledgeNamespace[], items: KnowledgeItem[], inbox: { ns: string }[]): NamespaceSummary[] {
+  return namespaces.map((n) => {
+    const mine = items.filter((it) => it.ns === n.ns);
+    const updated = mine.map((it) => it.updated).filter((d) => d && d !== '—').sort().pop() ?? '—';
+    return { ...n, items: mine.length, visibility: visibilityOf(mine), updated, proposals: proposalsIn(inbox, n.ns).length };
+  });
+}
+
+/** Find a repository by its label, its namespace, or one of its readers. */
+export function filterNamespaces(list: NamespaceSummary[], query: string): NamespaceSummary[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter((n) => [n.ns, n.label, ...n.readers.apps, ...n.readers.delegates].join(' ').toLowerCase().includes(q));
+}

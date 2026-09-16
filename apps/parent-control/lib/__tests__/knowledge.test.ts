@@ -6,11 +6,15 @@ import {
   buildKnowledgeItems,
   editReaches,
   filterKnowledge,
+  filterNamespaces,
   groupKnowledge,
   itemReaders,
   kindOfEntry,
   knowledgeNamespaces,
+  namespaceSummaries,
+  proposalsIn,
   readersOfNamespace,
+  visibilityOf,
   type KnowledgeEntry,
 } from '../client/knowledge';
 
@@ -122,5 +126,48 @@ describe('grouping and filtering', () => {
     expect(filterKnowledge(items, 'household', true).map((i) => i.key)).toEqual(['food-preferences']);
     expect(filterKnowledge(items, '', true)).toHaveLength(2);
     expect(filterKnowledge(items, '', false)).toHaveLength(4);
+  });
+});
+
+describe('repositories (#695 step F2)', () => {
+  const opened = { household: [entry('household', 'food-preferences'), entry('household', 'wifi')] };
+  const taxonomy = [{ ns: 'household', label: 'Household' }, { ns: 'health', label: 'Health' }, { ns: 'travel', label: 'Travel' }];
+  const ns = knowledgeNamespaces(taxonomy, [food, gene], opened, [chef, tutor, gone], []);
+  const items = buildKnowledgeItems([food, gene], opened);
+  const inbox = [{ ns: 'health' }, { ns: 'health' }, { ns: 'travel' }];
+
+  it('rates visibility by the highest tier inside', () => {
+    expect(visibilityOf([])).toBe('unrated');
+    expect(visibilityOf([{ sensitivity: null }])).toBe('unrated');
+    expect(visibilityOf([{ sensitivity: 'safe' }, { sensitivity: null }])).toBe('safe');
+    expect(visibilityOf([{ sensitivity: 'safe' }, { sensitivity: 'sensitive' }])).toBe('sensitive');
+  });
+
+  it('summarizes each repository: items, visibility, newest day, pending proposals', () => {
+    const s = namespaceSummaries(ns, items, inbox);
+    const household = s.find((n) => n.ns === 'household')!;
+    expect(household.items).toBe(2); // the typed item (its entry attached) + the untyped note
+    expect(household.visibility).toBe('safe');
+    expect(household.updated).toBe('2026-09-13'); // the note's day is newer than the row's
+    expect(household.proposals).toBe(0);
+    const health = s.find((n) => n.ns === 'health')!;
+    expect(health.items).toBe(1);
+    expect(health.visibility).toBe('sensitive');
+    expect(health.proposals).toBe(2);
+    const travel = s.find((n) => n.ns === 'travel')!;
+    expect(travel.items).toBe(0);
+    expect(travel.visibility).toBe('unrated');
+    expect(travel.updated).toBe('—');
+    expect(travel.proposals).toBe(1);
+  });
+
+  it('finds a repository by label, namespace or reader, and lists a namespace proposals', () => {
+    const s = namespaceSummaries(ns, items, inbox);
+    expect(filterNamespaces(s, 'HEAL').map((n) => n.ns)).toEqual(['health']);
+    expect(filterNamespaces(s, 'tutor').map((n) => n.ns)).toEqual(['household']);
+    expect(filterNamespaces(s, 'chef').map((n) => n.ns)).toEqual(['household', 'health']);
+    expect(filterNamespaces(s, '')).toHaveLength(3);
+    expect(proposalsIn(inbox, 'travel')).toHaveLength(1);
+    expect(proposalsIn(inbox, 'household')).toHaveLength(0);
   });
 });
