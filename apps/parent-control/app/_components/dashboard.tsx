@@ -6,7 +6,7 @@ import type { ConnectionStatus } from '@/lib/client/types';
 import { AgentTabsPanel } from './agent_tabs';
 import { AutoDistributePanel, StagedPermissionEditor } from './permissions';
 import type { ProposedScope } from '@/lib/client/types';
-import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
+import { ActorTree, Chip, Dot, EmptyState, LifecycleChip, PageHead, Panel } from './shared';
 import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
 import { isPluginService, isCapabilityService, capabilityGrantCommit, actorIsChannelEndpoint, actorTypeIsUnknown, channelGrantCommit, isChannelService } from './types';
 import {
@@ -292,6 +292,17 @@ export function ActorDetail({
         }
       />
 
+      {!isMaster && !isDevice && actor.status !== 'bad' && (
+        <div className="banner" style={{ marginBottom: 14 }}>
+          <span className="lbl">pull cost</span>
+          <span style={{ display: 'inline-flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <LifecycleChip channelId={`opchat-${actor.label.replace(' (revoked)', '')}`} sync empty={<Chip>no stage published yet</Chip>} />
+            <span className="muted" style={{ fontSize: 11.5 }}>
+              The chip is this delegate&apos;s last pull: its stage, the pass duration, and (on hover) the lines it wrote to its engine — one engine write is one embedding through the gate relay (op 93), so the line count is the embed count of the pass (#694). A respawn with nothing changed should read <code>0 lines mirrored</code>.
+            </span>
+          </span>
+        </div>
+      )}
       <Panel title="── binding">
         <dl className="kvs">
           <dt>actor_omni</dt><dd className="mono">{actor.omni} <span className="muted">({actor.omniHex})</span></dd>

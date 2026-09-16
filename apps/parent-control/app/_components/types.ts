@@ -281,6 +281,31 @@ export const capabilityGrantCommit = (
   };
 };
 
+/** The exact `setScope` inputs for toggling ONE repository's read grant
+ *  (`knowledge:<ns>`) on an actor from the Knowledge page's Access tab (#674's
+ *  audience editor): the memory names are rebuilt from the chain-mirrored scope
+ *  with that bit set or cleared, every other known name is restated and the
+ *  current tool grants are echoed — the same composition the permissions panel
+ *  commits — so an Access-tab toggle can never drop a channel, credential or
+ *  tool grant. A revoke also drops a stale `knowledge:<ns>` from the known
+ *  names, so the revoked service never rides back in through `services`. */
+export const knowledgeGrantCommit = (
+  a: Actor,
+  ns: string,
+  read: boolean,
+): { services: string[]; preserve: string[] } => {
+  const scope = { ...(a.scope ?? {}) } as Record<string, ScopeBits>;
+  const cur = scope[ns] ?? { read: false, write: false };
+  scope[ns] = { ...cur, read };
+  const currentTools = (a.services ?? []).filter((s) => isCapabilityService(s) && !isPluginService(s));
+  const out = capabilityGrantCommit({ ...a, scope: scope as Actor['scope'] }, currentTools);
+  const name = `knowledge:${ns}`;
+  return {
+    services: read ? out.services : out.services.filter((s) => s !== name),
+    preserve: out.preserve,
+  };
+};
+
 /** A bound actor whose known grants are all channel services = a channel-endpoint
  *  device (D6). Only decidable when the daemon knows the service NAMES (accepts
  *  done through this daemon session); after a daemon restart a chain-reconstructed

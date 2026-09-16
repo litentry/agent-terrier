@@ -176,3 +176,27 @@ Cheap first pass without touching the sandbox: on the broker, `channel/poll` in 
 ## Layer ordering — keep the daemon last
 
 The daemon `COPY` is deliberately the **final** layer: it is the only thing that changes on a normal code push, so a rebuild invalidates exactly one ~50 MB layer and a re-push uploads only that. **Anything added below it re-inflates every incremental push** — put new steps above it.
+
+## The engine's embedder: gate relay (default) or a local model (opt-in, #694 step 5)
+
+The sandbox's OpenViking engine embeds every mirrored knowledge line. By
+default it does so through the model gate relay (`OPENVIKING_EMBED_PROVIDER=volcengine`,
+the gate base + `gk_` key pair, metered as op 93 `GateEmbed`). The no-egress
+alternative is the engine's own `local` provider — llama-cpp-python and a GGUF
+(`bge-small-zh-v1.5-f16`, dimension 512, the engine's default) — which costs
+image size + sandbox CPU instead of gate calls. It is a **two-part opt-in**,
+default off on both parts:
+
+1. **Bake it into the foreign base** (laptop-built; the CN broker never fetches):
+   `local · main checkout` — `OV_LOCAL_EMBED=1 bash scripts/operator/seed-dsh-base.sh`.
+   The base tag gains `-localembed`, so a base with the model is never mistaken
+   for one without; the per-push cycle (`build-image-dsh.sh`) builds FROM it.
+2. **Select it per pod** in the veFaaS function env template:
+   `OPENVIKING_EMBED_PROVIDER=local` (optionally `OPENVIKING_EMBED_MODEL_PATH`).
+   An image ENV is never merged into a pod (#587 class), so this is a template
+   edit + the usual flip. A pod told `local` on an image built without the model
+   refuses to start the engine (rc 78) instead of running without embeddings.
+
+"Ship vectors from origin" is **not** an option with this engine: its write
+API takes text only (`WriteContentRequest`, `extra="forbid"`, v0.4.16) and
+vectorizes on write — see `docs/plan/knowledge-repository.md` §11.

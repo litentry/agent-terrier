@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   capabilityGrantCommit,
+  knowledgeGrantCommit,
   isCapabilityService,
   isPluginService,
   runtimeActivityLine,
@@ -102,5 +103,38 @@ describe('runtimeActivityLine (#617)', () => {
   it('leaves every other op_kind to the generic decode rows', () => {
     expect(runtimeActivityLine({ op_kind: 90, op_body: { tool: 'x' } })).toBeUndefined();
     expect(runtimeActivityLine({ op_kind: OP_KIND_RUNTIME_APPROVAL, op_body: {} })?.text).toMatch(/a tool/);
+  });
+});
+
+describe('knowledgeGrantCommit (#674 audience editor)', () => {
+  it('grants a repository read bit while restating every other known grant and echoing the tools', () => {
+    const { services, preserve } = knowledgeGrantCommit(actor(), 'household', true);
+    expect(services).toContain('knowledge:household');
+    expect(services).toContain('knowledge:travel'); // the existing bit survives
+    expect(services).toContain('channel-pub:cam');
+    expect(services).toContain('openrouter');
+    expect(services).toContain('plugin:openviking-memory');
+    expect(services).toContain('tool:web'); // the current tool grant is echoed, never dropped
+    expect(preserve).toEqual(['0xchan', '0xcred']); // the tool hash is re-added by name, the rest kept
+  });
+
+  it('revokes only the one repository, keeping the write bit and a stale name out', () => {
+    const a = actor({
+      scope: { travel: { read: true, write: true }, household: { read: true, write: false } },
+      services: ['knowledge:household', 'tool:web', 'channel-pub:cam'],
+    });
+    const { services } = knowledgeGrantCommit(a, 'household', false);
+    expect(services).not.toContain('knowledge:household');
+    expect(services).toContain('knowledge:travel');
+    expect(services).toContain('proposal:travel');
+    expect(services).toContain('tool:web');
+    expect(services).toContain('channel-pub:cam');
+  });
+
+  it('is idempotent: granting an already-read repository changes nothing', () => {
+    const a = actor();
+    const once = knowledgeGrantCommit(a, 'travel', true);
+    expect(once.services.filter((s) => s === 'knowledge:travel')).toHaveLength(1);
+    expect(new Set(once.services)).toEqual(new Set(capabilityGrantCommit(a, ['tool:web']).services));
   });
 });

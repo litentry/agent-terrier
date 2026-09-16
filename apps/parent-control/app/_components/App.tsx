@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   clearMasterIdentity,
   ensureActiveStack,
@@ -23,6 +23,8 @@ import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
 import { LogoPage } from './logos';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import { KnowledgePage } from './knowledge';
+import { HeaderSearch } from './search';
+import { PAGE_ENTRIES, type SearchEntry } from '@/lib/client/search';
 import { decodeBase64Utf8, errorJson } from '@/lib/client/diff';
 import { DiffView } from './shared';
 import { CredentialsPage } from './credentials';
@@ -110,6 +112,12 @@ export function App() {
   // reconciled from chain is in hand (an install adds grants the previous
   // read could not know).
   const [actorsSyncing, setActorsSyncing] = useState(false);
+  // The header search's jump into one knowledge repository (a nonce so the
+  // same namespace can be picked twice in a row).
+  const [knowledgeFocus, setKnowledgeFocus] = useState<{ ns: string; nonce: number } | null>(null);
+  // The namespaces curated items live in — a repository the taxonomy may not
+  // name (or that a failed taxonomy read left out), so the search still finds it.
+  const [resourceNamespaces, setResourceNamespaces] = useState<string[]>([]);
   // #207 item 1A — config-init entry point A (default-preset bootstrap): the
   // bundled presets, the shipped default id, and the in-flight authoring state.
   const [presets, setPresets] = useState<ConfigPreset[]>([]);
@@ -187,13 +195,15 @@ export function App() {
     if (!onboarded) return;
     let cancelled = false;
     (async () => {
-      const [cats, pre, creds, inb] = await Promise.all([
+      const [cats, pre, creds, inb, res] = await Promise.all([
         client.listMemoryCategories(),
         client.listConfigPresets(),
         client.listCredentials(),
         client.listInbox(),
+        client.listResources ? client.listResources() : Promise.resolve(null),
       ]);
       if (cancelled) return;
+      if (res?.ok) setResourceNamespaces(Array.from(new Set(res.data.items.map((it) => it.ns))).sort());
       if (cats.ok) {
         setCategories(cats.data);
         setSessionExpired(false); // a successful chain read proves the J1 is live
@@ -565,6 +575,33 @@ export function App() {
     document.addEventListener('keydown', onKey);
     return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
   }, []);
+
+  // Everything the header search can land on: the sections, the actors (an
+  // app's delegate carries the app's label), the knowledge repositories, the
+  // channels and the vault's services — all from state the shell already holds.
+  const searchIndex = useMemo<SearchEntry[]>(() => [
+    ...PAGE_ENTRIES,
+    ...categories.map((c) => ({ kind: 'repository' as const, id: c.ns, label: c.label, hint: `knowledge:${c.ns}`, keywords: [c.ns] })),
+    ...resourceNamespaces
+      .filter((ns) => !categories.some((c) => c.ns === ns))
+      .map((ns) => ({ kind: 'repository' as const, id: ns, label: ns, hint: `knowledge:${ns}`, keywords: [ns] })),
+    ...actors.map((a) => ({
+      kind: 'actor' as const,
+      id: a.id,
+      label: a.label.replace(' (revoked)', ''),
+      hint: [a.role, a.kind === 'device' ? 'device' : '', a.derivation, a.status === 'bad' ? 'revoked' : ''].filter(Boolean).join(' · '),
+      keywords: [a.omniHex, a.vendor],
+    })),
+    ...channels.map((ch) => ({ kind: 'channel' as const, id: ch.id, label: ch.name || ch.id, hint: ch.id, keywords: [ch.note ?? ''] })),
+    ...credentials.map((c) => ({ kind: 'credential' as const, id: c.service, label: c.service, hint: `${c.category} · ${c.sensitivity}` })),
+  ], [categories, resourceNamespaces, actors, channels, credentials]);
+  const pickSearch = (e: SearchEntry) => {
+    if (e.kind === 'page') go(e.id as Page);
+    else if (e.kind === 'actor') go('detail', e.id);
+    else if (e.kind === 'repository') { setKnowledgeFocus({ ns: e.id, nonce: Date.now() }); go('knowledge'); }
+    else if (e.kind === 'channel') go('channels');
+    else go('credentials');
+  };
 
   const go = (p: Page, id: string | null = null) => {
     document.querySelectorAll<HTMLDetailsElement>('details.app-menu[open]').forEach((d) => { d.open = false; });
@@ -1336,6 +1373,7 @@ export function App() {
             <span className="mark">agentKeys</span>
             <span className="sub">parent control · m1</span>
           </div>
+          <HeaderSearch entries={searchIndex} onPick={pickSearch} />
         </div>
         <div className="head-right">
           <span className="head-status" style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{(daemonChain ?? CHAIN_PROFILE.name)} · {status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
@@ -1469,7 +1507,7 @@ export function App() {
         {page === 'knowledge' && (
           // 2026-09-13 — ONE page over canonical memory + the curated, bindable items
           // (the former memory + resources pages); it reads the app registry itself.
-          <KnowledgePage client={client} showToast={showToast} reloadKey={reloadKey} categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} inbox={inbox} inboxBusy={inboxBusy} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onReloadNamespace={reloadCategory} onView={setMemoryView} onAcceptInbox={acceptInboxItem} onRejectInbox={rejectInboxItem} onRefreshInbox={refreshInbox} onViewInboxBody={viewInboxBody} onOpenActor={(id) => go('detail', id)} onOpenApps={() => go('applications')} />
+          <KnowledgePage client={client} showToast={showToast} reloadKey={reloadKey} categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} inbox={inbox} inboxBusy={inboxBusy} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onReloadNamespace={reloadCategory} onView={setMemoryView} onAcceptInbox={acceptInboxItem} onRejectInbox={rejectInboxItem} onRefreshInbox={refreshInbox} onViewInboxBody={viewInboxBody} onOpenActor={(id) => go('detail', id)} onOpenApps={() => go('applications')} focusNs={knowledgeFocus} onCommitScope={commitScope} />
         )}
         {page === 'credentials' && (
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />

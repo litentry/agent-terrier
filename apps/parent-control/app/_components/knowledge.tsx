@@ -44,7 +44,7 @@ import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import { CeremonyRunner } from './ceremony';
 import { Chip, DiffView, EmptyState, LifecycleChip, Modal, PageHead, Panel, Tabs } from './shared';
 import { errorJson } from '@/lib/client/diff';
-import type { Actor, CeremonyStep, PreservedMemory } from './types';
+import { actorIsChannelEndpoint, knowledgeGrantCommit, type Actor, type CeremonyStep, type PreservedMemory } from './types';
 
 const PLANT_STEPS: CeremonyStep[] = [
   { label: 'Read prepared archive', sub: `${PREPARED_MEMORY.length} entries · travel / personal / family`, onchain: false },
@@ -132,6 +132,8 @@ export function KnowledgePage({
   onViewInboxBody,
   onOpenActor,
   onOpenApps,
+  focusNs,
+  onCommitScope,
 }: {
   client: AgentKeysClient;
   showToast: (msg: string, sticky?: boolean) => void;
@@ -166,6 +168,12 @@ export function KnowledgePage({
   onOpenActor?: (id: string) => void;
   /** Access tab — an app's grants are its install sheet, on the Applications page. */
   onOpenApps?: () => void;
+  /** The header search landing on one repository (a new nonce = a new jump). */
+  focusNs?: { ns: string; nonce: number } | null;
+  /** Access tab (#674 audience editor) — ONE setScope UserOp, master Touch ID:
+   *  grant or revoke a repository's read bit on a delegate (an app's delegate
+   *  included). Resolves true on success; the shell re-reads the actor tree. */
+  onCommitScope?: (a: Actor, services: string[], readOnly: boolean, preserveOverride?: string[]) => Promise<boolean>;
 }) {
   const connected = status.kind === 'connected';
   const busy = planting || initializing;
@@ -219,6 +227,10 @@ export function KnowledgePage({
   useEffect(() => {
     if (view.kind === 'ns' && connected && entriesByNs[view.ns] === undefined) onLoadCategory(view.ns);
   }, [view, connected, entriesByNs, onLoadCategory]);
+
+  useEffect(() => {
+    if (focusNs) setView({ kind: 'ns', ns: focusNs.ns, tab: 'files' });
+  }, [focusNs]);
 
   const goList = (tab: ListTab = 'repositories') => setView({ kind: 'list', tab });
   const goNs = (ns: string, tab: NsTab = 'files') => setView({ kind: 'ns', ns, tab });
@@ -536,7 +548,7 @@ export function KnowledgePage({
       )}
 
       {view.tab === 'access' && openNs && (
-        <AccessTab ns={view.ns} apps={apps} actors={actors} onOpenActor={onOpenActor} onOpenApps={onOpenApps} />
+        <AccessTab ns={view.ns} apps={apps} actors={actors} onOpenActor={onOpenActor} onOpenApps={onOpenApps} onCommitScope={onCommitScope} showToast={showToast} />
       )}
 
       {view.tab === 'sync' && (
@@ -882,20 +894,73 @@ function AccessTab({
   actors,
   onOpenActor,
   onOpenApps,
+  onCommitScope,
+  showToast,
 }: {
   ns: string;
   apps: AppInstanceRow[];
   actors: Actor[];
   onOpenActor?: (id: string) => void;
   onOpenApps?: () => void;
+  onCommitScope?: (a: Actor, services: string[], readOnly: boolean, preserveOverride?: string[]) => Promise<boolean>;
+  showToast: (msg: string, sticky?: boolean) => void;
 }) {
   const { service, appRows, delegates } = nsReaders(ns, apps, actors);
   const none = appRows.length === 0 && delegates.length === 0;
+  const [busy, setBusy] = useState<string | null>(null);
+  const [pick, setPick] = useState('');
+  // An app's delegate is an actor too: the grant the install minted is a scope
+  // bit on it, so the editor acts on the actor behind the app row.
+  const actorOf = (a: AppInstanceRow): Actor | undefined =>
+    actors.find((x) => x.label === a.label || x.omniHex.toLowerCase() === a.actor_omni.toLowerCase());
+  const readingLabels = new Set([...appRows.map((a) => a.label), ...delegates.map((d) => d.label)]);
+  // Who could be granted: live delegates (a device is a conduit, never a reader) not reading yet.
+  const candidates = actors.filter((a) => a.role === 'agent' && !actorIsChannelEndpoint(a) && a.status !== 'bad' && !readingLabels.has(a.label));
+  const canEdit = !!onCommitScope;
+  const commit = async (actor: Actor, read: boolean) => {
+    if (!onCommitScope || busy) return;
+    const verb = read ? 'grant' : 'revoke';
+    if (!read && !window.confirm(`Revoke ${actor.label}'s read grant on knowledge:${ns}?\n\nOne Touch ID (setScope). Its clone stops pulling this repository on the next pass; every other grant stays.`)) return;
+    setBusy(`${verb}:${actor.id}`);
+    const { services, preserve } = knowledgeGrantCommit(actor, ns, read);
+    const ok = await onCommitScope(actor, services, true, preserve);
+    setBusy(null);
+    if (ok) {
+      showToast(read ? `${actor.label} now reads knowledge:${ns} — its clone pulls it on the next pass (or "sync now").` : `${actor.label} no longer reads knowledge:${ns}.`);
+      setPick('');
+    }
+  };
+  const revokeButton = (actor: Actor | undefined) =>
+    !canEdit ? null : !actor ? (
+      <span className="muted" style={{ fontSize: 11 }} title="the actor tree does not list this reader yet — recheck after the fleet reconciles">actor not in the tree</span>
+    ) : (
+      <button className="btn sm" style={{ color: 'var(--danger)' }} disabled={!!busy} onClick={() => void commit(actor, false)}>
+        {busy === `revoke:${actor.id}` ? 'Touch ID…' : 'revoke read'}
+      </button>
+    );
   return (
-    <Panel title="who reads this repository" flush>
+    <Panel
+      title="who reads this repository"
+      flush
+      right={canEdit ? (
+        <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 }}>
+          <select style={{ ...INPUT, width: 180, padding: '3px 8px' }} value={pick} onChange={(e) => setPick(e.target.value)} disabled={!!busy || candidates.length === 0}>
+            <option value="">{candidates.length === 0 ? 'every delegate reads it' : 'grant read to…'}</option>
+            {candidates.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+          </select>
+          <button
+            className="btn primary sm"
+            disabled={!pick || !!busy}
+            onClick={() => { const a = actors.find((x) => x.id === pick); if (a) void commit(a, true); }}
+          >
+            {busy?.startsWith('grant:') ? 'Touch ID…' : 'grant · Touch ID'}
+          </button>
+        </span>
+      ) : undefined}
+    >
       {none && (
         <div className="muted" style={{ padding: 16, fontSize: 12.5 }}>
-          No one yet. A reader is granted the whole repository: bind one of its items in an app install, or set the <code>{service}</code> scope bit on a delegate&apos;s actor page.
+          No one yet. A reader is granted the whole repository: pick a delegate above (one Touch ID), bind one of its items in an app install, or set the <code>{service}</code> bit on a delegate&apos;s actor page.
         </div>
       )}
       {!none && (
@@ -911,6 +976,19 @@ function AccessTab({
           <tbody>
             {appRows.map((a) => {
               const bound = a.bindings.resources.filter((rb) => rb.ns === ns);
+              const actor = actorOf(a);
+              const bit = actor ? scopeBits(actor, ns)?.read === true : undefined;
+              // An absent bit is "revoked" only when the daemon named every grant
+              // on the actor; unnamed hashes (a taxonomy it could not read) may
+              // well BE this grant — say so instead of claiming a revoke.
+              const unnamed = actor?.scopeUnknownServiceIds?.length ?? 0;
+              const chainFact = bit === undefined
+                ? 'chain: its actor is not in the tree yet'
+                : bit
+                  ? 'chain: read bit set on its delegate'
+                  : unnamed > 0
+                    ? `chain: read bit not resolved — the delegate carries ${unnamed} grant hash${unnamed === 1 ? '' : 'es'} the daemon cannot name right now (a taxonomy read names them)`
+                    : 'chain: no read bit on its delegate — the sheet still names it (a re-install rewrites the sheet)';
               return (
                 <tr key={`a-${a.label}`}>
                   <td style={{ fontWeight: 600 }}>{a.label}<div className="secondary">{a.template_id} · {a.status}</div></td>
@@ -920,8 +998,12 @@ function AccessTab({
                       ? <>install sheet · <code>{service}</code> (read-only)</>
                       : <>a binding in this namespace</>}
                     {bound.length > 0 && <div className="secondary">bound: {bound.map((rb) => rb.item_id).join(', ')}</div>}
+                    <div className="secondary">{chainFact}</div>
                   </td>
-                  <td className="right">{onOpenApps && <button className="btn sm" onClick={onOpenApps}>applications →</button>}</td>
+                  <td className="right" style={{ whiteSpace: 'nowrap' }}>
+                    {bit !== false && revokeButton(actor)}
+                    {onOpenApps && <>{' '}<button className="btn sm" onClick={onOpenApps}>applications →</button></>}
+                  </td>
                 </tr>
               );
             })}
@@ -930,14 +1012,17 @@ function AccessTab({
                 <td style={{ fontWeight: 600 }}>{d.label}<div className="secondary mono">{shortOmni(d.omniHex)}</div></td>
                 <td><Chip>delegate</Chip></td>
                 <td>scope bit on chain · <code>{service}</code>{scopeBits(d, ns)?.write ? ' · write' : ' · read'}</td>
-                <td className="right">{onOpenActor && <button className="btn sm" onClick={() => onOpenActor(d.id)}>actor page →</button>}</td>
+                <td className="right" style={{ whiteSpace: 'nowrap' }}>
+                  {revokeButton(d)}
+                  {onOpenActor && <>{' '}<button className="btn sm" onClick={() => onOpenActor(d.id)}>actor page →</button></>}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
       <div className="muted" style={{ padding: '10px 16px', fontSize: 11.5, borderTop: '1px solid var(--rule-hair)' }}>
-        Revoking is where the grant was signed: uninstall the app, or clear the scope bit on the actor page — one Touch ID each. A reader&apos;s sandbox keeps a derived copy that the daemon refreshes every few minutes and can never write back here.
+        A grant here is the on-chain read bit on the delegate — one <code>setScope</code>, one Touch ID, nothing else on the actor changes. An app&apos;s install sheet stays what the install minted; the chain bit is what its clone actually pulls with. A reader&apos;s sandbox keeps a derived copy that the daemon refreshes every few minutes and can never write back here.
       </div>
     </Panel>
   );

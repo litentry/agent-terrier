@@ -332,7 +332,7 @@ export function DiffView({ before, after, maxHeight = 320 }: { before: string; a
  *  feed every 10 s while mounted: `booting · restoring · syncing k/n · ready ·
  *  degraded · pulling`, the detail on hover, and — when asked — a "sync now"
  *  poke (a `command` event the delegate answers with an immediate pull). */
-export function LifecycleChip({ channelId, sync = false }: { channelId: string; sync?: boolean }) {
+export function LifecycleChip({ channelId, sync = false, empty }: { channelId: string; sync?: boolean; empty?: ReactNode }) {
   const client = useClient();
   const [lc, setLc] = useState<DelegateLifecycle | null>(null);
   const [poked, setPoked] = useState(false);
@@ -350,7 +350,9 @@ export function LifecycleChip({ channelId, sync = false }: { channelId: string; 
       clearInterval(t);
     };
   }, [client, channelId]);
-  if (!lc) return null;
+  // No stage on the feed yet (an older image, nothing running, or a daemon
+  // without the route): render the caller's fallback, else nothing.
+  if (!lc) return empty ? <>{empty}</> : null;
   return (
     <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }} title={stageDetail(lc)}>
       <Chip kind={stageTone(lc.stage)}>{stageLabel(lc)}</Chip>
