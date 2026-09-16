@@ -150,8 +150,12 @@ covered() { # $1 = route. Param routes match each :seg as one path segment
       grep -lF "$1" $corpus_files >/dev/null 2>&1 ;;
   esac
 }
-waived() { printf '%s\n' "$WAIVERS" | grep -qE "^$1	"; }
-waiver_reason() { printf '%s\n' "$WAIVERS" | grep -E "^$1	" | head -1 | cut -f2; }
+# The waiver lookups read the table WITHOUT a pipe: `printf … | grep -q` raced
+# itself (grep exits at the first match, printf's write of the long table then
+# fails EPIPE, and under pipefail the lookup reads "not waived" — a waived route
+# became a violation in CI, 2026-09-16). awk over a here-string, one pass.
+waived() { awk -F'\t' -v r="$1" '$1 == r { found = 1; exit } END { exit !found }' <<<"$WAIVERS"; }
+waiver_reason() { awk -F'\t' -v r="$1" '$1 == r { print $2; exit }' <<<"$WAIVERS"; }
 
 info "ui_bridge serves $(printf '%s\n' "$routes" | wc -l | tr -d ' ') routes; checking runtime coverage (e2e/ + frontend tests)…"
 fails=0; ncov=0; nwaiv=0
