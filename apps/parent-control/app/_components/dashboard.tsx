@@ -29,7 +29,7 @@ export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status
       <>
         <PageHead
           crumb="actor tree · O_master"
-          title={<><span className="muted serif">/</span> actors</>}
+          title="actors"
           desc="Devices and agents bound to your actor tree. Each row is an HDKD child of your master — its own omni, its own scope, its own wallet."
         />
         <EmptyState
@@ -45,7 +45,7 @@ export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status
     <>
       <PageHead
         crumb="actor tree · O_master"
-        title={<><span className="muted serif">/</span> actors</>}
+        title="actors"
         desc="Devices and agents bound to your actor tree. Each row is an HDKD child of your master — its own omni, its own scope, its own wallet."
       />
       <div className="stats">
@@ -271,7 +271,7 @@ export function ActorDetail({
     <>
       <PageHead
         crumb={<><a onClick={onBack} style={{ cursor: 'pointer' }}>actors</a> <span className="muted">/</span> {actor.derivation}</>}
-        title={<><span className="muted serif">/</span> {actor.label}</>}
+        title={actor.label}
         desc={`Bound at ${actor.omni}. Knowledge scope changes stage locally, then commit on chain with one master Touch ID (setScope · K11).`}
         actions={
           <>
@@ -413,7 +413,7 @@ export function AuditFeed({
       <>
         <PageHead
           crumb="tier-1 · sse · audit-service · decodable on click"
-          title={<><span className="muted serif">/</span> audit feed</>}
+          title="audit feed"
           desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction."
         />
         <EmptyState
@@ -429,7 +429,7 @@ export function AuditFeed({
     <>
       <PageHead
         crumb="tier-1 · sse · audit-service · decodable on click"
-        title={<><span className="muted serif">/</span> audit feed</>}
+        title="audit feed"
         desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction."
         actions={<button className="btn sm" onClick={onPause}>{paused ? '▶ resume' : '❚❚ pause'}</button>}
       />

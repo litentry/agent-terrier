@@ -74,7 +74,6 @@ export function App() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [page, setPage] = useState<Page>('actors');
   const [actorId, setActorId] = useState<string | null>(null);
-  const [sideOpen, setSideOpen] = useState(false);
   const [paused, setPaused] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [eventDetail, setEventDetail] = useState<AuditEvent | null>(null);
@@ -548,10 +547,22 @@ export function App() {
     }
   };
 
+  // The header's ⋯ menu is a plain <details>: close it on an outside click,
+  // on Escape, and (below) on a pick — a native details only toggles on its
+  // own summary.
+  useEffect(() => {
+    const openMenus = () => Array.from(document.querySelectorAll<HTMLDetailsElement>('details.app-menu[open]'));
+    const onDown = (e: MouseEvent) => openMenus().forEach((d) => { if (!d.contains(e.target as Node)) d.open = false; });
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') openMenus().forEach((d) => { d.open = false; }); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, []);
+
   const go = (p: Page, id: string | null = null) => {
+    document.querySelectorAll<HTMLDetailsElement>('details.app-menu[open]').forEach((d) => { d.open = false; });
     setPage(p);
     setActorId(id);
-    setSideOpen(false);
     setProposals(null); // #207: a fresh actor detail starts un-classified
     setProposing(false);
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'instant' });
@@ -630,7 +641,6 @@ export function App() {
     setEventDetail(null);
     setActorId(null);
     setPage('actors');
-    setSideOpen(false);
   };
 
   const updateActor = (id: string, patch: Partial<Actor>) => {
@@ -1310,14 +1320,13 @@ export function App() {
     <div className="app">
       <header className="app-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <button className="hamb" onClick={() => setSideOpen((o) => !o)} aria-label="menu">{sideOpen ? '✕' : '≡'}</button>
           <div className="brand">
             <span className="mark">agentKeys</span>
             <span className="sub">parent control · m1</span>
           </div>
         </div>
         <div className="head-right">
-          <span style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{(daemonChain ?? CHAIN_PROFILE.name)} · {status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
+          <span className="head-status" style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{(daemonChain ?? CHAIN_PROFILE.name)} · {status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
           <button
             className={`bell ${pairingRequests.length ? 'has-req' : ''}`}
             // Route to where the pending claims actually are: delegate claims →
@@ -1335,94 +1344,87 @@ export function App() {
           >{maskEm ? '🕶' : '👁'}</button>
           <span className="who" title={whoOmni ?? ''}><span className="who-text">{whoOmni ? `${whoLabel} · ${shortOmni(whoOmni)}` : whoLabel}</span></span>
           <button className="btn sm" onClick={logout} title="Clear this session and return to login">log out</button>
+          <details className="app-menu">
+            <summary className="btn sm" title="account · session">⋯</summary>
+            <div className="menu-body">
+              <button className="menu-item" onClick={() => go('logo')}>logo &amp; brand</button>
+              <button
+                className="menu-item"
+                style={{ color: 'var(--danger)' }}
+                title="Unbind the master (local + on-chain) so you can re-onboard a fresh passkey — e.g. after the master passkey was deleted in your OS password manager, or an accept fails with SIG_VALIDATION."
+                onClick={() => {
+                  // #243: state the blast radius — reset tears down the whole fleet.
+                  const agentCount = actors.filter((a) => a.role === 'agent').length;
+                  const pendingCount = pairingRequests.length;
+                  if (window.confirm(`Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Disconnects your whole fleet: revokes ${agentCount} paired agent(s) on chain (ONE Touch ID approval covers all of them, asked first) + declines ${pendingCount} pending pairing request(s) — re-pairing needs a fresh ceremony\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?`)) resetMaster();
+                }}
+              >
+                reset master · re-onboard passkey
+              </button>
+              <div className="menu-info">
+                K6 · session JWT<br />{status.kind === 'connected' ? `daemon · ${status.via}` : 'daemon · offline'}<br />K11 · master device
+              </div>
+            </div>
+          </details>
         </div>
       </header>
 
-      <aside className={`app-side ${sideOpen ? 'open' : ''}`}>
-        <div className="nav-section">control</div>
-        <button className={`nav-item ${page === 'actors' ? 'active' : ''}`} onClick={() => go('actors')}>
-          <span className="marker">[•]</span> actors<span className="count">{actors.length}</span>
+      {/* The sections as one tab row under the header (the GitHub shape, #695
+          §9): counters ride as pills, the pending pairing claims tint their tab,
+          and the open actor page shows as its own tab. The former left rail's
+          account + session rows live in the header's ⋯ menu; the actor tree is
+          the Actors page itself. */}
+      <nav className="app-nav" aria-label="sections">
+        <button className={`app-nav-item ${page === 'actors' ? 'active' : ''}`} onClick={() => go('actors')}>
+          actors<span className="count">{actors.length}</span>
         </button>
-        <button className={`nav-item ${page === 'knowledge' ? 'active' : ''}`} onClick={() => go('knowledge')}>
-          <span className="marker">[◇]</span> knowledge<span className="count">{categories.length || '∅'}</span>
+        <button className={`app-nav-item ${page === 'knowledge' ? 'active' : ''}`} onClick={() => go('knowledge')}>
+          knowledge<span className="count">{categories.length || '∅'}</span>
         </button>
-        <button className={`nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
-          <span className="marker">[$]</span> credentials<span className="count">{credentials.length || '∅'}</span>
+        <button className={`app-nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
+          credentials<span className="count">{credentials.length || '∅'}</span>
         </button>
-
-        {/* #404 IA — household: delegates (sandbox agents) · devices (channel
-            endpoints) · channels (the id-anchored registry) · contacts (WeChat
-            contact gate + family). The former top-level pairing page is retired. */}
-        <div className="nav-section">household</div>
-        <button className={`nav-item ${page === 'delegates' ? 'active' : ''}`} onClick={() => go('delegates')}>
-          <span className="marker">[⇄]</span> delegates
-          {pairingRequests.filter((r) => !r.isDevice).length > 0 && <span className="count" style={{ color: 'var(--accent)' }}>{pairingRequests.filter((r) => !r.isDevice).length}●</span>}
+        <span className="app-nav-sep" aria-hidden="true" />
+        <button className={`app-nav-item ${page === 'delegates' ? 'active' : ''}`} onClick={() => go('delegates')}>
+          delegates
+          {pairingRequests.filter((r) => !r.isDevice).length > 0 && <span className="count attention">{pairingRequests.filter((r) => !r.isDevice).length}</span>}
         </button>
-        <button className={`nav-item ${page === 'devices' ? 'active' : ''}`} onClick={() => go('devices')}>
-          <span className="marker">[▣]</span> devices
-          {pairingRequests.filter((r) => r.isDevice).length > 0 && <span className="count" style={{ color: 'var(--accent)' }}>{pairingRequests.filter((r) => r.isDevice).length}●</span>}
+        <button className={`app-nav-item ${page === 'devices' ? 'active' : ''}`} onClick={() => go('devices')}>
+          devices
+          {pairingRequests.filter((r) => r.isDevice).length > 0 && <span className="count attention">{pairingRequests.filter((r) => r.isDevice).length}</span>}
         </button>
-        <button className={`nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
-          <span className="marker">[≋]</span> channels<span className="count">{channels.length || '∅'}</span>
+        <button className={`app-nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
+          channels<span className="count">{channels.length || '∅'}</span>
         </button>
-        <button className={`nav-item ${page === 'contacts' ? 'active' : ''}`} onClick={() => go('contacts')}>
-          <span className="marker">[◑]</span> contacts
+        <button className={`app-nav-item ${page === 'contacts' ? 'active' : ''}`} onClick={() => go('contacts')}>
+          contacts
         </button>
-        <button className={`nav-item ${page === 'applications' ? 'active' : ''}`} onClick={() => go('applications')}>
-          <span className="marker">[▣]</span> applications
+        <button className={`app-nav-item ${page === 'applications' ? 'active' : ''}`} onClick={() => go('applications')}>
+          applications
         </button>
-
-        <div className="nav-section">telemetry</div>
-        <button className={`nav-item ${page === 'audit' ? 'active' : ''}`} onClick={() => go('audit')}>
-          <span className="marker">{paused ? '[ ]' : '[~]'}</span> audit feed<span className="count">{events.length}</span>
+        <span className="app-nav-sep" aria-hidden="true" />
+        <button className={`app-nav-item ${page === 'audit' || page === 'decode' ? 'active' : ''}`} onClick={() => go('audit')}>
+          audit feed<span className="count">{events.length}</span>
         </button>
-        <button className={`nav-item ${page === 'chain' ? 'active' : ''}`} onClick={() => go('chain')}>
-          <span className="marker">[⇔]</span> chain
+        <button className={`app-nav-item ${page === 'chain' ? 'active' : ''}`} onClick={() => go('chain')}>
+          chain
         </button>
-
-        <div className="nav-section">account</div>
-        <button className="nav-item" onClick={logout}>
-          <span className="marker">[◆]</span> log out · replay onboarding
-        </button>
-        <button
-          className="nav-item"
-          style={{ color: 'var(--danger)' }}
-          title="Unbind the master (local + on-chain) so you can re-onboard a fresh passkey — e.g. after the master passkey was deleted in your OS password manager, or an accept fails with SIG_VALIDATION."
-          onClick={() => {
-            // #243: state the blast radius — reset tears down the whole fleet.
-            const agentCount = actors.filter((a) => a.role === 'agent').length;
-            const pendingCount = pairingRequests.length;
-            if (window.confirm(`Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Disconnects your whole fleet: revokes ${agentCount} paired agent(s) on chain (ONE Touch ID approval covers all of them, asked first) + declines ${pendingCount} pending pairing request(s) — re-pairing needs a fresh ceremony\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?`)) resetMaster();
-          }}
-        >
-          <span className="marker">[⟲]</span> reset master · re-onboard passkey
-        </button>
-
-        <div className="nav-section">brand</div>
-        <button className={`nav-item ${page === 'logo' ? 'active' : ''}`} onClick={() => go('logo')}>
-          <span className="marker">[◐]</span> logo
-        </button>
-
-        <div className="nav-section">actor tree</div>
-        {actors.map((a) => (
-          <button
-            key={a.id}
-            className={`nav-item ${page === 'detail' && actorId === a.id ? 'active' : ''}`}
-            onClick={() => go('detail', a.id)}
-            style={{ paddingLeft: a.role === 'agent' ? 36 : 22 }}
-          >
-            <span className="marker" style={{ fontSize: 10 }}>{a.role === 'master' ? '/' : '└'}</span>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.label.replace(' (revoked)', '')}</span>
-            {a.status === 'bad' && <span className="count" style={{ color: 'var(--danger)' }}>rvk</span>}
-            {a.status === 'warn' && <span className="count" style={{ color: 'var(--accent)' }}>!</span>}
-          </button>
-        ))}
-
-        <div className="nav-section">session</div>
-        <div style={{ padding: '6px 22px', fontSize: 11, color: 'var(--ink-faint)', lineHeight: 1.7 }}>
-          K6 · session JWT<br />{status.kind === 'connected' ? `daemon · ${status.via}` : 'daemon · offline'}<br />K11 · master device
-        </div>
-      </aside>
+        {page === 'detail' && currentActor && (
+          <>
+            <span className="app-nav-sep" aria-hidden="true" />
+            <button className="app-nav-item active" onClick={() => go('detail', currentActor.id)}>
+              ↳ {currentActor.label.replace(' (revoked)', '')}
+              {currentActor.status === 'bad' && <span className="count">revoked</span>}
+            </button>
+          </>
+        )}
+        {page === 'logo' && (
+          <>
+            <span className="app-nav-sep" aria-hidden="true" />
+            <button className="app-nav-item active" onClick={() => go('logo')}>logo</button>
+          </>
+        )}
+      </nav>
 
       <main className="app-main" data-section={sectionAttr}>
         {/* #242 — the master J1 lapsed but the coords are still held: ONE Touch ID
@@ -1688,7 +1690,7 @@ function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => v
       <div className="page-head">
         <div>
           <div className="crumb">audit · event · {event.kind}</div>
-          <h1><span className="muted serif">/</span> decode</h1>
+          <h1>decode</h1>
           <div className="desc">CBOR audit envelope + the on-chain transaction, decoded against the verified ABIs.</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
@@ -1859,7 +1861,7 @@ function ChainPage() {
       <div className="page-head">
         <div>
           <div className="crumb">chain · {name} · chain_id {chainId}</div>
-          <h1><span className="muted serif">/</span> chain</h1>
+          <h1>chain</h1>
           <div className="desc">{display}. Contracts deployed via Foundry; tier-2 audit anchors a Merkle root here every 2 minutes.</div>
         </div>
         {chains.length > 0 && (

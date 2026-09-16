@@ -53,11 +53,14 @@ export function Panel({
   flush?: boolean;
   children: ReactNode;
 }) {
+  // The old look prefixed panel titles with "── "; the GitHub-shaped console
+  // draws the box instead, so a string title drops it here.
+  const shown = typeof title === 'string' ? title.replace(/^──\s*/, '') : title;
   return (
     <div className="panel">
       {title && (
         <div className="panel-head">
-          <span>{title}</span>
+          <span>{shown}</span>
           {right}
         </div>
       )}

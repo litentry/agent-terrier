@@ -22,7 +22,29 @@
   --danger: var(--ds-blocked);
   --danger-soft: color-mix(in srgb, var(--ds-blocked) 9%, #fff);
   --info: #2d5ba8;
+  --btn-primary: var(--ink);
+  --btn-primary-ink: var(--bg);
+  --display-style: italic;
 }
+
+/* The GitHub-shaped console (the default since 2026-09-16, #695 §9): gray
+   hairlines instead of ink rules, a blue accent, green primary buttons, an
+   upright system-sans display; the three brand themes keep their look. */
+html[data-theme='github'] {
+  --rule: var(--ds-border);
+  --rule-soft: var(--ds-border);
+  --rule-hair: var(--ds-border);
+  --accent: var(--ds-primary);
+  --accent-soft: #ddf4ff;
+  --ok-soft: #dafbe1;
+  --danger-soft: #ffebe9;
+  --info: var(--ds-primary);
+  --btn-primary: var(--ds-secondary);
+  --btn-primary-ink: #ffffff;
+  --display-style: normal;
+  font-size: 14px;
+}
+html[data-theme='github'] body { font-size: 14px; }
 
 * { box-sizing: border-box; }
 
@@ -167,11 +189,12 @@ a:hover { text-decoration-color: var(--ink); }
 .app {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 240px 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto 1fr;
   grid-template-areas:
-    "head head"
-    "side main";
+    "head"
+    "nav"
+    "main";
 }
 
 .app-head {
@@ -194,9 +217,10 @@ a:hover { text-decoration-color: var(--ink); }
   gap: 10px;
 }
 .brand .mark {
-  font-family: 'IBM Plex Serif', serif;
+  font-family: var(--ds-font-display);
   font-size: 18px;
-  font-style: italic;
+  font-weight: 600;
+  font-style: var(--display-style);
   letter-spacing: -0.01em;
 }
 .brand .sub {
@@ -223,80 +247,105 @@ a:hover { text-decoration-color: var(--ink); }
   display: inline-block;
 }
 
-.app-side {
-  grid-area: side;
-  border-right: 1px solid var(--rule);
-  padding: 20px 0;
+/* ─── Top navigation (the sections as one tab row) ─────────── */
+
+.app-nav {
+  grid-area: nav;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+  overflow-x: auto;
   position: sticky;
   top: 53px;
-  height: calc(100vh - 53px);
-  overflow-y: auto;
+  z-index: 9;
 }
-.nav-section { padding: 0 22px 6px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); margin-top: 16px; }
-.nav-section:first-child { margin-top: 0; }
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 22px;
-  cursor: pointer;
-  font-size: 13px;
-  border: 0;
+.app-nav-item {
+  appearance: none;
   background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.app-nav-item:hover { color: var(--ink); background: var(--bg-elev); }
+.app-nav-item.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.app-nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.app-nav-item .count {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  background: var(--bg-deep);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 18px;
+  min-width: 18px;
+  text-align: center;
+}
+.app-nav-item .count.attention { background: var(--accent); color: #fff; }
+.app-nav-sep { width: 1px; background: var(--rule); margin: 10px 6px; flex: 0 0 auto; }
+
+.app-menu { position: relative; }
+.app-menu summary { list-style: none; cursor: pointer; }
+.app-menu summary::-webkit-details-marker { display: none; }
+.app-menu .menu-body {
+  position: absolute;
+  right: 0;
+  top: 34px;
+  min-width: 260px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(31, 35, 40, 0.12);
+  padding: 6px;
+  z-index: 20;
+}
+.app-menu .menu-item {
+  display: block;
   width: 100%;
   text-align: left;
-  font-family: inherit;
+  background: none;
+  border: 0;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12.5px;
   color: var(--ink);
+  cursor: pointer;
+  border-radius: 4px;
 }
-.nav-item:hover { background: var(--bg-elev); }
-.nav-item.active {
-  background: var(--ink);
-  color: var(--bg);
-}
-.nav-item .marker {
-  font-family: inherit;
-  width: 14px;
-  display: inline-block;
-  color: var(--ink-faint);
-}
-.nav-item.active .marker { color: var(--bg); }
-.nav-item .count {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--ink-faint);
-}
-.nav-item.active .count { color: var(--bg-deep); }
+.app-menu .menu-item:hover { background: var(--bg-elev); }
+.app-menu .menu-info { padding: 7px 10px; font-size: 11px; color: var(--ink-faint); line-height: 1.7; border-top: 1px solid var(--rule-hair); margin-top: 4px; }
 
 .app-main {
   grid-area: main;
   padding: 28px 36px 80px;
   max-width: 1180px;
+  min-width: 0;
+  overflow-x: auto;
 }
+.tab td.mono, .tab td .mono { overflow-wrap: anywhere; }
 
 /* ─── Mobile ──────────────────────────────────────────────────── */
 
-.hamb { display: none; background: none; border: 1px solid var(--rule); padding: 6px 10px; font-family: inherit; font-size: 12px; cursor: pointer; color: var(--ink); }
-
 @media (max-width: 820px) {
-  .app {
-    grid-template-columns: 1fr;
-    grid-template-areas: "head" "main";
-  }
-  .app-side {
-    position: fixed;
-    inset: 53px 0 0 0;
-    height: auto;
-    width: 100%;
-    background: var(--bg);
-    z-index: 9;
-    border-right: 0;
-    transform: translateX(-100%);
-    transition: transform 0.18s ease;
-  }
-  .app-side.open { transform: translateX(0); }
+  .app-head { padding: 10px 14px; gap: 8px; }
+  .brand .sub, .head-status { display: none; }
+  .head-right { gap: 8px; }
+  .app-nav { padding: 0 10px; top: 45px; }
+  .app-nav-item { padding: 10px 9px; font-size: 12.5px; }
   .app-main { padding: 20px 18px 80px; }
-  .hamb { display: inline-block; }
   .head-right .who-text { display: none; }
+  .app-menu .menu-body { min-width: 220px; max-width: calc(100vw - 28px); }
 }
 
 /* ─── Page header ─────────────────────────────────────────────── */
@@ -312,12 +361,12 @@ a:hover { text-decoration-color: var(--ink); }
   flex-wrap: wrap;
 }
 .page-head h1 {
-  font-family: 'IBM Plex Serif', serif;
+  font-family: var(--ds-font-display);
   font-weight: 400;
   font-size: 28px;
   margin: 0 0 2px;
   letter-spacing: -0.015em;
-  font-style: italic;
+  font-style: var(--display-style);
 }
 .page-head .crumb {
   font-size: 11px;
@@ -481,8 +530,8 @@ a:hover { text-decoration-color: var(--ink); }
   letter-spacing: 0.02em;
 }
 .btn:hover { background: var(--bg-elev); }
-.btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-.btn.primary:hover { background: #000; }
+.btn.primary { background: var(--btn-primary); color: var(--btn-primary-ink); border-color: var(--btn-primary); }
+.btn.primary:hover { filter: brightness(0.92); }
 .btn.danger { background: var(--bg); color: var(--danger); border-color: var(--danger); }
 .btn.danger:hover { background: var(--danger); color: var(--bg); }
 .btn.danger.solid { background: var(--danger); color: var(--bg); }
@@ -581,7 +630,7 @@ a:hover { text-decoration-color: var(--ink); }
 }
 .stat:last-child { border-right: 0; }
 .stat .v {
-  font-family: 'IBM Plex Serif', serif;
+  font-family: var(--ds-font-display);
   font-size: 26px;
   font-weight: 400;
   line-height: 1;
@@ -710,7 +759,6 @@ a:hover { text-decoration-color: var(--ink); }
 /* Tap targets on mobile */
 @media (max-width: 820px) {
   .btn { padding: 10px 16px; font-size: 12.5px; }
-  .nav-item { padding: 12px 22px; }
   .tab td, .tab th { padding: 12px 14px; }
 }
 
@@ -971,10 +1019,10 @@ a:hover { text-decoration-color: var(--ink); }
   border-top-left-radius: var(--ds-r-panel);
   border-top-right-radius: var(--ds-r-panel);
 }
-.btn, .chip, .tswitch, .view-toggle, .perm-seg, .bell, .hamb, .perm-switch {
+.btn, .chip, .tswitch, .view-toggle, .perm-seg, .bell, .perm-switch {
   border-radius: var(--ds-r-pill);
 }
-.btn.primary, .nav-item.active {
+.btn.primary {
   background: var(--ds-primary);
   color: var(--ds-on-primary);
   border-color: var(--ds-primary);
@@ -997,3 +1045,50 @@ input, textarea, select { border-radius: var(--ds-r-field); }
 .diff-line.add { background: color-mix(in srgb, var(--ok, #2f7d4a) 14%, transparent); }
 .diff-line.del { background: color-mix(in srgb, var(--danger, #b3261e) 12%, transparent); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger, #b3261e) 50%, transparent); }
 .diff-sign { display: inline-block; width: 14px; color: var(--ink-faint); user-select: none; }
+
+/* ─── GitHub-shaped surfaces (html[data-theme='github']) ─────────
+   Boxes with 6 px corners, labels as pills, upright 600-weight titles, an
+   underline nav, no small-caps tracking, no section hues. */
+html[data-theme='github'] a { color: var(--ds-primary); text-decoration: none; }
+html[data-theme='github'] a:hover { text-decoration: underline; }
+html[data-theme='github'] ::selection { background: rgba(9, 105, 218, 0.2); color: inherit; }
+html[data-theme='github'] .app-head { padding: 12px 22px; background: var(--bg-elev); }
+html[data-theme='github'] .app-nav { background: var(--bg-elev); }
+html[data-theme='github'] .panel { border-radius: var(--ds-r-card); }
+html[data-theme='github'] .panel-head { border-radius: calc(var(--ds-r-card) - 1px) calc(var(--ds-r-card) - 1px) 0 0; }
+html[data-theme='github'] .panel-head { text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+html[data-theme='github'] .page-head { padding-bottom: 12px; }
+html[data-theme='github'] .page-head h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+html[data-theme='github'] .page-head .crumb { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--ink-dim); }
+html[data-theme='github'] .page-head .desc { font-size: 13px; }
+html[data-theme='github'] .btn { border-radius: var(--ds-r-card); background: var(--bg-elev); font-weight: 500; letter-spacing: 0; padding: 5px 12px; font-size: 12.5px; box-shadow: 0 1px 0 rgba(31, 35, 40, 0.04); }
+html[data-theme='github'] .btn:hover { background: var(--bg-deep); }
+html[data-theme='github'] .btn.sm { padding: 3px 9px; font-size: 12px; }
+html[data-theme='github'] .btn.ghost { background: transparent; box-shadow: none; }
+html[data-theme='github'] .btn.primary { background: var(--btn-primary); }
+html[data-theme='github'] .chip { border-radius: 999px; text-transform: none; letter-spacing: 0; font-size: 11px; font-weight: 500; padding: 1px 8px; line-height: 18px; }
+html[data-theme='github'] .dot { border-radius: 50%; width: 8px; height: 8px; }
+html[data-theme='github'] .tab th { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 600; color: var(--ink-dim); background: var(--bg-elev); }
+html[data-theme='github'] .tab th, html[data-theme='github'] .tab td { padding: 8px 16px; }
+html[data-theme='github'] .stats { border-radius: var(--ds-r-card); overflow: hidden; background: var(--bg-elev); }
+html[data-theme='github'] .stat .v { font-size: 22px; font-weight: 600; }
+html[data-theme='github'] .stat .k { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--ink-dim); }
+html[data-theme='github'] .banner { border-radius: var(--ds-r-card); background: #ddf4ff; border-color: rgba(84, 174, 255, 0.4); }
+html[data-theme='github'] .banner.warn { background: #fff8c5; border-color: rgba(212, 167, 44, 0.4); }
+html[data-theme='github'] .banner .lbl { text-transform: none; letter-spacing: 0; font-weight: 600; font-size: 12px; color: var(--ink); }
+html[data-theme='github'] .kvs dt { text-transform: none; letter-spacing: 0; font-size: 12px; }
+html[data-theme='github'] .tabbar-item { font-size: 14px; padding: 8px 12px; }
+html[data-theme='github'] .tabbar-item.active { border-bottom-color: var(--accent); }
+html[data-theme='github'] .device-card, html[data-theme='github'] .worker-card, html[data-theme='github'] .diff, html[data-theme='github'] .perm-rows { border-radius: var(--ds-r-card); }
+html[data-theme='github'] .feed-row { padding: 10px 16px; }
+html[data-theme='github'] .nav-section, html[data-theme='github'] .perm-section-head .ttl { text-transform: none; letter-spacing: 0; }
+html[data-theme='github'] .app-main[data-section] { --section: var(--ink); --section-soft: var(--bg-elev); --section-faint: var(--bg-elev); }
+html[data-theme='github'] .app-main[data-section] .page-head { border-bottom-color: var(--rule); }
+html[data-theme='github'] .app-main[data-section] .page-head .crumb { color: var(--ink-dim); }
+html[data-theme='github'] .app-main[data-section] .panel-head { background: var(--bg-elev); border-bottom-color: var(--rule); color: var(--ink); }
+html[data-theme='github'] .app-main[data-section] .banner:not(.warn) { background: #ddf4ff; border-color: rgba(84, 174, 255, 0.4); }
+html[data-theme='github'] .app-main[data-section] .banner:not(.warn) .lbl { color: var(--ink); border-right-color: rgba(84, 174, 255, 0.4); }
+html[data-theme='github'] input, html[data-theme='github'] select, html[data-theme='github'] textarea { border-radius: var(--ds-r-card); }
+/* The fixed chain badge used to ride the header's top-right corner, over the
+   account row; the tab-row shell docks it bottom-right instead (under a toast). */
+html[data-theme='github'] .chain-badge { top: auto; bottom: 10px; right: 10px; z-index: 150; border-radius: 999px; }

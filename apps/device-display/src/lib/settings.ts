@@ -3,8 +3,13 @@
 // provisioned by opening one link. No default broker: an unconfigured display
 // shows the settings screen instead of silently pointing at some stack.
 
+import { BRAND_THEMES } from '@agentkeys/design-system';
+import type { ThemeName } from '@agentkeys/design-system';
+
 export type Locale = 'en' | 'zh';
-export type ThemeName = 'meadow' | 'terracotta' | 'forest';
+// The design system owns the theme names (a hand-mirrored union drifted the
+// moment a theme was added, caught by CI); a display offers the brand sets.
+export type { ThemeName };
 
 export interface Settings {
   /** The broker base URL, e.g. https://test-broker.agentterrier.cn */
@@ -61,7 +66,7 @@ export function loadSettings(storage: StorageLike | null, search: string): Setti
   const lang = q.get('lang');
   if (lang === 'en' || lang === 'zh') merged.locale = lang;
   const theme = q.get('theme');
-  if (theme === 'meadow' || theme === 'terracotta' || theme === 'forest') merged.theme = theme;
+  if (theme && BRAND_THEMES.some((t) => t.name === theme)) merged.theme = theme as ThemeName;
   return merged;
 }
 
