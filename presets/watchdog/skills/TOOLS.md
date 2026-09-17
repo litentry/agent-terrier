@@ -21,7 +21,7 @@
 2. Kids: total outdoor time, longest stretch, who.
 3. Door: deliveries, visitors (known vs unknown), odd-hour events.
 4. Gaps: any feed silence longer than an hour, stated plainly.
-Publish to the granted channels; keep it under 10 lines.
+Publish to the granted channels with the `publish_to_slot` tool (a file publishes nothing); keep it under 10 lines.
 
 ## Ad-hoc questions
 

@@ -177,6 +177,25 @@ Cheap first pass without touching the sandbox: on the broker, `channel/poll` in 
 
 The daemon `COPY` is deliberately the **final** layer: it is the only thing that changes on a normal code push, so a rebuild invalidates exactly one ~50 MB layer and a re-push uploads only that. **Anything added below it re-inflates every incremental push** — put new steps above it.
 
+## "update runtime" is a long request — the broker vhost's read timeout (2026-09-17)
+
+The #577 in-place update is one synchronous `POST /v1/agent/update`: snapshot →
+kill → `CreateSandbox` → (on a cold image) the ~29 s veFaaS cold-start budget
+→ adopt-by-name polling → the runtime-home import. On the VE broker the nginx
+vhost rendered **no** `proxy_read_timeout`, so nginx's default 60 s applied:
+measured 2026-09-17, both "update runtime" clicks got `504 Gateway Time-out`
+at exactly 60 s while the rotates went on — the pods finished booting, the
+ensure path adopted them, and image-status showed both delegates Ready on the
+new image. Both host scripts now render `proxy_read_timeout` from ONE knob,
+`BROKER_NGINX_PROXY_TIMEOUT_SECS` (default **300**; AWS was 120). What a
+longer read timeout costs: a truly stuck upstream request holds its nginx
+connection and the client's spinner for up to 5 min before the 504 (the
+console's button already says "may take a minute", and its verify poll checks
+image-status afterwards); it changes no correctness. The structural fix — run
+the rotate detached from the request, answer 202 after a short inline wait,
+let the console verify by polling — is the follow-up; until then a rotate
+that outruns even 300 s is still cancelled mid-flight by the disconnect.
+
 ## The engine's embedder: gate relay (default) or a local model (opt-in, #694 step 5)
 
 The sandbox's OpenViking engine embeds every mirrored knowledge line. By

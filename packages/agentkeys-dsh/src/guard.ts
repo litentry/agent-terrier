@@ -16,7 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { PreToolDecision, ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools';
-import { classifyTool, type MappingConfig } from './mapping.js';
+import { classifyTool, holdsPublishGrant, type MappingConfig } from './mapping.js';
 import { consumeApprovedCall, DEFAULT_GRANTS_URL, GrantsCache } from './grants.js';
 
 export const name = 'agentkeys-guard';
@@ -28,6 +28,7 @@ export interface Config extends MappingConfig {
   ttlMs?: number;
   toolClasses?: Record<string, string[]>;
   baseline?: string[];
+  publishTools?: string[];
 }
 
 export const Config: z<Config> = z.object({
@@ -36,6 +37,7 @@ export const Config: z<Config> = z.object({
   ttlMs: z.number().default(60_000),
   toolClasses: z.dict(z.array(z.string())),
   baseline: z.array(z.string()),
+  publishTools: z.array(z.string()),
 });
 
 /** Pure decision core (exported for tests): what does a tool name deserve
@@ -61,6 +63,18 @@ export function decide(
       return {
         kind: 'ask',
         reason: `AgentKeys: requires the ${verdict.service} grant (not held by this delegate)`,
+      };
+    case 'publish':
+      if (!available) {
+        return {
+          kind: 'deny',
+          reason: 'AgentKeys: grant view unavailable (daemon unreachable) — the publish feeds cannot be verified, failing closed',
+        };
+      }
+      if (holdsPublishGrant(services)) return { kind: 'allow' };
+      return {
+        kind: 'deny',
+        reason: `AgentKeys: ${JSON.stringify(toolName)} needs a channel-pub:<feed> grant and this delegate holds none — a feed is granted at install (a bound display / chat slot), never by an allow-once`,
       };
     case 'unmapped':
       return {

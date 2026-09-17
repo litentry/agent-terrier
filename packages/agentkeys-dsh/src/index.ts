@@ -1,11 +1,13 @@
 /** @module @agentkeys/dsh-suite — re-exports only; plugins mount via the
  *  subpaths `@agentkeys/dsh-suite/guard` and `@agentkeys/dsh-suite/answerer`.
  *  Deliberately NO default export anywhere (dsh postmortem 0001). */
-export { classifyTool, DEFAULT_BASELINE, DEFAULT_TOOL_CLASSES, OPENVIKING_TOOL_PATTERNS } from './mapping.js';
+export { classifyTool, DEFAULT_BASELINE, DEFAULT_PUBLISH_TOOLS, DEFAULT_TOOL_CLASSES, holdsPublishGrant, OPENVIKING_TOOL_PATTERNS, PUBLISH_SERVICE_PREFIX } from './mapping.js';
 export type { MappingConfig, ToolVerdict } from './mapping.js';
 export { DEFAULT_GRANTS_URL, GrantsCache, consumeApprovedCall, recordApprovedCall } from './grants.js';
 export type { GrantView, GrantsConfig } from './grants.js';
 export { decide } from './guard.js';
+export { boundPubSlots, EVENT_KINDS, parseReceipt, publishArgv, PUBLISH_TOOL_NAME, runDaemon, stderrTail } from './publish.js';
+export type { DaemonRun, PublishArgs, Receipt } from './publish.js';
 export { answer, proposeBody } from './answerer.js';
 export { AgentKeysCredentialProvider, DEFAULT_CREDENTIAL_URL } from './credentials.js';
 export { approvalRow, AuditSink, OP_KIND_RUNTIME_APPROVAL, OP_KIND_RUNTIME_TOOL_RESULT, toolResultRow } from './audit.js';

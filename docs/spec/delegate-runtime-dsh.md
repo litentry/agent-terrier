@@ -75,6 +75,7 @@ Scope-grant services are strings; the vocabulary gets two families:
 |---|---|---|---|
 | **Data services** (existing) | `knowledge:<ns>` · `cred:<service>` · `channel:<id>` · `proposal:<ns>` · `config` | broker cap-mint + the per-class workers | yes |
 | **Capability services** (new) | `plugin:<id>` — may this capability provider be mounted in the session; `tool:<class>` (`tool:web`, `tool:code`, `tool:schedule`, …) — may this action family run | the preset compiler (mount) and the guard (call class) **only** | never |
+| **The publish action** (2026-09-17) | `publish_to_slot` — the suite's own tool (`@agentkeys/dsh-suite/publish`), the delegate's "act" verb: one event to a bound pub slot through `agentkeys-daemon --publish-once`. **Not a capability class**: the guard allows it when the delegate holds *any* `channel-pub:<id>` data service and denies it otherwise (an allow-once cannot mint a feed); *which* feed is the cap-mint's verdict. Why it exists: the image's `publish-to-slot` shell helper needs `tool:code`, which no application sheet grants — a chef told to publish its card wrote a file instead (measured on the clock and on demand). | the guard (pub-grant presence) + broker cap-mint (the feed) | yes (the channel worker) |
 
 With capability services the action plane becomes **`compiled(authority)` everywhere, with no hand-authored remainder**. The projection ladder:
 

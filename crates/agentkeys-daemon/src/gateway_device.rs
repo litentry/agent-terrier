@@ -129,6 +129,7 @@ pub(crate) async fn finish_gateway_enrollment(
             granted_service_names: Vec::new(),
             updated_at: now_unix(),
             preset_id: None,
+            agent_url: None,
             memory_ns: None,
             archived_at: None,
             resources_kept: None,

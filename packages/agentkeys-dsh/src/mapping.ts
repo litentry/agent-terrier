@@ -21,6 +21,21 @@ export const DEFAULT_TOOL_CLASSES: Readonly<Record<string, readonly string[]>> =
   schedule: ['schedule_create', 'schedule_delete', 'schedule_list'],
 };
 
+/** The publish action (`@agentkeys/dsh-suite/publish`, 2026-09-17): the
+ *  delegate's own "act" verb. Not a capability class — publishing IS the
+ *  granted data service: allowed when the delegate holds ANY `channel-pub:<id>`
+ *  grant, and WHICH feed is the cap-mint's verdict (an ungranted feed is
+ *  refused there with the worker's reason). Denied outright without one: an
+ *  allow-once cannot mint a feed grant, so asking would only mislead. */
+export const DEFAULT_PUBLISH_TOOLS: readonly string[] = ['publish_to_slot'];
+export const PUBLISH_SERVICE_PREFIX = 'channel-pub:';
+
+/** Does the (lower-cased) grant view hold any publish feed? */
+export function holdsPublishGrant(services: ReadonlySet<string>): boolean {
+  for (const s of services) if (s.startsWith(PUBLISH_SERVICE_PREFIX)) return true;
+  return false;
+}
+
 /** Always-allowed baseline (no grant consulted). */
 export const DEFAULT_BASELINE: readonly string[] = [
   'read', 'write', 'edit', 'read_image', 'str_replace_editor', 'glob', 'grep',
@@ -39,11 +54,13 @@ export const OPENVIKING_TOOL_PATTERNS: readonly RegExp[] = [
 export interface MappingConfig {
   readonly toolClasses?: Readonly<Record<string, readonly string[]>>;
   readonly baseline?: readonly string[];
+  readonly publishTools?: readonly string[];
 }
 
 export type ToolVerdict =
   | { kind: 'baseline' }
   | { kind: 'classed'; toolClass: string; service: string }
+  | { kind: 'publish' }
   | { kind: 'unmapped' };
 
 /** Pure classification of a registered tool name. */
@@ -54,6 +71,8 @@ export function classifyTool(name: string, config: MappingConfig = {}): ToolVerd
   const baseline = config.baseline?.length ? config.baseline : DEFAULT_BASELINE;
   if (baseline.includes(name)) return { kind: 'baseline' };
   if (OPENVIKING_TOOL_PATTERNS.some((re) => re.test(name))) return { kind: 'baseline' };
+  const publish = config.publishTools?.length ? config.publishTools : DEFAULT_PUBLISH_TOOLS;
+  if (publish.includes(name)) return { kind: 'publish' };
   const classes =
     config.toolClasses && Object.keys(config.toolClasses).length > 0
       ? config.toolClasses

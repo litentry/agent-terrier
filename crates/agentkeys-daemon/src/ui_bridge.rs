@@ -561,6 +561,12 @@ pub struct BindingManifestEntry {
     /// spawn or a pre-#427 binding). Readable-layer only, like `label`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
+    /// The delegate's bridge base (`sandbox.agent_url` of the spawn / #577
+    /// update response — the veFaaS gateway, routed per instance by header),
+    /// so the preset can be re-applied later without a spawn response in
+    /// hand. Absent on a row that predates 2026-09-17 until its next update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_url: Option<String>,
     /// #427 — the delegate's `knowledge:<ns>` namespace name (the #425 O2
     /// inheritance-discovery key; grants on-chain are keccak ids).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -651,6 +657,9 @@ impl BindingManifest {
                 // state them (a scope re-grant must not wipe the spawn record).
                 if entry.preset_id.is_none() {
                     entry.preset_id = existing.preset_id.clone();
+                }
+                if entry.agent_url.is_none() {
+                    entry.agent_url = existing.agent_url.clone();
                 }
                 if entry.memory_ns.is_none() {
                     entry.memory_ns = existing.memory_ns.clone();
@@ -1329,6 +1338,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/master/persona/rollback", post(rollback_master_persona))
         .route("/v1/master/persona/delete", post(delete_master_persona))
         .route("/v1/master/agent/restart", post(restart_master_agent))
+        .route(
+            "/v1/master/agent/preset/reapply",
+            post(agent_preset_reapply),
+        )
         .route("/v1/master/agent/context", get(get_master_agent_context))
         // #404 — the master's channel registry (id-anchored channel definitions;
         // the device pages SELECT from it — channels are never created silently):
@@ -3914,13 +3927,50 @@ fn ct_bearer_eq(a: &str, b: &str) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// The channel grants a SANDBOX can name without any registry: its own opchat
+/// feed (`AGENTKEYS_CHAT_CHANNEL_ID`) and every bound slot's channel
+/// (`AGENTKEYS_BOUND_CHANNELS`), as `keccak(channel-pub:<id>)` /
+/// `keccak(channel-sub:<id>)` → name. The self-grant view must carry them since
+/// 2026-09-17: the suite's `publish_to_slot` verdict is "any `channel-pub:`
+/// grant held", and a view that left every channel hash unresolved denied the
+/// card to a chef holding five channel grants on chain (measured live). A name
+/// is recovered only when the chain scope actually holds that hash.
+fn sandbox_channel_service_candidates(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> HashMap<String, String> {
+    use agentkeys_backend_client::protocol::{
+        sandbox_env, service_channel_pub, service_channel_sub,
+    };
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(id) = lookup(sandbox_env::CHAT_CHANNEL_ID).filter(|v| !v.trim().is_empty()) {
+        ids.push(id.trim().to_string());
+    }
+    for bound in crate::app_runtime::AppRuntimeConfig::from_lookup(&lookup).bound_channels {
+        ids.push(bound.channel_id);
+    }
+    let mut map = HashMap::new();
+    for id in ids {
+        for name in [service_channel_pub(&id), service_channel_sub(&id)] {
+            let h = format!(
+                "0x{}",
+                hex::encode(agentkeys_core::device_crypto::keccak256(name.as_bytes()))
+            );
+            map.entry(h).or_insert(name);
+        }
+    }
+    map
+}
+
 /// Pure name assembly for the self-grant view: memory/inbox names from the
 /// classified scope map, capability names (`tool:<class>`) recovered via the
-/// enumerable candidates, everything else left as raw unresolved hashes
-/// (`cred:<x>` etc. — the delegate does not need their names to guard tools).
+/// enumerable candidates, the sandbox's own channel grants via
+/// `extra_candidates` (see [`sandbox_channel_service_candidates`]), everything
+/// else left as raw unresolved hashes (`cred:<x>` etc. — the delegate does not
+/// need their names to guard tools).
 fn assemble_self_grant_names(
     scope: &Option<HashMap<String, ApiScopeBits>>,
     unknown_ids: &[String],
+    extra_candidates: &HashMap<String, String>,
 ) -> (Vec<String>, Vec<String>) {
     let mut names: Vec<String> = Vec::new();
     if let Some(map) = scope {
@@ -3939,12 +3989,230 @@ fn assemble_self_grant_names(
     let candidates = capability_service_candidates();
     let mut unresolved: Vec<String> = Vec::new();
     for h in unknown_ids {
-        match candidates.get(&h.to_lowercase()) {
+        let key = h.to_lowercase();
+        match candidates.get(&key).or_else(|| extra_candidates.get(&key)) {
             Some(name) => names.push(name.clone()),
             None => unresolved.push(h.clone()),
         }
     }
     (names, unresolved)
+}
+
+/// The error for a bridge answer that is not JSON — the gateway (or a booting
+/// pod) answering in the bridge's place: the status and a body snippet, never
+/// a bare "parse: error decoding response body" (that line hid the 5xx behind
+/// the chef install's skills apply, 2026-09-16, and the skills were lost).
+fn bridge_non_json_error(url: &str, status: &str, text: &str, parse: &str) -> String {
+    let snippet: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect();
+    format!("bridge {url} {status}: non-JSON body ({parse}): {snippet}")
+}
+
+const PRESET_APPLY_READY_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+const PRESET_APPLY_READY_POLL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Wait (bounded) until the delegate's bridge answers `/healthz` 200 — the pod
+/// booted and the agent handle exists — then distribute the preset. A bridge
+/// that never answers still gets the attempt, so the audit row carries its
+/// actual answer; an unconfigured base (no gateway known) skips the wait.
+async fn apply_preset_when_ready(
+    state: &SharedUiBridgeState,
+    broker: &str,
+    preset_id: &str,
+    delegate_omni: &str,
+    sandbox_id: Option<&str>,
+    agent_url: Option<&str>,
+) -> String {
+    let started = std::time::Instant::now();
+    let mut last_err = String::new();
+    let ready = loop {
+        match sandbox_bridge_request_instanced(
+            state,
+            reqwest::Method::GET,
+            "/healthz",
+            None,
+            sandbox_id,
+            agent_url,
+        )
+        .await
+        {
+            Ok(_) => break true,
+            Err(e) if e.starts_with("sandbox_unconfigured") => {
+                last_err = e;
+                break false;
+            }
+            Err(e) => last_err = e,
+        }
+        if started.elapsed() >= PRESET_APPLY_READY_BUDGET {
+            break false;
+        }
+        tokio::time::sleep(PRESET_APPLY_READY_POLL).await;
+    };
+    let prefix = if ready {
+        String::new()
+    } else {
+        preset_apply_audit(
+            state,
+            preset_id,
+            delegate_omni,
+            format!(
+                "bridge not ready after {}s ({last_err}) — applying anyway",
+                started.elapsed().as_secs()
+            ),
+            "warn",
+        )
+        .await;
+        format!("bridge not ready ({last_err}); ")
+    };
+    let note = apply_preset_at_spawn(
+        state,
+        broker,
+        preset_id,
+        delegate_omni,
+        sandbox_id,
+        agent_url,
+    )
+    .await;
+    format!("{prefix}{note}")
+}
+
+/// The preset apply detached from a spawn / update response (the wait is up
+/// to two minutes; the response must not carry it). Every outcome lands in
+/// the audit feed as `agent.preset_applied`.
+fn spawn_preset_apply_task(
+    state: SharedUiBridgeState,
+    broker: String,
+    preset_id: String,
+    delegate_omni: String,
+    sandbox_id: Option<String>,
+    agent_url: Option<String>,
+) {
+    tokio::spawn(async move {
+        apply_preset_when_ready(
+            &state,
+            &broker,
+            &preset_id,
+            &delegate_omni,
+            sandbox_id.as_deref(),
+            agent_url.as_deref(),
+        )
+        .await;
+    });
+}
+
+/// After a #577 update the re-created sandbox holds the runtime-home hand-off
+/// (DSH_HOME), not the preset bundle — re-apply persona + skills once the new
+/// instance answers. The base is the update response's, else the recorded one.
+async fn reapply_preset_after_update(
+    state: &SharedUiBridgeState,
+    broker: &str,
+    device_key_hash: &str,
+    sandbox_id: Option<String>,
+    agent_url: Option<String>,
+) {
+    let Ok(manifest) = ensure_binding_manifest(state).await else {
+        return;
+    };
+    let Some(entry) = manifest.entry_for("", device_key_hash).cloned() else {
+        return;
+    };
+    let Some(preset_id) = entry.preset_id.clone().filter(|p| !p.is_empty()) else {
+        return;
+    };
+    let base = agent_url.or_else(|| entry.agent_url.clone());
+    spawn_preset_apply_task(
+        state.clone(),
+        broker.to_string(),
+        preset_id,
+        entry.actor_omni.clone(),
+        sandbox_id,
+        base,
+    );
+}
+
+#[derive(Deserialize)]
+struct PresetReapplyRequest {
+    actor_omni: String,
+}
+
+/// `POST /v1/master/agent/preset/reapply` — write the delegate's preset
+/// (persona + skills) into its LIVE sandbox again: the lever for a delegate
+/// whose spawn-time apply was lost, or whose preset text moved since it was
+/// spawned. The base is the one recorded at spawn / update; the current
+/// instance comes from the broker's image-status (J1-gated), so a rotated
+/// sandbox is still the one targeted.
+async fn agent_preset_reapply(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<PresetReapplyRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let entry = match ensure_binding_manifest(&state).await {
+        Ok(m) => m.entry_for(&req.actor_omni, "").cloned(),
+        Err(e) => return pairing_err(StatusCode::BAD_GATEWAY, &format!("binding manifest: {e}")),
+    };
+    let Some(entry) = entry else {
+        return pairing_err(StatusCode::NOT_FOUND, "no binding row for this actor");
+    };
+    let Some(preset_id) = entry.preset_id.clone().filter(|p| !p.is_empty()) else {
+        return pairing_err(
+            StatusCode::CONFLICT,
+            "this delegate was not spawned from a preset — nothing to re-apply",
+        );
+    };
+    let Some(agent_url) = entry.agent_url.clone().filter(|u| !u.trim().is_empty()) else {
+        return pairing_err(
+            StatusCode::CONFLICT,
+            "no bridge base recorded for this delegate yet — run \"update runtime\" once: it records the base and re-applies the preset itself",
+        );
+    };
+    let body = serde_json::json!({
+        "operator_omni": operator_omni,
+        "device_key_hashes": [entry.device_key_hash],
+    });
+    let (resp, parsed) =
+        forward_to_broker_value(&broker, "/v1/agent/image-status", &j1, &body).await;
+    if !resp.status().is_success() {
+        return resp;
+    }
+    let sandbox_id = parsed
+        .as_ref()
+        .and_then(|v| v.get("delegates"))
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first())
+        .and_then(|d| d.get("sandbox_id"))
+        .and_then(|x| x.as_str())
+        .filter(|x| !x.is_empty())
+        .map(str::to_string);
+    let detail = apply_preset_when_ready(
+        &state,
+        &broker,
+        &preset_id,
+        &entry.actor_omni,
+        sandbox_id.as_deref(),
+        Some(&agent_url),
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "preset_id": preset_id,
+            "sandbox_id": sandbox_id,
+            "detail": detail,
+        })),
+    )
+        .into_response()
 }
 
 /// Shared gate for the `/v1/sandbox/self/*` surface: 404 off-sandbox, bearer
@@ -4148,7 +4416,9 @@ async fn sandbox_self_grants(
     .await
     {
         Ok((scope, unknown_ids)) => {
-            let (services, unresolved) = assemble_self_grant_names(&scope, &unknown_ids);
+            let channel_candidates = sandbox_channel_service_candidates(|k| std::env::var(k).ok());
+            let (services, unresolved) =
+                assemble_self_grant_names(&scope, &unknown_ids, &channel_candidates);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -6493,6 +6763,7 @@ async fn ack_pairing(
                     // #427 fields ride only the spawn ceremony; a pairing
                     // accept states none (upsert preserves any existing).
                     preset_id: None,
+                    agent_url: None,
                     memory_ns: None,
                     archived_at: None,
                     resources_kept: None,
@@ -6927,6 +7198,11 @@ pub(crate) async fn spawn_submit_core(
                     granted_service_names: services,
                     updated_at: now_unix(),
                     preset_id: Some(sfield(spawned, "preset_id")),
+                    agent_url: spawned
+                        .pointer("/sandbox/agent_url")
+                        .and_then(|v| v.as_str())
+                        .filter(|u| !u.trim().is_empty())
+                        .map(str::to_string),
                     memory_ns: Some(sfield(ctx, "memory_ns")),
                     archived_at: None,
                     resources_kept: None,
@@ -6965,15 +7241,19 @@ pub(crate) async fn spawn_submit_core(
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             if !preset_id.is_empty() && !delegate_omni.is_empty() {
-                apply_preset_at_spawn(
-                    state,
-                    &broker,
-                    &preset_id,
-                    &delegate_omni,
-                    sandbox_id.as_deref(),
-                    agent_url.as_deref(),
-                )
-                .await;
+                // Detached: the pod is still booting when the spawn finalizes
+                // (#589: ~29 s to the bridge's first 200) and the apply waits
+                // for it — the install response must not (the 2026-09-16 chef
+                // install applied at +12 s, hit the gateway's error page and
+                // lost its skills for good).
+                spawn_preset_apply_task(
+                    state.clone(),
+                    broker.to_string(),
+                    preset_id,
+                    delegate_omni,
+                    sandbox_id,
+                    agent_url,
+                );
             }
         }
     }
@@ -7256,6 +7536,17 @@ async fn agent_update_proxy(
         &state,
         &req.device_key_hash,
         mapped.sandbox_error.clone(),
+        s("/sandbox/agent_url"),
+    )
+    .await;
+    // 2026-09-17 — a re-created sandbox has no skills unless we apply them
+    // (chef: two updates changed nothing); persona + skills again, detached.
+    reapply_preset_after_update(
+        &state,
+        &broker,
+        &req.device_key_hash,
+        mapped.sandbox_id.clone(),
+        s("/sandbox/agent_url"),
     )
     .await;
     Json(mapped).into_response()
@@ -7270,6 +7561,7 @@ async fn refresh_binding_runtime_after_update(
     state: &UiBridgeState,
     device_key_hash: &str,
     sandbox_error: Option<String>,
+    agent_url: Option<String>,
 ) {
     let mut manifest = match ensure_binding_manifest(state).await {
         Ok(m) => m,
@@ -7293,6 +7585,9 @@ async fn refresh_binding_runtime_after_update(
     });
     runtime.spawn_error = sandbox_error;
     updated.runtime = Some(runtime);
+    if agent_url.is_some() {
+        updated.agent_url = agent_url;
+    }
     updated.updated_at = now_unix();
     manifest.upsert(updated);
     if let Err(e) = persist_binding_manifest(state, manifest).await {
@@ -8225,7 +8520,7 @@ async fn apply_preset_at_spawn(
     delegate_omni: &str,
     sandbox_id: Option<&str>,
     agent_url: Option<&str>,
-) {
+) -> String {
     let url = format!("{}/v1/presets/{}", broker.trim_end_matches('/'), preset_id);
     let bundle: agentkeys_backend_client::protocol::PresetBundle =
         match reqwest::Client::new().get(&url).send().await {
@@ -8240,7 +8535,7 @@ async fn apply_preset_at_spawn(
                         "warn",
                     )
                     .await;
-                    return;
+                    return format!("bundle parse failed: {e}");
                 }
             },
             Ok(resp) => {
@@ -8252,7 +8547,7 @@ async fn apply_preset_at_spawn(
                     "warn",
                 )
                 .await;
-                return;
+                return format!("catalog fetch HTTP {} — unknown preset?", resp.status());
             }
             Err(e) => {
                 preset_apply_audit(
@@ -8263,7 +8558,7 @@ async fn apply_preset_at_spawn(
                     "warn",
                 )
                 .await;
-                return;
+                return format!("catalog unreachable: {e}");
             }
         };
 
@@ -8361,14 +8656,9 @@ async fn apply_preset_at_spawn(
         }
     };
 
-    preset_apply_audit(
-        state,
-        preset_id,
-        delegate_omni,
-        format!("{persona_note}; {skills_note}"),
-        "ok",
-    )
-    .await;
+    let note = format!("{persona_note}; {skills_note}");
+    preset_apply_audit(state, preset_id, delegate_omni, note.clone(), "ok").await;
+    note
 }
 
 /// One audit-feed line per preset apply — the operator-visible record of what
@@ -8515,7 +8805,8 @@ async fn scope_submit_proxy(
                     kind: String::new(),            // kept from the existing entry
                     granted_service_names: services,
                     updated_at: now_unix(),
-                    preset_id: None,      // kept from the existing entry (#427)
+                    preset_id: None, // kept from the existing entry (#427)
+                    agent_url: None,
                     memory_ns: None,      // kept from the existing entry (#427)
                     archived_at: None,    // kept from the existing entry (#427)
                     resources_kept: None, // kept from the existing entry (#427)
@@ -12126,10 +12417,21 @@ async fn sandbox_bridge_request_instanced(
         .await
         .map_err(|e| format!("bridge {url} transport: {e}"))?;
     let status = resp.status();
-    let value: serde_json::Value = resp
-        .json()
+    let text = resp
+        .text()
         .await
-        .map_err(|e| format!("bridge {url} parse: {e}"))?;
+        .map_err(|e| format!("bridge {url} {status}: reading the body: {e}"))?;
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(bridge_non_json_error(
+                &url,
+                &status.to_string(),
+                &text,
+                &e.to_string(),
+            ))
+        }
+    };
     if !status.is_success() {
         let err = value
             .get("error")
@@ -13555,6 +13857,46 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_non_json_bridge_answer_names_the_status_and_a_snippet() {
+        // 2026-09-16: the chef install's skills apply hit the gateway's error
+        // page while the pod booted and reported "parse: error decoding
+        // response body" — the status and the body must be in the line.
+        let e = bridge_non_json_error(
+            "https://gw/v1/context/apply",
+            "502 Bad Gateway",
+            "<html>\n  <body>upstream   connect error</body>\n</html>",
+            "expected value at line 1 column 1",
+        );
+        assert_eq!(
+            e,
+            "bridge https://gw/v1/context/apply 502 Bad Gateway: non-JSON body (expected value at line 1 column 1): <html> <body>upstream connect error</body> </html>"
+        );
+        assert!(bridge_non_json_error("u", "200 OK", &"x".repeat(500), "p").len() < 260);
+    }
+
+    #[test]
+    fn manifest_merge_keeps_the_recorded_bridge_base() {
+        // A scope re-grant upserts a row without the readable-layer fields;
+        // the recorded base must survive like preset_id does.
+        let mut m = BindingManifest::default();
+        m.upsert(BindingManifestEntry {
+            actor_omni: "0xaa".into(),
+            device_key_hash: "0xdd".into(),
+            preset_id: Some("chef".into()),
+            agent_url: Some("https://gw.example".into()),
+            ..Default::default()
+        });
+        m.upsert(BindingManifestEntry {
+            actor_omni: "0xaa".into(),
+            device_key_hash: "0xdd".into(),
+            ..Default::default()
+        });
+        let e = m.entry_for("0xaa", "").expect("row");
+        assert_eq!(e.preset_id.as_deref(), Some("chef"));
+        assert_eq!(e.agent_url.as_deref(), Some("https://gw.example"));
+    }
+
     /// The archived-ghost rules (#440 live find): reconcile must evict rows
     /// the canon has disowned — chain-revoked or manifest-archived — while
     /// NEVER touching the master row, rows without a device hash, or
@@ -13911,12 +14253,75 @@ mod tests {
             "0x{}",
             hex::encode(agentkeys_core::device_crypto::keccak256(b"tool:web"))
         );
-        let (names, unresolved) =
-            assemble_self_grant_names(&Some(map), &[web_hash, "0xdead".to_string()]);
+        let (names, unresolved) = assemble_self_grant_names(
+            &Some(map),
+            &[web_hash, "0xdead".to_string()],
+            &HashMap::new(),
+        );
         assert!(names.contains(&"knowledge:travel".to_string()));
         assert!(names.contains(&"proposal:travel".to_string()));
         assert!(names.contains(&"tool:web".to_string()));
         assert_eq!(unresolved, vec!["0xdead".to_string()]);
+    }
+
+    #[test]
+    fn self_grant_view_names_the_sandbox_own_channel_grants() {
+        // 2026-09-17: chef held channel-pub:kitchen-screen on chain, yet the
+        // view left every channel hash unresolved (no registry in a sandbox)
+        // and the suite's publish verdict denied the card. The sandbox knows
+        // its channel ids from its own env — those are the candidates; a hash
+        // the chain does not hold is never named, a foreign channel stays
+        // unresolved.
+        let env = |k: &str| {
+            match k {
+            "AGENTKEYS_CHAT_CHANNEL_ID" => Some("opchat-chef".to_string()),
+            "AGENTKEYS_BOUND_CHANNELS" => Some(
+                r#"[{"slot":"kitchen_screen","kind":"display","direction":"pub","channel_id":"kitchen-screen"},{"slot":"family_chat","kind":"messaging","direction":"duplex","channel_id":"family-chat-chef"}]"#
+                    .to_string(),
+            ),
+            _ => None,
+        }
+        };
+        let h = |s: &str| {
+            format!(
+                "0x{}",
+                hex::encode(agentkeys_core::device_crypto::keccak256(s.as_bytes()))
+            )
+        };
+        let cands = sandbox_channel_service_candidates(env);
+        assert_eq!(cands.len(), 6);
+        assert_eq!(
+            cands
+                .get(&h("channel-pub:kitchen-screen"))
+                .map(String::as_str),
+            Some("channel-pub:kitchen-screen")
+        );
+        assert_eq!(
+            cands.get(&h("channel-sub:opchat-chef")).map(String::as_str),
+            Some("channel-sub:opchat-chef")
+        );
+        let (names, unresolved) = assemble_self_grant_names(
+            &None,
+            &[
+                h("channel-pub:kitchen-screen"),
+                h("tool:web"),
+                h("channel-pub:somewhere-else"),
+                "0xdead".to_string(),
+            ],
+            &cands,
+        );
+        assert_eq!(
+            names,
+            vec![
+                "channel-pub:kitchen-screen".to_string(),
+                "tool:web".to_string()
+            ]
+        );
+        assert_eq!(
+            unresolved,
+            vec![h("channel-pub:somewhere-else"), "0xdead".to_string()]
+        );
+        assert!(sandbox_channel_service_candidates(|_| None).is_empty());
     }
 
     #[test]

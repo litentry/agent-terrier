@@ -100,6 +100,18 @@ export function AgentPanel({ actor }: { actor: Actor }) {
     setBusy(false);
   };
 
+  const reapply = async () => {
+    setBusy(true);
+    const r = await api.presetReapply(delegate);
+    if (r.ok) {
+      setNotice(`preset re-applied — ${r.data.detail}`);
+      setError(null);
+    } else {
+      setError(errText(r));
+    }
+    setBusy(false);
+  };
+
   const dirty = draft !== (state?.current?.body ?? '');
   const versionNum = (v: string) => Number.parseInt(v.replace(/^v/, ''), 10) || 0;
 
@@ -154,6 +166,14 @@ export function AgentPanel({ actor }: { actor: Actor }) {
           </button>
           <button className="btn sm" disabled={busy} onClick={restart}>
             {confirmRestart ? 'confirm restart? (resets the conversation)' : '↻ restart agent (re-source)'}
+          </button>
+          <button
+            className="btn sm"
+            disabled={busy}
+            onClick={reapply}
+            title="Write the preset's persona + skills into the live sandbox again — the spawn-time distribution can be lost while the pod boots, and a runtime update re-creates the sandbox without it"
+          >
+            ↻ re-apply preset (persona + skills)
           </button>
           {state && !state.sandbox_configured && (
             <span className="muted" style={{ fontSize: 11.5 }}>

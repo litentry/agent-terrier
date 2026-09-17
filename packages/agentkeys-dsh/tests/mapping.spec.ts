@@ -84,3 +84,17 @@ describe('answer (answerer core)', () => {
     expect(body).toContain('web_fetch');
   });
 });
+
+describe('the publish action (publish_to_slot)', () => {
+  it('is its own verdict: allowed by ANY channel-pub grant, never by a tool class, denied without one', () => {
+    expect(classifyTool('publish_to_slot')).toEqual({ kind: 'publish' });
+    expect(decide('publish_to_slot', view('channel-pub:kitchen-display'), true, {})).toEqual({ kind: 'allow' });
+    expect(decide('publish_to_slot', view('CHANNEL-PUB:opchat-chef', 'tool:web'), true, {})).toEqual({ kind: 'allow' });
+    const none = decide('publish_to_slot', view('tool:web', 'tool:code', 'channel-sub:kitchen-display'), true, {});
+    expect(none.kind).toBe('deny');
+    expect((none as { reason?: string }).reason).toContain('channel-pub:<feed> grant');
+    expect(decide('publish_to_slot', view('channel-pub:x'), false, {}).kind).toBe('deny');
+    expect(classifyTool('publish_to_slot', { publishTools: ['other_publish'] })).toEqual({ kind: 'unmapped' });
+    expect(classifyTool('other_publish', { publishTools: ['other_publish'] })).toEqual({ kind: 'publish' });
+  });
+});

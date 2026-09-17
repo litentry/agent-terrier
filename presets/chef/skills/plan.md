@@ -22,5 +22,8 @@ Commands you receive back (`command` events from any renderer): act on them
 with the same skill and republish the card; `dinner.swap` never repeats a dish
 from the last three days.
 
-Use `publish-to-slot kitchen_screen doc application/vnd.agentkeys.card+json`
-for the card and `publish-to-slot family_chat text` for the chat line.
+Publish with the `publish_to_slot` tool — the only way anything reaches the
+screen or the chat (a file on disk publishes nothing): `slot: kitchen_screen,
+kind: doc, body: <the card JSON>` for the card, then `slot: family_chat,
+kind: text, body: <the line>` for the chat line. A refused slot was not
+granted at install — say so in your reply instead of retrying.

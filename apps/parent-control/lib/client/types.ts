@@ -648,6 +648,10 @@ export interface AgentKeysClient {
     version: number,
   ): Promise<Result<ApiPersonaEditResponse>>;
   restartAgent(): Promise<Result<{ restarted: boolean }>>;
+  /** Write the delegate's preset (persona + skills) into its live sandbox again. */
+  presetReapply(
+    actorOmni: string,
+  ): Promise<Result<{ ok: boolean; preset_id: string; sandbox_id: string | null; detail: string }>>;
   getAgentContext(): Promise<Result<AgentContextView>>;
 
   // §1A onboarding — config-init entry point A (default-preset bootstrap, #207

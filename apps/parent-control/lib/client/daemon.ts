@@ -736,6 +736,15 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson<{ restarted: boolean }>('/v1/master/agent/restart', {});
   }
 
+  /** Write the delegate's preset (persona + skills) into its live sandbox
+   *  again — the spawn-time distribution can be lost on a booting pod, and a
+   *  runtime update re-creates the sandbox without it (2026-09-17). */
+  async presetReapply(
+    actorOmni: string,
+  ): Promise<Result<{ ok: boolean; preset_id: string; sandbox_id: string | null; detail: string }>> {
+    return this.postJson('/v1/master/agent/preset/reapply', { actor_omni: actorOmni });
+  }
+
   async getAgentContext(): Promise<Result<AgentContextView>> {
     return this.getJson<AgentContextView>('/v1/master/agent/context');
   }

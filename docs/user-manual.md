@@ -522,7 +522,13 @@ the permissions you approve. parent-control → **applications**:
   the kitchen screen shows; tapping a button publishes a command from **this
   console's own device actor** — the first install that binds a display slot
   enrolls the console in the same Touch ID as the install (a console never
-  enrolled publishes taps as you, the master).
+  enrolled publishes taps as you, the master). **Ask for the card now**: the
+  panel offers one button per schedule entry of the app's template (chef:
+  *Morning plan*, *Dinner plan*; an app without a schedule gets one generic
+  ask). A click sends that entry's prompt to the app as a turn — exactly what
+  its clock does at the cron minute, tagged as asked from the console — and
+  the panel watches the display feed for the card. The app's answer is in its
+  chat; if no card lands within three minutes the panel says so.
 - **Endpoints — one Touch ID, never a second prompt.** The first install that
   binds the family chat enrolls the WeChat / Telegram contact gate as a device
   actor in the SAME Touch ID as the install, and the first install that binds

@@ -235,6 +235,12 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
+  async presetReapply(
+    _actorOmni: string,
+  ): Promise<Result<{ ok: boolean; preset_id: string; sandbox_id: string | null; detail: string }>> {
+    return disconnected();
+  }
+
   async getAgentContext(): Promise<Result<AgentContextView>> {
     return disconnected();
   }

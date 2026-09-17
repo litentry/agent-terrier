@@ -31,6 +31,7 @@ import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { ServiceAnnotation } from '@/lib/generated/ServiceAnnotation';
 import { Chip, Dot, LifecycleChip, Modal, PageHead, Panel } from './shared';
+import { cardAsks, onDemandTurnText } from '@/lib/client/askCard';
 import { KnowledgeItemModal } from './knowledge';
 import { editReaches } from '@/lib/client/knowledge';
 import { FEED_ID_RE, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
@@ -208,6 +209,44 @@ export function ApplicationsPage({
 
   const live = installed.filter((a) => a.status !== 'uninstalled');
   const catalogFree = (catalog ?? []).filter((tp) => !live.some((a) => a.template_id === tp.id));
+
+  // ── "ask for the card now": the entry's prompt as a turn on the app's
+  // opchat feed (the clock's own mechanism, tagged on-demand), then the
+  // display feed is polled until a NEW card event lands (bounded: a delegate
+  // that is still booting or has no display grant never leaves the panel
+  // spinning — the ask is recorded either way).
+  const [asking, setAsking] = useState<{ label: string; entry: string; since: number; note: string } | null>(null);
+  const askForCard = useCallback(
+    async (row: AppInstanceRow, entry: { label: string; prompt: string }) => {
+      if (asking) return;
+      const before = dashboard?.card_event_id ?? null;
+      setAsking({ label: row.label, entry: entry.label, since: Date.now(), note: 'sending the ask…' });
+      const r = await client.chatSend(row.chat_channel_id, onDemandTurnText(entry), 'text');
+      if (!r.ok) {
+        showToast(`${row.label}: the ask did not reach its feed — ${r.status?.detail ?? 'error'}`, true);
+        setAsking(null);
+        return;
+      }
+      setAsking((a) => (a ? { ...a, note: `${row.label} is composing — the card lands here when it publishes (its answer is in the chat)` } : a));
+      for (let i = 0; i < 36; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((res) => setTimeout(res, 5000));
+        // eslint-disable-next-line no-await-in-loop
+        const d = client.appDashboard ? await client.appDashboard(row.label) : null;
+        if (d?.ok) {
+          setDashboard(d.data);
+          if (d.data.card && d.data.card_event_id !== before) {
+            showToast(`${row.label} published its card.`);
+            setAsking(null);
+            return;
+          }
+        }
+      }
+      showToast(`${row.label} has not published a card in 3 minutes — read its answer in the chat (it may have asked something back, or lack the display grant).`, true);
+      setAsking(null);
+    },
+    [asking, client, dashboard?.card_event_id, showToast],
+  );
 
   // ── the card-action tap: a `command` event from the console's device actor
   const onCardAction = useCallback(
@@ -441,6 +480,8 @@ export function ApplicationsPage({
               resources={resources}
               apps={live}
               onEditResource={(row) => setAddingResource({ edit: row })}
+              asking={asking?.label === selectedRow.label ? asking : null}
+              onAskCard={(entry) => void askForCard(selectedRow, entry)}
             />
           )}
         </>
@@ -596,6 +637,8 @@ function AppDetail({
   resources,
   apps,
   onEditResource,
+  asking,
+  onAskCard,
 }: {
   app: AppInstanceRow;
   template?: PresetSummary;
@@ -608,9 +651,25 @@ function AppDetail({
   resources: ResourceItemRow[];
   apps: AppInstanceRow[];
   onEditResource: (row: ResourceItemRow) => void;
+  /** An ask in flight for THIS app (entry label + status note), else null. */
+  asking?: { entry: string; since: number; note: string } | null;
+  /** "Ask for the card now" — run a schedule entry's prompt as a turn. */
+  onAskCard?: (entry: { label: string; prompt: string }) => void;
 }) {
   const st = statusOf(app);
   const display = app.bound_channels.find((b) => b.kind === 'display');
+  const asks = cardAsks(template?.schedule);
+  const askRow = display && onAskCard && app.status !== 'uninstalled' && (
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: dashboard?.card ? 10 : 8 }}>
+      <span className="muted" style={{ fontSize: 11.5 }}>{dashboard?.card ? 'ask for a fresh card:' : 'ask for the card now:'}</span>
+      {asks.map((e) => (
+        <button key={e.label} className="btn sm" disabled={!!asking} title={e.prompt} onClick={() => onAskCard(e)}>
+          ▶ {e.label}
+        </button>
+      ))}
+      {asking && <span className="muted" style={{ fontSize: 11.5 }}>· {asking.entry} — {asking.note}</span>}
+    </div>
+  );
   return (
     <div style={{ marginTop: 18 }}>
       <PageHead
@@ -635,9 +694,13 @@ function AppDetail({
                   <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
                     Rendered from the card the app published (event {dashboard.card_event_id}); a tap publishes a <code>command</code> event from {dashboard.console_actor_omni ? 'the console’s device actor' : 'the master (console not enrolled yet)'}.
                   </div>
+                  {askRow}
                 </>
               ) : (
-                <div className="muted" style={{ fontSize: 12.5 }}>{dashboard ? 'No card published yet — the app publishes one on its schedule or when asked.' : 'Loading the display feed…'}</div>
+                <>
+                  <div className="muted" style={{ fontSize: 12.5 }}>{dashboard ? 'No card published yet — the app publishes one on its schedule, or when you ask below.' : 'Loading the display feed…'}</div>
+                  {dashboard && askRow}
+                </>
               )}
             </Panel>
           )}

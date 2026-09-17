@@ -14,7 +14,7 @@
 2. Identify the gap: protein / vegetables / fiber / hydration / over-target.
 3. Propose 2–4 dishes with per-person portions; respect `family-health`
    constraints (allergies and restrictions are absolute).
-4. One sentence of rationale per dish. Publish to the granted channels.
+4. One sentence of rationale per dish. Publish to the granted channels with the `publish_to_slot` tool (a file publishes nothing).
 
 ## Weekly review (on request)
 
