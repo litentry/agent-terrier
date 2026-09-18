@@ -46,7 +46,7 @@ veFaaS pod (dsh-sandbox image) — outer boundary unchanged
 | AgentKeys plugin suite | the in-loop enforcement of AgentKeys authority (§4) | `@agentkeys/*`; consumes grants via the co-located daemon; never holds K10 (#552 signer custody) |
 | bridge plugin | the HTTP contract the five existing bridge consumers already speak | daemon chat loop, broker update handler, parent-control persona editor, ESP32 firmware, dev tooling need **zero** changes |
 | OpenViking plugin | memory tools + auto-recall | reads the same `OPENVIKING_*` / `~/.openviking/ov.conf` the sandbox renders today; requires server support for the `viking://~` home alias (§7) |
-| agentkeys-daemon | unchanged | `chat_loop`, `memory_mirror` (provider-coupled, not Hermes-coupled), `checkpoint` (re-anchored to `DSH_HOME`, §3.2) |
+| agentkeys-daemon | unchanged | `chat_loop`, `memory_mirror` (provider-coupled, not Hermes-coupled; since 2026-09-18 it files canonical knowledge as OpenViking resources — `viking://resources/<ns>/<item>/` with L0/L1 sidecars from the item's title/preview — the layout the plugin's per-step context recall reads), `checkpoint` (re-anchored to `DSH_HOME`, §3.2) |
 
 ### 3.2 Preserved contracts and constants
 
@@ -76,6 +76,7 @@ Scope-grant services are strings; the vocabulary gets two families:
 | **Data services** (existing) | `knowledge:<ns>` · `cred:<service>` · `channel:<id>` · `proposal:<ns>` · `config` | broker cap-mint + the per-class workers | yes |
 | **Capability services** (new) | `plugin:<id>` — may this capability provider be mounted in the session; `tool:<class>` (`tool:web`, `tool:code`, `tool:schedule`, …) — may this action family run | the preset compiler (mount) and the guard (call class) **only** | never |
 | **The publish action** (2026-09-17) | `publish_to_slot` — the suite's own tool (`@agentkeys/dsh-suite/publish`), the delegate's "act" verb: one event to a bound pub slot through `agentkeys-daemon --publish-once`. **Not a capability class**: the guard allows it when the delegate holds *any* `channel-pub:<id>` data service and denies it otherwise (an allow-once cannot mint a feed); *which* feed is the cap-mint's verdict. Why it exists: the image's `publish-to-slot` shell helper needs `tool:code`, which no application sheet grants — a chef told to publish its card wrote a file instead (measured on the clock and on demand). | the guard (pub-grant presence) + broker cap-mint (the feed) | yes (the channel worker) |
+| **The propose action** (2026-09-18) | `propose_to_owner` — the suite's own tool (`@agentkeys/dsh-suite/propose`), the delegate's "propose" verb: one durable learning into the owner's review queue through `agentkeys-daemon --propose-once` (rate- and size-bounded there). **Not a capability class**: the guard allows it when the delegate holds *any* `proposal:<ns>` data service (every installed application holds its own inbox) and denies it otherwise; *which* namespace is the cap-mint's verdict. Why it exists: the image's `propose-to-owner` shell helper needs `tool:code`, which no application sheet grants — no application could propose. | the guard (proposal-grant presence) + broker cap-mint (the namespace) | yes (the memory worker's inbox) |
 
 With capability services the action plane becomes **`compiled(authority)` everywhere, with no hand-authored remainder**. The projection ladder:
 

@@ -29,9 +29,8 @@ use agentkeys_backend_client::protocol::{
     service_knowledge, CapMintOp, CapMintRequest, LifecycleStage, MemoryGetInput,
 };
 use agentkeys_backend_client::{normalize_omni_0x, BackendClient, BackendError};
-use agentkeys_memory_engine::MemoryLine;
 use agentkeys_memory_openviking::{
-    ingest_manifest_from_env, OpenVikingClient, ReconcileStats, DEFAULT_ENDPOINT,
+    ingest_manifest_from_env, MirrorItem, OpenVikingClient, ReconcileStats, DEFAULT_ENDPOINT,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
@@ -257,15 +256,13 @@ async fn mirror_namespace(
     let dkh = credential.device_key_hash();
     match fetch_canonical(&client, cfg, ns, &dkh, bearer).await {
         Ok(content) => {
-            let lines = mirror_units(&content);
+            let items = mirror_units(&content);
             NamespaceOutcome::Reconciled(
-                cfg.engine
-                    .reconcile_ingested(ns, &lines, &cfg.manifest)
-                    .await,
+                cfg.engine.reconcile_items(ns, &items, &cfg.manifest).await,
             )
         }
         Err((stage, BackendError::Http { status: 403, body })) => NamespaceOutcome::Denied {
-            stats: cfg.engine.reconcile_ingested(ns, &[], &cfg.manifest).await,
+            stats: cfg.engine.reconcile_items(ns, &[], &cfg.manifest).await,
             denied_at: stage,
             detail: truncate(&body, 300),
         },
@@ -275,7 +272,7 @@ async fn mirror_namespace(
         // next respawn. Distinct label keeps "not authorized" (403)
         // diagnosable from "no longer exists" (404).
         Err((_, BackendError::Http { status: 404, .. })) => {
-            NamespaceOutcome::Absent(cfg.engine.reconcile_ingested(ns, &[], &cfg.manifest).await)
+            NamespaceOutcome::Absent(cfg.engine.reconcile_items(ns, &[], &cfg.manifest).await)
         }
         Err((_, BackendError::Http { status: 401, .. })) => NamespaceOutcome::SessionExpired,
         Err((stage, e)) => NamespaceOutcome::FetchError(format!("{stage}: {e}")),
@@ -306,8 +303,14 @@ pub fn summarize(reports: &[NamespaceReport]) -> PassSummary {
                 s.deleted += st.deleted as u64;
                 if st.write_failed > 0 || st.delete_failed > 0 {
                     s.errors.push(format!(
-                        "engine {}: {} write(s) / {} delete(s) failed",
-                        r.ns, st.write_failed, st.delete_failed
+                        "engine {}: {} write(s) / {} delete(s) failed{}",
+                        r.ns,
+                        st.write_failed,
+                        st.delete_failed,
+                        st.first_error
+                            .as_deref()
+                            .map(|e| format!(" — first: {e}"))
+                            .unwrap_or_default()
                     ));
                 }
             }
@@ -421,30 +424,33 @@ async fn fetch_canonical(
         .map_err(|e| ("decode", BackendError::Parse(format!("memory utf8: {e}"))))
 }
 
-/// Split a canonical blob into the units the engine should hold — ONE engine
-/// file per memory ENTRY.
+/// Split a canonical blob into the ITEMS the engine should hold — ONE resource
+/// directory per knowledge entry (`viking://resources/<ns>/<key>/`, the L0/L1
+/// sidecars from the entry's title and preview, the body as L2).
 ///
 /// Canonical namespaces are #201 JSON ARRAYS of `ApiMemoryEntry`-shaped objects
 /// (`agentkeys_protocol::web_api::ApiMemoryEntry` is the producer/owner type;
 /// read permissively here by its canonical field names, because harness and
 /// pre-#201 blobs carry only a subset of them). Line-splitting such a blob —
-/// what this did before — mirrored the pretty-printed JSON's individual lines
-/// as if each were a memory, so the engine filled up with fragments like `}`
-/// and `"bytes": 51` and the agent would surface those as recalled "memories"
-/// (caught by suite-7 step 7 reading back `"bytes": 51`).
+/// what this did long ago — mirrored the pretty-printed JSON's individual
+/// lines as if each were a memory, so the engine filled up with fragments
+/// like `}` and `"bytes": 51` (caught by suite-7 step 7 reading back
+/// `"bytes": 51`).
 ///
-/// A plain-TEXT blob keeps the line-split behaviour, and an array we cannot
-/// interpret falls back to it too — never fail closed on an unexpected shape,
-/// the durable truth is elsewhere.
-fn mirror_units(blob: &str) -> Vec<MemoryLine> {
-    if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(blob) {
-        let mut out: Vec<MemoryLine> = Vec::new();
-        for item in &items {
-            match item {
+/// A plain-TEXT blob keeps a line-per-item fallback (keyed `line-<n>`), and an
+/// array we cannot interpret falls back to it too — never fail closed on an
+/// unexpected shape, the durable truth is elsewhere.
+fn mirror_units(blob: &str) -> Vec<MirrorItem> {
+    if let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(blob) {
+        let mut out: Vec<MirrorItem> = Vec::new();
+        for entry in &entries {
+            match entry {
                 serde_json::Value::String(text) if !text.trim().is_empty() => {
-                    out.push(MemoryLine {
-                        text: text.trim().to_string(),
-                        seq: out.len(),
+                    out.push(MirrorItem {
+                        key: format!("item-{}", out.len()),
+                        title: String::new(),
+                        preview: String::new(),
+                        body: text.trim().to_string(),
                     });
                 }
                 serde_json::Value::Object(obj) => {
@@ -455,25 +461,20 @@ fn mirror_units(blob: &str) -> Vec<MemoryLine> {
                             .trim()
                             .to_string()
                     };
-                    let body = match field("body") {
-                        b if !b.is_empty() => b,
-                        _ => field("preview"),
-                    };
-                    if body.is_empty() {
+                    let body = field("body");
+                    let preview = field("preview");
+                    if body.is_empty() && preview.is_empty() {
                         continue; // nothing searchable in this entry
                     }
-                    let heading = match field("title") {
-                        t if !t.is_empty() => t,
-                        _ => field("key"),
+                    let key = match field("key") {
+                        k if !k.is_empty() => k,
+                        _ => format!("item-{}", out.len()),
                     };
-                    let text = if heading.is_empty() {
-                        body
-                    } else {
-                        format!("# {heading}\n\n{body}")
-                    };
-                    out.push(MemoryLine {
-                        text,
-                        seq: out.len(),
+                    out.push(MirrorItem {
+                        key,
+                        title: field("title"),
+                        preview,
+                        body,
                     });
                 }
                 _ => {}
@@ -483,7 +484,17 @@ fn mirror_units(blob: &str) -> Vec<MemoryLine> {
             return out;
         }
     }
-    MemoryLine::from_blob(blob)
+    blob.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .enumerate()
+        .map(|(seq, line)| MirrorItem {
+            key: format!("line-{seq}"),
+            title: String::new(),
+            preview: String::new(),
+            body: line.to_string(),
+        })
+        .collect()
 }
 
 /// Machine-readable report for `--memory-mirror-once` (and the e2e steps that
@@ -696,57 +707,65 @@ mod tests {
 ]"#;
 
     #[test]
-    fn json_array_mirrors_one_unit_per_entry_not_per_line() {
+    fn json_array_mirrors_one_item_per_entry_not_per_line() {
         let units = mirror_units(CANONICAL);
         assert_eq!(
             units.len(),
             1,
-            "one engine file per ENTRY, not per JSON line"
+            "one resource directory per ENTRY, not per JSON line"
         );
-        assert!(units[0].text.contains("mirror-proof: pandas at Dujiangyan"));
-        assert!(
-            units[0].text.contains("# ci-wire-proof"),
-            "title becomes a heading"
-        );
-        // the regression: JSON fragments must never become memories
+        assert_eq!(units[0].key, "ci-wire-proof");
+        assert_eq!(units[0].title, "ci-wire-proof");
+        assert!(units[0].body.contains("mirror-proof: pandas at Dujiangyan"));
+        // the regression: JSON fragments must never become items
         for junk in ["\"bytes\": 51", "}", "]"] {
             assert!(
-                !units.iter().any(|u| u.text.trim() == junk),
+                !units.iter().any(|u| u.body.trim() == junk),
                 "fragment {junk:?} leaked into the engine"
             );
         }
     }
 
     #[test]
-    fn multi_entry_array_yields_one_unit_each() {
+    fn multi_entry_array_yields_one_item_each_keyed_by_the_entry() {
         let blob = r#"[{"key":"a","body":"first fact"},{"key":"b","body":"second fact"}]"#;
         let units = mirror_units(blob);
         assert_eq!(units.len(), 2);
-        assert_eq!(units[0].seq, 0);
-        assert_eq!(units[1].seq, 1);
-        assert!(units[1].text.contains("second fact"));
+        assert_eq!(units[0].key, "a");
+        assert_eq!(units[1].key, "b");
+        assert!(units[1].body.contains("second fact"));
     }
 
     #[test]
-    fn entry_without_body_falls_back_to_preview_then_is_skipped() {
-        let blob = r#"[{"key":"a","preview":"only a preview"},{"key":"b","title":"t"}]"#;
+    fn entry_carries_its_preview_and_a_bodyless_previewless_entry_is_skipped() {
+        let blob =
+            r#"[{"key":"a","title":"A","preview":"only a preview"},{"key":"b","title":"t"}]"#;
         let units = mirror_units(blob);
-        assert_eq!(units.len(), 1, "the body-less entry contributes nothing");
-        assert!(units[0].text.contains("only a preview"));
+        assert_eq!(
+            units.len(),
+            1,
+            "the entry without body or preview contributes nothing"
+        );
+        assert_eq!(units[0].preview, "only a preview");
+        assert_eq!(units[0].title, "A");
+        assert!(units[0].body.is_empty());
     }
 
     #[test]
-    fn plain_text_blob_keeps_line_splitting() {
+    fn plain_text_blob_keeps_one_item_per_line() {
         let units = mirror_units("first line\nsecond line\n");
         assert_eq!(units.len(), 2);
-        assert_eq!(units[0].text, "first line");
+        assert_eq!(units[0].body, "first line");
+        assert_eq!(units[0].key, "line-0");
+        assert_eq!(units[1].key, "line-1");
     }
 
     #[test]
     fn json_array_of_strings_mirrors_each_string() {
         let units = mirror_units(r#"["alpha","beta"]"#);
         assert_eq!(units.len(), 2);
-        assert_eq!(units[1].text, "beta");
+        assert_eq!(units[1].body, "beta");
+        assert_ne!(units[0].key, units[1].key);
     }
 
     #[test]

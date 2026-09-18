@@ -16,7 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { PreToolDecision, ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools';
-import { classifyTool, holdsPublishGrant, type MappingConfig } from './mapping.js';
+import { classifyTool, holdsProposeGrant, holdsPublishGrant, type MappingConfig } from './mapping.js';
 import { consumeApprovedCall, DEFAULT_GRANTS_URL, GrantsCache } from './grants.js';
 
 export const name = 'agentkeys-guard';
@@ -29,6 +29,7 @@ export interface Config extends MappingConfig {
   toolClasses?: Record<string, string[]>;
   baseline?: string[];
   publishTools?: string[];
+  proposeTools?: string[];
 }
 
 export const Config: z<Config> = z.object({
@@ -38,6 +39,7 @@ export const Config: z<Config> = z.object({
   toolClasses: z.dict(z.array(z.string())),
   baseline: z.array(z.string()),
   publishTools: z.array(z.string()),
+  proposeTools: z.array(z.string()),
 });
 
 /** Pure decision core (exported for tests): what does a tool name deserve
@@ -75,6 +77,18 @@ export function decide(
       return {
         kind: 'deny',
         reason: `AgentKeys: ${JSON.stringify(toolName)} needs a channel-pub:<feed> grant and this delegate holds none — a feed is granted at install (a bound display / chat slot), never by an allow-once`,
+      };
+    case 'propose':
+      if (!available) {
+        return {
+          kind: 'deny',
+          reason: 'AgentKeys: grant view unavailable (daemon unreachable) — the proposal namespaces cannot be verified, failing closed',
+        };
+      }
+      if (holdsProposeGrant(services)) return { kind: 'allow' };
+      return {
+        kind: 'deny',
+        reason: `AgentKeys: ${JSON.stringify(toolName)} needs a proposal:<ns> grant and this delegate holds none — an application's own inbox is granted at install, never by an allow-once`,
       };
     case 'unmapped':
       return {

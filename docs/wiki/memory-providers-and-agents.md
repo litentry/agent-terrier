@@ -46,3 +46,7 @@ The same holds for agent-native files like **skills** and `AGENTS.md`/`CLAUDE.md
 - **One shared memory, plus each agent's own.** There's *one shared canonical memory* you curate and distribute to the delegates you authorize — a learning curated once is available everywhere you've granted it. Each delegate **also keeps its own private working memory**, which is never collapsed into the shared one; sharing is additive (you grant a read), not a merge of everyone's notes.
 
 For the underlying construction, sync, and cost model, see `../plan/memory-construction.md` (operator-internal). For the storage and isolation guarantees, see [`./knowledge-storage.md`](./knowledge-storage.md) and [`./tag-based-access.md`](./tag-based-access.md).
+
+## Resources and memories inside the engine (2026-09-18)
+
+OpenViking keeps two kinds of content, and AgentKeys uses them the way OpenViking names them. **Resources** are knowledge: the items of every namespace the application was granted, mirrored by the daemon as small directories (an abstract and an overview built from the item's title and preview, and the body). This is what the agent's automatic recall draws on before each turn. **Memories** are the agent's own cognition: the files it writes into the engine's category folders (`events/`, `entities/`, `preferences/`), private to that sandbox. A learning that should outlive the sandbox or reach other applications travels as a **proposal** the owner accepts. The full picture, with diagrams: [Knowledge Store and Applications](./knowledge-store-and-applications.md).

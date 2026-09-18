@@ -2,7 +2,9 @@
 
 ## Observation log
 
-- One memory entry per notable moment: `{child, moment, mood, context, at}`.
+- One memory file per notable moment (`mcp__openviking__write` under
+  `viking://user/default/memories/events/<date>/`; `remember` is not available
+  in this runtime): `{child, moment, mood, context, at}`.
   "Notable" = emotion, achievement, friction, or a repeated theme — not a
   transcript. Never store anything a parent would be surprised to find.
 

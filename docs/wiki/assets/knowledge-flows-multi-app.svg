@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" width="1280" height="800" font-family="Helvetica, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="aGold" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#b8860b"/></marker>
+    <marker id="aBlue" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#1f6fb2"/></marker>
+    <marker id="aGreen" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#2e8b57"/></marker>
+    <marker id="aGrey" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#888"/></marker>
+  </defs>
+  <rect x="0" y="0" width="1280" height="800" fill="#fbfaf7"/>
+  <text x="640" y="34" text-anchor="middle" font-size="22" font-weight="bold" fill="#222">Multi-app cognition on the git-style knowledge store</text>
+  <text x="640" y="56" text-anchor="middle" font-size="13" fill="#666">an app's memory stays in its own OpenViking engine · household knowledge lives in canonical namespaces and reaches every granted app as resources</text>
+
+  <!-- Owner console -->
+  <rect x="440" y="76" width="400" height="76" rx="10" fill="#fff4d6" stroke="#c9a227" stroke-width="2"/>
+  <text x="640" y="100" text-anchor="middle" font-size="16" font-weight="bold" fill="#5a4300">Owner · parent-control console</text>
+  <text x="640" y="121" text-anchor="middle" font-size="12" fill="#5a4300">Knowledge page: reviews proposals; accept = commit</text>
+  <text x="640" y="140" text-anchor="middle" font-size="12" fill="#5a4300">grants per app: knowledge:&lt;ns&gt; (read) · proposal:&lt;ns&gt; (propose)</text>
+  <path d="M640,152 L640,196" fill="none" stroke="#b8860b" stroke-width="2.5" marker-end="url(#aGold)"/>
+  <text x="652" y="180" font-size="12" fill="#5a4300">curates, grants</text>
+
+  <!-- Canonical store -->
+  <rect x="440" y="200" width="400" height="322" rx="12" fill="#eef4fb" stroke="#1f6fb2" stroke-width="2"/>
+  <text x="640" y="222" text-anchor="middle" font-size="16" font-weight="bold" fill="#123d66">Canonical knowledge store (encrypted, per owner)</text>
+  <text x="640" y="240" text-anchor="middle" font-size="11" fill="#456">git-style: namespaces = repos · typed items (title · preview · body)</text>
+  <text x="640" y="254" text-anchor="middle" font-size="11" fill="#456">versions · proposals = PRs</text>
+
+  <rect x="460" y="266" width="360" height="72" rx="8" fill="#fff" stroke="#8fb3d9" stroke-dasharray="6 4"/>
+  <text x="640" y="286" text-anchor="middle" font-weight="bold" fill="#123d66">curate queue · proposal:&lt;ns&gt;</text>
+  <text x="640" y="304" text-anchor="middle" font-size="12" fill="#234">append-only, distinct from the read grant</text>
+  <text x="640" y="319" text-anchor="middle" font-size="12" fill="#234">nothing enters shared knowledge unaccepted</text>
+  <text x="640" y="333" text-anchor="middle" font-size="11" fill="#666">optional auto-accept per namespace (owner decision)</text>
+  <path d="M640,338 L640,354" fill="none" stroke="#b8860b" stroke-width="2.5" marker-end="url(#aGold)"/>
+  <text x="652" y="350" font-size="12" fill="#5a4300">accept = commit</text>
+
+  <rect x="460" y="356" width="360" height="66" rx="8" fill="#fff" stroke="#8fb3d9"/>
+  <text x="640" y="376" text-anchor="middle" font-size="13" font-weight="bold" fill="#123d66">household namespaces: family · health · devices · …</text>
+  <text x="640" y="395" text-anchor="middle" font-size="12" fill="#234">owner-curated knowledge, shared by GRANT, never by copy</text>
+  <text x="640" y="411" text-anchor="middle" font-size="12" fill="#456">one source of truth for every app</text>
+
+  <rect x="460" y="436" width="360" height="72" rx="8" fill="#fff" stroke="#8fb3d9"/>
+  <text x="640" y="456" text-anchor="middle" font-size="13" font-weight="bold" fill="#123d66">per-app namespaces: app-chef · app-health · …</text>
+  <text x="640" y="475" text-anchor="middle" font-size="12" fill="#234">own cognition, checkpointed as an engine workspace</text>
+  <text x="640" y="491" text-anchor="middle" font-size="12" fill="#456">opaque blob: relaunch and update only, never shared</text>
+
+  <!-- Chef sandbox -->
+  <rect x="20" y="200" width="320" height="490" rx="12" fill="#f0f7f1" stroke="#2e8b57" stroke-width="2"/>
+  <text x="180" y="224" text-anchor="middle" font-size="16" font-weight="bold" fill="#1d5a38">Chef sandbox · its own OpenViking engine</text>
+
+  <rect x="40" y="240" width="280" height="130" rx="8" fill="#fff" stroke="#9cc9ad"/>
+  <text x="180" y="262" text-anchor="middle" font-weight="bold" fill="#1d5a38">memories/ = chef's cognition</text>
+  <text x="180" y="283" text-anchor="middle" font-size="13" fill="#234">events/ · what the family ate</text>
+  <text x="180" y="302" text-anchor="middle" font-size="13" fill="#234">entities/ · fridge inventory</text>
+  <text x="180" y="321" text-anchor="middle" font-size="13" fill="#234">preferences/ · what it learns they like</text>
+  <text x="180" y="343" text-anchor="middle" font-size="12" fill="#456">recall per step: 1 event · 2 entities</text>
+  <text x="180" y="360" text-anchor="middle" font-size="12" fill="#456">1 preference · extracted or written by chef</text>
+
+  <rect x="40" y="400" width="280" height="130" rx="8" fill="#fff" stroke="#9cc9ad"/>
+  <text x="180" y="422" text-anchor="middle" font-weight="bold" fill="#1d5a38">resources/ = household knowledge</text>
+  <text x="180" y="443" text-anchor="middle" font-size="13" fill="#234">family/food-preferences/</text>
+  <text x="180" y="462" text-anchor="middle" font-size="13" fill="#234">health/gene-report/</text>
+  <text x="180" y="481" text-anchor="middle" font-size="13" fill="#234">devices/kitchen-screen-01/</text>
+  <text x="180" y="503" text-anchor="middle" font-size="12" fill="#456">L0 ← item title · L1 ← item preview · L2 ← body</text>
+  <text x="180" y="520" text-anchor="middle" font-size="12" fill="#456">recall: ≤3 per step, then read the body</text>
+
+  <rect x="40" y="548" width="280" height="44" rx="8" fill="#f7f7f7" stroke="#bbb"/>
+  <text x="180" y="567" text-anchor="middle" font-size="12" fill="#444">engine workspace = index + mirror manifest</text>
+  <text x="180" y="583" text-anchor="middle" font-size="11" fill="#666">checkpointed every few minutes (#594 / #694)</text>
+
+  <text x="180" y="618" text-anchor="middle" font-size="13" fill="#1d5a38">grants: knowledge:family · knowledge:health</text>
+  <text x="180" y="636" text-anchor="middle" font-size="13" fill="#1d5a38">knowledge:devices · proposal:family</text>
+  <text x="180" y="660" text-anchor="middle" font-size="12" fill="#456">one engine per sandbox:</text>
+  <text x="180" y="676" text-anchor="middle" font-size="12" fill="#456">nothing here is visible to another app</text>
+
+  <!-- Health sandbox -->
+  <rect x="940" y="200" width="320" height="490" rx="12" fill="#f0f7f1" stroke="#2e8b57" stroke-width="2"/>
+  <text x="1100" y="224" text-anchor="middle" font-size="16" font-weight="bold" fill="#1d5a38">Health sandbox · its own OpenViking engine</text>
+
+  <rect x="960" y="240" width="280" height="130" rx="8" fill="#fff" stroke="#9cc9ad"/>
+  <text x="1100" y="262" text-anchor="middle" font-weight="bold" fill="#1d5a38">memories/ = health's cognition</text>
+  <text x="1100" y="283" text-anchor="middle" font-size="13" fill="#234">events/ · check-ups, symptoms logged</text>
+  <text x="1100" y="302" text-anchor="middle" font-size="13" fill="#234">entities/ · each family member</text>
+  <text x="1100" y="321" text-anchor="middle" font-size="13" fill="#234">preferences/ · reminder habits</text>
+  <text x="1100" y="343" text-anchor="middle" font-size="12" fill="#456">never sees chef's memories</text>
+  <text x="1100" y="360" text-anchor="middle" font-size="12" fill="#456">chef's accepted learnings: resources here</text>
+
+  <rect x="960" y="400" width="280" height="130" rx="8" fill="#fff" stroke="#9cc9ad"/>
+  <text x="1100" y="422" text-anchor="middle" font-weight="bold" fill="#1d5a38">resources/ = household knowledge</text>
+  <text x="1100" y="443" text-anchor="middle" font-size="13" fill="#234">family/food-preferences/</text>
+  <text x="1100" y="462" text-anchor="middle" font-size="13" fill="#234">family/pantry-habits/ (chef proposed)</text>
+  <text x="1100" y="481" text-anchor="middle" font-size="13" fill="#234">health/gene-report/</text>
+  <text x="1100" y="503" text-anchor="middle" font-size="12" fill="#456">same L0/L1/L2 from the same canonical item</text>
+  <text x="1100" y="520" text-anchor="middle" font-size="12" fill="#456">by grant · every 5 min or on sync now</text>
+
+  <rect x="960" y="548" width="280" height="44" rx="8" fill="#f7f7f7" stroke="#bbb"/>
+  <text x="1100" y="567" text-anchor="middle" font-size="12" fill="#444">engine workspace = index + mirror manifest</text>
+  <text x="1100" y="583" text-anchor="middle" font-size="11" fill="#666">checkpointed every few minutes (#594 / #694)</text>
+
+  <text x="1100" y="618" text-anchor="middle" font-size="13" fill="#1d5a38">grants: knowledge:family · knowledge:health</text>
+  <text x="1100" y="636" text-anchor="middle" font-size="13" fill="#1d5a38">proposal:health</text>
+
+  <!-- Lane 1 (top): proposals into the curate queue -->
+  <path d="M320,262 C380,262 400,299 460,299" fill="none" stroke="#2e8b57" stroke-width="2.5" marker-end="url(#aGreen)"/>
+  <text x="392" y="250" text-anchor="middle" font-size="12" font-weight="bold" fill="#2e8b57">propose_to_owner</text>
+  <text x="392" y="264" text-anchor="middle" font-size="11" fill="#2e8b57">a learning worth keeping</text>
+  <path d="M960,262 C900,262 880,299 820,299" fill="none" stroke="#2e8b57" stroke-width="2.5" marker-end="url(#aGreen)"/>
+  <text x="888" y="250" text-anchor="middle" font-size="12" font-weight="bold" fill="#2e8b57">propose_to_owner</text>
+
+  <!-- Lane 2 (middle): mirror pulls into resources -->
+  <path d="M460,389 C400,389 380,452 320,452" fill="none" stroke="#1f6fb2" stroke-width="2.5" marker-end="url(#aBlue)"/>
+  <text x="392" y="412" text-anchor="middle" font-size="12" font-weight="bold" fill="#1f6fb2">mirror (pull)</text>
+  <text x="392" y="426" text-anchor="middle" font-size="11" fill="#1f6fb2">gate-checks the grant</text>
+  <path d="M820,389 C880,389 900,452 960,452" fill="none" stroke="#1f6fb2" stroke-width="2.5" marker-end="url(#aBlue)"/>
+  <text x="888" y="412" text-anchor="middle" font-size="12" font-weight="bold" fill="#1f6fb2">mirror (pull)</text>
+  <text x="888" y="426" text-anchor="middle" font-size="11" fill="#1f6fb2">gate-checks the grant</text>
+
+  <!-- Lane 3 (bottom): checkpoints into per-app namespaces -->
+  <path d="M320,570 C380,570 400,472 460,472" fill="none" stroke="#888" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#aGrey)"/>
+  <text x="392" y="540" text-anchor="middle" font-size="11" fill="#666">checkpoint (push)</text>
+  <text x="392" y="554" text-anchor="middle" font-size="11" fill="#666">app-chef only</text>
+  <path d="M960,570 C900,570 880,472 820,472" fill="none" stroke="#888" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#aGrey)"/>
+  <text x="888" y="540" text-anchor="middle" font-size="11" fill="#666">checkpoint (push)</text>
+  <text x="888" y="554" text-anchor="middle" font-size="11" fill="#666">app-health only</text>
+
+  <!-- Legend -->
+  <rect x="440" y="542" width="400" height="154" rx="8" fill="#fff" stroke="#ccc"/>
+  <text x="460" y="562" font-weight="bold" fill="#222">What crosses apps, and how</text>
+  <text x="460" y="582" font-size="11.5" fill="#234">• only items in a household namespace, only to apps with its read grant</text>
+  <text x="460" y="599" font-size="11.5" fill="#234">• raw memories never cross; a learning crosses as an accepted proposal</text>
+  <text x="460" y="616" font-size="11.5" fill="#234">• the proposer gets it back as a resource: knowledge, not memory</text>
+  <text x="460" y="640" font-size="12" font-weight="bold" fill="#222">New pieces</text>
+  <text x="460" y="658" font-size="11.5" fill="#234">• propose_to_owner as a suite tool (today a shell helper behind tool:code)</text>
+  <text x="460" y="674" font-size="11.5" fill="#234">• the mirror writes resources with L0/L1 from the item's title and preview</text>
+  <text x="460" y="690" font-size="11.5" fill="#234">• a template rule: share these memories to &lt;ns&gt;</text>
+
+  <text x="640" y="724" text-anchor="middle" font-size="12" fill="#888">existing today: knowledge:&lt;ns&gt; and proposal:&lt;ns&gt; grants · the curate queue · the mirror · the #594/#694 checkpoint · one engine per sandbox</text>
+  <text x="640" y="744" text-anchor="middle" font-size="12" fill="#888">the alternative, one shared OpenViking with per-peer subtrees, would move access control out of the on-chain grants into the engine; not proposed</text>
+</svg>

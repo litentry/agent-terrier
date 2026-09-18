@@ -8591,9 +8591,13 @@ async fn apply_preset_at_spawn(
         }
     };
 
-    // Skills → the sandbox skills dir. The bridge's `skills_written` response
-    // key is the capability signal: absent = pre-#428 image, called out loud.
-    let skills_note = if bundle.skills.is_empty() {
+    // Skills (+ the #662 knowledge docs) → the sandbox's skills / knowledge
+    // dirs, one apply; the bridge renders both as prompt sections. The
+    // bridge's `skills_written` response key is the capability signal: absent
+    // = pre-#428 image, called out loud. (Until 2026-09-18 the knowledge docs
+    // were validated at install and never sent — chef's plan skill named
+    // `nutrition-basics.md` as an input the prompt never carried.)
+    let skills_note = if bundle.skills.is_empty() && bundle.knowledge.is_empty() {
         "no skills in bundle".to_string()
     } else {
         use base64::{engine::general_purpose::STANDARD, Engine};
@@ -8604,7 +8608,15 @@ async fn apply_preset_at_spawn(
                 serde_json::Value::String(STANDARD.encode(doc.content.as_bytes())),
             );
         }
-        let body = serde_json::json!({ "skills": skills, "restart": false });
+        let mut knowledge = serde_json::Map::new();
+        for doc in &bundle.knowledge {
+            knowledge.insert(
+                doc.filename.clone(),
+                serde_json::Value::String(STANDARD.encode(doc.content.as_bytes())),
+            );
+        }
+        let body =
+            serde_json::json!({ "skills": skills, "knowledge": knowledge, "restart": false });
         match sandbox_bridge_request_instanced(
             state,
             reqwest::Method::POST,
@@ -8616,7 +8628,17 @@ async fn apply_preset_at_spawn(
         .await
         {
             Ok(v) => match v.get("skills_written").and_then(|s| s.as_array()) {
-                Some(w) => format!("{} skills doc(s) distributed", w.len()),
+                Some(w) => {
+                    let knowledge = v
+                        .get("knowledge_written")
+                        .and_then(|k| k.as_array())
+                        .map(|k| k.len())
+                        .unwrap_or(0);
+                    format!(
+                        "{} skills doc(s) + {knowledge} knowledge doc(s) distributed",
+                        w.len()
+                    )
+                }
                 None => {
                     tracing::warn!(
                         target: "agentkeys.daemon.ui_bridge",

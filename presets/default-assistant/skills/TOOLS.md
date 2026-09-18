@@ -2,10 +2,18 @@
 
 ## Remembering
 
-- `memory` namespace: read before answering household questions; write when
-  the operator says "remember", "记住", or gives a standing preference.
-- Keep entries small and titled (one fact or list per entry) so they can be
-  recalled and corrected individually.
+- The household knowledge you were granted is in your OpenViking resources
+  (`viking://resources/<namespace>/…`): read it before answering household
+  questions (`mcp__openviking__search` with `mode: "context"`, then
+  `mcp__openviking__read` for the body).
+- Your own notes are memory files you write with `mcp__openviking__write`
+  under `viking://user/default/memories/` (`preferences/`, `entities/`,
+  `events/` — one small, titled file per fact or list, so each can be
+  recalled and corrected individually). `remember` is not available in this
+  runtime.
+- When the operator says "remember", "记住", or gives a standing preference,
+  send it to them with `propose_to_owner` as well: accepted, it becomes shared
+  knowledge that outlives this sandbox and reaches the other applications.
 
 ## Planning
 

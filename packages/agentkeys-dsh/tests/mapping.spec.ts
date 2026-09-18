@@ -85,6 +85,20 @@ describe('answer (answerer core)', () => {
   });
 });
 
+describe('the propose action (propose_to_owner)', () => {
+  it('is allowed by any proposal grant, denied without one, and never a class', () => {
+    expect(classifyTool('propose_to_owner')).toEqual({ kind: 'propose' });
+    expect(decide('propose_to_owner', view('proposal:app-chef'), true, {})).toEqual({ kind: 'allow' });
+    expect(decide('propose_to_owner', view('PROPOSAL:family', 'tool:web'), true, {})).toEqual({ kind: 'allow' });
+    const none = decide('propose_to_owner', view('tool:web', 'knowledge:family', 'channel-pub:kitchen-display'), true, {});
+    expect(none.kind).toBe('deny');
+    expect(JSON.stringify(none)).toContain('proposal:<ns> grant');
+    expect(decide('propose_to_owner', view('proposal:x'), false, {}).kind).toBe('deny');
+    expect(classifyTool('propose_to_owner', { proposeTools: ['other_propose'] })).toEqual({ kind: 'unmapped' });
+    expect(classifyTool('other_propose', { proposeTools: ['other_propose'] })).toEqual({ kind: 'propose' });
+  });
+});
+
 describe('the publish action (publish_to_slot)', () => {
   it('is its own verdict: allowed by ANY channel-pub grant, never by a tool class, denied without one', () => {
     expect(classifyTool('publish_to_slot')).toEqual({ kind: 'publish' });

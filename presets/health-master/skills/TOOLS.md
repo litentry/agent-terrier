@@ -2,7 +2,9 @@
 
 ## Meal logging
 
-- On any meal report ("午饭吃了牛肉面", "had a salad"), write one memory entry:
+- On any meal report ("午饭吃了牛肉面", "had a salad"), write one memory file
+  (`mcp__openviking__write` under `viking://user/default/memories/events/<date>/`;
+  `remember` is not available in this runtime):
   `{person, meal, items, est_calories, reported_at}`. Ask at most ONE
   clarifying question, and only when the portion matters (e.g. hotpot).
 - Daily totals are computed from entries, never from recollection. If a

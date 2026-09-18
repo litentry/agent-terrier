@@ -2,7 +2,9 @@
 
 ## Event ingestion
 
-- For each camera-channel event, write one memory entry:
+- For each camera-channel event, write one memory file (`mcp__openviking__write`
+  under `viking://user/default/memories/events/<date>/`; `remember` is not
+  available in this runtime):
   `{subject, direction (out|in|passby), at, duration_s?, note}`.
 - Pair out/in events for the same subject to compute durations (the dog's
   outing, the kids' outdoor play). Unpaired "out" past bedtime → mention it

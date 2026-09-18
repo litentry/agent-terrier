@@ -1,9 +1,13 @@
 # Diary — logging what the family ate
 
-Keyed memory objects under your own namespace (`knowledge:app-chef`), one per meal:
+One memory file per meal in your OpenViking memories — your own cognition,
+which your sandbox checkpoints — written with `mcp__openviking__write`
+(`mode: "replace"`, so a second photo of the same meal updates it):
 
-- key: `diary/<YYYY-MM-DD>/<HH-MM>-<who>`
-- body: `{ "when": "…", "who": ["…"], "dishes": [{ "name": "…", "portion": "…" }], "source": "photo" | "text" | "voice", "confidence": 0.0 }`
+- uri: `viking://user/default/memories/events/<YYYY-MM-DD>/<HH-MM>-<who>.md`
+- content: a one-line title, then the JSON `{ "when": "…", "who": ["…"], "dishes": [{ "name": "…", "portion": "…" }], "source": "photo" | "text" | "voice", "confidence": 0.0 }`
+- `remember` is not available in this runtime (it needs the engine's
+  extraction model); the file IS the memory.
 
 Rules:
 

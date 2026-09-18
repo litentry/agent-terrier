@@ -30,6 +30,7 @@ export interface Config extends MappingConfig {
   toolClasses?: Record<string, string[]>;
   baseline?: string[];
   publishTools?: string[];
+  proposeTools?: string[];
   /** Best-effort propose-to-owner command (the #573 wrapper baked into the
    *  sandbox image); empty disables. The daemon enforces its own rate + size
    *  caps — this plugin only throttles duplicates per class. */
@@ -43,6 +44,7 @@ export const Config: z<Config> = z.object({
   toolClasses: z.dict(z.array(z.string())),
   baseline: z.array(z.string()),
   publishTools: z.array(z.string()),
+  proposeTools: z.array(z.string()),
   proposeCommand: z.string().default('/opt/agentkeys/propose-to-owner'),
 });
 

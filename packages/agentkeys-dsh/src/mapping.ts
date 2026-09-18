@@ -36,6 +36,20 @@ export function holdsPublishGrant(services: ReadonlySet<string>): boolean {
   return false;
 }
 
+/** The propose action (`@agentkeys/dsh-suite/propose`, 2026-09-18): the
+ *  delegate's "propose" verb — a learning into the owner's review queue.
+ *  Like publish, not a capability class: allowed when the delegate holds ANY
+ *  `proposal:<ns>` grant (every installed application holds its own), and
+ *  WHICH namespace is the cap-mint's verdict. Denied outright without one. */
+export const DEFAULT_PROPOSE_TOOLS: readonly string[] = ['propose_to_owner'];
+export const PROPOSE_SERVICE_PREFIX = 'proposal:';
+
+/** Does the (lower-cased) grant view hold any proposal namespace? */
+export function holdsProposeGrant(services: ReadonlySet<string>): boolean {
+  for (const s of services) if (s.startsWith(PROPOSE_SERVICE_PREFIX)) return true;
+  return false;
+}
+
 /** Always-allowed baseline (no grant consulted). */
 export const DEFAULT_BASELINE: readonly string[] = [
   'read', 'write', 'edit', 'read_image', 'str_replace_editor', 'glob', 'grep',
@@ -55,12 +69,14 @@ export interface MappingConfig {
   readonly toolClasses?: Readonly<Record<string, readonly string[]>>;
   readonly baseline?: readonly string[];
   readonly publishTools?: readonly string[];
+  readonly proposeTools?: readonly string[];
 }
 
 export type ToolVerdict =
   | { kind: 'baseline' }
   | { kind: 'classed'; toolClass: string; service: string }
   | { kind: 'publish' }
+  | { kind: 'propose' }
   | { kind: 'unmapped' };
 
 /** Pure classification of a registered tool name. */
@@ -73,6 +89,8 @@ export function classifyTool(name: string, config: MappingConfig = {}): ToolVerd
   if (OPENVIKING_TOOL_PATTERNS.some((re) => re.test(name))) return { kind: 'baseline' };
   const publish = config.publishTools?.length ? config.publishTools : DEFAULT_PUBLISH_TOOLS;
   if (publish.includes(name)) return { kind: 'publish' };
+  const propose = config.proposeTools?.length ? config.proposeTools : DEFAULT_PROPOSE_TOOLS;
+  if (propose.includes(name)) return { kind: 'propose' };
   const classes =
     config.toolClasses && Object.keys(config.toolClasses).length > 0
       ? config.toolClasses

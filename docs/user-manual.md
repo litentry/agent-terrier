@@ -9,23 +9,38 @@ operator or end user needs to know about how AgentKeys touches their machine.
 
 ## Your agent's long-term memory: OpenViking, bounded by your grants (#566)
 
-Inside every AgentKeys sandbox, the agent uses **OpenViking as its
-native memory provider** (`memory.provider: openviking` — the agent's own
-`viking_search` / `viking_remember` tools). What the agent can *recall* from
-your family's shared memory is bounded by **your grants**, not by the agent's
-choices:
+Inside every AgentKeys sandbox, the agent uses **OpenViking as its native
+memory provider** (the official dsh memory plugin: a recall before every
+step, plus the `mcp__openviking__*` search / read / write tools). Two kinds of
+content live in that engine, named the way OpenViking names them, and what
+the agent can *recall* of your family's knowledge is bounded by **your
+grants**, not by the agent's choices:
 
-- The AgentKeys **daemon mirror** is the only writer of shared (canonical)
-  memory into the engine, and it can only mirror namespaces the memory worker
-  authorizes — a namespace you never granted (or later revoked) answers 403 at
-  the worker and never enters the agent's index. Revoking a grant removes the
-  mirrored content at the next mirror pass, and always by the sandbox's next
-  respawn.
-- The agent's own `viking_remember` notes are its private working memory. They
-  live only inside its sandbox; when the agent judges a learning durable it can
-  **propose** it to you through the **inbox** flow (its `propose-to-owner`
-  tool — you approve each item, and proposals are rate-limited) — never
-  written into shared memory directly.
+- **Resources = knowledge you granted.** Every item of a knowledge namespace
+  the application may read (a food-preferences profile, a gene report, a
+  device's static files) is mirrored by the AgentKeys **daemon** into the
+  engine's `resources/` as a small directory: an abstract and an overview made
+  from the item's **title and preview**, and the body itself. Before each turn
+  the agent's recall shows it the overview of the relevant resources (up to
+  three), and it reads the body when it needs it — so curate the title and
+  preview on the Knowledge page: they are what the agent sees first. The
+  daemon is the only writer of granted knowledge, and it can only mirror
+  namespaces the memory worker authorizes — a namespace you never granted (or
+  later revoked) answers 403 at the worker and never enters the engine; a
+  revoked one leaves at the next pass (every five minutes, or on "sync now").
+- **Memories = what the agent itself learns.** Its diary, inventories and
+  learned preferences are files it writes into the engine's `memories/`
+  category folders (`events/`, `entities/`, `preferences/`). They live only in
+  that sandbox (checkpointed, so an update or relaunch keeps them) and never
+  reach another application. The engine's automatic extraction (`remember`)
+  is not enabled in the sandbox, so the files the agent writes are its memory.
+- **A learning crosses to you as a proposal.** When the agent judges a
+  learning durable — a standing preference you stated, a household fact — it
+  sends it with its `propose_to_owner` tool into your review queue (rate- and
+  size-limited). Accepting it on the Knowledge page makes it an item of the
+  namespace you choose; every application granted that namespace then receives
+  it as a resource. Nothing an agent learns enters shared knowledge without
+  that acceptance. See the wiki page *Knowledge Store and Applications*.
 - The memory engine is **never load-bearing**: if it is down or not enabled,
   the agent falls back to its built-in memory and chat keeps working.
 

@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720" font-family="Helvetica, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="aBlue" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#1f6fb2"/></marker>
+    <marker id="aGreen" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#2e8b57"/></marker>
+    <marker id="aGold" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#b8860b"/></marker>
+    <marker id="aGrey" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#888"/></marker>
+  </defs>
+  <rect x="0" y="0" width="1280" height="720" fill="#fbfaf7"/>
+  <text x="640" y="34" text-anchor="middle" font-size="22" font-weight="bold" fill="#222">Inside one application: what the agent sees on each turn</text>
+  <text x="640" y="56" text-anchor="middle" font-size="13" fill="#666">the chef sandbox — one OpenViking engine, the dsh memory plugin's recall before every model step, the AgentKeys tools around the model</text>
+
+  <!-- Engine -->
+  <rect x="30" y="90" width="400" height="430" rx="12" fill="#eef4fb" stroke="#1f6fb2" stroke-width="2"/>
+  <text x="230" y="116" text-anchor="middle" font-size="16" font-weight="bold" fill="#123d66">OpenViking engine (in the sandbox, :1933)</text>
+
+  <rect x="50" y="132" width="360" height="176" rx="8" fill="#fff" stroke="#8fb3d9"/>
+  <text x="230" y="154" text-anchor="middle" font-weight="bold" fill="#123d66">resources/ = knowledge the household granted</text>
+  <text x="230" y="174" text-anchor="middle" font-size="12" fill="#456">written by the AgentKeys daemon mirror, only what the gate allows</text>
+  <text x="70" y="197" font-size="12" font-family="Menlo, monospace" fill="#234">resources/family/food-preferences/</text>
+  <text x="90" y="214" font-size="11" font-family="Menlo, monospace" fill="#456">.abstract.md  ← title + preview (L0, ≤256)</text>
+  <text x="90" y="230" font-size="11" font-family="Menlo, monospace" fill="#456">.overview.md  ← preview (L1, ≤4000)</text>
+  <text x="90" y="246" font-size="11" font-family="Menlo, monospace" fill="#456">food-preferences.md ← body (L2)</text>
+  <text x="70" y="268" font-size="12" font-family="Menlo, monospace" fill="#234">resources/health/gene-report/ …</text>
+  <text x="70" y="286" font-size="12" font-family="Menlo, monospace" fill="#234">resources/devices/kitchen-screen-01/ …</text>
+  <text x="230" y="302" text-anchor="middle" font-size="11" fill="#666">every 5 min, or on "sync now" · a revoked namespace leaves at the next pass</text>
+
+  <rect x="50" y="322" width="360" height="176" rx="8" fill="#fff" stroke="#8fb3d9"/>
+  <text x="230" y="344" text-anchor="middle" font-weight="bold" fill="#123d66">memories/ = the app's own cognition</text>
+  <text x="230" y="364" text-anchor="middle" font-size="12" fill="#456">written by the agent itself; private to this sandbox; checkpointed</text>
+  <text x="70" y="387" font-size="12" font-family="Menlo, monospace" fill="#234">memories/events/2026-09-18/12-30-kid.md</text>
+  <text x="70" y="405" font-size="12" font-family="Menlo, monospace" fill="#234">memories/entities/fridge/inventory.md</text>
+  <text x="70" y="423" font-size="12" font-family="Menlo, monospace" fill="#234">memories/preferences/…</text>
+  <text x="230" y="448" text-anchor="middle" font-size="11" fill="#666">recall reads only these category folders (+ resources, skills)</text>
+  <text x="230" y="464" text-anchor="middle" font-size="11" fill="#666">a folder outside them is searchable by a tool, never auto-recalled</text>
+  <text x="230" y="486" text-anchor="middle" font-size="11" fill="#666">no extraction model in the sandbox: `remember` stores nothing; files are the memory</text>
+
+  <!-- Model step -->
+  <rect x="480" y="90" width="360" height="430" rx="12" fill="#f0f7f1" stroke="#2e8b57" stroke-width="2"/>
+  <text x="660" y="116" text-anchor="middle" font-size="16" font-weight="bold" fill="#1d5a38">One model step (dsh + the memory plugin)</text>
+
+  <rect x="500" y="132" width="320" height="120" rx="8" fill="#fff" stroke="#9cc9ad"/>
+  <text x="660" y="154" text-anchor="middle" font-weight="bold" fill="#1d5a38">1 · automatic recall</text>
+  <text x="660" y="174" text-anchor="middle" font-size="12" fill="#234">one context search with the turn text, score ≥ 0.35</text>
+  <text x="660" y="194" text-anchor="middle" font-size="12" fill="#234">slots: 3 resources · 2 entities · 1 event · 1 preference</text>
+  <text x="660" y="212" text-anchor="middle" font-size="12" fill="#234">1 experience · 2 skills · ~1600 tokens</text>
+  <text x="660" y="234" text-anchor="middle" font-size="11" fill="#666">a resource shows its overview; a memory shows its full body</text>
+
+  <rect x="500" y="266" width="320" height="110" rx="8" fill="#fff" stroke="#9cc9ad"/>
+  <text x="660" y="288" text-anchor="middle" font-weight="bold" fill="#1d5a38">2 · the prompt the model reads</text>
+  <text x="660" y="308" text-anchor="middle" font-size="12" fill="#234">persona (SOUL.md) · skills · knowledge docs (from the template)</text>
+  <text x="660" y="326" text-anchor="middle" font-size="12" fill="#234">+ the recalled &lt;openviking-context&gt; block</text>
+  <text x="660" y="344" text-anchor="middle" font-size="12" fill="#234">+ the turn: a chat message, a clock tick, a command from a screen</text>
+  <text x="660" y="364" text-anchor="middle" font-size="11" fill="#666">the AgentKeys guard checks every tool call against the app's grants</text>
+
+  <rect x="500" y="390" width="320" height="110" rx="8" fill="#fff" stroke="#9cc9ad"/>
+  <text x="660" y="412" text-anchor="middle" font-weight="bold" fill="#1d5a38">3 · tools the model may call</text>
+  <text x="660" y="432" text-anchor="middle" font-size="12" font-family="Menlo, monospace" fill="#234">mcp__openviking__search / read / list / write</text>
+  <text x="660" y="450" text-anchor="middle" font-size="12" font-family="Menlo, monospace" fill="#234">publish_to_slot   (needs a channel-pub grant)</text>
+  <text x="660" y="468" text-anchor="middle" font-size="12" font-family="Menlo, monospace" fill="#234">propose_to_owner  (needs a proposal grant)</text>
+  <text x="660" y="488" text-anchor="middle" font-size="11" fill="#666">web_search / schedule only with their tool grants; no shell</text>
+
+  <!-- Outputs -->
+  <rect x="890" y="90" width="360" height="430" rx="12" fill="#fff4d6" stroke="#c9a227" stroke-width="2"/>
+  <text x="1070" y="116" text-anchor="middle" font-size="16" font-weight="bold" fill="#5a4300">Where things go</text>
+
+  <rect x="910" y="132" width="320" height="86" rx="8" fill="#fff" stroke="#e0c46a"/>
+  <text x="1070" y="154" text-anchor="middle" font-weight="bold" fill="#5a4300">the kitchen screen · the family chat</text>
+  <text x="1070" y="174" text-anchor="middle" font-size="12" fill="#234">publish_to_slot → a card (doc) or a line (text)</text>
+  <text x="1070" y="192" text-anchor="middle" font-size="12" fill="#234">on the app's bound feeds; taps come back as commands</text>
+  <text x="1070" y="208" text-anchor="middle" font-size="11" fill="#666">a file the model writes publishes nothing</text>
+
+  <rect x="910" y="232" width="320" height="86" rx="8" fill="#fff" stroke="#e0c46a"/>
+  <text x="1070" y="254" text-anchor="middle" font-weight="bold" fill="#5a4300">the owner's review queue</text>
+  <text x="1070" y="274" text-anchor="middle" font-size="12" fill="#234">propose_to_owner → a learning worth keeping</text>
+  <text x="1070" y="292" text-anchor="middle" font-size="12" fill="#234">accepted on the Knowledge page → an item of a namespace</text>
+  <text x="1070" y="308" text-anchor="middle" font-size="11" fill="#666">→ mirrored back to every granted app as a resource</text>
+
+  <rect x="910" y="332" width="320" height="86" rx="8" fill="#fff" stroke="#e0c46a"/>
+  <text x="1070" y="354" text-anchor="middle" font-weight="bold" fill="#5a4300">the app's own memories</text>
+  <text x="1070" y="374" text-anchor="middle" font-size="12" fill="#234">mcp__openviking__write → a diary event, the fridge entity</text>
+  <text x="1070" y="392" text-anchor="middle" font-size="12" fill="#234">recalled on later turns; checkpointed with the sandbox</text>
+  <text x="1070" y="408" text-anchor="middle" font-size="11" fill="#666">never visible to another application</text>
+
+  <rect x="910" y="432" width="320" height="70" rx="8" fill="#fff" stroke="#e0c46a"/>
+  <text x="1070" y="454" text-anchor="middle" font-weight="bold" fill="#5a4300">the canonical store (AgentKeys)</text>
+  <text x="1070" y="474" text-anchor="middle" font-size="12" fill="#234">source of truth for resources; receives proposals</text>
+  <text x="1070" y="492" text-anchor="middle" font-size="12" fill="#234">and the sandbox's checkpoint of its engine</text>
+
+  <!-- Arrows -->
+  <path d="M430,220 C460,220 460,186 500,186" fill="none" stroke="#1f6fb2" stroke-width="2.5" marker-end="url(#aBlue)"/>
+  <path d="M430,410 C465,410 465,206 500,206" fill="none" stroke="#1f6fb2" stroke-width="2.5" marker-end="url(#aBlue)"/>
+  <text x="455" y="170" text-anchor="middle" font-size="11" fill="#1f6fb2">recall</text>
+  <path d="M820,175 C860,175 860,175 910,175" fill="none" stroke="#b8860b" stroke-width="2.5" marker-end="url(#aGold)"/>
+  <path d="M820,275 C860,275 860,275 910,275" fill="none" stroke="#b8860b" stroke-width="2.5" marker-end="url(#aGold)"/>
+  <path d="M820,375 C860,375 860,375 910,375" fill="none" stroke="#b8860b" stroke-width="2.5" marker-end="url(#aGold)"/>
+  <path d="M1070,418 L1070,540 L230,540 L230,502" fill="none" stroke="#888" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#aGrey)"/>
+  <text x="650" y="534" text-anchor="middle" font-size="11" fill="#666">the memory write lands in the engine's memories/ and is recalled on the next turn</text>
+
+  <!-- Curation note -->
+  <rect x="30" y="560" width="1220" height="120" rx="8" fill="#fff" stroke="#ccc"/>
+  <text x="50" y="584" font-weight="bold" fill="#222">Curating for recall</text>
+  <text x="50" y="606" font-size="12" fill="#234">• A resource is recalled through its overview, so the item's title and preview on the Knowledge page decide what the agent sees first; the body is one `read` away.</text>
+  <text x="50" y="626" font-size="12" fill="#234">• Keep directories small and specific — one item per fact sheet, one namespace per topic (family, health, devices): recall descends by directory abstracts.</text>
+  <text x="50" y="646" font-size="12" fill="#234">• The recall's score cut-off is 0.35 on the real embedding model; an indirect question may miss, which is why the skills also name explicit `search` + `read` steps.</text>
+  <text x="50" y="666" font-size="12" fill="#234">• Enabling the engine's extraction model (through the model gate) would add automatic memory extraction and generated layers at token cost — an owner decision, off today.</text>
+</svg>

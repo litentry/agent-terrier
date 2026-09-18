@@ -12,7 +12,7 @@ The four verbs the runtime gives an app:
 |---|---|---|
 | **perceive** | events from every bound slot arrive as turns — text, `image`, `audio-clip`, `command` | `skills/perception.md` (the R2 pre-turn prompt per media kind) |
 | **act** | publish `text` / `doc` / `image` to any bound `pub` slot | the `publish-to-slot <slot> <kind>` helper from a skill |
-| **remember** | keyed objects under `knowledge:app-<label>`; proposals to the owner via `proposal:app-<label>` | conventions in your skills (keys, shapes) |
+| **remember** | memory files the app writes into its engine's `memories/` category folders (`events/`, `entities/`, `preferences/` — its own cognition, checkpointed with the sandbox); a durable learning goes to the owner with the `propose_to_owner` tool under `proposal:<ns>`; granted knowledge arrives as `resources/` (see [Knowledge Store and Applications](./knowledge-store-and-applications.md)) | conventions in your skills (URIs, shapes) |
 | **may** | every action is gated by the grant set; a denied tool is a denied tool, never a fallback | `tools`, `schedule`, and what you *don't* ask for |
 
 ## Layout

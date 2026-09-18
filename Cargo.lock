@@ -247,7 +247,6 @@ dependencies = [
  "agentkeys-catalog",
  "agentkeys-cli",
  "agentkeys-core",
- "agentkeys-memory-engine",
  "agentkeys-memory-openviking",
  "agentkeys-mock-server",
  "agentkeys-provisioner",
@@ -355,7 +354,6 @@ version = "0.1.0"
 name = "agentkeys-memory-openviking"
 version = "0.1.0"
 dependencies = [
- "agentkeys-memory-engine",
  "axum",
  "reqwest",
  "serde",

@@ -1,6 +1,8 @@
 # Fridge — the inventory
 
-One keyed memory object: `fridge/inventory` (`knowledge:app-chef`).
+One memory file, `viking://user/default/memories/entities/fridge/inventory.md`,
+written with `mcp__openviking__write` (`mode: "replace"`) — read it with
+`mcp__openviking__read` before planning.
 
 - body: `{ "seen_at": "…", "items": [{ "name": "…", "quantity": "…", "state": "ok" | "low" | "spoiling" | "new", "last_seen": "…" }] }`
 - A fridge photo REPLACES the item list for the shelves it shows and keeps
