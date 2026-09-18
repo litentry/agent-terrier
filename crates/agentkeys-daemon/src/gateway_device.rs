@@ -114,11 +114,15 @@ pub(crate) async fn finish_gateway_enrollment(
              ({e}) — retry the contact gate's device status once the broker's pairing row settles"
         )
     })?;
-    let actor_omni = if done.actor_omni.is_empty() {
-        pending.child_omni.clone()
-    } else {
-        done.actor_omni.clone()
-    };
+    // The canonical `0x` form (`normalize_omni_0x`): the gate reports the omni
+    // the claim relayed, which is BARE hex — a manifest row and every cap-mint
+    // body carry the prefixed form.
+    let actor_omni =
+        agentkeys_backend_client::normalize_omni_0x(if done.actor_omni.trim().is_empty() {
+            pending.child_omni.trim()
+        } else {
+            done.actor_omni.trim()
+        });
     upsert_binding_manifest_entry(
         state,
         BindingManifestEntry {

@@ -29,6 +29,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use agentkeys_backend_client::normalize_omni_0x;
 use agentkeys_core::device_crypto::DeviceKey;
 
 use crate::ui_bridge::{
@@ -94,24 +95,67 @@ pub(crate) fn console_key_file() -> String {
 /// Load the persisted coordinates for THIS broker (a console enrolled on one
 /// stack is not enrolled on another — the omni tree is per stack, #464).
 pub(crate) fn load_persisted(broker_url: Option<&str>) -> Option<ConsoleDevice> {
+    load_persisted_from(&console_device_file(), broker_url)
+}
+
+/// [`load_persisted`] against an explicit file. A record persisted with a BARE
+/// actor omni (enrolled before the claim's answer was canonicalized — the bare
+/// form failed every cap mint with `actor_omni must start with 0x`) is healed
+/// to the `0x` form in memory AND rewritten, so its mints validate without a
+/// re-enrollment.
+pub(crate) fn load_persisted_from(path: &str, broker_url: Option<&str>) -> Option<ConsoleDevice> {
     // No broker known = no stack to be enrolled on (a persisted enrollment is
     // per stack, #464) — never adopt one blind.
     let broker = broker_url?.trim_end_matches('/');
-    let raw = std::fs::read_to_string(console_device_file()).ok()?;
-    let dev: ConsoleDevice = serde_json::from_str(&raw).ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut dev: ConsoleDevice = serde_json::from_str(&raw).ok()?;
     if broker != dev.broker_url.trim_end_matches('/') {
         return None;
+    }
+    let canonical = normalize_omni_0x(dev.actor_omni.trim());
+    if canonical != dev.actor_omni {
+        tracing::info!(
+            bare = %dev.actor_omni,
+            canonical = %canonical,
+            "#541 console device: healing the persisted actor omni to the canonical 0x form"
+        );
+        dev.actor_omni = canonical;
+        if let Err(e) = persist_to(path, &dev) {
+            tracing::warn!(
+                error = %e,
+                "#541 console device: the healed record could not be rewritten — healed in memory only"
+            );
+        }
     }
     Some(dev)
 }
 
+/// The child omni a claim answered with, in the canonical `0x` form every
+/// cap-mint body carries ([`normalize_omni_0x`]). The broker's claim relays
+/// `child_omni_hex`, which is BARE hex, and the cap-mint validator refuses a
+/// bare `actor_omni` — the #200 drift class, re-introduced by the console +
+/// gateway enrollments (persisted bare, minted bare: every card-action tap
+/// answered 502 `actor_omni must start with 0x`, 2026-09-17).
+pub(crate) fn claim_child_omni(claim: &serde_json::Value, label: &str) -> Result<String, String> {
+    claim
+        .get("child_omni")
+        .and_then(|c| c.as_str())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(normalize_omni_0x)
+        .ok_or_else(|| format!("claim ({label}) returned no child_omni"))
+}
+
 fn persist(dev: &ConsoleDevice) -> Result<(), String> {
-    let path = console_device_file();
-    if let Some(parent) = std::path::Path::new(&path).parent() {
+    persist_to(&console_device_file(), dev)
+}
+
+fn persist_to(path: &str, dev: &ConsoleDevice) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(dev).map_err(|e| format!("serialize: {e}"))?;
-    agentkeys_core::device_crypto::write_key_0600(&path, &json)
+    agentkeys_core::device_crypto::write_key_0600(path, &json)
         .map_err(|e| format!("write {path}: {e}"))
 }
 
@@ -346,11 +390,8 @@ pub(crate) async fn device_accept_build(
             ))
         }
     };
-    let child_omni = claim
-        .get("child_omni")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let child_omni = claim_child_omni(&claim, label)
+        .map_err(|e| pairing_err(StatusCode::BAD_GATEWAY, &format!("device claim: {e}")))?;
     let body = serde_json::json!({
         "operator_omni": operator_omni,
         "actor_omni": child_omni,
@@ -645,10 +686,15 @@ pub(crate) async fn publish_as_console_or_master(
                 )
                 .await
                 .map_err(|e| {
-                    format!(
-                        "console device cap mint on channel-pub:{channel_id}: {e} — the console \
-                         holds no publish grant on this feed (an app install grants it)"
-                    )
+                    // The grant hint only when the broker DENIED (403); a
+                    // malformed body or a broker outage is reported as it is.
+                    let base = format!("console device cap mint on channel-pub:{channel_id}: {e}");
+                    match e {
+                        agentkeys_backend_client::BackendError::Http { status: 403, .. } => format!(
+                            "{base} — the console holds no publish grant on this feed (an app install grants it)"
+                        ),
+                        _ => base,
+                    }
                 })?;
             (
                 serde_json::to_value(&cap).map_err(|e| format!("cap serialize: {e}"))?,
@@ -733,6 +779,56 @@ mod tests {
         let json = serde_json::to_string(&dev).unwrap();
         let back: ConsoleDevice = serde_json::from_str(&json).unwrap();
         assert_eq!(back.actor_omni, "0xabc");
+    }
+
+    #[test]
+    fn a_claim_child_omni_is_canonical_0x() {
+        let bare = "d8".repeat(32);
+        let prefixed = format!("0x{bare}");
+        let v = serde_json::json!({ "child_omni": bare });
+        assert_eq!(claim_child_omni(&v, "console-mac").unwrap(), prefixed);
+        let v = serde_json::json!({ "child_omni": prefixed });
+        assert_eq!(claim_child_omni(&v, "console-mac").unwrap(), prefixed);
+        let e = claim_child_omni(&serde_json::json!({}), "console-mac").unwrap_err();
+        assert!(
+            e.contains("console-mac") && e.contains("no child_omni"),
+            "{e}"
+        );
+        assert!(claim_child_omni(&serde_json::json!({ "child_omni": " " }), "x").is_err());
+    }
+
+    /// The owner's console (enrolled 2026-09-16) persisted the claim's bare
+    /// omni and every card-action tap died at cap mint — a load heals it.
+    #[test]
+    fn a_bare_persisted_omni_is_healed_on_load_and_rewritten() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentkeys-console-device-heal-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir
+            .join("console-device.json")
+            .to_string_lossy()
+            .to_string();
+        let bare = "d8".repeat(32);
+        let dev = ConsoleDevice {
+            actor_omni: bare.clone(),
+            device_key_hash: "0xdef".into(),
+            device_pubkey: "0x11".into(),
+            label: "console-mac".into(),
+            key_file: "/tmp/k".into(),
+            broker_url: "https://broker.example".into(),
+            enrolled_at: 1,
+        };
+        std::fs::write(&path, serde_json::to_string(&dev).unwrap()).unwrap();
+        let loaded = load_persisted_from(&path, Some("https://broker.example/")).unwrap();
+        assert_eq!(loaded.actor_omni, format!("0x{bare}"));
+        let rewritten: ConsoleDevice =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(rewritten.actor_omni, format!("0x{bare}"));
+        assert!(load_persisted_from(&path, Some("https://other.example")).is_none());
+        assert!(load_persisted_from(&path, None).is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The console's status read: a fresh daemon is not enrolled and suggests

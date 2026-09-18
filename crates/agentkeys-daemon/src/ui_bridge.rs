@@ -4016,10 +4016,11 @@ fn bridge_non_json_error(url: &str, status: &str, text: &str, parse: &str) -> St
 const PRESET_APPLY_READY_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 const PRESET_APPLY_READY_POLL: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Wait (bounded) until the delegate's bridge answers `/healthz` 200 — the pod
-/// booted and the agent handle exists — then distribute the preset. A bridge
-/// that never answers still gets the attempt, so the audit row carries its
-/// actual answer; an unconfigured base (no gateway known) skips the wait.
+/// Wait (bounded) until the delegate's bridge is REACHABLE — it answers
+/// `/healthz` with its own body, at any status (`sandbox_bridge_reachable`) —
+/// then distribute the preset. A bridge that never answers still gets the
+/// attempt, so the audit row carries its actual answer; an unconfigured base
+/// (no gateway known) skips the wait.
 async fn apply_preset_when_ready(
     state: &SharedUiBridgeState,
     broker: &str,
@@ -4031,17 +4032,8 @@ async fn apply_preset_when_ready(
     let started = std::time::Instant::now();
     let mut last_err = String::new();
     let ready = loop {
-        match sandbox_bridge_request_instanced(
-            state,
-            reqwest::Method::GET,
-            "/healthz",
-            None,
-            sandbox_id,
-            agent_url,
-        )
-        .await
-        {
-            Ok(_) => break true,
+        match sandbox_bridge_reachable(state, sandbox_id, agent_url).await {
+            Ok(()) => break true,
             Err(e) if e.starts_with("sandbox_unconfigured") => {
                 last_err = e;
                 break false;
@@ -12389,6 +12381,70 @@ async fn sandbox_bridge_request_instanced(
     instance: Option<&str>,
     base_override: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    let (url, status, value) =
+        sandbox_bridge_exchange_instanced(state, method, path, body, instance, base_override)
+            .await?;
+    if !status.is_success() {
+        let err = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no error body)");
+        return Err(format!("bridge {url} {status}: {err}"));
+    }
+    Ok(value)
+}
+
+/// The bridge's own `/healthz` body (`bridge-frames.ts` `HealthzBody`) — its
+/// string `phase` tells the bridge apart from the gateway answering in its
+/// place (`{"error": …}`, or no JSON at all while the pod boots).
+fn is_bridge_healthz_body(value: &serde_json::Value) -> bool {
+    value.get("phase").is_some_and(|p| p.is_string())
+}
+
+/// The bridge is REACHABLE once `/healthz` answers with its own body — at ANY
+/// status. 200 there means the bridge holds an agent session: it starts one in
+/// the background at boot, but an update's runtime-home import disposes it and
+/// nothing re-creates it until the next turn — so a freshly UPDATED pod answers
+/// 503 `starting` for as long as nobody chats, while `/v1/context/apply` (files
+/// written; a re-source only when a session exists) is already served. Gating
+/// the preset apply on a 2xx made every update wait out the whole budget and
+/// then apply INTO the first turn in flight — chef, 2026-09-17: a 121 s wait,
+/// then its on-demand ask came back empty.
+async fn sandbox_bridge_reachable(
+    state: &SharedUiBridgeState,
+    instance: Option<&str>,
+    base_override: Option<&str>,
+) -> Result<(), String> {
+    let (url, status, value) = sandbox_bridge_exchange_instanced(
+        state,
+        reqwest::Method::GET,
+        "/healthz",
+        None,
+        instance,
+        base_override,
+    )
+    .await?;
+    if is_bridge_healthz_body(&value) {
+        return Ok(());
+    }
+    Err(format!(
+        "bridge {url} {status}: not the bridge's healthz body"
+    ))
+}
+
+/// One instanced bridge exchange: the URL, the status and the decoded JSON
+/// body. A non-JSON answer — the gateway's own page while the pod boots — is
+/// the error (`bridge_non_json_error`); a JSON non-2xx is the CALLER's call
+/// (`sandbox_bridge_request_instanced` rejects it, the reachability probe
+/// accepts the bridge's own 503).
+async fn sandbox_bridge_exchange_instanced(
+    state: &SharedUiBridgeState,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    instance: Option<&str>,
+    base_override: Option<&str>,
+) -> Result<(String, reqwest::StatusCode, serde_json::Value), String> {
     let base = base_override
         .filter(|b| !b.trim().is_empty())
         .or(state.sandbox_bridge_url.as_deref())
@@ -12432,14 +12488,7 @@ async fn sandbox_bridge_request_instanced(
             ))
         }
     };
-    if !status.is_success() {
-        let err = value
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(no error body)");
-        return Err(format!("bridge {url} {status}: {err}"));
-    }
-    Ok(value)
+    Ok((url, status, value))
 }
 
 /// Apply a persona body into the sandbox (file write + ACP re-source, the #390
@@ -13856,6 +13905,18 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bridge_healthz_body_counts_as_reachable_at_any_status() {
+        assert!(is_bridge_healthz_body(&serde_json::json!({
+            "ok": false, "engine": "dsh", "version": "0.1.1-rc.2", "model": "x", "phase": "starting"
+        })));
+        assert!(!is_bridge_healthz_body(
+            &serde_json::json!({ "error": "no such instance" })
+        ));
+        assert!(!is_bridge_healthz_body(&serde_json::json!({ "phase": 3 })));
+        assert!(!is_bridge_healthz_body(&serde_json::json!("starting")));
+    }
 
     #[test]
     fn a_non_json_bridge_answer_names_the_status_and_a_snippet() {

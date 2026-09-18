@@ -664,8 +664,10 @@ export function apply(ctx: Context, config: Config): void {
   for (const route of routes) {
     ctx.effect(() => ctx.webServer.register(route), `agentkeys-bridge: ${route.path}`);
   }
-  // Bind-first (#589): the webserver listens on activation; the agent is created
-  // lazily on the first /v1/chat, so the port answers within the veFaaS budget.
+  // Bind-first (#589): the webserver listens on activation and the agent session
+  // is created in the BACKGROUND (not awaited), so the port answers within the
+  // veFaaS budget; /healthz reads 503 `starting` until it exists. A session
+  // import disposes it and the next /v1/chat re-creates it.
   void ensureAgent();
 
   ctx.effect(() => async () => {

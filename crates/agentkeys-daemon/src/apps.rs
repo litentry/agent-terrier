@@ -791,7 +791,8 @@ async fn plan_enrollments(
     Ok((enrollments, pending, console_child))
 }
 
-/// The master's claim of an endpoint's pairing code → its child omni.
+/// The master's claim of an endpoint's pairing code → its child omni, in the
+/// canonical `0x` form (`console_device::claim_child_omni`).
 async fn claim_child(
     broker: &str,
     j1: &str,
@@ -804,11 +805,7 @@ async fn claim_child(
             .await
             .map_err(|e| format!("claim ({label}): {e:#}"))?;
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    v.get("child_omni")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| format!("claim ({label}) returned no child_omni"))
+    crate::console_device::claim_child_omni(&v, label)
 }
 
 /// POST /v1/master/apps/install/submit — the install ceremony, submit half:
