@@ -162,6 +162,7 @@ pub(crate) fn delegate_identity_envs(
     channel_worker_override: Option<&str>,
     mgmt_token: Option<&str>,
     memory_ns: Option<&str>,
+    bridge_token: Option<&str>,
 ) -> Vec<(String, String)> {
     use agentkeys_protocol::sandbox_env as env_names;
     let norm0x = |o: &str| format!("0x{}", crate::handlers::accept::norm_omni(o));
@@ -174,6 +175,13 @@ pub(crate) fn delegate_identity_envs(
     // never stored (see `sandbox_mgmt_token`).
     if let Some(token) = mgmt_token.filter(|t| !t.trim().is_empty()) {
         envs.push((env_names::MGMT_TOKEN.to_string(), token.to_string()));
+    }
+    // #715 — the in-pod bearer: gates the bridge's chat/context routes and the
+    // daemon's self surface, presented by every in-pod client. Derived like
+    // the mgmt token (see `sandbox_bridge_token`); a sandbox without it is
+    // fail-closed on both surfaces, never open.
+    if let Some(token) = bridge_token.filter(|t| !t.trim().is_empty()) {
+        envs.push((env_names::BRIDGE_TOKEN.to_string(), token.to_string()));
     }
     if let Some(secret) = k10_secret_hex.filter(|s| !s.trim().is_empty()) {
         envs.push((env_names::DEVICE_KEY_HEX.to_string(), secret.to_string()));
@@ -260,16 +268,53 @@ pub(crate) fn sandbox_mgmt_token(
     session_keypair: &crate::jwt::session::SessionKeypair,
     device_key_hash: &str,
 ) -> String {
+    derived_sandbox_token(
+        session_keypair,
+        device_key_hash,
+        b"agentkeys-sandbox-mgmt-v1:",
+        "smt1",
+    )
+}
+
+/// #715 — the per-delegate IN-POD bearer (`AGENTKEYS_BRIDGE_TOKEN`): the same
+/// derivation as the mgmt token under a DISTINCT domain string, so the two
+/// surfaces (runtime-home export/import vs chat/context) never share a
+/// credential — a device or console that could ever hold the chat bearer must
+/// not thereby hold the home snapshot. Re-derived by the broker at every
+/// `/v1/agent/bridge` call; nothing at rest (D2).
+pub(crate) fn sandbox_bridge_token(
+    session_keypair: &crate::jwt::session::SessionKeypair,
+    device_key_hash: &str,
+) -> String {
+    derived_sandbox_token(
+        session_keypair,
+        device_key_hash,
+        b"agentkeys-sandbox-bridge-v1:",
+        "sbt1",
+    )
+}
+
+/// keccak256(session private key || domain || normalized device_key_hash):
+/// deterministic per (broker key, delegate), `0x`/case-insensitive on the hash.
+/// keccak256 is a sponge — no length-extension issue with the `secret ||
+/// payload` shape. Rotating the broker session keypair orphans PRE-rotation
+/// instances' tokens (surfaced — never fatal — by the callers).
+fn derived_sandbox_token(
+    session_keypair: &crate::jwt::session::SessionKeypair,
+    device_key_hash: &str,
+    domain: &[u8],
+    prefix: &str,
+) -> String {
     let norm = device_key_hash
         .trim()
         .trim_start_matches("0x")
         .to_lowercase();
     let mut buf = Vec::new();
     buf.extend_from_slice(session_keypair.private_key_pem.as_bytes());
-    buf.extend_from_slice(b"agentkeys-sandbox-mgmt-v1:");
+    buf.extend_from_slice(domain);
     buf.extend_from_slice(norm.as_bytes());
     format!(
-        "smt1_{}",
+        "{prefix}_{}",
         hex::encode(agentkeys_core::device_crypto::keccak256(&buf))
     )
 }
@@ -387,6 +432,10 @@ pub async fn ensure_for_delegate(
                 worker_override.as_deref(),
                 Some(&sandbox_mgmt_token(&state.session_keypair, device_key_hash)),
                 Some(&c.memory_ns),
+                Some(&sandbox_bridge_token(
+                    &state.session_keypair,
+                    device_key_hash,
+                )),
             );
             // #660 — the app-runtime set rides every re-create too (a
             // re-created Chef must poll its WeChat feed, not just opchat).
@@ -717,6 +766,7 @@ mod tests {
             None,
             Some("smt1_feed"),
             Some("watchdog"),
+            Some("sbt1_feed"),
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         for required in agentkeys_protocol::sandbox_env::CHAT_REQUIRED {
@@ -745,6 +795,35 @@ mod tests {
         assert_eq!(get("AGENTKEYS_SANDBOX_MGMT_TOKEN"), "smt1_feed");
         // #594 — the checkpoint namespace rides too.
         assert_eq!(get("AGENTKEYS_MEMORY_NS"), "watchdog");
+        // #715 — the in-pod bearer rides every armed create.
+        assert_eq!(get("AGENTKEYS_BRIDGE_TOKEN"), "sbt1_feed");
+    }
+
+    /// #715 — the bridge token is a sibling derivation of the mgmt token under
+    /// its own domain: deterministic, normalized, per-delegate, and NEVER equal
+    /// to the mgmt token of the same delegate (distinct surfaces, distinct
+    /// credentials).
+    #[test]
+    fn sandbox_bridge_token_is_derived_distinct_from_the_mgmt_token() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentkeys-bridge-token-test-{}",
+            std::process::id()
+        ));
+        let kp = crate::jwt::session::SessionKeypair::generate_and_persist(
+            &dir.join("session-keypair.json"),
+        )
+        .unwrap();
+        let a = sandbox_bridge_token(&kp, &format!("0x{}", "AB".repeat(32)));
+        let b = sandbox_bridge_token(&kp, &"ab".repeat(32));
+        assert_eq!(a, b, "0x-prefix and case must not fork the token");
+        assert!(a.starts_with("sbt1_"), "{a}");
+        assert_ne!(a, sandbox_bridge_token(&kp, &"cd".repeat(32)));
+        assert_ne!(
+            a.trim_start_matches("sbt1_"),
+            sandbox_mgmt_token(&kp, &"ab".repeat(32)).trim_start_matches("smt1_"),
+            "the bridge and mgmt tokens must derive under distinct domains"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #577 — the mgmt token is a pure derivation: stable per (key, delegate)
@@ -791,9 +870,11 @@ mod tests {
             // #594 — a pre-#594 row's EMPTY ns injects nothing (the daemon
             // derives from the channel id instead).
             Some(""),
+            None,
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         assert!(!keys.contains(&"AGENTKEYS_DEVICE_KEY_HEX"));
+        assert!(!keys.contains(&"AGENTKEYS_BRIDGE_TOKEN"));
         assert!(!keys.contains(&"AGENTKEYS_CHAT_CHANNEL_ID"));
         assert!(!keys.contains(&"AGENTKEYS_BROKER_URL"));
         assert!(!keys.contains(&"AGENTKEYS_SANDBOX_MGMT_TOKEN"));

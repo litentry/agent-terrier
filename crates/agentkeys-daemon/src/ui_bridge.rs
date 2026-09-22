@@ -4046,7 +4046,7 @@ async fn apply_preset_when_ready(
     let started = std::time::Instant::now();
     let mut last_err = String::new();
     let ready = loop {
-        match sandbox_bridge_reachable(state, sandbox_id, agent_url).await {
+        match sandbox_bridge_reachable(state, sandbox_id, agent_url, Some(delegate_omni)).await {
             Ok(()) => break true,
             Err(e) if e.starts_with("sandbox_unconfigured") => {
                 last_err = e;
@@ -8724,6 +8724,7 @@ async fn apply_preset_at_spawn(
             Some(body),
             sandbox_id,
             agent_url,
+            Some(delegate_omni),
         )
         .await
         {
@@ -12488,7 +12489,7 @@ async fn sandbox_bridge_request(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    sandbox_bridge_request_instanced(state, method, path, body, None, None).await
+    sandbox_bridge_request_instanced(state, method, path, body, None, None, None).await
 }
 
 /// #428/#430 per-delegate variant: when `instance` is set, the request carries
@@ -12503,10 +12504,18 @@ async fn sandbox_bridge_request_instanced(
     body: Option<serde_json::Value>,
     instance: Option<&str>,
     base_override: Option<&str>,
+    delegate_omni: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    let (url, status, value) =
-        sandbox_bridge_exchange_instanced(state, method, path, body, instance, base_override)
-            .await?;
+    let (url, status, value) = sandbox_bridge_exchange_instanced(
+        state,
+        method,
+        path,
+        body,
+        instance,
+        base_override,
+        delegate_omni,
+    )
+    .await?;
     if !status.is_success() {
         let err = value
             .get("error")
@@ -12537,6 +12546,7 @@ async fn sandbox_bridge_reachable(
     state: &SharedUiBridgeState,
     instance: Option<&str>,
     base_override: Option<&str>,
+    delegate_omni: Option<&str>,
 ) -> Result<(), String> {
     let (url, status, value) = sandbox_bridge_exchange_instanced(
         state,
@@ -12545,6 +12555,7 @@ async fn sandbox_bridge_reachable(
         None,
         instance,
         base_override,
+        delegate_omni,
     )
     .await?;
     if is_bridge_healthz_body(&value) {
@@ -12567,7 +12578,21 @@ async fn sandbox_bridge_exchange_instanced(
     body: Option<serde_json::Value>,
     instance: Option<&str>,
     base_override: Option<&str>,
+    delegate_omni: Option<&str>,
 ) -> Result<(String, reqwest::StatusCode, serde_json::Value), String> {
+    // #715 — a PER-DELEGATE instance is reached THROUGH THE BROKER: the veFaaS
+    // gateway demands the function's stack-wide secret token (which never
+    // leaves the broker host) and the bridge demands the per-delegate in-pod
+    // bearer (which the broker derives). The console sends its master J1 +
+    // the delegate's on-chain identity; the broker checks ownership and
+    // forwards. The direct call survives ONLY for the single-bridge dev
+    // topology (`--sandbox-bridge-url`, no instance).
+    if let Some(id) = instance.filter(|i| !i.trim().is_empty()) {
+        if let Some(target) = bridge_via_broker_target(state, delegate_omni).await {
+            return sandbox_bridge_exchange_via_broker(state, &target, id, method, path, body)
+                .await;
+        }
+    }
     let base = base_override
         .filter(|b| !b.trim().is_empty())
         .or(state.sandbox_bridge_url.as_deref())
@@ -12614,12 +12639,101 @@ async fn sandbox_bridge_exchange_instanced(
     Ok((url, status, value))
 }
 
+/// #715 — what the broker needs to route a bridge call to an owned delegate.
+struct BridgeViaBroker {
+    broker: String,
+    j1: String,
+    operator_omni: String,
+    device_key_hash: String,
+}
+
+/// The via-broker target for a per-delegate bridge call, when the console
+/// has everything the broker's `/v1/agent/bridge` needs: a broker, a master
+/// session, and the delegate's `device_key_hash` (from the binding manifest,
+/// by the delegate omni). `None` = fall back to the direct call (dev / no
+/// session / unknown delegate) — which the gateway then refuses loudly.
+async fn bridge_via_broker_target(
+    state: &SharedUiBridgeState,
+    delegate_omni: Option<&str>,
+) -> Option<BridgeViaBroker> {
+    let broker = state.broker_url.clone()?;
+    let omni = delegate_omni.filter(|o| !o.trim().is_empty())?;
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return None,
+    };
+    let manifest = ensure_binding_manifest(state).await.ok()?;
+    let entry = manifest.entry_for(omni, "")?;
+    let device_key_hash = entry.device_key_hash.trim().to_string();
+    if device_key_hash.is_empty() {
+        return None;
+    }
+    Some(BridgeViaBroker {
+        broker,
+        j1,
+        operator_omni,
+        device_key_hash,
+    })
+}
+
+/// One bridge exchange THROUGH the broker (`POST /v1/agent/bridge`): the
+/// broker answers with the upstream's status + JSON body verbatim, so the
+/// callers' judgement of the bridge's own answers (a 503 `starting` healthz,
+/// a 400 apply) is unchanged; the broker's own refusals (not owned, no live
+/// instance, gateway unreachable) arrive as `{"error": …}` JSON.
+async fn sandbox_bridge_exchange_via_broker(
+    state: &SharedUiBridgeState,
+    target: &BridgeViaBroker,
+    sandbox_id: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<(String, reqwest::StatusCode, serde_json::Value), String> {
+    let _ = state;
+    let url = format!("{}/v1/agent/bridge", target.broker.trim_end_matches('/'));
+    // The shared wire type (D7): the broker deserializes exactly this.
+    let req_body = agentkeys_backend_client::protocol::BridgeProxyBody {
+        operator_omni: target.operator_omni.clone(),
+        device_key_hash: target.device_key_hash.clone(),
+        sandbox_id: Some(sandbox_id.to_string()),
+        method: Some(method.as_str().to_string()),
+        path: path.to_string(),
+        body,
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(200))
+        .build()
+        .map_err(|e| format!("bridge client: {e}"))?;
+    let resp = client
+        .post(&url)
+        .bearer_auth(&target.j1)
+        .json(&req_body)
+        .send()
+        .await
+        .map_err(|e| format!("bridge {path} via broker transport: {e}"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("bridge {path} via broker {status}: reading the body: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        bridge_non_json_error(
+            &format!("{url} → {path}"),
+            &status.to_string(),
+            &text,
+            &e.to_string(),
+        )
+    })?;
+    Ok((format!("{url} → {path}"), status, value))
+}
+
 /// Apply a persona body into the sandbox (file write + ACP re-source, the #390
 /// distribution leg). Returns `(applied, detail)` — an unconfigured/unreachable
 /// sandbox is NOT an edit failure (the canonical store already committed), but
 /// it is always surfaced, never silently swallowed.
 async fn apply_persona_to_sandbox(
     state: &SharedUiBridgeState,
+    delegate_omni: &str,
     soul_body: &str,
     instance: Option<&str>,
     bridge_base: Option<&str>,
@@ -12643,6 +12757,7 @@ async fn apply_persona_to_sandbox(
         Some(body),
         instance,
         bridge_base,
+        Some(delegate_omni),
     )
     .await
     {
@@ -12731,7 +12846,7 @@ async fn persona_commit(
         version = v;
     }
     let (applied, apply_detail) =
-        apply_persona_to_sandbox(state, new_body, instance, bridge_base).await;
+        apply_persona_to_sandbox(state, delegate_omni, new_body, instance, bridge_base).await;
     let evt = ApiAuditEvent {
         id: format!("e-persona-{}", now_unix()),
         ts: now_ts_hms(),

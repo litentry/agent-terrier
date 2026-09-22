@@ -130,32 +130,56 @@ impl StsCreds {
 #[derive(Debug, Clone)]
 pub struct OptionalStsCreds(pub Option<StsCreds>);
 
+/// Read the strict-mode switch (`AGENTKEYS_WORKER_REQUIRE_STS=1|true`).
+pub fn strict_sts_required() -> bool {
+    std::env::var("AGENTKEYS_WORKER_REQUIRE_STS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// The ONE credential-resolution verdict for a worker request, shared by the
+/// [`OptionalStsCreds`] extractor and the handlers that can mint server-side
+/// (#716 — the memory worker's own-namespace put/get redeem the delegate's cap
+/// at the broker's `/v1/cap/own-sts` when the request carries a session
+/// bearer instead of `X-Aws-*` headers).
+///
+/// - all three `X-Aws-*` headers → `Ok(Some(creds))` (the client relay);
+/// - some but not all → 401 (a half-authed client is never useful, and
+///   silently dropping the half is the downgrade surface);
+/// - none, `server_side_mint_available` → `Ok(None)`: the handler mints its
+///   own scoped creds — strict mode does NOT reject this, because the
+///   server-side mint IS the OIDC federation path strict mode exists to force;
+/// - none, strict → 401;
+/// - none, lax → `Ok(None)`: the default credential chain (dev / stage-1).
+pub fn resolve_sts_creds(
+    headers: &HeaderMap,
+    strict: bool,
+    server_side_mint_available: bool,
+) -> Result<Option<StsCreds>, (StatusCode, String)> {
+    let has_any = headers.get("x-aws-access-key-id").is_some()
+        || headers.get("x-aws-secret-access-key").is_some()
+        || headers.get("x-aws-session-token").is_some();
+    match (StsCreds::from_headers(headers), has_any) {
+        (Some(c), _) => Ok(Some(c)),
+        (None, true) => Err((
+            StatusCode::UNAUTHORIZED,
+            "partial X-Aws-* headers — must pass all three (X-Aws-Access-Key-Id, X-Aws-Secret-Access-Key, X-Aws-Session-Token) or none".to_string(),
+        )),
+        (None, false) if server_side_mint_available => Ok(None),
+        (None, false) if strict => Err((
+            StatusCode::UNAUTHORIZED,
+            "AGENTKEYS_WORKER_REQUIRE_STS=1 — request must carry OIDC-minted STS creds via X-Aws-* headers".to_string(),
+        )),
+        (None, false) => Ok(None),
+    }
+}
+
 #[async_trait]
 impl<S: Send + Sync> FromRequestParts<S> for OptionalStsCreds {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        // Distinguish "no headers at all" (legacy / backward-compat) from
-        // "some but not all" (programmer error or downgrade attempt).
-        let has_any = parts.headers.get("x-aws-access-key-id").is_some()
-            || parts.headers.get("x-aws-secret-access-key").is_some()
-            || parts.headers.get("x-aws-session-token").is_some();
-        let parsed = StsCreds::from_headers(&parts.headers);
-        let strict = std::env::var("AGENTKEYS_WORKER_REQUIRE_STS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        match (parsed, has_any, strict) {
-            (Some(c), _, _) => Ok(OptionalStsCreds(Some(c))),
-            (None, true, _) => Err((
-                StatusCode::UNAUTHORIZED,
-                "partial X-Aws-* headers — must pass all three (X-Aws-Access-Key-Id, X-Aws-Secret-Access-Key, X-Aws-Session-Token) or none".to_string(),
-            )),
-            (None, false, true) => Err((
-                StatusCode::UNAUTHORIZED,
-                "AGENTKEYS_WORKER_REQUIRE_STS=1 — request must carry OIDC-minted STS creds via X-Aws-* headers".to_string(),
-            )),
-            (None, false, false) => Ok(OptionalStsCreds(None)),
-        }
+        resolve_sts_creds(&parts.headers, strict_sts_required(), false).map(OptionalStsCreds)
     }
 }
 
@@ -243,6 +267,40 @@ mod tests {
             dbg.contains("ASIA"),
             "Debug should show access_key_id prefix"
         );
+    }
+
+    // #716 — the shared verdict the extractor and the server-side-mint handlers
+    // both consult.
+    #[test]
+    fn resolver_verdicts_by_headers_strictness_and_server_side_mint() {
+        let empty = HeaderMap::new();
+        let mut partial = HeaderMap::new();
+        partial.insert("x-aws-access-key-id", HeaderValue::from_static("AKIA"));
+        let mut full = HeaderMap::new();
+        full.insert("x-aws-access-key-id", HeaderValue::from_static("AKIA"));
+        full.insert("x-aws-secret-access-key", HeaderValue::from_static("s"));
+        full.insert("x-aws-session-token", HeaderValue::from_static("t"));
+
+        // Full headers always win, whatever the mode.
+        assert!(resolve_sts_creds(&full, true, true).unwrap().is_some());
+        assert!(resolve_sts_creds(&full, false, false).unwrap().is_some());
+        // Partial is ALWAYS 401 — even when a server-side mint would be possible.
+        assert_eq!(
+            resolve_sts_creds(&partial, false, true).unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            resolve_sts_creds(&partial, true, false).unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
+        // No headers: strict without a server-side path → 401; strict WITH one
+        // → the handler mints (None); lax → the default chain (None).
+        assert_eq!(
+            resolve_sts_creds(&empty, true, false).unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(resolve_sts_creds(&empty, true, true).unwrap().is_none());
+        assert!(resolve_sts_creds(&empty, false, false).unwrap().is_none());
     }
 
     // codex P2: extractor enforcement tests. We can't easily mock

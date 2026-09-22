@@ -1891,6 +1891,31 @@ pub struct InboxStsResult {
     pub expiration: i64,
 }
 
+/// #716 — request body for the broker `POST /v1/cap/own-sts`: the OWN-namespace
+/// twin of [`InboxStsBody`]. The memory WORKER relays a delegate's session
+/// bearer + its broker-minted `Store`/`Fetch` Memory cap and receives STS
+/// scoped to the delegate's OWN prefix objects for that one service — minted
+/// server-side for the one write the delegate previously had no credential
+/// path for on VE (the #594/#694 checkpoint put). The delegate never holds
+/// cloud creds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnStsBody {
+    pub cap: CapToken,
+}
+
+/// Response from `/v1/cap/own-sts`: the ACTOR-tagged creds the worker uses for
+/// the delegate's own-namespace object (`bots/<actor>/memory/<service>.enc` +
+/// `<service>.objects/*`). Same shape as [`InboxStsResult`]; semantically a
+/// PutObject+GetObject (Store cap) or GetObject-only (Fetch cap) grant on the
+/// caller's OWN prefix — never the operator's, never another actor's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnStsResult {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    pub expiration: i64,
+}
+
 /// The decrypted inbox proposal — what the worker stores (inside the envelope)
 /// and the master reads back to curate. `source_delegate_omni`, `ns`, `ts`, and
 /// `content_hash` are **worker-stamped** (the delegate controls only `key` +
@@ -2716,6 +2741,34 @@ pub fn is_capability_service(service: &str) -> bool {
     lower.starts_with("tool:") || lower.starts_with("plugin:")
 }
 
+/// #715 — the console→broker body for `POST /v1/agent/bridge`: one bridge
+/// call to an OWNED delegate's in-sandbox bridge, forwarded by the broker
+/// (which holds the stack-wide gateway credential and derives the delegate's
+/// `AGENTKEYS_BRIDGE_TOKEN`). ONE definition (D7): the broker deserializes it,
+/// the console daemon serializes it — a drift is a compile error, not a 4xx.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeProxyBody {
+    /// The master's omni (must match the J1 session).
+    pub operator_omni: String,
+    /// The delegate's on-chain binding — chain-probed for ownership + tier.
+    pub device_key_hash: String,
+    /// The instance the console believes is current. When set it must be one
+    /// of the delegate's LIVE instances (a stale id is refused, never silently
+    /// redirected); absent = the live one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_id: Option<String>,
+    /// `GET` or `POST` (absent = `POST`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// One of the broker's allowlisted bridge routes (`/healthz`, `/v1/chat`,
+    /// `/v1/jobs`, `/v1/agent/restart`, `/v1/context/files`,
+    /// `/v1/context/apply`) — never the mgmt surface.
+    pub path: String,
+    /// The JSON body to forward (absent for GETs / bodiless POSTs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+}
+
 /// The delegate-sandbox env contract (#430/#546) — the variable names the
 /// broker's spawn paths inject and the sandbox-resident daemon's chat loop
 /// consumes. ONE definition (the #203 discipline applied to env names): the
@@ -2758,6 +2811,17 @@ pub mod sandbox_env {
     /// `device_key_hash`), so nothing new sits at rest. NOT a chat-contract
     /// env — a sandbox without it simply cannot migrate its runtime home.
     pub const MGMT_TOKEN: &str = "AGENTKEYS_SANDBOX_MGMT_TOKEN";
+    /// #715 — the per-delegate IN-POD bearer, injected at CREATE and derived
+    /// by the broker the same way as [`MGMT_TOKEN`] (session keypair +
+    /// `device_key_hash`; nothing at rest). It gates every in-pod server the
+    /// runtime owns: the dsh bridge's non-mgmt routes on :8090 (`/v1/chat`,
+    /// `/v1/context/*`, `/v1/jobs`, `/v1/agent/restart`) and the daemon's
+    /// `/v1/sandbox/self/*` surface on :3114 — and every in-pod client
+    /// presents it (the daemon's chat loop / scheduler / app runtime to the
+    /// bridge, the dsh suite plugins to the daemon). The broker presents it
+    /// through the gateway on the console's behalf (`/v1/agent/bridge`).
+    /// Before #715 a leaked instance name alone opened both surfaces.
+    pub const BRIDGE_TOKEN: &str = "AGENTKEYS_BRIDGE_TOKEN";
     /// #594 — the delegate's OWN `knowledge:<ns>` namespace name (the spawn
     /// template grant), injected at CREATE so the in-sandbox checkpoint loop
     /// addresses the right grant even for an INHERITED namespace (#425 O2,

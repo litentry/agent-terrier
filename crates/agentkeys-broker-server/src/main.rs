@@ -261,6 +261,13 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // #715 — say, at every boot, whether the sandbox gateway demands a
+    // credential (GetFunction.EnableSecretToken) and whether this broker
+    // holds it. An open gateway is an ERROR line naming the ceremony; the
+    // broker still boots (spawns must keep working while the operator flips).
+    if let Some(backend) = sandbox.as_ref() {
+        backend.log_gateway_posture().await;
+    }
 
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))

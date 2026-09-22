@@ -1168,6 +1168,11 @@ async fn finalize_spawn(
         )),
         // #594 — the checkpoint loop's namespace (empty on the no-row path).
         Some(&memory_ns),
+        // #715 — the in-pod bearer gating the bridge + daemon self surfaces.
+        Some(&crate::handlers::sandbox::sandbox_bridge_token(
+            &state.session_keypair,
+            device_key_hash,
+        )),
     ));
     // #660 — the app-runtime set (template, bound feeds, availability, mirror
     // namespaces, tz): the same values every re-create injects from the row.

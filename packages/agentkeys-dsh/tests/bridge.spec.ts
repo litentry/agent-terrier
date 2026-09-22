@@ -86,9 +86,15 @@ afterEach(async () => {
   ctx = undefined;
 });
 
+// #715 — the in-pod bearer every non-healthz route demands (fail-closed).
+const BRIDGE_TOKEN = 'sbt1_test';
+const AUTH = { authorization: `Bearer ${BRIDGE_TOKEN}` };
+
 async function boot(opts?: {
   defaultModel?: { provider: string; model: string };
   preMode?: (fake: ReturnType<typeof fakeAgents>) => void;
+  /** Boot WITHOUT a bridge token (the not-armed posture). */
+  unarmed?: boolean;
 }) {
   ctx = new Context();
   const fake = fakeAgents(ctx, 'agentkeys-bridge-session');
@@ -100,7 +106,7 @@ async function boot(opts?: {
     ctx.provide('agentDefaultModel', { currentSelection: () => selection });
   }
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 });
-  await ctx.plugin(bridgePlugin, { cwd: '/tmp', engine: 'dsh', model: 'mock-model' });
+  await ctx.plugin(bridgePlugin, { cwd: '/tmp', engine: 'dsh', model: 'mock-model', ...(opts?.unarmed ? {} : { bridgeToken: BRIDGE_TOKEN }) });
   const base = `http://127.0.0.1:${ctx.webServer.port}`;
   return { base, fake };
 }
@@ -118,7 +124,7 @@ describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
 
   it('v1/jobs returns the object shape {jobs:[...]} (the daemon parse bug guard)', async () => {
     const { base } = await boot();
-    const res = await fetch(`${base}/v1/jobs`);
+    const res = await fetch(`${base}/v1/jobs`, { headers: AUTH });
     expect(await res.json()).toEqual({ jobs: [] });
   });
 
@@ -139,13 +145,46 @@ describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
     expect(fake.createCalls[0]).toMatchObject({ agentOptions: { provider: 'gate', model: 'mock-model' } });
   });
 
+  // #715 — the in-pod bearer gate: every route but /healthz (and the mgmt
+  // surface, which keeps its own token) is fail-closed.
+  it('refuses a bearer-less or wrong-bearer call on every gated route with 401 (#715)', async () => {
+    const { base } = await boot();
+    await new Promise((r) => setTimeout(r, 20));
+    for (const [path, init] of [
+      ['/v1/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"x"}' }],
+      ['/v1/jobs', {}],
+      ['/v1/agent/restart', { method: 'POST' }],
+      ['/v1/context/files', {}],
+      ['/v1/context/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"skills":{}}' }],
+    ] as const) {
+      const missing = await fetch(`${base}${path}`, init as RequestInit);
+      expect(missing.status, `${path} without bearer`).toBe(401);
+      const wrong = await fetch(`${base}${path}`, {
+        ...(init as RequestInit),
+        headers: { ...((init as RequestInit).headers ?? {}), authorization: 'Bearer sbt1_wrong' },
+      });
+      expect(wrong.status, `${path} wrong bearer`).toBe(401);
+    }
+    // /healthz stays open: veFaaS readiness + the console's reachability probe.
+    expect((await fetch(`${base}/healthz`)).status).toBe(200);
+  });
+
+  it('answers 401 not-armed on the gated routes when no bridge token is configured (#715 fail-closed)', async () => {
+    const { base } = await boot({ unarmed: true });
+    await new Promise((r) => setTimeout(r, 20));
+    const res = await fetch(`${base}/v1/jobs`, { headers: AUTH });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toMatch(/not armed/);
+    expect((await fetch(`${base}/healthz`)).status).toBe(200);
+  });
+
   it('a turn that ends in error surfaces as 502, never a 200 empty reply (#631)', async () => {
     const { base, fake } = await boot();
     await new Promise((r) => setTimeout(r, 20)); // agent created at activation
     const followedUp = fake.followupCalled();
     const pending = fetch(`${base}/v1/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ text: 'hi' }),
     });
     await followedUp;
@@ -191,7 +230,7 @@ describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
     fake.modes.persistedLog = true;
     const turn = fetch(`${base}/v1/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ text: 'hello', stream: false }),
     });
     // the retry's followup fires on the RESUMED handle; then finish the turn
@@ -209,7 +248,7 @@ describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
     const { base } = await boot();
     const res = await fetch(`${base}/v1/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: 'not json',
     });
     expect(res.status).toBe(400);

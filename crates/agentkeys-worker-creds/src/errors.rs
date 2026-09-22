@@ -40,6 +40,12 @@ pub fn err_403(msg: impl Into<String>, reason: &'static str) -> ApiError {
     err(StatusCode::FORBIDDEN, msg, reason)
 }
 
+/// 401 — the request carries no usable credential for the op (a partial
+/// `X-Aws-*` header set, or strict mode with nothing to mint from).
+pub fn err_401(msg: impl Into<String>, reason: &'static str) -> ApiError {
+    err(StatusCode::UNAUTHORIZED, msg, reason)
+}
+
 /// 404 — used by the data-class workers' GET handlers when the requested object
 /// does not exist (S3 `NoSuchKey`). Distinct from `err_502` so a CALLER (e.g.
 /// the daemon's read-modify-write plant, #201 Phase 4) can tell "never written"

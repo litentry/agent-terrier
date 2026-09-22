@@ -10,7 +10,10 @@
  * cwd AND registered as dsh system-prompt sections so the next model step
  * reads them), `/v1/context/files` (the #390 view leg), `/v1/agent/restart`
  * (the explicit re-source: a fresh session), and the `/v1/sandbox/mgmt/*`
- * checkpoint surface (#577/#594) — bind-first on :8090.
+ * checkpoint surface (#577/#594) — bind-first on :8090. Every route but
+ * `/healthz` and the mgmt surface is gated on the per-delegate in-pod bearer
+ * (`AGENTKEYS_BRIDGE_TOKEN`, #715 — fail-closed when unset); the mgmt surface
+ * keeps its own `AGENTKEYS_SANDBOX_MGMT_TOKEN`.
  *
  * Byte-exactness of the wire lives in bridge-frames.ts + bridge-stream.ts
  * (pure, unit-tested). NO default export (dsh postmortem 0001).
@@ -43,6 +46,10 @@ export interface Config {
   /** #577 mgmt bearer override (default: env AGENTKEYS_SANDBOX_MGMT_TOKEN).
    *  Empty/absent = the surface answers 404 not-armed (fail closed). */
   mgmtToken?: string;
+  /** #715 in-pod bearer override (default: env AGENTKEYS_BRIDGE_TOKEN) gating
+   *  every NON-mgmt route but /healthz. Empty/absent = those routes answer 401
+   *  not-armed (fail closed): a sandbox the broker did not arm serves no chat. */
+  bridgeToken?: string;
 }
 
 export const Config: z<Config> = z.object({
@@ -52,6 +59,7 @@ export const Config: z<Config> = z.object({
   model: z.string().default(process.env.LLM_ENDPOINT_ID ?? '(unset)'),
   homeDir: z.string().default(process.env.DSH_HOME ?? '/root/.dsh'),
   mgmtToken: z.string(),
+  bridgeToken: z.string(),
 });
 
 interface ModelSelection {
@@ -375,6 +383,14 @@ export function apply(ctx: Context, config: Config): void {
     return run;
   }
 
+  /** Constant-time bearer compare (never early-exits on a prefix). */
+  function bearerMatches(req: IncomingMessage, expected: string): boolean {
+    const presented = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
+    const a = Buffer.from(presented);
+    const b = Buffer.from(expected);
+    return a.length === b.length && a.every((x, i) => x === b[i]);
+  }
+
   /** #577 fail-closed mgmt auth: unset ⇒ 404 not-armed; wrong ⇒ 403. Never
    *  falls through to the bridge token. Constant-time compare. */
   function mgmtGate(req: IncomingMessage, res: ServerResponse): boolean {
@@ -383,12 +399,28 @@ export function apply(ctx: Context, config: Config): void {
       sendJson(res, 404, { error: 'mgmt surface not armed (no AGENTKEYS_SANDBOX_MGMT_TOKEN)' });
       return false;
     }
-    const presented = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
-    const a = Buffer.from(presented);
-    const b = Buffer.from(expected);
-    const equal = a.length === b.length && a.every((x, i) => x === b[i]);
-    if (!equal) {
+    if (!bearerMatches(req, expected)) {
       sendJson(res, 403, { error: 'mgmt bearer missing or invalid' });
+      return false;
+    }
+    return true;
+  }
+
+  /** #715 fail-closed in-pod auth for every non-mgmt route but /healthz:
+   *  unset ⇒ 401 not-armed (a sandbox the broker did not arm serves no chat —
+   *  measured 2026-09-22, an instance name alone let anyone chat as the
+   *  operator, inject a persona and read the context); wrong ⇒ 401. The
+   *  callers are the in-pod daemon (chat loop / scheduler / app runtime) and
+   *  the broker on the console's behalf — both hold AGENTKEYS_BRIDGE_TOKEN.
+   *  Deliberately a DIFFERENT credential from the mgmt bearer. */
+  function bridgeGate(req: IncomingMessage, res: ServerResponse): boolean {
+    const expected = config.bridgeToken ?? process.env.AGENTKEYS_BRIDGE_TOKEN ?? '';
+    if (!expected) {
+      sendJson(res, 401, { error: 'bridge not armed (no AGENTKEYS_BRIDGE_TOKEN) — the broker injects it at create' });
+      return false;
+    }
+    if (!bearerMatches(req, expected)) {
+      sendJson(res, 401, { error: 'bridge bearer missing or invalid' });
       return false;
     }
     return true;
@@ -425,6 +457,7 @@ export function apply(ctx: Context, config: Config): void {
       kind: 'exact',
       path: '/v1/chat',
       handler: async (req, res) => {
+        if (!bridgeGate(req, res)) return;
         let body: { text?: unknown; query?: unknown; stream?: unknown };
         try {
           body = (await readBody(req)) as typeof body;
@@ -466,6 +499,7 @@ export function apply(ctx: Context, config: Config): void {
       kind: 'exact',
       path: '/v1/jobs',
       handler: async (req, res) => {
+        if (!bridgeGate(req, res)) return;
         if (req.method === 'POST') {
           let body: { jobs?: unknown };
           try {
@@ -496,7 +530,8 @@ export function apply(ctx: Context, config: Config): void {
     {
       kind: 'exact',
       path: '/v1/agent/restart',
-      handler: async (_req, res) => {
+      handler: async (req, res) => {
+        if (!bridgeGate(req, res)) return;
         const restarted = await restartAgent();
         sendJson(res, 200, { restarted, ok: true });
       },
@@ -504,7 +539,8 @@ export function apply(ctx: Context, config: Config): void {
     {
       kind: 'exact',
       path: '/v1/context/files',
-      handler: (_req, res) => {
+      handler: (req, res) => {
+        if (!bridgeGate(req, res)) return;
         const root = cwd();
         const file = (id: string, name: string, content: string | undefined, editable: boolean) => ({
           id,
@@ -525,6 +561,7 @@ export function apply(ctx: Context, config: Config): void {
       kind: 'exact',
       path: '/v1/context/apply',
       handler: async (req, res) => {
+        if (!bridgeGate(req, res)) return;
         let body: { files?: unknown; skills?: unknown; knowledge?: unknown; restart?: unknown };
         try {
           body = (await readBody(req)) as typeof body;

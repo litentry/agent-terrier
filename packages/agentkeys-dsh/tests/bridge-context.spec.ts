@@ -11,6 +11,10 @@ import { renderContextSections } from '../src/bridge.js';
 // knowledge land under the runtime cwd AND as dsh system-prompt sections; the
 // schedule entries register; restart disposes the live session.
 
+// #715 — the in-pod bearer every gated route demands.
+const BRIDGE_TOKEN = 'sbt1_test';
+const AUTH = { authorization: `Bearer ${BRIDGE_TOKEN}` };
+
 function fakeAgents() {
   const disposeCalls: string[] = [];
   const handle = {
@@ -67,7 +71,7 @@ async function boot(withPrompt: boolean) {
   ctx.provide('sessions', {});
   if (withPrompt) ctx.provide('systemPrompt', prompt.service);
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 });
-  await ctx.plugin(bridgePlugin, { cwd, engine: 'dsh', model: 'mock-model' });
+  await ctx.plugin(bridgePlugin, { cwd, engine: 'dsh', model: 'mock-model', bridgeToken: BRIDGE_TOKEN });
   await new Promise((r) => setTimeout(r, 20));
   return { base: `http://127.0.0.1:${ctx.webServer.port}`, cwd, agents, prompt };
 }
@@ -90,7 +94,7 @@ describe('bridge context + jobs surface', () => {
     const { base, cwd, prompt } = await boot(true);
     const res = await fetch(`${base}/v1/context/apply`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({
         files: { soul: b64('# Chef\nCook well.') },
         skills: { 'perception.md': b64('Look at the photo.'), 'plan.md': b64('Plan.') },
@@ -117,14 +121,14 @@ describe('bridge context + jobs surface', () => {
     // A second apply REPLACES the sections (no duplicate-name throw).
     const again = await fetch(`${base}/v1/context/apply`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ files: { soul: b64('# Chef v2') } }),
     });
     expect(again.status).toBe(200);
     expect(prompt.sections.filter((s) => s.name === 'agentkeys:persona')).toHaveLength(1);
     expect(prompt.sections.find((s) => s.name === 'agentkeys:persona')?.text).toBe('# Chef v2');
 
-    const view = await (await fetch(`${base}/v1/context/files`)).json();
+    const view = await (await fetch(`${base}/v1/context/files`, { headers: AUTH })).json();
     expect(view.files[0]).toMatchObject({ id: 'soul', present: true, content: '# Chef v2', editable: true });
     expect(view.files[1]).toMatchObject({ id: 'agents', present: false });
     expect(view.skills).toEqual(['perception.md', 'plan.md']);
@@ -134,7 +138,7 @@ describe('bridge context + jobs surface', () => {
   it('refuses an empty apply, a traversal name, and bad base64 (400)', async () => {
     const { base } = await boot(false);
     const post = (payload: unknown) =>
-      fetch(`${base}/v1/context/apply`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+      fetch(`${base}/v1/context/apply`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     expect((await post({})).status).toBe(400);
     expect((await post({ skills: { '../evil.md': b64('x') } })).status).toBe(400);
     expect((await post({ files: { config: b64('x') } })).status).toBe(400);
@@ -145,7 +149,7 @@ describe('bridge context + jobs surface', () => {
     const { base } = await boot(false);
     const res = await fetch(`${base}/v1/context/apply`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ skills: { 'x.md': b64('x') } }),
     });
     expect(await res.json()).toMatchObject({ ok: true, skills_written: ['x.md'], prompt_registered: false });
@@ -155,17 +159,17 @@ describe('bridge context + jobs surface', () => {
     const { base, agents } = await boot(false);
     const reg = await fetch(`${base}/v1/jobs`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ jobs: [{ id: 'schedule-0-morning', cron: '0 7 * * *', label: 'Morning plan', status: 'armed' }] }),
     });
     expect(reg.status).toBe(200);
-    const list = await (await fetch(`${base}/v1/jobs`)).json();
+    const list = await (await fetch(`${base}/v1/jobs`, { headers: AUTH })).json();
     expect(list.jobs).toHaveLength(1);
     expect(list.jobs[0]).toMatchObject({ id: 'schedule-0-morning', status: 'armed' });
-    const bad = await fetch(`${base}/v1/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobs: [{ cron: 'x' }] }) });
+    const bad = await fetch(`${base}/v1/jobs`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body: JSON.stringify({ jobs: [{ cron: 'x' }] }) });
     expect(bad.status).toBe(400);
 
-    const restart = await fetch(`${base}/v1/agent/restart`, { method: 'POST' });
+    const restart = await fetch(`${base}/v1/agent/restart`, { method: 'POST', headers: AUTH });
     expect(await restart.json()).toMatchObject({ restarted: true, ok: true });
     expect(agents.disposeCalls).toEqual(['disposed']);
   });

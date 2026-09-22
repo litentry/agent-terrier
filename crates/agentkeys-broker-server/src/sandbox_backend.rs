@@ -90,8 +90,11 @@ pub struct LiveRuntime {
 
 /// The per-cloud delegate-sandbox driver behind one interface.
 pub enum SandboxBackend {
-    VeFaas(VeFaasClient),
-    AwsEcs(EcsSandboxClient),
+    // Both boxed: the clients carry config + memos (#714/#715) and differ
+    // ~2× in size; one heap indirection per boot, matched by reference
+    // everywhere (clippy::large_enum_variant).
+    VeFaas(Box<VeFaasClient>),
+    AwsEcs(Box<EcsSandboxClient>),
 }
 
 impl SandboxBackend {
@@ -107,8 +110,10 @@ impl SandboxBackend {
                  AGENTKEYS_SANDBOX_ECS_CLUSTER = ECS) — a broker runs exactly one spawn \
                  backend; unset one of them"
             ),
-            (Some(ve), None) => Ok(Some(Self::VeFaas(ve))),
-            (None, Some(cfg)) => Ok(Some(Self::AwsEcs(EcsSandboxClient::new(cfg).await))),
+            (Some(ve), None) => Ok(Some(Self::VeFaas(Box::new(ve)))),
+            (None, Some(cfg)) => Ok(Some(Self::AwsEcs(Box::new(
+                EcsSandboxClient::new(cfg).await,
+            )))),
             (None, None) => Ok(None),
         }
     }
@@ -259,19 +264,10 @@ impl SandboxBackend {
         &self,
         sandbox_id: &str,
     ) -> Option<(String, Vec<(String, String)>)> {
-        match self {
-            Self::VeFaas(c) => Some((
-                c.agent_url().to_string(),
-                vec![
-                    ("x-faas-instance-name".into(), sandbox_id.to_string()),
-                    (
-                        "x-faas-proxy-port".into(),
-                        agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT.to_string(),
-                    ),
-                ],
-            )),
-            Self::AwsEcs(_) => None,
-        }
+        self.instance_endpoint(
+            sandbox_id,
+            agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT,
+        )
     }
 
     /// The agentkeys-daemon's own surface inside ONE instance (its
@@ -283,18 +279,41 @@ impl SandboxBackend {
         &self,
         sandbox_id: &str,
     ) -> Option<(String, Vec<(String, String)>)> {
+        self.instance_endpoint(
+            sandbox_id,
+            agentkeys_protocol::sandbox_env::SANDBOX_DAEMON_PORT,
+        )
+    }
+
+    /// ONE builder for every broker→instance request through the shared
+    /// veFaaS gateway: the routing headers (instance name + proxy port) plus,
+    /// since #715, the gateway credential (`EnableSecretToken`) — attached
+    /// here and nowhere else, so no per-port caller can forget it.
+    fn instance_endpoint(
+        &self,
+        sandbox_id: &str,
+        port: u16,
+    ) -> Option<(String, Vec<(String, String)>)> {
         match self {
-            Self::VeFaas(c) => Some((
-                c.agent_url().to_string(),
-                vec![
+            Self::VeFaas(c) => {
+                let mut headers = vec![
                     ("x-faas-instance-name".into(), sandbox_id.to_string()),
-                    (
-                        "x-faas-proxy-port".into(),
-                        agentkeys_protocol::sandbox_env::SANDBOX_DAEMON_PORT.to_string(),
-                    ),
-                ],
-            )),
+                    ("x-faas-proxy-port".into(), port.to_string()),
+                ];
+                if let Some((name, value)) = c.gateway_secret_header() {
+                    headers.push((name, value));
+                }
+                Some((c.agent_url().to_string(), headers))
+            }
             Self::AwsEcs(_) => None,
+        }
+    }
+
+    /// #715 — the boot-time gateway posture line (veFaaS only; ECS has no
+    /// shared gateway).
+    pub async fn log_gateway_posture(&self) {
+        if let Self::VeFaas(c) = self {
+            c.log_gateway_posture().await;
         }
     }
 }

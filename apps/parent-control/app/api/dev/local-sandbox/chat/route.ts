@@ -1,6 +1,6 @@
 // #631 — server-side proxy to the LOCAL dsh test twin's /v1/chat (non-stream).
 import { NextResponse } from 'next/server';
-import { bridgeBase, sandboxDownBody } from '../shared';
+import { bridgeAuthHeaders, bridgeBase, sandboxDownBody } from '../shared';
 
 export async function POST(req: Request): Promise<NextResponse> {
   let body: unknown;
@@ -12,7 +12,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   try {
     const res = await fetch(`${bridgeBase()}/v1/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...bridgeAuthHeaders(), 'content-type': 'application/json' },
       body: JSON.stringify(body),
       cache: 'no-store',
       // A real-Ark turn with recall can run well over a minute (tool steps).

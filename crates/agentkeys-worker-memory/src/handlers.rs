@@ -16,11 +16,14 @@ use agentkeys_core::audit::{
 };
 use agentkeys_protocol::{ContextKind, InboxItem, InboxItemMeta};
 use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
-use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
+use agentkeys_worker_creds::aws_creds::{
+    resolve_sts_creds, s3_for_request, strict_sts_required, OptionalStsCreds, StsCreds,
+};
 use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::s3_error_summary;
 use agentkeys_worker_creds::errors::{
-    err_400, err_403, err_404, err_409, err_500, err_502, err_502_s3_get, ApiError, S3FetchAttempt,
+    err_400, err_401, err_403, err_404, err_409, err_500, err_502, err_502_s3_get, ApiError,
+    S3FetchAttempt,
 };
 use agentkeys_worker_creds::verify::{self, CapOp, CapPayload, CapToken, DataClass};
 
@@ -131,7 +134,7 @@ pub struct TeardownResponse {
 
 async fn memory_put(
     State(state): State<SharedMemoryWorkerState>,
-    OptionalStsCreds(creds): OptionalStsCreds,
+    headers: HeaderMap,
     Json(req): Json<PutRequest>,
 ) -> Result<Json<PutResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Store).await?;
@@ -140,6 +143,11 @@ async fn memory_put(
     if let Some(k) = &req.object_key {
         validate_object_key(k)?;
     }
+    // #716 — the credential for an OWN-namespace put: relayed X-Aws-* creds
+    // when the client has them, else (a delegate carrying its session bearer)
+    // the broker's own-sts, minted here server-side. Resolved AFTER cap-verify:
+    // the cap must be the delegate's before any bearer is relayed anywhere.
+    let creds = resolve_own_creds(&state, &headers, &req.cap).await?;
 
     let outcome = memory_put_inner(&state, creds.as_ref(), &req).await;
     // Durable audit (#229): after cap-verify, before the success response.
@@ -272,14 +280,104 @@ fn check_expected_hash(expected: &str, current: Option<&[u8]>) -> Result<(), Api
 /// by #295 — the active `agentkeys.memory.get` path.
 async fn memory_get(
     State(state): State<SharedMemoryWorkerState>,
-    OptionalStsCreds(creds): OptionalStsCreds,
+    headers: HeaderMap,
     Json(req): Json<GetRequest>,
 ) -> Result<Json<GetResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Fetch).await?;
     if let Some(k) = &req.object_key {
         validate_object_key(k)?;
     }
+    // #716 — same credential resolution as the put (the checkpoint RESTORE
+    // is the read half of the same delegate path).
+    let creds = resolve_own_creds(&state, &headers, &req.cap).await?;
     memory_read_after_verify(&state, creds.as_ref(), &req).await
+}
+
+/// #716 — the credential an OWN-namespace op (`memory_put` / `memory_get`)
+/// touches storage with. ONE verdict (`resolve_sts_creds`, shared with the
+/// extractor the other routes use), plus the delegate arm: a request that
+/// carries NO `X-Aws-*` creds but a session bearer and a DELEGATE cap
+/// (`operator != actor`) redeems that cap at the broker's `/v1/cap/own-sts`
+/// (`fetch_own_sts`, the twin of `fetch_inbox_sts`) — never the worker's
+/// default client. A master-self cap keeps the pre-#716 behaviour (relayed
+/// creds, else the default chain; strict mode refuses the latter).
+async fn resolve_own_creds(
+    state: &SharedMemoryWorkerState,
+    headers: &HeaderMap,
+    cap: &CapToken,
+) -> Result<Option<StsCreds>, ApiError> {
+    let bearer = bearer_from_headers(headers);
+    let server_side = bearer.is_some() && own_op_is_delegated(&cap.payload);
+    let relayed = resolve_sts_creds(headers, strict_sts_required(), server_side).map_err(
+        |(status, msg)| {
+            if status == axum::http::StatusCode::UNAUTHORIZED {
+                err_401(msg, "sts_creds_required")
+            } else {
+                err_400(msg, "sts_creds_invalid")
+            }
+        },
+    )?;
+    if relayed.is_some() {
+        return Ok(relayed);
+    }
+    match bearer {
+        Some(bearer) if server_side => fetch_own_sts(state, &bearer, cap).await.map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// A delegate's own-namespace op: the actor is not the operator. (A
+/// master-self op carries the operator's own authority already.)
+fn own_op_is_delegated(payload: &CapPayload) -> bool {
+    strip0x_lc(&payload.operator_omni) != strip0x_lc(&payload.actor_omni)
+}
+
+/// Server-side own-namespace STS (#716): relay the delegate's session bearer +
+/// the (already chain-verified) `Store`/`Fetch` cap to the broker's
+/// `/v1/cap/own-sts`. The broker re-verifies `session == cap.actor` and returns
+/// ACTOR-tagged creds scoped to this one service's objects under the delegate's
+/// OWN prefix — minted HERE (server-side), never handed to the delegate.
+async fn fetch_own_sts(
+    state: &SharedMemoryWorkerState,
+    bearer: &str,
+    cap: &CapToken,
+) -> Result<StsCreds, ApiError> {
+    let broker_url = state.config.broker_url.trim_end_matches('/');
+    if broker_url.is_empty() {
+        return Err(err_500(
+            "delegate own-namespace op unavailable: BROKER_URL is not set on the memory worker"
+                .to_string(),
+            "broker_url_unset",
+        ));
+    }
+    let url = format!("{broker_url}/v1/cap/own-sts");
+    let resp = state
+        .http
+        .post(&url)
+        .bearer_auth(bearer)
+        .json(&serde_json::json!({ "cap": cap }))
+        .send()
+        .await
+        .map_err(|e| err_502(e.to_string(), "own_sts_post"))?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        // Surface the broker's authz verdict (e.g. 403 cap-actor-mismatch) as a
+        // 403, not a generic 502 — the caller gets the real reason.
+        return Err(err_403(
+            format!("broker own-sts {status}: {body}"),
+            "own_sts_denied",
+        ));
+    }
+    let creds: agentkeys_protocol::OwnStsResult = resp
+        .json()
+        .await
+        .map_err(|e| err_502(e.to_string(), "own_sts_json"))?;
+    Ok(StsCreds {
+        access_key_id: creds.access_key_id,
+        secret_access_key: creds.secret_access_key,
+        session_token: creds.session_token,
+    })
 }
 
 /// #295 P1 — delegated READ of the master's CANONICAL memory
@@ -1296,6 +1394,30 @@ mod tests {
             expires_at: u64::MAX,
             nonce: "n".to_string(),
         }
+    }
+
+    /// #716 — the server-side own-sts arm fires only for a DELEGATE's
+    /// own-namespace op; a master-self cap keeps the relay/default path.
+    #[test]
+    fn own_op_is_delegated_when_actor_differs_from_operator() {
+        let master = format!("0x{}", "aa".repeat(32));
+        let delegate = format!("0x{}", "bb".repeat(32));
+        let mk = |op: &str, actor: &str| CapPayload {
+            operator_omni: op.to_string(),
+            actor_omni: actor.to_string(),
+            service: "knowledge:chef".into(),
+            op: CapOp::Store,
+            data_class: DataClass::Memory,
+            device_key_hash: "0x00".into(),
+            k3_epoch: 0,
+            issued_at: 0,
+            expires_at: 0,
+            nonce: String::new(),
+        };
+        assert!(own_op_is_delegated(&mk(&master, &delegate)));
+        assert!(!own_op_is_delegated(&mk(&master, &master)));
+        // 0x / case never fork the verdict.
+        assert!(!own_op_is_delegated(&mk(&master, &"AA".repeat(32))));
     }
 
     #[test]

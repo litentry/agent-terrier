@@ -99,6 +99,13 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/cap/inbox-sts",
             post(handlers::inbox_sts::mint_inbox_sts),
         )
+        // #716 — broker-brokered scoped STS for a delegate's OWN-namespace
+        // memory op (the own-prefix sibling of canonical/inbox-sts): the
+        // memory worker presents the delegate's Store/Fetch cap + the
+        // delegate's OWN session and gets back ACTOR-tagged creds scoped to
+        // that one service's objects — the credential path the #594/#694
+        // checkpoint put never had on VE.
+        .route("/v1/cap/own-sts", post(handlers::own_sts::mint_own_sts))
         // Per-data-class CONFIG caps (#178 P1 / config-data-class-memory-list).
         // data_class=Config — the policy / memory-types taxonomy; master-only.
         .route(
@@ -178,6 +185,15 @@ pub fn create_router(state: SharedState) -> Router {
         // durable spawn context; NO chain write, NO Touch ID, NO archive) and
         // the staleness surface that makes "running old bits" visible.
         .route("/v1/agent/update", post(handlers::update::agent_update))
+        // #715 — the broker-mediated bridge path: a J1_master holder reaches
+        // an OWNED delegate's in-sandbox bridge (chat/context/healthz) through
+        // the broker, which holds the stack-wide gateway credential and
+        // derives the per-delegate in-pod bearer. The console never touches
+        // the gateway directly any more.
+        .route(
+            "/v1/agent/bridge",
+            post(handlers::bridge_proxy::agent_bridge),
+        )
         // #717 — rebind an installed app's slot in place (build → ONE Touch ID
         // → /v1/scope/submit), then the durable context + the live runtime.
         .route(

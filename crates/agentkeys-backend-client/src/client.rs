@@ -443,6 +443,40 @@ impl BackendClient {
         })
     }
 
+    /// #716 — the credential the memory worker gets for an OWN-namespace op:
+    /// the relayed `X-Aws-*` headers when the AWS relay is configured, else
+    /// the caller's session bearer so the worker can redeem the cap at the
+    /// broker's `/v1/cap/own-sts` SERVER-SIDE (the VE posture — the sandbox
+    /// holds no role ARN; before this, its checkpoint puts reached the worker
+    /// credential-less). Pure verdict in [`Self::own_bearer_when_no_relay`].
+    async fn attach_memory_creds(
+        &self,
+        mut req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, BackendError> {
+        let relayed = self.sts_headers(self.memory_role_arn.as_ref()).await?;
+        if let Some(bearer) = self.own_bearer_when_no_relay(relayed.is_some()) {
+            req = req.bearer_auth(bearer);
+        }
+        if let Some(headers) = relayed {
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+        Ok(req)
+    }
+
+    /// The bearer the worker's own-namespace path needs: only when NO relayed
+    /// creds ride the request (the worker prefers `X-Aws-*` when present) and
+    /// a session bearer is configured.
+    fn own_bearer_when_no_relay(&self, relayed: bool) -> Option<&str> {
+        if relayed {
+            return None;
+        }
+        self.agent_session_bearer
+            .as_deref()
+            .filter(|b| !b.is_empty())
+    }
+
     /// cap (already minted) → STS relay → `POST /v1/memory/put`. Returns the
     /// worker's S3 key + envelope size.
     pub async fn memory_put(&self, input: MemoryPutInput) -> Result<MemoryPutResult, BackendError> {
@@ -454,11 +488,7 @@ impl BackendClient {
             object_key: input.object_key.clone(),
             expected_content_hash: input.expected_content_hash.clone(),
         });
-        if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-        }
+        req = self.attach_memory_creds(req).await?;
         let resp = req
             .send()
             .await
@@ -492,11 +522,7 @@ impl BackendClient {
             namespace: input.namespace.clone(),
             object_key: input.object_key.clone(),
         });
-        if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-        }
+        req = self.attach_memory_creds(req).await?;
         let resp = req
             .send()
             .await
@@ -890,5 +916,33 @@ mod sts_relay_tests {
         let c = client(None, Some("arn:aws:iam::1:role/x"));
         let err = c.sts_headers(c.memory_role_arn.as_ref()).await.unwrap_err();
         assert!(matches!(err, BackendError::NotConfigured(_)));
+    }
+
+    // #716 — the own-namespace bearer rides ONLY when no relay creds do.
+    #[test]
+    fn own_bearer_rides_only_without_relayed_creds() {
+        let c = BackendClient::new(
+            Some("https://broker.example".into()),
+            Some("https://memory.example".into()),
+            None,
+            None,
+            Some("agent-jwt".into()),
+            None,
+            None,
+            "us-east-1".into(),
+        );
+        assert_eq!(c.own_bearer_when_no_relay(false), Some("agent-jwt"));
+        assert_eq!(c.own_bearer_when_no_relay(true), None);
+        let no_bearer = BackendClient::new(
+            None,
+            None,
+            None,
+            None,
+            Some(String::new()),
+            None,
+            None,
+            "us-east-1".into(),
+        );
+        assert_eq!(no_bearer.own_bearer_when_no_relay(false), None);
     }
 }

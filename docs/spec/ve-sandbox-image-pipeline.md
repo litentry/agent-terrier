@@ -169,7 +169,7 @@ docker image inspect "$CR_IMAGE" --format '{{index .RepoDigests 0}}'   # must eq
 docker run --rm --entrypoint bash "$CR_IMAGE" -c 'dsh --version'
 ```
 
-**Then check a live sandbox.** Reach any sandbox port through the veFaaS gateway with `-H "x-faas-instance-name: <SandboxId>" -H "x-faas-proxy-port: N"` (8090 = the dsh bridge — its `/healthz` reports `{"engine":"dsh", …}`; **3114 = the agentkeys-daemon ui-bridge**), then ask the agent via `POST /v1/chat` to read `/var/log/agentkeys-daemon.log` (the chat loop's own verdict). The broker-side `DescribeSandbox.ImageInfo.Id` against the current registration id is the frozen-vs-current proof (the #602 machinery — the first dsh pod was proven exactly this way, `ImageInfo.Id = ybt857fxm9`).
+**Then check a live sandbox.** Reach any sandbox port through the veFaaS gateway with `-H "x-faas-instance-name: <SandboxId>" -H "x-faas-proxy-port: N"` plus the gateway's secret token header (#715 — the operator ceremony in the Volcano config runbook §5a; the bridge's chat/context routes additionally want the pod's `AGENTKEYS_BRIDGE_TOKEN` bearer) (8090 = the dsh bridge — its `/healthz` reports `{"engine":"dsh", …}`; **3114 = the agentkeys-daemon ui-bridge**), then ask the agent via `POST /v1/chat` to read `/var/log/agentkeys-daemon.log` (the chat loop's own verdict). The broker-side `DescribeSandbox.ImageInfo.Id` against the current registration id is the frozen-vs-current proof (the #602 machinery — the first dsh pod was proven exactly this way, `ImageInfo.Id = ybt857fxm9`).
 
 Cheap first pass without touching the sandbox: on the broker, `channel/poll` in the nginx access log coming only from the operator's laptop IP (never a VE address) proves no sandbox ever subscribed.
 

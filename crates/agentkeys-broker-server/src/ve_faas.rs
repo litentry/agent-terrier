@@ -164,8 +164,36 @@ pub struct VeFaasConfig {
     /// injecting the SHARED host ark key into non-gate-provisioned sandboxes
     /// (UNMETERED). Default false — such creates are refused.
     pub allow_direct_ark: bool,
+    /// #715 — the function's gateway credential (`EnableSecretToken`): the
+    /// header NAME + VALUE every request through `SANDBOX_GATEWAY_URL` must
+    /// carry once the operator has run `UpsertSecretToken` on the function
+    /// (`SANDBOX_GATEWAY_SECRET_TOKEN_HEADER` + `SANDBOX_GATEWAY_SECRET_TOKEN`,
+    /// both or neither — a half-set pair is a hard error, never a silent
+    /// unauthenticated gateway). The header name is config, not a constant:
+    /// VE documents no header for the token in anything reachable at the time
+    /// of writing (2026-09-22), so the operator measures it at the flip
+    /// (docs/hardware/volcano/config.md) — an invented name would fail
+    /// closed at the gateway, loudly, which is the right failure but not the
+    /// right default.
+    pub gateway_secret: Option<GatewaySecret>,
     pub host: String,
     pub region: String,
+}
+
+/// #715 — the gateway credential pair (see [`VeFaasConfig::gateway_secret`]).
+#[derive(Clone)]
+pub struct GatewaySecret {
+    pub header: String,
+    pub value: String,
+}
+
+impl std::fmt::Debug for GatewaySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewaySecret")
+            .field("header", &self.header)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 impl VeFaasConfig {
@@ -217,9 +245,36 @@ impl VeFaasConfig {
                 "AGENTKEYS_VEFAAS_RECENT_INSTANCE_SECS must be 0..=3600, got {recent_instance_secs}"
             );
         }
+        let gateway_secret = match (
+            non_empty("SANDBOX_GATEWAY_SECRET_TOKEN_HEADER"),
+            non_empty("SANDBOX_GATEWAY_SECRET_TOKEN"),
+        ) {
+            (None, None) => None,
+            (Some(header), Some(value)) => {
+                let header = header.trim().to_ascii_lowercase();
+                if !header
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
+                    bail!(
+                        "SANDBOX_GATEWAY_SECRET_TOKEN_HEADER={header:?} is not a header name ([a-z0-9-])"
+                    );
+                }
+                Some(GatewaySecret {
+                    header,
+                    value: value.trim().to_string(),
+                })
+            }
+            _ => bail!(
+                "SANDBOX_GATEWAY_SECRET_TOKEN_HEADER and SANDBOX_GATEWAY_SECRET_TOKEN must be set \
+                 together (#715: the gateway credential is a header NAME + VALUE pair; a half-set \
+                 pair would either send nothing or send the token under no header)"
+            ),
+        };
         Ok(Some(Self {
             function_id,
             gateway_url,
+            gateway_secret,
             image: non_empty("CR_IMAGE").unwrap_or_default(),
             port: parse_u32("AGENTKEYS_VEFAAS_PORT", 8090)?,
             command: non_empty("AGENTKEYS_VEFAAS_COMMAND")
@@ -500,6 +555,69 @@ impl VeFaasClient {
     /// The base URL devices talk to (`agent_url` in the resolve response).
     pub fn agent_url(&self) -> &str {
         &self.config.gateway_url
+    }
+
+    /// #715 — the gateway credential header this broker presents on every
+    /// request through `SANDBOX_GATEWAY_URL` (`None` = not configured: the
+    /// gateway is expected to be open, which the boot probe reports).
+    pub fn gateway_secret_header(&self) -> Option<(String, String)> {
+        self.config
+            .gateway_secret
+            .as_ref()
+            .map(|g| (g.header.clone(), g.value.clone()))
+    }
+
+    /// #715 — `GetFunction.EnableSecretToken` for the sandbox function: does
+    /// the gateway demand a credential? Read-only (the `FunctionReadForBootGate`
+    /// grant). `Err` = the probe itself failed (surfaced, never assumed).
+    pub async fn gateway_secret_token_enabled(&self) -> Result<bool> {
+        let v = self
+            .vefaas_call(
+                "GetFunction",
+                serde_json::json!({ "Id": self.config.function_id }),
+            )
+            .await?;
+        v["Result"]["EnableSecretToken"]
+            .as_bool()
+            .ok_or_else(|| anyhow!("GetFunction returned no boolean Result.EnableSecretToken: {v}"))
+    }
+
+    /// #715 — the boot-time posture line: an OPEN gateway (every port of every
+    /// sandbox reachable with an instance name — measured 2026-09-22: shell
+    /// exec as root through :8080, the bridge through :8090, the daemon's
+    /// credential surface through :3114) is logged at ERROR with the ceremony;
+    /// a configured credential the function does not enforce, or an enforced
+    /// credential the broker does not hold, is logged as drift.
+    pub async fn log_gateway_posture(&self) {
+        match self.gateway_secret_token_enabled().await {
+            Ok(true) if self.config.gateway_secret.is_some() => tracing::info!(
+                function_id = %self.config.function_id,
+                "#715 sandbox gateway: EnableSecretToken=true and the broker holds the credential"
+            ),
+            Ok(true) => tracing::error!(
+                function_id = %self.config.function_id,
+                "#715 sandbox gateway: EnableSecretToken=true but SANDBOX_GATEWAY_SECRET_TOKEN(_HEADER) \
+                 are unset on this broker — every mgmt/bridge call through the gateway will be refused. \
+                 Place the pair in the broker's secret env (docs/hardware/volcano/config.md) and converge."
+            ),
+            Ok(false) if self.config.gateway_secret.is_some() => tracing::warn!(
+                function_id = %self.config.function_id,
+                "#715 sandbox gateway: the broker holds a credential but the function reports \
+                 EnableSecretToken=false — the gateway is OPEN (drift: re-run UpsertSecretToken)"
+            ),
+            Ok(false) => tracing::error!(
+                function_id = %self.config.function_id,
+                "#715 SECURITY: the sandbox gateway takes NO credential (EnableSecretToken=false) — \
+                 anyone with an instance name reaches every sandbox port (root shell on :8080, the \
+                 bridge on :8090, the daemon's credential surface on :3114). Run the UpsertSecretToken \
+                 ceremony (docs/hardware/volcano/config.md) and converge the broker with the pair."
+            ),
+            Err(e) => tracing::warn!(
+                function_id = %self.config.function_id,
+                error = %format!("{e:#}"),
+                "#715 sandbox gateway posture UNKNOWN — GetFunction failed (grant FunctionReadForBootGate?)"
+            ),
+        }
     }
 
     /// `PrecacheSandboxImages` — warm the veFaaS image cache for our `CR_IMAGE`
@@ -1672,6 +1790,52 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(cfg.image, "cr/dsh-sandbox:v2");
+    }
+
+    /// #715 — the gateway credential is a NAME + VALUE pair: both or neither;
+    /// the header name is normalized and validated (it goes on the wire).
+    #[test]
+    fn config_gateway_secret_pair_both_or_neither() {
+        let base = [
+            ("SANDBOX_FUNCTION_ID", "fn1"),
+            ("SANDBOX_GATEWAY_URL", "https://gw.example"),
+        ];
+        let none = VeFaasConfig::from_lookup(cfg_lookup(&base))
+            .unwrap()
+            .unwrap();
+        assert!(none.gateway_secret.is_none());
+        let both = [
+            ("SANDBOX_FUNCTION_ID", "fn1"),
+            ("SANDBOX_GATEWAY_URL", "https://gw.example"),
+            (
+                "SANDBOX_GATEWAY_SECRET_TOKEN_HEADER",
+                " X-Faas-Secret-Token ",
+            ),
+            ("SANDBOX_GATEWAY_SECRET_TOKEN", "tok-1 "),
+        ];
+        let cfg = VeFaasConfig::from_lookup(cfg_lookup(&both))
+            .unwrap()
+            .unwrap();
+        let g = cfg.gateway_secret.as_ref().unwrap();
+        assert_eq!(g.header, "x-faas-secret-token");
+        assert_eq!(g.value, "tok-1");
+        assert!(
+            !format!("{g:?}").contains("tok-1"),
+            "Debug must redact the value"
+        );
+        let half = [
+            ("SANDBOX_FUNCTION_ID", "fn1"),
+            ("SANDBOX_GATEWAY_URL", "https://gw.example"),
+            ("SANDBOX_GATEWAY_SECRET_TOKEN", "tok-1"),
+        ];
+        assert!(VeFaasConfig::from_lookup(cfg_lookup(&half)).is_err());
+        let bad_name = [
+            ("SANDBOX_FUNCTION_ID", "fn1"),
+            ("SANDBOX_GATEWAY_URL", "https://gw.example"),
+            ("SANDBOX_GATEWAY_SECRET_TOKEN_HEADER", "not a header"),
+            ("SANDBOX_GATEWAY_SECRET_TOKEN", "tok-1"),
+        ];
+        assert!(VeFaasConfig::from_lookup(cfg_lookup(&bad_name)).is_err());
     }
 
     #[test]
