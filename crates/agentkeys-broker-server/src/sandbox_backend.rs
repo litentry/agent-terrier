@@ -273,6 +273,30 @@ impl SandboxBackend {
             Self::AwsEcs(_) => None,
         }
     }
+
+    /// The agentkeys-daemon's own surface inside ONE instance (its
+    /// `/v1/sandbox/self/*` routes on
+    /// [`agentkeys_protocol::sandbox_env::SANDBOX_DAEMON_PORT`]) — the #717
+    /// live-rebind push. Same routing contract as
+    /// [`Self::instance_mgmt_endpoint`].
+    pub fn instance_daemon_endpoint(
+        &self,
+        sandbox_id: &str,
+    ) -> Option<(String, Vec<(String, String)>)> {
+        match self {
+            Self::VeFaas(c) => Some((
+                c.agent_url().to_string(),
+                vec![
+                    ("x-faas-instance-name".into(), sandbox_id.to_string()),
+                    (
+                        "x-faas-proxy-port".into(),
+                        agentkeys_protocol::sandbox_env::SANDBOX_DAEMON_PORT.to_string(),
+                    ),
+                ],
+            )),
+            Self::AwsEcs(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]

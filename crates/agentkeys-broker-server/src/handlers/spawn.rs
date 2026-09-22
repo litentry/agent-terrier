@@ -1490,8 +1490,8 @@ mod tests {
         let parsed = parse_endpoint_scopes(&[EndpointScope {
             actor_omni: gw.clone(),
             services: vec![
-                "channel-pub:weixin-chef".into(),
-                "channel-sub:weixin-chef".into(),
+                "channel-pub:family-chat".into(),
+                "channel-sub:family-chat".into(),
             ],
             preserve_service_ids: vec![kept.clone(), kept.clone()],
         }])
@@ -1501,7 +1501,7 @@ mod tests {
         assert_eq!(parsed[0].grant.services.len(), 3);
         assert_eq!(
             parsed[0].grant.services[0],
-            agentkeys_core::device_crypto::keccak256(b"channel-pub:weixin-chef")
+            agentkeys_core::device_crypto::keccak256(b"channel-pub:family-chat")
         );
         assert_eq!(parsed[0].grant.services[2], [0xcc; 32]);
         assert_eq!(parsed[0].grant.max_total, 0);
@@ -1568,7 +1568,7 @@ mod tests {
             slots: vec![
                 SlotBinding {
                     slot: "family_chat".into(),
-                    channel_id: "weixin".into(),
+                    channel_id: "family-chat".into(),
                     endpoint_actor_omni: None,
                 },
                 SlotBinding {
@@ -1598,8 +1598,8 @@ mod tests {
             "channel-sub:opchat-chef",
             "knowledge:app-chef",
             "proposal:app-chef",
-            "channel-sub:weixin-chef",
-            "channel-pub:weixin-chef",
+            "channel-sub:family-chat",
+            "channel-pub:family-chat",
             "channel-pub:kitchen-display",
             "knowledge:food-prefs",
             "tool:schedule",

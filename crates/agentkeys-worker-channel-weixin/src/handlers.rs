@@ -60,6 +60,9 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
             "/v1/gateway/admin/contacts/update",
             post(admin::contacts_update),
         )
+        // 2026-09-22 — the bound channel IS the feed: the console registers
+        // `alias → channel` here at install / rebind (clears it at uninstall).
+        .route("/v1/gateway/admin/apps/update", post(admin::apps_update))
         .route(
             "/v1/gateway/admin/contacts/revoke",
             post(admin::contacts_revoke),
@@ -324,12 +327,11 @@ async fn telegram_mock_inbound(
             outcome.media_marker,
             true,
             &outcome.reach,
-            outcome.decision.target_alias.as_deref().and_then(|a| {
-                state.app_stage_hint(
-                    &agentkeys_protocol::messaging_feed_id("telegram", a),
-                    relay::unix_secs() * 1000,
-                )
-            }),
+            outcome
+                .decision
+                .target_alias
+                .as_deref()
+                .and_then(|a| state.app_stage_hint_for_alias(a, relay::unix_secs() * 1000)),
         )
     });
     // The mock driver IS the delivery surface: a welcome returned here counts as sent.

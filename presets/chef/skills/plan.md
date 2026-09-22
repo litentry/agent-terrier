@@ -41,5 +41,6 @@ granted at install — say so in your reply instead of retrying.
 
 A standing rule the family states in chat ("no more pork", "grandma is off
 salt now") is a learning for the household, not just for you: send it with
-`propose_to_owner` (a few sentences, namespace `family`); the owner accepts it
-into the shared knowledge, and it comes back to you as a resource.
+`propose_to_owner` (a few sentences; leave the namespace out — it goes to your
+own inbox, and the owner files it where it belongs); the owner accepts it into
+the shared knowledge, and it comes back to you as a resource.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChannelDef } from '../client/types';
-import { FEED_ID_RE, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '../client/slotOptions';
+import { FEED_ID_RE, gateRelayNote, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '../client/slotOptions';
 
 const ch = (id: string, kind?: ChannelDef["kind"], name = id): ChannelDef => ({ id, name, kind, createdAt: 0 });
 
@@ -54,5 +54,18 @@ describe('install wizard item options (D-K2: the type is metadata)', () => {
     const { matching, others } = partitionResourceOptions(items, 'dataset');
     expect(matching).toEqual([]);
     expect(others).toHaveLength(4);
+  });
+});
+
+describe('the relay note under a messaging slot (2026-09-22: the bound channel IS the feed)', () => {
+  it('says the gate relays the picked channel, and whether it still has to enroll', () => {
+    expect(gateRelayNote({ configured: true, enrolled: true, transport: 'weixin' }, 'chef')).toBe(
+      'the 微信 · WeChat contact gate relays whichever channel you pick here for `chef`, both ways.',
+    );
+    expect(gateRelayNote({ configured: true, enrolled: false, transport: 'telegram' }, '')).toContain('enrolls with this install');
+  });
+  it('says plainly when no gate exists', () => {
+    expect(gateRelayNote(null, 'chef')).toContain('no contact gate is configured');
+    expect(gateRelayNote({ configured: false, enrolled: false, transport: 'weixin' }, 'chef')).toContain('still works as a feed');
   });
 });

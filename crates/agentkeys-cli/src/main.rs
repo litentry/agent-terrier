@@ -1033,6 +1033,30 @@ enum AppAction {
         #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
         daemon_url: String,
     },
+    /// Rebind an installed app's channel slots in place (ONE signature; #717).
+    #[command(
+        about = "Master (headless/CI): rebind an app's channel slots — a commit, not a reinstall"
+    )]
+    Rebind {
+        #[arg(long)]
+        label: String,
+        #[arg(
+            long,
+            help = "slot=channel-id[,slot=channel-id…] — the slots to change"
+        )]
+        bind: String,
+        #[arg(
+            long,
+            help = "Do NOT fold the contact gate's device-actor enrollment into the signature (headless CI)"
+        )]
+        skip_endpoint_enrollment: bool,
+        #[arg(long, env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE")]
+        k11_key_file: String,
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
     /// Tap a card action headlessly (publishes a `command` event).
     Command {
         #[arg(long)]
@@ -2094,6 +2118,29 @@ async fn main() {
                     daemon_url,
                     label,
                     *keep_memory,
+                    k11_key_file,
+                    rp_id,
+                )
+                .await
+            }
+            AppAction::Rebind {
+                label,
+                bind,
+                skip_endpoint_enrollment,
+                k11_key_file,
+                rp_id,
+                daemon_url,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless app rebind signs with the SOFTWARE P-256 passkey on \
+                     disk — CI / headless / throwaway-TEST masters ONLY. A real owner rebinds \
+                     from parent-control (Touch ID)."
+                );
+                agentkeys_cli::app_admin::app_rebind(
+                    daemon_url,
+                    label,
+                    bind,
+                    !*skip_endpoint_enrollment,
                     k11_key_file,
                     rp_id,
                 )

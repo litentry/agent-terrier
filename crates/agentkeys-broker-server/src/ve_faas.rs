@@ -130,6 +130,15 @@ pub struct VeFaasConfig {
     /// re-extends by, so an ACTIVE device's sandbox never expires while an
     /// abandoned one dies within this window.
     pub timeout_minutes: u32,
+    /// How long an instance this broker created or adopted stays REMEMBERED
+    /// per delegate (`AGENTKEYS_VEFAAS_RECENT_INSTANCE_SECS`, default 600,
+    /// 0..=3600; 0 = off). Within that window an ensure whose ListSandboxes
+    /// view shows no live instance for the delegate DESCRIBES the remembered
+    /// one first — the list lags the platform's own state right after a
+    /// create/adopt (measured 2026-09-19 06:30:52 CST: 60 ms after the
+    /// sweeper adopted chef's instance, a resolve's ensure listed nothing
+    /// live and created a duplicate that answered every ask twice).
+    pub recent_instance_secs: u32,
     /// Per-request HTTP timeout for `CreateSandbox` in seconds
     /// (`AGENTKEYS_VEFAAS_CREATE_TIMEOUT_SECS`, default 180; bounds 15..=600).
     /// SEPARATE from `timeout_minutes` (the sandbox LIFETIME): provisioning an
@@ -202,6 +211,12 @@ impl VeFaasConfig {
                 "AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS must be 0..=600, got {coldstart_wait_secs}"
             );
         }
+        let recent_instance_secs = parse_u32("AGENTKEYS_VEFAAS_RECENT_INSTANCE_SECS", 600)?;
+        if recent_instance_secs > 3600 {
+            bail!(
+                "AGENTKEYS_VEFAAS_RECENT_INSTANCE_SECS must be 0..=3600, got {recent_instance_secs}"
+            );
+        }
         Ok(Some(Self {
             function_id,
             gateway_url,
@@ -212,6 +227,7 @@ impl VeFaasConfig {
             timeout_minutes,
             create_timeout_secs,
             coldstart_wait_secs,
+            recent_instance_secs,
             max_instances: parse_u32("AGENTKEYS_VEFAAS_MAX_INSTANCES", 20)? as usize,
             allow_direct_ark: non_empty("AGENTKEYS_ALLOW_DIRECT_ARK")
                 .is_some_and(|v| v.trim() == "1"),
@@ -343,6 +359,21 @@ pub struct VeFaasClient {
     /// a rare event (pair / device boot); one lock is simpler than a
     /// per-device map and the contention is irrelevant at this rate.
     ensure_lock: tokio::sync::Mutex<()>,
+    /// Instances this broker created or adopted, per delegate label — the
+    /// list view's lag bridge (see [`VeFaasConfig::recent_instance_secs`]).
+    recent_instances: std::sync::Mutex<HashMap<String, (String, std::time::Instant)>>,
+}
+
+/// The remembered instance for `key`, if still within `ttl` of when it was
+/// remembered — pure, so the lag bridge's arithmetic is testable.
+fn remembered_instance(
+    memo: &HashMap<String, (String, std::time::Instant)>,
+    key: &str,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+) -> Option<String> {
+    let (id, at) = memo.get(key)?;
+    (now.duration_since(*at) < ttl).then(|| id.clone())
 }
 
 impl VeFaasClient {
@@ -398,7 +429,72 @@ impl VeFaasClient {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             ensure_lock: tokio::sync::Mutex::new(()),
+            recent_instances: std::sync::Mutex::new(HashMap::new()),
         }))
+    }
+
+    fn remember_instance(&self, device_key_hash: &str, sandbox_id: &str) {
+        if self.config.recent_instance_secs == 0 {
+            return;
+        }
+        if let Ok(mut memo) = self.recent_instances.lock() {
+            memo.retain(|_, (_, at)| {
+                at.elapsed().as_secs() < u64::from(self.config.recent_instance_secs)
+            });
+            memo.insert(
+                label_value(device_key_hash),
+                (sandbox_id.to_string(), std::time::Instant::now()),
+            );
+        }
+    }
+
+    fn forget_instance(&self, device_key_hash: &str) {
+        if let Ok(mut memo) = self.recent_instances.lock() {
+            memo.remove(&label_value(device_key_hash));
+        }
+    }
+
+    /// The lag bridge: when the list shows nothing live for the delegate but
+    /// this broker remembers creating/adopting an instance recently, ask the
+    /// platform about THAT instance — `Some` when it is live (reuse it).
+    async fn remembered_live_instance(&self, device_key_hash: &str) -> Option<SandboxInstance> {
+        let ttl = std::time::Duration::from_secs(u64::from(self.config.recent_instance_secs));
+        let id = {
+            let memo = self.recent_instances.lock().ok()?;
+            remembered_instance(
+                &memo,
+                &label_value(device_key_hash),
+                std::time::Instant::now(),
+                ttl,
+            )?
+        };
+        match self.describe(&id).await {
+            Ok((status, expire_at)) => {
+                let inst = SandboxInstance {
+                    id: id.clone(),
+                    status,
+                    expire_at,
+                    metadata: HashMap::new(),
+                };
+                if inst.is_live() {
+                    tracing::info!(
+                        sandbox_id = %id,
+                        status = %inst.status,
+                        "#377 ensure: the list showed no live instance for this delegate, but the \
+                         one this broker created moments ago is live — reusing it (list lag)"
+                    );
+                    Some(inst)
+                } else {
+                    self.forget_instance(device_key_hash);
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::info!(sandbox_id = %id, error = %format!("{e:#}"), "#377 ensure: remembered instance no longer describable — forgotten");
+                self.forget_instance(device_key_hash);
+                None
+            }
+        }
     }
 
     /// The base URL devices talk to (`agent_url` in the resolve response).
@@ -1149,38 +1245,59 @@ impl VeFaasClient {
                 "Command": self.config.command,
             });
         }
-        let v = match self.vefaas_call("CreateSandbox", body).await {
-            Ok(v) => v,
-            // #589 — a cold-start 408 is IN-PROGRESS, not failure: the pod
-            // keeps booting past veFaaS's ~29s create budget and the error
-            // names it. Adopt it once Ready (same philosophy as the precache
-            // rule: a timeout is not a failure — resume, never restart).
-            Err(e) => {
-                if let Some(id) = cold_start_instance_name(&e.to_string()) {
-                    return self.adopt_booting_instance(&id, &e).await;
+        // #589 — a cold-start 408 is IN-PROGRESS, not failure: the pod keeps
+        // booting past veFaaS's ~29s create budget and the error names it.
+        // Adopt it once Ready (same philosophy as the precache rule: a timeout
+        // is not a failure — resume, never restart). One exception, measured
+        // 2026-09-18 (3 of 3 re-creates that evening): the platform DELETES
+        // the booting instance — DescribeSandbox answers 404 ResourceNotFound —
+        // and polling that corpse for the whole budget ends in "gave up". A
+        // gone instance cannot be duplicated, so ONE fresh CreateSandbox
+        // follows it (the sweeper's own retry a minute later succeeded that
+        // evening; this folds that retry into the create itself).
+        let mut fresh_creates_left = 1u8;
+        loop {
+            let v = match self.vefaas_call("CreateSandbox", body.clone()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let Some(id) = cold_start_instance_name(&e.to_string()) else {
+                        return Err(e);
+                    };
+                    match self.adopt_booting_instance(&id).await {
+                        Ok(id) => return Ok(id),
+                        Err(AdoptError::Vanished { last }) if fresh_creates_left > 0 => {
+                            fresh_creates_left -= 1;
+                            tracing::warn!(
+                                sandbox_id = %id,
+                                last = %last,
+                                "#589 cold-start resume: the booting instance is GONE (the platform \
+                                 deleted it) — one fresh CreateSandbox instead of polling a corpse"
+                            );
+                            continue;
+                        }
+                        Err(err) => return Err(err.into_error(&e)),
+                    }
                 }
-                return Err(e);
+            };
+            let id = v["Result"]["SandboxId"].as_str().unwrap_or_default();
+            if id.is_empty() {
+                bail!("CreateSandbox returned no Result.SandboxId: {v}");
             }
-        };
-        let id = v["Result"]["SandboxId"].as_str().unwrap_or_default();
-        if id.is_empty() {
-            bail!("CreateSandbox returned no Result.SandboxId: {v}");
+            return Ok(id.to_string());
         }
-        Ok(id.to_string())
     }
 
     /// #589 — poll the instance a cold-start-timed-out `CreateSandbox` left
     /// booting, and adopt it once `Ready`. Bounded by
-    /// `AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS`; the ORIGINAL error propagates
-    /// when the budget expires (or the resume is disabled with 0).
-    async fn adopt_booting_instance(
-        &self,
-        sandbox_id: &str,
-        cause: &anyhow::Error,
-    ) -> Result<String> {
+    /// `AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS`. Every state CHANGE is logged
+    /// (the failure line used to carry only the last state, so a two-minute
+    /// poll of a deleted instance read as an opaque "gave up"). Two "not
+    /// found" answers in a row = the platform deleted the instance
+    /// ([`AdoptError::Vanished`]) — the caller may create afresh.
+    async fn adopt_booting_instance(&self, sandbox_id: &str) -> Result<String, AdoptError> {
         let budget = self.config.coldstart_wait_secs;
         if budget == 0 {
-            bail!("{cause} (cold-start resume disabled: AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS=0)");
+            return Err(AdoptError::Disabled);
         }
         tracing::warn!(
             sandbox_id = %sandbox_id,
@@ -1188,22 +1305,52 @@ impl VeFaasClient {
             "#589 CreateSandbox hit the veFaaS ~29s cold-start budget — the pod keeps booting; \
              polling DescribeSandbox to ADOPT it instead of failing (a retry would duplicate it)"
         );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(budget as u64);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(budget as u64);
+        let mut last = String::from("pending");
+        let mut gone_in_a_row = 0u8;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let last = match self.describe(sandbox_id).await {
+            let state = match self.describe(sandbox_id).await {
                 Ok((status, _)) if status.eq_ignore_ascii_case("ready") => {
-                    tracing::info!(sandbox_id = %sandbox_id, "#589 cold-start resume: instance Ready — adopted");
+                    tracing::info!(
+                        sandbox_id = %sandbox_id,
+                        elapsed_s = started.elapsed().as_secs(),
+                        "#589 cold-start resume: instance Ready — adopted"
+                    );
                     return Ok(sandbox_id.to_string());
                 }
-                Ok((status, _)) => status,
-                Err(e) => format!("describe error: {e}"),
+                Ok((status, _)) => {
+                    gone_in_a_row = 0;
+                    status
+                }
+                Err(e) => {
+                    let text = format!("{e:#}");
+                    if describe_says_gone(&text) {
+                        gone_in_a_row += 1;
+                    } else {
+                        gone_in_a_row = 0;
+                    }
+                    format!("describe error: {text}")
+                }
             };
-            if std::time::Instant::now() >= deadline {
-                bail!(
-                    "cold-start resume gave up after {budget}s (last state: {last}) — original \
-                     CreateSandbox error: {cause}"
+            if state != last {
+                tracing::info!(
+                    sandbox_id = %sandbox_id,
+                    state = %state,
+                    elapsed_s = started.elapsed().as_secs(),
+                    "#589 cold-start resume: state"
                 );
+                last = state;
+            }
+            if gone_in_a_row >= 2 {
+                return Err(AdoptError::Vanished { last });
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(AdoptError::GaveUp {
+                    budget_secs: budget.to_string(),
+                    last,
+                });
             }
         }
     }
@@ -1241,7 +1388,12 @@ impl VeFaasClient {
         let _guard = self.ensure_lock.lock().await;
 
         let all = self.list_instances::<&str>(None).await?;
-        if let Some(mine) = pick_live_for_device(&all, device_key_hash) {
+        let listed = pick_live_for_device(&all, device_key_hash).cloned();
+        let mine = match listed {
+            Some(m) => Some(m),
+            None => self.remembered_live_instance(device_key_hash).await,
+        };
+        if let Some(mine) = mine {
             // Keep an ACTIVE delegate's runtime alive; an extend failure is a
             // WARN, not a spawn failure — the instance still lives until its
             // current expiry.
@@ -1274,6 +1426,7 @@ impl VeFaasClient {
         let id = self
             .create_for_delegate(device_key_hash, actor_omni, &merged)
             .await?;
+        self.remember_instance(device_key_hash, &id);
 
         // Quota-invariant self-check: the fresh instance must be findable by
         // its label, or every future ensure() will duplicate it. Loud ERROR,
@@ -1846,6 +1999,46 @@ mod tests {
 /// `function_cold_start_timeout` 408: veFaaS names the instance it left
 /// booting, and adopting it (instead of retrying) is the only duplicate-free
 /// recovery — a booting instance is invisible to the reuse pre-check.
+/// Why a cold-start resume ended without an adopted instance.
+#[derive(Debug, PartialEq, Eq)]
+enum AdoptError {
+    /// `AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS=0`.
+    Disabled,
+    /// The budget ran out; `last` is the final observed state.
+    GaveUp { budget_secs: String, last: String },
+    /// DescribeSandbox answered "not found" twice in a row — the platform
+    /// deleted the booting instance (measured 2026-09-18).
+    Vanished { last: String },
+}
+
+impl AdoptError {
+    /// The caller-facing error, with the ORIGINAL CreateSandbox failure kept
+    /// verbatim (its instance name and the platform's own wording).
+    fn into_error(self, cause: &anyhow::Error) -> anyhow::Error {
+        match self {
+            AdoptError::Disabled => anyhow::anyhow!(
+                "{cause} (cold-start resume disabled: AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS=0)"
+            ),
+            AdoptError::GaveUp { budget_secs, last } => anyhow::anyhow!(
+                "cold-start resume gave up after {budget_secs}s (last state: {last}) — original \
+                 CreateSandbox error: {cause}"
+            ),
+            AdoptError::Vanished { last } => anyhow::anyhow!(
+                "cold-start resume: the platform deleted the booting instance (last state: \
+                 {last}) and a fresh create was already spent — original CreateSandbox error: \
+                 {cause}"
+            ),
+        }
+    }
+}
+
+/// A DescribeSandbox failure that means the instance no longer exists —
+/// byte-for-byte the live answer of 2026-09-18: `vefaas DescribeSandbox error
+/// (http 404 Not Found): Code=ResourceNotFound Message=Sandbox not found`.
+fn describe_says_gone(err: &str) -> bool {
+    err.contains("ResourceNotFound") || err.contains("Sandbox not found")
+}
+
 fn cold_start_instance_name(err: &str) -> Option<String> {
     if !err.contains("function_cold_start_timeout") {
         return None;
@@ -1860,8 +2053,79 @@ fn cold_start_instance_name(err: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+mod recent_instance_tests {
+    use super::remembered_instance;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_remembered_instance_is_offered_within_the_ttl_and_never_after() {
+        let now = Instant::now();
+        let mut memo = HashMap::new();
+        memo.insert("abc".to_string(), ("sb-1".to_string(), now));
+        let ttl = Duration::from_secs(600);
+        assert_eq!(
+            remembered_instance(&memo, "abc", now + Duration::from_secs(1), ttl).as_deref(),
+            Some("sb-1")
+        );
+        assert_eq!(
+            remembered_instance(&memo, "abc", now + Duration::from_secs(599), ttl).as_deref(),
+            Some("sb-1")
+        );
+        assert_eq!(
+            remembered_instance(&memo, "abc", now + Duration::from_secs(600), ttl),
+            None
+        );
+        assert_eq!(remembered_instance(&memo, "other", now, ttl), None);
+        // The knob at 0 = never offered (the old behaviour).
+        assert_eq!(remembered_instance(&memo, "abc", now, Duration::ZERO), None);
+    }
+}
+
+#[cfg(test)]
 mod cold_start_resume_tests {
-    use super::cold_start_instance_name;
+    use super::{cold_start_instance_name, describe_says_gone, AdoptError};
+
+    #[test]
+    fn a_not_found_describe_means_the_platform_deleted_the_instance() {
+        // Byte-for-byte the live answer from 2026-09-18 (chef, agent-i ×2).
+        let gone = "vefaas DescribeSandbox error (http 404 Not Found): Code=ResourceNotFound \
+                    Message=Sandbox not found";
+        assert!(describe_says_gone(gone));
+        assert!(!describe_says_gone(
+            "vefaas DescribeSandbox request failed: connection reset"
+        ));
+        assert!(!describe_says_gone("http 429 Too Many Requests"));
+    }
+
+    #[test]
+    fn every_outcome_keeps_the_original_create_error() {
+        let cause = anyhow::anyhow!("vefaas CreateSandbox error (http 408 Request Timeout)");
+        let vanished = AdoptError::Vanished {
+            last: "describe error: not found".into(),
+        }
+        .into_error(&cause)
+        .to_string();
+        assert!(
+            vanished.contains("deleted the booting instance"),
+            "{vanished}"
+        );
+        assert!(vanished.contains("http 408"), "{vanished}");
+        let gave_up = AdoptError::GaveUp {
+            budget_secs: "120".into(),
+            last: "Pending".into(),
+        }
+        .into_error(&cause)
+        .to_string();
+        assert!(
+            gave_up.contains("gave up after 120s (last state: Pending)"),
+            "{gave_up}"
+        );
+        assert!(AdoptError::Disabled
+            .into_error(&cause)
+            .to_string()
+            .contains("COLDSTART_WAIT_SECS=0"));
+    }
 
     #[test]
     fn parses_the_measured_408_body() {

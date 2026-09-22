@@ -126,6 +126,20 @@ impl WeixinGatewayState {
         stage_hint(&stage, now_millis.saturating_sub(ts))
     }
 
+    /// The channel an app alias is bound to on this gate (registry `apps`).
+    pub fn app_feed_for_alias(&self, alias: &str) -> Option<String> {
+        self.registry
+            .snapshot()
+            .app_channel(alias)
+            .map(str::to_string)
+    }
+
+    /// [`Self::app_stage_hint`] keyed by the app's alias.
+    pub fn app_stage_hint_for_alias(&self, alias: &str, now_millis: u64) -> Option<&'static str> {
+        let feed = self.app_feed_for_alias(alias)?;
+        self.app_stage_hint(&feed, now_millis)
+    }
+
     pub fn build(config: WeixinGatewayConfig) -> anyhow::Result<Self> {
         let registry = RegistryHandle::load(&config.registry_file)?;
         let rate = RateLimiter::new(config.rate_max, config.rate_window_secs);

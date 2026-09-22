@@ -76,6 +76,7 @@ fn seeded_registry() -> ContactRegistry {
             welcomed: true,
         }],
         pending: vec![],
+        apps: vec![],
         invites: vec![BindInvite {
             bind_code: "123456".into(),
             contact_id: "c-kid".into(),

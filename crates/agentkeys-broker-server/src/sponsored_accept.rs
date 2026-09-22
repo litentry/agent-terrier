@@ -195,6 +195,27 @@ pub fn assemble_scope_userop(
     assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
 }
 
+/// **The #717 rebind sibling** — [`assemble_scope_userop`] plus the endpoint
+/// mirrors and any endpoint enrollment, ONE Touch ID
+/// (`rebind_batch_calldata`). `p.register` supplies only the omni pair.
+pub fn assemble_rebind_userop(
+    p: &AcceptUserOpParams,
+    extra: &[agentkeys_core::erc4337::ExtraScope],
+    enrollments: &[agentkeys_core::erc4337::AgentRegister],
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = agentkeys_core::erc4337::rebind_batch_calldata(
+        &p.registry,
+        &p.scope,
+        &p.register.operator_omni,
+        &p.register.actor_omni,
+        p.grant,
+        extra,
+        enrollments,
+    );
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
 /// **The unpair sibling** — assemble the agent-revoke UserOp
 /// (`executeBatch([revokeAgentDevice × N])`; one hash = the single unpair, many
 /// = the #260 master-reset fleet teardown, ONE Touch ID). The registry enforces

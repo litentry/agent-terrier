@@ -10,6 +10,7 @@ pub mod inbox_sts;
 pub mod metrics;
 pub mod oidc;
 pub mod presets;
+pub mod rebind;
 pub mod register;
 pub mod revoke;
 pub mod sandbox;

@@ -976,6 +976,23 @@ pub struct ContactRegistry {
     /// bot. `default` keeps pre-#418 registry files parseable unchanged.
     #[serde(default)]
     pub invites: Vec<BindInvite>,
+    /// The apps this gate relays, `alias → channel` (owner decision
+    /// 2026-09-22: the channel an app's messaging slot binds IS its feed — no
+    /// derived `<transport>-<alias>` name). The console writes a row at
+    /// install / rebind and clears it at uninstall through
+    /// `/v1/gateway/admin/apps/update`; `default` keeps older registry files
+    /// parseable (an app with no row is unreachable until it is rebound).
+    #[serde(default)]
+    pub apps: Vec<AppFeed>,
+}
+
+/// One relayed app: the alias contacts address it by (its delegate label)
+/// and the channel its messaging slot binds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct AppFeed {
+    pub alias: String,
+    pub channel_id: String,
 }
 
 impl ContactRegistry {
@@ -985,6 +1002,44 @@ impl ContactRegistry {
         self.bound
             .iter()
             .find(|c| c.transport == transport && c.transport_id == transport_id)
+    }
+
+    /// The channel `alias` is bound to on this gate (alias case-insensitive).
+    pub fn app_channel(&self, alias: &str) -> Option<&str> {
+        self.apps
+            .iter()
+            .find(|a| a.alias.eq_ignore_ascii_case(alias.trim()))
+            .map(|a| a.channel_id.as_str())
+    }
+
+    /// Every alias bound to `channel_id` (normally one — the console refuses
+    /// a channel shared by two apps).
+    pub fn aliases_on_channel(&self, channel_id: &str) -> Vec<String> {
+        self.apps
+            .iter()
+            .filter(|a| a.channel_id == channel_id)
+            .map(|a| a.alias.clone())
+            .collect()
+    }
+
+    /// Upsert `alias → channel_id` (the alias stored lowercase).
+    pub fn set_app_feed(&mut self, alias: &str, channel_id: &str) {
+        let alias = alias.trim().to_lowercase();
+        match self.apps.iter_mut().find(|a| a.alias == alias) {
+            Some(a) => a.channel_id = channel_id.to_string(),
+            None => self.apps.push(AppFeed {
+                alias,
+                channel_id: channel_id.to_string(),
+            }),
+        }
+    }
+
+    /// Drop `alias`; `true` when a row went.
+    pub fn remove_app_feed(&mut self, alias: &str) -> bool {
+        let before = self.apps.len();
+        self.apps
+            .retain(|a| !a.alias.eq_ignore_ascii_case(alias.trim()));
+        self.apps.len() != before
     }
 }
 
@@ -1324,6 +1379,18 @@ pub struct GatewayContactRevokeRequest {
     pub contact_id: String,
 }
 
+/// `POST /v1/gateway/admin/apps/update` — the console registers the channel
+/// an app's messaging slot binds (`alias → channel_id`); `channel_id` absent
+/// / null clears the row (uninstall).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayAppFeedUpdateRequest {
+    pub alias: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channel_id: Option<String>,
+}
+
 /// `POST /v1/gateway/admin/contacts/welcome` — (re)send a bound contact's
 /// acknowledgement («✅ 绑定成功…»): delivered now when their bot already holds
 /// a reply token for them, else ARMED for their next message.
@@ -1361,6 +1428,9 @@ pub struct GatewayBindRejectRequest {
 pub struct GatewayContactsResponse {
     pub ok: bool,
     pub contacts: Vec<ContactSummary>,
+    /// The relayed apps (`alias → channel`), for the console's checks.
+    #[serde(default)]
+    pub apps: Vec<AppFeed>,
 }
 
 /// One line in the operator's LIVE message monitor (#1) — a single inbound turn
@@ -2722,6 +2792,11 @@ pub mod sandbox_env {
     /// unreadable by the daemon's `gem` user). ONE owner: the image's
     /// supervisord unit pins `PORT="8090"` on the bridge.
     pub const SANDBOX_BRIDGE_PORT: u16 = 8090;
+    /// The agentkeys-daemon's own ui-bridge inside the sandbox — its
+    /// `/v1/sandbox/self/*` surface (the self-grants view the dsh guard reads,
+    /// the #717 live-rebind push the broker makes). Reached through the same
+    /// gateway with `x-faas-proxy-port` set to it.
+    pub const SANDBOX_DAEMON_PORT: u16 = 3114;
 
     /// The identity/link envs required in BOTH custody modes (#552).
     pub const CHAT_COMMON: [&str; 4] = [BROKER_URL, CHAT_CHANNEL_ID, ACTOR_OMNI, OPERATOR_OMNI];
@@ -3115,6 +3190,7 @@ mod tests {
             }],
             pending: vec![],
             invites: vec![],
+            apps: vec![],
         };
         assert_eq!(
             reg.resolve("weixin", "openid-abc").unwrap().contact_id,

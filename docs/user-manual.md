@@ -271,8 +271,16 @@ agent's sandbox in place:
   and tells you — click **"update anyway"** only if losing their output is
   acceptable.
 
-The button also works as a plain "respawn now" for an agent whose sandbox has
-expired. **Archive** remains the separate, Touch-ID-gated action for actually
+The button reads its own state. **"✓ up to date"** (disabled): the agent
+already runs the current image — nothing to do, and its sandbox is replaced
+automatically before its lease ends. **"⟳ update runtime"**: it runs older
+bits. **"▶ wake"**: nothing is running — a scheduled application sleeps
+between its ticks, and an agent whose re-create failed has no runtime either;
+wake re-creates it now (a cold start, up to about two minutes). The card's
+**runtime** row always says which: the image tag and engine when a sandbox is
+live, "none" when not — the lifecycle chip next to the name reads "no runtime"
+then instead of the sleeping sandbox's last report. Asking an application for
+a card from the Applications page wakes it first when needed. **Archive** remains the separate, Touch-ID-gated action for actually
 retiring an agent — updating never archives.
 
 Each agent's card also shows what is actually running: a **runtime** row with
@@ -551,6 +559,34 @@ the permissions you approve. parent-control → **applications**:
   them under "also enrolled by this Touch ID". The endpoints tab shows both
   and is the standalone way to enroll either ahead of time; the contact gate's
   status card says whether the "feed hop" is armed and why not.
+- **Where the family chat goes.** The channel you bind to an app's messaging
+  slot IS its feed — `family-chat` stays `family-chat`; nothing is derived
+  from it. The install (or a rebind) tells the contact gate "chef listens on
+  `family-chat`" and grants the gate that channel, so a family message
+  addressed to chef lands there and chef's replies come back through it. One
+  messaging channel serves one app (the install refuses a channel another app
+  already holds). The channels page flags a messaging channel an app holds but
+  no gate does, and shows every channel's feed in place (the operator chat is
+  the one you can write into there); the application page keeps the same
+  panels for quick access.
+- **Rebinding a slot is a commit, not a reinstall.** On the application page,
+  **edit bindings** → pick the new channel → **commit**: one Touch ID re-signs
+  the app's grants (and enrolls the contact gate on the new channel when it
+  needs to), the running app re-sources its feeds in place, and a sleeping app
+  picks the new channel up at its next wake. No uninstall, no delegate slot
+  consumed, and the app keeps its memory. The old channel row stays in the
+  registry until you clear it (**clear orphaned** on the channels page).
+  The bound channels live in ONE place — the broker's durable spawn context,
+  the anchor — never in the sandbox image and never frozen in a running
+  instance: the running app re-reads the anchor (every 90 s by default,
+  `AGENTKEYS_BINDINGS_POLL_SECS`) and re-sources its feeds, and the commit also
+  pushes the change into it right away when it can reach it.
+- **A woken app seeds its own context.** An app the broker wakes for a
+  schedule tick, or re-creates at its lease end, applies its template's
+  persona, skills and knowledge to its runtime by itself at boot — only what
+  is missing, never over an applied persona. (Until 2026-09-22 a woken app ran
+  bare and improvised its card as free-form text; the display panel now says
+  when the newest documents on the feed are not cards.)
 - **WeChat is each member's own iLink clawbot.** The family talks to an app
   through their own clawbot, the one the assistants already use (the iLink
   personal-bot API, one bot per member): text, photos and voice clips all relay, and a voice

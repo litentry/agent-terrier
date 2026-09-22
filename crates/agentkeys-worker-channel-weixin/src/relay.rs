@@ -180,20 +180,38 @@ pub async fn process_turn(
     let event = if decision.allowed {
         let alias = decision.target_alias.clone().unwrap_or_default();
         state.device.set_last_alias(transport, transport_id, &alias);
-        let channel_id = agentkeys_protocol::messaging_feed_id(transport, &alias);
+        // The app's bound channel (registry `apps`, written at install /
+        // rebind — the bound channel IS the feed, 2026-09-22). No row = the
+        // console never registered this app's feed: the hop cannot land,
+        // loudly, until the app is rebound.
+        let channel_id = state
+            .registry
+            .snapshot()
+            .app_channel(&alias)
+            .map(str::to_string)
+            .unwrap_or_default();
         let stamp = ContactStamp {
             contact_id: contact_id.clone(),
             tier: tier.clone(),
         };
-        match feed_hop(state, &channel_id, &inbound, media.as_ref(), &stamp).await {
-            Ok(r) => feed = Some(r),
-            Err(e) => {
-                tracing::warn!(
-                    channel = %channel_id,
-                    contact = %contact_id,
-                    "#667 feed hop did NOT land — the turn never reached the app: {e}"
-                );
-                feed_error = Some(e);
+        if channel_id.is_empty() {
+            tracing::warn!(
+                alias = %alias,
+                contact = %contact_id,
+                "#667 feed hop did NOT land — no channel is registered for this alias on this gate (the app's install / rebind registers it)"
+            );
+            feed_error = Some(format!("app_feed_unregistered:{alias}"));
+        } else {
+            match feed_hop(state, &channel_id, &inbound, media.as_ref(), &stamp).await {
+                Ok(r) => feed = Some(r),
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %channel_id,
+                        contact = %contact_id,
+                        "#667 feed hop did NOT land — the turn never reached the app: {e}"
+                    );
+                    feed_error = Some(e);
+                }
             }
         }
         let has_text = !inbound.text.trim().is_empty();

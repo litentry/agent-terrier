@@ -69,6 +69,13 @@ export function proposeArgv(a: ProposeArgs): string[] {
  *  (the first of the spawn's `AGENTKEYS_MEMORY_NAMESPACES`, the daemon's own
  *  default). Pure; empty when the env carries none. */
 export function defaultProposalNamespace(env: Record<string, string | undefined>): string {
+  // The application's OWN namespace first (`AGENTKEYS_MEMORY_NS` — the inbox
+  // every install is granted, `proposal:app-<label>`), else the first of the
+  // pull list. The pull list OPENS with the household namespaces the app only
+  // READS, which it can never propose into — measured 2026-09-18: chef's list
+  // was `household,personal,…` while its only proposal grant was `app-chef`.
+  const own = (env.AGENTKEYS_MEMORY_NS ?? '').trim();
+  if (own) return own;
   const first = (env.AGENTKEYS_MEMORY_NAMESPACES ?? '').split(',')[0] ?? '';
   return first.trim();
 }
@@ -108,7 +115,9 @@ export function apply(ctx: Context, config: Config): void {
   const command = (config.daemonCommand ?? '').trim() || DEFAULT_DAEMON_COMMAND;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const ownNamespace = defaultProposalNamespace(process.env);
-  const ownNote = ownNamespace ? ` Your own namespace is ${ownNamespace}; that is the default.` : '';
+  const ownNote = ownNamespace
+    ? ` Your own namespace is ${ownNamespace}; that is the default — leave the namespace out unless the owner told you which shared one you may propose into.`
+    : '';
   ctx.effect(
     () =>
       ctx.tools.register(

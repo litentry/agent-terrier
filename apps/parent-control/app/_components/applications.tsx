@@ -31,10 +31,11 @@ import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { ServiceAnnotation } from '@/lib/generated/ServiceAnnotation';
 import { Chip, Dot, LifecycleChip, Modal, PageHead, Panel } from './shared';
+import { ChatPanel } from './chat';
 import { cardAsks, onDemandTurnText } from '@/lib/client/askCard';
 import { KnowledgeItemModal } from './knowledge';
 import { editReaches } from '@/lib/client/knowledge';
-import { FEED_ID_RE, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
+import { FEED_ID_RE, gateRelayNote, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
 
 type View = 'apps' | 'endpoints';
 
@@ -138,6 +139,8 @@ export function ApplicationsPage({
   const [addingResource, setAddingResource] = useState<null | { kind?: ResourceKind; slot?: string; edit?: ResourceItemRow }>(null);
   const [console_, setConsole] = useState<ConsoleDeviceStatus | null>(null);
   const [gateway, setGateway] = useState<GatewayDeviceStatus | null>(null);
+  /** #717 — the rebind ceremony's current step, while one runs. */
+  const [rebinding, setRebinding] = useState<string | null>(null);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -221,13 +224,38 @@ export function ApplicationsPage({
       if (asking) return;
       const before = dashboard?.card_event_id ?? null;
       setAsking({ label: row.label, entry: entry.label, since: Date.now(), note: 'sending the ask…' });
+      // A scheduled app sleeps between its ticks (#669): an ask into a feed
+      // nothing consumes spins for three minutes and lands nowhere (chef,
+      // 2026-09-18 — its lease had ended 40 min earlier). Wake it first.
+      const status = await client.agentImageStatus([row.device_key_hash]);
+      const bare = row.device_key_hash.toLowerCase().replace(/^0x/, '');
+      const rt = status.ok
+        ? status.data.delegates.find((d) => d.device_key_hash.toLowerCase().replace(/^0x/, '') === bare)
+        : undefined;
+      if (rt && !rt.error && !rt.sandbox_id) {
+        setAsking((a) =>
+          a ? { ...a, note: `${row.label} has no runtime (it sleeps between its scheduled ticks) — waking it first: a cold start, up to ~2 minutes…` } : a,
+        );
+        const w = await client.agentUpdate({ deviceKeyHash: row.device_key_hash });
+        const wakeError = w.ok ? w.data.sandbox_error : (w.status?.detail ?? 'wake failed');
+        if (wakeError) {
+          showToast(`${row.label}: could not wake its runtime — ${wakeError}`, true);
+          setAsking(null);
+          return;
+        }
+        setAsking((a) => (a ? { ...a, note: `${row.label} is awake — sending the ask…` } : a));
+      }
       const r = await client.chatSend(row.chat_channel_id, onDemandTurnText(entry), 'text');
       if (!r.ok) {
         showToast(`${row.label}: the ask did not reach its feed — ${r.status?.detail ?? 'error'}`, true);
         setAsking(null);
         return;
       }
-      setAsking((a) => (a ? { ...a, note: `${row.label} is composing — the card lands here when it publishes (its answer is in the chat)` } : a));
+      setAsking((a) =>
+        a
+          ? { ...a, note: `${row.label} is composing — the card lands here when it publishes; its reply lands in the chat panel below` }
+          : a,
+      );
       for (let i = 0; i < 36; i++) {
         // eslint-disable-next-line no-await-in-loop
         await new Promise((res) => setTimeout(res, 5000));
@@ -242,7 +270,7 @@ export function ApplicationsPage({
           }
         }
       }
-      showToast(`${row.label} has not published a card in 3 minutes — read its answer in the chat (it may have asked something back, or lack the display grant).`, true);
+      showToast(`${row.label} has not published a card in 3 minutes — read its reply in the chat panel below: it may have asked something back, or lack the display grant.`, true);
       setAsking(null);
     },
     [asking, client, dashboard?.card_event_id, showToast],
@@ -296,6 +324,47 @@ export function ApplicationsPage({
       await refresh();
     },
     [client, onInstalled, refresh, resources, showToast],
+  );
+
+  // ── the rebind ceremony (#717): build → ONE Touch ID → submit; the app
+  // keeps running and re-sources its feeds — a commit, not a reinstall.
+  const rebind = useCallback(
+    async (app: AppInstanceRow, slots: Record<string, string>) => {
+      if (!client.appRebindBuild || !client.appRebindSubmit) return;
+      setRebinding('Compiling the new sheet…');
+      const built = await client.appRebindBuild(app.label, { slots: Object.entries(slots).map(([slot, channel_id]) => ({ slot, channel_id })) });
+      if (!built.ok) {
+        setRebinding(null);
+        showToast(`rebind build failed — ${built.status?.detail ?? 'error'}`, true);
+        return;
+      }
+      const build = built.data.build as { user_op?: unknown; user_op_hash?: string };
+      akLog('apps: rebind built', { label: app.label, changes: built.data.changes, endpointScopes: built.data.endpoint_scopes });
+      setRebinding('Approve with Touch ID…');
+      let assertion;
+      try {
+        const cred = getMasterCredId() || null;
+        assertion = await getAssertionOverHash(String(build.user_op_hash ?? ''), cred ? [cred] : undefined);
+      } catch {
+        setRebinding(null);
+        showToast('Touch ID cancelled — nothing changed.', true);
+        return;
+      }
+      setRebinding('Committing on chain…');
+      const submitted = await client.appRebindSubmit(app.label, { user_op: build.user_op, assertion });
+      if (!submitted.ok) {
+        setRebinding(null);
+        showToast(`rebind submit failed — ${submitted.status?.detail ?? 'error'}`, true);
+        return;
+      }
+      const rebound = (submitted.data as { rebound?: { runtime?: { mode?: string; detail?: string } } }).rebound;
+      akLog('apps: rebind confirmed', { txHash: submitted.data.tx_hash, rebound });
+      showToast(`${app.label} rebound — ${rebound?.runtime?.detail ?? 'committed'}`);
+      setRebinding(null);
+      await openApp(app.label);
+      await refresh();
+    },
+    [client, openApp, refresh, showToast],
   );
 
   // ── the uninstall ceremony (archive): build → ONE Touch ID → submit
@@ -482,6 +551,12 @@ export function ApplicationsPage({
               onEditResource={(row) => setAddingResource({ edit: row })}
               asking={asking?.label === selectedRow.label ? asking : null}
               onAskCard={(entry) => void askForCard(selectedRow, entry)}
+              onRebind={(slots) => void rebind(selectedRow, slots)}
+              rebinding={rebinding}
+              channels={channels}
+              gateway={gateway}
+              onGoChannels={onGoChannels}
+              onGoEndpoints={() => setView('endpoints')}
             />
           )}
         </>
@@ -537,10 +612,12 @@ export function ApplicationsPage({
             tp={tp}
             channels={channels}
             resources={resources}
+            gateway={gateway}
             setW={setWizard}
             onInstall={(w) => void install(w, tp)}
             onOpen={(label) => { setWizard(null); setView('apps'); void openApp(label); }}
             onGoChannels={onGoChannels}
+            onGoEndpoints={() => setView('endpoints')}
             onCreateChannel={onCreateChannel}
             onAddResource={(kind, slot) => setAddingResource({ kind, slot })}
             onRetypeResource={retypeResource}
@@ -639,6 +716,12 @@ function AppDetail({
   onEditResource,
   asking,
   onAskCard,
+  onRebind,
+  rebinding,
+  channels,
+  gateway,
+  onGoChannels,
+  onGoEndpoints,
 }: {
   app: AppInstanceRow;
   template?: PresetSummary;
@@ -655,8 +738,24 @@ function AppDetail({
   asking?: { entry: string; since: number; note: string } | null;
   /** "Ask for the card now" — run a schedule entry's prompt as a turn. */
   onAskCard?: (entry: { label: string; prompt: string }) => void;
+  /** #717 — commit new channel bindings in place: one Touch ID, no reinstall. */
+  onRebind?: (slots: Record<string, string>) => void;
+  /** The rebind ceremony's current step, while one runs. */
+  rebinding?: string | null;
+  channels: ChannelDef[];
+  gateway: GatewayDeviceStatus | null;
+  onGoChannels: () => void;
+  onGoEndpoints: () => void;
 }) {
   const st = statusOf(app);
+  const [editingBindings, setEditingBindings] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string | null>>({});
+  const channelSlots = template?.slots ?? [];
+  const currentOf = (slot: string) => app.bound_channels.find((b) => b.slot === slot)?.channel_id ?? null;
+  const changedSlots = channelSlots.filter((s) => {
+    const v = draft[s.slot];
+    return typeof v === 'string' && v !== currentOf(s.slot);
+  });
   const display = app.bound_channels.find((b) => b.kind === 'display');
   const asks = cardAsks(template?.schedule);
   const askRow = display && onAskCard && app.status !== 'uninstalled' && (
@@ -694,16 +793,62 @@ function AppDetail({
                   <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
                     Rendered from the card the app published (event {dashboard.card_event_id}); a tap publishes a <code>command</code> event from {dashboard.console_actor_omni ? 'the console’s device actor' : 'the master (console not enrolled yet)'}.
                   </div>
+                  {(dashboard?.non_card_docs ?? 0) > 0 && (
+                    <div className="banner warn" style={{ marginTop: 8 }}>
+                      <span className="lbl">newer, not a card</span>
+                      <span>
+                        The app published {dashboard!.non_card_docs} newer document{dashboard!.non_card_docs === 1 ? '' : 's'} on this feed that {dashboard!.non_card_docs === 1 ? 'is' : 'are'} not in the card format, so the screen keeps the last real card. That is what an app running without its skills does — wake or update its runtime on the Delegates page, then ask again.
+                        {dashboard!.last_doc_preview ? ` Newest starts: ${dashboard!.last_doc_preview}` : ''}
+                      </span>
+                    </div>
+                  )}
                   {askRow}
                 </>
               ) : (
                 <>
-                  <div className="muted" style={{ fontSize: 12.5 }}>{dashboard ? 'No card published yet — the app publishes one on its schedule, or when you ask below.' : 'Loading the display feed…'}</div>
+                  <div className="muted" style={{ fontSize: 12.5 }}>{dashboard ? "No card in this feed's recent window — the app publishes one on its schedule, or when you ask below." : 'Loading the display feed…'}</div>
+                  {(dashboard?.non_card_docs ?? 0) > 0 && (
+                    <div className="banner warn" style={{ marginTop: 8 }}>
+                      <span className="lbl">newer, not a card</span>
+                      <span>
+                        The app published {dashboard!.non_card_docs} newer document{dashboard!.non_card_docs === 1 ? '' : 's'} on this feed that {dashboard!.non_card_docs === 1 ? 'is' : 'are'} not in the card format, so the screen keeps the last real card. That is what an app running without its skills does — wake or update its runtime on the Delegates page, then ask again.
+                        {dashboard!.last_doc_preview ? ` Newest starts: ${dashboard!.last_doc_preview}` : ''}
+                      </span>
+                    </div>
+                  )}
                   {dashboard && askRow}
                 </>
               )}
             </Panel>
           )}
+          {/* The app's opchat feed, in place (#430 ChatPanel): the schedule's
+              asks go in here and the replies come back here — the only place
+              to read what the app SAID when no card appears. Operator-only. */}
+          {app.status !== 'uninstalled' && app.chat_channel_id && (
+            <Panel title={`── chat · ${app.chat_channel_id} · operator-only`}>
+              <ChatPanel
+                key={app.chat_channel_id}
+                channelId={app.chat_channel_id}
+                emptyHint={`Direct chat with ${app.label} on ${app.chat_channel_id} — the transcript IS its durable opchat feed; the schedule's asks and its replies land here too.`}
+              />
+            </Panel>
+          )}
+          {/* The app's messaging slots (the family chat), read-only: what the
+              app says to the family is readable HERE; it reaches the family
+              only through a contact gate that serves this feed. */}
+          {app.status !== 'uninstalled' &&
+            app.bound_channels
+              .filter((b) => b.kind === 'messaging' && b.channel_id !== app.chat_channel_id)
+              .map((b) => (
+                <Panel key={b.channel_id} title={`── ${b.slot} · ${b.channel_id} · read-only`}>
+                  <ChatPanel
+                    key={b.channel_id}
+                    channelId={b.channel_id}
+                    readOnly
+                    emptyHint={`Nothing on ${b.channel_id} yet. What the app publishes here reaches the family only through a contact gate that serves this feed (the WeChat gate serves the feeds named after its transport, see the manual); any other feed is readable here and delivered nowhere.`}
+                  />
+                </Panel>
+              ))}
           <Panel title="── today" flush>
             <div className="feed">
               {(dashboard?.activity ?? []).length === 0 && <div className="muted" style={{ padding: 14 }}>No activity attributed to this app yet.</div>}
@@ -745,10 +890,20 @@ function AppDetail({
               )}
             </div>
           </Panel>
-          <Panel title="── bindings">
+          <Panel
+            title="── bindings"
+            right={onRebind && app.status !== 'uninstalled' && !editingBindings ? <button className="btn sm" onClick={() => { setDraft({}); setEditingBindings(true); }}>edit bindings</button> : undefined}
+          >
             <dl className="kvs">
               {app.bound_channels.map((b) => (
-                <div key={b.slot} style={{ display: 'contents' }}><dt>{b.slot}</dt><dd><code>{b.channel_id}</code> · {b.kind} · {b.direction}{b.endpoint_actor_omni ? ` · actor ${b.endpoint_actor_omni.slice(0, 10)}…` : ''}</dd></div>
+                <div key={b.slot} style={{ display: 'contents' }}>
+                  <dt>{b.slot}</dt>
+                  <dd>
+                    <code>{b.channel_id}</code> · {b.kind} · {b.direction}
+                    {b.kind === 'messaging' && (b.endpoint_actor_omni ? ' · relayed by the contact gate' : ' · no contact gate on it — rebind to enroll one')}
+                    {b.kind !== 'messaging' && b.endpoint_actor_omni ? ` · actor ${b.endpoint_actor_omni.slice(0, 10)}…` : ''}
+                  </dd>
+                </div>
               ))}
               {app.bindings.resources.map((r) => {
                 const row = resources.find((it) => it.id === r.item_id);
@@ -771,6 +926,37 @@ function AppDetail({
               <div style={{ display: 'contents' }}><dt>opchat</dt><dd><code>{app.chat_channel_id}</code></dd></div>
               <div style={{ display: 'contents' }}><dt>availability</dt><dd>{app.availability}</dd></div>
             </dl>
+            {editingBindings && onRebind && (
+              <div style={{ marginTop: 12 }}>
+                <div className="banner" style={{ marginBottom: 10 }}>
+                  <span className="lbl">rebind</span>
+                  <span>Pick the new channel for a slot and commit. One Touch ID re-signs the app&apos;s grants and enrolls the contact gate on the new channel when it needs to; the running app re-sources its feeds in place — no reinstall, no slot consumed.</span>
+                </div>
+                {channelSlots.map((s) => (
+                  <SlotChooser
+                    key={s.slot}
+                    slot={s}
+                    label={app.label}
+                    channels={channels}
+                    gateway={gateway}
+                    value={draft[s.slot] !== undefined ? draft[s.slot] : currentOf(s.slot)}
+                    onPick={(id) => setDraft({ ...draft, [s.slot]: id })}
+                    onGoChannels={onGoChannels}
+                    onGoEndpoints={onGoEndpoints}
+                  />
+                ))}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button
+                    className="btn sm primary"
+                    disabled={changedSlots.length === 0 || !!rebinding}
+                    onClick={() => onRebind(Object.fromEntries(changedSlots.map((s) => [s.slot, draft[s.slot] as string])))}
+                  >
+                    {rebinding ?? `commit ${changedSlots.length} change${changedSlots.length === 1 ? '' : 's'} (one Touch ID)`}
+                  </button>
+                  <button className="btn sm" disabled={!!rebinding} onClick={() => { setEditingBindings(false); setDraft({}); }}>cancel</button>
+                </div>
+              </div>
+            )}
           </Panel>
           {template && (template.schedule ?? []).length > 0 && (
             <Panel title="── schedule">
@@ -801,10 +987,12 @@ function InstallWizard({
   tp,
   channels,
   resources,
+  gateway,
   setW,
   onInstall,
   onOpen,
   onGoChannels,
+  onGoEndpoints,
   onCreateChannel,
   onAddResource,
   onRetypeResource,
@@ -813,10 +1001,13 @@ function InstallWizard({
   tp: PresetSummary;
   channels: ChannelDef[];
   resources: ResourceItemRow[];
+  /** The contact gate's device status — the ONLY option a messaging slot may bind. */
+  gateway: GatewayDeviceStatus | null;
   setW: (w: WizardState | null) => void;
   onInstall: (w: WizardState) => void;
   onOpen: (label: string) => void;
   onGoChannels: () => void;
+  onGoEndpoints: () => void;
   onCreateChannel?: CreateChannelFn;
   /** Open the knowledge modal pre-set to the slot's kind; a successful add binds the new item to `slot`. */
   onAddResource?: (kind: ResourceKind, slot: string) => void;
@@ -881,11 +1072,14 @@ function InstallWizard({
             <SlotChooser
               key={s.slot}
               slot={s}
+              label={w.label}
               channels={channels}
+              gateway={gateway}
               value={w.bindings[s.slot]}
               onPick={(id) => setW({ ...w, bindings: { ...w.bindings, [s.slot]: id } })}
               onCreateChannel={onCreateChannel}
               onGoChannels={onGoChannels}
+              onGoEndpoints={onGoEndpoints}
             />
           ))}
         </>
@@ -986,18 +1180,25 @@ type SlotSpec = NonNullable<PresetSummary['slots']>[number];
  *  "create + pick" for a fresh feed, and the explicit skip for optional slots. */
 function SlotChooser({
   slot,
+  label,
   channels,
+  gateway,
   value,
   onPick,
   onCreateChannel,
   onGoChannels,
+  onGoEndpoints,
 }: {
   slot: SlotSpec;
+  /** The delegate label being installed — names the gate's derived feed. */
+  label: string;
   channels: ChannelDef[];
+  gateway: GatewayDeviceStatus | null;
   value: string | null | undefined;
   onPick: (id: string | null) => void;
   onCreateChannel?: CreateChannelFn;
   onGoChannels: () => void;
+  onGoEndpoints: () => void;
 }) {
   const [query, setQuery] = useState('');
   const [showOthers, setShowOthers] = useState(false);
@@ -1038,6 +1239,12 @@ function SlotChooser({
         <span className="ttl">{slot.slot} · {slot.kind} · {slot.direction}</span>
         <span className="summary">{slot.required ? 'required' : 'optional'}{value ? ` · ${value}` : ''}</span>
       </div>
+      {slot.kind === 'messaging' && (
+        <div className="muted" style={{ fontSize: 11.5, marginBottom: 6 }}>
+          {gateRelayNote(gateway, label)}
+          {!gateway?.configured && <>{' '}<button className="btn sm" type="button" onClick={onGoEndpoints}>set up the contact gate</button></>}
+        </div>
+      )}
       {channels.length > 6 && (
         <input
           style={{ ...INPUT, marginBottom: 6 }}

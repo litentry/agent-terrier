@@ -54,6 +54,7 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/sandbox/self/audit	serves the in-sandbox dsh suite (#611-613); client half pinned by packages/agentkeys-dsh/tests/audit.spec.ts against the wire shape — daemon-handler runtime test lands with the #620 spawn-valve e2e (needs a spawned dsh sandbox on the test stack)
 /v1/sandbox/self/credential	same dsh-suite surface — client half pinned by packages/agentkeys-dsh/tests/credentials.spec.ts; daemon handler needs the #620 spawned-sandbox e2e
 /v1/sandbox/self/grants	same dsh-suite surface — client half pinned by packages/agentkeys-dsh/tests/guard.spec.ts; daemon handler needs the #620 spawned-sandbox e2e
+/v1/sandbox/self/bindings	#717 the LIVE REBIND push — SANDBOX-INTERNAL (delegate daemon; bearer = the broker-minted per-delegate mgmt token), never a web surface: the broker's /v1/agent/spawn/context/update drives it after a rebind confirm (phase 8 exercises that path headlessly through `agentkeys app rebind`), and the bearer gate + the override file are unit-tested (ui_bridge::rebind_gate_tests, app_runtime::live_bindings_tests). Retire when a suite step drives a live delegate's rebind end to end.
 /v1/actors/:id/revoke	master-gated revoke (gas) — covered at CLI level by heima-device-revoke.sh; web submit needs signed UserOp e2e
 /v1/actors/:id/caps/revoke	cap revoke — broker cap.rs unit-tests the revoked-deny; web path needs a live cap fixture (former MCP-tool coverage retired, #560)
 /v1/audit/stream	SSE — curl smoke would hang a step; needs a timeout-bounded SSE reader helper

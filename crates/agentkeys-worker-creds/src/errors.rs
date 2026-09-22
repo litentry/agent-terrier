@@ -166,13 +166,30 @@ where
 /// instead of the SDK's generic "service error" the operator can't act on.
 pub fn s3_error_summary<E, R>(e: &SdkError<E, R>) -> String
 where
-    E: ProvideErrorMetadata,
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+    R: std::fmt::Debug + 'static,
 {
     match (e.code(), e.message()) {
         (Some(code), Some(msg)) if !msg.is_empty() => format!("{code} — {msg}"),
         (Some(code), _) => code.to_string(),
-        _ => e.to_string(),
+        _ => error_chain(e),
     }
+}
+
+/// The SDK's Display plus its source chain. A transport-level failure has no
+/// service code, and the SDK's own Display for it is the bare "dispatch
+/// failure" — which is all every sandbox checkpoint PUT on the VE memory
+/// worker answered (measured 2026-09-22): the cause (a reset, a timeout, a
+/// stalled upload, a TLS refusal) lives in the sources.
+pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        out.push_str(" ← ");
+        out.push_str(&s.to_string());
+        cur = s.source();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -273,5 +290,41 @@ mod tests {
         let e = SdkError::<GetObjectError, ()>::timeout_error("mock timeout");
         assert_eq!(s3_error_code(&e), "transport_timeout");
         assert_eq!(s3_error_message(&e), None);
+    }
+}
+
+#[cfg(test)]
+mod error_chain_tests {
+    use super::error_chain;
+
+    #[derive(Debug)]
+    struct Leaf;
+    impl std::fmt::Display for Leaf {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("connection reset by peer")
+        }
+    }
+    impl std::error::Error for Leaf {}
+
+    #[derive(Debug)]
+    struct Outer(Leaf);
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("dispatch failure")
+        }
+    }
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn the_chain_names_the_cause_behind_a_bare_display() {
+        assert_eq!(
+            error_chain(&Outer(Leaf)),
+            "dispatch failure ← connection reset by peer"
+        );
+        assert_eq!(error_chain(&Leaf), "connection reset by peer");
     }
 }

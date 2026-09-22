@@ -70,8 +70,15 @@ impl AppRuntimeConfig {
         }
     }
 
+    /// The spawn env, then this instance's live-rebind override when one was
+    /// pushed (`bound_channels_file`) — a `--publish-once` subprocess and a
+    /// daemon restart inside the same instance follow the rebind too.
     pub fn from_env() -> Self {
-        Self::from_lookup(|k| std::env::var(k).ok())
+        let mut cfg = Self::from_lookup(|k| std::env::var(k).ok());
+        if let Some(bound) = read_bound_channels_override(&bound_channels_file()) {
+            cfg.bound_channels = bound;
+        }
+        cfg
     }
 
     /// The feed the sandbox polls (R1): every bound `sub`/`duplex` slot plus
@@ -113,6 +120,59 @@ impl AppRuntimeConfig {
             .map(|b| b.channel_id.clone())
             .unwrap_or_else(|| slot_or_channel.to_string())
     }
+}
+
+/// Where a live rebind (#717) persists this instance's bound channels over the
+/// spawn env (`AGENTKEYS_BOUND_CHANNELS_FILE`, default
+/// `/var/lib/agentkeys/bound-channels.json`). A re-created instance boots from
+/// the broker's updated context and never sees the file.
+pub fn bound_channels_file() -> String {
+    std::env::var("AGENTKEYS_BOUND_CHANNELS_FILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "/var/lib/agentkeys/bound-channels.json".to_string())
+}
+
+pub fn read_bound_channels_override(path: &str) -> Option<Vec<BoundChannel>> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<Vec<BoundChannel>>(&raw) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                path,
+                error = %e,
+                "#717 live rebind: the bound-channels override is not a BoundChannel JSON array — ignored"
+            );
+            None
+        }
+    }
+}
+
+static LIVE_BINDINGS: std::sync::OnceLock<tokio::sync::watch::Sender<Option<Vec<BoundChannel>>>> =
+    std::sync::OnceLock::new();
+
+/// The live-rebind channel: `/v1/sandbox/self/bindings` sends, the chat
+/// loop's feed supervisor receives.
+pub fn live_bindings_sender() -> &'static tokio::sync::watch::Sender<Option<Vec<BoundChannel>>> {
+    LIVE_BINDINGS.get_or_init(|| tokio::sync::watch::channel(None).0)
+}
+
+pub fn live_bindings_receiver() -> tokio::sync::watch::Receiver<Option<Vec<BoundChannel>>> {
+    live_bindings_sender().subscribe()
+}
+
+/// Apply a live rebind: persist the override, hand the set to the chat loop.
+/// Returns the bound-channel count.
+pub fn apply_live_bindings(bound: Vec<BoundChannel>) -> Result<usize, String> {
+    let path = bound_channels_file();
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let json = serde_json::to_vec_pretty(&bound).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("{path}: {e}"))?;
+    let n = bound.len();
+    live_bindings_sender().send_replace(Some(bound));
+    Ok(n)
 }
 
 /// One feed the loop polls / publishes, tagged for the agent turn (R1: "events
@@ -307,5 +367,311 @@ mod tests {
         assert!(tool_granted(&g, "schedule"));
         assert!(!tool_granted(&g, "web"));
         assert!(!tool_granted(&[], "schedule"));
+    }
+}
+
+/// How long [`seed_bundle_context_when_bridge_up`] waits for the bridge to
+/// answer (`AGENTKEYS_BRIDGE_APPLY_WAIT_SECS`, default 180, 10..=900) — the
+/// bridge binds early (#589) but a cold pod can take a minute to reach it.
+fn bridge_apply_wait_secs() -> u64 {
+    std::env::var("AGENTKEYS_BRIDGE_APPLY_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| (10..=900).contains(s))
+        .unwrap_or(180)
+}
+
+/// What the bridge's `/v1/context/files` view says is present.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextPresence {
+    pub soul: bool,
+    pub skills: usize,
+    pub knowledge: usize,
+}
+
+/// Parse the bridge's `/v1/context/files` answer (`files[{id, present}]`,
+/// `skills[]`, `knowledge[]`) — pure.
+pub fn parse_context_presence(v: &serde_json::Value) -> ContextPresence {
+    let soul = v
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|files| {
+            files.iter().any(|f| {
+                f.get("id").and_then(|i| i.as_str()) == Some("soul")
+                    && f.get("present").and_then(|p| p.as_bool()) == Some(true)
+            })
+        })
+        .unwrap_or(false);
+    let count = |k: &str| {
+        v.get(k)
+            .and_then(|a| a.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    };
+    ContextPresence {
+        soul,
+        skills: count("skills"),
+        knowledge: count("knowledge"),
+    }
+}
+
+/// The `/v1/context/apply` body that fills what the bridge LACKS from the
+/// template bundle: the persona only when no SOUL.md is present (and the
+/// bundle's passed the persona gate), the skills only when the skills store
+/// is empty, the knowledge likewise — name → base64 content, `restart: false`
+/// (the bridge re-registers its prompt sections on every apply; the next turn
+/// sees them, a turn in flight is never cut). `None` = nothing to seed. Pure.
+pub fn bundle_seed_body(
+    present: &ContextPresence,
+    bundle: &PresetBundle,
+    persona_valid: bool,
+) -> Option<serde_json::Value> {
+    use base64::Engine as _;
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
+    let docs = |v: &[agentkeys_backend_client::protocol::PresetSkillDoc]| -> serde_json::Map<String, serde_json::Value> {
+        v.iter()
+            .map(|d| (d.filename.clone(), serde_json::Value::String(b64(&d.content))))
+            .collect()
+    };
+    let mut body = serde_json::Map::new();
+    if !present.soul && persona_valid && !bundle.soul_md.trim().is_empty() {
+        body.insert(
+            "files".into(),
+            serde_json::json!({ "soul": b64(&bundle.soul_md) }),
+        );
+    }
+    if present.skills == 0 && !bundle.skills.is_empty() {
+        body.insert(
+            "skills".into(),
+            serde_json::Value::Object(docs(&bundle.skills)),
+        );
+    }
+    if present.knowledge == 0 && !bundle.knowledge.is_empty() {
+        body.insert(
+            "knowledge".into(),
+            serde_json::Value::Object(docs(&bundle.knowledge)),
+        );
+    }
+    if body.is_empty() {
+        return None;
+    }
+    body.insert("restart".into(), serde_json::Value::Bool(false));
+    Some(serde_json::Value::Object(body))
+}
+
+/// Wait for the local bridge, read what it holds, and seed the missing
+/// persona / skills / knowledge from the template bundle. Every outcome is
+/// logged; nothing here is load-bearing for the loop.
+pub async fn seed_bundle_context_when_bridge_up(
+    http: reqwest::Client,
+    bridge_url: String,
+    bridge_token: Option<String>,
+    bundle: PresetBundle,
+    persona_valid: bool,
+) {
+    let base = bridge_url.trim_end_matches('/').to_string();
+    let template = bundle.manifest.id.clone();
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(bridge_apply_wait_secs());
+    let authed = |req: reqwest::RequestBuilder| match &bridge_token {
+        Some(token) => req.bearer_auth(token),
+        None => req,
+    };
+    // The bridge answers /healthz at ANY status once its process is up (503
+    // `starting` while no agent holds a session — #711); a transport error
+    // means it is not listening yet.
+    loop {
+        let up = http
+            .get(format!("{base}/healthz"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .is_ok();
+        if up {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                template = %template,
+                "#660 app runtime: bridge never answered — the template context was NOT seeded at boot"
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+    let present = match authed(http.get(format!("{base}/v1/context/files")))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            parse_context_presence(&resp.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+        Ok(resp) => {
+            tracing::warn!(template = %template, status = %resp.status(), "#660 app runtime: bridge context view refused — seeding skipped");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(template = %template, error = %e, "#660 app runtime: bridge context view failed — seeding skipped");
+            return;
+        }
+    };
+    if !persona_valid {
+        tracing::error!(template = %template, "#660 app runtime: the template's SOUL.md fails the persona gate — not seeded (repo-bundle bug)");
+    }
+    let Some(body) = bundle_seed_body(&present, &bundle, persona_valid) else {
+        tracing::info!(
+            template = %template,
+            soul = present.soul,
+            skills = present.skills,
+            knowledge = present.knowledge,
+            "#660 app runtime: bridge context already present — nothing to seed"
+        );
+        return;
+    };
+    match authed(http.post(format!("{base}/v1/context/apply")))
+        .timeout(std::time::Duration::from_secs(30))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let v: serde_json::Value = resp.json().await.unwrap_or_default();
+            let n = |k: &str| {
+                v.get(k)
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            };
+            tracing::info!(
+                template = %template,
+                files = n("files_written"),
+                skills = n("skills_written"),
+                knowledge = n("knowledge_written"),
+                "#660 app runtime: template context seeded into the bridge at boot"
+            );
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                template = %template,
+                %status,
+                body = %text.chars().take(200).collect::<String>(),
+                "#660 app runtime: bridge refused the context seed"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(template = %template, error = %e, "#660 app runtime: context seed failed");
+        }
+    }
+}
+
+#[cfg(test)]
+mod bundle_seed_tests {
+    use super::{bundle_seed_body, parse_context_presence, ContextPresence};
+    use agentkeys_backend_client::protocol::PresetBundle;
+
+    fn bundle() -> PresetBundle {
+        serde_json::from_value(serde_json::json!({
+            "manifest": { "id": "chef", "version": "1.0.0", "name": "Chef" },
+            "soul_md": "# Chef\n\nA family cook.",
+            "skills": [{ "filename": "plan.md", "content": "plan" }],
+            "knowledge": [{ "filename": "nutrition-basics.md", "content": "basics" }]
+        }))
+        .expect("a minimal bundle")
+    }
+
+    #[test]
+    fn a_bare_bridge_gets_persona_skills_and_knowledge_without_a_restart() {
+        let body = bundle_seed_body(&ContextPresence::default(), &bundle(), true).expect("seed");
+        assert_eq!(body["files"]["soul"], "IyBDaGVmCgpBIGZhbWlseSBjb29rLg==");
+        assert_eq!(body["skills"]["plan.md"], "cGxhbg==");
+        assert_eq!(body["knowledge"]["nutrition-basics.md"], "YmFzaWNz");
+        assert_eq!(body["restart"], false);
+    }
+
+    #[test]
+    fn only_what_is_missing_is_seeded_and_a_full_bridge_gets_nothing() {
+        let present = ContextPresence {
+            soul: true,
+            skills: 0,
+            knowledge: 1,
+        };
+        let body = bundle_seed_body(&present, &bundle(), true).expect("skills missing");
+        assert!(
+            body.get("files").is_none(),
+            "an applied persona is never clobbered"
+        );
+        assert!(body.get("knowledge").is_none());
+        assert_eq!(body["skills"]["plan.md"], "cGxhbg==");
+        let full = ContextPresence {
+            soul: true,
+            skills: 4,
+            knowledge: 1,
+        };
+        assert!(bundle_seed_body(&full, &bundle(), true).is_none());
+        // A persona that fails the gate is skipped; the docs still seed.
+        let body = bundle_seed_body(&ContextPresence::default(), &bundle(), false).expect("docs");
+        assert!(body.get("files").is_none());
+        assert!(body.get("skills").is_some());
+    }
+
+    #[test]
+    fn the_bridge_view_parses_into_presence() {
+        let v = serde_json::json!({
+            "files": [{ "id": "soul", "present": false }, { "id": "agents", "present": true }],
+            "skills": ["diary.md", "plan.md"],
+            "knowledge": [],
+            "cwd": "/opt/agentkeys"
+        });
+        assert_eq!(
+            parse_context_presence(&v),
+            ContextPresence {
+                soul: false,
+                skills: 2,
+                knowledge: 0
+            }
+        );
+        assert_eq!(
+            parse_context_presence(&serde_json::json!({})),
+            ContextPresence::default()
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_bindings_tests {
+    use super::*;
+
+    #[test]
+    fn the_override_file_round_trips_and_garbage_is_ignored() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("ak-bind-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bound-channels.json");
+        let bound = vec![BoundChannel {
+            slot: "family_chat".into(),
+            kind: ChannelEndpointKind::Messaging,
+            direction: SlotDirection::Duplex,
+            channel_id: "family-chat".into(),
+            event_kinds: vec![],
+            endpoint_actor_omni: None,
+        }];
+        std::fs::write(&path, serde_json::to_vec(&bound).unwrap()).unwrap();
+        assert_eq!(
+            read_bound_channels_override(path.to_str().unwrap()),
+            Some(bound)
+        );
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(read_bound_channels_override(path.to_str().unwrap()), None);
+        assert_eq!(
+            read_bound_channels_override(dir.join("absent.json").to_str().unwrap()),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

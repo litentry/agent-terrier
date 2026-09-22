@@ -430,6 +430,41 @@ pub fn scope_batch_calldata(
     execute_batch_calldata(&[*scope], &[0u128], &[scope_cd])
 }
 
+/// **The #717 rebind batch** — a slot change on an INSTALLED app under ONE
+/// Touch ID: `executeBatch([registerAgentDevice(endpoint_new)…,
+/// setScope(delegate), setScope(endpoint_1)…])`. The delegate's binding
+/// exists, so only its grant set (set-replace) and the endpoints' mirror
+/// grants change; an endpoint the new channel needs that is not yet bound (a
+/// contact gate) is registered first in the same batch. No `registerDelegate`,
+/// no slot consumed.
+pub fn rebind_batch_calldata(
+    registry: &[u8; 20],
+    scope: &[u8; 20],
+    operator_omni: &[u8; 32],
+    actor_omni: &[u8; 32],
+    grant: &ScopeGrant,
+    extra: &[ExtraScope],
+    enrollments: &[AgentRegister],
+) -> Vec<u8> {
+    let mut dests = Vec::with_capacity(1 + extra.len() + enrollments.len());
+    let mut values = Vec::with_capacity(dests.capacity());
+    let mut calls = Vec::with_capacity(dests.capacity());
+    for e in enrollments {
+        dests.push(*registry);
+        values.push(0u128);
+        calls.push(register_agent_device_calldata(e));
+    }
+    dests.push(*scope);
+    values.push(0u128);
+    calls.push(set_scope_calldata(operator_omni, actor_omni, grant));
+    for e in extra {
+        dests.push(*scope);
+        values.push(0u128);
+        calls.push(set_scope_calldata(operator_omni, &e.actor_omni, &e.grant));
+    }
+    execute_batch_calldata(&dests, &values, &calls)
+}
+
 /// One extra `setScope` an install / uninstall batch carries for an ENDPOINT
 /// actor (#663 — the gateway that relays a messaging feed, the console that
 /// renders a display feed): `(actor_omni, the actor's FULL replacement grant)`.
@@ -1654,5 +1689,50 @@ mod tests {
         // the three derivations are distinct (different preimage shapes).
         assert_ne!(master_account_salt(&omni), master_device_key_hash(&omni));
         assert_ne!(master_cred_id_hash(&omni), master_account_salt(&omni));
+    }
+}
+
+#[cfg(test)]
+mod rebind_batch_tests {
+    use super::*;
+
+    fn grant() -> ScopeGrant {
+        ScopeGrant {
+            services: vec![[0x11u8; 32]],
+            read_only: false,
+            max_per_call: 0,
+            max_per_period: 0,
+            max_total: 0,
+            period_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn a_rebind_without_endpoints_is_the_plain_scope_batch() {
+        let g = grant();
+        let plain = scope_batch_calldata(&[0xaa; 20], &[1u8; 32], &[2u8; 32], &g);
+        let rebind = rebind_batch_calldata(
+            &[0xbb; 20],
+            &[0xaa; 20],
+            &[1u8; 32],
+            &[2u8; 32],
+            &g,
+            &[],
+            &[],
+        );
+        assert_eq!(plain, rebind);
+        let with_mirror = rebind_batch_calldata(
+            &[0xbb; 20],
+            &[0xaa; 20],
+            &[1u8; 32],
+            &[2u8; 32],
+            &g,
+            &[ExtraScope {
+                actor_omni: [3u8; 32],
+                grant: grant(),
+            }],
+            &[],
+        );
+        assert!(with_mirror.len() > plain.len());
     }
 }

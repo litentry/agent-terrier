@@ -145,6 +145,8 @@ pub struct UiBridgeState {
     pub app_install_by_dkh: RwLock<HashMap<String, crate::apps::AppInstallStash>>,
     /// #664 — the uninstall ceremony stash, keyed by label.
     pub app_uninstall_by_label: RwLock<HashMap<String, crate::apps::AppUninstallStash>>,
+    /// #717 — the rebind stash (build → ONE Touch ID → submit), by app label.
+    pub app_rebind_by_label: RwLock<HashMap<String, crate::apps::AppRebindStash>>,
     /// #541 — this console's OWN device actor once enrolled (loaded from the
     /// persisted coordinates at boot).
     pub console_device: RwLock<Option<crate::console_device::ConsoleDevice>>,
@@ -1287,6 +1289,8 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/sandbox/self/grants", get(sandbox_self_grants))
         .route("/v1/sandbox/self/credential", post(sandbox_self_credential))
         .route("/v1/sandbox/self/audit", post(sandbox_self_audit))
+        // #717 — the live rebind: the broker pushes new bound channels here.
+        .route("/v1/sandbox/self/bindings", post(sandbox_self_bindings))
         .route("/v1/k11/enroll/begin", post(enroll_begin))
         .route("/v1/k11/enroll/finish", post(enroll_finish))
         .route("/v1/master/register/submit", post(master_register_submit))
@@ -1414,6 +1418,15 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route(
             "/v1/master/apps/:label/uninstall/submit",
             post(crate::apps::app_uninstall_submit),
+        )
+        // #717 — rebind a slot in place: ONE Touch ID, no reinstall.
+        .route(
+            "/v1/master/apps/:label/rebind/build",
+            post(crate::apps::app_rebind_build),
+        )
+        .route(
+            "/v1/master/apps/:label/rebind/submit",
+            post(crate::apps::app_rebind_submit),
         )
         .route(
             "/v1/master/apps/:label/command",
@@ -1703,6 +1716,7 @@ pub fn build_state(
         resource_registry: RwLock::new(None),
         app_install_by_dkh: RwLock::new(HashMap::new()),
         app_uninstall_by_label: RwLock::new(HashMap::new()),
+        app_rebind_by_label: RwLock::new(HashMap::new()),
         console_device: RwLock::new(crate::console_device::load_persisted(broker_url.as_deref())),
         console_session: RwLock::new(None),
         console_enroll_pending: RwLock::new(None),
@@ -7214,7 +7228,13 @@ pub(crate) async fn spawn_submit_core(
                         l
                     }
                 };
-                ensure_channel_named(state, &chat_id, &format!("Chat · {display}")).await;
+                ensure_channel_named(
+                    state,
+                    &chat_id,
+                    &format!("Chat · {display}"),
+                    "auto-registered at spawn (#430 operator chat)",
+                )
+                .await;
             }
             // #428 — distribute the preset content into the fresh delegate
             // (persona canonical + sandbox apply + skills docs). Best-effort
@@ -7714,11 +7734,13 @@ async fn list_inheritable_namespaces(
     Json(serde_json::json!({ "namespaces": namespaces })).into_response()
 }
 
-/// #430 — auto-register a spawn's opchat channel id with a display name, so
-/// its grants render with a NAME after daemon restarts (the registry is the
-/// id→name dictionary; the keccak re-name map alone yields a raw-id chip).
-/// Insert-if-absent; best-effort loud.
-pub(crate) async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: &str) {
+/// #430 — auto-register a feed's channel id with a display name and a note
+/// saying what registered it, so its grants render with a NAME after daemon
+/// restarts (the registry is the id→name dictionary; the keccak re-name map
+/// alone yields a raw-id chip). Insert-if-absent; best-effort loud. (Until
+/// 2026-09-22 every caller stamped "operator chat" — an app's family-chat feed
+/// read as one on the channels page.)
+pub(crate) async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: &str, note: &str) {
     if !valid_channel_id(id) {
         return;
     }
@@ -7738,7 +7760,7 @@ pub(crate) async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: 
     registry.channels.push(ApiChannel {
         id: id.to_string(),
         name: name.to_string(),
-        note: Some("auto-registered at spawn (#430 operator chat)".to_string()),
+        note: Some(note.to_string()),
         created_at: now_unix(),
         kind: None,
         endpoint_actor_omni: None,
@@ -7876,6 +7898,44 @@ pub struct ChatPollRequest {
     pub wait_seconds: u64,
 }
 
+fn env_u32(name: &str, default: u32, range: std::ops::RangeInclusive<u32>) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|n| range.contains(n))
+        .unwrap_or(default)
+}
+
+/// How many events a chat history load asks the worker for
+/// (`AGENTKEYS_CHAT_HISTORY_TAIL`, default 200, 1..=5000): the worker decrypts
+/// only that tail — one TOS object per event, ~30 ms each (measured
+/// 2026-09-19: an unbounded load of a 1000-event feed took 36 s through this
+/// daemon and overran its own budget).
+pub(crate) fn chat_history_tail() -> u32 {
+    static TAIL: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *TAIL.get_or_init(|| env_u32("AGENTKEYS_CHAT_HISTORY_TAIL", 200, 1..=5000))
+}
+
+/// How many events a display-feed read (the latest card + the recent
+/// commands) asks for (`AGENTKEYS_DISPLAY_FEED_TAIL`, default 120, 1..=5000).
+pub(crate) fn display_feed_tail() -> u32 {
+    static TAIL: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *TAIL.get_or_init(|| env_u32("AGENTKEYS_DISPLAY_FEED_TAIL", 120, 1..=5000))
+}
+
+/// The worker's own work per poll on top of the long-poll window it may hold:
+/// the cap verification against the chain (2–3 reads at 1–3 s each on the
+/// public RPC, measured 2026-09-19) and the decrypt of the window.
+const WORKER_POLL_OVERHEAD_SECS: u64 = 35;
+
+/// The HTTP budget for one worker poll — the window the worker may hold PLUS
+/// its own work. A flat 40 s used to lose a 25 s long-poll behind a slow
+/// verification: the console read "error sending request" for a poll the
+/// worker went on to answer (499 at nginx).
+pub(crate) fn worker_poll_budget(wait_seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(wait_seconds + WORKER_POLL_OVERHEAD_SECS)
+}
+
 /// The channel worker the daemon talks to — same env family as every worker
 /// URL (`AGENTKEYS_WORKER_CHANNEL_URL`, wired by dev.sh / the host env files).
 /// The channel worker base URL for the caller's SELECTED stack.
@@ -7912,12 +7972,40 @@ pub(crate) fn channel_worker_url(broker: &str) -> Result<String, String> {
 /// Master-self channel cap (operator == actor — the session-authenticated
 /// operator path of the channel-kind matrix; no operator K10 involved beyond
 /// the daemon's own device key for the #76 PoP when configured).
+/// The console's channel caps are minted with this TTL (seconds)…
+const CHANNEL_CAP_TTL_SECS: u64 = 120;
+/// …and reused for that long minus this margin. Every chip poll, chat poll
+/// and dashboard read used to mint a fresh cap — three chain reads at the
+/// broker per poll (1–3 s each on the public RPC, measured 2026-09-19).
+const CHANNEL_CAP_REUSE_MARGIN_SECS: u64 = 20;
+
+type ChannelCapCache =
+    std::sync::Mutex<HashMap<String, (serde_json::Value, SessionCoords, std::time::Instant)>>;
+
+fn channel_cap_cache() -> &'static ChannelCapCache {
+    static CACHE: std::sync::OnceLock<ChannelCapCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Is a cap minted `age` ago still worth reusing under the TTL/margin rule?
+pub(crate) fn channel_cap_reusable(age: std::time::Duration) -> bool {
+    age.as_secs() + CHANNEL_CAP_REUSE_MARGIN_SECS < CHANNEL_CAP_TTL_SECS
+}
+
 pub(crate) async fn master_channel_cap(
     state: &UiBridgeState,
     direction_service: String,
     op: agentkeys_backend_client::protocol::CapMintOp,
 ) -> Result<(serde_json::Value, SessionCoords), String> {
     let coords = resolve_session_coords(state).await?;
+    let cache_key = format!("{}|{}|{:?}", coords.omni, direction_service, op);
+    if let Ok(cache) = channel_cap_cache().lock() {
+        if let Some((cap, cached_coords, at)) = cache.get(&cache_key) {
+            if channel_cap_reusable(at.elapsed()) && cached_coords.broker == coords.broker {
+                return Ok((cap.clone(), coords));
+            }
+        }
+    }
     let client = agentkeys_backend_client::BackendClient::new(
         Some(coords.broker.clone()),
         None,
@@ -7936,13 +8024,20 @@ pub(crate) async fn master_channel_cap(
                 actor_omni: coords.omni.clone(),
                 service: direction_service,
                 device_key_hash: coords.device_key_hash.clone(),
-                ttl_seconds: 120,
+                ttl_seconds: CHANNEL_CAP_TTL_SECS,
             },
             &coords.j1,
         )
         .await
         .map_err(|e| format!("channel cap mint: {e}"))?;
     let cap_json = serde_json::to_value(&cap).map_err(|e| format!("cap serialize: {e}"))?;
+    if let Ok(mut cache) = channel_cap_cache().lock() {
+        cache.retain(|_, (_, _, at)| channel_cap_reusable(at.elapsed()));
+        cache.insert(
+            cache_key,
+            (cap_json.clone(), coords.clone(), std::time::Instant::now()),
+        );
+    }
     Ok((cap_json, coords))
 }
 
@@ -8335,7 +8430,7 @@ async fn master_agent_lifecycle(
     });
     let resp = match reqwest::Client::new()
         .post(format!("{worker}/v1/channel/poll"))
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(worker_poll_budget(0))
         .json(&body)
         .send()
         .await
@@ -8442,14 +8537,19 @@ async fn master_chat_poll(
         }
     };
     // @backend-fixture: channel_poll_body
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "cap": cap,
         "after": req.after,
         "wait_seconds": req.wait_seconds.min(25),
     });
+    // A history load (no cursor) asks for a bounded TAIL of the feed; a
+    // cursor read continues from where the caller left off.
+    if req.after.trim().is_empty() {
+        body["tail"] = serde_json::json!(chat_history_tail());
+    }
     let resp = match reqwest::Client::new()
         .post(format!("{worker}/v1/channel/poll"))
-        .timeout(std::time::Duration::from_secs(40))
+        .timeout(worker_poll_budget(req.wait_seconds.min(25)))
         .json(&body)
         .send()
         .await
@@ -10129,6 +10229,7 @@ async fn get_master_memory_entry_inner(
 /// (memory + config): the broker, the master J1, the (normalized) master omni,
 /// the on-chain device hash, and the region. Resolved once; the per-data-class
 /// contexts add the worker URL + IAM role on top.
+#[derive(Clone)]
 pub(crate) struct SessionCoords {
     pub(crate) broker: String,
     pub(crate) region: String,
@@ -18515,5 +18616,124 @@ mod tests {
         let resp = get_master_agent_context(State(state)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await["configured"], false);
+    }
+}
+
+#[cfg(test)]
+mod channel_cap_reuse_tests {
+    use super::{channel_cap_reusable, worker_poll_budget};
+    use std::time::Duration;
+
+    #[test]
+    fn a_cap_is_reused_until_the_margin_before_its_ttl() {
+        assert!(channel_cap_reusable(Duration::from_secs(0)));
+        assert!(channel_cap_reusable(Duration::from_secs(99)));
+        assert!(!channel_cap_reusable(Duration::from_secs(100)));
+        assert!(!channel_cap_reusable(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn the_poll_budget_covers_the_held_window_plus_the_workers_own_work() {
+        assert_eq!(worker_poll_budget(25), Duration::from_secs(60));
+        assert_eq!(worker_poll_budget(0), Duration::from_secs(35));
+    }
+}
+
+/// `POST /v1/sandbox/self/bindings` — the #717 LIVE REBIND: the broker's
+/// spawn-context update pushes the delegate's new bound channels into the
+/// running instance; the chat loop re-sources its pollers, the publish
+/// targets follow, nothing restarts. Gated by the per-delegate management
+/// token the broker minted at spawn (`AGENTKEYS_SANDBOX_MGMT_TOKEN` — the
+/// bearer the dsh bridge's `/v1/sandbox/mgmt/*` checks), never the
+/// open-when-unset bridge token of the self-view: an unauthenticated caller
+/// must not be able to re-point a delegate's feeds (#715).
+#[derive(Deserialize)]
+struct SandboxBindingsRequest {
+    #[serde(default)]
+    bound_channels: Vec<agentkeys_backend_client::protocol::BoundChannel>,
+}
+
+/// The management-bearer gate of the live-rebind route: 404 without a token
+/// in the env (not a broker-managed delegate), 401 on a mismatch
+/// (constant-time compare).
+fn mgmt_bearer_gate(
+    expected: Option<&str>,
+    presented: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let Some(expected) = expected.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no management token in this daemon's env — not a broker-managed sandbox delegate"
+            })),
+        ));
+    };
+    if !ct_bearer_eq(presented, expected) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "unauthorized: missing or invalid management bearer"
+            })),
+        ));
+    }
+    Ok(())
+}
+
+async fn sandbox_self_bindings(
+    headers: HeaderMap,
+    Json(req): Json<SandboxBindingsRequest>,
+) -> impl IntoResponse {
+    let expected = std::env::var(agentkeys_backend_client::protocol::sandbox_env::MGMT_TOKEN).ok();
+    let presented = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if let Err(refused) = mgmt_bearer_gate(expected.as_deref(), presented) {
+        return refused;
+    }
+    match crate::app_runtime::apply_live_bindings(req.bound_channels) {
+        Ok(n) => {
+            tracing::info!(feeds = n, "#717 live rebind: bound channels applied");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "feeds": n,
+                    "applied": crate::app_runtime::live_bindings_sender().receiver_count() > 0,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod rebind_gate_tests {
+    use super::*;
+
+    #[test]
+    fn the_live_rebind_route_is_gated_by_the_mgmt_bearer() {
+        let code = |r: Result<(), (StatusCode, Json<serde_json::Value>)>| r.err().map(|e| e.0);
+        assert_eq!(
+            code(mgmt_bearer_gate(None, "smt1_x")),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            code(mgmt_bearer_gate(Some("  "), "smt1_x")),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            code(mgmt_bearer_gate(Some("smt1_x"), "")),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            code(mgmt_bearer_gate(Some("smt1_x"), "smt1_y")),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert!(mgmt_bearer_gate(Some("smt1_x"), "smt1_x").is_ok());
     }
 }

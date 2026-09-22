@@ -87,8 +87,11 @@ describe('propose_to_owner — pure pieces', () => {
       '--propose-once', '--propose-ns', 'family', '--propose-key', 'pantry-habits', '--propose-kind', 'knowledge',
     ]);
   });
-  it('the default namespace is the first of the spawn env list', () => {
-    expect(defaultProposalNamespace({ AGENTKEYS_MEMORY_NAMESPACES: 'app-chef,family,personal' })).toBe('app-chef');
+  it('the default namespace is the app’s own inbox, else the first of the pull list', () => {
+    // chef, measured 2026-09-18: the pull list opens with what it READS.
+    expect(defaultProposalNamespace({ AGENTKEYS_MEMORY_NS: 'app-chef', AGENTKEYS_MEMORY_NAMESPACES: 'household,personal,family' })).toBe('app-chef');
+    expect(defaultProposalNamespace({ AGENTKEYS_MEMORY_NAMESPACES: 'family,personal' })).toBe('family');
+    expect(defaultProposalNamespace({ AGENTKEYS_MEMORY_NS: '  ' , AGENTKEYS_MEMORY_NAMESPACES: 'family' })).toBe('family');
     expect(defaultProposalNamespace({})).toBe('');
   });
   it('parses the daemon receipt and rejects anything else', () => {

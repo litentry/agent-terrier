@@ -549,6 +549,24 @@ async fn run(cfg: ChatLoopConfig) {
     let perception_prompt = bundle
         .as_ref()
         .and_then(|b| b.perception_prompt().map(str::to_string));
+    // The template's persona, skills and knowledge belong to the RUNTIME, not
+    // to a console click: a sandbox the broker wakes (a scheduled tick, a
+    // lease rotation) has no console apply behind it, and a checkpoint that
+    // never landed restores nothing — measured 2026-09-22 on VE prod: both
+    // live sandboxes ran bare (no SOUL.md, no skills, no knowledge), and chef
+    // improvised free-form JSON instead of the card contract its plan skill
+    // spells out. The seed fills only what is MISSING on the bridge (a console
+    // apply that raced ahead, or a restored home, is never clobbered), and
+    // never restarts the agent (a turn in flight survives).
+    if let Some(b) = &bundle {
+        tokio::spawn(crate::app_runtime::seed_bundle_context_when_bridge_up(
+            http.clone(),
+            cfg.bridge_url.clone(),
+            cfg.bridge_token.clone(),
+            b.clone(),
+            crate::persona::validate_persona_body(&b.soul_md).is_ok(),
+        ));
+    }
     if !app.template_id.is_empty() {
         tracing::info!(
             template = %app.template_id,
@@ -576,23 +594,59 @@ async fn run(cfg: ChatLoopConfig) {
         }
     }
 
-    // R1 — one poller per readable feed, all feeding ONE dispatcher queue.
-    let feeds = app.feeds(&cfg.chat_channel_id);
-    // #693 — every stage change lands on every feed this delegate writes.
-    crate::lifecycle::spawn_publisher(hub.clone(), publisher.clone(), feeds.clone());
+    // R1 — one poller per readable feed, all feeding ONE dispatcher queue. The
+    // set follows a LIVE REBIND (#717): the broker pushes new bound channels
+    // through `/v1/sandbox/self/bindings`; pollers of dropped feeds stop, new
+    // feeds start, the rest keep their cursors — nothing restarts.
+    let feeds_now = Arc::new(std::sync::RwLock::new(app.feeds(&cfg.chat_channel_id)));
+    // #693 — every stage change lands on the delegate's conversational feeds
+    // (opchat + messaging); device feeds carry content only.
+    crate::lifecycle::spawn_publisher(hub.clone(), publisher.clone(), feeds_now.clone());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(FeedSpec, ChannelEvent)>(256);
-    for feed in feeds.iter().filter(|f| f.direction.reads()) {
-        tracing::info!(slot = %feed.slot, channel = %feed.channel_id, kind = %feed.kind.as_str(), "#665 chat loop: polling feed");
-        tokio::spawn(poll_feed(
-            feed.clone(),
-            session.clone(),
-            cfg.clone(),
-            credential.clone(),
-            http.clone(),
-            tx.clone(),
-        ));
+    let poller_ctx = PollerCtx {
+        session: session.clone(),
+        cfg: cfg.clone(),
+        credential: credential.clone(),
+        http: http.clone(),
+        tx,
+    };
+    let mut pollers: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    let initial = feeds_now.read().expect("feeds lock").clone();
+    reconcile_pollers(&mut pollers, &initial, &poller_ctx);
+    {
+        let app_static = app.clone();
+        let chat_channel_id = cfg.chat_channel_id.clone();
+        let feeds_now = feeds_now.clone();
+        let mut rx_bind = crate::app_runtime::live_bindings_receiver();
+        tokio::spawn(async move {
+            while rx_bind.changed().await.is_ok() {
+                let Some(bound) = rx_bind.borrow_and_update().clone() else {
+                    continue;
+                };
+                let mut next = (*app_static).clone();
+                next.bound_channels = bound;
+                let feeds = next.feeds(&chat_channel_id);
+                *feeds_now.write().expect("feeds lock") = feeds.clone();
+                reconcile_pollers(&mut pollers, &feeds, &poller_ctx);
+                tracing::info!(
+                    feeds = feeds.len(),
+                    pollers = pollers.len(),
+                    "#717 live rebind: feed set re-sourced"
+                );
+            }
+        });
     }
-    drop(tx);
+    // The ANCHOR (owner decision 2026-09-22): the bound channels live in the
+    // broker's durable spawn context — never baked into the image, never
+    // frozen in this instance. The loop re-reads it and re-sources itself, so
+    // a rebind lands without any restart even when the live push above never
+    // reached this instance.
+    tokio::spawn(anchor_poll(
+        session.clone(),
+        cfg.clone(),
+        http.clone(),
+        app.bound_channels.clone(),
+    ));
 
     let runtime = LoopRuntime {
         http: http.clone(),
@@ -607,6 +661,149 @@ async fn run(cfg: ChatLoopConfig) {
         handle_event(&runtime, &feed, &event).await;
     }
     tracing::warn!("#665 chat loop: every feed poller stopped — loop ending");
+}
+
+/// How often the loop re-reads its spawn context on the broker
+/// (`AGENTKEYS_BINDINGS_POLL_SECS`, default 90, floor 15).
+fn bindings_poll_secs() -> u64 {
+    std::env::var("AGENTKEYS_BINDINGS_POLL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.max(15))
+        .unwrap_or(90)
+}
+
+/// Follow the anchor: `GET /v1/agent/self/context` with the delegate's own
+/// session; a changed `bound_channels` set is applied through the same path
+/// the live push uses (persisted + the pollers reconciled). A broker without
+/// the route (or a row) is announced once and never retried loudly.
+async fn anchor_poll(
+    session: Arc<SessionHandle>,
+    cfg: Arc<ChatLoopConfig>,
+    http: reqwest::Client,
+    initial: Vec<agentkeys_backend_client::protocol::BoundChannel>,
+) {
+    let every = Duration::from_secs(bindings_poll_secs());
+    let url = format!(
+        "{}/v1/agent/self/context",
+        cfg.broker_url.trim_end_matches('/')
+    );
+    let mut last = serde_json::to_string(&initial).unwrap_or_default();
+    let mut announced_absent = false;
+    loop {
+        tokio::time::sleep(every).await;
+        let bearer = match session.bearer().await {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let resp = match http.get(&url).bearer_auth(&bearer).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(error = %e, "#717 anchor: broker unreachable");
+                continue;
+            }
+        };
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            if !announced_absent {
+                tracing::info!(
+                    "#717 anchor: no self-context on this broker (route or row) — bindings follow the spawn env + the live push only"
+                );
+                announced_absent = true;
+            }
+            continue;
+        }
+        if !resp.status().is_success() {
+            tracing::debug!(status = %resp.status(), "#717 anchor: refused");
+            continue;
+        }
+        let v: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "#717 anchor: non-JSON answer");
+                continue;
+            }
+        };
+        let Some(bound) = v.get("bound_channels").cloned() else {
+            continue;
+        };
+        let json = bound.to_string();
+        // A live push already applied this very set: stay in step with it.
+        let pushed_json = crate::app_runtime::live_bindings_sender()
+            .borrow()
+            .as_ref()
+            .and_then(|p| serde_json::to_string(p).ok());
+        if pushed_json.as_deref() == Some(json.as_str()) {
+            last = json;
+            continue;
+        }
+        if json == last {
+            continue;
+        }
+        match serde_json::from_value::<Vec<agentkeys_backend_client::protocol::BoundChannel>>(bound)
+        {
+            Ok(b) => {
+                match crate::app_runtime::apply_live_bindings(b) {
+                    Ok(n) => {
+                        tracing::info!(feeds = n, "#717 anchor: bound channels changed on the broker — re-sourced in place");
+                        last = json;
+                    }
+                    Err(e) => tracing::warn!(error = %e, "#717 anchor: apply failed"),
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "#717 anchor: bound_channels is not a BoundChannel array")
+            }
+        }
+    }
+}
+
+/// What a feed poller needs (R1), cloned per spawned poller.
+#[derive(Clone)]
+struct PollerCtx {
+    session: Arc<SessionHandle>,
+    cfg: Arc<ChatLoopConfig>,
+    credential: Arc<DelegateCredential>,
+    http: reqwest::Client,
+    tx: tokio::sync::mpsc::Sender<(FeedSpec, ChannelEvent)>,
+}
+
+/// Make the running pollers match `wanted` (its readable feeds): abort the
+/// ones no longer bound, start the new ones, keep the rest (cursors and cap
+/// caches intact).
+fn reconcile_pollers(
+    pollers: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+    wanted: &[FeedSpec],
+    ctx: &PollerCtx,
+) {
+    let want: Vec<&FeedSpec> = wanted.iter().filter(|f| f.direction.reads()).collect();
+    let stale: Vec<String> = pollers
+        .keys()
+        .filter(|id| !want.iter().any(|f| &f.channel_id == *id))
+        .cloned()
+        .collect();
+    for id in stale {
+        if let Some(h) = pollers.remove(&id) {
+            h.abort();
+            tracing::info!(channel = %id, "#717 chat loop: poller stopped (feed no longer bound)");
+        }
+    }
+    for feed in want {
+        if pollers.contains_key(&feed.channel_id) {
+            continue;
+        }
+        tracing::info!(slot = %feed.slot, channel = %feed.channel_id, kind = %feed.kind.as_str(), "#665 chat loop: polling feed");
+        pollers.insert(
+            feed.channel_id.clone(),
+            tokio::spawn(poll_feed(
+                feed.clone(),
+                ctx.session.clone(),
+                ctx.cfg.clone(),
+                ctx.credential.clone(),
+                ctx.http.clone(),
+                ctx.tx.clone(),
+            )),
+        );
+    }
 }
 
 /// One feed's long-poll loop (R1): its own subscribe-cap cache + cursor +

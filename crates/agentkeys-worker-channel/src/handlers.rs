@@ -697,28 +697,48 @@ async fn channel_list_after(
 ) -> Result<Vec<ChannelEvent>, ApiError> {
     let prefix = feed_prefix(owner, channel_id);
     let s3 = storage_s3(state, creds, cap, owner, channel_id).await?;
-    let mut list = s3
-        .list_objects_v2()
-        .bucket(&state.config.channel_bucket)
-        .prefix(&prefix);
-    if !after.is_empty() {
-        list = list.start_after(after);
-    }
-    let resp = list.send().await.map_err(|e| {
-        err_502(
-            format!("s3 ListObjectsV2: {}", s3_error_summary(&e)),
-            "s3_list",
-        )
-    })?;
-
-    let aad = envelope::aad("", owner, channel_id, 0);
-    // #693 — a tail read decrypts only the last N keys of the window.
-    let mut keys: Vec<&str> = resp.contents().iter().filter_map(|o| o.key()).collect();
-    if let Some(n) = tail.map(|n| n as usize).filter(|n| *n > 0) {
-        if keys.len() > n {
-            keys.drain(..keys.len() - n);
+    let tail_n = tail.map(|n| n as usize).filter(|n| *n > 0);
+    // The listing is PAGED (S3 answers at most 1000 keys per call). A cursor
+    // read takes ONE page — the caller advances its cursor on the next poll.
+    // A tail read (#693) must walk EVERY page to find the feed's true tail:
+    // until 2026-09-22 it tailed the FIRST page only, so a feed past 1000
+    // events froze the console's latest-card and lifecycle reads at its first
+    // thousand (the kitchen display feed held 984 lifecycle rows there).
+    let mut keys: Vec<String> = Vec::new();
+    let mut continuation: Option<String> = None;
+    loop {
+        let mut list = s3
+            .list_objects_v2()
+            .bucket(&state.config.channel_bucket)
+            .prefix(&prefix);
+        if !after.is_empty() {
+            list = list.start_after(after);
+        }
+        if let Some(token) = &continuation {
+            list = list.continuation_token(token);
+        }
+        let resp = list.send().await.map_err(|e| {
+            err_502(
+                format!("s3 ListObjectsV2: {}", s3_error_summary(&e)),
+                "s3_list",
+            )
+        })?;
+        keys.extend(
+            resp.contents()
+                .iter()
+                .filter_map(|o| o.key().map(str::to_string)),
+        );
+        if let Some(n) = tail_n {
+            keep_tail(&mut keys, n);
+        }
+        let more = resp.is_truncated().unwrap_or(false);
+        match (tail_n, more, resp.next_continuation_token()) {
+            (Some(_), true, Some(token)) => continuation = Some(token.to_string()),
+            _ => break,
         }
     }
+
+    let aad = envelope::aad("", owner, channel_id, 0);
     let mut events = Vec::new();
     for key in keys {
         let got = s3
@@ -1006,5 +1026,33 @@ mod tests {
         let c = feed_key("o", "c", "0000000002-0000000000000000");
         assert!(a < b, "same millis, later seq sorts after");
         assert!(b < c, "later millis sorts after");
+    }
+}
+
+/// Keep only the last `n` keys — the tail of a feed listing, applied per page
+/// so a long feed never holds more than `n` keys in memory.
+fn keep_tail(keys: &mut Vec<String>, n: usize) {
+    if keys.len() > n {
+        keys.drain(..keys.len() - n);
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::keep_tail;
+
+    #[test]
+    fn the_tail_is_the_last_n_keys_across_pages() {
+        let mut keys: Vec<String> = (1..=1000).map(|i| format!("k{i:05}")).collect();
+        keep_tail(&mut keys, 3);
+        assert_eq!(keys, vec!["k00998", "k00999", "k01000"]);
+        // The next page appends, and the tail follows it.
+        keys.extend((1001..=1002).map(|i| format!("k{i:05}")));
+        keep_tail(&mut keys, 3);
+        assert_eq!(keys, vec!["k01000", "k01001", "k01002"]);
+        // Fewer keys than the tail: all kept.
+        let mut few = vec!["a".to_string()];
+        keep_tail(&mut few, 3);
+        assert_eq!(few, vec!["a"]);
     }
 }

@@ -178,6 +178,22 @@ pub fn create_router(state: SharedState) -> Router {
         // durable spawn context; NO chain write, NO Touch ID, NO archive) and
         // the staleness surface that makes "running old bits" visible.
         .route("/v1/agent/update", post(handlers::update::agent_update))
+        // #717 — rebind an installed app's slot in place (build → ONE Touch ID
+        // → /v1/scope/submit), then the durable context + the live runtime.
+        .route(
+            "/v1/agent/rebind/build",
+            post(handlers::rebind::rebind_build),
+        )
+        .route(
+            "/v1/agent/spawn/context/update",
+            post(handlers::rebind::spawn_context_update),
+        )
+        // The ANCHOR a delegate re-reads at runtime (bound channels live
+        // here, never in the image, never frozen in the instance).
+        .route(
+            "/v1/agent/self/context",
+            axum::routing::get(handlers::rebind::self_context),
+        )
         .route(
             "/v1/agent/image-status",
             post(handlers::update::agent_image_status),

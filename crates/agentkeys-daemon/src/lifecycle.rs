@@ -5,8 +5,13 @@
 //! pass runs.
 //!
 //! The stage lives in a watch channel every loop reads; each change is also
-//! published as a `lifecycle` event on every feed this delegate WRITES (D2 —
-//! no broker state: the console and the contact gate read the feed), and a
+//! published as a `lifecycle` event on every CONVERSATIONAL feed this delegate
+//! writes — its opchat and messaging slots (D2 — no broker state: the console
+//! and the contact gate read the stage there). Device feeds (display, camera,
+//! …) carry the app's content only: a lifecycle row there is noise a renderer
+//! skips, and it pushes the content out of a bounded read (measured
+//! 2026-09-19: the kitchen display feed held 984 lifecycle rows against 13
+//! cards and the console's "latest card" read found none). And a
 //! turn waits for `ready` up to a bound (`AGENTKEYS_KNOWLEDGE_READY_WAIT_SECS`,
 //! default 60) before answering in `degraded` and saying so. "sync now" is a
 //! `command` event on the same feed; the mirror answers with an immediate pass.
@@ -15,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentkeys_backend_client::protocol::{DelegateLifecycle, LifecycleStage};
+use agentkeys_backend_client::protocol::{ChannelEndpointKind, DelegateLifecycle, LifecycleStage};
 use tokio::sync::{mpsc, watch, Notify};
 
 use crate::app_runtime::FeedSpec;
@@ -223,17 +228,44 @@ pub fn degraded_note(r: Readiness) -> Option<&'static str> {
     }
 }
 
-/// Forward every stage change to every feed this delegate writes, the current
-/// stage first (a console that missed the boot still sees where we are).
-pub fn spawn_publisher(hub: Arc<LifecycleHub>, publisher: Arc<Publisher>, feeds: Vec<FeedSpec>) {
+/// The feeds a lifecycle report belongs on: the conversational feeds this
+/// delegate WRITES — its opchat (`chat`) and its messaging slots. A display or
+/// any other device feed carries content only (see the module doc).
+pub fn lifecycle_feeds(feeds: &[FeedSpec]) -> Vec<FeedSpec> {
+    feeds
+        .iter()
+        .filter(|f| {
+            f.direction.writes()
+                && matches!(
+                    f.kind,
+                    ChannelEndpointKind::Chat | ChannelEndpointKind::Messaging
+                )
+        })
+        .cloned()
+        .collect()
+}
+
+/// Forward every stage change to the delegate's conversational feeds (see
+/// [`lifecycle_feeds`]), the current stage first (a console that missed the
+/// boot still sees where we are). `feeds` is the chat loop's LIVE set — a
+/// #717 rebind swaps it and the next report goes to the new feeds.
+pub fn spawn_publisher(
+    hub: Arc<LifecycleHub>,
+    publisher: Arc<Publisher>,
+    feeds: Arc<std::sync::RwLock<Vec<FeedSpec>>>,
+) {
     let Some(mut rx) = hub.take_events() else {
         return;
     };
-    let feeds: Vec<FeedSpec> = feeds.into_iter().filter(|f| f.direction.writes()).collect();
+    let current = |feeds: &std::sync::RwLock<Vec<FeedSpec>>| -> Vec<FeedSpec> {
+        lifecycle_feeds(&feeds.read().expect("feeds lock"))
+    };
     tokio::spawn(async move {
-        publish_all(&publisher, &feeds, &hub.current()).await;
+        let now = current(&feeds);
+        publish_all(&publisher, &now, &hub.current()).await;
         while let Some(ev) = rx.recv().await {
-            publish_all(&publisher, &feeds, &ev).await;
+            let now = current(&feeds);
+            publish_all(&publisher, &now, &ev).await;
         }
     });
 }
@@ -345,5 +377,71 @@ mod tests {
         assert!(degraded_note(Readiness::Degraded)
             .unwrap()
             .contains("unavailable"));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_feed_tests {
+    use super::lifecycle_feeds;
+    use crate::app_runtime::FeedSpec;
+    use agentkeys_backend_client::protocol::{ChannelEndpointKind, SlotDirection};
+
+    fn feed(
+        slot: &str,
+        kind: ChannelEndpointKind,
+        direction: SlotDirection,
+        channel: &str,
+    ) -> FeedSpec {
+        FeedSpec {
+            slot: slot.into(),
+            kind,
+            direction,
+            channel_id: channel.into(),
+            endpoint_actor_omni: None,
+        }
+    }
+
+    #[test]
+    fn only_the_conversational_feeds_carry_lifecycle() {
+        let feeds = vec![
+            feed(
+                "opchat",
+                ChannelEndpointKind::Chat,
+                SlotDirection::Duplex,
+                "opchat-chef",
+            ),
+            feed(
+                "kitchen_screen",
+                ChannelEndpointKind::Display,
+                SlotDirection::Pub,
+                "kitchen-screen",
+            ),
+            feed(
+                "family_chat",
+                ChannelEndpointKind::Messaging,
+                SlotDirection::Duplex,
+                "weixin-chef",
+            ),
+            feed(
+                "inbox",
+                ChannelEndpointKind::Messaging,
+                SlotDirection::Sub,
+                "weixin-inbox",
+            ),
+            feed(
+                "cam",
+                ChannelEndpointKind::Camera,
+                SlotDirection::Pub,
+                "fridge-cam",
+            ),
+        ];
+        let out: Vec<String> = lifecycle_feeds(&feeds)
+            .into_iter()
+            .map(|f| f.channel_id)
+            .collect();
+        assert_eq!(
+            out,
+            vec!["opchat-chef".to_string(), "weixin-chef".to_string()]
+        );
     }
 }

@@ -21,6 +21,11 @@ fn write_registry() -> String {
       ],
       "pending": [
         {"transport":"weixin","transport_id":"openid-pending","bind_code":"BIND-1234"}
+      ],
+      "apps": [
+        {"alias":"chef","channel_id":"family-chat"},
+        {"alias":"doorkeeper","channel_id":"door"},
+        {"alias":"storyteller","channel_id":"stories"}
       ]
     }"#;
     // UNIQUE per call — the 8 tests spawn in parallel and `fs::write` truncates
@@ -111,7 +116,7 @@ async fn bound_contact_reaching_allowed_agent_is_routed_with_contact_provenance(
         "c-owner"
     );
     assert_eq!(body["routed_event"]["producer"]["contact"]["tier"], "owner");
-    assert_eq!(body["routed_event"]["channel_id"], "weixin-chef");
+    assert_eq!(body["routed_event"]["channel_id"], "family-chat");
     // No credential of any kind is echoed to the contact-facing response.
     let raw = body.to_string().to_lowercase();
     assert!(!raw.contains("app_secret") && !raw.contains("secret") && !raw.contains("aws"));
@@ -318,7 +323,7 @@ async fn advisory_router_routes_a_no_alias_message_within_reach() {
     assert_eq!(body["decision"]["target_alias"], "doorkeeper");
     assert_eq!(body["decision"]["routed_by"], "advisory_router");
     // The routed agent is one the owner can reach (chef|doorkeeper) — never wider.
-    assert_eq!(body["routed_event"]["channel_id"], "weixin-doorkeeper");
+    assert_eq!(body["routed_event"]["channel_id"], "door");
 }
 
 #[tokio::test]

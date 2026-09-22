@@ -1,6 +1,7 @@
 import type { AppDashboard } from '@/lib/generated/AppDashboard';
 import type { AppInstallBindings } from '@/lib/generated/AppInstallBindings';
 import type { AppInstallBuildResponse } from '@/lib/generated/AppInstallBuildResponse';
+import type { AppRebindBuildResponse } from '@/lib/generated/AppRebindBuildResponse';
 import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
 import type { ApiChannelsClearOrphaned } from '@/lib/generated/ApiChannelsClearOrphaned';
 import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
@@ -831,6 +832,9 @@ export interface AgentKeysClient {
   appInstallSubmit?(body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { installed?: unknown[] }>>;
   appUninstallBuild?(label: string, input: { resources_kept: boolean }): Promise<Result<BuildArchiveUserOpResponse>>;
   appUninstallSubmit?(label: string, body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { uninstalled?: unknown }>>;
+  /** #717 — rebind channel slots in place: build → ONE Touch ID → submit. */
+  appRebindBuild?(label: string, input: { slots: { slot: string; channel_id: string }[] }): Promise<Result<AppRebindBuildResponse>>;
+  appRebindSubmit?(label: string, body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { rebound?: unknown }>>;
   appCommand?(
     label: string,
     input: { channel_id?: string; action: string; command: string; args?: unknown; card_updated_at?: number },

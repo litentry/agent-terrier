@@ -43,6 +43,20 @@ use crate::lifecycle::LifecycleHub;
 /// it as "nothing authorized here".
 pub const DEFAULT_NAMESPACES: &str = "personal,family,work,travel";
 
+/// Default bound for the first pass's engine wait (see
+/// [`MirrorConfig::first_pass_engine_wait`]).
+pub const DEFAULT_FIRST_PASS_ENGINE_WAIT_SECS: u64 = 90;
+
+/// Whether an unanswered engine `/health` should be waited out rather than
+/// judged: only on the first pass, and only within the bound.
+pub(crate) fn first_pass_waits_for_engine(
+    first_pass: bool,
+    waited: Duration,
+    bound: Duration,
+) -> bool {
+    first_pass && waited < bound
+}
+
 #[cfg(test)]
 #[test]
 fn default_namespaces_match_the_protocol_owner() {
@@ -64,6 +78,12 @@ pub struct MirrorConfig {
     pub memory_worker_url: String,
     pub namespaces: Vec<String>,
     pub interval: Duration,
+    /// How long the FIRST pass waits for the engine's `/health` before judging
+    /// it (`AGENTKEYS_MEMORY_MIRROR_ENGINE_WAIT_SECS`, default 90, 0..=600).
+    /// The engine boots after the daemon (supervisord priority), so a first
+    /// pass that judged it before it listened stamped `degraded` for a whole
+    /// interval — measured 2026-09-18: 12 s after boot, `ready` 5 min later.
+    pub first_pass_engine_wait: Duration,
     pub engine: OpenVikingClient,
     pub manifest: std::path::PathBuf,
     /// #694 — namespaces of one pass reconcile concurrently, this many at a time
@@ -119,6 +139,10 @@ impl MirrorConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|&s| (30..=3600).contains(&s))
             .unwrap_or(300);
+        let first_pass_engine_wait = read("AGENTKEYS_MEMORY_MIRROR_ENGINE_WAIT_SECS")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&s| s <= 600)
+            .unwrap_or(DEFAULT_FIRST_PASS_ENGINE_WAIT_SECS);
         // In-sandbox the engine is co-located; the env identity defaults match
         // the engine tree's historical coordinates (`default`/`default`/`hermes`,
         // the hermes-era plugin default — kept for tree continuity, override via
@@ -144,6 +168,7 @@ impl MirrorConfig {
             memory_worker_url,
             namespaces,
             interval: Duration::from_secs(interval),
+            first_pass_engine_wait: Duration::from_secs(first_pass_engine_wait),
             engine,
             manifest: ingest_manifest_from_env(),
             fanout,
@@ -579,11 +604,24 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
     let mut session: Option<String> = None;
     let mut engine_down_logged = false;
     let mut first_pass = true;
+    let first_pass_started = Instant::now();
     loop {
         if !cfg.engine.health().await {
             // #694 — the engine waits for the workspace restore before its first
             // start; while that phase runs, an unanswered /health is expected.
             if cfg.hub.as_ref().is_some_and(|h| h.restore_pending()) {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            // The engine starts after this daemon (supervisord priority): give
+            // its first `/health` a bounded wait before judging it, so the
+            // first report is `ready`, not a `degraded` that stands for a
+            // whole interval.
+            if first_pass_waits_for_engine(
+                first_pass,
+                first_pass_started.elapsed(),
+                cfg.first_pass_engine_wait,
+            ) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -782,5 +820,43 @@ mod tests {
             4,
             "personal,family,work,travel"
         );
+    }
+}
+
+#[cfg(test)]
+mod first_pass_engine_wait_tests {
+    use super::first_pass_waits_for_engine;
+    use std::time::Duration;
+
+    #[test]
+    fn the_first_pass_waits_within_the_bound_and_never_after_it() {
+        let bound = Duration::from_secs(90);
+        assert!(first_pass_waits_for_engine(
+            true,
+            Duration::from_secs(0),
+            bound
+        ));
+        assert!(first_pass_waits_for_engine(
+            true,
+            Duration::from_secs(89),
+            bound
+        ));
+        assert!(!first_pass_waits_for_engine(
+            true,
+            Duration::from_secs(90),
+            bound
+        ));
+        // A later pass judges the engine at once — the interval is the wait.
+        assert!(!first_pass_waits_for_engine(
+            false,
+            Duration::from_secs(0),
+            bound
+        ));
+        // The knob at 0 = the old behaviour.
+        assert!(!first_pass_waits_for_engine(
+            true,
+            Duration::from_secs(0),
+            Duration::ZERO
+        ));
     }
 }

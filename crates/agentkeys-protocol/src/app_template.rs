@@ -74,9 +74,10 @@ pub mod platform_caps {
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub enum ChannelEndpointKind {
-    /// A gateway transport (WeChat / Telegram): contacts write, the app reads
-    /// and replies. The bound registry row id is the transport id; the feed
-    /// the gateway relays into is derived (`<transport>-<label>`).
+    /// A contact-gate channel (WeChat / Telegram behind it): contacts write,
+    /// the app reads and replies. The bound registry row IS the feed — the
+    /// gate registers `<app> → <channel>` at install / rebind and relays that
+    /// channel both ways (owner decision 2026-09-22: no derived name).
     Messaging,
     /// An interactive chat feed (the operator chat, a console session).
     Chat,
@@ -1071,12 +1072,6 @@ pub fn opchat_channel_id(label: &str) -> String {
     format!("opchat-{label}")
 }
 
-/// The feed a gateway relays a contact's messages into for one app: the
-/// gateway's `{transport}-{alias}` with alias = the delegate label.
-pub fn messaging_feed_id(transport: &str, label: &str) -> String {
-    format!("{transport}-{label}")
-}
-
 fn push_unique(services: &mut Vec<String>, s: String) -> bool {
     if services.contains(&s) {
         false
@@ -1209,11 +1204,15 @@ pub fn compile_app(
                 ));
                 continue;
             }
-            let feed = if slot.kind == ChannelEndpointKind::Messaging {
-                messaging_feed_id(&b.channel_id, label)
-            } else {
-                b.channel_id.clone()
-            };
+            // The bound channel IS the feed, whatever the slot kind (owner
+            // decision 2026-09-22, "channel name is enough"): a messaging
+            // slot's channel is what the contact gate relays for this app —
+            // the gate learns `<alias> → <channel>` from the install, and the
+            // endpoint grants below mirror the channel there. (Until then the
+            // feed was derived as `<transport>-<label>`: a second name nobody
+            // could see in the registry, and the 2026-09-22 double family
+            // chat.)
+            let feed = b.channel_id.clone();
             if slot.direction.reads() {
                 note(
                     &mut services,
@@ -1503,7 +1502,7 @@ mod tests {
             slots: vec![
                 SlotBinding {
                     slot: "family_chat".into(),
-                    channel_id: "weixin".into(),
+                    channel_id: "family-chat".into(),
                     endpoint_actor_omni: Some("0xgateway".into()),
                 },
                 SlotBinding {
@@ -1571,8 +1570,8 @@ mod tests {
                 "channel-pub:opchat-chef",
                 "channel-sub:opchat-chef",
                 "knowledge:app-chef",
-                "channel-sub:weixin-chef",
-                "channel-pub:weixin-chef",
+                "channel-sub:family-chat",
+                "channel-pub:family-chat",
                 "channel-pub:kitchen-display",
                 "knowledge:household-preferences",
                 "knowledge:household-health",
@@ -1589,11 +1588,11 @@ mod tests {
         assert_eq!(c.endpoint_grants[0].actor_omni, "0xgateway");
         assert_eq!(
             c.endpoint_grants[0].add,
-            vec!["channel-pub:weixin-chef", "channel-sub:weixin-chef"]
+            vec!["channel-pub:family-chat", "channel-sub:family-chat"]
         );
         // Bound channels = what the sandbox polls / publishes.
         assert_eq!(c.bound_channels.len(), 2);
-        assert_eq!(c.bound_channels[0].channel_id, "weixin-chef");
+        assert_eq!(c.bound_channels[0].channel_id, "family-chat");
         assert_eq!(c.bound_channels[0].kind, ChannelEndpointKind::Messaging);
         assert_eq!(c.bound_channels[1].channel_id, "kitchen-display");
         // Sensitivity rides the annotation for the sheet.
@@ -1896,6 +1895,30 @@ mod tests {
     }
 
     #[test]
+    fn a_messaging_slot_binds_the_channel_itself() {
+        // Owner decision 2026-09-22, "channel name is enough": the channel the
+        // slot binds is the feed the app polls AND the one the contact gate
+        // mirrors — no `<transport>-<label>` derivation (the double
+        // family-chat of 2026-09-22 came from exactly that second name).
+        let p = preset(CHEF);
+        let mut b = chef_bindings();
+        b.slots[0].channel_id = "kitchen-family".into();
+        let c = compile_app(&p, "chef", None, &b).expect("compiles");
+        assert_eq!(c.bound_channels[0].channel_id, "kitchen-family");
+        assert!(c
+            .services
+            .contains(&"channel-sub:kitchen-family".to_string()));
+        assert!(c
+            .services
+            .contains(&"channel-pub:kitchen-family".to_string()));
+        assert_eq!(
+            c.endpoint_grants[0].add,
+            vec!["channel-pub:kitchen-family", "channel-sub:kitchen-family"]
+        );
+        assert!(c.services.iter().all(|s| !s.contains("weixin-")));
+    }
+
+    #[test]
     fn empty_binding_fields_are_refused() {
         let p = preset(CHEF);
         let mut b = chef_bindings();
@@ -1977,7 +2000,6 @@ mod tests {
     fn derived_names_have_one_owner() {
         assert_eq!(app_memory_ns("chef"), "app-chef");
         assert_eq!(opchat_channel_id("chef"), "opchat-chef");
-        assert_eq!(messaging_feed_id("weixin", "chef"), "weixin-chef");
         assert_eq!(normalize_tool_class(" Tool:Web "), "web");
         assert!(is_valid_label("chef-2"));
         assert!(!is_valid_label("Chef"));

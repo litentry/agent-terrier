@@ -191,6 +191,7 @@ mod tests {
             ],
             pending: vec![],
             invites: vec![],
+            apps: vec![],
         }
     }
 

@@ -38,15 +38,32 @@ const RATE_WINDOW_SECS: u64 = 3600;
 pub struct ProposeConfig {
     pub chat: ChatLoopConfig,
     pub memory_worker_url: String,
-    /// Fallback namespace when the invocation names none — the FIRST entry of
-    /// `AGENTKEYS_MEMORY_NAMESPACES` (the same candidate list the #566 mirror
-    /// probes), so the propose default follows the granted-context wiring.
+    /// Fallback namespace when the invocation names none — the application's
+    /// OWN namespace (`AGENTKEYS_MEMORY_NS`, the inbox every install is
+    /// granted), else the FIRST entry of `AGENTKEYS_MEMORY_NAMESPACES`. That
+    /// pull list opens with the household namespaces the app only READS, which
+    /// it can never propose into (chef, measured 2026-09-18: `household,…`
+    /// against a lone `proposal:app-chef` grant).
     pub default_namespace: String,
     pub max_per_hour: u32,
     pub max_bytes: usize,
     /// Sliding-window ledger (unix-seconds lines). Sandbox-local, dies with
     /// the sandbox — like the mirror's ingest manifest.
     pub stamp_file: PathBuf,
+}
+
+/// The proposal namespace when the invocation names none: the app's own
+/// (`AGENTKEYS_MEMORY_NS`) when set, else the first non-empty entry of the pull
+/// list (`AGENTKEYS_MEMORY_NAMESPACES`, the mirror's defaults when unset).
+pub(crate) fn default_namespace_from(own: Option<&str>, pull_list: Option<&str>) -> Option<String> {
+    if let Some(own) = own.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(own.to_string());
+    }
+    pull_list
+        .unwrap_or(crate::memory_mirror::DEFAULT_NAMESPACES)
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
 }
 
 impl ProposeConfig {
@@ -71,11 +88,10 @@ impl ProposeConfig {
                 return None;
             }
         };
-        let default_namespace = read("AGENTKEYS_MEMORY_NAMESPACES")
-            .unwrap_or_else(|| crate::memory_mirror::DEFAULT_NAMESPACES.to_string())
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .find(|s| !s.is_empty())?;
+        let default_namespace = default_namespace_from(
+            read("AGENTKEYS_MEMORY_NS").as_deref(),
+            read("AGENTKEYS_MEMORY_NAMESPACES").as_deref(),
+        )?;
         let max_per_hour = read("AGENTKEYS_PROPOSE_MAX_PER_HOUR")
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&n| (1..=1000).contains(&n))
@@ -256,5 +272,29 @@ mod tests {
         rate_gate(&stamps, 1_000_000, 1).expect("garbage + stale lines ignored");
         let err = rate_gate(&stamps, 1_000_001, 1).expect_err("now full");
         assert!(err.to_string().contains("max 1"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod default_namespace_tests {
+    use super::default_namespace_from;
+
+    #[test]
+    fn the_apps_own_namespace_wins_over_the_pull_list() {
+        // chef, measured 2026-09-18: the pull list opens with what it READS.
+        assert_eq!(
+            default_namespace_from(Some("app-chef"), Some("household,personal,family")).as_deref(),
+            Some("app-chef")
+        );
+        assert_eq!(
+            default_namespace_from(Some("  "), Some(" family ,personal")).as_deref(),
+            Some("family")
+        );
+        assert_eq!(
+            default_namespace_from(None, None).as_deref(),
+            Some("personal"),
+            "the mirror's defaults when nothing is injected"
+        );
+        assert_eq!(default_namespace_from(None, Some(" , ")), None);
     }
 }

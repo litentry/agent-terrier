@@ -16,8 +16,10 @@
 // The registry is a master-only, signer-encrypted Config-class doc
 // (`config/channel-registry.enc`); the WeChat contact gate + family live on the
 // Contacts page.
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 
+import { useClient } from '@/lib/ClientProvider';
+import { ChatPanel } from './chat';
 import { PageHead, Panel } from './shared';
 import type { Actor } from './types';
 import { channelHolders, isChannelService, orphanedChannels } from './types';
@@ -131,6 +133,20 @@ function CreateChannelPanel({ onCreate }: { onCreate: ChannelRegistryProps['onCr
 }
 
 function ChannelList({ registry }: { registry: ChannelRegistryProps }) {
+  // The contact gate's device actor: a messaging channel an app holds that the
+  // gate holds no grant on is readable here but delivered to nobody — say so.
+  const client = useClient();
+  const [gate, setGate] = useState<GateFacts | null>(null);
+  useEffect(() => {
+    if (!client.gatewayDeviceStatus) return;
+    let alive = true;
+    void client.gatewayDeviceStatus().then((r) => {
+      if (alive && r.ok && r.data.configured) setGate({ transport: r.data.transport.toLowerCase(), actorOmni: r.data.actor_omni ?? null });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [client]);
   if (registry.channels.length === 0) {
     return (
       <div className="banner">
@@ -142,19 +158,32 @@ function ChannelList({ registry }: { registry: ChannelRegistryProps }) {
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       {registry.channels.map((c) => (
-        <ChannelRow key={c.id} channel={c} registry={registry} />
+        <ChannelRow key={c.id} channel={c} registry={registry} gate={gate} />
       ))}
     </div>
   );
 }
 
-function ChannelRow({ channel, registry }: { channel: ChannelDef; registry: ChannelRegistryProps }) {
+/** The configured contact gate, as the channels page needs it. */
+type GateFacts = { transport: string; actorOmni: string | null };
+
+const normOmni = (s: string | null | undefined): string => (s ?? '').trim().toLowerCase().replace(/^0x/, '');
+
+function ChannelRow({ channel, registry, gate }: { channel: ChannelDef; registry: ChannelRegistryProps; gate: GateFacts | null }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(channel.name);
   const [note, setNote] = useState(channel.note ?? '');
   const [busy, setBusy] = useState(false);
+  const [showFeed, setShowFeed] = useState(false);
   const holders = channelHolders(registry.actors, channel.id);
   const inUse = holders.length > 0;
+  // The operator chat is the one feed the master writes into from here (D13);
+  // every other feed is read-only on this page.
+  const isOpchat = channel.id.startsWith('opchat-');
+  // 2026-09-22: the bound channel IS the feed — the gate relays whichever
+  // channel an app's messaging slot binds, once the gate holds a grant on it.
+  const gateHolds = !!gate?.actorOmni && holders.some((h) => normOmni(h.omniHex) === normOmni(gate.actorOmni) || normOmni(h.omni) === normOmni(gate.actorOmni));
+  const unservedMessaging = channel.kind === 'messaging' && inUse && !!gate && !gateHolds;
 
   const save = async () => {
     if (busy) return;
@@ -198,6 +227,9 @@ function ChannelRow({ channel, registry }: { channel: ChannelDef; registry: Chan
           )}
           {!editing ? (
             <>
+              <button className="btn sm" onClick={() => setShowFeed((v) => !v)} title={isOpchat ? 'the operator chat — you can write here' : 'the feed, read-only'}>
+                {showFeed ? 'hide feed' : 'feed'}
+              </button>
               <button className="btn sm" onClick={() => { setEditing(true); setName(channel.name); setNote(channel.note ?? ''); }}>rename</button>
               <button
                 className="btn sm"
@@ -216,6 +248,24 @@ function ChannelRow({ channel, registry }: { channel: ChannelDef; registry: Chan
           )}
         </span>
       </div>
+      {channel.kind && <div style={{ marginTop: 6 }}><span className="chip">{channel.kind}</span></div>}
+      {unservedMessaging && (
+        <div className="banner warn" style={{ marginTop: 8 }}>
+          <span className="lbl">not relayed</span>
+          <span>
+            An app holds this messaging channel but the contact gate holds no grant on it, so what the app writes here is readable below and reaches nobody. Rebind the app&apos;s messaging slot to this channel from its application page — one Touch ID enrolls the gate on it — and the family reaches it.
+          </span>
+        </div>
+      )}
+      {showFeed && (
+        <div style={{ marginTop: 10 }}>
+          <ChatPanel
+            channelId={channel.id}
+            readOnly={!isOpchat}
+            emptyHint={isOpchat ? `Direct chat on ${channel.id} — the transcript IS the durable feed.` : `Nothing on ${channel.id} yet — this page shows the feed read-only.`}
+          />
+        </div>
+      )}
       <div className="muted" style={{ fontSize: 10.5, marginTop: 6 }}>
         created {channel.createdAt ? new Date(channel.createdAt * 1000).toLocaleString() : '—'} · grants: <span className="mono">channel-pub:{channel.id}</span> · <span className="mono">channel-sub:{channel.id}</span>
       </div>

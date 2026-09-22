@@ -171,6 +171,64 @@ pub async fn app_install(
     Ok(serde_json::to_string_pretty(&out)?)
 }
 
+/// `agentkeys app rebind` (#717) — change an INSTALLED app's channel slots in
+/// place: build → ONE software-passkey signature → submit. A commit, not a
+/// reinstall: no uninstall, no delegate slot consumed; the daemon updates the
+/// registry row, the gate's `alias → channel`, the broker's spawn context and
+/// re-sources the live runtime.
+pub async fn app_rebind(
+    daemon_url: &str,
+    label: &str,
+    bind: &str,
+    enroll_endpoints: bool,
+    k11_key_file: &str,
+    rp_id: &str,
+) -> Result<String> {
+    let slots = parse_slot_bindings(bind)?;
+    if slots.is_empty() {
+        anyhow::bail!("--bind names no slot (slot=channel-id[,slot=channel-id…])");
+    }
+    let client = client()?;
+    let built = daemon_json(
+        &client,
+        reqwest::Method::POST,
+        daemon_url,
+        &format!("/v1/master/apps/{label}/rebind/build"),
+        Some(&json!({ "slots": slots, "enroll_endpoints": enroll_endpoints })),
+    )
+    .await?;
+    let build = built
+        .get("build")
+        .cloned()
+        .ok_or_else(|| anyhow!("rebind/build returned no `build` envelope: {built}"))?;
+    let user_op_hash = build
+        .get("user_op_hash")
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| anyhow!("rebind/build carried no user_op_hash"))?;
+    let assertion = crate::agent_admin::software_assertion(k11_key_file, user_op_hash, rp_id)?;
+    let submit_body = json!({ "user_op": build.get("user_op"), "assertion": assertion });
+    let submitted = daemon_json(
+        &client,
+        reqwest::Method::POST,
+        daemon_url,
+        &format!("/v1/master/apps/{label}/rebind/submit"),
+        Some(&submit_body),
+    )
+    .await?;
+    let out = json!({
+        "outcome": "rebound",
+        "label": label,
+        "changes": built.get("changes"),
+        "services": built.get("services"),
+        "bound_channels": built.get("bound_channels"),
+        "endpoint_scopes": built.get("endpoint_scopes"),
+        "endpoint_enrollments": built.get("endpoint_enrollments"),
+        "tx_hash": submitted.get("tx_hash"),
+        "rebound": submitted.get("rebound"),
+    });
+    Ok(serde_json::to_string_pretty(&out)?)
+}
+
 /// `agentkeys app list`
 pub async fn app_list(daemon_url: &str) -> Result<String> {
     let v = daemon_json(

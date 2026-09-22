@@ -938,6 +938,7 @@ pub(crate) async fn admin_contacts(
     let reg = state.registry.snapshot();
     let body = GatewayContactsResponse {
         ok: true,
+        apps: reg.apps.clone(),
         contacts: reg
             .bound
             .iter()
@@ -1627,4 +1628,59 @@ async fn bind_member_by_scan(
         }
     }
     Ok((contact, persist_err))
+}
+
+/// `POST /v1/gateway/admin/apps/update` — the console registers (or clears)
+/// the channel an app's messaging slot binds: `alias → channel_id`; a `null` /
+/// absent channel removes the row. The outbound subscription and the inbound
+/// hop both key on this table (owner decision 2026-09-22: the bound channel
+/// IS the feed — no `<transport>-<alias>` derivation).
+pub(crate) async fn apps_update(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_protocol::GatewayAppFeedUpdateRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let alias = req.alias.trim().to_lowercase();
+    if alias.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "reason": "alias_empty"})),
+        )
+            .into_response();
+    }
+    let channel = req
+        .channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string);
+    let result = state.registry.mutate(|reg| {
+        Ok(match &channel {
+            Some(c) => {
+                reg.set_app_feed(&alias, c);
+                true
+            }
+            None => reg.remove_app_feed(&alias),
+        })
+    });
+    match result {
+        Ok(changed) => {
+            info!(alias = %alias, channel = ?channel, "app feed registered by operator");
+            (
+                StatusCode::OK,
+                Json(
+                    json!({"ok": true, "alias": alias, "channel_id": channel, "changed": changed}),
+                ),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "reason": e.to_string()})),
+        )
+            .into_response(),
+    }
 }

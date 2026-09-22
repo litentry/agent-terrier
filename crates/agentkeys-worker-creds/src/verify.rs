@@ -549,6 +549,13 @@ pub async fn check_chain_k3_epoch(
     Ok(())
 }
 
+/// The bound on ONE eth_call attempt (seconds): the public Heima RPC answers
+/// in 1–3 s (measured 2026-09-19 from the VE broker host) and the retry loop
+/// below covers the transient failures; without a per-attempt bound a hung
+/// connection held a worker request open until nginx cut it at its proxy
+/// timeout, and the console read the poll as a transport error.
+pub const ETH_CALL_ATTEMPT_TIMEOUT_SECS: u64 = 10;
+
 async fn eth_call(
     http: &reqwest::Client,
     rpc_url: &str,
@@ -577,7 +584,15 @@ async fn eth_call(
             let ms = 150u64 * (1u64 << (attempt - 1)); // 150, 300, 600 ms
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
-        let resp = match http.post(rpc_url).json(&body).send().await {
+        let resp = match http
+            .post(rpc_url)
+            .timeout(std::time::Duration::from_secs(
+                ETH_CALL_ATTEMPT_TIMEOUT_SECS,
+            ))
+            .json(&body)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 last = format!("eth_call POST: {e}");

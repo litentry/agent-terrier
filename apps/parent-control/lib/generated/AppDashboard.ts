@@ -19,4 +19,15 @@ console_actor_omni?: string,
  * The most recent `command` events on the display feed (the owner sees
  * their own taps attributed).
  */
-commands: unknown[], };
+commands: unknown[], 
+/**
+ * `doc` events on the display feed SINCE the latest card that are NOT
+ * cards — an app improvising JSON instead of the card contract (chef
+ * without its skills, 2026-09-19); the console says so instead of
+ * passing a stale card off as current.
+ */
+non_card_docs: number, 
+/**
+ * The head of the newest such document.
+ */
+last_doc_preview?: string, };

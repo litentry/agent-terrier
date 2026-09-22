@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useClient } from '@/lib/ClientProvider';
 import { sandboxExpiryLabel } from '@/lib/client/sandboxExpiry';
 import type { ApiImageStatus } from '@/lib/generated/ApiImageStatus';
-import { Dot, LifecycleChip, PageHead } from './shared';
+import { Chip, Dot, LifecycleChip, PageHead } from './shared';
 import { PermissionView } from './permissions';
 import type { Actor, PairingRequest } from './types';
 import { isCapabilityService } from './types';
@@ -60,6 +60,21 @@ function scopeOptions(
 /** The image ref's version tag (#598 `…:vYYYYMMDD-HHMMSS-g<sha8>`) — the
  *  human "which build" answer. Falls back to the ref's tail so a digest or
  *  bare tag still renders something identifying. */
+/** The image-status row for one delegate (hash forms differ by a `0x`). */
+function imageRowIn(status: ApiImageStatus | null, dkh: string | undefined): ApiImageStatus['delegates'][number] | null {
+  if (!dkh || !status) return null;
+  const bare = dkh.toLowerCase().replace(/^0x/, '');
+  return status.delegates.find((d) => d.device_key_hash.toLowerCase().replace(/^0x/, '') === bare) ?? null;
+}
+
+/** A row WITHOUT a sandbox id = nothing runs for this delegate (a scheduled
+ *  app asleep between its ticks, #669, or a failed re-create). Unknown — no
+ *  row yet, or the broker could not list — is never "gone". */
+function rowRuntimeGone(status: ApiImageStatus | null, dkh: string | undefined): boolean {
+  const rt = imageRowIn(status, dkh);
+  return !!rt && !rt.error && !rt.sandbox_id;
+}
+
 function imageTag(url: string | null | undefined): string | null {
   if (!url) return null;
   const tail = url.split('/').pop() ?? url;
@@ -182,18 +197,10 @@ export function DelegatesPage({
     refreshImageStatus();
   }, [refreshImageStatus]);
 
-  const imageRowFor = (dkh: string | undefined) => {
-    if (!dkh || !imageStatus) return null;
-    return (
-      imageStatus.delegates.find(
-        (d) =>
-          d.device_key_hash.toLowerCase().replace(/^0x/, '') ===
-          dkh.toLowerCase().replace(/^0x/, ''),
-      ) ?? null
-    );
-  };
+  const imageRowFor = (dkh: string | undefined) => imageRowIn(imageStatus, dkh);
   const staleFor = (dkh: string | undefined): boolean | null =>
     imageRowFor(dkh)?.stale ?? null;
+  const runtimeGone = (dkh: string | undefined): boolean => rowRuntimeGone(imageStatus, dkh);
 
   const recordUpdate = useCallback((dkh: string, ok: boolean, text: string) => {
     setLastUpdate((prev) => {
@@ -257,7 +264,13 @@ export function DelegatesPage({
       const dkh = a.deviceKeyHash;
       if (!dkh || updating.has(dkh)) return;
       setUpdating((prev) => new Set(prev).add(dkh));
-      recordUpdate(dkh, true, 'update requested — killing + re-creating the sandbox…');
+      recordUpdate(
+        dkh,
+        true,
+        rowRuntimeGone(imageStatus, dkh)
+          ? 'wake requested — re-creating the sandbox (a cold start, up to ~2 minutes)…'
+          : 'update requested — killing + re-creating the sandbox…',
+      );
       try {
         const r = await client.agentUpdate({ deviceKeyHash: dkh, force: forceArmed.has(dkh) });
         if (r.ok) {
@@ -308,7 +321,7 @@ export function DelegatesPage({
         refreshImageStatus();
       }
     },
-    [client, forceArmed, recordUpdate, refreshImageStatus, toast, updating, verifyUpdated],
+    [client, forceArmed, imageStatus, recordUpdate, refreshImageStatus, toast, updating, verifyUpdated],
   );
 
   const staleAgents = pairedAgents.filter((a) => staleFor(a.deviceKeyHash) === true);
@@ -443,8 +456,16 @@ export function DelegatesPage({
                     update available
                   </span>
                 )}
-                {/* #693 — the launch / pull stage from the delegate's own feed. */}
-                {a.status !== 'bad' && <LifecycleChip channelId={`opchat-${a.label.replace(' (revoked)', '')}`} />}
+                {/* #693 — the launch / pull stage from the delegate's own feed,
+                    only while a sandbox exists: the feed keeps the LAST event of
+                    a runtime that is gone (chef read "ready · 3.3 s" for 40 min
+                    after its lease had ended, 2026-09-18). */}
+                {a.status !== 'bad' &&
+                  (runtimeGone(a.deviceKeyHash) ? (
+                    <Chip kind="warn">no runtime</Chip>
+                  ) : (
+                    <LifecycleChip channelId={`opchat-${a.label.replace(' (revoked)', '')}`} />
+                  ))}
               </div>
               <dl className="device-kvs">
                 <dt>actor</dt><dd className="mono">{a.omni}</dd>
@@ -467,23 +488,29 @@ export function DelegatesPage({
                   if (!rt) return null;
                   return (
                     <>
-                      {(rt.agent_engine || rt.agent_version || rt.booted_image_url) && (
-                        <>
-                          <dt>runtime</dt>
-                          <dd
-                            title={[
-                              rt.model ? `LLM endpoint: ${rt.model}` : null,
-                              rt.booted_image_url ? `booted image: ${rt.booted_image_url}` : null,
-                            ]
-                              .filter(Boolean)
-                              .join('\n') || undefined}
-                          >
-                            {rt.agent_engine ?? 'agent'}
-                            {rt.agent_version ? ` ${rt.agent_version}` : ''}
-                            {imageTag(rt.booted_image_url) ? ` · ${imageTag(rt.booted_image_url)}` : ''}
-                            {rt.stale === false ? ' · current' : ''}
-                          </dd>
-                        </>
+                      {/* Always a runtime row: what runs (engine · version ·
+                          image tag) — or that NOTHING does. */}
+                      <dt>runtime</dt>
+                      {rt.sandbox_id ? (
+                        <dd
+                          title={[
+                            rt.model ? `LLM endpoint: ${rt.model}` : null,
+                            rt.booted_image_url ? `booted image: ${rt.booted_image_url}` : null,
+                          ]
+                            .filter(Boolean)
+                            .join('\n') || undefined}
+                        >
+                          {rt.agent_engine ?? (rt.booted_image_url ? 'sandbox' : 'booting')}
+                          {rt.agent_version ? ` ${rt.agent_version}` : ''}
+                          {imageTag(rt.booted_image_url) ? ` · ${imageTag(rt.booted_image_url)}` : ''}
+                          {rt.stale === false ? ' · current' : rt.stale === true ? ' · update available' : ''}
+                        </dd>
+                      ) : (
+                        <dd className="muted" title={rt.error ?? undefined}>
+                          {rt.error
+                            ? `unknown — ${rt.error}`
+                            : 'none — nothing is running (a scheduled app sleeps between its ticks; “wake” re-creates it now)'}
+                        </dd>
                       )}
                       {rt.sandbox_id && (
                         <>
@@ -528,18 +555,40 @@ export function DelegatesPage({
                   the "respawn now" affordance for an expired sandbox. */}
               {a.status !== 'bad' && a.deviceKeyHash && (
                 <button
-                  className={`btn sm ${staleFor(a.deviceKeyHash) === true ? 'primary' : ''}`}
-                  disabled={updating.has(a.deviceKeyHash) || verifying.has(a.deviceKeyHash)}
+                  className={`btn sm ${
+                    staleFor(a.deviceKeyHash) === true || runtimeGone(a.deviceKeyHash) ? 'primary' : ''
+                  }`}
+                  disabled={
+                    updating.has(a.deviceKeyHash) ||
+                    verifying.has(a.deviceKeyHash) ||
+                    // Current image + something running = nothing to do (its
+                    // sandbox is replaced automatically before its lease ends).
+                    (staleFor(a.deviceKeyHash) === false &&
+                      !runtimeGone(a.deviceKeyHash) &&
+                      !forceArmed.has(a.deviceKeyHash))
+                  }
                   onClick={() => updateOne(a)}
-                  title="Re-create this agent's sandbox on the current image. Identity, grants, channel and persona are preserved; the live conversation restarts."
+                  title={
+                    runtimeGone(a.deviceKeyHash)
+                      ? 'Nothing is running for this agent — re-create its sandbox on the current image now (a cold start, up to ~2 minutes). Identity, grants, channel and persona are preserved.'
+                      : staleFor(a.deviceKeyHash) === false
+                        ? 'This agent already runs the current image — nothing to update. Its sandbox is replaced automatically before its lease ends.'
+                        : "Re-create this agent's sandbox on the current image. Identity, grants, channel and persona are preserved; the live conversation restarts."
+                  }
                 >
                   {updating.has(a.deviceKeyHash)
-                    ? 'updating… (may take a minute)'
+                    ? runtimeGone(a.deviceKeyHash)
+                      ? 'waking… (a cold start, up to ~2 minutes)'
+                      : 'updating… (may take a minute)'
                     : verifying.has(a.deviceKeyHash)
                       ? 'verifying new runtime…'
                       : forceArmed.has(a.deviceKeyHash)
                         ? '⟳ update anyway (kills running jobs)'
-                        : '⟳ update runtime'}
+                        : runtimeGone(a.deviceKeyHash)
+                          ? '▶ wake · re-create the runtime'
+                          : staleFor(a.deviceKeyHash) === false
+                            ? '✓ up to date'
+                            : '⟳ update runtime'}
                 </button>
               )}
               {/* #577 observability — the durable update record: what the last

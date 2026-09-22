@@ -149,7 +149,7 @@ pub struct DelegateImageStatus {
 /// J1 session auth + operator match (the spawn/archive rule, minus the
 /// master-ACCOUNT resolution — an update performs no chain write, so a
 /// legacy-EOA master may still update). Returns the normalized session omni.
-fn auth_session(
+pub(crate) fn auth_session(
     state: &SharedState,
     headers: &HeaderMap,
     operator_omni: &str,
@@ -170,7 +170,7 @@ fn auth_session(
 /// Chain-probe one delegate binding and require: registered, not revoked,
 /// TIER_AGENT (2), owned by `session_omni`. Returns the probe (its
 /// `actor_omni` is the chain-read identity the re-create is labeled with).
-async fn probe_owned_delegate(
+pub(crate) async fn probe_owned_delegate(
     state: &SharedState,
     rpc_url: &str,
     registry: &[u8; 20],
@@ -208,7 +208,7 @@ async fn probe_owned_delegate(
 /// One bearer-gated call to an instance's in-sandbox management surface,
 /// through the backend's routing headers.
 #[allow(clippy::too_many_arguments)] // thin HTTP shim — a param per wire fact
-async fn mgmt_request(
+pub(crate) async fn mgmt_request(
     http: &reqwest::Client,
     base: &str,
     headers: &[(String, String)],

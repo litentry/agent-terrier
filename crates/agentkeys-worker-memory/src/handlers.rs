@@ -18,6 +18,7 @@ use agentkeys_protocol::{ContextKind, InboxItem, InboxItemMeta};
 use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
+use agentkeys_worker_creds::errors::s3_error_summary;
 use agentkeys_worker_creds::errors::{
     err_400, err_403, err_404, err_409, err_500, err_502, err_502_s3_get, ApiError, S3FetchAttempt,
 };
@@ -239,7 +240,7 @@ async fn memory_put_inner(
         .body(env_bytes.clone().into())
         .send()
         .await
-        .map_err(|e| err_502(e.to_string(), "s3_put"))?;
+        .map_err(|e| err_502(format!("s3 PutObject: {}", s3_error_summary(&e)), "s3_put"))?;
     Ok((key, env_bytes))
 }
 

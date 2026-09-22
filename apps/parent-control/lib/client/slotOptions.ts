@@ -45,3 +45,18 @@ export function suggestedFeedId(slot: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 32);
 }
+
+/** What the contact gate does with the channel a messaging slot binds (owner
+ *  decision 2026-09-22: the bound channel IS the feed — the gate learns
+ *  `<app> → <channel>` at install / rebind and relays it both ways). */
+export function gateRelayNote(
+  gateway: { configured: boolean; enrolled: boolean; transport: string } | null | undefined,
+  label: string,
+): string {
+  const app = label.trim() || '<app>';
+  if (!gateway?.configured) {
+    return `no contact gate is configured — the family cannot reach \`${app}\` on this channel until one is set up; the channel still works as a feed.`;
+  }
+  const name = gateway.transport === 'weixin' ? '微信 · WeChat' : gateway.transport === 'telegram' ? 'Telegram' : gateway.transport;
+  return `the ${name} contact gate relays whichever channel you pick here for \`${app}\`, both ways${gateway.enrolled ? '' : ' (the gate enrolls with this install — same Touch ID)'}.`;
+}

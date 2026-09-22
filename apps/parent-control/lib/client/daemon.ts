@@ -56,6 +56,7 @@ import type { ApiActor } from '@/lib/generated/ApiActor';
 import type { AppDashboard } from '@/lib/generated/AppDashboard';
 import type { AppInstallBindings } from '@/lib/generated/AppInstallBindings';
 import type { AppInstallBuildResponse } from '@/lib/generated/AppInstallBuildResponse';
+import type { AppRebindBuildResponse } from '@/lib/generated/AppRebindBuildResponse';
 import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
 import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
 import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
@@ -1024,6 +1025,14 @@ export class DaemonBackend implements AgentKeysClient {
 
   async appUninstallSubmit(label: string, body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { uninstalled?: unknown }>> {
     return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/uninstall/submit`, body);
+  }
+
+  async appRebindBuild(label: string, input: { slots: { slot: string; channel_id: string }[] }): Promise<Result<AppRebindBuildResponse>> {
+    return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/rebind/build`, input);
+  }
+
+  async appRebindSubmit(label: string, body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { rebound?: unknown }>> {
+    return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/rebind/submit`, body);
   }
 
   async appCommand(
