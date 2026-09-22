@@ -101,6 +101,7 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         speech_role_arn: String::new(),
         channel_role_arn: String::new(),
         channel_sts_token: String::new(),
+        sts_provider: "aws".into(),
         audit_db_path: tmp.path().join("audit.sqlite"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,

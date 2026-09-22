@@ -2822,6 +2822,15 @@ pub mod sandbox_env {
     /// through the gateway on the console's behalf (`/v1/agent/bridge`).
     /// Before #715 a leaked instance name alone opened both surfaces.
     pub const BRIDGE_TOKEN: &str = "AGENTKEYS_BRIDGE_TOKEN";
+    /// The stack's data-plane credential provider (`aws` | `ve`), injected at
+    /// CREATE from the broker's own `AGENTKEYS_STS_PROVIDER` — the delegate
+    /// runtime then mints its OWN-namespace storage credential the same way
+    /// the master plane does on that stack: on VE at the signer's
+    /// `/dev/sign-sts` (the #513 chain-gated issuance, with its own J1_agent),
+    /// on AWS through the anonymous relay. OPTIONAL: absent, the daemon sends
+    /// only its session bearer and the memory worker mints server-side
+    /// (`/v1/cap/own-sts`, #716) — the fallback, never a silent one.
+    pub const STS_PROVIDER: &str = "AGENTKEYS_STS_PROVIDER";
     /// #594 — the delegate's OWN `knowledge:<ns>` namespace name (the spawn
     /// template grant), injected at CREATE so the in-sandbox checkpoint loop
     /// addresses the right grant even for an INHERITED namespace (#425 O2,

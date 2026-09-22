@@ -97,6 +97,38 @@ pub struct BackendClient {
     /// bound `device_key_hash` + co-signature that the worker re-verifies. `None`
     /// = the direct #76 path (the client holds the actor's own registered K10).
     pub delegation: Option<Delegation>,
+    /// The VE data plane's credential mint for this actor's OWN namespace: the
+    /// signer's chain-gated `/dev/sign-sts` (#513 rule 3 at issuance), reached
+    /// with the actor's own session bearer. When set, own-namespace memory ops
+    /// carry signer-minted `X-Aws-*` creds scoped to `bots/<actor>/*` of the
+    /// memory bucket — the broker is out of that loop. `None` = not a VE stack
+    /// (the AWS relay above) or a delegate that should fall back to the
+    /// worker-minted `/v1/cap/own-sts` (#716).
+    pub signer_sts: Option<SignerSts>,
+}
+
+/// The signer-mint coordinates (`BackendClient::with_signer_sts`).
+#[derive(Clone, Debug)]
+pub struct SignerSts {
+    /// The stack's signer base URL (derived `signer.<zone>` or the override).
+    pub signer_url: String,
+    /// The actor's omni (`0x`+64 hex) — must equal the session bearer's claim;
+    /// the signer refuses a mismatch (`actor_mismatch`).
+    pub actor_omni: String,
+}
+
+/// Which signer failures may fall back to the worker-minted own-sts path: only
+/// the "signer not there" class — an unarmed endpoint (503
+/// `sts_signing_not_configured`), a transport failure, a broker OIDC mint that
+/// could not be reached. Every 4xx is an AUTHZ or contract verdict
+/// (`grant_not_found`, `actor_mismatch`, `ttl_too_long`, …) and stays a hard
+/// error: a refused delegate must never quietly obtain a credential elsewhere.
+pub(crate) fn signer_failure_falls_back(e: &BackendError) -> bool {
+    match e {
+        BackendError::Http { status, .. } => *status >= 500,
+        BackendError::Transport(_) => true,
+        _ => false,
+    }
 }
 
 impl BackendClient {
@@ -124,7 +156,24 @@ impl BackendClient {
             device_key: None,
             remote_cap_pop: None,
             delegation: None,
+            signer_sts: None,
         }
+    }
+
+    /// Route this client's OWN-namespace memory credential through the VE
+    /// signer's `/dev/sign-sts` (the stack's data-plane mint, #513/#514): the
+    /// actor's own J1 + the broker-minted OIDC JWT → class-scoped, actor-scoped
+    /// creds, chain-gated at issuance. Requires `agent_session_bearer`.
+    pub fn with_signer_sts(
+        mut self,
+        signer_url: impl Into<String>,
+        actor_omni: impl Into<String>,
+    ) -> Self {
+        self.signer_sts = Some(SignerSts {
+            signer_url: signer_url.into(),
+            actor_omni: actor_omni.into(),
+        });
+        self
     }
 
     /// Attach the K10 device key used to sign the cap-mint proof-of-possession
@@ -452,8 +501,27 @@ impl BackendClient {
     async fn attach_memory_creds(
         &self,
         mut req: reqwest::RequestBuilder,
+        verbs: &[&str],
     ) -> Result<reqwest::RequestBuilder, BackendError> {
-        let relayed = self.sts_headers(self.memory_role_arn.as_ref()).await?;
+        // Precedence: the AWS relay (a role ARN is configured) → the VE signer
+        // mint (this stack's data plane) → the session bearer (the worker mints
+        // own-sts server-side). Each arm is explicit; a signer refusal that is
+        // an AUTHZ verdict (4xx: grant_not_found, actor_mismatch, …) is a hard
+        // error — never quietly downgraded to the bearer path.
+        let mut relayed = self.sts_headers(self.memory_role_arn.as_ref()).await?;
+        if relayed.is_none() && self.signer_sts.is_some() {
+            match self.signer_sts_headers("memory", verbs).await {
+                Ok(h) => relayed = Some(h),
+                Err(e) if signer_failure_falls_back(&e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "signer sign-sts unavailable for the own-namespace op — falling back to the \
+                         session bearer (the memory worker mints /v1/cap/own-sts server-side)"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
         if let Some(bearer) = self.own_bearer_when_no_relay(relayed.is_some()) {
             req = req.bearer_auth(bearer);
         }
@@ -463,6 +531,62 @@ impl BackendClient {
             }
         }
         Ok(req)
+    }
+
+    /// The VE signer mint for ONE own-namespace op: broker OIDC JWT (identity)
+    /// → signer `/dev/sign-sts` with the intent `{data_class, verbs}` (the
+    /// signer renders the per-actor policy itself and, when armed, re-verifies
+    /// the actor's on-chain device binding before signing) → `X-Aws-*` headers.
+    /// The daemon names only the INTENT — never a role, never a policy.
+    async fn signer_sts_headers(
+        &self,
+        data_class: &str,
+        verbs: &[&str],
+    ) -> Result<[(&'static str, String); 3], BackendError> {
+        let signer = self
+            .signer_sts
+            .as_ref()
+            .ok_or(BackendError::NotConfigured("signer_sts"))?;
+        let bearer = self
+            .agent_session_bearer
+            .as_deref()
+            .filter(|b| !b.is_empty())
+            .ok_or(BackendError::NotConfigured("agent_session_bearer"))?;
+        let jwt = agentkeys_provisioner::fetch_oidc_jwt(self.broker()?, bearer)
+            .await
+            .map_err(|e| {
+                BackendError::Transport(format!("broker OIDC mint ({data_class}): {e}"))
+            })?;
+        let body = agentkeys_protocol::SignStsBody {
+            omni_account: signer.actor_omni.clone(),
+            data_class: data_class.to_string(),
+            verbs: verbs.iter().map(|v| v.to_string()).collect(),
+            ttl_seconds: 900,
+            oidc_token: jwt.jwt,
+        };
+        let url = format!("{}/dev/sign-sts", signer.signer_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(format!("signer sign-sts ({data_class}): {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        let out: agentkeys_protocol::SignStsResult = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Parse(format!("signer sign-sts ({data_class}): {e}")))?;
+        Ok([
+            ("x-aws-access-key-id", out.access_key_id),
+            ("x-aws-secret-access-key", out.secret_access_key),
+            ("x-aws-session-token", out.session_token),
+        ])
     }
 
     /// The bearer the worker's own-namespace path needs: only when NO relayed
@@ -488,7 +612,7 @@ impl BackendClient {
             object_key: input.object_key.clone(),
             expected_content_hash: input.expected_content_hash.clone(),
         });
-        req = self.attach_memory_creds(req).await?;
+        req = self.attach_memory_creds(req, &["get", "put"]).await?;
         let resp = req
             .send()
             .await
@@ -522,7 +646,7 @@ impl BackendClient {
             namespace: input.namespace.clone(),
             object_key: input.object_key.clone(),
         });
-        req = self.attach_memory_creds(req).await?;
+        req = self.attach_memory_creds(req, &["get"]).await?;
         let resp = req
             .send()
             .await
@@ -916,6 +1040,47 @@ mod sts_relay_tests {
         let c = client(None, Some("arn:aws:iam::1:role/x"));
         let err = c.sts_headers(c.memory_role_arn.as_ref()).await.unwrap_err();
         assert!(matches!(err, BackendError::NotConfigured(_)));
+    }
+
+    /// The signer fallback verdict: unavailability falls back (loudly, the
+    /// caller logs), an authorization/contract refusal never does.
+    #[test]
+    fn signer_fallback_only_on_unavailability() {
+        let http = |status: u16| BackendError::Http {
+            status,
+            body: String::new(),
+        };
+        assert!(signer_failure_falls_back(&http(503)));
+        assert!(signer_failure_falls_back(&http(502)));
+        assert!(signer_failure_falls_back(&http(500)));
+        assert!(signer_failure_falls_back(&BackendError::Transport(
+            "x".into()
+        )));
+        for refused in [400u16, 401, 403, 404, 422] {
+            assert!(!signer_failure_falls_back(&http(refused)), "{refused}");
+        }
+        assert!(!signer_failure_falls_back(&BackendError::NotConfigured(
+            "x"
+        )));
+        assert!(!signer_failure_falls_back(&BackendError::Parse("x".into())));
+    }
+
+    #[test]
+    fn with_signer_sts_records_the_coordinates() {
+        let c = BackendClient::new(
+            Some("https://broker.example".into()),
+            Some("https://memory.example".into()),
+            None,
+            None,
+            Some("agent-jwt".into()),
+            None,
+            None,
+            "us-east-1".into(),
+        )
+        .with_signer_sts("https://signer.example/", format!("0x{}", "ab".repeat(32)));
+        let s = c.signer_sts.as_ref().unwrap();
+        assert_eq!(s.signer_url, "https://signer.example/");
+        assert!(s.actor_omni.starts_with("0xab"));
     }
 
     // #716 — the own-namespace bearer rides ONLY when no relay creds do.

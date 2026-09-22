@@ -181,9 +181,8 @@ async fn main() -> anyhow::Result<()> {
     // broker-side, signed with the broker's least-priv VE identity, and each
     // session carries a per-actor scope-down Policy. Unknown values fail loud
     // — never a silent fallback to a different cloud's credential plane.
-    let sts_provider = std::env::var("AGENTKEYS_STS_PROVIDER").unwrap_or_default();
-    let sts: Arc<dyn StsClient> = match sts_provider.as_str() {
-        "" | "aws" => {
+    let sts: Arc<dyn StsClient> = match config.sts_provider.as_str() {
+        "aws" => {
             tracing::info!("STS client: AWS SDK default chain (creds optional after issue #71 — only the GetCallerIdentity startup probe consults them)");
             Arc::new(AwsStsClient::with_default_chain(&config.aws_region).await)
         }

@@ -70,6 +70,11 @@ pub const CHANNEL_ROLE_ARN: &str = "CHANNEL_ROLE_ARN";
 /// generate-once posture as the worker KEKs) and written to BOTH the broker
 /// unit env and the channel worker env; never in the repo env files.
 pub const AGENTKEYS_CHANNEL_STS_TOKEN: &str = "AGENTKEYS_CHANNEL_STS_TOKEN";
+/// The data-plane credential provider (`aws` default | `ve`): selects the
+/// broker's own STS client and is injected into every delegate sandbox at
+/// create so the delegate runtime mints its own storage credential the way
+/// this stack does (VE: the signer's chain-gated `/dev/sign-sts`).
+pub const AGENTKEYS_STS_PROVIDER: &str = "AGENTKEYS_STS_PROVIDER";
 /// Optional. Path to the audit-log SQLite DB. Defaults to `~/.agentkeys/broker/audit.sqlite`.
 pub const BROKER_AUDIT_DB_PATH: &str = "BROKER_AUDIT_DB_PATH";
 /// Optional. AWS region used for STS calls. Defaults to `us-east-1`.

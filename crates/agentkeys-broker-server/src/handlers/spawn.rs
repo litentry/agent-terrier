@@ -1173,6 +1173,9 @@ async fn finalize_spawn(
             &state.session_keypair,
             device_key_hash,
         )),
+        // The stack's credential provider — the delegate's own-namespace
+        // storage credential is minted the way this stack mints (VE: signer).
+        Some(&state.config.sts_provider),
     ));
     // #660 — the app-runtime set (template, bound feeds, availability, mirror
     // namespaces, tz): the same values every re-create injects from the row.

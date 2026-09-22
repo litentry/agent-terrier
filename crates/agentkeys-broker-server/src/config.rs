@@ -23,6 +23,12 @@ pub struct BrokerConfig {
     /// #541 — the host-minted shared bearer authenticating the CHANNEL WORKER
     /// to `/v1/cap/channel-sts`. Empty = the endpoint refuses (not configured).
     pub channel_sts_token: String,
+    /// The data-plane credential provider this stack runs (`AGENTKEYS_STS_PROVIDER`:
+    /// `aws` — the default — or `ve`). Selects the broker's own STS client
+    /// (main.rs) AND is injected into every delegate sandbox at create
+    /// (`sandbox_env::STS_PROVIDER`) so the delegate runtime mints its own
+    /// storage credential the way this stack does. Unknown values fail boot.
+    pub sts_provider: String,
     pub audit_db_path: PathBuf,
     pub aws_region: String,
     pub session_duration_seconds: i32,
@@ -94,6 +100,18 @@ impl BrokerConfig {
         // with a clear error instead of failing boot.
         let channel_role_arn = std::env::var(env::CHANNEL_ROLE_ARN).unwrap_or_default();
         let channel_sts_token = std::env::var(env::AGENTKEYS_CHANNEL_STS_TOKEN).unwrap_or_default();
+        let sts_provider = match std::env::var(env::AGENTKEYS_STS_PROVIDER)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "aws" => "aws".to_string(),
+            "ve" => "ve".to_string(),
+            other => anyhow::bail!(
+                "unknown AGENTKEYS_STS_PROVIDER={other:?} (expected \"aws\" or \"ve\") — refusing to guess a credential plane"
+            ),
+        };
 
         let audit_db_path = std::env::var(env::BROKER_AUDIT_DB_PATH)
             .ok()
@@ -149,6 +167,7 @@ impl BrokerConfig {
             speech_role_arn,
             channel_role_arn,
             channel_sts_token,
+            sts_provider,
             audit_db_path,
             aws_region,
             session_duration_seconds,

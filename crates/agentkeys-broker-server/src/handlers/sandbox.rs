@@ -163,6 +163,7 @@ pub(crate) fn delegate_identity_envs(
     mgmt_token: Option<&str>,
     memory_ns: Option<&str>,
     bridge_token: Option<&str>,
+    sts_provider: Option<&str>,
 ) -> Vec<(String, String)> {
     use agentkeys_protocol::sandbox_env as env_names;
     let norm0x = |o: &str| format!("0x{}", crate::handlers::accept::norm_omni(o));
@@ -182,6 +183,16 @@ pub(crate) fn delegate_identity_envs(
     // fail-closed on both surfaces, never open.
     if let Some(token) = bridge_token.filter(|t| !t.trim().is_empty()) {
         envs.push((env_names::BRIDGE_TOKEN.to_string(), token.to_string()));
+    }
+    // The stack's credential provider: the delegate mints its OWN-namespace
+    // storage credential the way this stack does (VE: the signer's
+    // chain-gated sign-sts, AWS: the anonymous relay) — the broker leaves that
+    // loop; absent, the daemon falls back to the worker-minted own-sts loudly.
+    if let Some(provider) = sts_provider.filter(|p| !p.trim().is_empty()) {
+        envs.push((
+            env_names::STS_PROVIDER.to_string(),
+            provider.trim().to_string(),
+        ));
     }
     if let Some(secret) = k10_secret_hex.filter(|s| !s.trim().is_empty()) {
         envs.push((env_names::DEVICE_KEY_HEX.to_string(), secret.to_string()));
@@ -436,6 +447,7 @@ pub async fn ensure_for_delegate(
                     &state.session_keypair,
                     device_key_hash,
                 )),
+                Some(&state.config.sts_provider),
             );
             // #660 — the app-runtime set rides every re-create too (a
             // re-created Chef must poll its WeChat feed, not just opchat).
@@ -767,6 +779,7 @@ mod tests {
             Some("smt1_feed"),
             Some("watchdog"),
             Some("sbt1_feed"),
+            Some("ve"),
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         for required in agentkeys_protocol::sandbox_env::CHAT_REQUIRED {
@@ -797,6 +810,9 @@ mod tests {
         assert_eq!(get("AGENTKEYS_MEMORY_NS"), "watchdog");
         // #715 — the in-pod bearer rides every armed create.
         assert_eq!(get("AGENTKEYS_BRIDGE_TOKEN"), "sbt1_feed");
+        // The stack's credential provider rides too — the delegate mints its
+        // own storage credential the way the stack does.
+        assert_eq!(get("AGENTKEYS_STS_PROVIDER"), "ve");
     }
 
     /// #715 — the bridge token is a sibling derivation of the mgmt token under
@@ -871,10 +887,12 @@ mod tests {
             // derives from the channel id instead).
             Some(""),
             None,
+            None,
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         assert!(!keys.contains(&"AGENTKEYS_DEVICE_KEY_HEX"));
         assert!(!keys.contains(&"AGENTKEYS_BRIDGE_TOKEN"));
+        assert!(!keys.contains(&"AGENTKEYS_STS_PROVIDER"));
         assert!(!keys.contains(&"AGENTKEYS_CHAT_CHANNEL_ID"));
         assert!(!keys.contains(&"AGENTKEYS_BROKER_URL"));
         assert!(!keys.contains(&"AGENTKEYS_SANDBOX_MGMT_TOKEN"));

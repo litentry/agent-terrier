@@ -84,6 +84,7 @@ async fn spawn_broker_with_wallet_sig() -> (String, Arc<AppState>) {
         speech_role_arn: String::new(),
         channel_role_arn: String::new(),
         channel_sts_token: String::new(),
+        sts_provider: "aws".into(),
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,
