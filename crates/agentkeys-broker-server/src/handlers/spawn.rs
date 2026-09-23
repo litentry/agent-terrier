@@ -57,8 +57,7 @@ use crate::handlers::accept::{
 };
 use crate::handlers::revoke::parse_device_probe;
 use crate::sponsored_accept::{
-    assemble_revoke_userop_with_scopes, assemble_spawn_userop_with_endpoints, AcceptUserOpParams,
-    BuildAcceptResponse,
+    assemble_revoke_userop_with_scopes, AcceptUserOpParams, BuildAcceptResponse,
 };
 use crate::state::SharedState;
 use agentkeys_core::erc4337::AgentRegister;
@@ -130,6 +129,10 @@ pub struct PendingSpawn {
     /// injected into the sandbox at confirm, dropped with the row. EMPTY under
     /// #552 signer custody — no secret ever exists broker-side.
     pub k10_secret_hex: String,
+    /// The anchor seal this ceremony carries (2026-09-22): the context
+    /// document's version + hash, written to the row at confirm.
+    pub context_version: u64,
+    pub context_hash: String,
     /// #660 — the app-runtime facts the durable spawn context persists at
     /// confirm (template, bound feeds, availability, mirror namespaces, tz).
     pub app: AppRuntimeFacts,
@@ -253,6 +256,10 @@ pub struct SpawnBuildRequest {
 pub struct SpawnBuildResponse {
     #[serde(flatten)]
     pub build: BuildAcceptResponse,
+    /// The anchor seal folded into this batch (absent when the stack names
+    /// no audit contract — the install still lands, unsealed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_seal: Option<agentkeys_protocol::ContextSeal>,
     pub actor_omni: String,
     pub device_key_hash: String,
     /// The duplex operator-chat channel id in the template grant (S4).
@@ -791,9 +798,39 @@ pub async fn spawn_build(
         register: &register,
         grant: &grant,
     };
-    let assembled =
-        assemble_spawn_userop_with_endpoints(&params, &extra_scopes, &enrollments, &broker_sk)
-            .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // The anchor seal (2026-09-22): the context document this delegate will
+    // boot from, hashed into the SAME batch — `appendRoot` on the audit
+    // contract. No audit contract on this stack = an unsealed install, loud.
+    let context_doc =
+        crate::handlers::anchor::compose_context_doc(crate::handlers::anchor::ContextDocFacts {
+            version: 1,
+            previous_hash: None,
+            label: &req.label,
+            device_key_hash: &device_key_hash,
+            actor_omni: &actor_omni,
+            k10_address: &k10_address,
+            preset_id: &plan.template_id,
+            chat_channel_id: &chat_channel_id,
+            memory_ns: &memory_ns,
+            bound_channels: &plan.bound_channels,
+            availability: plan.availability.as_str(),
+            memory_namespaces: &plan.memory_namespaces(),
+            tz_offset_minutes: req
+                .bindings
+                .as_ref()
+                .map(|b| b.tz_offset_minutes as i64)
+                .unwrap_or(0),
+        });
+    let (trailing, context_seal) =
+        crate::handlers::anchor::seal_for(&cfg, &register.operator_omni, &context_doc);
+    let assembled = crate::sponsored_accept::assemble_spawn_userop_sealed(
+        &params,
+        &extra_scopes,
+        &enrollments,
+        &trailing,
+        &broker_sk,
+    )
+    .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     state.pending_ceremonies.put_spawn(PendingSpawn {
         operator_omni: session_omni,
@@ -807,6 +844,14 @@ pub async fn spawn_build(
         services: services.clone(),
         k10_address: k10_address.clone(),
         k10_secret_hex,
+        context_version: context_seal
+            .as_ref()
+            .map(|s| s.context_version)
+            .unwrap_or(0),
+        context_hash: context_seal
+            .as_ref()
+            .map(|s| s.context_hash.clone())
+            .unwrap_or_default(),
         app: AppRuntimeFacts {
             template_version: plan.template_version.clone(),
             bound_channels: plan.bound_channels.clone(),
@@ -839,6 +884,7 @@ pub async fn spawn_build(
         template_version: plan.template_version,
         endpoint_scopes: req.endpoint_scopes.clone(),
         endpoint_enrollments: req.endpoint_enrollments.clone(),
+        context_seal,
     }))
 }
 
@@ -1099,6 +1145,8 @@ async fn finalize_spawn(
             availability: r.app.availability_str(),
             memory_namespaces: r.app.memory_namespaces.clone(),
             tz_offset_minutes: r.app.tz_offset_minutes,
+            context_version: r.context_version as i64,
+            context_hash: r.context_hash.clone(),
         }
     });
     if let Some(ctx) = &ctx_row {
@@ -1345,6 +1393,8 @@ mod tests {
             chat_channel_id: "opchat-watchdog".into(),
             services: vec!["knowledge:watchdog".into()],
             k10_secret_hex: "0xdead".into(),
+            context_version: 0,
+            context_hash: String::new(),
             app: AppRuntimeFacts::default(),
             created_at: Instant::now(),
         });

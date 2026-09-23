@@ -673,10 +673,12 @@ fn bindings_poll_secs() -> u64 {
         .unwrap_or(90)
 }
 
-/// Follow the anchor: `GET /v1/agent/self/context` with the delegate's own
-/// session; a changed `bound_channels` set is applied through the same path
-/// the live push uses (persisted + the pollers reconciled). A broker without
-/// the route (or a row) is announced once and never retried loudly.
+/// Follow the anchor. The document on the MEMORY PLANE first (the app's own
+/// namespace, entry `context`, read with the delegate's own cap — outside any
+/// broker), then the broker's `GET /v1/agent/self/context` view when no memory
+/// worker is configured or the plane read fails. A changed `bound_channels`
+/// set is applied through the same path the live push uses (persisted + the
+/// pollers reconciled).
 async fn anchor_poll(
     session: Arc<SessionHandle>,
     cfg: Arc<ChatLoopConfig>,
@@ -690,12 +692,45 @@ async fn anchor_poll(
     );
     let mut last = serde_json::to_string(&initial).unwrap_or_default();
     let mut announced_absent = false;
+    let plane = crate::memory_mirror::MirrorConfig::from_chat_env((*cfg).clone());
+    let own_ns = std::env::var(agentkeys_backend_client::protocol::sandbox_env::MEMORY_NS)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let plane_credential = match &plane {
+        Some(_) => build_credential(&cfg).await.map(Arc::new),
+        None => None,
+    };
     loop {
         tokio::time::sleep(every).await;
         let bearer = match session.bearer().await {
             Ok(b) => b,
             Err(_) => continue,
         };
+        // 1. the plane: the sealed document itself
+        if let (Some(mcfg), Some(ns), Some(cred)) = (&plane, &own_ns, &plane_credential) {
+            match crate::memory_mirror::fetch_own_context(mcfg, cred, &bearer, ns).await {
+                Ok(Some(doc)) => {
+                    let json = serde_json::to_string(&doc.bound_channels).unwrap_or_default();
+                    if json != last {
+                        match crate::app_runtime::apply_live_bindings(doc.bound_channels) {
+                            Ok(n) => {
+                                tracing::info!(feeds = n, version = doc.version, "#717 anchor: the sealed context document changed on the memory plane — re-sourced in place");
+                                last = json;
+                            }
+                            Err(e) => tracing::warn!(error = %e, "#717 anchor: apply failed"),
+                        }
+                    }
+                    continue;
+                }
+                Ok(None) => {
+                    tracing::debug!("#717 anchor: no context document on the plane yet — falling back to the broker view");
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "#717 anchor: plane read failed — falling back to the broker view");
+                }
+            }
+        }
+        // 2. the broker's view of its row
         let resp = match http.get(&url).bearer_auth(&bearer).send().await {
             Ok(r) => r,
             Err(e) => {

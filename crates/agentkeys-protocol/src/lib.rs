@@ -1794,6 +1794,9 @@ pub enum ContextKind {
     Skill,
     Persona,
     Resource,
+    /// The delegate's sealed context document (`DelegateContextDoc`) in the
+    /// app's own namespace — never a prompt section, never inbox-adoptable.
+    Context,
 }
 
 impl ContextKind {
@@ -1805,6 +1808,7 @@ impl ContextKind {
             ContextKind::Skill => "skill",
             ContextKind::Persona => "persona",
             ContextKind::Resource => "resource",
+            ContextKind::Context => "context",
         }
     }
 
@@ -1815,6 +1819,7 @@ impl ContextKind {
             "skill" => Some(ContextKind::Skill),
             "persona" => Some(ContextKind::Persona),
             "resource" => Some(ContextKind::Resource),
+            "context" => Some(ContextKind::Context),
             _ => None,
         }
     }
@@ -1822,7 +1827,10 @@ impl ContextKind {
     /// Whether a delegate proposal of this kind may ever be adopted from the
     /// inbox: persona and resources are master-authored only.
     pub fn inbox_adoptable(&self) -> bool {
-        !matches!(self, ContextKind::Persona | ContextKind::Resource)
+        !matches!(
+            self,
+            ContextKind::Persona | ContextKind::Resource | ContextKind::Context
+        )
     }
 }
 

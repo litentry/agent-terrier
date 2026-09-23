@@ -57,6 +57,7 @@ import type { AppDashboard } from '@/lib/generated/AppDashboard';
 import type { AppInstallBindings } from '@/lib/generated/AppInstallBindings';
 import type { AppInstallBuildResponse } from '@/lib/generated/AppInstallBuildResponse';
 import type { AppRebindBuildResponse } from '@/lib/generated/AppRebindBuildResponse';
+import type { AppContextView } from '@/lib/generated/AppContextView';
 import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
 import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
 import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
@@ -1005,6 +1006,10 @@ export class DaemonBackend implements AgentKeysClient {
     return this.getJson(`/v1/master/apps/${encodeURIComponent(label)}`);
   }
 
+  async appContext(label: string): Promise<Result<AppContextView>> {
+    return this.getJson(`/v1/master/apps/${encodeURIComponent(label)}/context`);
+  }
+
   async appInstallBuild(input: {
     template_id: string;
     label: string;
@@ -1033,6 +1038,18 @@ export class DaemonBackend implements AgentKeysClient {
 
   async appRebindSubmit(label: string, body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { rebound?: unknown }>> {
     return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/rebind/submit`, body);
+  }
+
+  async appAnchorsSealBuild(input: { labels?: string[] }): Promise<Result<{ build: { user_op?: unknown; user_op_hash?: string }; labels: string[] }>> {
+    return this.postJson('/v1/master/apps/anchors/seal/build', { labels: input.labels ?? [] });
+  }
+
+  async appAnchorsSealSubmit(body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { sealed?: unknown[] }>> {
+    return this.postJson('/v1/master/apps/anchors/seal/submit', body);
+  }
+
+  async appsRehydrate(input: { labels?: string[] }): Promise<Result<{ ok: boolean; results: { label: string; status?: number; skipped?: string; error?: string; result?: unknown }[] }>> {
+    return this.postJson('/v1/master/apps/rehydrate', { labels: input.labels ?? [] });
   }
 
   async appCommand(

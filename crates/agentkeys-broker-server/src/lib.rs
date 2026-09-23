@@ -210,6 +210,16 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/agent/self/context",
             axum::routing::get(handlers::rebind::self_context),
         )
+        // The anchor: seal apps installed before it existed (ONE Touch ID),
+        // and rebuild a row from a sealed document (a fresh broker).
+        .route(
+            "/v1/agent/anchors/build",
+            post(handlers::anchor::anchors_build),
+        )
+        .route(
+            "/v1/agent/spawn/context/rehydrate",
+            post(handlers::anchor::rehydrate),
+        )
         .route(
             "/v1/agent/image-status",
             post(handlers::update::agent_image_status),

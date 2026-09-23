@@ -486,6 +486,12 @@ fn mirror_units(blob: &str) -> Vec<MirrorItem> {
                             .trim()
                             .to_string()
                     };
+                    // The sealed context document (the anchor) lives in the
+                    // app's own namespace as `kind: context` — runtime facts
+                    // for the daemon, never a knowledge item for the engine.
+                    if field("kind") == "context" {
+                        continue;
+                    }
                     let body = field("body");
                     let preview = field("preview");
                     if body.is_empty() && preview.is_empty() {
@@ -859,4 +865,46 @@ mod first_pass_engine_wait_tests {
             Duration::ZERO
         ));
     }
+}
+
+/// The delegate's sealed context document from its OWN namespace on the
+/// memory plane (the anchor — entry `context`, `kind: context`), read with
+/// its own cap. `Ok(None)` = no such entry yet.
+pub(crate) async fn fetch_own_context(
+    cfg: &MirrorConfig,
+    credential: &DelegateCredential,
+    bearer: &str,
+    own_ns: &str,
+) -> Result<Option<agentkeys_backend_client::protocol::DelegateContextDoc>, String> {
+    let client = BackendClient::new(
+        Some(cfg.chat.broker_url.clone()),
+        Some(cfg.memory_worker_url.clone()),
+        None,
+        None,
+        Some(bearer.to_string()),
+        None,
+        None,
+        std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
+    );
+    let client = credential.configure_client(client);
+    let dkh = credential.device_key_hash();
+    let blob = match fetch_canonical(&client, cfg, own_ns, &dkh, bearer).await {
+        Ok(b) => b,
+        Err((_, BackendError::Http { status: 404, .. })) => return Ok(None),
+        Err((stage, e)) => return Err(format!("{stage}: {e}")),
+    };
+    let key = agentkeys_backend_client::protocol::CONTEXT_ENTRY_KEY;
+    let entries: serde_json::Value = serde_json::from_str(&blob).map_err(|e| e.to_string())?;
+    let Some(body) = entries
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|e| e.get("key").and_then(|k| k.as_str()) == Some(key))
+        .and_then(|e| e.get("body").and_then(|b| b.as_str()))
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str(body)
+        .map(Some)
+        .map_err(|e| format!("context document: {e}"))
 }

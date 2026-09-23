@@ -82,6 +82,10 @@ pub struct SpawnContext {
     pub memory_namespaces: String,
     /// #669 — the household's UTC offset in minutes for cron evaluation.
     pub tz_offset_minutes: i64,
+    /// The sealed context document this row caches (2026-09-22: the anchor
+    /// lives on the memory plane + chain; `0` / empty = never sealed).
+    pub context_version: i64,
+    pub context_hash: String,
 }
 
 impl SpawnContext {
@@ -206,6 +210,14 @@ impl SpawnContextStore {
                 "tz_offset_minutes",
                 "ALTER TABLE spawn_contexts ADD COLUMN tz_offset_minutes INTEGER NOT NULL DEFAULT 0",
             ),
+            (
+                "context_version",
+                "ALTER TABLE spawn_contexts ADD COLUMN context_version INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "context_hash",
+                "ALTER TABLE spawn_contexts ADD COLUMN context_hash TEXT NOT NULL DEFAULT ''",
+            ),
         ] {
             match self.lock()?.execute(ddl, []) {
                 Ok(_) => {}
@@ -229,8 +241,8 @@ impl SpawnContextStore {
                 "INSERT OR REPLACE INTO spawn_contexts
                  (device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
                   memory_ns, created_at, preset_id, bound_channels, availability,
-                  memory_namespaces, tz_offset_minutes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  memory_namespaces, tz_offset_minutes, context_version, context_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     norm(&ctx.device_key_hash),
                     ctx.label,
@@ -244,6 +256,8 @@ impl SpawnContextStore {
                     ctx.availability,
                     ctx.memory_namespaces,
                     ctx.tz_offset_minutes,
+                    ctx.context_version,
+                    ctx.context_hash,
                 ],
             )
             .map_err(|e| BrokerError::Internal(format!("upsert spawn context: {e}")))?;
@@ -255,7 +269,7 @@ impl SpawnContextStore {
             .query_row(
                 "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
                         memory_ns, created_at, preset_id, bound_channels, availability,
-                        memory_namespaces, tz_offset_minutes
+                        memory_namespaces, tz_offset_minutes, context_version, context_hash
                  FROM spawn_contexts WHERE device_key_hash = ?1",
                 params![norm(device_key_hash)],
                 row_to_ctx,
@@ -273,7 +287,7 @@ impl SpawnContextStore {
             .prepare(
                 "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
                         memory_ns, created_at, preset_id, bound_channels, availability,
-                        memory_namespaces, tz_offset_minutes
+                        memory_namespaces, tz_offset_minutes, context_version, context_hash
                  FROM spawn_contexts ORDER BY created_at",
             )
             .map_err(|e| BrokerError::Internal(format!("list spawn contexts: {e}")))?;
@@ -315,6 +329,8 @@ fn row_to_ctx(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpawnContext> {
         availability: row.get(9)?,
         memory_namespaces: row.get(10)?,
         tz_offset_minutes: row.get(11)?,
+        context_version: row.get(12)?,
+        context_hash: row.get(13)?,
     })
 }
 
@@ -336,6 +352,8 @@ mod tests {
             availability: String::new(),
             memory_namespaces: String::new(),
             tz_offset_minutes: 0,
+            context_version: 0,
+            context_hash: String::new(),
         }
     }
 

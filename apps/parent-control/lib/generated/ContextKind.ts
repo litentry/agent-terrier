@@ -13,4 +13,4 @@
  * never inbox-adoptable. Wire spelling is the lowercase word; absent =
  * `knowledge` (full back-compat — every pre-#390 object is knowledge).
  */
-export type ContextKind = "knowledge" | "skill" | "persona" | "resource";
+export type ContextKind = "knowledge" | "skill" | "persona" | "resource" | "context";

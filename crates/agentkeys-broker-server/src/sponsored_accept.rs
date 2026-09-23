@@ -195,6 +195,61 @@ pub fn assemble_scope_userop(
     assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
 }
 
+/// **The sealed install batch** — [`assemble_spawn_userop_with_endpoints`]
+/// plus the trailing anchor seal (`appendRoot` on the audit contract), all
+/// under the ONE Touch ID.
+pub fn assemble_spawn_userop_sealed(
+    p: &AcceptUserOpParams,
+    extra: &[agentkeys_core::erc4337::ExtraScope],
+    enrollments: &[agentkeys_core::erc4337::AgentRegister],
+    trailing: &[agentkeys_core::erc4337::TrailingCall],
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = agentkeys_core::erc4337::spawn_batch_calldata_sealed(
+        &p.registry,
+        &p.scope,
+        p.register,
+        p.grant,
+        extra,
+        enrollments,
+        trailing,
+    );
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
+/// **The sealed rebind batch** — [`assemble_rebind_userop`] plus the trailing
+/// anchor seal.
+pub fn assemble_rebind_userop_sealed(
+    p: &AcceptUserOpParams,
+    extra: &[agentkeys_core::erc4337::ExtraScope],
+    enrollments: &[agentkeys_core::erc4337::AgentRegister],
+    trailing: &[agentkeys_core::erc4337::TrailingCall],
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = agentkeys_core::erc4337::rebind_batch_calldata_sealed(
+        &p.registry,
+        &p.scope,
+        &p.register.operator_omni,
+        &p.register.actor_omni,
+        p.grant,
+        extra,
+        enrollments,
+        trailing,
+    );
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
+/// **The seal-only batch** — one `appendRoot` per app installed before the
+/// anchor existed ("seal existing apps"), ONE Touch ID, no grant touched.
+pub fn assemble_trailing_userop(
+    p: &AcceptUserOpParams,
+    trailing: &[agentkeys_core::erc4337::TrailingCall],
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let call_data = agentkeys_core::erc4337::trailing_batch_calldata(trailing);
+    assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
+}
+
 /// **The #717 rebind sibling** — [`assemble_scope_userop`] plus the endpoint
 /// mirrors and any endpoint enrollment, ONE Touch ID
 /// (`rebind_batch_calldata`). `p.register` supplies only the omni pair.

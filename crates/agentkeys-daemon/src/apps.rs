@@ -25,6 +25,7 @@ use agentkeys_backend_client::protocol::{
     ResourceRegistryDoc, Sensitivity, ServiceAnnotation, SlotAudience, SlotBinding, TemplateError,
     APP_REGISTRY_SERVICE, RESOURCE_REGISTRY_SERVICE,
 };
+use agentkeys_backend_client::protocol::{AppAnchor, ContextSeal, DelegateContextDoc};
 
 use crate::ui_bridge::{
     config_fetch_doc, config_store_doc, ensure_binding_manifest, ensure_channel_named,
@@ -148,6 +149,9 @@ pub(crate) struct AppInstallStash {
     /// context at confirm, so a read of `ceremony_context_by_dkh` after the
     /// submit finds nothing (the registry row shipped with `services: []`).
     pub services: Vec<String>,
+    /// The anchor seal the batch carries: the context document stored on the
+    /// memory plane after the confirm.
+    pub context_seal: Option<ContextSeal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -615,6 +619,9 @@ pub async fn app_install_build(
                 .get("services")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_else(|| compiled.services.clone()),
+            context_seal: built
+                .get("context_seal")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         },
     );
     (
@@ -897,6 +904,16 @@ pub async fn app_install_submit(
             uninstalled_at: None,
             resources_kept: None,
             reach_aliases: reach_aliases.clone(),
+            anchor: stash.context_seal.as_ref().map(|s| AppAnchor {
+                version: s.context_version,
+                hash: s.context_hash.clone(),
+                tx_hash: parsed
+                    .as_ref()
+                    .and_then(|v| v.get("tx_hash"))
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string),
+                sealed_at: now_unix(),
+            }),
         };
         let storage = match ensure_app_registry(&state).await {
             Ok(mut reg) => {
@@ -942,6 +959,28 @@ pub async fn app_install_submit(
         let reach = apply_reach(&state, &stash.label, &stash.audience, true).await;
         // The gate learns WHERE the app listens (`alias → channel`).
         let app_feeds = apply_app_feeds(&state, &stash.label, &stash.bound_channels, true).await;
+        // The anchor: the sealed document, verbatim, into the app's own namespace.
+        let context_storage = match &stash.context_seal {
+            Some(seal) => {
+                match crate::ui_bridge::context_doc_store(
+                    &state,
+                    &row.memory_ns,
+                    &seal.context_doc,
+                    seal.context_version,
+                )
+                .await
+                {
+                    Ok(s) => s.to_string(),
+                    Err(e) => {
+                        tracing::warn!(label = %stash.label, "anchor: context document store FAILED (the seal IS on chain) — {e}");
+                        format!("failed: {e}")
+                    }
+                }
+            }
+            None => {
+                "unsealed: the broker carried no seal (no audit contract on this stack)".to_string()
+            }
+        };
         installed.push(serde_json::json!({
             "label": stash.label,
             "template_id": stash.template_id,
@@ -950,6 +989,8 @@ pub async fn app_install_submit(
             "reach": reach,
             "app_feeds": app_feeds,
             "enrolled": enrolled,
+            "anchor": row.anchor,
+            "context_storage": context_storage,
         }));
     }
     invalidate_fleet_sync(&state);
@@ -2119,6 +2160,7 @@ mod tests {
             uninstalled_at: None,
             resources_kept: None,
             reach_aliases: vec![],
+            anchor: None,
         }
     }
 
@@ -3248,6 +3290,16 @@ pub(crate) struct AppRebindStash {
     pub services: Vec<String>,
     pub enrollments: Vec<PendingEnrollment>,
     pub changes: Vec<String>,
+    /// The anchor seal the batch carries (the new context document).
+    pub context_seal: Option<ContextSeal>,
+}
+
+/// What the daemon keeps between anchors/seal/build and /submit: one sealed
+/// document per app installed before the anchor existed.
+#[derive(Debug, Clone)]
+pub(crate) struct AppAnchorSealStash {
+    /// `(label, memory_ns, device_key_hash, seal)`
+    pub seals: Vec<(String, String, String, ContextSeal)>,
 }
 
 #[derive(Debug, Serialize, ts_rs::TS)]
@@ -3466,6 +3518,7 @@ pub async fn app_rebind_build(
         "services": compiled.services,
         "endpoint_scopes": endpoint_scopes,
         "endpoint_enrollments": endpoint_enrollments,
+        "bound_channels": compiled.bound_channels,
     });
     let (resp, parsed) =
         crate::ui_bridge::forward_to_broker_value(&broker, "/v1/agent/rebind/build", &j1, &body)
@@ -3487,6 +3540,9 @@ pub async fn app_rebind_build(
             services: compiled.services.clone(),
             enrollments: pending_enrollments,
             changes: changes.clone(),
+            context_seal: built
+                .get("context_seal")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         },
     );
     (
@@ -3539,7 +3595,19 @@ pub async fn app_rebind_submit(
     // 1. the registry row
     let mut previous_bound: Vec<BoundChannel> = Vec::new();
     let mut device_key_hash = String::new();
+    let mut memory_ns = String::new();
     let mut audience: Vec<SlotAudience> = Vec::new();
+    let tx_hash: Option<String> = parsed
+        .as_ref()
+        .and_then(|v| v.get("tx_hash"))
+        .and_then(|t| t.as_str())
+        .map(str::to_string);
+    let anchor = stash.context_seal.as_ref().map(|s| AppAnchor {
+        version: s.context_version,
+        hash: s.context_hash.clone(),
+        tx_hash: tx_hash.clone(),
+        sealed_at: now_unix(),
+    });
     let storage = match ensure_app_registry(&state).await {
         Ok(mut reg) => match reg
             .apps
@@ -3549,10 +3617,14 @@ pub async fn app_rebind_submit(
             Some(row) => {
                 previous_bound = row.bound_channels.clone();
                 device_key_hash = row.device_key_hash.clone();
+                memory_ns = row.memory_ns.clone();
                 audience = row.bindings.audience.clone();
                 row.bindings = stash.bindings.clone();
                 row.bound_channels = stash.bound_channels.clone();
                 row.services = stash.services.clone();
+                if anchor.is_some() {
+                    row.anchor = anchor.clone();
+                }
                 match persist_app_registry(&state, reg.clone()).await {
                     Ok(s) => s.to_string(),
                     Err(e) => {
@@ -3585,6 +3657,27 @@ pub async fn app_rebind_submit(
     // 4. the gate: where the app listens now + who may reach it (idempotent)
     let app_feeds = apply_app_feeds(&state, &label, &stash.bound_channels, true).await;
     let reach = apply_reach(&state, &label, &audience, true).await;
+    // 4b. the anchor: the sealed document, verbatim, into the app's namespace
+    let context_storage = match (&stash.context_seal, memory_ns.is_empty()) {
+        (Some(seal), false) => {
+            match crate::ui_bridge::context_doc_store(
+                &state,
+                &memory_ns,
+                &seal.context_doc,
+                seal.context_version,
+            )
+            .await
+            {
+                Ok(s) => s.to_string(),
+                Err(e) => {
+                    tracing::warn!(label = %label, "anchor: context document store FAILED (the seal IS on chain) — {e}");
+                    format!("failed: {e}")
+                }
+            }
+        }
+        (Some(_), true) => "skipped: the registry row carries no memory namespace".to_string(),
+        (None, _) => "unsealed: the broker carried no seal".to_string(),
+    };
     // 5. the durable spawn context + the live runtime
     let mut runtime = serde_json::json!({
         "mode": "skipped",
@@ -3595,6 +3688,8 @@ pub async fn app_rebind_submit(
             "operator_omni": operator_omni,
             "device_key_hash": device_key_hash,
             "bound_channels": stash.bound_channels,
+            "context_version": stash.context_seal.as_ref().map(|s| s.context_version),
+            "context_hash": stash.context_seal.as_ref().map(|s| s.context_hash.clone()),
         });
         let (ctx_resp, ctx_parsed) = crate::ui_bridge::forward_to_broker_value(
             &broker,
@@ -3666,7 +3761,435 @@ pub async fn app_rebind_submit(
         "enrolled": enrolled,
         "app_feeds": app_feeds,
         "reach": reach,
+        "anchor": anchor,
+        "context_storage": context_storage,
         "runtime": runtime,
     });
     (StatusCode::OK, Json(out)).into_response()
+}
+
+// ── the anchor: seal existing apps · re-hydrate a fresh broker ──────────────
+
+/// `POST /v1/master/apps/anchors/seal/build` — the apps installed before the
+/// anchor existed (no `anchor` on their row) get their context document
+/// sealed on chain in ONE batch (one Touch ID); the broker composes each
+/// document from its row. `labels` narrows the set.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppAnchorsSealRequest {
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+pub async fn app_anchors_seal_build(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<AppAnchorsSealRequest>,
+) -> axum::response::Response {
+    if let Err(r) = crate::ui_bridge::require_master_session(&state).await {
+        return r;
+    }
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let reg = match ensure_app_registry(&state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("app registry: {e}")),
+    };
+    let targets: Vec<AppInstanceRow> = reg
+        .live()
+        .filter(|a| req.labels.is_empty() || req.labels.iter().any(|l| l == &a.label))
+        .filter(|a| a.anchor.is_none() && !a.device_key_hash.is_empty())
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return pairing_err(
+            StatusCode::BAD_REQUEST,
+            "nothing to seal — every installed app already carries an anchor",
+        );
+    }
+    let body = serde_json::json!({
+        "operator_omni": operator_omni,
+        "device_key_hashes": targets.iter().map(|a| a.device_key_hash.clone()).collect::<Vec<_>>(),
+    });
+    let (resp, parsed) =
+        crate::ui_bridge::forward_to_broker_value(&broker, "/v1/agent/anchors/build", &j1, &body)
+            .await;
+    if !resp.status().is_success() {
+        return resp;
+    }
+    let Some(built) = parsed else {
+        return pairing_err(
+            StatusCode::BAD_GATEWAY,
+            "broker anchors build returned no JSON",
+        );
+    };
+    let mut seals: Vec<(String, String, String, ContextSeal)> = Vec::new();
+    for s in built
+        .get("seals")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let dkh = s
+            .get("device_key_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        let Ok(seal) = serde_json::from_value::<ContextSeal>(s.clone()) else {
+            continue;
+        };
+        if let Some(app) = targets
+            .iter()
+            .find(|a| a.device_key_hash.to_lowercase() == dkh)
+        {
+            seals.push((app.label.clone(), app.memory_ns.clone(), dkh, seal));
+        }
+    }
+    let labels: Vec<String> = seals.iter().map(|(l, _, _, _)| l.clone()).collect();
+    *state.app_anchor_seal.write().await = Some(AppAnchorSealStash { seals });
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "build": built, "labels": labels })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/master/apps/anchors/seal/submit` — the signed seal batch to the
+/// accept relay, then each document onto the memory plane, each row's anchor,
+/// and each broker row's cache columns.
+pub async fn app_anchors_seal_submit(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    if let Err(r) = crate::ui_bridge::require_master_session(&state).await {
+        return r;
+    }
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let Some(stash) = state.app_anchor_seal.write().await.take() else {
+        return pairing_err(StatusCode::CONFLICT, "no seal build pending — build first");
+    };
+    let (resp, parsed) =
+        crate::ui_bridge::forward_to_broker_value(&broker, "/v1/scope/submit", &j1, &body).await;
+    if !resp.status().is_success() {
+        return resp;
+    }
+    let tx_hash: Option<String> = parsed
+        .as_ref()
+        .and_then(|v| v.get("tx_hash"))
+        .and_then(|t| t.as_str())
+        .map(str::to_string);
+    let mut sealed: Vec<serde_json::Value> = Vec::new();
+    let mut reg = ensure_app_registry(&state).await.ok();
+    for (label, memory_ns, dkh, seal) in &stash.seals {
+        let context_storage = match crate::ui_bridge::context_doc_store(
+            &state,
+            memory_ns,
+            &seal.context_doc,
+            seal.context_version,
+        )
+        .await
+        {
+            Ok(s) => s.to_string(),
+            Err(e) => format!("failed: {e}"),
+        };
+        if let Some(reg) = reg.as_mut() {
+            if let Some(row) = reg.apps.iter_mut().find(|a| &a.label == label) {
+                row.anchor = Some(AppAnchor {
+                    version: seal.context_version,
+                    hash: seal.context_hash.clone(),
+                    tx_hash: tx_hash.clone(),
+                    sealed_at: now_unix(),
+                });
+            }
+        }
+        // the broker row caches the seal (bound channels unchanged)
+        let ctx_body = serde_json::json!({
+            "operator_omni": operator_omni,
+            "device_key_hash": dkh,
+            "bound_channels": serde_json::from_str::<DelegateContextDoc>(&seal.context_doc)
+                .map(|d| d.bound_channels)
+                .unwrap_or_default(),
+            "context_version": seal.context_version,
+            "context_hash": seal.context_hash,
+        });
+        let (c_resp, _) = crate::ui_bridge::forward_to_broker_value(
+            &broker,
+            "/v1/agent/spawn/context/update",
+            &j1,
+            &ctx_body,
+        )
+        .await;
+        sealed.push(serde_json::json!({
+            "label": label,
+            "version": seal.context_version,
+            "hash": seal.context_hash,
+            "context_storage": context_storage,
+            "broker_row": c_resp.status().as_u16(),
+        }));
+    }
+    let registry_storage = match reg {
+        Some(reg) => match persist_app_registry(&state, reg).await {
+            Ok(s) => s.to_string(),
+            Err(e) => format!("failed: {e}"),
+        },
+        None => "failed: app registry unavailable".to_string(),
+    };
+    invalidate_fleet_sync(&state);
+    let mut out = parsed.unwrap_or_else(|| serde_json::json!({ "ok": true }));
+    out["sealed"] = serde_json::json!(sealed);
+    out["registry_storage"] = serde_json::json!(registry_storage);
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+/// `POST /v1/master/apps/rehydrate` — for every installed app, read its
+/// sealed document from the memory plane and have the broker rebuild (or
+/// refresh) its spawn-context row from it, verifying the seal on chain. What
+/// a fresh broker needs after a host switch; harmless on a current one.
+pub async fn apps_rehydrate(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<AppAnchorsSealRequest>,
+) -> axum::response::Response {
+    if let Err(r) = crate::ui_bridge::require_master_session(&state).await {
+        return r;
+    }
+    let Some(broker) = state.broker_url.clone() else {
+        return pairing_err(StatusCode::SERVICE_UNAVAILABLE, "no broker configured");
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
+    };
+    let reg = match ensure_app_registry(&state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("app registry: {e}")),
+    };
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for app in reg
+        .live()
+        .filter(|a| req.labels.is_empty() || req.labels.iter().any(|l| l == &a.label))
+    {
+        let doc = match crate::ui_bridge::context_doc_load(&state, &app.memory_ns).await {
+            Ok((Some(d), _)) => d,
+            Ok((None, _)) => {
+                results.push(serde_json::json!({ "label": app.label, "skipped": "no context document on the memory plane — seal it first" }));
+                continue;
+            }
+            Err(e) => {
+                results.push(serde_json::json!({ "label": app.label, "error": format!("context document read: {e}") }));
+                continue;
+            }
+        };
+        let body = serde_json::json!({ "operator_omni": operator_omni, "context_doc": doc });
+        let (resp, parsed) = crate::ui_bridge::forward_to_broker_value(
+            &broker,
+            "/v1/agent/spawn/context/rehydrate",
+            &j1,
+            &body,
+        )
+        .await;
+        results.push(serde_json::json!({
+            "label": app.label,
+            "status": resp.status().as_u16(),
+            "result": parsed,
+        }));
+    }
+    invalidate_fleet_sync(&state);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "results": results })),
+    )
+        .into_response()
+}
+
+// ── the context document on the operator surface ─────────────────────────────
+
+/// What the application page shows of an app's sealed context document: the
+/// parsed fields, the verbatim bytes, their hash, and whether they match the
+/// row's seal and the row's bindings.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct AppContextView {
+    pub label: String,
+    /// Where the document was read from: `memory-plane` · `cache` (no memory
+    /// worker configured) · `absent` (never sealed).
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub doc: Option<DelegateContextDoc>,
+    /// The stored bytes, verbatim — what the chain root hashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub doc_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub anchor: Option<AppAnchor>,
+    /// The stored document's hash equals the row's sealed anchor hash.
+    pub matches_anchor: bool,
+    /// The stored document's bound channels equal the row's.
+    pub matches_row: bool,
+}
+
+/// The pure half: the view from the stored bytes and the registry row.
+pub(crate) fn context_view(
+    label: &str,
+    source: &str,
+    doc_json: Option<String>,
+    row: &AppInstanceRow,
+) -> AppContextView {
+    let hash = doc_json.as_ref().map(|j| {
+        format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(j.as_bytes()))
+        )
+    });
+    let doc: Option<DelegateContextDoc> = doc_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok());
+    let matches_anchor = match (&hash, &row.anchor) {
+        (Some(h), Some(a)) => h.eq_ignore_ascii_case(&a.hash),
+        _ => false,
+    };
+    let matches_row = doc
+        .as_ref()
+        .map(|d| d.bound_channels == row.bound_channels)
+        .unwrap_or(false);
+    AppContextView {
+        label: label.to_string(),
+        source: source.to_string(),
+        doc,
+        doc_json,
+        hash,
+        anchor: row.anchor.clone(),
+        matches_anchor,
+        matches_row,
+    }
+}
+
+/// `GET /v1/master/apps/:label/context` — the sealed context document as
+/// stored (the anchor), for the operator surface.
+pub async fn app_context(
+    State(state): State<SharedUiBridgeState>,
+    Path(label): Path<String>,
+) -> axum::response::Response {
+    if let Err(r) = crate::ui_bridge::require_master_session(&state).await {
+        return r;
+    }
+    let reg = match ensure_app_registry(&state).await {
+        Ok(r) => r,
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("app registry: {e}")),
+    };
+    let Some(row) = reg.find(&label).cloned() else {
+        return registry_err(
+            StatusCode::NOT_FOUND,
+            "no installed application with that label",
+        );
+    };
+    let (doc_json, source) = match crate::ui_bridge::context_doc_load(&state, &row.memory_ns).await
+    {
+        Ok((Some(j), src)) => (Some(j), src),
+        Ok((None, _)) => (None, "absent"),
+        Err(e) => return registry_err(StatusCode::BAD_GATEWAY, &format!("context document: {e}")),
+    };
+    (
+        StatusCode::OK,
+        Json(context_view(&label, source, doc_json, &row)),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod context_view_tests {
+    use super::*;
+
+    fn row(anchor_hash: Option<&str>, channel: &str) -> AppInstanceRow {
+        AppInstanceRow {
+            label: "chef".into(),
+            template_id: "chef".into(),
+            template_version: "1.0.0".into(),
+            template_schema: 1,
+            actor_omni: "0xactor".into(),
+            device_key_hash: "0xdkh".into(),
+            memory_ns: "app-chef".into(),
+            chat_channel_id: "opchat-chef".into(),
+            bindings: Default::default(),
+            bound_channels: vec![BoundChannel {
+                slot: "family_chat".into(),
+                kind: ChannelEndpointKind::Messaging,
+                direction: agentkeys_backend_client::protocol::SlotDirection::Duplex,
+                channel_id: channel.into(),
+                event_kinds: vec![],
+                endpoint_actor_omni: None,
+            }],
+            services: vec![],
+            availability: Availability::default(),
+            status: AppInstanceStatus::Installed,
+            installed_at: 1,
+            uninstalled_at: None,
+            resources_kept: None,
+            reach_aliases: vec![],
+            anchor: anchor_hash.map(|h| AppAnchor {
+                version: 1,
+                hash: h.into(),
+                tx_hash: None,
+                sealed_at: 1,
+            }),
+        }
+    }
+
+    #[test]
+    fn the_view_hashes_the_bytes_and_compares_them_to_the_seal_and_the_row() {
+        let doc = DelegateContextDoc {
+            schema: agentkeys_backend_client::protocol::CONTEXT_DOC_SCHEMA,
+            version: 1,
+            previous_hash: None,
+            label: "chef".into(),
+            device_key_hash: "0xdkh".into(),
+            actor_omni: "0xactor".into(),
+            k10_address: "0xk10".into(),
+            preset_id: "chef".into(),
+            chat_channel_id: "opchat-chef".into(),
+            memory_ns: "app-chef".into(),
+            bound_channels: row(None, "family-chat").bound_channels.clone(),
+            availability: "scheduled".into(),
+            memory_namespaces: String::new(),
+            tz_offset_minutes: 480,
+            updated_at: 1,
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        let hash = format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(json.as_bytes()))
+        );
+        let v = context_view(
+            "chef",
+            "memory-plane",
+            Some(json.clone()),
+            &row(Some(&hash), "family-chat"),
+        );
+        assert!(v.matches_anchor && v.matches_row);
+        assert_eq!(v.hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(v.doc.as_ref().map(|d| d.version), Some(1));
+        // a stale row (different bindings) and a foreign seal are both visible
+        let v2 = context_view(
+            "chef",
+            "memory-plane",
+            Some(json),
+            &row(Some("0xother"), "kitchen"),
+        );
+        assert!(!v2.matches_anchor && !v2.matches_row);
+        let v3 = context_view("chef", "absent", None, &row(None, "family-chat"));
+        assert!(v3.doc.is_none() && v3.hash.is_none() && !v3.matches_anchor);
+    }
 }

@@ -446,7 +446,31 @@ pub fn rebind_batch_calldata(
     extra: &[ExtraScope],
     enrollments: &[AgentRegister],
 ) -> Vec<u8> {
-    let mut dests = Vec::with_capacity(1 + extra.len() + enrollments.len());
+    rebind_batch_calldata_sealed(
+        registry,
+        scope,
+        operator_omni,
+        actor_omni,
+        grant,
+        extra,
+        enrollments,
+        &[],
+    )
+}
+
+/// [`rebind_batch_calldata`] plus the trailing calls (the anchor seal).
+#[allow(clippy::too_many_arguments)] // one param per batch leg
+pub fn rebind_batch_calldata_sealed(
+    registry: &[u8; 20],
+    scope: &[u8; 20],
+    operator_omni: &[u8; 32],
+    actor_omni: &[u8; 32],
+    grant: &ScopeGrant,
+    extra: &[ExtraScope],
+    enrollments: &[AgentRegister],
+    trailing: &[TrailingCall],
+) -> Vec<u8> {
+    let mut dests = Vec::with_capacity(1 + extra.len() + enrollments.len() + trailing.len());
     let mut values = Vec::with_capacity(dests.capacity());
     let mut calls = Vec::with_capacity(dests.capacity());
     for e in enrollments {
@@ -461,6 +485,11 @@ pub fn rebind_batch_calldata(
         dests.push(*scope);
         values.push(0u128);
         calls.push(set_scope_calldata(operator_omni, &e.actor_omni, &e.grant));
+    }
+    for (dest, call) in trailing {
+        dests.push(*dest);
+        values.push(0u128);
+        calls.push(call.clone());
     }
     execute_batch_calldata(&dests, &values, &calls)
 }
@@ -489,6 +518,41 @@ pub fn spawn_batch_calldata_with_scopes(
     spawn_batch_calldata_with_endpoints(registry, scope, reg, grant, extra, &[])
 }
 
+/// One trailing call an install / rebind batch carries beside the registry
+/// and scope calls — the ANCHOR SEAL on the audit contract (2026-09-22).
+pub type TrailingCall = ([u8; 20], Vec<u8>);
+
+/// `appendRoot(bytes32,bytes32,uint64)` on `CredentialAudit` — the master-gated
+/// tier-A root append, reused as the anchor seal: `root` = keccak256 of a
+/// delegate's context document, `count` = the document's version.
+pub fn append_root_calldata(operator_omni: &[u8; 32], root: &[u8; 32], count: u64) -> Vec<u8> {
+    let sel = selector("appendRoot(bytes32,bytes32,uint64)");
+    let mut out = Vec::with_capacity(4 + 3 * WORD);
+    out.extend_from_slice(&sel);
+    out.extend_from_slice(operator_omni);
+    out.extend_from_slice(root);
+    out.extend_from_slice(&word_u128(count as u128));
+    out
+}
+
+/// `rootCount(bytes32)` view calldata on `CredentialAudit`.
+pub fn root_count_calldata(operator_omni: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + WORD);
+    out.extend_from_slice(&selector("rootCount(bytes32)"));
+    out.extend_from_slice(operator_omni);
+    out
+}
+
+/// `getRoot(bytes32,uint256)` view calldata on `CredentialAudit` — answers
+/// `(merkleRoot, entryCount, timestamp)`, three words.
+pub fn get_root_calldata(operator_omni: &[u8; 32], index: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + 2 * WORD);
+    out.extend_from_slice(&selector("getRoot(bytes32,uint256)"));
+    out.extend_from_slice(operator_omni);
+    out.extend_from_slice(&word_u128(index as u128));
+    out
+}
+
 /// **The #663 install batch with endpoint ENROLLMENTS** — one Touch ID:
 /// `executeBatch([registerAgentDevice(endpoint_1)…, registerDelegate,
 /// setScope(delegate), setScope(endpoint_1)…])`. An endpoint device actor
@@ -504,10 +568,24 @@ pub fn spawn_batch_calldata_with_endpoints(
     extra: &[ExtraScope],
     enrollments: &[AgentRegister],
 ) -> Vec<u8> {
-    if extra.is_empty() && enrollments.is_empty() {
+    spawn_batch_calldata_sealed(registry, scope, reg, grant, extra, enrollments, &[])
+}
+
+/// [`spawn_batch_calldata_with_endpoints`] plus the trailing calls (the anchor
+/// seal). Empty `trailing` = byte-identical to it.
+pub fn spawn_batch_calldata_sealed(
+    registry: &[u8; 20],
+    scope: &[u8; 20],
+    reg: &AgentRegister,
+    grant: &ScopeGrant,
+    extra: &[ExtraScope],
+    enrollments: &[AgentRegister],
+    trailing: &[TrailingCall],
+) -> Vec<u8> {
+    if extra.is_empty() && enrollments.is_empty() && trailing.is_empty() {
         return spawn_batch_calldata(registry, scope, reg, grant);
     }
-    let mut dests = Vec::with_capacity(2 + extra.len() + enrollments.len());
+    let mut dests = Vec::with_capacity(2 + extra.len() + enrollments.len() + trailing.len());
     let mut values = Vec::with_capacity(dests.capacity());
     let mut calls = Vec::with_capacity(dests.capacity());
     for e in enrollments {
@@ -534,6 +612,20 @@ pub fn spawn_batch_calldata_with_endpoints(
             &e.grant,
         ));
     }
+    for (dest, call) in trailing {
+        dests.push(*dest);
+        values.push(0u128);
+        calls.push(call.clone());
+    }
+    execute_batch_calldata(&dests, &values, &calls)
+}
+
+/// A batch of trailing calls ONLY — the "seal existing apps" ceremony: one
+/// `appendRoot` per app installed before the anchor existed, ONE Touch ID.
+pub fn trailing_batch_calldata(trailing: &[TrailingCall]) -> Vec<u8> {
+    let dests: Vec<[u8; 20]> = trailing.iter().map(|(d, _)| *d).collect();
+    let values = vec![0u128; trailing.len()];
+    let calls: Vec<Vec<u8>> = trailing.iter().map(|(_, c)| c.clone()).collect();
     execute_batch_calldata(&dests, &values, &calls)
 }
 
@@ -1734,5 +1826,55 @@ mod rebind_batch_tests {
             &[],
         );
         assert!(with_mirror.len() > plain.len());
+    }
+}
+
+#[cfg(test)]
+mod anchor_seal_tests {
+    use super::*;
+
+    #[test]
+    fn the_seal_calldata_carries_operator_root_and_version() {
+        let cd = append_root_calldata(&[1u8; 32], &[2u8; 32], 7);
+        assert_eq!(cd.len(), 4 + 3 * 32);
+        assert_eq!(&cd[4..36], &[1u8; 32]);
+        assert_eq!(&cd[36..68], &[2u8; 32]);
+        assert_eq!(cd[99], 7);
+        assert_eq!(root_count_calldata(&[1u8; 32]).len(), 4 + 32);
+        assert_eq!(get_root_calldata(&[1u8; 32], 3).len(), 4 + 64);
+    }
+
+    #[test]
+    fn a_sealed_batch_is_the_plain_batch_plus_the_trailing_call() {
+        let grant = ScopeGrant {
+            services: vec![[0x11u8; 32]],
+            read_only: false,
+            max_per_call: 0,
+            max_per_period: 0,
+            max_total: 0,
+            period_seconds: 0,
+        };
+        let plain = rebind_batch_calldata(
+            &[0xbb; 20],
+            &[0xaa; 20],
+            &[1u8; 32],
+            &[2u8; 32],
+            &grant,
+            &[],
+            &[],
+        );
+        let seal = ([0xcc; 20], append_root_calldata(&[1u8; 32], &[9u8; 32], 1));
+        let sealed = rebind_batch_calldata_sealed(
+            &[0xbb; 20],
+            &[0xaa; 20],
+            &[1u8; 32],
+            &[2u8; 32],
+            &grant,
+            &[],
+            &[],
+            std::slice::from_ref(&seal),
+        );
+        assert!(sealed.len() > plain.len());
+        assert!(trailing_batch_calldata(&[seal]).len() > 4);
     }
 }

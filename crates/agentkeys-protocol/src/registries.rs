@@ -80,6 +80,26 @@ pub struct AppInstanceRow {
     /// uninstall) — one per messaging slot, normally just the label.
     #[serde(default)]
     pub reach_aliases: Vec<String>,
+    /// The sealed context document's facts (the anchor): version, hash, the
+    /// tx that carried the seal. Absent for an app installed before the
+    /// anchor existed — "seal existing apps" mints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub anchor: Option<AppAnchor>,
+}
+
+/// The anchor facts the console keeps beside an app row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct AppAnchor {
+    #[ts(type = "number")]
+    pub version: u64,
+    pub hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tx_hash: Option<String>,
+    #[ts(type = "number")]
+    pub sealed_at: u64,
 }
 
 /// The `app-registry` doc.
@@ -438,6 +458,7 @@ mod tests {
             uninstalled_at: None,
             resources_kept: None,
             reach_aliases: vec![label.to_string()],
+            anchor: None,
         };
         reg.upsert(row("chef", AppInstanceStatus::Pending));
         reg.upsert(row("chef", AppInstanceStatus::Installed));

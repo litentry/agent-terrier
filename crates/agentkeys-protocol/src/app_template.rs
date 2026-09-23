@@ -2006,3 +2006,87 @@ mod tests {
         assert!(is_semver("1.0.0") && !is_semver("1.0") && !is_semver("v1.0.0"));
     }
 }
+
+// ─── the delegate's context DOCUMENT — the anchor (owner, 2026-09-22) ────────
+
+/// The key of the context entry in the app's OWN namespace on the memory plane
+/// (`knowledge:<memory_ns>`): a `kind: "context"` entry whose `body` is the
+/// exact JSON the on-chain seal hashed.
+pub const CONTEXT_ENTRY_KEY: &str = "context";
+
+/// The context document's schema version.
+pub const CONTEXT_DOC_SCHEMA: u32 = 1;
+
+/// A delegate's runtime context as SEALED on chain and stored on the memory
+/// plane — the anchor its bound channels live in: never baked into the image,
+/// never only in a broker's row (that row is a cache of this). Never a secret:
+/// the K10 stays in the signer, `k10_address` is public. The seal is
+/// keccak256 of the exact JSON bytes stored as the entry body, appended to the
+/// audit contract as a root (`appendRoot(operator, hash, version)`) inside the
+/// SAME batch the owner signs for the install / rebind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct DelegateContextDoc {
+    pub schema: u32,
+    #[ts(type = "number")]
+    pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous_hash: Option<String>,
+    pub label: String,
+    pub device_key_hash: String,
+    pub actor_omni: String,
+    pub k10_address: String,
+    pub preset_id: String,
+    pub chat_channel_id: String,
+    pub memory_ns: String,
+    pub bound_channels: Vec<BoundChannel>,
+    pub availability: String,
+    pub memory_namespaces: String,
+    #[ts(type = "number")]
+    pub tz_offset_minutes: i64,
+    #[ts(type = "number")]
+    pub updated_at: u64,
+}
+
+/// What a build returns beside the UserOp when it seals a context: the
+/// document bytes the root hashes (stored verbatim after the confirm), the
+/// root, the version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ContextSeal {
+    pub context_doc: String,
+    pub context_hash: String,
+    #[ts(type = "number")]
+    pub context_version: u64,
+}
+
+#[cfg(test)]
+mod context_doc_tests {
+    use super::*;
+
+    #[test]
+    fn the_document_round_trips_and_keeps_its_field_order() {
+        let doc = DelegateContextDoc {
+            schema: CONTEXT_DOC_SCHEMA,
+            version: 2,
+            previous_hash: Some("0xabc".into()),
+            label: "chef".into(),
+            device_key_hash: "0xdkh".into(),
+            actor_omni: "0xactor".into(),
+            k10_address: "0xk10".into(),
+            preset_id: "chef".into(),
+            chat_channel_id: "opchat-chef".into(),
+            memory_ns: "app-chef".into(),
+            bound_channels: vec![],
+            availability: "scheduled".into(),
+            memory_namespaces: "household-preferences,app-chef".into(),
+            tz_offset_minutes: 480,
+            updated_at: 1,
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        assert!(json.starts_with("{\"schema\":1,\"version\":2,\"previous_hash\":\"0xabc\""));
+        let back: DelegateContextDoc = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, doc);
+    }
+}

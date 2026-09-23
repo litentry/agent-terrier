@@ -210,6 +210,8 @@ mod tests {
             availability: availability.into(),
             memory_namespaces: String::new(),
             tz_offset_minutes: 0,
+            context_version: 0,
+            context_hash: String::new(),
         }
     }
 

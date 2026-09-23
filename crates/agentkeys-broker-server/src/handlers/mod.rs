@@ -1,5 +1,6 @@
 pub mod accept;
 pub mod agent;
+pub mod anchor;
 pub mod audit_emit;
 pub mod auth;
 pub mod bridge_proxy;

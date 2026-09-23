@@ -162,6 +162,7 @@ pub async fn app_install(
         "audience": build.get("audience"),
         "endpoint_scopes": built.get("endpoint_scopes"),
         "endpoint_enrollments": built.get("endpoint_enrollments"),
+        "context_seal": build.get("context_seal"),
         "actor_omni": build.get("actor_omni"),
         "device_key_hash": build.get("device_key_hash"),
         "tx_hash": submitted.get("tx_hash"),
@@ -223,6 +224,7 @@ pub async fn app_rebind(
         "bound_channels": built.get("bound_channels"),
         "endpoint_scopes": built.get("endpoint_scopes"),
         "endpoint_enrollments": built.get("endpoint_enrollments"),
+        "context_seal": build.get("context_seal"),
         "tx_hash": submitted.get("tx_hash"),
         "rebound": submitted.get("rebound"),
     });

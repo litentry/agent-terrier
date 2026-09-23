@@ -26,6 +26,7 @@ import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
 import type { ConsoleDeviceStatus } from '@/lib/generated/ConsoleDeviceStatus';
 import type { ContactTier } from '@/lib/generated/ContactTier';
 import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
+import type { AppContextView } from '@/lib/generated/AppContextView';
 import type { PresetSummary } from '@/lib/generated/PresetSummary';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
@@ -131,6 +132,9 @@ export function ApplicationsPage({
   const [selected, setSelected] = useState<string | null>(null);
   const [dashboard, setDashboard] = useState<AppDashboard | null>(null);
   const [dashError, setDashError] = useState<string | null>(null);
+  /** The sealed context document (the anchor) as the daemon reads it back. */
+  const [context, setContext] = useState<AppContextView | null>(null);
+  const [contextErr, setContextErr] = useState<string | null>(null);
   const [wizard, setWizard] = useState<WizardState | null>(null);
   const [uninstalling, setUninstalling] = useState<AppInstanceRow | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -141,6 +145,9 @@ export function ApplicationsPage({
   const [gateway, setGateway] = useState<GatewayDeviceStatus | null>(null);
   /** #717 — the rebind ceremony's current step, while one runs. */
   const [rebinding, setRebinding] = useState<string | null>(null);
+  /** The anchor ceremonies (seal existing · re-hydrate): the current step + the last outcome. */
+  const [anchorBusy, setAnchorBusy] = useState<string | null>(null);
+  const [anchorNote, setAnchorNote] = useState<string | null>(null);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -197,17 +204,30 @@ export function ApplicationsPage({
     setWizard((w) => (w ? { ...w, resources: { ...w.resources, [slot]: id } } : w));
   };
 
+  const loadContext = useCallback(
+    async (label: string) => {
+      setContext(null);
+      setContextErr(null);
+      if (!client.appContext) return;
+      const c = await client.appContext(label);
+      if (c.ok) setContext(c.data);
+      else setContextErr(c.status?.detail ?? 'context document unavailable');
+    },
+    [client],
+  );
+
   const openApp = useCallback(
     async (label: string) => {
       setSelected(label);
       setDashboard(null);
       setDashError(null);
+      void loadContext(label);
       if (!client.appDashboard) return;
       const d = await client.appDashboard(label);
       if (d.ok) setDashboard(d.data);
       else setDashError(d.status?.detail ?? 'dashboard unavailable');
     },
-    [client],
+    [client, loadContext],
   );
 
   const live = installed.filter((a) => a.status !== 'uninstalled');
@@ -366,6 +386,65 @@ export function ApplicationsPage({
     },
     [client, openApp, refresh, showToast],
   );
+
+  // ── the anchor: seal the apps installed before it existed (ONE Touch ID)
+  const sealExisting = useCallback(async () => {
+    if (!client.appAnchorsSealBuild || !client.appAnchorsSealSubmit) return;
+    setAnchorBusy('Composing the context documents…');
+    setAnchorNote(null);
+    const built = await client.appAnchorsSealBuild({});
+    if (!built.ok) {
+      setAnchorBusy(null);
+      setAnchorNote(`seal build failed — ${built.status?.detail ?? 'error'}`);
+      return;
+    }
+    const build = built.data.build;
+    setAnchorBusy(`Sealing ${built.data.labels.join(', ')} — approve with Touch ID…`);
+    let assertion;
+    try {
+      const cred = getMasterCredId() || null;
+      assertion = await getAssertionOverHash(String(build.user_op_hash ?? ''), cred ? [cred] : undefined);
+    } catch {
+      setAnchorBusy(null);
+      setAnchorNote('Touch ID cancelled — nothing sealed.');
+      return;
+    }
+    setAnchorBusy('Committing the seals on chain…');
+    const submitted = await client.appAnchorsSealSubmit({ user_op: build.user_op, assertion });
+    setAnchorBusy(null);
+    if (!submitted.ok) {
+      setAnchorNote(`seal submit failed — ${submitted.status?.detail ?? 'error'}`);
+      return;
+    }
+    const sealed = (submitted.data.sealed ?? []) as { label: string; version: number; context_storage: string }[];
+    setAnchorNote(`sealed ${sealed.map((s) => `${s.label} v${s.version} (${s.context_storage})`).join(' · ')}`);
+    showToast(`${sealed.length} app${sealed.length === 1 ? '' : 's'} sealed on chain`);
+    await refresh();
+  }, [client, refresh, showToast]);
+
+  // ── the anchor: a fresh broker rebuilds its rows from the sealed documents
+  const rehydrate = useCallback(async () => {
+    if (!client.appsRehydrate) return;
+    setAnchorBusy('Re-hydrating the broker from the sealed documents…');
+    setAnchorNote(null);
+    const r = await client.appsRehydrate({});
+    setAnchorBusy(null);
+    if (!r.ok) {
+      setAnchorNote(`re-hydrate failed — ${r.status?.detail ?? 'error'}`);
+      return;
+    }
+    setAnchorNote(
+      r.data.results
+        .map((x) => {
+          const res = (x.result ?? {}) as { row?: string; sealed_index?: number; error?: string };
+          if (x.skipped) return `${x.label}: ${x.skipped}`;
+          if (x.error) return `${x.label}: ${x.error}`;
+          return `${x.label}: ${x.status === 200 ? `row ${res.row ?? 'ok'} (sealed root #${res.sealed_index ?? '?'})` : `HTTP ${x.status} ${res.error ?? ''}`}`;
+        })
+        .join(' · ') || 'no installed apps',
+    );
+    await refresh();
+  }, [client, refresh]);
 
   // ── the uninstall ceremony (archive): build → ONE Touch ID → submit
   const uninstall = useCallback(
@@ -553,6 +632,9 @@ export function ApplicationsPage({
               onAskCard={(entry) => void askForCard(selectedRow, entry)}
               onRebind={(slots) => void rebind(selectedRow, slots)}
               rebinding={rebinding}
+              context={context}
+              contextErr={contextErr}
+              onReloadContext={() => void loadContext(selectedRow.label)}
               channels={channels}
               gateway={gateway}
               onGoChannels={onGoChannels}
@@ -574,6 +656,18 @@ export function ApplicationsPage({
               <div style={{ display: 'contents' }}><dt>actor omni</dt><dd><code style={{ fontSize: 11 }}>{console_?.actor_omni ?? '—'}</code></dd></div>
             </dl>
             {!console_?.enrolled && <button className="btn primary" disabled={!client.consoleEnrollBuild || !!busy} onClick={() => void enroll('console')}>enroll this console · Touch ID</button>}
+          </Panel>
+          <Panel title="── anchors · the sealed context documents">
+            <p className="muted" style={{ fontSize: 12.5 }}>
+              Each app&apos;s bound channels live in a context document on the memory plane, sealed on chain by the ceremony that changed it; the broker&apos;s row is a cache of it. An app installed before the anchor existed needs one seal, and a fresh broker rebuilds its rows from the documents.
+            </p>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button className="btn sm primary" disabled={!!anchorBusy || live.every((a) => !!a.anchor)} onClick={() => void sealExisting()}>
+                {anchorBusy ?? `seal ${live.filter((a) => !a.anchor).length} existing app${live.filter((a) => !a.anchor).length === 1 ? '' : 's'} (one Touch ID)`}
+              </button>
+              <button className="btn sm" disabled={!!anchorBusy} onClick={() => void rehydrate()}>re-hydrate runtime contexts</button>
+            </div>
+            {anchorNote && <div className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>{anchorNote}</div>}
           </Panel>
           <Panel title="── contact gate · device actor (#667)">
             <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
@@ -722,6 +816,9 @@ function AppDetail({
   gateway,
   onGoChannels,
   onGoEndpoints,
+  context,
+  contextErr,
+  onReloadContext,
 }: {
   app: AppInstanceRow;
   template?: PresetSummary;
@@ -746,6 +843,10 @@ function AppDetail({
   gateway: GatewayDeviceStatus | null;
   onGoChannels: () => void;
   onGoEndpoints: () => void;
+  /** The sealed context document as stored (the anchor), null while loading. */
+  context?: AppContextView | null;
+  contextErr?: string | null;
+  onReloadContext?: () => void;
 }) {
   const st = statusOf(app);
   const [editingBindings, setEditingBindings] = useState(false);
@@ -925,6 +1026,19 @@ function AppDetail({
               <div style={{ display: 'contents' }}><dt>own namespace</dt><dd><code>knowledge:{app.memory_ns}</code> · <code>proposal:{app.memory_ns}</code></dd></div>
               <div style={{ display: 'contents' }}><dt>opchat</dt><dd><code>{app.chat_channel_id}</code></dd></div>
               <div style={{ display: 'contents' }}><dt>availability</dt><dd>{app.availability}</dd></div>
+              <div style={{ display: 'contents' }}>
+                <dt>anchor</dt>
+                <dd>
+                  {app.anchor ? (
+                    <>
+                      v{app.anchor.version} · <code>{app.anchor.hash.slice(0, 14)}…</code>
+                      {app.anchor.tx_hash ? ` · sealed in tx ${app.anchor.tx_hash.slice(0, 14)}…` : ' · seal pending'}
+                    </>
+                  ) : (
+                    <span className="muted">not sealed yet — seal existing apps on the endpoints tab</span>
+                  )}
+                </dd>
+              </div>
             </dl>
             {editingBindings && onRebind && (
               <div style={{ marginTop: 12 }}>
@@ -956,6 +1070,51 @@ function AppDetail({
                   <button className="btn sm" disabled={!!rebinding} onClick={() => { setEditingBindings(false); setDraft({}); }}>cancel</button>
                 </div>
               </div>
+            )}
+          </Panel>
+          <Panel
+            title="── context · the sealed document (the anchor)"
+            right={onReloadContext ? <button className="btn sm" onClick={onReloadContext}>re-read</button> : undefined}
+          >
+            {contextErr && (
+              <div className="banner warn"><span className="lbl">unavailable</span><span>{contextErr}</span></div>
+            )}
+            {!contextErr && !context && <div className="muted" style={{ fontSize: 12.5 }}>Reading the document…</div>}
+            {context && !context.doc && (
+              <div className="banner">
+                <span className="lbl">no document</span>
+                <span>This app has no sealed context document yet ({context.source}) — seal existing apps on the endpoints tab.</span>
+              </div>
+            )}
+            {context && context.doc && (
+              <>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                  <Chip kind={context.matches_anchor ? 'ok' : 'bad'}>{context.matches_anchor ? 'matches the sealed anchor' : 'does NOT match the sealed anchor'}</Chip>
+                  <Chip kind={context.matches_row ? 'ok' : 'bad'}>{context.matches_row ? 'matches the bindings' : 'bindings differ from the document'}</Chip>
+                  <Chip>read from the {context.source}</Chip>
+                </div>
+                <dl className="kvs">
+                  <div style={{ display: 'contents' }}><dt>version</dt><dd>v{context.doc.version}{context.doc.previous_hash ? <> · previous <code>{context.doc.previous_hash.slice(0, 14)}…</code></> : ' · the first document'}</dd></div>
+                  <div style={{ display: 'contents' }}><dt>hash</dt><dd><code>{context.hash}</code></dd></div>
+                  <div style={{ display: 'contents' }}><dt>sealed</dt><dd>{context.anchor?.tx_hash ? <>tx <code>{context.anchor.tx_hash}</code> · {new Date(context.anchor.sealed_at * 1000).toLocaleString()}</> : <span className="muted">seal pending</span>}</dd></div>
+                  <div style={{ display: 'contents' }}><dt>written</dt><dd>{new Date(context.doc.updated_at * 1000).toLocaleString()}</dd></div>
+                  <div style={{ display: 'contents' }}><dt>template</dt><dd><code>{context.doc.preset_id || '(role preset)'}</code></dd></div>
+                  <div style={{ display: 'contents' }}><dt>delegate</dt><dd>actor <code>{context.doc.actor_omni.slice(0, 14)}…</code> · device <code>{context.doc.device_key_hash.slice(0, 14)}…</code> · K10 <code>{context.doc.k10_address}</code></dd></div>
+                  <div style={{ display: 'contents' }}><dt>opchat</dt><dd><code>{context.doc.chat_channel_id}</code></dd></div>
+                  <div style={{ display: 'contents' }}><dt>memory</dt><dd><code>{context.doc.memory_ns}</code>{context.doc.memory_namespaces ? <> · mirrors <code>{context.doc.memory_namespaces}</code></> : null}</dd></div>
+                  <div style={{ display: 'contents' }}><dt>availability</dt><dd>{context.doc.availability} · tz {context.doc.tz_offset_minutes >= 0 ? '+' : ''}{context.doc.tz_offset_minutes / 60}h</dd></div>
+                  {context.doc.bound_channels.map((b) => (
+                    <div key={b.slot} style={{ display: 'contents' }}>
+                      <dt>{b.slot}</dt>
+                      <dd><code>{b.channel_id}</code> · {b.kind} · {b.direction}{b.endpoint_actor_omni ? ' · relayed by an endpoint actor' : ''}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <details style={{ marginTop: 8 }}>
+                  <summary className="muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>raw document — the exact bytes the seal hashed</summary>
+                  <pre style={{ fontSize: 11, overflowX: 'auto', margin: '6px 0 0' }}>{context.doc_json}</pre>
+                </details>
+              </>
             )}
           </Panel>
           {template && (template.schedule ?? []).length > 0 && (

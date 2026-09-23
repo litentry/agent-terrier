@@ -147,6 +147,8 @@ pub struct UiBridgeState {
     pub app_uninstall_by_label: RwLock<HashMap<String, crate::apps::AppUninstallStash>>,
     /// #717 — the rebind stash (build → ONE Touch ID → submit), by app label.
     pub app_rebind_by_label: RwLock<HashMap<String, crate::apps::AppRebindStash>>,
+    /// The "seal existing apps" stash (build → ONE Touch ID → submit).
+    pub app_anchor_seal: RwLock<Option<crate::apps::AppAnchorSealStash>>,
     /// #541 — this console's OWN device actor once enrolled (loaded from the
     /// persisted coordinates at boot).
     pub console_device: RwLock<Option<crate::console_device::ConsoleDevice>>,
@@ -1411,6 +1413,11 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             post(crate::apps::app_install_submit),
         )
         .route("/v1/master/apps/:label", get(crate::apps::app_dashboard))
+        // The sealed context document (the anchor) on the operator surface.
+        .route(
+            "/v1/master/apps/:label/context",
+            get(crate::apps::app_context),
+        )
         .route(
             "/v1/master/apps/:label/uninstall/build",
             post(crate::apps::app_uninstall_build),
@@ -1427,6 +1434,20 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route(
             "/v1/master/apps/:label/rebind/submit",
             post(crate::apps::app_rebind_submit),
+        )
+        // The anchor: seal the apps installed before it existed (ONE Touch
+        // ID) and rebuild a fresh broker's rows from the sealed documents.
+        .route(
+            "/v1/master/apps/anchors/seal/build",
+            post(crate::apps::app_anchors_seal_build),
+        )
+        .route(
+            "/v1/master/apps/anchors/seal/submit",
+            post(crate::apps::app_anchors_seal_submit),
+        )
+        .route(
+            "/v1/master/apps/rehydrate",
+            post(crate::apps::apps_rehydrate),
         )
         .route(
             "/v1/master/apps/:label/command",
@@ -1717,6 +1738,7 @@ pub fn build_state(
         app_install_by_dkh: RwLock::new(HashMap::new()),
         app_uninstall_by_label: RwLock::new(HashMap::new()),
         app_rebind_by_label: RwLock::new(HashMap::new()),
+        app_anchor_seal: RwLock::new(None),
         console_device: RwLock::new(crate::console_device::load_persisted(broker_url.as_deref())),
         console_session: RwLock::new(None),
         console_enroll_pending: RwLock::new(None),
@@ -11994,6 +12016,14 @@ fn curate_gate(
              this proposal and edit the item via `agentkeys resource add` (#666)"
                 .to_string(),
         )),
+        // The sealed context document is the delegate's anchor — written by
+        // the install / rebind ceremony only, never by a delegate proposal.
+        ContextKind::Context => Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "context_not_inbox_adoptable: the context document is sealed by the install / \
+             rebind ceremony — reject this proposal"
+                .to_string(),
+        )),
         ContextKind::Skill => {
             if body_bytes > SKILL_MAX_BYTES {
                 return Err((
@@ -18851,4 +18881,100 @@ mod rebind_gate_tests {
         );
         assert!(mgmt_bearer_gate(Some("smt1_x"), "smt1_x").is_ok());
     }
+}
+
+// ─── the delegate's context document on the memory plane (the anchor) ────────
+//
+// Owner decision 2026-09-22: a delegate's bound channels live in a document
+// OUTSIDE the image and the instance — the entry `context` in the app's OWN
+// namespace on the memory plane — and its hash is sealed on chain by the
+// ceremony that changed it. The broker's row is a cache of this document; the
+// running sandbox re-reads it with its own cap.
+
+/// Store the sealed document verbatim (its bytes ARE what the seal hashed).
+pub(crate) async fn context_doc_store(
+    state: &SharedUiBridgeState,
+    memory_ns: &str,
+    doc_json: &str,
+    version: u64,
+) -> Result<&'static str, String> {
+    let key = agentkeys_backend_client::protocol::CONTEXT_ENTRY_KEY;
+    let backend = persona_backend(state).await.map_err(|(_, e)| e)?;
+    let mut entries: Vec<StoredMemoryEntry> = match &backend {
+        PersonaBackend::Real(ctx, creds) => {
+            let client = reqwest::Client::new();
+            memory_get_ns_real(&client, ctx, creds, memory_ns)
+                .await?
+                .unwrap_or_default()
+        }
+        PersonaBackend::Cache => {
+            let cache = state.master_memory.read().await;
+            cache
+                .values()
+                .filter(|e| e.ns == memory_ns)
+                .map(|e| e.to_stored())
+                .collect()
+        }
+    };
+    entries.retain(|e| e.key != key);
+    let entry = StoredMemoryEntry {
+        key: key.to_string(),
+        title: format!("runtime context v{version}"),
+        body: doc_json.to_string(),
+        updated: now_date_utc(),
+        bytes: doc_json.len() as u64,
+        version: format!("v{version}"),
+        kind: ContextKind::Context,
+    };
+    entries.push(entry.clone());
+    match &backend {
+        PersonaBackend::Real(ctx, creds) => {
+            let client = reqwest::Client::new();
+            memory_put_ns_real(&client, ctx, creds, memory_ns, &entries, None)
+                .await
+                .map(|_| "durable")
+        }
+        PersonaBackend::Cache => {
+            let mut cache = state.master_memory.write().await;
+            cache.retain(|_, e| !(e.ns == memory_ns && e.key == key));
+            let mut api = ApiMemoryEntry::from_stored(memory_ns, entry);
+            api.content_hash = api.compute_hash();
+            cache.insert(api.content_hash.clone(), api);
+            Ok("cached")
+        }
+    }
+}
+
+/// The stored document's exact bytes, if any, and where they were read from
+/// (`memory-plane` · `cache`).
+pub(crate) async fn context_doc_load(
+    state: &SharedUiBridgeState,
+    memory_ns: &str,
+) -> Result<(Option<String>, &'static str), String> {
+    let key = agentkeys_backend_client::protocol::CONTEXT_ENTRY_KEY;
+    let backend = persona_backend(state).await.map_err(|(_, e)| e)?;
+    let source = match &backend {
+        PersonaBackend::Real(..) => "memory-plane",
+        PersonaBackend::Cache => "cache",
+    };
+    let entries: Vec<StoredMemoryEntry> = match &backend {
+        PersonaBackend::Real(ctx, creds) => {
+            let client = reqwest::Client::new();
+            memory_get_ns_real(&client, ctx, creds, memory_ns)
+                .await?
+                .unwrap_or_default()
+        }
+        PersonaBackend::Cache => {
+            let cache = state.master_memory.read().await;
+            cache
+                .values()
+                .filter(|e| e.ns == memory_ns)
+                .map(|e| e.to_stored())
+                .collect()
+        }
+    };
+    Ok((
+        entries.into_iter().find(|e| e.key == key).map(|e| e.body),
+        source,
+    ))
 }

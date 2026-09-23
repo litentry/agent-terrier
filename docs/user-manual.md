@@ -576,11 +576,23 @@ the permissions you approve. parent-control → **applications**:
   picks the new channel up at its next wake. No uninstall, no delegate slot
   consumed, and the app keeps its memory. The old channel row stays in the
   registry until you clear it (**clear orphaned** on the channels page).
-  The bound channels live in ONE place — the broker's durable spawn context,
-  the anchor — never in the sandbox image and never frozen in a running
-  instance: the running app re-reads the anchor (every 90 s by default,
-  `AGENTKEYS_BINDINGS_POLL_SECS`) and re-sources its feeds, and the commit also
-  pushes the change into it right away when it can reach it.
+  The bound channels live in ONE place — the app's **context document**, the
+  anchor: an entry in the app's own namespace on the memory plane, whose hash
+  the same Touch ID seals on chain (a root on the audit contract). It is never
+  in the sandbox image and never frozen in a running instance: the running app
+  re-reads the document with its own credential (every 90 s by default,
+  `AGENTKEYS_BINDINGS_POLL_SECS`) and re-sources its feeds, the commit also
+  pushes the change into it right away when it can reach it, and the broker's
+  own row is only a cache of the document. The application page shows each
+  app's anchor (version, hash, the sealing tx) and the **document itself** —
+  its fields, the raw bytes the seal hashed, and whether they match the sealed
+  anchor and the current bindings (**re-read** fetches it again).
+- **Anchors survive a broker switch.** A fresh broker has no rows: on the
+  endpoints tab, **re-hydrate runtime contexts** reads every app's sealed
+  document and has the broker rebuild its rows after checking each hash
+  against the operator's roots on chain. Apps installed before the anchor
+  existed carry no document yet — **seal existing apps** mints one per app in
+  a single batch, one Touch ID.
 - **A woken app seeds its own context.** An app the broker wakes for a
   schedule tick, or re-creates at its lease end, applies its template's
   persona, skills and knowledge to its runtime by itself at boot — only what

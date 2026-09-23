@@ -2,6 +2,7 @@ import type { AppDashboard } from '@/lib/generated/AppDashboard';
 import type { AppInstallBindings } from '@/lib/generated/AppInstallBindings';
 import type { AppInstallBuildResponse } from '@/lib/generated/AppInstallBuildResponse';
 import type { AppRebindBuildResponse } from '@/lib/generated/AppRebindBuildResponse';
+import type { AppContextView } from '@/lib/generated/AppContextView';
 import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
 import type { ApiChannelsClearOrphaned } from '@/lib/generated/ApiChannelsClearOrphaned';
 import type { ChannelEndpointKind } from '@/lib/generated/ChannelEndpointKind';
@@ -822,6 +823,8 @@ export interface AgentKeysClient {
   // resource curation. Daemon backend only.
   listApps?(): Promise<Result<{ apps: AppInstanceRow[]; storage: string; console_device?: string | null }>>;
   appDashboard?(label: string): Promise<Result<AppDashboard>>;
+  /** The app's sealed context document (the anchor) as stored: fields, bytes, hash, and whether it matches the seal + the bindings. */
+  appContext?(label: string): Promise<Result<AppContextView>>;
   appInstallBuild?(input: {
     template_id: string;
     label: string;
@@ -835,6 +838,10 @@ export interface AgentKeysClient {
   /** #717 — rebind channel slots in place: build → ONE Touch ID → submit. */
   appRebindBuild?(label: string, input: { slots: { slot: string; channel_id: string }[] }): Promise<Result<AppRebindBuildResponse>>;
   appRebindSubmit?(label: string, body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { rebound?: unknown }>>;
+  /** The anchor: seal the apps installed before it existed (build → ONE Touch ID → submit), and rebuild a fresh broker's rows from the sealed documents. */
+  appAnchorsSealBuild?(input: { labels?: string[] }): Promise<Result<{ build: { user_op?: unknown; user_op_hash?: string }; labels: string[] }>>;
+  appAnchorsSealSubmit?(body: unknown): Promise<Result<SubmitAcceptUserOpResponse & { sealed?: unknown[] }>>;
+  appsRehydrate?(input: { labels?: string[] }): Promise<Result<{ ok: boolean; results: { label: string; status?: number; skipped?: string; error?: string; result?: unknown }[] }>>;
   appCommand?(
     label: string,
     input: { channel_id?: string; action: string; command: string; args?: unknown; card_updated_at?: number },

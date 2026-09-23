@@ -21,7 +21,7 @@ use crate::handlers::accept::{
 use crate::handlers::scope::{parse_scope_grant, BuildScopeRequest};
 use crate::handlers::spawn::{parse_endpoint_enrollments, parse_endpoint_scopes};
 use crate::handlers::update::{auth_session, mgmt_request, probe_owned_delegate};
-use crate::sponsored_accept::{assemble_rebind_userop, AcceptUserOpParams, BuildAcceptResponse};
+use crate::sponsored_accept::{AcceptUserOpParams, BuildAcceptResponse};
 use crate::state::SharedState;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +39,10 @@ pub struct RebindBuildRequest {
     /// An endpoint the new channel needs that is not enrolled yet.
     #[serde(default)]
     pub endpoint_enrollments: Vec<EndpointEnrollment>,
+    /// The compiled bound channels after the change — what the sealed
+    /// context document carries.
+    #[serde(default)]
+    pub bound_channels: Vec<BoundChannel>,
 }
 
 /// Same shape as the spawn / archive builds: the UserOp envelope FLATTENED
@@ -49,6 +53,9 @@ pub struct RebindBuildRequest {
 pub struct RebindBuildResponse {
     #[serde(flatten)]
     pub build: BuildAcceptResponse,
+    /// The anchor seal folded into this batch (absent = no audit contract).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_seal: Option<agentkeys_protocol::ContextSeal>,
     pub actor_omni: String,
     pub device_key_hash: String,
     pub services: Vec<String>,
@@ -150,8 +157,49 @@ pub async fn rebind_build(
         register: &register,
         grant: &grant,
     };
-    let assembled = assemble_rebind_userop(&params, &extra, &enrollments, &broker_sk)
+    // The anchor seal: the row's document, version + 1, with the new bound
+    // channels — hashed into the SAME batch.
+    let ctx = state
+        .spawn_context_store
+        .get(&req.device_key_hash)
         .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (trailing, context_seal) = match &ctx {
+        Some(c) => {
+            let doc = crate::handlers::anchor::compose_context_doc(
+                crate::handlers::anchor::ContextDocFacts {
+                    version: (c.context_version.max(0) as u64) + 1,
+                    previous_hash: Some(c.context_hash.clone()).filter(|h| !h.is_empty()),
+                    label: &c.label,
+                    device_key_hash: &c.device_key_hash,
+                    actor_omni: &actor_omni,
+                    k10_address: &c.k10_address,
+                    preset_id: &c.preset_id,
+                    chat_channel_id: &c.chat_channel_id,
+                    memory_ns: &c.memory_ns,
+                    bound_channels: &req.bound_channels,
+                    availability: &c.availability,
+                    memory_namespaces: &c.memory_namespaces,
+                    tz_offset_minutes: c.tz_offset_minutes,
+                },
+            );
+            crate::handlers::anchor::seal_for(&cfg, &register.operator_omni, &doc)
+        }
+        None => {
+            tracing::warn!(
+                device_key_hash = %req.device_key_hash,
+                "anchor: no spawn context row for this delegate — the rebind carries NO seal (re-hydrate it, then seal)"
+            );
+            (Vec::new(), None)
+        }
+    };
+    let assembled = crate::sponsored_accept::assemble_rebind_userop_sealed(
+        &params,
+        &extra,
+        &enrollments,
+        &trailing,
+        &broker_sk,
+    )
+    .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     tracing::info!(
         device_key_hash = %req.device_key_hash,
         actor = %actor_omni,
@@ -167,6 +215,7 @@ pub async fn rebind_build(
         services: req.services,
         endpoint_scopes: req.endpoint_scopes,
         endpoint_enrollments: req.endpoint_enrollments,
+        context_seal,
     }))
 }
 
@@ -178,6 +227,11 @@ pub struct SpawnContextUpdateRequest {
     pub device_key_hash: String,
     #[serde(default)]
     pub bound_channels: Vec<BoundChannel>,
+    /// The seal that confirmed with this change (the row caches it).
+    #[serde(default)]
+    pub context_version: Option<u64>,
+    #[serde(default)]
+    pub context_hash: Option<String>,
 }
 
 /// What happened to the RUNNING runtime, if any.
@@ -238,6 +292,10 @@ pub async fn spawn_context_update(
     };
     ctx.bound_channels_json = serde_json::to_string(&req.bound_channels)
         .map_err(|e| aerr(StatusCode::BAD_REQUEST, format!("bound_channels: {e}")))?;
+    if let (Some(v), Some(h)) = (req.context_version, req.context_hash.as_deref()) {
+        ctx.context_version = v as i64;
+        ctx.context_hash = h.to_string();
+    }
     state.spawn_context_store.upsert(&ctx).map_err(|e| {
         aerr(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -365,6 +423,9 @@ pub struct SelfContextResponse {
     pub availability: String,
     pub tz_offset_minutes: i64,
     pub preset_id: String,
+    /// The sealed document this row caches (0 / empty = never sealed).
+    pub context_version: i64,
+    pub context_hash: String,
 }
 
 /// `GET /v1/agent/self/context` (J1_agent) — the delegate reads its OWN
@@ -418,5 +479,7 @@ pub async fn self_context(
         availability: ctx.availability.clone(),
         tz_offset_minutes: ctx.tz_offset_minutes,
         preset_id: ctx.preset_id.clone(),
+        context_version: ctx.context_version,
+        context_hash: ctx.context_hash.clone(),
     }))
 }
