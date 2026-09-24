@@ -2,6 +2,7 @@
 import type { ChannelEndpointKind } from "./ChannelEndpointKind";
 import type { ChannelEventKind } from "./ChannelEventKind";
 import type { ContactTier } from "./ContactTier";
+import type { SessionPolicy } from "./SessionPolicy";
 import type { SlotDirection } from "./SlotDirection";
 
 /**
@@ -31,4 +32,11 @@ event_kinds: Array<ChannelEventKind>,
  * the app; the master confirms (or edits) at install and each allowed
  * contact's `reach` gains the app's alias.
  */
-audience: Array<ContactTier>, reason: string, reason_zh: string, };
+audience: Array<ContactTier>, 
+/**
+ * Typed sessions (2026-09-23): this slot's session policy when it must
+ * differ from its kind's default (`default_feed_session`) — e.g. a
+ * messaging slot whose members share one `conversation`. Applies to
+ * every turn on the slot; a lifecycle event is never a turn.
+ */
+session?: SessionPolicy, reason: string, reason_zh: string, };

@@ -573,7 +573,7 @@ export function DelegatesPage({
                       ? 'Nothing is running for this agent — re-create its sandbox on the current image now (a cold start, up to ~2 minutes). Identity, grants, channel and persona are preserved.'
                       : staleFor(a.deviceKeyHash) === false
                         ? 'This agent already runs the current image — nothing to update. Its sandbox is replaced automatically before its lease ends.'
-                        : "Re-create this agent's sandbox on the current image. Identity, grants, channel and persona are preserved; the live conversation restarts."
+                        : "Re-create this agent's sandbox on the current image. Identity, grants, channel and persona are preserved, and the conversation carries over to the new sandbox."
                   }
                 >
                   {updating.has(a.deviceKeyHash)

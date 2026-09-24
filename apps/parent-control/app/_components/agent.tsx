@@ -92,7 +92,7 @@ export function AgentPanel({ actor }: { actor: Actor }) {
     setBusy(true);
     const r = await api.restartAgent();
     if (r.ok) {
-      setNotice('agent re-sourced — context files re-read; the conversation starts fresh');
+      setNotice('agent re-sourced — context files re-read; open conversations continue (New session in the chat starts fresh)');
       setError(null);
     } else {
       setError(errText(r));
@@ -165,7 +165,7 @@ export function AgentPanel({ actor }: { actor: Actor }) {
             save persona{state?.current ? ` (→ v${versionNum(state.current.version) + 1})` : ' (v1)'}
           </button>
           <button className="btn sm" disabled={busy} onClick={restart}>
-            {confirmRestart ? 'confirm restart? (resets the conversation)' : '↻ restart agent (re-source)'}
+            {confirmRestart ? 'confirm restart? (re-reads persona and skills)' : '↻ restart agent (re-source)'}
           </button>
           <button
             className="btn sm"

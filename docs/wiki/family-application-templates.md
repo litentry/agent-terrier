@@ -11,7 +11,7 @@ The four verbs the runtime gives an app:
 | verb | what the app does | how a template uses it |
 |---|---|---|
 | **perceive** | events from every bound slot arrive as turns — text, `image`, `audio-clip`, `command` | `skills/perception.md` (the R2 pre-turn prompt per media kind) |
-| **act** | publish `text` / `doc` / `image` to any bound `pub` slot | the `publish-to-slot <slot> <kind>` helper from a skill |
+| **act** | publish `text` / `doc` / `image` to any bound `pub` slot | the `publish_to_slot` tool — the daemon advertises it with the slots this install bound, so a skill names the slot, never a channel id |
 | **remember** | memory files the app writes into its engine's `memories/` category folders (`events/`, `entities/`, `preferences/` — its own cognition, checkpointed with the sandbox); a durable learning goes to the owner with the `propose_to_owner` tool under `proposal:<ns>`; granted knowledge arrives as `resources/` (see [Knowledge Store and Applications](./knowledge-store-and-applications.md)) | conventions in your skills (URIs, shapes) |
 | **may** | every action is gated by the grant set; a denied tool is a denied tool, never a fallback | `tools`, `schedule`, and what you *don't* ask for |
 

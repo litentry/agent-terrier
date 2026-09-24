@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     service_channel_pub, service_channel_sub, service_knowledge, service_plugin, service_proposal,
-    service_tool, ChannelEventKind, ContactTier, PresetSchedule, PresetSummary,
+    service_tool, validate_session_policy, ChannelEventKind, ContactTier, PresetSchedule,
+    PresetSummary, SessionPolicy,
 };
 pub use agentkeys_catalog::Sensitivity;
 
@@ -63,6 +64,10 @@ pub mod platform_caps {
     pub const GATE_TOKENS_PER_DAY: u64 = 2_000_000;
     pub const GATE_TURNS_PER_HOUR: u32 = 600;
     pub const FEED_EVENTS_PER_DAY: u32 = 5_000;
+    /// The longest silence a `thread` / `conversation` session may outlive
+    /// (a week) — a template cannot turn a window back into a resident
+    /// session.
+    pub const MAX_SESSION_IDLE_MINUTES: u32 = 7 * 24 * 60;
 }
 
 /// The closed channel-kind vocabulary a slot binds by (plan §4.3 / §4.8 —
@@ -263,6 +268,13 @@ pub struct AppSlot {
     /// contact's `reach` gains the app's alias.
     #[serde(default)]
     pub audience: Vec<ContactTier>,
+    /// Typed sessions (2026-09-23): this slot's session policy when it must
+    /// differ from its kind's default (`default_feed_session`) — e.g. a
+    /// messaging slot whose members share one `conversation`. Applies to
+    /// every turn on the slot; a lifecycle event is never a turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub session: Option<SessionPolicy>,
     #[serde(default)]
     pub reason: String,
     #[serde(default)]
@@ -611,6 +623,15 @@ pub fn validate_template(
                 ),
             ));
         }
+        if let Some(policy) = &s.session {
+            if let Err(why) = validate_session_policy(policy) {
+                errs.push(TemplateError::new(
+                    format!("{row}.session"),
+                    "session_policy_invalid",
+                    format!("slot '{}': {why}", s.slot),
+                ));
+            }
+        }
         if s.kind == ChannelEndpointKind::Messaging && !s.direction.reads() {
             errs.push(TemplateError::new(
                 format!("{row}.direction"),
@@ -710,6 +731,15 @@ pub fn validate_template(
                 "cron_syntax",
                 format!("'{}': {why}", s.cron),
             ));
+        }
+        if let Some(policy) = &s.session {
+            if let Err(why) = validate_session_policy(policy) {
+                errs.push(TemplateError::new(
+                    format!("schedule[{i}].session"),
+                    "session_policy_invalid",
+                    format!("schedule '{}': {why}", s.label),
+                ));
+            }
         }
         if s.prompt.trim().is_empty() {
             errs.push(TemplateError::new(
@@ -1694,6 +1724,57 @@ mod tests {
         ] {
             assert!(c.contains(&want.to_string()), "missing {want} in {c:?}");
         }
+    }
+
+    #[test]
+    fn negative_session_policy_rows() {
+        let mut p = preset(CHEF);
+        // a bound on a throwaway window means nothing; a limit past the cap
+        // would turn a window back into a resident session
+        p.app.slots[1].session = Some(SessionPolicy::new(crate::SessionWindow::Event, Some(10)));
+        p.app.slots[0].session = Some(SessionPolicy::new(
+            crate::SessionWindow::Thread,
+            Some(platform_caps::MAX_SESSION_IDLE_MINUTES + 1),
+        ));
+        p.schedule[0].session = Some(SessionPolicy::new(crate::SessionWindow::Thread, Some(0)));
+        let errs = validate_template(&p, &[], &[]).unwrap_err();
+        let rows: Vec<&str> = errs
+            .iter()
+            .filter(|e| e.code == "session_policy_invalid")
+            .map(|e| e.row.as_str())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                "slots[0].session",
+                "slots[1].session",
+                "schedule[0].session"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_valid_session_override_passes_and_round_trips() {
+        let mut p = preset(CHEF);
+        p.app.slots[0].session = Some(SessionPolicy::new(
+            crate::SessionWindow::Conversation,
+            Some(120),
+        ));
+        p.schedule[0].session = Some(SessionPolicy::new(crate::SessionWindow::Conversation, None));
+        validate_template(&p, &[], &[]).expect("a bounded override is valid");
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            json["slots"][0]["session"],
+            serde_json::json!({ "window": "conversation", "idle_minutes": 120 })
+        );
+        assert_eq!(
+            json["schedule"][0]["session"],
+            serde_json::json!({ "window": "conversation" })
+        );
+        // absent stays absent on the wire (older consumers see no new key)
+        assert!(json["slots"][1].get("session").is_none());
+        let back: PresetSummary = serde_json::from_value(json).unwrap();
+        assert_eq!(back.app.slots[0].session, p.app.slots[0].session);
     }
 
     #[test]

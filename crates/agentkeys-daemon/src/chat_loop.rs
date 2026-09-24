@@ -19,7 +19,11 @@
 //!
 //! Boot posture: the FIRST poll fast-forwards to the current cursor without
 //! replying (a sandbox restart must not replay-answer history); only events
-//! that arrive after boot get replies. Every failure is loud + backed off,
+//! that arrive after boot get replies. The fast-forward is a TAIL read
+//! (`tail: 1`): a cursor read answers ONE page (the oldest ≤1000 events), so
+//! fast-forwarding on it skipped only that page and every later page of a long
+//! feed was answered again at each restart (measured 2026-09-23: chef
+//! re-answered the same 09-19 and 09-22 asks at 06:31 and again at 13:21). Every failure is loud + backed off,
 //! never a crash — chat degrades, the sandbox (and its jobs) keep running.
 
 use std::collections::HashMap;
@@ -27,7 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentkeys_backend_client::protocol::{
-    CapMintOp, CapMintRequest, ChannelEvent, ChannelEventKind,
+    BridgeChatSession, BridgeSessionReset, CapMintOp, CapMintRequest, ChannelEvent,
+    ChannelEventKind, SessionPolicy, SessionResetScope, SessionWindow,
 };
 use agentkeys_backend_client::BackendClient;
 use serde::Deserialize;
@@ -444,6 +449,23 @@ impl SessionHandle {
         }
     }
 
+    /// A handle seeded with an already-resolved bearer (the self surface
+    /// resolves once per request and hands it on — no second resolve).
+    pub(crate) fn with_bearer(
+        http: reqwest::Client,
+        cfg: Arc<ChatLoopConfig>,
+        credential: Arc<DelegateCredential>,
+        bearer: String,
+    ) -> Self {
+        Self {
+            http,
+            cfg,
+            credential,
+            jwt: tokio::sync::RwLock::new(Some(bearer)),
+            refresh: tokio::sync::Mutex::new(()),
+        }
+    }
+
     /// The current bearer, resolving one when none is held.
     pub(crate) async fn bearer(&self) -> Result<String, String> {
         if let Some(j) = self.jwt.read().await.clone() {
@@ -500,6 +522,12 @@ pub(crate) struct LoopRuntime {
     pub perception_prompt: Option<String>,
     pub min_confidence: f32,
     pub perception_cache: tokio::sync::Mutex<crate::perception::PerceptionCache>,
+    /// Typed sessions: the template's per-slot session overrides.
+    pub slot_sessions: HashMap<String, SessionPolicy>,
+    /// The open sessions (thread / conversation) this boot has already sent
+    /// to the bridge. The first turn of each carries the window rebuilt from
+    /// the feed, in case the sandbox came up without the session it held.
+    pub sent_sessions: tokio::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 async fn run(cfg: ChatLoopConfig) {
@@ -656,6 +684,11 @@ async fn run(cfg: ChatLoopConfig) {
         perception_prompt,
         min_confidence: crate::perception::min_confidence_from(|k| std::env::var(k).ok()),
         perception_cache: tokio::sync::Mutex::new(crate::perception::PerceptionCache::new(256)),
+        slot_sessions: bundle
+            .as_ref()
+            .map(|b| crate::session_scope::slot_session_overrides(&b.manifest))
+            .unwrap_or_default(),
+        sent_sessions: tokio::sync::Mutex::new(std::collections::HashSet::new()),
     };
     while let Some((feed, event)) = rx.recv().await {
         handle_event(&runtime, &feed, &event).await;
@@ -904,13 +937,7 @@ async fn poll_feed(
                 }
             },
         };
-        // @backend-fixture: channel_poll_body — compiled from the protocol type
-        // family (cap + after + wait_seconds), never a drifting hand-rolled shape.
-        let poll_body = serde_json::json!({
-            "cap": sub_cap,
-            "after": cursor,
-            "wait_seconds": if fast_forwarded { 25 } else { 0 },
-        });
+        let poll_body = poll_request_body(&sub_cap, &cursor, fast_forwarded);
         let poll: PollResponse = match http
             .post(format!(
                 "{}/v1/channel/poll",
@@ -1023,6 +1050,13 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
     if event.kind == ChannelEventKind::Lifecycle {
         return;
     }
+    // Typed sessions: which session this trigger's turn runs in — its type's
+    // default (slot kind × event kind) or the template's slot override.
+    let Some(session) =
+        crate::session_scope::feed_session(feed, event, rt.slot_sessions.get(&feed.slot).copied())
+    else {
+        return;
+    };
     match event.kind {
         ChannelEventKind::Lifecycle => {} // returned above — never a turn
         // #519 — a voice turn on the OPERATOR chat feed (a device conversation):
@@ -1037,8 +1071,10 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
                 }
             };
             let audio_b64 = base64_of(&bytes);
-            match voice_turn(http, cfg, &audio_b64, event.audio.as_ref()).await {
+            let session = session_with_context(rt, feed, event, session).await;
+            match voice_turn(http, cfg, &audio_b64, event.audio.as_ref(), &session).await {
                 Ok(turn) => {
+                    mark_sent(rt, &session).await;
                     if let Err(e) = publisher
                         .publish_text_out(channel, &turn.reply_text, &event.event_id)
                         .await
@@ -1070,7 +1106,7 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
         // #668 (R2) — a media event becomes a PRE-TURN on the full-resolution
         // original, then the agent's turn; low confidence asks for a closer look.
         ChannelEventKind::Image | ChannelEventKind::Frame | ChannelEventKind::AudioClip => {
-            perceive_and_turn(rt, feed, event, contact_tier).await;
+            perceive_and_turn(rt, feed, event, contact_tier, session).await;
         }
         // #525 — a device asked for the background-task list (kind=command,
         // body "jobs"); #670 — a card action tap is a `CardCommand` JSON body
@@ -1107,6 +1143,14 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
                 }
                 return;
             }
+            // Typed sessions: a reset marker ends sessions. The marker itself
+            // stays in the feed, so the transcript shows where the new one began.
+            if let Some(scope) =
+                agentkeys_backend_client::protocol::parse_session_reset(cmd.trim().as_bytes())
+            {
+                handle_session_reset(rt, feed, event, scope).await;
+                return;
+            }
             match agentkeys_backend_client::protocol::parse_card_command(cmd.as_bytes()) {
                 Ok(card_cmd) => {
                     let actor = match &event.producer {
@@ -1131,8 +1175,19 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
                             format!("\nargs: {}", card_cmd.args)
                         }
                     );
-                    let reply = match bridge_chat(http, cfg, &text).await {
-                        Ok(r) => r,
+                    let session = if session.window == SessionWindow::Event {
+                        BridgeChatSession {
+                            context: tapped_card(rt, feed, event, card_cmd.card_updated_at).await,
+                            ..session
+                        }
+                    } else {
+                        session_with_context(rt, feed, event, session).await
+                    };
+                    let reply = match bridge_chat(http, cfg, &text, Some(&session)).await {
+                        Ok(r) => {
+                            mark_sent(rt, &session).await;
+                            r
+                        }
                         Err(e) => format!("(agent error: {e})"),
                     };
                     if let Err(e) = publisher
@@ -1171,19 +1226,34 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
             // explicit hint: a consumer that never sends it (old web app,
             // fleet TUI, devices) gets today's single-shot reply, so partials
             // can never fragment-spam a UI that doesn't merge them.
+            let session = session_with_context(rt, feed, event, session).await;
             let reply = if event.stream == Some(true) {
-                match bridge_chat_stream(http, cfg, &text, publisher, channel, &event.event_id)
-                    .await
+                match bridge_chat_stream(
+                    http,
+                    cfg,
+                    &text,
+                    Some(&session),
+                    publisher,
+                    channel,
+                    &event.event_id,
+                )
+                .await
                 {
-                    Ok(r) => r,
+                    Ok(r) => {
+                        mark_sent(rt, &session).await;
+                        r
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "#563 chat loop: streamed bridge turn failed");
                         format!("(agent error: {e})")
                     }
                 }
             } else {
-                match bridge_chat(http, cfg, &text).await {
-                    Ok(r) => r,
+                match bridge_chat(http, cfg, &text, Some(&session)).await {
+                    Ok(r) => {
+                        mark_sent(rt, &session).await;
+                        r
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "#430 chat loop: bridge /v1/chat failed");
                         format!("(agent error: {e})")
@@ -1249,6 +1319,7 @@ async fn perceive_and_turn(
     feed: &FeedSpec,
     event: &ChannelEvent,
     contact_tier: Option<&str>,
+    session: BridgeChatSession,
 ) {
     let kind = event.kind.as_str();
     let channel = feed.channel_id.as_str();
@@ -1342,8 +1413,12 @@ async fn perceive_and_turn(
         return;
     }
     let turn = crate::perception::agent_turn_text(&feed.slot, kind, contact_tier, None, &result);
-    let reply = match bridge_chat(&rt.http, &rt.cfg, &turn).await {
-        Ok(r) => r,
+    let session = session_with_context(rt, feed, event, session).await;
+    let reply = match bridge_chat(&rt.http, &rt.cfg, &turn, Some(&session)).await {
+        Ok(r) => {
+            mark_sent(rt, &session).await;
+            r
+        }
         Err(e) => {
             tracing::warn!(error = %e, "#668 chat loop: agent turn after perception failed");
             format!("(agent error: {e})")
@@ -1436,6 +1511,7 @@ async fn voice_turn(
     cfg: &ChatLoopConfig,
     audio_b64: &str,
     params: Option<&agentkeys_backend_client::protocol::ChannelAudioParams>,
+    session: &BridgeChatSession,
 ) -> Result<VoiceTurn, String> {
     let (Some(speech_url), Some(bearer)) = (&cfg.speech_url, &cfg.speech_bearer) else {
         return Err(
@@ -1455,7 +1531,7 @@ async fn voice_turn(
     let base = speech_url.trim_end_matches('/');
 
     let transcript = gate_transcribe(http, cfg, audio_b64, &format).await?;
-    let reply_text = bridge_chat(http, cfg, &transcript).await?;
+    let reply_text = bridge_chat(http, cfg, &transcript, Some(session)).await?;
     let reply_audio_b64 = tts_synthesize(http, base, bearer, &reply_text, params).await?;
     Ok(VoiceTurn {
         reply_text,
@@ -1589,8 +1665,189 @@ async fn bridge_chat(
     http: &reqwest::Client,
     cfg: &ChatLoopConfig,
     text: &str,
+    session: Option<&BridgeChatSession>,
 ) -> Result<String, String> {
-    bridge_chat_at(http, &cfg.bridge_url, cfg.bridge_token.as_deref(), text).await
+    bridge_chat_at(
+        http,
+        &cfg.bridge_url,
+        cfg.bridge_token.as_deref(),
+        text,
+        session,
+    )
+    .await
+}
+
+/// The bridge `/v1/chat` body: the turn text, plus the typed session it runs
+/// in (absent = the bridge's legacy resident session).
+fn bridge_chat_body(
+    text: &str,
+    stream: bool,
+    session: Option<&BridgeChatSession>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({ "text": text, "stream": stream });
+    if let Some(session) = session {
+        body["session"] = serde_json::to_value(session).unwrap_or(serde_json::Value::Null);
+    }
+    body
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Typed sessions: the first turn this boot sends into an open session
+/// carries the window rebuilt from the feed. The bridge uses it only when it
+/// has to create the session — a sandbox that came up without the one it held.
+async fn session_with_context(
+    rt: &LoopRuntime,
+    feed: &FeedSpec,
+    event: &ChannelEvent,
+    mut session: BridgeChatSession,
+) -> BridgeChatSession {
+    let Some(key) = crate::session_scope::open_session_key(&session) else {
+        return session;
+    };
+    if rt.sent_sessions.lock().await.contains(&key) {
+        return session;
+    }
+    match rt
+        .publisher
+        .tail(&feed.channel_id, crate::session_scope::REBUILD_TAIL_EVENTS)
+        .await
+    {
+        Ok(events) => {
+            session.context = crate::session_scope::rebuild_window(
+                &events,
+                &session,
+                &event.event_id,
+                now_millis(),
+            )
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            channel = %feed.channel_id,
+            "typed sessions: feed read for the window rebuild failed — a new session starts without it"
+        ),
+    }
+    session
+}
+
+/// Remember that this boot has sent an open session to the bridge.
+async fn mark_sent(rt: &LoopRuntime, session: &BridgeChatSession) {
+    if let Some(key) = crate::session_scope::open_session_key(session) {
+        rt.sent_sessions.lock().await.insert(key);
+    }
+}
+
+/// Typed sessions: the card a tap was made on, read back from the feed the
+/// tap arrived on (the display renders the delegate's newest card there).
+async fn tapped_card(
+    rt: &LoopRuntime,
+    feed: &FeedSpec,
+    event: &ChannelEvent,
+    card_updated_at: u64,
+) -> Option<String> {
+    let events = match rt
+        .publisher
+        .tail(
+            &feed.channel_id,
+            crate::session_scope::CARD_LOOKUP_TAIL_EVENTS,
+        )
+        .await
+    {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::warn!(error = %e, channel = %feed.channel_id, "typed sessions: card lookup failed — the tap runs without its card");
+            return None;
+        }
+    };
+    let mut cards: Vec<(u64, Vec<u8>)> = Vec::new();
+    for card_event in events
+        .iter()
+        .filter(|e| crate::session_scope::is_card_event(e))
+    {
+        let bytes = match (&card_event.body, &card_event.body_ref) {
+            (Some(b64), _) => {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+                STANDARD.decode(b64).ok()
+            }
+            (None, Some(body_ref)) => rt
+                .publisher
+                .fetch_blob(&feed.channel_id, body_ref)
+                .await
+                .ok()
+                .map(|(bytes, _)| bytes),
+            (None, None) => None,
+        };
+        if let Some(bytes) = bytes {
+            cards.push((card_event.ts_millis, bytes));
+        }
+    }
+    crate::session_scope::tapped_card_context(&cards, card_updated_at, event.ts_millis)
+}
+
+/// Typed sessions: a reset marker on a feed — authorized by where it arrived
+/// and who sent it, applied at the bridge, acknowledged on the same feed.
+async fn handle_session_reset(
+    rt: &LoopRuntime,
+    feed: &FeedSpec,
+    event: &ChannelEvent,
+    scope: SessionResetScope,
+) {
+    let channel = feed.channel_id.as_str();
+    let reply = match crate::session_scope::authorize_reset(scope, feed, event) {
+        None => {
+            tracing::info!(scope = scope.as_str(), slot = %feed.slot, "typed sessions: reset refused for this sender");
+            crate::session_scope::RESET_REFUSED_REPLY.to_string()
+        }
+        Some(reset) => match bridge_session_reset(&rt.http, &rt.cfg, &reset).await {
+            Ok(ended) => {
+                tracing::info!(scope = scope.as_str(), ended, slot = %feed.slot, "typed sessions: reset");
+                crate::session_scope::reset_ack(scope).to_string()
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "typed sessions: bridge reset failed");
+                format!("(reset failed: {e})")
+            }
+        },
+    };
+    if let Err(e) = rt
+        .publisher
+        .publish_text_out(channel, &reply, &event.event_id)
+        .await
+    {
+        tracing::warn!(error = %e, "typed sessions: reset acknowledgement publish failed");
+    }
+}
+
+/// The bridge `POST /v1/session/reset` → how many open sessions it ended.
+async fn bridge_session_reset(
+    http: &reqwest::Client,
+    cfg: &ChatLoopConfig,
+    reset: &BridgeSessionReset,
+) -> Result<u64, String> {
+    let mut req = http
+        .post(format!(
+            "{}/v1/session/reset",
+            cfg.bridge_url.trim_end_matches('/')
+        ))
+        .timeout(Duration::from_secs(60))
+        .json(reset);
+    if let Some(token) = &cfg.bridge_token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.map_err(|e| format!("bridge send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("bridge HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("bridge parse: {e}"))?;
+    Ok(v.get("ended").and_then(|n| n.as_u64()).unwrap_or(0))
 }
 
 /// One non-streamed bridge `/v1/chat` turn at an explicit bridge base — the
@@ -1600,11 +1857,12 @@ pub(crate) async fn bridge_chat_at(
     bridge_url: &str,
     bridge_token: Option<&str>,
     text: &str,
+    session: Option<&BridgeChatSession>,
 ) -> Result<String, String> {
     let mut req = http
         .post(format!("{}/v1/chat", bridge_url.trim_end_matches('/')))
         .timeout(Duration::from_secs(180))
-        .json(&serde_json::json!({ "text": text, "stream": false }));
+        .json(&bridge_chat_body(text, false, session));
     if let Some(token) = bridge_token {
         req = req.bearer_auth(token);
     }
@@ -2052,6 +2310,38 @@ impl Publisher {
         Ok(put.body_ref)
     }
 
+    /// The feed's newest `n` events, oldest first. A tail read walks every
+    /// page of the feed, so this is the true end, not the first page.
+    pub async fn tail(&self, channel_id: &str, n: u32) -> Result<Vec<ChannelEvent>, String> {
+        let (sub_cap, _) = self.cap_for(channel_id, false).await?;
+        let body = agentkeys_backend_client::protocol::ChannelPollBody {
+            cap: sub_cap,
+            after: String::new(),
+            wait_seconds: 0,
+            tail: Some(n),
+        };
+        let resp = self
+            .http
+            .post(format!(
+                "{}/v1/channel/poll",
+                self.cfg.channel_worker_url.trim_end_matches('/')
+            ))
+            .timeout(Duration::from_secs(30))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("tail send: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                self.invalidate_cap(channel_id, false).await;
+            }
+            return Err(format!("tail HTTP {status}"));
+        }
+        let poll: PollResponse = resp.json().await.map_err(|e| format!("tail parse: {e}"))?;
+        Ok(poll.events)
+    }
+
     /// #667 — fetch a media original by `body_ref` under the feed's subscribe
     /// cap → `(content_type, bytes)`.
     pub async fn fetch_blob(
@@ -2103,6 +2393,7 @@ async fn bridge_chat_stream(
     http: &reqwest::Client,
     cfg: &ChatLoopConfig,
     text: &str,
+    session: Option<&BridgeChatSession>,
     publisher: &Publisher,
     channel_id: &str,
     correlation: &str,
@@ -2110,7 +2401,7 @@ async fn bridge_chat_stream(
     let mut req = http
         .post(format!("{}/v1/chat", cfg.bridge_url.trim_end_matches('/')))
         .timeout(Duration::from_secs(300))
-        .json(&serde_json::json!({ "text": text, "stream": true }));
+        .json(&bridge_chat_body(text, true, session));
     if let Some(token) = &cfg.bridge_token {
         req = req.bearer_auth(token);
     }
@@ -2413,5 +2704,72 @@ mod tests {
         // Unknown bytes default to wav — the ASR then rejects loudly rather
         // than the loop guessing silently.
         assert_eq!(sniff_audio_format(b"\x00\x01\x02\x03"), "wav");
+    }
+}
+
+/// One poll's body (pure — unit-tested). The FIRST poll after boot is the
+/// fast-forward: a TAIL read of one event walks every page of the feed, so the
+/// returned cursor is the feed's true end (the worker's cursor = the last
+/// event it returned). Later polls continue from the cursor and long-poll.
+fn poll_request_body<C: serde::Serialize>(
+    cap: &C,
+    cursor: &str,
+    fast_forwarded: bool,
+) -> serde_json::Value {
+    // @backend-fixture: channel_poll_body — compiled from the protocol type
+    // family (cap + after + wait_seconds + tail), never a drifting hand-rolled shape.
+    let mut body = serde_json::json!({
+        "cap": cap,
+        "after": cursor,
+        "wait_seconds": if fast_forwarded { 25 } else { 0 },
+    });
+    if !fast_forwarded {
+        body["tail"] = serde_json::json!(1);
+    }
+    body
+}
+
+#[cfg(test)]
+mod boot_fast_forward_tests {
+    use super::poll_request_body;
+
+    #[test]
+    fn the_boot_fast_forward_reads_the_true_end_of_the_feed() {
+        let boot = poll_request_body(&"cap", "", false);
+        assert_eq!(boot["tail"], 1);
+        assert_eq!(boot["wait_seconds"], 0);
+        assert_eq!(boot["after"], "");
+        let steady = poll_request_body(&"cap", "k-0042", true);
+        assert!(steady.get("tail").is_none());
+        assert_eq!(steady["wait_seconds"], 25);
+        assert_eq!(steady["after"], "k-0042");
+    }
+}
+
+#[cfg(test)]
+mod bridge_chat_body_tests {
+    use super::bridge_chat_body;
+    use agentkeys_backend_client::protocol::{BridgeChatSession, SessionWindow};
+
+    #[test]
+    fn a_typed_turn_names_its_session_and_a_legacy_turn_names_none() {
+        let legacy = bridge_chat_body("hi", false, None);
+        assert_eq!(legacy, serde_json::json!({ "text": "hi", "stream": false }));
+        let session = BridgeChatSession {
+            window: SessionWindow::Thread,
+            scope: "ch-family".into(),
+            party: Some("grandma".into()),
+            idle_minutes: Some(30),
+            context: None,
+        };
+        let typed = bridge_chat_body("hi", true, Some(&session));
+        assert_eq!(
+            typed,
+            serde_json::json!({
+                "text": "hi",
+                "stream": true,
+                "session": { "window": "thread", "scope": "ch-family", "party": "grandma", "idle_minutes": 30 }
+            })
+        );
     }
 }

@@ -1,6 +1,6 @@
 {
   "id": "chef",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "schema": 1,
   "publisher": "agentkeys",
   "name": "Chef",
@@ -21,9 +21,9 @@
     {
       "slot": "kitchen_screen",
       "kind": "display",
-      "direction": "pub",
+      "direction": "duplex",
       "required": false,
-      "event_kinds": ["doc"],
+      "event_kinds": ["doc", "command"],
       "reason": "Shows today's summary and what to cook; the card's buttons come back as commands.",
       "reason_zh": "显示今天的饮食小结和建议做什么；卡片上的按钮会作为指令回传。"
     }

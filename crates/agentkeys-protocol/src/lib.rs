@@ -38,10 +38,13 @@ use serde_json::Value;
 mod app_template;
 mod card;
 mod registries;
+pub mod sandbox_actions;
+mod session_window;
 mod worker_url;
 pub use app_template::*;
 pub use card::*;
 pub use registries::*;
+pub use session_window::*;
 pub use worker_url::*;
 
 /// Op discriminator that maps onto the four broker cap-mint endpoints. The
@@ -2522,6 +2525,12 @@ pub struct PresetSchedule {
     #[serde(default)]
     pub label_zh: String,
     pub prompt: String,
+    /// Typed sessions (2026-09-23): this entry's session policy when its runs
+    /// should share one (e.g. `conversation`, so a plan builds on the last
+    /// one). Absent = [`SCHEDULE_SESSION`]: every run starts clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub session: Option<SessionPolicy>,
 }
 
 /// `preset.json` — the manifest half of a repo-resident bundle (also the

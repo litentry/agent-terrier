@@ -884,6 +884,17 @@ function AppDetail({
         }
       />
       {error && <div className="banner warn" style={{ marginBottom: 12 }}><span className="lbl">dashboard</span><span>{error}</span></div>}
+      {template && template.version !== app.template_version && app.status !== 'uninstalled' && onRebind && (
+        <div className="banner" style={{ marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span className="lbl">update</span>
+          <span style={{ flex: 1 }}>
+            Template v{template.version} is available; this app runs v{app.template_version}. Updating applies the new version's permissions and slot directions with one Touch ID and re-applies its skills. Your bindings stay.
+          </span>
+          <button className="btn sm primary" disabled={!!rebinding} onClick={() => onRebind({})}>
+            update to v{template.version}
+          </button>
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {display && (

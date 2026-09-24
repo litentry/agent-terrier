@@ -41,6 +41,13 @@ grants**, not by the agent's choices:
   namespace you choose; every application granted that namespace then receives
   it as a resource. Nothing an agent learns enters shared knowledge without
   that acceptance. See the wiki page *Knowledge Store and Applications*.
+- **A grant request reaches you the same way.** When an application tries a
+  capability it was not granted (say web search without the web capability),
+  the call is denied on the spot and a *grant request* lands in that
+  application's review queue — at most one per capability every ten minutes.
+  Approve the capability from the permissions page (the toggle mints the
+  grant; the next attempt passes without asking), or ignore the request to
+  keep the denial. Nothing is granted by the request itself.
 - The memory engine is **never load-bearing**: if it is down or not enabled,
   the agent falls back to its built-in memory and chat keeps working.
 
@@ -264,9 +271,10 @@ agent's sandbox in place:
 - **Kept:** its identity, permissions, chat channel, persona (SOUL.md), skills
   docs, and everything in its canonical memory + config (those live in the
   workers and never leave them).
-- **Restarts:** the conversation it was holding in its head. The live session
-  is in-memory in the runtime, so the updated agent greets you fresh — the
-  same thing that already happens when a sandbox reaches its normal lifetime.
+- **Carried over:** its open conversations. The old sandbox hands its working
+  files, open sessions included, to the new one; when that hand-off misses,
+  the next message rebuilds the recent exchange from the chat history (see
+  [Conversations and the New session button](#conversations-and-the-new-session-button)).
 - **Guarded:** if the agent has background jobs running, the update refuses
   and tells you — click **"update anyway"** only if losing their output is
   acceptable.
@@ -310,10 +318,43 @@ expires). You don't have to do anything about it:
   the latest checkpoint at boot. Only the agent itself can read or write its
   checkpoint — it lives under the same permission your pairing grant already
   gave it, encrypted at rest.
-- **The live conversation still restarts.** As with updates, the in-progress
-  chat session is held in the runtime's memory and starts fresh on the new
-  sandbox — the agent greets you anew but remembers everything it had
-  written down.
+- **Open conversations carry over.** A planned move hands the open sessions
+  over directly, as an update does. When a sandbox died instead, the new one
+  restores them from the latest checkpoint (saved every 15 minutes by
+  default), so the last few messages may be missing from the session; when
+  nothing could be restored, the first message rebuilds the recent exchange
+  from the chat history.
+
+## Conversations and the New session button
+
+What your agent keeps in mind during a conversation depends on where a
+message came from. Each kind of trigger gets its own session:
+
+| Where the message came from | What the agent sees of the conversation | When the session ends |
+|---|---|---|
+| Your chat in the console | your recent back-and-forth | after a day of silence, or **New session** |
+| Voice on your chat (a device) | the current spoken exchange | after 2 minutes of silence |
+| A family member on WeChat | that member's own recent messages, never another member's | after 30 minutes of silence |
+| A tap on a card (the kitchen screen) | the card that was tapped | with the reply: every tap starts fresh |
+| A camera, microphone or sensor event | only that event | with the reply |
+| A scheduled run (the morning plan) | nothing from earlier runs | with the reply |
+
+None of this limits what the agent knows long-term. Its granted memory and
+knowledge, its persona and skills, and the application's settings apply in
+every session. Anything the agent must remember beyond one session, such as
+"no dish from the last three days", it writes into its memory rather than
+relying on a conversation.
+
+**New session**, next to **Send** in the chat, ends every open conversation
+of the agent: your chat, the family members' threads, and a device talking to
+it directly. The next message starts fresh. A "— new session —" divider
+marks the point, and the earlier messages stay readable. Nothing else
+changes: memory, knowledge, persona, skills and the application's settings
+all stay.
+
+An application's template may give a slot or a scheduled run a different
+kind of session, for example one shared conversation for the whole family
+chat. A session can outlast at most a week of silence.
 
 ## Editing your agent's persona + config files (parent-control, #390)
 
@@ -338,10 +379,10 @@ shape it, and letting you edit the ones that are yours to edit:
 
 Two behaviors worth knowing:
 
-- **↻ restart agent (re-source)** reloads all context files *and starts a
-  fresh conversation* — the running session IS the agent's short-term memory,
-  so a restart forgets the current chat (your shared memories are unaffected).
-  Saving a persona does this restart for you.
+- **↻ restart agent (re-source)** reloads all context files. Open
+  conversations continue with the new persona and skills; to start a fresh
+  one, use **New session** in the chat. Saving a persona does this restart
+  for you.
 - **Delegates cannot write personas.** An agent may *propose* memories or
   skills into your inbox, but a persona proposal is never adoptable — the
   inbox shows it as `not adoptable`; personas are authored only here. Skill
@@ -552,6 +593,14 @@ the permissions you approve. parent-control → **applications**:
   its clock does at the cron minute, tagged as asked from the console — and
   the panel watches the display feed for the card. The app's answer is in its
   chat; if no card lands within three minutes the panel says so.
+- **Template updates.** When the catalog carries a newer version of an
+  installed app's template, the app's page shows **update to vX**. One Touch
+  ID applies the new version's permissions and slot directions over your
+  existing bindings, and the new skills are applied to the running app;
+  nothing is reinstalled. Chef 1.1.0 is such an update: its kitchen screen
+  becomes two-way, so the card's **Completed** and **Ready for the next
+  meal** buttons reach chef (before it, chef only published to the screen and
+  never heard a tap).
 - **Endpoints — one Touch ID, never a second prompt.** The first install that
   binds the family chat enrolls the WeChat / Telegram contact gate as a device
   actor in the SAME Touch ID as the install, and the first install that binds
@@ -671,7 +720,7 @@ A shared screen (a kitchen tablet, an old phone on the fridge) shows your househ
 
 1. Open the display app on the tablet (`apps/device-display`, `http://<your-dev-host>:3119`, or the hosted URL your operator gives you; `?broker=…&feed=…&label=…` in the link pre-fills the settings). Enter your family's broker address once. It shows a **pairing code** and a QR.
 2. On your parent-control console go to **Devices → claim a device**: type the code, keep the label (`kitchen-display` by default), attach the display feed of the app you installed (the feed name is on the tablet, `kitchen-display` by default) with **listen + speak**, then approve with **one Touch ID**.
-3. The tablet switches to the card by itself. Taps such as *Cooked ✓* or *Swap dinner* reach the app as commands attributed to **the display** — the console's Applications dashboard lists them under recent commands with that device's identity.
+3. The tablet switches to the card by itself. Taps such as *Completed* or *Ready for the next meal* reach the app as commands attributed to **the display** — the console's Applications dashboard lists them under recent commands with that device's identity.
 
 **Good to know:**
 

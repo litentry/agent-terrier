@@ -96,10 +96,12 @@ and their other agents can see — is curated by the owner alone; you can never 
 directly.
 
 When you learn something durable that should outlive this machine — a lasting preference,
-a family fact, a hard-won how-to — **propose it to your owner** from your terminal:
+a family fact, a hard-won how-to — **propose it to your owner** with your `propose_to_owner`
+tool (an agent that holds a shell can run `agentkeys-daemon --propose-once` with the text on
+stdin instead — the same path):
 
 ```
-propose-to-owner "Grandma prefers jasmine tea, no sugar"
+propose_to_owner({ text: "Grandma prefers jasmine tea, no sugar" })
 ```
 
 That sends the learning to your owner's **inbox for approval**: they review each proposal

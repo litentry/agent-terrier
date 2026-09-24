@@ -12,6 +12,15 @@
  * OpenViking store (mirror-bounded, #566), todo/plan/report bookkeeping, and
  * asking its own owner a question. Everything unmapped is DENIED — new tools a
  * future dsh version introduces arrive inside the deny-by-absence envelope.
+ *
+ * Advertised actions (2026-09-24, plan dsh-plugin-abstraction PR 1) are the
+ * daemon's own verbs: the `actions` plugin registers them from
+ * `GET /v1/sandbox/self/actions`, and each names the GRANT FAMILY it needs —
+ * publishing IS the `channel-pub:<id>` data service, proposing IS the
+ * `proposal:<ns>` one. The guard allows the verb when the delegate holds ANY
+ * grant of that family; WHICH feed / namespace is the cap-mint's verdict at
+ * the daemon. Denied outright without one: an allow-once cannot mint a feed,
+ * so asking would only mislead.
  */
 
 /** Grant-classed tools: running one requires the matching `tool:<class>` grant. */
@@ -21,32 +30,39 @@ export const DEFAULT_TOOL_CLASSES: Readonly<Record<string, readonly string[]>> =
   schedule: ['schedule_create', 'schedule_delete', 'schedule_list'],
 };
 
-/** The publish action (`@agentkeys/dsh-suite/publish`, 2026-09-17): the
- *  delegate's own "act" verb. Not a capability class — publishing IS the
- *  granted data service: allowed when the delegate holds ANY `channel-pub:<id>`
- *  grant, and WHICH feed is the cap-mint's verdict (an ungranted feed is
- *  refused there with the worker's reason). Denied outright without one: an
- *  allow-once cannot mint a feed grant, so asking would only mislead. */
-export const DEFAULT_PUBLISH_TOOLS: readonly string[] = ['publish_to_slot'];
+/** The two verbs every delegate daemon advertises, and their grant families
+ *  (agentkeys-protocol `sandbox_actions`). Seeded here so the guard's verdict
+ *  never depends on the advertisement having arrived; the actions plugin
+ *  replaces the set with what the daemon actually advertises. */
+export const PUBLISH_ACTION = 'publish_to_slot';
+export const PROPOSE_ACTION = 'propose_to_owner';
 export const PUBLISH_SERVICE_PREFIX = 'channel-pub:';
-
-/** Does the (lower-cased) grant view hold any publish feed? */
-export function holdsPublishGrant(services: ReadonlySet<string>): boolean {
-  for (const s of services) if (s.startsWith(PUBLISH_SERVICE_PREFIX)) return true;
-  return false;
-}
-
-/** The propose action (`@agentkeys/dsh-suite/propose`, 2026-09-18): the
- *  delegate's "propose" verb — a learning into the owner's review queue.
- *  Like publish, not a capability class: allowed when the delegate holds ANY
- *  `proposal:<ns>` grant (every installed application holds its own), and
- *  WHICH namespace is the cap-mint's verdict. Denied outright without one. */
-export const DEFAULT_PROPOSE_TOOLS: readonly string[] = ['propose_to_owner'];
 export const PROPOSE_SERVICE_PREFIX = 'proposal:';
 
-/** Does the (lower-cased) grant view hold any proposal namespace? */
-export function holdsProposeGrant(services: ReadonlySet<string>): boolean {
-  for (const s of services) if (s.startsWith(PROPOSE_SERVICE_PREFIX)) return true;
+const ADVERTISED = new Map<string, string>([
+  [PUBLISH_ACTION, PUBLISH_SERVICE_PREFIX],
+  [PROPOSE_ACTION, PROPOSE_SERVICE_PREFIX],
+]);
+
+/** Replace the advertised set with the daemon's list (name → grant family).
+ *  Module-level on purpose: the actions plugin (writer) and the guard /
+ *  answerer (readers) ship in this package and run in one process. */
+export function registerAdvertised(entries: Iterable<{ name: string; requires_grant_prefix: string }>): void {
+  const next: Array<[string, string]> = [];
+  for (const e of entries) next.push([e.name, e.requires_grant_prefix.toLowerCase()]);
+  ADVERTISED.clear();
+  for (const [n, p] of next) ADVERTISED.set(n, p);
+}
+
+/** The grant family an advertised tool needs, or undefined when it is not one. */
+export function advertisedGrantPrefix(name: string): string | undefined {
+  return ADVERTISED.get(name);
+}
+
+/** Does the (lower-cased) grant view hold any service of the family? */
+export function holdsGrantWithPrefix(services: ReadonlySet<string>, prefix: string): boolean {
+  const p = prefix.toLowerCase();
+  for (const s of services) if (s.startsWith(p)) return true;
   return false;
 }
 
@@ -56,6 +72,13 @@ export const DEFAULT_BASELINE: readonly string[] = [
   'todo_write', 'exit_plan_mode', 'ask_user_question', 'report',
   'job_list', 'job_output', 'job_kill',
 ];
+
+/** Tools this deployment switches off: the bridge masks them out of every
+ *  agent's view, and the guard denies them as the backstop. `remember` asks
+ *  OpenViking to extract memories from a throwaway session, and the sandbox's
+ *  OpenViking runs without an extraction model (start-openviking.sh), so it
+ *  would answer "stored" and store nothing (#726 turns extraction on). */
+export const DEFAULT_HIDDEN_TOOLS: readonly string[] = ['mcp__openviking__remember', 'viking_remember'];
 
 /** OpenViking memory tools ride the delegate's own bounded store — baseline.
  *  Matches both the 0.1.0 native names (`viking_*`) and the 0.2.1 MCP-proxy
@@ -68,15 +91,14 @@ export const OPENVIKING_TOOL_PATTERNS: readonly RegExp[] = [
 export interface MappingConfig {
   readonly toolClasses?: Readonly<Record<string, readonly string[]>>;
   readonly baseline?: readonly string[];
-  readonly publishTools?: readonly string[];
-  readonly proposeTools?: readonly string[];
+  readonly hiddenTools?: readonly string[];
 }
 
 export type ToolVerdict =
   | { kind: 'baseline' }
   | { kind: 'classed'; toolClass: string; service: string }
-  | { kind: 'publish' }
-  | { kind: 'propose' }
+  | { kind: 'advertised'; requiresPrefix: string }
+  | { kind: 'hidden' }
   | { kind: 'unmapped' };
 
 /** Pure classification of a registered tool name. */
@@ -84,13 +106,13 @@ export function classifyTool(name: string, config: MappingConfig = {}): ToolVerd
   // Schemastery materializes array/dict schema fields as EMPTY collections, so
   // "absent" arrives as [] / {} — treat empty as "use the defaults" (an
   // operator overriding the mapping always supplies a non-empty value).
+  const hidden = config.hiddenTools?.length ? config.hiddenTools : DEFAULT_HIDDEN_TOOLS;
+  if (hidden.includes(name)) return { kind: 'hidden' };
   const baseline = config.baseline?.length ? config.baseline : DEFAULT_BASELINE;
   if (baseline.includes(name)) return { kind: 'baseline' };
   if (OPENVIKING_TOOL_PATTERNS.some((re) => re.test(name))) return { kind: 'baseline' };
-  const publish = config.publishTools?.length ? config.publishTools : DEFAULT_PUBLISH_TOOLS;
-  if (publish.includes(name)) return { kind: 'publish' };
-  const propose = config.proposeTools?.length ? config.proposeTools : DEFAULT_PROPOSE_TOOLS;
-  if (propose.includes(name)) return { kind: 'propose' };
+  const requiresPrefix = advertisedGrantPrefix(name);
+  if (requiresPrefix !== undefined) return { kind: 'advertised', requiresPrefix };
   const classes =
     config.toolClasses && Object.keys(config.toolClasses).length > 0
       ? config.toolClasses

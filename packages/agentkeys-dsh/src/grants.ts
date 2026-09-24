@@ -7,6 +7,7 @@
  * Fail-closed: while the view is unavailable (daemon down, fetch failing) the
  * guard treats every grant-classed tool as ungranted.
  */
+import { DaemonClient, DEFAULT_DAEMON_URL } from './daemon-client.js';
 
 export interface GrantView {
   readonly services: ReadonlySet<string>;
@@ -20,7 +21,7 @@ export interface GrantsConfig {
   readonly ttlMs?: number;
 }
 
-export const DEFAULT_GRANTS_URL = 'http://127.0.0.1:3114/v1/sandbox/self/grants';
+export const DEFAULT_GRANTS_URL = `${DEFAULT_DAEMON_URL}/v1/sandbox/self/grants`;
 const DEFAULT_TTL_MS = 60_000;
 const UNAVAILABLE_RETRY_MS = 5_000;
 
@@ -29,7 +30,10 @@ const EMPTY: GrantView = { services: new Set(), fetchedAt: 0, available: false }
 export class GrantsCache {
   private view: GrantView = EMPTY;
   private inflight: Promise<void> | undefined;
-  constructor(private readonly config: GrantsConfig = {}) {}
+  private readonly client: DaemonClient;
+  constructor(private readonly config: GrantsConfig = {}) {
+    this.client = new DaemonClient({ bridgeToken: config.bridgeToken });
+  }
 
   /** Synchronous read for the monotonic guard (guards must be sync). */
   current(): GrantView {
@@ -56,12 +60,7 @@ export class GrantsCache {
   async refresh(): Promise<void> {
     const url = this.config.grantsUrl ?? DEFAULT_GRANTS_URL;
     try {
-      const headers: Record<string, string> = {};
-      const token = this.config.bridgeToken ?? process.env.AGENTKEYS_BRIDGE_TOKEN ?? '';
-      if (token) headers.authorization = `Bearer ${token}`;
-      const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as { services?: unknown };
+      const body = await this.client.getJson<{ services?: unknown }>(url, { timeoutMs: 10_000 });
       const services = Array.isArray(body.services)
         ? body.services.filter((s): s is string => typeof s === 'string')
         : [];

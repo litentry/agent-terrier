@@ -8,7 +8,24 @@
 import { parseLifecycle, stageLabel } from '@/lib/client/lifecycle';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ApiChatEvent } from '@/lib/generated/ApiChatEvent';
+import type { SessionResetCommand } from '@/lib/generated/SessionResetCommand';
 import { useClient } from '@/lib/ClientProvider';
+
+/** The typed reset marker this panel publishes ("New session"). */
+const NEW_SESSION_BODY = JSON.stringify({ session_reset: 'app' } satisfies SessionResetCommand);
+
+/** A `command` event that is a reset marker → its scope. */
+function resetScope(e: ApiChatEvent): SessionResetCommand['session_reset'] | null {
+  if (e.kind !== 'command') return null;
+  try {
+    const body = JSON.parse(e.text) as Partial<SessionResetCommand>;
+    return body.session_reset === 'app' || body.session_reset === 'feed' || body.session_reset === 'thread'
+      ? body.session_reset
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export function ChatPanel({
   channelId,
@@ -107,6 +124,18 @@ export function ChatPanel({
     const out: Bubble[] = [];
     const open = new Map<string, number>();
     for (const e of events) {
+      // Typed sessions — a reset marker is where a new session began.
+      const scope = resetScope(e);
+      if (scope) {
+        out.push({
+          key: e.event_id,
+          direction: 'status',
+          text: scope === 'app' ? '— new session —' : '— started over —',
+          ts_millis: e.ts_millis,
+          streaming: false,
+        });
+        continue;
+      }
       // #693 — a lifecycle report renders as a status line, never a bubble.
       if (e.kind === 'lifecycle') {
         const lc = parseLifecycle(e.text);
@@ -180,6 +209,23 @@ export function ChatPanel({
     setDraft('');
   }, [api, channelId, draft, sending, addLog]);
 
+  // Typed sessions — end the delegate's open sessions; the marker stays in
+  // the feed as the divider. Memory, knowledge and the app's settings stay.
+  const newSession = useCallback(async () => {
+    if (sending) return;
+    setSending(true);
+    const r = await api.chatSend(channelId, NEW_SESSION_BODY, 'command');
+    setSending(false);
+    if (!r.ok) {
+      const detail = r.status?.detail ?? 'new session failed';
+      setError(detail);
+      addLog(`new session failed — ${detail}`);
+      return;
+    }
+    addLog('new session requested — the next message starts fresh');
+    awaitingRef.current = Date.now();
+  }, [api, channelId, sending, addLog]);
+
   return (
     <div className="chat-panel" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       {error && (
@@ -243,6 +289,14 @@ export function ChatPanel({
           />
           <button className="btn primary" onClick={() => void send()} disabled={sending || !draft.trim()}>
             {sending ? 'Sending…' : 'Send'}
+          </button>
+          <button
+            className="btn"
+            onClick={() => void newSession()}
+            disabled={sending}
+            title="End the current conversation and start fresh. Memory, knowledge and the app's settings stay."
+          >
+            New session
           </button>
         </div>
       )}

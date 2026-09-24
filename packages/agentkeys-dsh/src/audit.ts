@@ -16,6 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
+import { DaemonClient, DaemonError, DEFAULT_DAEMON_URL } from './daemon-client.js';
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 
 export const name = 'agentkeys-audit';
@@ -30,7 +31,7 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
-  auditUrl: z.string().default('http://127.0.0.1:3114/v1/sandbox/self/audit'),
+  auditUrl: z.string().default(`${DEFAULT_DAEMON_URL}/v1/sandbox/self/audit`),
   bridgeToken: z.string(),
 });
 
@@ -91,19 +92,12 @@ export class AuditSink {
   }
 
   private async send(row: AuditRow): Promise<void> {
-    const url = this.config.auditUrl ?? 'http://127.0.0.1:3114/v1/sandbox/self/audit';
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    const token = this.config.bridgeToken ?? process.env.AGENTKEYS_BRIDGE_TOKEN ?? '';
-    if (token) headers.authorization = `Bearer ${token}`;
+    const url = this.config.auditUrl ?? `${DEFAULT_DAEMON_URL}/v1/sandbox/self/audit`;
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(row),
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (res.status === 404) this.disabled = true; // not a sandbox daemon — stand down
-    } catch {
+      const client = new DaemonClient({ bridgeToken: this.config.bridgeToken });
+      await client.postJson<unknown>(url, row, { timeoutMs: 15_000 });
+    } catch (e) {
+      if (e instanceof DaemonError && e.status === 404) this.disabled = true; // not a sandbox daemon — stand down
       // fire-and-forget: a lost row never blocks the loop; the durable session
       // log remains the complete record
     }

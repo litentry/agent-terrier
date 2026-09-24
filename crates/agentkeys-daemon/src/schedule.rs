@@ -224,11 +224,13 @@ pub async fn run(rt: ScheduleRuntime) {
                 let text = clock_turn_text(entry, now, rt.tz_offset_minutes);
                 let correlation = clock_correlation(i, entry, now);
                 tracing::info!(label = %entry.label, "#669 schedule: tick — running the scheduled turn");
+                let session = crate::session_scope::schedule_session(&entry.label, entry.session);
                 let reply = match crate::chat_loop::bridge_chat_at(
                     &rt.http,
                     &rt.bridge_url,
                     rt.bridge_token.as_deref(),
                     &text,
+                    Some(&session),
                 )
                 .await
                 {
@@ -261,6 +263,7 @@ mod tests {
             label: label.into(),
             label_zh: String::new(),
             prompt: "Publish the plan.".into(),
+            session: None,
         }
     }
 

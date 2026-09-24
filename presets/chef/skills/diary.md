@@ -5,7 +5,9 @@ which your sandbox checkpoints — written with `mcp__openviking__write`
 (`mode: "replace"`, so a second photo of the same meal updates it):
 
 - uri: `viking://user/default/memories/events/<YYYY-MM-DD>/<HH-MM>-<who>.md`
-- content: a one-line title, then the JSON `{ "when": "…", "who": ["…"], "dishes": [{ "name": "…", "portion": "…" }], "source": "photo" | "text" | "voice", "confidence": 0.0 }`
+- content: a one-line title, then the JSON `{ "when": "…", "who": ["…"], "dishes": [{ "name": "…", "portion": "…" }], "source": "photo" | "text" | "voice" | "button", "confidence": 0.0 }`
+  (`button` = the family tapped **Completed** on the card: log the card's
+  meal with `confidence: 1.0` and no `portion`, since nobody measured it)
 - `remember` is not available in this runtime (it needs the engine's
   extraction model); the file IS the memory.
 

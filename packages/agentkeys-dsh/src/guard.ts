@@ -11,12 +11,17 @@
  *    a rogue pre-execute `allow` cannot bypass grants while an owner-approved
  *    call still runs.
  *
+ * An ADVERTISED action (the daemon's own verbs, mapping.ts) is allowed when
+ * the delegate holds any grant of the family the daemon declared for it and
+ * denied outright otherwise — a feed or a namespace is granted at install,
+ * never by an allow-once.
+ *
  * NO default export (dsh postmortem 0001 — Loader drops `inject` otherwise).
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { PreToolDecision, ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools';
-import { classifyTool, holdsProposeGrant, holdsPublishGrant, type MappingConfig } from './mapping.js';
+import { classifyTool, holdsGrantWithPrefix, type MappingConfig } from './mapping.js';
 import { consumeApprovedCall, DEFAULT_GRANTS_URL, GrantsCache } from './grants.js';
 
 export const name = 'agentkeys-guard';
@@ -28,8 +33,7 @@ export interface Config extends MappingConfig {
   ttlMs?: number;
   toolClasses?: Record<string, string[]>;
   baseline?: string[];
-  publishTools?: string[];
-  proposeTools?: string[];
+  hiddenTools?: string[];
 }
 
 export const Config: z<Config> = z.object({
@@ -38,8 +42,7 @@ export const Config: z<Config> = z.object({
   ttlMs: z.number().default(60_000),
   toolClasses: z.dict(z.array(z.string())),
   baseline: z.array(z.string()),
-  publishTools: z.array(z.string()),
-  proposeTools: z.array(z.string()),
+  hiddenTools: z.array(z.string()),
 });
 
 /** Pure decision core (exported for tests): what does a tool name deserve
@@ -66,29 +69,22 @@ export function decide(
         kind: 'ask',
         reason: `AgentKeys: requires the ${verdict.service} grant (not held by this delegate)`,
       };
-    case 'publish':
+    case 'advertised':
       if (!available) {
         return {
           kind: 'deny',
-          reason: 'AgentKeys: grant view unavailable (daemon unreachable) — the publish feeds cannot be verified, failing closed',
+          reason: `AgentKeys: grant view unavailable (daemon unreachable) — the ${verdict.requiresPrefix}<…> grants cannot be verified, failing closed`,
         };
       }
-      if (holdsPublishGrant(services)) return { kind: 'allow' };
+      if (holdsGrantWithPrefix(services, verdict.requiresPrefix)) return { kind: 'allow' };
       return {
         kind: 'deny',
-        reason: `AgentKeys: ${JSON.stringify(toolName)} needs a channel-pub:<feed> grant and this delegate holds none — a feed is granted at install (a bound display / chat slot), never by an allow-once`,
+        reason: `AgentKeys: ${JSON.stringify(toolName)} needs a ${verdict.requiresPrefix}<…> grant and this delegate holds none — it is granted at install (a bound slot, the application's own namespace), never by an allow-once`,
       };
-    case 'propose':
-      if (!available) {
-        return {
-          kind: 'deny',
-          reason: 'AgentKeys: grant view unavailable (daemon unreachable) — the proposal namespaces cannot be verified, failing closed',
-        };
-      }
-      if (holdsProposeGrant(services)) return { kind: 'allow' };
+    case 'hidden':
       return {
         kind: 'deny',
-        reason: `AgentKeys: ${JSON.stringify(toolName)} needs a proposal:<ns> grant and this delegate holds none — an application's own inbox is granted at install, never by an allow-once`,
+        reason: `AgentKeys: ${JSON.stringify(toolName)} is switched off here — this sandbox's OpenViking has no extraction model, so it would store nothing (#726). Save the fact as a file with mcp__openviking__write instead.`,
       };
     case 'unmapped':
       return {

@@ -20,10 +20,10 @@ use serde::{Deserialize, Serialize};
 use agentkeys_backend_client::protocol::{
     compile_app, service_channel_pub, service_channel_sub, validate_template, AppInstallBindings,
     AppInstanceRow, AppInstanceStatus, AppRegistryDoc, Availability, BoundChannel, CardCommand,
-    CardDocument, ChannelEndpointKind, ContactSummary, ContactTier, EndpointEnrollment,
-    EndpointGrantDelta, EndpointScope, PresetBundle, PresetSummary, ResourceItemRow, ResourceKind,
-    ResourceRegistryDoc, Sensitivity, ServiceAnnotation, SlotAudience, SlotBinding, TemplateError,
-    APP_REGISTRY_SERVICE, RESOURCE_REGISTRY_SERVICE,
+    CardDocument, ChannelEndpointKind, CompiledApp, ContactSummary, ContactTier,
+    EndpointEnrollment, EndpointGrantDelta, EndpointScope, PresetBundle, PresetSummary,
+    ResourceItemRow, ResourceKind, ResourceRegistryDoc, Sensitivity, ServiceAnnotation,
+    SlotAudience, SlotBinding, TemplateError, APP_REGISTRY_SERVICE, RESOURCE_REGISTRY_SERVICE,
 };
 use agentkeys_backend_client::protocol::{AppAnchor, ContextSeal, DelegateContextDoc};
 
@@ -3274,7 +3274,10 @@ async fn apply_app_feeds(
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppRebindBuildRequest {
     /// `slot → channel_id` for the slots to change; unlisted slots keep their
-    /// binding, resources and the audience are untouched.
+    /// binding, resources and the audience are untouched. EMPTY = a template
+    /// upgrade: the catalog's current version is applied to the installed
+    /// app — its grants and slot directions recompiled over the unchanged
+    /// bindings.
     #[serde(default)]
     pub slots: Vec<SlotBinding>,
     #[serde(default = "default_true")]
@@ -3292,6 +3295,8 @@ pub(crate) struct AppRebindStash {
     pub changes: Vec<String>,
     /// The anchor seal the batch carries (the new context document).
     pub context_seal: Option<ContextSeal>,
+    /// A template upgrade: the version the registry row moves to.
+    pub template_version: Option<String>,
 }
 
 /// What the daemon keeps between anchors/seal/build and /submit: one sealed
@@ -3342,6 +3347,54 @@ async fn endpoint_scopes_for_rebind(
         s.services.retain(|svc| !dropped.contains(svc));
     }
     scopes
+}
+
+/// What a template upgrade changes for an installed app, as sheet lines: the
+/// version, each slot whose direction moved, and — when no channel moved —
+/// each grant the new version adds or drops.
+pub(crate) fn template_upgrade_changes(
+    row: &AppInstanceRow,
+    new_version: &str,
+    compiled: &CompiledApp,
+    list_grants: bool,
+) -> Vec<String> {
+    let mut changes = vec![format!(
+        "template {} → {}",
+        row.template_version, new_version
+    )];
+    for now in &compiled.bound_channels {
+        if let Some(before) = row
+            .bound_channels
+            .iter()
+            .find(|b| b.slot == now.slot && b.channel_id == now.channel_id)
+        {
+            if before.direction != now.direction {
+                changes.push(format!(
+                    "{}: {} → {}",
+                    now.slot,
+                    before.direction.as_str(),
+                    now.direction.as_str()
+                ));
+            }
+        }
+    }
+    if list_grants {
+        for service in compiled
+            .services
+            .iter()
+            .filter(|s| !row.services.contains(s))
+        {
+            changes.push(format!("+ {service}"));
+        }
+        for service in row
+            .services
+            .iter()
+            .filter(|s| !compiled.services.contains(s))
+        {
+            changes.push(format!("− {service}"));
+        }
+    }
+    changes
 }
 
 /// `POST /v1/master/apps/:label/rebind/build` — compile the installed app's
@@ -3448,10 +3501,14 @@ pub async fn app_rebind_build(
             rows_err,
         );
     }
-    if changes.is_empty() {
+    // A template upgrade: the catalog serves a newer version than the row
+    // runs, so its grants and slot directions are recompiled over the bindings.
+    let upgrading = bundle.manifest.version != row.template_version;
+    let channels_changed = !changes.is_empty();
+    if !channels_changed && !upgrading {
         return pairing_err(
             StatusCode::BAD_REQUEST,
-            "nothing to change — every listed slot already binds that channel",
+            "nothing to change — every listed slot already binds that channel, and the app already runs the template's current version",
         );
     }
     resolve_binding_endpoints(&state, &mut bindings).await;
@@ -3504,6 +3561,14 @@ pub async fn app_rebind_build(
         Ok(c) => c,
         Err(rows) => return refused(StatusCode::BAD_REQUEST, "template_bindings_invalid", rows),
     };
+    if upgrading {
+        changes.extend(template_upgrade_changes(
+            &row,
+            &bundle.manifest.version,
+            &compiled,
+            !channels_changed,
+        ));
+    }
     let endpoint_scopes = endpoint_scopes_for_rebind(
         &state,
         &compiled.endpoint_grants,
@@ -3543,6 +3608,7 @@ pub async fn app_rebind_build(
             context_seal: built
                 .get("context_seal")
                 .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            template_version: upgrading.then(|| bundle.manifest.version.clone()),
         },
     );
     (
@@ -3622,6 +3688,9 @@ pub async fn app_rebind_submit(
                 row.bindings = stash.bindings.clone();
                 row.bound_channels = stash.bound_channels.clone();
                 row.services = stash.services.clone();
+                if let Some(version) = &stash.template_version {
+                    row.template_version = version.clone();
+                }
                 if anchor.is_some() {
                     row.anchor = anchor.clone();
                 }
@@ -3744,6 +3813,22 @@ pub async fn app_rebind_submit(
             };
         }
     }
+    // A template upgrade brings the template's new skills and knowledge:
+    // re-apply the preset into the live sandbox (what "update runtime" does
+    // after a re-create), detached — the apply waits for the bridge.
+    let preset_reapply = if stash.template_version.is_some() && !device_key_hash.is_empty() {
+        crate::ui_bridge::reapply_preset_after_update(
+            &state,
+            &broker,
+            &device_key_hash,
+            None,
+            None,
+        )
+        .await;
+        "queued"
+    } else {
+        "not needed"
+    };
     invalidate_fleet_sync(&state);
     tracing::info!(
         label = %label,
@@ -3764,6 +3849,8 @@ pub async fn app_rebind_submit(
         "anchor": anchor,
         "context_storage": context_storage,
         "runtime": runtime,
+        "template_version": stash.template_version,
+        "preset_reapply": preset_reapply,
     });
     (StatusCode::OK, Json(out)).into_response()
 }
@@ -4191,5 +4278,74 @@ mod context_view_tests {
         assert!(!v2.matches_anchor && !v2.matches_row);
         let v3 = context_view("chef", "absent", None, &row(None, "family-chat"));
         assert!(v3.doc.is_none() && v3.hash.is_none() && !v3.matches_anchor);
+    }
+}
+
+#[cfg(test)]
+mod template_upgrade_tests {
+    use super::template_upgrade_changes;
+    use agentkeys_backend_client::protocol::{AppInstanceRow, CompiledApp};
+
+    fn bound(direction: &str) -> serde_json::Value {
+        serde_json::json!([
+            { "slot": "family_chat", "kind": "messaging", "direction": "duplex", "channel_id": "family-chat" },
+            { "slot": "kitchen_screen", "kind": "display", "direction": direction, "channel_id": "kitchen-display" }
+        ])
+    }
+
+    fn row() -> AppInstanceRow {
+        serde_json::from_value(serde_json::json!({
+            "label": "chef",
+            "template_id": "chef",
+            "template_version": "1.0.0",
+            "actor_omni": "0xchef",
+            "device_key_hash": "0xhash",
+            "memory_ns": "app-chef",
+            "chat_channel_id": "opchat-chef",
+            "bound_channels": bound("pub"),
+            "services": ["channel-sub:family-chat", "channel-pub:family-chat", "channel-pub:kitchen-display"],
+            "installed_at": 1
+        }))
+        .expect("a well-formed row")
+    }
+
+    fn compiled() -> CompiledApp {
+        serde_json::from_value(serde_json::json!({
+            "services": ["channel-sub:family-chat", "channel-pub:family-chat", "channel-sub:kitchen-display", "channel-pub:kitchen-display"],
+            "annotations": [],
+            "bound_channels": bound("duplex"),
+            "audience": [],
+            "endpoint_grants": [],
+            "memory_ns": "app-chef",
+            "chat_channel_id": "opchat-chef",
+            "availability": "scheduled",
+            "schedule": [],
+            "disclosure": [],
+            "resource_namespaces": []
+        }))
+        .expect("a well-formed compile")
+    }
+
+    #[test]
+    fn a_pure_upgrade_names_the_version_the_direction_and_the_new_grant() {
+        assert_eq!(
+            template_upgrade_changes(&row(), "1.1.0", &compiled(), true),
+            vec![
+                "template 1.0.0 → 1.1.0".to_string(),
+                "kitchen_screen: pub → duplex".to_string(),
+                "+ channel-sub:kitchen-display".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_upgrade_riding_a_channel_change_leaves_the_grant_lines_to_the_slot_lines() {
+        assert_eq!(
+            template_upgrade_changes(&row(), "1.1.0", &compiled(), false),
+            vec![
+                "template 1.0.0 → 1.1.0".to_string(),
+                "kitchen_screen: pub → duplex".to_string()
+            ]
+        );
     }
 }

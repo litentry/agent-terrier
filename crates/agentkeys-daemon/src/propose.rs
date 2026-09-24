@@ -1,8 +1,12 @@
 //! #573 — the ABSORPTION BRIDGE (arch §17.6 context flows, the `context-pub`
 //! leg): an agent-INVOKED "propose to my owner" verb that pushes ONE
 //! working-memory learning into the master's staging inbox for curated merge.
-//! In the sandbox the agent runs `propose-to-owner "<text>" [namespace]`
-//! (a thin wrapper over `agentkeys-daemon --propose-once`); the daemon signs
+//! In the sandbox the agent calls its `propose_to_owner` tool — a verb the
+//! daemon ADVERTISES and serves at `POST /v1/sandbox/self/propose` (2026-09-24,
+//! plan `docs/plan/dsh-plugin-abstraction.md`); an operator or a `tool:code`
+//! delegate runs `agentkeys-daemon --propose-once` with the text on stdin; the
+//! approval answerer files its runtime ask (spec §4.4) through the same route.
+//! Every entry runs `SelfBackend::propose` → [`propose_once`]. The daemon signs
 //! as the delegate and rides the EXISTING inbox-append path — cap-mint against
 //! the on-chain `proposal:<ns>` grant, worker-stamped provenance, master
 //! curation. The inbox stays the ONLY write path toward canonical.
@@ -230,6 +234,10 @@ pub async fn propose_once(
         bearer,
     )
     .await?;
+    let summary = format!(
+        "proposed: {} → {namespace}/{key} (awaiting the owner’s review)",
+        kind.as_str()
+    );
     Ok(serde_json::json!({
         "outcome": "proposed",
         "namespace": namespace,
@@ -237,6 +245,7 @@ pub async fn propose_once(
         "kind": kind.as_str(),
         "content_hash": resp.content_hash,
         "s3_key": resp.s3_key,
+        "summary": summary,
     }))
 }
 

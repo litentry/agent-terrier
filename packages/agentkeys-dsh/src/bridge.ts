@@ -9,17 +9,25 @@
  * (#428/#390/#662: persona + skills + knowledge, written under the runtime
  * cwd AND registered as dsh system-prompt sections so the next model step
  * reads them), `/v1/context/files` (the #390 view leg), `/v1/agent/restart`
- * (the explicit re-source: a fresh session), and the `/v1/sandbox/mgmt/*`
- * checkpoint surface (#577/#594) — bind-first on :8090. Every route but
+ * (the explicit re-source: persona and skills re-read, the conversation
+ * continues), `/v1/session/reset` (typed sessions: end open sessions), and
+ * the `/v1/sandbox/mgmt/*` checkpoint surface (#577/#594) — bind-first on
+ * :8090. Every route but
  * `/healthz` and the mgmt surface is gated on the per-delegate in-pod bearer
  * (`AGENTKEYS_BRIDGE_TOKEN`, #715 — fail-closed when unset); the mgmt surface
  * keeps its own `AGENTKEYS_SANDBOX_MGMT_TOKEN`.
+ *
+ * Typed sessions (owner decision 2026-09-23): a `/v1/chat` body that names a
+ * `session` runs in that session — a throwaway one for `none` / `event`, the
+ * open one for its `thread` / `conversation` key (bridge-sessions.ts). A body
+ * without one runs in the legacy resident session, kept for the direct
+ * callers that carry no feed (the ESP32 client, the broker's bridge proxy).
  *
  * Byte-exactness of the wire lives in bridge-frames.ts + bridge-stream.ts
  * (pure, unit-tested). NO default export (dsh postmortem 0001).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
@@ -31,7 +39,23 @@ import type { AgentHandle } from '@deepseek-ai/dsh-agent';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import { chatReply, encodeFrame, healthzBody } from './bridge-frames.js';
 import { exportHome, homeBytes, importHome, settleQuiet } from './bridge-mgmt.js';
+import {
+  endMatching,
+  expireIdle,
+  MAX_LIVE_SESSIONS,
+  newSessionId,
+  parseChatSession,
+  parseResetBody,
+  planTurn,
+  readIndex,
+  removeSessionDirs,
+  retire,
+  touch,
+  writeIndex,
+} from './bridge-sessions.js';
+import type { ChatSessionSpec, ResetSpec, SessionIndex } from './bridge-sessions.js';
 import { TurnStreamer } from './bridge-stream.js';
+import { DEFAULT_HIDDEN_TOOLS } from './mapping.js';
 
 export const name = 'agentkeys-bridge';
 export const inject = ['agents', 'sessions', 'webServer'];
@@ -50,6 +74,9 @@ export interface Config {
    *  every NON-mgmt route but /healthz. Empty/absent = those routes answer 401
    *  not-armed (fail closed): a sandbox the broker did not arm serves no chat. */
   bridgeToken?: string;
+  /** Typed sessions: how often idle `thread` / `conversation` sessions are
+   *  ended when no turn arrives (ms). */
+  sessionSweepMs?: number;
 }
 
 export const Config: z<Config> = z.object({
@@ -60,6 +87,7 @@ export const Config: z<Config> = z.object({
   homeDir: z.string().default(process.env.DSH_HOME ?? '/root/.dsh'),
   mgmtToken: z.string(),
   bridgeToken: z.string(),
+  sessionSweepMs: z.number().default(60_000),
 });
 
 interface ModelSelection {
@@ -85,6 +113,23 @@ function currentSelection(ctx: Context, config: Config): ModelSelection | undefi
 }
 
 const SESSION_ID = 'agentkeys-bridge-session';
+
+/** Take the tools this deployment switches off out of an agent's view
+ *  (`remember`: OpenViking runs without an extraction model here, #726). The
+ *  guard denies them too — a tool registered after setup stays visible but
+ *  refused. dsh's restrict() rejects a name no plugin registered yet, so each
+ *  name is masked on its own. */
+export function hideTools(agentCtx: Context): void {
+  const tools = (agentCtx as unknown as { tools?: { restrict(filter: { deny: string[] }): () => void } }).tools;
+  if (!tools) return;
+  for (const name of DEFAULT_HIDDEN_TOOLS) {
+    try {
+      tools.restrict({ deny: [name] });
+    } catch {
+      /* not registered (yet) — the guard's deny covers it */
+    }
+  }
+}
 
 /** A context file / skill / knowledge name the bridge will write: one path
  *  segment, no traversal, no hidden files. */
@@ -266,7 +311,7 @@ export function apply(ctx: Context, config: Config): void {
 
   function agentOpts() {
     const selection = currentSelection(ctx, config);
-    return selection ? { agentOptions: selection } : {};
+    return { ...(selection ? { agentOptions: selection } : {}), setup: hideTools };
   }
 
   /** Resume the bridge session's persisted log; undefined when none exists.
@@ -362,25 +407,190 @@ export function apply(ctx: Context, config: Config): void {
   async function runTurn(text: string, onFrame?: (frame: string) => void): Promise<TurnStreamer> {
     const agent = handle;
     if (!agent) throw new Error('acp_starting');
-    const run = turnLock.then(async () => {
-      const streamer = new TurnStreamer();
-      const off = ctx.on('session/event', (s: Session, e: SessionEvent) => {
-        if (String(s.id) !== SESSION_ID) return;
-        for (const frame of streamer.push(e)) if (onFrame) onFrame(encodeFrame(frame));
-      });
-      try {
-        agent.agent.followup(
-          createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
+    const run = turnLock.then(() => runTurnOn(agent, SESSION_ID, text, onFrame));
+    turnLock = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Submit one turn to `agent`, project its session events into frames and
+   *  resolve when it is idle. `context` (a typed session's background, new
+   *  sessions only) enters first as a plugin-sourced message: model input,
+   *  never recorded by the memory plugin as something a person said. */
+  async function runTurnOn(
+    agent: AgentHandle,
+    sessionId: string,
+    text: string,
+    onFrame?: (frame: string) => void,
+    context?: string,
+  ): Promise<TurnStreamer> {
+    const streamer = new TurnStreamer();
+    const off = ctx.on('session/event', (s: Session, e: SessionEvent) => {
+      if (String(s.id) !== sessionId) return;
+      for (const frame of streamer.push(e)) if (onFrame) onFrame(encodeFrame(frame));
+    });
+    try {
+      if (context) {
+        agent.agent.inject(
+          createUserMessage({
+            content: [{ type: 'text', text: context }],
+            source: { kind: 'plugin', plugin: 'agentkeys-bridge' },
+          }),
         );
-        await agent.agent.whenIdle();
-        for (const frame of streamer.finish()) if (onFrame) onFrame(encodeFrame(frame));
-      } finally {
-        off();
       }
-      return streamer;
+      agent.agent.followup(
+        createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
+      );
+      await agent.agent.whenIdle();
+      for (const frame of streamer.finish()) if (onFrame) onFrame(encodeFrame(frame));
+    } finally {
+      off();
+    }
+    return streamer;
+  }
+
+  // ── typed sessions (owner decision 2026-09-23) ──────────────────────────
+  /** Live typed sessions: dsh session id → handle + last use. */
+  const live = new Map<string, { handle: AgentHandle; usedAt: number }>();
+  /** The index, cached; re-read after a home import. */
+  let sessionIndex: SessionIndex | undefined;
+
+  async function loadIndex(): Promise<SessionIndex> {
+    if (!sessionIndex) sessionIndex = await readIndex(home());
+    return sessionIndex;
+  }
+
+  async function saveIndex(next: SessionIndex): Promise<void> {
+    sessionIndex = next;
+    await writeIndex(home(), next);
+  }
+
+  async function disposeLive(ids: Iterable<string>): Promise<void> {
+    for (const id of [...ids]) {
+      const entry = live.get(id);
+      live.delete(id);
+      if (entry) await entry.handle.dispose().catch(() => {});
+    }
+  }
+
+  /** End sessions: dispose their live handles (the memory plugin commits each
+   *  OpenViking session) and retire their logs — the newest few stay. */
+  async function endSessions(ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await disposeLive(ids);
+    const { index, toDelete } = retire(await loadIndex(), ids);
+    await saveIndex(index);
+    for (const id of toDelete) await removeSessionDirs(home(), id);
+  }
+
+  /** Hold at most MAX_LIVE_SESSIONS in memory: the least recently used goes
+   *  (it stays open in the index and resumes on its next turn). */
+  async function evictBeyondLiveCap(keep: string): Promise<void> {
+    while (live.size > MAX_LIVE_SESSIONS) {
+      let oldest: string | undefined;
+      let oldestAt = Number.POSITIVE_INFINITY;
+      for (const [id, entry] of live) {
+        if (id !== keep && entry.usedAt < oldestAt) {
+          oldest = id;
+          oldestAt = entry.usedAt;
+        }
+      }
+      if (!oldest) return;
+      await disposeLive([oldest]);
+    }
+  }
+
+  /** The live handle for a typed session: a new one, or its log resumed (a
+   *  log that is gone — a sandbox that came up without it — starts fresh). */
+  async function ensureTyped(sessionId: string, fresh: boolean): Promise<{ handle: AgentHandle; created: boolean }> {
+    const current = live.get(sessionId);
+    if (current) {
+      current.usedAt = Date.now();
+      return { handle: current.handle, created: false };
+    }
+    let resumed: AgentHandle | undefined;
+    if (!fresh) {
+      try {
+        resumed = await ctx.agents.resume({ resumeSessionId: SessionId(sessionId), ...agentOpts() });
+      } catch (e) {
+        if (!SESSION_NOT_FOUND.test(String((e as Error).message ?? e))) throw e;
+      }
+    }
+    const agent =
+      resumed ??
+      (await ctx.agents.create({
+        sessionId: SessionId(sessionId),
+        meta: { cwd: config.cwd ?? '/opt/agentkeys' },
+        ...agentOpts(),
+      }));
+    live.set(sessionId, { handle: agent, usedAt: Date.now() });
+    await evictBeyondLiveCap(sessionId);
+    return { handle: agent, created: resumed === undefined };
+  }
+
+  /** One typed-session turn, serialized with every other turn. */
+  async function runTypedTurn(
+    spec: ChatSessionSpec,
+    text: string,
+    onFrame?: (frame: string) => void,
+  ): Promise<{ streamer: TurnStreamer; sessionId: string; fresh: boolean }> {
+    const run = turnLock.then(async () => {
+      const now = Date.now();
+      const swept = expireIdle(await loadIndex(), now);
+      if (swept.ended.length > 0) {
+        await saveIndex(swept.index);
+        await endSessions(swept.ended);
+      }
+      const plan = planTurn(await loadIndex(), spec, now, () =>
+        newSessionId(spec.window, now, randomBytes(4).toString('hex')),
+      );
+      await saveIndex(plan.index);
+      await endSessions(plan.ended);
+      try {
+        const { handle: agent, created } = await ensureTyped(plan.sessionId, plan.fresh);
+        const streamer = await runTurnOn(agent, plan.sessionId, text, onFrame, created ? spec.context : undefined);
+        if (!plan.throwaway) await saveIndex(touch(await loadIndex(), plan.sessionId, Date.now()));
+        return { streamer, sessionId: plan.sessionId, fresh: created };
+      } finally {
+        if (plan.throwaway) await endSessions([plan.sessionId]);
+      }
     });
     turnLock = run.catch(() => undefined);
     return run;
+  }
+
+  /** Idle sessions end on time even when no turn arrives. */
+  async function sweepIdle(): Promise<number> {
+    const run = turnLock.then(async () => {
+      const swept = expireIdle(await loadIndex(), Date.now());
+      if (swept.ended.length === 0) return 0;
+      await saveIndex(swept.index);
+      await endSessions(swept.ended);
+      console.error(`agentkeys-bridge: ended ${swept.ended.length} idle session(s)`);
+      return swept.ended.length;
+    });
+    turnLock = run.catch(() => undefined);
+    return run;
+  }
+
+  /** End the open sessions a reset covers. An app-wide reset also starts the
+   *  legacy resident session over (its log goes; the next ensure creates). */
+  async function resetSessions(reset: ResetSpec): Promise<{ ended: number; legacyReset: boolean }> {
+    const run = turnLock.then(async () => {
+      const { index, ended } = endMatching(await loadIndex(), reset);
+      await saveIndex(index);
+      await endSessions(ended);
+      if (reset.scope !== 'app') return { ended: ended.length, legacyReset: false };
+      if (handle) {
+        await handle.dispose().catch(() => {});
+        handle = undefined;
+      }
+      await removeSessionDirs(home(), SESSION_ID);
+      return { ended: ended.length, legacyReset: true };
+    });
+    turnLock = run.catch(() => undefined);
+    const outcome = await run;
+    if (outcome.legacyReset) void ensureAgent();
+    return outcome;
   }
 
   /** Constant-time bearer compare (never early-exits on a prefix). */
@@ -428,10 +638,15 @@ export function apply(ctx: Context, config: Config): void {
 
   const home = () => config.homeDir ?? process.env.DSH_HOME ?? '/root/.dsh';
 
-  /** Dispose the live session so the next turn creates a fresh one (the
-   *  explicit re-source verb; also resets the conversation). */
+  /** Dispose the live session and ensure it again — the explicit re-source
+   *  verb (persona / skills re-read). It does NOT start a new conversation:
+   *  the ensure RESUMES the persisted log (#616 resume-first). */
   async function restartAgent(): Promise<boolean> {
-    if (!handle) return false;
+    const hadTyped = live.size > 0;
+    const typed = turnLock.then(() => disposeLive(live.keys()));
+    turnLock = typed.catch(() => undefined);
+    await typed;
+    if (!handle) return hadTyped;
     await handle.dispose().catch(() => {});
     handle = undefined;
     void ensureAgent();
@@ -458,14 +673,42 @@ export function apply(ctx: Context, config: Config): void {
       path: '/v1/chat',
       handler: async (req, res) => {
         if (!bridgeGate(req, res)) return;
-        let body: { text?: unknown; query?: unknown; stream?: unknown };
+        let body: { text?: unknown; query?: unknown; stream?: unknown; session?: unknown };
+        let spec: ChatSessionSpec | undefined;
         try {
           body = (await readBody(req)) as typeof body;
+          spec = parseChatSession(body.session);
         } catch (e) {
           sendJson(res, 400, { error: `bad request: ${(e as Error).message}` });
           return;
         }
         const text = String(body.text ?? body.query ?? '');
+        if (spec) {
+          const typed = spec;
+          if (body.stream) {
+            res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+            try {
+              await runTypedTurn(typed, text, (frame) => res.write(frame));
+            } catch (e) {
+              res.write(encodeFrame({ type: 'error', error: `agent error: ${(e as Error).message}` }));
+            }
+            res.end();
+            return;
+          }
+          try {
+            const { streamer, sessionId, fresh } = await runTypedTurn(typed, text);
+            const failure = streamer.errored();
+            if (failure !== undefined) {
+              sendJson(res, 502, { error: failure });
+              return;
+            }
+            const { reply, totalTokens } = streamer.reply();
+            sendJson(res, 200, { ...chatReply(reply, totalTokens), session: { id: sessionId, window: typed.window, fresh } });
+          } catch (e) {
+            sendJson(res, 502, { error: `agent error: ${(e as Error).message}` });
+          }
+          return;
+        }
         if (!(await ensureAgent())) {
           sendJson(res, 503, { error: 'acp_starting: the agent is still initializing — retry shortly' });
           return;
@@ -492,6 +735,30 @@ export function apply(ctx: Context, config: Config): void {
           sendJson(res, 200, chatReply(reply, totalTokens));
         } catch (e) {
           sendJson(res, 502, { error: `agent error: ${(e as Error).message}` });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/v1/session/reset',
+      handler: async (req, res) => {
+        if (!bridgeGate(req, res)) return;
+        if (String(req.method ?? '').toUpperCase() !== 'POST') {
+          sendJson(res, 405, { error: 'POST only — a reset ends sessions' });
+          return;
+        }
+        let reset: ResetSpec;
+        try {
+          reset = parseResetBody(await readBody(req));
+        } catch (e) {
+          sendJson(res, 400, { error: `bad request: ${(e as Error).message}` });
+          return;
+        }
+        try {
+          const outcome = await resetSessions(reset);
+          sendJson(res, 200, { ok: true, scope: reset.scope, ended: outcome.ended, legacy_reset: outcome.legacyReset });
+        } catch (e) {
+          sendJson(res, 500, { error: `session reset failed: ${(e as Error).message}` });
         }
       },
     },
@@ -639,6 +906,8 @@ export function apply(ctx: Context, config: Config): void {
           jobs: null,
           hermes_home: home(),
           hermes_home_bytes: await homeBytes(home()),
+          open_sessions: (await loadIndex()).open.length,
+          live_sessions: live.size,
         });
       },
     },
@@ -682,8 +951,13 @@ export function apply(ctx: Context, config: Config): void {
               handle = undefined;
               agentRestarted = true;
             }
+            if (body.restart !== false && live.size > 0) {
+              await disposeLive(live.keys());
+              agentRestarted = true;
+            }
             await settleQuiet(targets);
           });
+          sessionIndex = undefined;
           sendJson(res, 200, {
             ...outcome,
             agent_restarted: agentRestarted,
@@ -707,7 +981,12 @@ export function apply(ctx: Context, config: Config): void {
   // import disposes it and the next /v1/chat re-creates it.
   void ensureAgent();
 
+  const sweepTimer = setInterval(() => void sweepIdle().catch(() => {}), config.sessionSweepMs ?? 60_000);
+  sweepTimer.unref?.();
+  ctx.effect(() => () => clearInterval(sweepTimer), 'agentkeys-bridge: idle-session sweep');
+
   ctx.effect(() => async () => {
+    await disposeLive(live.keys());
     if (handle) await handle.dispose();
     handle = undefined;
   }, 'agentkeys-bridge: teardown');

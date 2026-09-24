@@ -27,6 +27,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials';
+import { DaemonClient, DEFAULT_DAEMON_URL } from './daemon-client.js';
 import type {
   CredentialInfo,
   CredentialKey,
@@ -37,7 +38,7 @@ import type {
   ResolvedCredential,
 } from '@deepseek-ai/dsh-credentials';
 
-export const DEFAULT_CREDENTIAL_URL = 'http://127.0.0.1:3114/v1/sandbox/self/credential';
+export const DEFAULT_CREDENTIAL_URL = `${DEFAULT_DAEMON_URL}/v1/sandbox/self/credential`;
 
 export interface Config {
   credentialUrl?: string;
@@ -76,18 +77,11 @@ export class AgentKeysCredentialProvider extends CredentialProvider {
       return undefined;
     }
     const url = this.config.credentialUrl ?? DEFAULT_CREDENTIAL_URL;
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    const token = this.config.bridgeToken ?? process.env.AGENTKEYS_BRIDGE_TOKEN ?? '';
-    if (token) headers.authorization = `Bearer ${token}`;
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ service }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!res.ok) return undefined; // unconfigured/denied both read as absent to the consumer
-      const body = (await res.json()) as { value_b64?: unknown; source?: unknown };
+      const client = new DaemonClient({ bridgeToken: this.config.bridgeToken });
+      // unconfigured / denied both read as absent to the consumer (a
+      // DaemonError lands in the catch like any transport failure)
+      const body = await client.postJson<{ value_b64?: unknown; source?: unknown }>(url, { service }, { timeoutMs: 30_000 });
       if (typeof body.value_b64 !== 'string' || body.value_b64.length === 0) return undefined;
       const value = Buffer.from(body.value_b64, 'base64').toString('utf8');
       if (!value) return undefined; // seam-wide rule: empty is absent everywhere

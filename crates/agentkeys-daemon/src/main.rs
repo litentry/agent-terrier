@@ -9,6 +9,7 @@ use anyhow::Context;
 use clap::Parser;
 use tracing::info;
 
+mod actions;
 mod app_runtime;
 mod apps;
 mod audit_decode;
@@ -31,6 +32,7 @@ mod proxy;
 mod schedule;
 mod self_backend;
 mod session;
+mod session_scope;
 mod ui_bridge;
 
 #[derive(Parser)]
@@ -65,8 +67,9 @@ struct Args {
     /// #573 absorption bridge — propose ONE learning to the owner's inbox.
     /// Reads the proposal TEXT from stdin and the same chat env contract as
     /// `--memory-mirror-once`; signs as the delegate, cap-mints against the
-    /// on-chain `proposal:<ns>` grant, and prints a JSON receipt. The in-sandbox
-    /// `propose-to-owner` wrapper is the agent-facing tool over this verb.
+    /// on-chain `proposal:<ns>` grant, and prints a JSON receipt. The agent's
+    /// `propose_to_owner` tool runs the SAME verb through the ui-bridge's
+    /// `POST /v1/sandbox/self/propose` (the daemon advertises it).
     #[arg(long)]
     propose_once: bool,
 
@@ -88,8 +91,9 @@ struct Args {
     /// #669 (R3) — publish ONE event to a bound pub slot (or any feed the
     /// delegate holds a `channel-pub` grant for). Reads the body from stdin
     /// (or `--publish-file` for binary media), rides the same chat env
-    /// contract as `--propose-once`, prints a JSON receipt. The in-sandbox
-    /// `publish-to-slot` wrapper is the agent-facing tool over this verb.
+    /// contract as `--propose-once`, prints a JSON receipt. The agent's
+    /// `publish_to_slot` tool runs the SAME verb through the ui-bridge's
+    /// `POST /v1/sandbox/self/publish` (the daemon advertises it).
     #[arg(long)]
     publish_once: bool,
 
@@ -457,65 +461,46 @@ async fn run_memory_mirror_once() -> anyhow::Result<()> {
 }
 
 /// #573 `--propose-once` — see the Args doc. Reads the proposal text from
-/// stdin, pushes it through the shared inbox-append core as the delegate,
-/// prints the JSON receipt, exit 0. Any refusal (empty/oversized text, rate
-/// limit, missing `proposal:<ns>` grant → cap-mint 403) is a fatal error with
-/// the reason on stderr — the agent reads it and can tell the owner.
+/// stdin, pushes it through `SelfBackend::propose` — the SAME path the
+/// ui-bridge's `POST /v1/sandbox/self/propose` (the advertised
+/// `propose_to_owner` verb) runs — prints the JSON receipt, exit 0. Any
+/// refusal (empty/oversized text, rate limit, missing `proposal:<ns>` grant →
+/// cap-mint 403) is a fatal error with the reason on stderr.
 async fn run_propose_once(args: Args) -> anyhow::Result<()> {
-    let cfg = chat_loop::ChatLoopConfig::from_env().ok_or_else(|| {
-        anyhow::anyhow!(
-            "propose-once: incomplete chat env contract (broker/channel/actor/operator \
-             + one credential) — see the warning above for the missing keys"
-        )
-    })?;
-    let propose_cfg = propose::ProposeConfig::from_chat_env(cfg)
-        .ok_or_else(|| anyhow::anyhow!("propose-once: bridge disabled by env (see log)"))?;
     let mut text = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
         .context("propose-once: reading the proposal text from stdin")?;
-    let credential = chat_loop::build_credential(&propose_cfg.chat)
+    let backend = self_backend::acquire()
         .await
-        .ok_or_else(|| anyhow::anyhow!("propose-once: credential bootstrap failed"))?;
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(40))
-        .build()?;
-    let bearer = chat_loop::resolve_session(&http, &propose_cfg.chat, &credential)
-        .await
-        .map_err(|e| anyhow::anyhow!("propose-once: delegate resolve failed: {e}"))?;
-    credential.on_new_session(&bearer).await;
+        .map_err(|e| anyhow::anyhow!("propose-once: {e}"))?;
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let receipt = propose::propose_once(
-        &propose_cfg,
-        &credential,
-        &bearer,
-        propose::ProposalInput {
-            namespace: args.propose_ns,
-            key: args.propose_key,
-            kind: args.propose_kind,
-            text,
-        },
-        now_unix,
-    )
-    .await?;
+    let receipt = backend
+        .propose(
+            propose::ProposalInput {
+                namespace: args.propose_ns,
+                key: args.propose_key,
+                kind: args.propose_kind,
+                text,
+            },
+            now_unix,
+        )
+        .await?;
     println!("{}", serde_json::to_string_pretty(&receipt)?);
     Ok(())
 }
 
-/// #669 `--publish-once` — see the Args doc. Resolves the slot name against
-/// `AGENTKEYS_BOUND_CHANNELS` (opchat always resolves), mints the publish cap
-/// as the delegate (an ungranted feed is refused at cap-mint — the worker's
-/// verdict, never a local rule), publishes `direction: out`, prints a receipt.
-/// A body over the worker's inline ceiling rides by reference (#667).
+/// #669 `--publish-once` — see the Args doc. Reads the body from stdin (or
+/// `--publish-file`), runs `SelfBackend::publish` — the SAME path the
+/// ui-bridge's `POST /v1/sandbox/self/publish` (the advertised
+/// `publish_to_slot` verb) runs: the slot resolves against the bound
+/// channels (opchat always resolves), the publish cap is minted as the
+/// delegate (an ungranted feed is refused at cap-mint — the worker's verdict,
+/// never a local rule), a body over the inline ceiling rides by reference
+/// (#667) — and prints the receipt.
 async fn run_publish_once(args: Args) -> anyhow::Result<()> {
-    let cfg = chat_loop::ChatLoopConfig::from_env().ok_or_else(|| {
-        anyhow::anyhow!(
-            "publish-once: incomplete chat env contract (broker/channel/actor/operator \
-             + one credential) — see the warning above for the missing keys"
-        )
-    })?;
     let slot = args
         .publish_slot
         .clone()
@@ -523,10 +508,6 @@ async fn run_publish_once(args: Args) -> anyhow::Result<()> {
         .ok_or_else(|| {
             anyhow::anyhow!("publish-once: --publish-slot <slot|channel-id> is required")
         })?;
-    let kind = args.publish_kind.trim().to_string();
-    if agentkeys_backend_client::protocol::ChannelEventKind::parse(&kind).is_none() {
-        anyhow::bail!("publish-once: --publish-kind must be one of text|image|audio-clip|frame|command|doc (got `{kind}`)");
-    }
     let bytes: Vec<u8> = match &args.publish_file {
         Some(path) => {
             std::fs::read(path).with_context(|| format!("publish-once: reading {path}"))?
@@ -538,70 +519,20 @@ async fn run_publish_once(args: Args) -> anyhow::Result<()> {
             buf
         }
     };
-    if bytes.is_empty() {
-        anyhow::bail!("publish-once: the body is empty");
-    }
-    let app = app_runtime::AppRuntimeConfig::from_env();
-    let channel_id = app.resolve_publish_target(&slot, &cfg.chat_channel_id);
-    let credential = chat_loop::build_credential(&cfg)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("publish-once: credential bootstrap failed"))?;
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
-    let cfg = std::sync::Arc::new(cfg);
-    let credential = std::sync::Arc::new(credential);
-    let session = std::sync::Arc::new(chat_loop::SessionHandle::new(
-        http.clone(),
-        cfg.clone(),
-        credential,
-    ));
-    let publisher = chat_loop::Publisher::new(http, cfg.clone(), session);
-    let correlation = args.publish_correlation.clone().unwrap_or_else(|| {
-        format!(
-            "publish-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        )
-    });
-    let content_type = args
-        .publish_content_type
-        .clone()
-        .unwrap_or_else(|| match kind.as_str() {
-            "image" | "frame" => "image/jpeg".to_string(),
-            "audio-clip" => "audio/wav".to_string(),
-            "doc" => agentkeys_backend_client::protocol::CARD_CONTENT_TYPE.to_string(),
-            _ => "text/plain".to_string(),
-        });
-    let inline_max = std::env::var("AGENTKEYS_CHANNEL_INLINE_MAX_BYTES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(1 << 20);
-    let body_ref = publisher
-        .publish_bytes(
-            &channel_id,
-            &kind,
-            &bytes,
-            &content_type,
-            &correlation,
-            inline_max,
-        )
+    let backend = self_backend::acquire()
         .await
         .map_err(|e| anyhow::anyhow!("publish-once: {e}"))?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "outcome": "published",
-            "slot": slot,
-            "channel_id": channel_id,
-            "kind": kind,
-            "bytes": bytes.len(),
-            "correlation": correlation,
-            "body_ref": body_ref,
-        }))?
-    );
+    let receipt = backend
+        .publish(actions::PublishInput {
+            slot,
+            kind: args.publish_kind.clone(),
+            bytes,
+            correlation: args.publish_correlation.clone(),
+            content_type: args.publish_content_type.clone(),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("publish-once: {e:#}"))?;
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
     Ok(())
 }
 

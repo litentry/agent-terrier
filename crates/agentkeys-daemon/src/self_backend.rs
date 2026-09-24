@@ -1,7 +1,10 @@
 //! #612 — the sandbox delegate's SELF-SERVICE backend: per-operation credential
-//! resolution and runtime-audit append on the delegate's OWN authority (its
+//! resolution, runtime-audit append and (2026-09-24, plan
+//! `docs/plan/dsh-plugin-abstraction.md` PR 1) the delegate's two VERBS —
+//! publish (#669) and propose (#573) — on the delegate's OWN authority (its
 //! chat credential + a fresh broker session), consumed by the AgentKeys dsh
-//! plugin suite through the ui-bridge's `/v1/sandbox/self/*` routes.
+//! plugin suite through the ui-bridge's `/v1/sandbox/self/*` routes and by
+//! the `--publish-once` / `--propose-once` one-shots (one code path each).
 //!
 //! Authority model (spec delegate-runtime-dsh §4.2 + §6): the daemon holds the
 //! delegate identity (legacy in-sandbox K10 or the #552 signer handle — the key
@@ -51,6 +54,9 @@ pub(crate) async fn acquire() -> Result<SelfBackend, String> {
         .build()
         .map_err(|e| format!("http client: {e}"))?;
     let bearer = resolve_session(&http, &cfg, &credential).await?;
+    // The chat loop's post-resolve discipline: signer custody adopts the fresh
+    // J1 (newer-wins by `exp`) so every signer call on this backend rides it.
+    credential.on_new_session(&bearer).await;
     Ok(SelfBackend {
         cfg,
         credential,
@@ -140,5 +146,42 @@ impl SelfBackend {
             .await
             .map(|_| ())
             .map_err(|e| format!("audit append: {e}"))
+    }
+
+    /// #573 — push ONE proposal into the owner's inbox as the delegate: the
+    /// ONE code path behind `agentkeys-daemon --propose-once` and the
+    /// ui-bridge's `POST /v1/sandbox/self/propose` (the advertised
+    /// `propose_to_owner` verb + the answerer's runtime ask, spec §4.4).
+    /// Consumes the backend: the propose config owns the chat config.
+    pub(crate) async fn propose(
+        self,
+        input: crate::propose::ProposalInput,
+        now_unix: u64,
+    ) -> anyhow::Result<serde_json::Value> {
+        let cfg = crate::propose::ProposeConfig::from_chat_env(self.cfg).ok_or_else(|| {
+            anyhow::anyhow!(
+                "propose bridge disabled by env (AGENTKEYS_PROPOSE=0, or no memory worker \
+                 URL / default namespace derivable — see the log)"
+            )
+        })?;
+        crate::propose::propose_once(&cfg, &self.credential, &self.bearer, input, now_unix).await
+    }
+
+    /// #669 — publish ONE event to a bound slot as the delegate: the ONE code
+    /// path behind `agentkeys-daemon --publish-once` and the ui-bridge's
+    /// `POST /v1/sandbox/self/publish` (the advertised `publish_to_slot`
+    /// verb). Consumes the backend; the resolved bearer seeds the publisher's
+    /// session so no second resolve runs.
+    pub(crate) async fn publish(
+        self,
+        input: crate::actions::PublishInput,
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::actions::publish_once(
+            std::sync::Arc::new(self.cfg),
+            std::sync::Arc::new(self.credential),
+            Some(self.bearer),
+            input,
+        )
+        .await
     }
 }

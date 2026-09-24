@@ -1291,6 +1291,21 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/sandbox/self/grants", get(sandbox_self_grants))
         .route("/v1/sandbox/self/credential", post(sandbox_self_credential))
         .route("/v1/sandbox/self/audit", post(sandbox_self_audit))
+        // 2026-09-24 (plan dsh-plugin-abstraction PR 1) — the daemon ADVERTISES
+        // the delegate's verbs and serves each as one bearer-gated POST; the
+        // dsh suite's `actions` plugin registers them as tools.
+        .route(
+            agentkeys_backend_client::protocol::sandbox_actions::SANDBOX_ACTIONS_ROUTE,
+            get(sandbox_self_actions),
+        )
+        .route(
+            agentkeys_backend_client::protocol::sandbox_actions::SANDBOX_PUBLISH_ROUTE,
+            post(sandbox_self_publish),
+        )
+        .route(
+            agentkeys_backend_client::protocol::sandbox_actions::SANDBOX_PROPOSE_ROUTE,
+            post(sandbox_self_propose),
+        )
         // #717 — the live rebind: the broker pushes new bound channels here.
         .route("/v1/sandbox/self/bindings", post(sandbox_self_bindings))
         .route("/v1/k11/enroll/begin", post(enroll_begin))
@@ -4136,7 +4151,7 @@ fn spawn_preset_apply_task(
 /// After a #577 update the re-created sandbox holds the runtime-home hand-off
 /// (DSH_HOME), not the preset bundle — re-apply persona + skills once the new
 /// instance answers. The base is the update response's, else the recorded one.
-async fn reapply_preset_after_update(
+pub(crate) async fn reapply_preset_after_update(
     state: &SharedUiBridgeState,
     broker: &str,
     device_key_hash: &str,
@@ -4395,6 +4410,144 @@ async fn sandbox_self_audit(
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "error": e })),
+        ),
+    }
+}
+
+/// The delegate's own propose default (`AGENTKEYS_MEMORY_NS`, else the
+/// first pull-list entry) — the same rule `ProposeConfig::from_chat_env`
+/// applies at push time, read here only to word the advertised description.
+fn self_default_namespace(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let read = |k: &str| lookup(k).filter(|v| !v.trim().is_empty());
+    crate::propose::default_namespace_from(
+        read(agentkeys_backend_client::protocol::sandbox_env::MEMORY_NS).as_deref(),
+        read(agentkeys_backend_client::protocol::sandbox_env::MEMORY_NAMESPACES).as_deref(),
+    )
+}
+
+/// 2026-09-24 — `GET /v1/sandbox/self/actions`: the verbs this delegate may
+/// call, worded for the model with the slots THIS install bound (spawn env +
+/// live rebind override) and its own namespace. No network: the list is a
+/// pure function of the daemon's env; authority stays at cap-mint per call.
+async fn sandbox_self_actions(headers: HeaderMap) -> impl IntoResponse {
+    if let Err(resp) = sandbox_self_gate(&headers) {
+        return resp;
+    }
+    let app = crate::app_runtime::AppRuntimeConfig::from_env();
+    let own = self_default_namespace(|k| std::env::var(k).ok());
+    let body = agentkeys_backend_client::protocol::sandbox_actions::SandboxActionsResponse {
+        actions: crate::actions::advertised_for(&app, own.as_deref()),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(body).unwrap_or_else(|_| serde_json::json!({ "actions": [] }))),
+    )
+}
+
+/// The one-shot's `ProposalInput` from a self-propose body (pure): blanks
+/// mean "the daemon's defaults", exactly like the omitted `--propose-*` flags.
+fn self_propose_input(
+    req: agentkeys_backend_client::protocol::sandbox_actions::SandboxProposeRequest,
+) -> crate::propose::ProposalInput {
+    let non_blank = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    crate::propose::ProposalInput {
+        namespace: non_blank(req.namespace),
+        key: non_blank(req.key),
+        kind: non_blank(req.kind).unwrap_or_else(|| "knowledge".to_string()),
+        text: req.text,
+    }
+}
+
+/// The publish core's input from a self-publish body (pure): the body is
+/// UTF-8 text on this route (media rides `--publish-file` / by-reference).
+fn self_publish_input(
+    req: agentkeys_backend_client::protocol::sandbox_actions::SandboxPublishRequest,
+) -> crate::actions::PublishInput {
+    crate::actions::PublishInput {
+        slot: req.slot,
+        kind: req.kind.unwrap_or_default(),
+        bytes: req.body.into_bytes(),
+        correlation: req.correlation,
+        content_type: req.content_type,
+    }
+}
+
+/// 2026-09-24 — `POST /v1/sandbox/self/publish`: the advertised
+/// `publish_to_slot` verb. Same code as `--publish-once`; an ungranted feed
+/// is refused at cap-mint with the worker's reason, relayed to the model.
+async fn sandbox_self_publish(
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_backend_client::protocol::sandbox_actions::SandboxPublishRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = sandbox_self_gate(&headers) {
+        return resp;
+    }
+    if req.slot.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "slot must not be empty" })),
+        );
+    }
+    if req.body.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "body is empty — nothing to publish" })),
+        );
+    }
+    let backend = match crate::self_backend::acquire().await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": format!("self backend unavailable: {e}") })),
+            )
+        }
+    };
+    match backend.publish(self_publish_input(req)).await {
+        Ok(receipt) => (StatusCode::OK, Json(receipt)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("{e:#}") })),
+        ),
+    }
+}
+
+/// #573 / spec §4.4 — `POST /v1/sandbox/self/propose`: the advertised
+/// `propose_to_owner` verb AND the answerer's runtime ask (an ungranted
+/// `tool:<class>` deny → a grant request in the app's own `proposal:<ns>`
+/// queue). Same `SelfBackend::propose` path as `--propose-once` (rate + size
+/// gates, cap-mint against the on-chain grant, worker-stamped provenance).
+async fn sandbox_self_propose(
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_backend_client::protocol::sandbox_actions::SandboxProposeRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = sandbox_self_gate(&headers) {
+        return resp;
+    }
+    if req.text.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "text must not be empty" })),
+        );
+    }
+    let backend = match crate::self_backend::acquire().await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": format!("self backend unavailable: {e}") })),
+            )
+        }
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match backend.propose(self_propose_input(req), now_unix).await {
+        Ok(receipt) => (StatusCode::OK, Json(receipt)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("propose: {e:#}") })),
         ),
     }
 }
@@ -13078,8 +13231,8 @@ struct PersonaQueryBody {
 
 /// `POST /v1/master/agent/restart` — the explicit re-source verb (#390 issue
 /// comment: "like the `source` command in shell"). Restarts the sandbox
-/// agent's ACP session so SOUL.md / AGENTS.md re-load; NOTE it also resets the
-/// conversation (the resident session IS the conversation memory).
+/// agent's session so SOUL.md / AGENTS.md re-load. It does NOT reset the
+/// conversation: the bridge RESUMES its persisted log (#616 resume-first).
 async fn restart_master_agent(
     State(state): State<SharedUiBridgeState>,
 ) -> axum::response::Response {
@@ -13091,7 +13244,7 @@ async fn restart_master_agent(
                 actor_id: "master".into(),
                 actor: "master".into(),
                 kind: "agent.restart".into(),
-                detail: "agent re-sourced (fresh ACP session; context files re-read)".into(),
+                detail: "agent re-sourced (session resumed; context files re-read)".into(),
                 chip: "persona".into(),
                 sev: "ok".into(),
                 tx_hash: None,
@@ -18853,6 +19006,85 @@ async fn sandbox_self_bindings(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
         ),
+    }
+}
+
+#[cfg(test)]
+mod sandbox_actions_tests {
+    use super::*;
+    use agentkeys_backend_client::protocol::sandbox_actions::{
+        SandboxProposeRequest, SandboxPublishRequest,
+    };
+
+    fn lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(kk, _)| *kk == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn self_propose_input_blanks_mean_the_daemon_defaults() {
+        // The route body mirrors the `--propose-*` flags: an omitted or blank
+        // namespace / key defers to the push's defaults (the app's own inbox,
+        // `proposal-<unix>`), kind defaults to knowledge, text passes verbatim.
+        let input = self_propose_input(SandboxProposeRequest {
+            text: "# Grant request: tool:web".to_string(),
+            namespace: Some("  ".to_string()),
+            key: None,
+            kind: Some("".to_string()),
+        });
+        assert_eq!(input.namespace, None);
+        assert_eq!(input.key, None);
+        assert_eq!(input.kind, "knowledge");
+        assert_eq!(input.text, "# Grant request: tool:web");
+        let input = self_propose_input(SandboxProposeRequest {
+            text: "x".to_string(),
+            namespace: Some(" family ".to_string()),
+            key: Some("pantry-habits".to_string()),
+            kind: Some("skill".to_string()),
+        });
+        assert_eq!(input.namespace.as_deref(), Some("family"));
+        assert_eq!(input.key.as_deref(), Some("pantry-habits"));
+        assert_eq!(input.kind, "skill");
+    }
+
+    #[test]
+    fn self_publish_input_carries_the_body_bytes_and_optional_fields() {
+        let input = self_publish_input(SandboxPublishRequest {
+            slot: "kitchen_screen".to_string(),
+            kind: None,
+            body: "{\"card\":1}".to_string(),
+            correlation: Some("evt-9".to_string()),
+            content_type: None,
+        });
+        assert_eq!(input.slot, "kitchen_screen");
+        assert_eq!(input.kind, "");
+        assert_eq!(input.bytes, b"{\"card\":1}");
+        assert_eq!(input.correlation.as_deref(), Some("evt-9"));
+        assert_eq!(input.content_type, None);
+    }
+
+    #[test]
+    fn the_default_namespace_prefers_the_apps_own_over_the_pull_list() {
+        assert_eq!(
+            self_default_namespace(lookup(&[
+                ("AGENTKEYS_MEMORY_NS", "app-chef"),
+                ("AGENTKEYS_MEMORY_NAMESPACES", "household,personal"),
+            ]))
+            .as_deref(),
+            Some("app-chef")
+        );
+        assert_eq!(
+            self_default_namespace(lookup(&[(
+                "AGENTKEYS_MEMORY_NAMESPACES",
+                "household,personal"
+            )]))
+            .as_deref(),
+            Some("household")
+        );
     }
 }
 
