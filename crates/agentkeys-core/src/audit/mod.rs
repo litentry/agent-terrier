@@ -57,11 +57,11 @@ pub use bodies::{
     ChannelPublishBody, ChannelSubscribeBody, ChannelTeardownBody, ConfigGetBody, ConfigPutBody,
     ConfigTeardownBody, ContactBindBody, CredFetchBody, CredStoreBody, CredTeardownBody,
     DelegateArchiveBody, DelegateLifecycleBody, DelegateSpawnBody, DeviceAddBody, DeviceRevokeBody,
-    EmailReceiveBody, EmailSendBody, GateEmbedBody, GateSearchBody, GateTurnBody, GatewayRelayBody,
-    K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody, MemoryPutBody,
-    MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody, RuntimeApprovalBody,
-    RuntimeToolResultBody, SandboxSpawnBody, SandboxTeardownBody, ScopeGrantBody, ScopeRevokeBody,
-    SignEip191Body, SignEip712Body, SpeechAsrBody, SpeechTtsBody,
+    EmailReceiveBody, EmailSendBody, GateDecideBody, GateEmbedBody, GateSearchBody, GateTurnBody,
+    GatewayRelayBody, K10RotateBody, K3EpochAdvanceBody, MemoryGetBody, MemoryInboxAppendBody,
+    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody,
+    RuntimeApprovalBody, RuntimeToolResultBody, SandboxSpawnBody, SandboxTeardownBody,
+    ScopeGrantBody, ScopeRevokeBody, SignEip191Body, SignEip712Body, SpeechAsrBody, SpeechTtsBody,
 };
 pub use op_kind::AuditOpKind;
 
@@ -253,6 +253,8 @@ pub enum TypedAuditBody {
     /// #693 — a delegate lifecycle pass (op_kind 105).
     DelegateLifecycle(DelegateLifecycleBody),
     GateSearch(GateSearchBody),
+    /// #722 — a typed decision through the gate's System One relay (op_kind 95).
+    GateDecide(GateDecideBody),
     ChannelPublish(ChannelPublishBody),
     ChannelSubscribe(ChannelSubscribeBody),
     ChannelTeardown(ChannelTeardownBody),
@@ -318,6 +320,7 @@ impl TypedAuditBody {
                 Self::DelegateLifecycle(serde_json::from_value(value).ok()?)
             }
             AuditOpKind::GateSearch => Self::GateSearch(serde_json::from_value(value).ok()?),
+            AuditOpKind::GateDecide => Self::GateDecide(serde_json::from_value(value).ok()?),
             AuditOpKind::ChannelPublish => {
                 Self::ChannelPublish(serde_json::from_value(value).ok()?)
             }

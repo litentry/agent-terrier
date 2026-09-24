@@ -148,6 +148,7 @@ fn config(api_base: String, registry_file: String, state_file: String) -> Weixin
         admin_token: None,
         allow_unsigned: false, // irrelevant — the telegram path never checks OA signatures
         device: Default::default(),
+        router: Default::default(),
     }
 }
 

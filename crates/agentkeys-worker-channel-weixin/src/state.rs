@@ -88,6 +88,12 @@ pub struct WeixinGatewayState {
     ilink_restart_tx: watch::Sender<u64>,
     /// The in-flight admin QR-login session, if any.
     pub admin_login: tokio::sync::Mutex<Option<AdminLogin>>,
+    /// #722 — the Jev router tier's client (`None` = the whole-word tier only).
+    pub jev: Option<crate::jev::JevClient>,
+    /// #722 — numbered asks waiting for a reply, keyed `transport:id`. MEMORY
+    /// ONLY (the member's original text rides here until they answer or the
+    /// TTL passes; it never reaches disk or audit — D13).
+    pending_asks: Mutex<HashMap<String, crate::jev::PendingAsk>>,
     /// The live-monitor ring the operator polls (`/admin/monitor`, #1).
     monitor: Mutex<MonitorRing>,
 }
@@ -165,6 +171,18 @@ impl WeixinGatewayState {
             config.device.clone(),
             config.channel_worker_url.clone(),
         ));
+        let jev = match (
+            config.router.jev_active(),
+            &config.router.gate_url,
+            &config.router.gate_key,
+        ) {
+            (true, Some(url), Some(key)) => Some(crate::jev::JevClient::new(
+                url,
+                key,
+                config.router.timeout_ms,
+            )),
+            _ => None,
+        };
         Ok(WeixinGatewayState {
             config,
             registry,
@@ -179,13 +197,54 @@ impl WeixinGatewayState {
             bots,
             ilink_restart_tx,
             admin_login: tokio::sync::Mutex::new(None),
+            jev,
+            pending_asks: Mutex::new(HashMap::new()),
             monitor: Mutex::new(MonitorRing::default()),
         })
+    }
+
+    /// #722 — file a numbered ask for this contact (a newer ask replaces it).
+    pub fn set_pending_ask(
+        &self,
+        transport: &str,
+        transport_id: &str,
+        ask: crate::jev::PendingAsk,
+    ) {
+        self.pending_asks
+            .lock()
+            .expect("pending asks lock")
+            .insert(format!("{transport}:{transport_id}"), ask);
+    }
+
+    /// #722 — the next message from a contact with a live ask: when it answers
+    /// the ask (a number, the alias, `/alias`) → `(chosen alias, ORIGINAL text)`;
+    /// otherwise the ask is dropped (a new message starts fresh) and `None`.
+    /// An expired ask is dropped either way.
+    pub fn take_ask_reply(
+        &self,
+        transport: &str,
+        transport_id: &str,
+        text: &str,
+        now_secs: u64,
+    ) -> Option<(String, String)> {
+        let key = format!("{transport}:{transport_id}");
+        let mut asks = self.pending_asks.lock().expect("pending asks lock");
+        let ask = asks.remove(&key)?;
+        if ask.expires_at_secs < now_secs {
+            return None;
+        }
+        crate::jev::parse_ask_reply(text, &ask.candidates).map(|alias| (alias, ask.original_text))
+    }
+
+    /// #722 — live asks (healthz).
+    pub fn pending_ask_count(&self) -> usize {
+        self.pending_asks.lock().expect("pending asks lock").len()
     }
 
     /// Record one inbound turn + its L3 decision in the live-monitor ring (#1).
     /// `contact` is the resolved bound `display_name` (or `"unknown"`), never an
     /// openid; `text` should already be a short preview. Assigns the seq + ts.
+    #[allow(clippy::too_many_arguments)]
     pub fn push_monitor_event(
         &self,
         contact: String,
@@ -194,6 +253,8 @@ impl WeixinGatewayState {
         allowed: bool,
         reason: String,
         target: Option<String>,
+        routed_by: Option<String>,
+        confidence: Option<f64>,
     ) {
         let ts_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -211,6 +272,8 @@ impl WeixinGatewayState {
             allowed,
             reason,
             target,
+            routed_by,
+            confidence,
         };
         ring.events.push_back(event.clone());
         while ring.events.len() > MONITOR_RING_CAP {

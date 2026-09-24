@@ -8,7 +8,8 @@
 
 use agentkeys_backend_client::{AuditAppendInput, BackendClient};
 use agentkeys_core::audit::{
-    AuditOpKind, GateEmbedBody, GateSearchBody, GateTurnBody, SpeechAsrBody, SpeechTtsBody,
+    AuditOpKind, GateDecideBody, GateEmbedBody, GateSearchBody, GateTurnBody, SpeechAsrBody,
+    SpeechTtsBody,
 };
 
 pub struct Auditor {
@@ -53,6 +54,14 @@ impl Auditor {
         let result = result_code(&body.outcome);
         let op_body = serde_json::to_value(&body).map_err(|e| format!("encode body: {e}"))?;
         self.emit(user_omni, AuditOpKind::GateSearch, op_body, result)
+            .await
+    }
+
+    /// #722 — one System One decision through the relay (op_kind 95).
+    pub async fn emit_decide(&self, user_omni: &str, body: GateDecideBody) -> Result<(), String> {
+        let result = result_code(&body.outcome);
+        let op_body = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+        self.emit(user_omni, AuditOpKind::GateDecide, op_body, result)
             .await
     }
 

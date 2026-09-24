@@ -29,6 +29,9 @@ pub fn router(relay: Arc<Relay>) -> Router {
         // #653 — the web-search relay (SearXNG behind the gate; engine set
         // pinned by config — Bing by deployment default).
         .route("/v1/search", post(search))
+        // #722 — the System One (Jev) decision relay: the household router's
+        // typed pick through the gate-held TypeSafe key. 503 when unconfigured.
+        .route(agentkeys_protocol::SYSTEMONE_ROUTE, post(systemone))
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
         // #519 — the speech relay legs (same gk_ auth; gate-held Doubao app
@@ -219,6 +222,28 @@ async fn search(State(relay): State<Arc<Relay>>, headers: HeaderMap, body: Bytes
         }
         Err(e) => {
             tracing::warn!(key = %caller.key_id, error = %e, "search call failed");
+            error_response(e)
+        }
+    }
+}
+
+/// #722 — the System One decision relay leg. Decisions never stream.
+async fn systemone(State(relay): State<Arc<Relay>>, headers: HeaderMap, body: Bytes) -> Response {
+    let caller = match authenticate_live(&relay, &headers) {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
+    match relay.handle_systemone(&caller, &body).await {
+        Ok(TurnOutput::Full {
+            status,
+            content_type,
+            body,
+        }) => full_response(status, content_type, body),
+        Ok(TurnOutput::Stream { .. }) => error_response(GateError::Internal(
+            "systemone relay produced a stream".into(),
+        )),
+        Err(e) => {
+            tracing::warn!(key = %caller.key_id, error = %e, "systemone call failed");
             error_response(e)
         }
     }

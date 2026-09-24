@@ -192,6 +192,9 @@ pub struct WeixinGatewayConfig {
     pub allow_unsigned: bool,
     /// #667 — the device actor + feed hop settings.
     pub device: DeviceConfig,
+    /// #722 — the Jev router tier: engine, the model gate's coordinates, the
+    /// threshold, the ask TTL. `Default` = deterministic only.
+    pub router: crate::jev::RouterConfig,
 }
 
 impl WeixinGatewayConfig {
@@ -459,6 +462,99 @@ impl WeixinGatewayConfig {
                 .map(str::trim),
             Some("0") | Some("false") | Some("off")
         );
+
+        // #722 — the Jev router tier. Engine `auto` converges from state: the
+        // model is consulted when the gate is configured, else the whole-word
+        // tier runs. The gate URL is explicit or DERIVED from the broker host
+        // (the rule every worker URL follows); the relay key is a stack
+        // credential the host setup provisions (never hand-placed, D4).
+        let router = {
+            use crate::jev::{RouterConfig, RouterEngine};
+            let defaults = RouterConfig::default();
+            let engine_raw = var("AGENTKEYS_WEIXIN_ROUTER_ENGINE").unwrap_or_default();
+            let engine = RouterEngine::parse(&engine_raw).ok_or_else(|| {
+                anyhow!(
+                    "AGENTKEYS_WEIXIN_ROUTER_ENGINE={engine_raw} is not an engine — use `auto` \
+                     (Jev when the model gate is configured), `jev` or `deterministic`"
+                )
+            })?;
+            let gate_url = var("AGENTKEYS_WEIXIN_GATE_URL")
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    device
+                        .broker_url
+                        .as_deref()
+                        .and_then(|b| agentkeys_protocol::derive_worker_url(b, "gate"))
+                });
+            let gate_key = secret_from(
+                lookup,
+                "AGENTKEYS_WEIXIN_GATE_KEY",
+                "AGENTKEYS_WEIXIN_GATE_KEY_FILE",
+            )?;
+            let f64_var = |k: &str, d: f64| {
+                var(k)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<f64>().ok())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(d)
+            };
+            let u64_var = |k: &str, d: u64| {
+                var(k)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .filter(|v| *v > 0)
+                    .unwrap_or(d)
+            };
+            let cfg = RouterConfig {
+                engine,
+                gate_url,
+                gate_key,
+                model: var("AGENTKEYS_WEIXIN_ROUTER_MODEL")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(defaults.model),
+                threshold: f64_var("AGENTKEYS_WEIXIN_ROUTER_THRESHOLD", defaults.threshold)
+                    .clamp(0.0, 1.0),
+                timeout_ms: u64_var("AGENTKEYS_WEIXIN_ROUTER_TIMEOUT_MS", defaults.timeout_ms),
+                ask_ttl_secs: u64_var(
+                    "AGENTKEYS_WEIXIN_ROUTER_ASK_TTL_SECS",
+                    defaults.ask_ttl_secs,
+                ),
+                last_agent_weight: f64_var(
+                    "AGENTKEYS_WEIXIN_ROUTER_LAST_AGENT_WEIGHT",
+                    defaults.last_agent_weight,
+                ),
+            };
+            match (cfg.engine, cfg.jev_active()) {
+                (RouterEngine::Deterministic, _) => eprintln!(
+                    "==> agentkeys-worker-channel-weixin: router engine = deterministic \
+                     (AGENTKEYS_WEIXIN_ROUTER_ENGINE) — plain messages route by whole-word alias only"
+                ),
+                (_, true) => eprintln!(
+                    "==> agentkeys-worker-channel-weixin: router engine = jev via the model gate at {} \
+                     (model {}, threshold {}, ask TTL {} s) — #722",
+                    cfg.gate_url.as_deref().unwrap_or("?"),
+                    cfg.model,
+                    cfg.threshold,
+                    cfg.ask_ttl_secs
+                ),
+                (RouterEngine::Jev, false) => eprintln!(
+                    "==> ⚠️  agentkeys-worker-channel-weixin: AGENTKEYS_WEIXIN_ROUTER_ENGINE=jev but the \
+                     model gate is not configured (AGENTKEYS_WEIXIN_GATE_URL — or a derivable broker \
+                     host — AND AGENTKEYS_WEIXIN_GATE_KEY[_FILE]) — plain messages use the \
+                     deterministic tier"
+                ),
+                (RouterEngine::Auto, false) => eprintln!(
+                    "==> agentkeys-worker-channel-weixin: router engine = deterministic (no model gate \
+                     configured; AGENTKEYS_WEIXIN_GATE_URL + AGENTKEYS_WEIXIN_GATE_KEY[_FILE] arm the \
+                     Jev tier, #722)"
+                ),
+            }
+            cfg
+        };
         Ok(WeixinGatewayConfig {
             bind,
             transport,
@@ -490,6 +586,7 @@ impl WeixinGatewayConfig {
             admin_token,
             allow_unsigned,
             device,
+            router,
         })
     }
 

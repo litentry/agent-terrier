@@ -214,6 +214,7 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
         admin_token: Some(ADMIN.into()),
         allow_unsigned: false,
         device: Default::default(),
+        router: Default::default(),
     };
     let state = Arc::new(WeixinGatewayState::build(cfg).unwrap());
 
@@ -539,6 +540,7 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
         admin_token: Some(ADMIN.into()),
         allow_unsigned: false,
         device: Default::default(),
+        router: Default::default(),
     };
     let state = Arc::new(WeixinGatewayState::build(cfg).unwrap());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -829,22 +831,27 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
         .find(|c| c["contact_id"] == "c-wife")
         .expect("wife bound");
     assert_eq!(row["welcomed"], true, "{row}");
-    // A second message carries no second welcome.
+    // A second message carries no second welcome. She reaches ONE app, so a
+    // plain message goes straight to it (#722 single reach) — the receipt
+    // rides her message's context token.
     mock.inbox_by_auth
         .lock()
         .unwrap()
         .get_mut(&format!("Bearer {WIFE_TOKEN}"))
         .unwrap()
         .push(user_msg(WIFE_USER, "你好，你是谁", "ctx-w2"));
-    wait_until("ask-back names HER reach", || {
-        mock.sends.lock().unwrap().iter().any(|(auth, b)| {
-            auth == &format!("Bearer {WIFE_TOKEN}")
-                && b["msg"]["context_token"] == "ctx-w2"
-                && b["msg"]["item_list"][0]["text_item"]["text"]
-                    .as_str()
-                    .is_some_and(|t| t.contains("你可以找：/chef"))
-        })
-    })
+    wait_until(
+        "her plain message routes to her ONE app (single reach)",
+        || {
+            mock.sends.lock().unwrap().iter().any(|(auth, b)| {
+                auth == &format!("Bearer {WIFE_TOKEN}")
+                    && b["msg"]["context_token"] == "ctx-w2"
+                    && b["msg"]["item_list"][0]["text_item"]["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("已转达给 chef"))
+            })
+        },
+    )
     .await;
     assert_eq!(
         mock.sends

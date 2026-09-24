@@ -1660,7 +1660,7 @@ pub(crate) async fn apps_update(
     let result = state.registry.mutate(|reg| {
         Ok(match &channel {
             Some(c) => {
-                reg.set_app_feed(&alias, c);
+                reg.set_app_feed(&alias, c, req.blurb.clone());
                 true
             }
             None => reg.remove_app_feed(&alias),

@@ -39,6 +39,7 @@ conversation (its only body mutations: the optional model override, and
 |---|---|---|
 | `POST /v1/chat/completions` | relay key | the proxied turn (streamed + non-streamed) |
 | `POST /v1/embeddings` | relay key | #572 embeddings relay (the in-sandbox OpenViking engine points `OPENVIKING_EMBED_API_BASE` here; no raw vendor key in the sandbox) |
+| `POST /v1/systemone` | relay key | #722 the System One (TypeSafe **Jev**) decision relay — the household router's typed pick (`agentkeys_protocol::SystemOneRequest` in, the vendor's answer body out, verbatim). Metered into the same budgets (`decide_tokens` / `decide_turns`), audited as `GateDecide` (op 95, counts only — never the `state` text). **503 until the `typesafe` family is provisioned**; the contact gate then runs its deterministic tier |
 | `GET /v1/models` | relay key or admin | upstream passthrough |
 | `GET /v1/usage` | relay key → own user; admin → `?user_omni=` or all | the rollup summary |
 | `POST /v1/admin/keys` | admin | #427 provision/rotate a relay key (broker spawn-finalize; secret returned ONCE) |
@@ -57,6 +58,7 @@ the boot log WARNs.
 | `AGENTKEYS_GATE_UPSTREAM_BASE_URL` | explicit upstream root override; unset → the **ark family** resolves it (#338: env `ARK_BASE_URL` > `~/.agentkeys/inference/ark.env` > the built-in Ark default) |
 | `AGENTKEYS_GATE_UPSTREAM_API_KEY[_FILE]` | explicit vendor-key override (engine-agnostic); unset → the **ark family** resolves it (env `ARK_API_KEY` > `ark.env` — rotate with `scripts/operator/secrets/rotate-inference-cred.sh ark`; inspect with `volcano-probe creds`) |
 | `AGENTKEYS_GATE_MODEL` | optional model / Ark endpoint-id override |
+| *(typesafe family)* | #722 — the Jev relay's key + base resolve ONLY through the `typesafe` inference family: env `TYPESAFE_API_KEY` (the vendor SDK's own name — a laptop `~/.zshenv` export works) > `<creds-dir>/typesafe.env` (`rotate-inference-cred.sh typesafe`); `TYPESAFE_BASE_URL` optional (default `https://api.typesafe.ai`). Unset = the leg 503s, loud at boot |
 | `AGENTKEYS_GATE_KEYS_FILE` | JSON: relay keys + per-user budgets (below) |
 | `AGENTKEYS_GATE_DEFAULT_BUDGET_TOKENS` | default per-user budget; unset = unlimited (still metered) |
 | `AGENTKEYS_GATE_ADMIN_TOKEN` | operator bearer for the all-users usage view |

@@ -111,6 +111,10 @@ pub struct HealthBody {
     /// the same stall signal (bad token / 409 conflict) for stack ②.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub telegram_last_ok_ms: Option<u64>,
+    /// #722 — which tier routes plain text: `jev` (the model, via the gate)
+    /// or `deterministic` (whole-word alias only), + the asks awaiting a reply.
+    pub router_engine: &'static str,
+    pub pending_asks: usize,
     /// #667 — the gateway's own device actor is enrolled (the feed hop can
     /// mint caps as it).
     pub device_enrolled: bool,
@@ -128,6 +132,8 @@ async fn healthz(State(state): State<SharedWeixinGatewayState>) -> Json<HealthBo
         outbound_enabled: state.outbound_enabled(),
         ilink_last_ok_ms: state.ilink_last_ok_ms(),
         telegram_last_ok_ms: state.telegram_last_ok_ms(),
+        router_engine: state.config.router.engine_label(),
+        pending_asks: state.pending_ask_count(),
         device_enrolled: state.device.enrolled(),
         feed_hop: state.device.hop_blocker().is_none(),
         version: env!("CARGO_PKG_VERSION"),
@@ -267,6 +273,22 @@ async fn callback_relay(
         if outcome.welcome.is_some() {
             state.mark_welcomed(&outcome.contact_id);
         }
+        // The zh reply the iLink loop would send — surfaced so the mock e2e can
+        // assert the #722 ask text and the receipts.
+        let reply = outcome.claim_ack.clone().or_else(|| {
+            relay::reply_text_for_turn(
+                &outcome.decision,
+                outcome.media_marker,
+                false,
+                &outcome.reach,
+                &outcome.ask_candidates,
+                outcome
+                    .decision
+                    .target_alias
+                    .as_deref()
+                    .and_then(|a| state.app_stage_hint_for_alias(a, relay::unix_secs() * 1000)),
+            )
+        });
         (
             StatusCode::OK,
             Json(json!({
@@ -275,6 +297,9 @@ async fn callback_relay(
                 "contact_id": outcome.contact_id,
                 "tier": outcome.tier,
                 "routed_event": outcome.event,
+                "reply": reply,
+                "ask_candidates": outcome.ask_candidates,
+                "router": outcome.router,
                 "welcome": outcome.welcome,
                 "feed": outcome.feed,
                 "feed_error": outcome.feed_error,
@@ -327,6 +352,7 @@ async fn telegram_mock_inbound(
             outcome.media_marker,
             true,
             &outcome.reach,
+            &outcome.ask_candidates,
             outcome
                 .decision
                 .target_alias
@@ -347,6 +373,8 @@ async fn telegram_mock_inbound(
             "tier": outcome.tier,
             "routed_event": outcome.event,
             "reply": reply,
+            "ask_candidates": outcome.ask_candidates,
+            "router": outcome.router,
             "welcome": outcome.welcome,
             "feed": outcome.feed,
             "feed_error": outcome.feed_error,

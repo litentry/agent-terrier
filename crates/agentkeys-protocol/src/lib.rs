@@ -40,11 +40,13 @@ mod card;
 mod registries;
 pub mod sandbox_actions;
 mod session_window;
+mod systemone;
 mod worker_url;
 pub use app_template::*;
 pub use card::*;
 pub use registries::*;
 pub use session_window::*;
+pub use systemone::*;
 pub use worker_url::*;
 
 /// Op discriminator that maps onto the four broker cap-mint endpoints. The
@@ -996,6 +998,34 @@ pub struct ContactRegistry {
 pub struct AppFeed {
     pub alias: String,
     pub channel_id: String,
+    /// #722 — what the app is for, in the words of its template: the router's
+    /// model (Jev) reads it as the option's description, so a plain message
+    /// («今晚吃什么») can find the right app without a `/alias`. Written by the
+    /// console at install / rebind; absent on rows from before #722 (the router
+    /// then describes the option by its alias alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub blurb: Option<AppBlurb>,
+}
+
+/// #722 — an app's one-paragraph identity for the router: its display names,
+/// a one-line purpose in both languages, and a few example messages. Copied
+/// from the template's `PresetSummary` (name / description / suggested
+/// examples), never free-typed by a contact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct AppBlurb {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub name_zh: String,
+    #[serde(default)]
+    pub purpose: String,
+    #[serde(default)]
+    pub purpose_zh: String,
+    /// Example messages this app is the right destination for.
+    #[serde(default)]
+    pub examples: Vec<String>,
 }
 
 impl ContactRegistry {
@@ -1025,16 +1055,41 @@ impl ContactRegistry {
             .collect()
     }
 
-    /// Upsert `alias → channel_id` (the alias stored lowercase).
-    pub fn set_app_feed(&mut self, alias: &str, channel_id: &str) {
+    /// Upsert `alias → channel_id` (the alias stored lowercase). A `blurb`
+    /// replaces the stored one; `None` keeps whatever the row already carries
+    /// (a rebind that only moves the channel never erases the description).
+    pub fn set_app_feed(&mut self, alias: &str, channel_id: &str, blurb: Option<AppBlurb>) {
         let alias = alias.trim().to_lowercase();
         match self.apps.iter_mut().find(|a| a.alias == alias) {
-            Some(a) => a.channel_id = channel_id.to_string(),
+            Some(a) => {
+                a.channel_id = channel_id.to_string();
+                if blurb.is_some() {
+                    a.blurb = blurb;
+                }
+            }
             None => self.apps.push(AppFeed {
                 alias,
                 channel_id: channel_id.to_string(),
+                blurb,
             }),
         }
+    }
+
+    /// #722 — the router's candidate descriptions for a contact's reach, in
+    /// reach order: `(alias, blurb-if-any)`. Only aliases in `reach` — never an
+    /// app the contact was not granted (D10 by construction).
+    pub fn reach_candidates(&self, reach: &[String]) -> Vec<(String, Option<AppBlurb>)> {
+        reach
+            .iter()
+            .map(|alias| {
+                let blurb = self
+                    .apps
+                    .iter()
+                    .find(|a| a.alias.eq_ignore_ascii_case(alias.trim()))
+                    .and_then(|a| a.blurb.clone());
+                (alias.clone(), blurb)
+            })
+            .collect()
     }
 
     /// Drop `alias`; `true` when a row went.
@@ -1392,6 +1447,10 @@ pub struct GatewayAppFeedUpdateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub channel_id: Option<String>,
+    /// #722 — the app's description for the router (kept when absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub blurb: Option<AppBlurb>,
 }
 
 /// `POST /v1/gateway/admin/contacts/welcome` — (re)send a bound contact's
@@ -1455,6 +1514,16 @@ pub struct GatewayMonitorEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub target: Option<String>,
+    /// #722 — how the target was chosen (`jev` / `advisory_router` /
+    /// `ask_reply` / `single_reach` / …); absent = a typed `/alias`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub routed_by: Option<String>,
+    /// #722 — the router model's confidence in its pick, 0…1 (only when a
+    /// model was consulted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub confidence: Option<f64>,
 }
 
 /// `GET /v1/gateway/admin/monitor?after=<cursor>` — the poll response. `events`

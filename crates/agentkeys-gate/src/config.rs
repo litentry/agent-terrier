@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use agentkeys_inference_creds::{AsrCreds, Resolver, TtsCreds};
+use agentkeys_inference_creds::{AsrCreds, Resolver, TtsCreds, TypesafeCreds};
 use agentkeys_protocol::normalize_omni_0x;
 
 #[derive(Parser, Debug, Clone)]
@@ -182,6 +182,11 @@ pub struct GateConfig {
     pub speech_tts: Option<TtsCreds>,
     /// #653 web-search relay — `None` = leg unconfigured (503, loud at boot).
     pub search: Option<SearchConfig>,
+    /// #722 — the System One (Jev) relay: the gate-held TypeSafe key + base,
+    /// resolved from the `typesafe` inference family. `None` = the leg is
+    /// unconfigured on this gate (`/v1/systemone` refuses 503, loud at boot,
+    /// and the contact gate's router falls back to its deterministic tier).
+    pub systemone: Option<TypesafeCreds>,
 }
 
 /// Missing vars = the family is legitimately unconfigured (None). A family
@@ -281,6 +286,7 @@ impl GateConfig {
             aws_region: cli.aws_region,
             speech_asr: optional_family(ark.asr())?,
             speech_tts: optional_family(ark.tts())?,
+            systemone: optional_family(ark.typesafe())?,
             search: cli
                 .search_url
                 .filter(|u| !u.trim().is_empty())
@@ -324,6 +330,7 @@ mod tests {
             speech_asr: None,
             speech_tts: None,
             search: None,
+            systemone: None,
         }
     }
 
@@ -394,6 +401,28 @@ mod tests {
             cfg.upstream.base_url,
             agentkeys_inference_creds::DEFAULT_ARK_BASE
         );
+    }
+
+    #[test]
+    fn typesafe_family_arms_the_systemone_leg_and_absence_is_a_loud_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("ark.env"), "ARK_API_KEY=file-key\n").unwrap();
+        let cfg =
+            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
+        assert!(
+            cfg.systemone.is_none(),
+            "no typesafe.env → leg unconfigured"
+        );
+        std::fs::write(
+            tmp.path().join("typesafe.env"),
+            "TYPESAFE_API_KEY=ts-key\nTYPESAFE_BASE_URL=https://mock.example/\n",
+        )
+        .unwrap();
+        let cfg =
+            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
+        let ts = cfg.systemone.expect("typesafe family resolved");
+        assert_eq!(ts.api_key, "ts-key");
+        assert_eq!(ts.base_url, "https://mock.example");
     }
 
     #[test]

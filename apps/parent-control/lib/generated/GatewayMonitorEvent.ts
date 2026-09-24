@@ -6,4 +6,14 @@
  * contact's `display_name` (or `"unknown"` for an unbound sender), NEVER the
  * openid; `text` is a short truncated preview for the operator's household view.
  */
-export type GatewayMonitorEvent = { seq: number, ts_ms: number, contact: string, tier: string, text: string, allowed: boolean, reason: string, target?: string, };
+export type GatewayMonitorEvent = { seq: number, ts_ms: number, contact: string, tier: string, text: string, allowed: boolean, reason: string, target?: string, 
+/**
+ * #722 — how the target was chosen (`jev` / `advisory_router` /
+ * `ask_reply` / `single_reach` / …); absent = a typed `/alias`.
+ */
+routed_by?: string, 
+/**
+ * #722 — the router model's confidence in its pick, 0…1 (only when a
+ * model was consulted).
+ */
+confidence?: number, };

@@ -162,6 +162,7 @@ fn config(base_url: String, registry_file: String, state_file: String) -> Weixin
         admin_token: None,
         allow_unsigned: false, // irrelevant — the iLink path never checks OA signatures
         device: Default::default(),
+        router: Default::default(),
     }
 }
 

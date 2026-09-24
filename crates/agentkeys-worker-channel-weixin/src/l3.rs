@@ -164,6 +164,7 @@ mod tests {
             admin_token: None,
             allow_unsigned: false,
             device: Default::default(),
+            router: Default::default(),
         }
     }
 

@@ -396,6 +396,27 @@ pub struct GateEmbedBody {
     pub total_tokens: u64,
 }
 
+/// #722 — one typed decision through the gate's System One relay (op_kind 95):
+/// the household router asked the Jev model to pick among a contact's reach.
+/// Same attribution model as GateTurn. The `state` (a family member's message)
+/// never lands here — the question count and the token counters only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateDecideBody {
+    /// Device the call is attributed to (from the relay key record).
+    pub device_id: String,
+    /// Relay api-key id the caller authenticated with (never the secret).
+    pub api_key_id: String,
+    /// The versioned model that answered (`jev-1.13.0`), or the requested id
+    /// when the call failed before an answer.
+    pub model: String,
+    /// `"ok"`, `"denied:budget_exceeded"`, or `"upstream_error"`.
+    pub outcome: String,
+    /// Questions in the request (answers come back one per question).
+    pub question_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 /// #693 — one delegate lifecycle pass (op_kind 105): the boot sequence or a
 /// knowledge pull, summarized. Counts and milliseconds only — never a line of
 /// knowledge, never a namespace's content.
@@ -492,6 +513,21 @@ pub struct GatewayRelayBody {
     /// beside the feed; the hash above covers the text only).
     #[serde(default)]
     pub media: bool,
+    /// #722 — how the target was chosen: `jev` (the decision model), `ask_reply`
+    /// (the member answered a numbered ask), `single_reach`, `advisory_router`
+    /// (the whole-word tier, incl. as the model's fallback); absent = a typed
+    /// `/alias`, or a refusal before routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_by: Option<String>,
+    /// #722 — the decision model's confidence in its pick, in permille (0…1000)
+    /// so the row stays integer-only under canonical CBOR. Present only when a
+    /// model answered (a routed pick, or the ask it fell below threshold on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_permille: Option<u16>,
+    /// #722 — the aliases an ask named (the member's own reach, never a
+    /// message text) when the decision was `router_ask`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<Vec<String>>,
 }
 
 /// #407 — a contact bind write (pending → bound / declined) AFTER the master's
@@ -649,6 +685,9 @@ mod tests {
             decision: "ok".into(),
             message_hash: format!("0x{}", "cd".repeat(32)),
             media: false,
+            routed_by: Some("jev".into()),
+            confidence_permille: Some(812),
+            candidates: None,
         };
         let env = envelope_for(
             [0x22; 32],
@@ -865,6 +904,35 @@ mod tests {
         assert_eq!(AuditOpKind::GateEmbed.label(), "gate.embed");
         match decoded.typed_body().unwrap() {
             TypedAuditBody::GateEmbed(b) => assert_eq!(b, embed),
+            other => panic!("unexpected typed body: {other:?}"),
+        }
+
+        // #722 — the System One relay row (op_kind 95) round-trips the same way.
+        let decide = GateDecideBody {
+            device_id: "contact-gate".into(),
+            api_key_id: "gk-contact-gate".into(),
+            model: "jev-1.13.0".into(),
+            outcome: "ok".into(),
+            question_count: 2,
+            input_tokens: 318,
+            output_tokens: 34,
+        };
+        let env = envelope_for(
+            [0x44; 32],
+            [0x44; 32],
+            AuditOpKind::GateDecide,
+            decide.clone(),
+            AuditResult::Success,
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            AuditEnvelope::from_canonical_cbor(&env.to_canonical_cbor().unwrap()).unwrap();
+        assert_eq!(decoded.op_kind, AuditOpKind::GateDecide as u8);
+        assert_eq!(AuditOpKind::GateDecide.label(), "gate.decide");
+        match decoded.typed_body().unwrap() {
+            TypedAuditBody::GateDecide(b) => assert_eq!(b, decide),
             other => panic!("unexpected typed body: {other:?}"),
         }
     }

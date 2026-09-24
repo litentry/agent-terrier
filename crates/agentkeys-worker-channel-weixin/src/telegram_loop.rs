@@ -268,6 +268,7 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
                         outcome.media_marker,
                         true,
                         &outcome.reach,
+                        &outcome.ask_candidates,
                         outcome.decision.target_alias.as_deref().and_then(|a| {
                             state.app_stage_hint_for_alias(a, relay::unix_secs() * 1000)
                         }),

@@ -15,6 +15,7 @@ use agentkeys_protocol::{
     GatewayInbound, L3Decision,
 };
 
+use crate::jev::{self, JevVerdict};
 use crate::state::WeixinGatewayState;
 
 /// One media original riding the turn (photo / voice) — see [`crate::media`].
@@ -67,6 +68,38 @@ pub struct RelayOutcome {
     /// moment an iLink bot can answer — no context token exists before it),
     /// then marks the row welcomed. `None` once delivered.
     pub welcome: Option<String>,
+    /// #722 — the aliases a `router_ask` named, best first (the reply
+    /// composer numbers them; the member answers with the number).
+    pub ask_candidates: Vec<String>,
+    /// #722 — what the router tier did on this turn (audit + monitor).
+    pub router: Option<RouterTrace>,
+}
+
+/// #722 — the router tier's trace for one turn: which engine answered, the
+/// model version, the verdict and its confidence. Never the message.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RouterTrace {
+    /// `jev` (the model answered) or `deterministic_fallback` (it could not).
+    pub engine: String,
+    pub model: String,
+    /// `route` / `ask` / `malformed` / `unavailable`.
+    pub verdict: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    /// The reach aliases the verdict named (the pick, or the ask's list).
+    pub candidates: Vec<String>,
+}
+
+impl RouterTrace {
+    fn fallback(model: &str, verdict: &str) -> Self {
+        Self {
+            engine: "deterministic_fallback".into(),
+            model: model.to_string(),
+            verdict: verdict.to_string(),
+            confidence: None,
+            candidates: Vec::new(),
+        }
+    }
 }
 
 /// Run one inbound `(transport_id, text)` turn through L3 + audit for the
@@ -104,22 +137,125 @@ pub async fn process_turn(
     raw_text: &str,
     media: Option<InboundMedia>,
 ) -> RelayOutcome {
-    let (mut alias, remaining) = parse_alias(raw_text);
+    let (mut alias, mut turn_text) = parse_alias(raw_text);
     let registry = state.registry.snapshot();
     let contact = registry.resolve(transport, transport_id);
+    let now_secs = unix_secs();
+
+    // #722 — TEXT turns with no `/alias`, in order: (1) the reply to a live
+    // numbered ask delivers the member's ORIGINAL message; (2) one reachable
+    // app gets every plain message; (3) the Jev tier picks among the reach —
+    // confident → route, unsure → ask (filed after L3 below), unusable /
+    // unreachable / unconfigured → nothing here, the whole-word tier in L3
+    // runs as today. Every branch stays inside `reach` (D10).
+    let mut routed_by_override: Option<&'static str> = None;
+    let mut ask_candidates: Vec<String> = Vec::new();
+    let mut router_trace: Option<RouterTrace> = None;
+    if alias.is_none() && media.is_none() && !turn_text.trim().is_empty() {
+        if let Some(c) = contact {
+            if let Some((chosen, original)) =
+                state.take_ask_reply(transport, transport_id, &turn_text, now_secs)
+            {
+                alias = Some(chosen);
+                turn_text = original;
+                routed_by_override = Some("ask_reply");
+            } else if c.reach.len() == 1 {
+                alias = Some(c.reach[0].clone());
+                routed_by_override = Some("single_reach");
+            } else if let Some(client) = state.jev.as_ref() {
+                let last = state
+                    .device
+                    .last_alias(transport, transport_id)
+                    .filter(|a| c.reach.iter().any(|r| r.eq_ignore_ascii_case(a)));
+                let candidates = registry.reach_candidates(&c.reach);
+                let req = jev::build_request(
+                    &state.config.router.model,
+                    &turn_text,
+                    c.tier.as_str(),
+                    last.as_deref(),
+                    &candidates,
+                );
+                match client.decide(&req).await {
+                    Ok(resp) => match jev::verdict_from(
+                        &resp,
+                        &c.reach,
+                        state.config.router.threshold,
+                        last.as_deref(),
+                        state.config.router.last_agent_weight,
+                    ) {
+                        JevVerdict::Route {
+                            alias: picked,
+                            confidence,
+                        } => {
+                            router_trace = Some(RouterTrace {
+                                engine: "jev".into(),
+                                model: resp.model.clone(),
+                                verdict: "route".into(),
+                                confidence: Some(confidence),
+                                candidates: vec![picked.clone()],
+                            });
+                            alias = Some(picked);
+                            routed_by_override = Some("jev");
+                        }
+                        JevVerdict::Ask {
+                            candidates,
+                            confidence,
+                        } => {
+                            router_trace = Some(RouterTrace {
+                                engine: "jev".into(),
+                                model: resp.model.clone(),
+                                verdict: "ask".into(),
+                                confidence: Some(confidence),
+                                candidates: candidates.clone(),
+                            });
+                            ask_candidates = candidates;
+                        }
+                        JevVerdict::Malformed(why) => {
+                            tracing::warn!(
+                                contact = %c.contact_id,
+                                model = %resp.model,
+                                why,
+                                "#722 the decision model's answer was unusable — the deterministic tier runs"
+                            );
+                            router_trace = Some(RouterTrace::fallback(&resp.model, "malformed"));
+                        }
+                    },
+                    Err(jev::JevError::Unconfigured) => {
+                        tracing::info!(
+                            contact = %c.contact_id,
+                            "#722 the model gate has no decision model yet (503) — the deterministic tier runs"
+                        );
+                        router_trace = Some(RouterTrace::fallback(
+                            &state.config.router.model,
+                            "unavailable",
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            contact = %c.contact_id,
+                            error = %e,
+                            "#722 the model gate did not answer — the deterministic tier runs"
+                        );
+                        router_trace = Some(RouterTrace::fallback(
+                            &state.config.router.model,
+                            "unavailable",
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     // #667 — follow-on routing for a MEDIA turn that names no `/alias` (a
     // caption-less photo / voice clip) when the advisory router asks back:
     // the contact's LAST routed alias (the photo belongs to the conversation
     // it was sent into), else the ONLY alias the contact can reach. Both are
     // subsets of `reach` (D10 — never wider than the contact could `/alias`
-    // directly), so a crafted caption cannot widen authority. TEXT turns keep
-    // today's rule unchanged: no alias + no router match = ask back.
-    let mut routed_by_override: Option<&'static str> = None;
+    // directly), so a crafted caption cannot widen authority.
     if alias.is_none() && media.is_some() {
         if let Some(c) = contact {
             let verdict =
-                crate::router::advisory_route(&remaining, &c.reach, state.config.router_enabled);
+                crate::router::advisory_route(&turn_text, &c.reach, state.config.router_enabled);
             if verdict == crate::router::RouteVerdict::AskBack {
                 let sticky = state
                     .device
@@ -138,18 +274,34 @@ pub async fn process_turn(
     let inbound = GatewayInbound {
         transport: transport.to_string(),
         transport_id: transport_id.to_string(),
-        text: remaining,
+        text: turn_text,
         alias,
     };
 
     // L3 (the PEP) — rate check + the pure decision.
-    let now_secs = unix_secs();
     let rate_ok = state.rate.check(transport_id, now_secs);
     let mut decision = crate::l3::decide(&state.config, &registry, &inbound, rate_ok);
     if decision.allowed && decision.routed_by.is_none() {
         if let Some(r) = routed_by_override {
             decision.routed_by = Some(r.to_string());
         }
+    }
+    // #722 — the model was unsure and the whole-word tier found nothing either:
+    // the refusal becomes a numbered ask, and the member's original text waits
+    // in memory for the answer. A whole-word hit routed instead — no ask.
+    if !decision.allowed && decision.reason == "no_alias" && !ask_candidates.is_empty() {
+        decision.reason = "router_ask".to_string();
+        state.set_pending_ask(
+            transport,
+            transport_id,
+            jev::PendingAsk {
+                original_text: inbound.text.clone(),
+                candidates: ask_candidates.clone(),
+                expires_at_secs: now_secs.saturating_add(state.config.router.ask_ttl_secs),
+            },
+        );
+    } else {
+        ask_candidates.clear();
     }
     let (contact_id, tier) = contact
         .map(|c| (c.contact_id.clone(), c.tier.as_str().to_string()))
@@ -271,6 +423,8 @@ pub async fn process_turn(
         &contact_id,
         &tier,
         media.is_some(),
+        router_trace.as_ref(),
+        &ask_candidates,
     )
     .await;
 
@@ -299,6 +453,8 @@ pub async fn process_turn(
         decision.allowed,
         decision.reason.clone(),
         decision.target_alias.clone(),
+        decision.routed_by.clone(),
+        router_trace.as_ref().and_then(|r| r.confidence),
     );
 
     RelayOutcome {
@@ -313,6 +469,8 @@ pub async fn process_turn(
         media_marker,
         reach,
         welcome,
+        ask_candidates,
+        router: router_trace,
     }
 }
 
@@ -483,6 +641,9 @@ pub fn reply_text_for(decision: &L3Decision) -> Option<String> {
         "no_alias" => {
             Some("请用 /别名 指定要找的助手（例如 /chef 晚饭吃什么），或换个说法。".to_string())
         }
+        // #722 — the candidate-naming ask is composed by `reply_text_for_turn`
+        // (it has the candidates); this is the generic fallback wording.
+        "router_ask" => Some("请回复数字选择要找的助手，或用 /别名。".to_string()),
         "out_of_reach" => Some("⛔ 你没有访问这个助手的权限。".to_string()),
         "operator_grade_requires_session" => Some(format!(
             "这类信息需要在家长控制台查看：{}",
@@ -507,6 +668,10 @@ pub fn reply_text_for_en(decision: &L3Decision) -> Option<String> {
         "rate_limited" => Some("⏳ Too many messages — try again in a minute.".to_string()),
         "no_alias" => Some(
             "Address an assistant with /alias (e.g. `/chef what's for dinner`), or rephrase."
+                .to_string(),
+        ),
+        "router_ask" => Some(
+            "Reply with the number of the assistant you meant, or address it with /alias."
                 .to_string(),
         ),
         "out_of_reach" => Some("⛔ You don't have access to that assistant.".to_string()),
@@ -555,9 +720,12 @@ pub fn reply_text_for_turn(
     media_marker: Option<&str>,
     en: bool,
     reach: &[String],
+    ask_candidates: &[String],
     stage_hint: Option<&str>,
 ) -> Option<String> {
-    let base = if !decision.allowed && decision.reason == "no_alias" {
+    let base = if !decision.allowed && decision.reason == "router_ask" {
+        jev::ask_text(ask_candidates, en)
+    } else if !decision.allowed && decision.reason == "no_alias" {
         ask_back_text(reach, en)
     } else if en {
         reply_text_for_en(decision)?
@@ -586,6 +754,7 @@ pub fn reply_text_for_turn(
     Some(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_relay_audit(
     state: &WeixinGatewayState,
     inbound: &GatewayInbound,
@@ -593,6 +762,8 @@ async fn emit_relay_audit(
     contact_id: &str,
     tier: &str,
     media: bool,
+    router: Option<&RouterTrace>,
+    ask_candidates: &[String],
 ) {
     let Some(audit) = state.audit.as_ref() else {
         return;
@@ -609,6 +780,12 @@ async fn emit_relay_audit(
         decision: decision.reason.clone(),
         message_hash: keccak_hex(inbound.text.as_bytes()),
         media,
+        routed_by: decision.routed_by.clone(),
+        confidence_permille: router
+            .and_then(|r| r.confidence)
+            .map(|c| (c.clamp(0.0, 1.0) * 1000.0).round() as u16),
+        candidates: (decision.reason == "router_ask" && !ask_candidates.is_empty())
+            .then(|| ask_candidates.to_vec()),
     };
     let result = if decision.allowed {
         AuditResult::Success
@@ -690,12 +867,27 @@ mod tests {
         );
         assert!(ask_back_text(&[], false).contains("/chef"));
         let turn =
-            reply_text_for_turn(&decision(false, "no_alias"), None, false, &reach, None).unwrap();
+            reply_text_for_turn(&decision(false, "no_alias"), None, false, &reach, &[], None)
+                .unwrap();
         assert!(turn.contains("/nanny") && !turn.contains("/chef"), "{turn}");
         assert!(
-            reply_text_for_turn(&decision(true, "ok"), Some("📷"), false, &reach, None)
+            reply_text_for_turn(&decision(true, "ok"), Some("📷"), false, &reach, &[], None)
                 .unwrap()
                 .ends_with("📷")
+        );
+        // #722 — the model's ask names the candidates, numbered, never the reach list.
+        let asked = reply_text_for_turn(
+            &decision(false, "router_ask"),
+            None,
+            false,
+            &reach,
+            &["nanny".to_string(), "agent".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            asked,
+            "你是想找 1 nanny 还是 2 agent？回复 1 或 2，或用 /别名（例如 /nanny）。"
         );
     }
 
@@ -723,19 +915,28 @@ mod tests {
     #[test]
     fn receipt_carries_the_apps_launch_state() {
         let reach = vec!["chef".to_string()];
-        let zh = reply_text_for_turn(&decision(true, "ok"), None, false, &reach, Some("loading"))
-            .unwrap();
+        let zh = reply_text_for_turn(
+            &decision(true, "ok"),
+            None,
+            false,
+            &reach,
+            &[],
+            Some("loading"),
+        )
+        .unwrap();
         assert!(zh.contains("加载知识"), "{zh}");
         let en = reply_text_for_turn(
             &decision(true, "ok"),
             Some("📷"),
             true,
             &reach,
+            &[],
             Some("degraded"),
         )
         .unwrap();
         assert!(en.contains("📷") && en.contains("unavailable"), "{en}");
-        let ready = reply_text_for_turn(&decision(true, "ok"), None, true, &reach, None).unwrap();
+        let ready =
+            reply_text_for_turn(&decision(true, "ok"), None, true, &reach, &[], None).unwrap();
         assert!(!ready.contains("loading"));
         // a refused turn never carries the app's state (nothing was routed)
         let refused = reply_text_for_turn(
@@ -743,6 +944,7 @@ mod tests {
             None,
             false,
             &reach,
+            &[],
             Some("loading"),
         )
         .unwrap();

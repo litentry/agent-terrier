@@ -1,13 +1,15 @@
-//! Per-family isolated loading of the three Volcano **inference** credential families (#338):
-//! **ARK** (LLM, Bearer `ARK_API_KEY`), **ASR** and **TTS** (app-token `*_APP_ID` /
-//! `*_ACCESS_TOKEN`). The Volcengine IAM AK/SK family (sandbox/storage, V4-signed) is NOT
-//! handled here — that is the broker STS-relay path (#337).
+//! Per-family isolated loading of the **inference** credential families (#338): the three
+//! Volcano ones — **ARK** (LLM, Bearer `ARK_API_KEY`), **ASR** and **TTS** (app-token
+//! `*_APP_ID` / `*_ACCESS_TOKEN`) — plus **TYPESAFE** (#722: the Jev decision model behind
+//! the household router, Bearer `TYPESAFE_API_KEY`; a US-hosted vendor, not Volcano). The
+//! Volcengine IAM AK/SK family (sandbox/storage, V4-signed) is NOT handled here — that is
+//! the broker STS-relay path (#337).
 //!
 //! Isolation contract (the point of this crate):
 //! - Each family resolves from its OWN two sources only: the family's process-env vars,
-//!   then the family's env file `<creds-dir>/{ark,asr,tts}.env`. A loader never opens
-//!   another family's file and never reads another family's vars — a leaked or rotated
-//!   key in one family has zero blast radius on the other two.
+//!   then the family's env file `<creds-dir>/{ark,asr,tts,typesafe}.env`. A loader never
+//!   opens another family's file and never reads another family's vars — a leaked or
+//!   rotated key in one family has zero blast radius on the others.
 //! - Precedence, identical everywhere: **process env > family file > built-in default**.
 //!   Empty values (env or file) count as unset, so a stray `VAR=` can never plant an
 //!   empty override.
@@ -19,8 +21,8 @@
 //!   `docker run --env-file`, and this loader identically. The loader tolerates
 //!   `export ` prefixes and surrounding quotes defensively; writers must not rely on it.
 //!
-//! Rotate one family with `scripts/operator/secrets/rotate-inference-cred.sh <ark|asr|tts>`; inspect what
-//! resolves from where (without printing secrets) with `volcano-probe creds`.
+//! Rotate one family with `scripts/operator/secrets/rotate-inference-cred.sh <ark|asr|tts|typesafe>`;
+//! inspect what resolves from where (without printing secrets) with `volcano-probe creds`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -44,22 +46,28 @@ pub const DEFAULT_ASR_QUERY_URL: &str =
     "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query";
 pub const DEFAULT_TTS_SSE_URL: &str =
     "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse";
+/// #722 — TypeSafe's hosted System One endpoint root (the gate posts to
+/// `<base>/v1/systemone`). The family source of truth for where Jev lives.
+pub const DEFAULT_TYPESAFE_BASE: &str = "https://api.typesafe.ai";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
     Ark,
     Asr,
     Tts,
+    /// #722 — the Jev decision model (TypeSafe), the household router's engine.
+    Typesafe,
 }
 
 impl Family {
-    pub const ALL: [Family; 3] = [Family::Ark, Family::Asr, Family::Tts];
+    pub const ALL: [Family; 4] = [Family::Ark, Family::Asr, Family::Tts, Family::Typesafe];
 
     pub fn name(self) -> &'static str {
         match self {
             Family::Ark => "ark",
             Family::Asr => "asr",
             Family::Tts => "tts",
+            Family::Typesafe => "typesafe",
         }
     }
 
@@ -68,6 +76,7 @@ impl Family {
             Family::Ark => "ark.env",
             Family::Asr => "asr.env",
             Family::Tts => "tts.env",
+            Family::Typesafe => "typesafe.env",
         }
     }
 
@@ -77,6 +86,7 @@ impl Family {
             Family::Ark => ARK_FIELDS,
             Family::Asr => ASR_FIELDS,
             Family::Tts => TTS_FIELDS,
+            Family::Typesafe => TYPESAFE_FIELDS,
         }
     }
 
@@ -85,6 +95,7 @@ impl Family {
             "ark" | "llm" => Some(Family::Ark),
             "asr" => Some(Family::Asr),
             "tts" => Some(Family::Tts),
+            "typesafe" | "jev" => Some(Family::Typesafe),
             _ => None,
         }
     }
@@ -121,6 +132,23 @@ const ARK_FIELDS: &[FieldSpec] = &[
         required: false,
         secret: false,
         default: Some(DEFAULT_ARK_BASE),
+    },
+];
+
+/// #722 — the TypeSafe family: the vendor's own SDK reads `TYPESAFE_API_KEY`,
+/// so the same name works for a laptop `~/.zshenv` export and the host file.
+const TYPESAFE_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        var: "TYPESAFE_API_KEY",
+        required: true,
+        secret: true,
+        default: None,
+    },
+    FieldSpec {
+        var: "TYPESAFE_BASE_URL",
+        required: false,
+        secret: false,
+        default: Some(DEFAULT_TYPESAFE_BASE),
     },
 ];
 
@@ -208,6 +236,15 @@ pub struct FamilyReport {
 pub struct ArkCreds {
     pub api_key: String,
     pub endpoint_id: String,
+    pub base_url: String,
+}
+
+/// #722 — the `typesafe` family: the one TypeSafe key the gate custodies for
+/// the `/v1/systemone` relay (the contact gate and the console present their
+/// `gk_` relay keys instead; this key never leaves the gate host).
+#[derive(Clone, Debug)]
+pub struct TypesafeCreds {
+    pub api_key: String,
     pub base_url: String,
 }
 
@@ -299,6 +336,20 @@ impl Resolver {
             access_token: vals.remove("TTS_ACCESS_TOKEN").unwrap(),
             resource_id: vals.remove("TTS_RESOURCE_ID").unwrap(),
             voice_type: vals.remove("TTS_VOICE_TYPE").unwrap(),
+        })
+    }
+
+    /// #722 — the Jev decision model's key (+ base). `Missing` when the family
+    /// is simply not provisioned yet (the gate's `/v1/systemone` then 503s).
+    pub fn typesafe(&self) -> Result<TypesafeCreds, Error> {
+        let mut vals = self.required_values(Family::Typesafe)?;
+        Ok(TypesafeCreds {
+            api_key: vals.remove("TYPESAFE_API_KEY").unwrap(),
+            base_url: vals
+                .remove("TYPESAFE_BASE_URL")
+                .unwrap()
+                .trim_end_matches('/')
+                .to_string(),
         })
     }
 
@@ -491,6 +542,41 @@ mod tests {
         assert_eq!(ark.api_key, "env-key");
         assert_eq!(ark.endpoint_id, "ep-file");
         assert_eq!(ark.base_url, "https://file.example/api");
+    }
+
+    #[test]
+    fn typesafe_loads_from_env_or_file_with_default_base_and_never_reads_ark() {
+        // env only: key present, base defaults to the vendor root.
+        let r = Resolver::with(env_of(&[("TYPESAFE_API_KEY", "ts-env")]), None);
+        let ts = r.typesafe().unwrap();
+        assert_eq!(ts.api_key, "ts-env");
+        assert_eq!(ts.base_url, DEFAULT_TYPESAFE_BASE);
+        // file only, trailing slash trimmed; the ark file next to it is never consulted.
+        let tmp = tempfile::tempdir().unwrap();
+        write_family(
+            tmp.path(),
+            Family::Typesafe,
+            "TYPESAFE_API_KEY=ts-file\nTYPESAFE_BASE_URL=https://mock.example/\n",
+        );
+        write_family(
+            tmp.path(),
+            Family::Ark,
+            "ARK_API_KEY=ark-key\nLLM_ENDPOINT_ID=ep\n",
+        );
+        let r = Resolver::with(env_of(&[]), Some(tmp.path().to_path_buf()));
+        let ts = r.typesafe().unwrap();
+        assert_eq!(ts.api_key, "ts-file");
+        assert_eq!(ts.base_url, "https://mock.example");
+        // unprovisioned = Missing, naming the family and its var.
+        let r = Resolver::with(env_of(&[]), None);
+        match r.typesafe() {
+            Err(Error::Missing { family, var, .. }) => {
+                assert_eq!(family, Family::Typesafe);
+                assert_eq!(var, "TYPESAFE_API_KEY");
+            }
+            other => panic!("expected Missing, got {other:?}"),
+        }
+        assert_eq!(Family::from_str_loose("jev"), Some(Family::Typesafe));
     }
 
     #[test]

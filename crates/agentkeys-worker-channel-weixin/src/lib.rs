@@ -11,7 +11,9 @@
 //!    master-curated **contact registry** (`policy`-class doc) — [`registry`].
 //! 4. **Enforces L3** BEFORE anything reaches an agent — reach, per-contact rate
 //!    limit, the operator-grade-needs-operator-grade-auth rule — [`l3`].
-//! 5. **Routes** deterministically (`/alias`; the advisory router is phase 5) and
+//! 5. **Routes** — `/alias` deterministically, else the Jev router tier (#722:
+//!    the decision model picks among the contact's reach through the model gate,
+//!    asks the member when unsure, falls back to the whole-word tier) — and
 //!    relays into the target delegate's channel feed, auditing each turn.
 //!
 //! **A PEP, never an authority** — it holds no master key, mints no grant; a
@@ -35,6 +37,7 @@ pub mod handlers;
 pub mod ilink;
 pub mod ilink_login;
 pub mod ilink_loop;
+pub mod jev;
 pub mod l3;
 pub mod media;
 pub mod outbound;

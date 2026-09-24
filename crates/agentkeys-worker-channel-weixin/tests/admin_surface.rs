@@ -63,6 +63,7 @@ fn config(registry_file: String) -> WeixinGatewayConfig {
         admin_token: Some("admin-secret".into()),
         allow_unsigned: true,
         device: Default::default(),
+        router: Default::default(),
     }
 }
 

@@ -21,8 +21,11 @@ use serde_json::{json, Value};
 use agentkeys_gate::config::{GateConfig, RelayKey, UpstreamConfig};
 use agentkeys_gate::relay::Relay;
 use agentkeys_gate::server;
+use agentkeys_inference_creds::TypesafeCreds;
 
 const UPSTREAM_KEY: &str = "ark-vendor-secret";
+/// #722 — the gate-held TypeSafe key (a different vendor than Ark).
+const TYPESAFE_KEY: &str = "ts-vendor-secret";
 const RELAY_KEY_1: &str = "gk_device_one";
 const RELAY_KEY_2: &str = "gk_device_two";
 
@@ -124,6 +127,43 @@ async fn upstream_embeddings(
     .into_response()
 }
 
+/// #722 — the mock TypeSafe endpoint: one Choice answer in the documented
+/// shape (API reference "Choice answer") + the input/output token usage.
+async fn upstream_systemone(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    state.requests.lock().unwrap().push((auth, body.clone()));
+    let mode = state.mode.lock().unwrap().clone();
+    if mode == "http500" {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "vendor exploded").into_response();
+    }
+    let first_question = body
+        .get("questions")
+        .and_then(Value::as_object)
+        .and_then(|q| q.keys().next().cloned())
+        .unwrap_or_else(|| "q".to_string());
+    Json(json!({
+        "model": "jev-1.13.0",
+        "answers": {
+            first_question: {
+                "type": "choice",
+                "choice": "chef",
+                "probabilities": {"chef": 0.88, "storyteller": 0.12},
+                "confidence": 0.81
+            }
+        },
+        "usage": {"input_tokens": 318, "output_tokens": 34}
+    }))
+    .into_response()
+}
+
 async fn spawn_upstream() -> (SocketAddr, UpstreamState) {
     let state = UpstreamState {
         mode: Arc::new(Mutex::new("ok".to_string())),
@@ -132,6 +172,7 @@ async fn spawn_upstream() -> (SocketAddr, UpstreamState) {
     let app = Router::new()
         .route("/v1/chat/completions", post(upstream_chat))
         .route("/v1/embeddings", post(upstream_embeddings))
+        .route("/v1/systemone", post(upstream_systemone))
         .route("/v1/models", get(upstream_models))
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -213,6 +254,11 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
         speech_asr: None,
         speech_tts: None,
         search: None,
+        // #722 — the mock upstream doubles as TypeSafe (same host, own key).
+        systemone: Some(TypesafeCreds {
+            api_key: TYPESAFE_KEY.into(),
+            base_url: format!("http://{up_addr}"),
+        }),
     };
     let relay = Arc::new(Relay::new(config));
     let app = server::router(relay);
@@ -843,6 +889,7 @@ async fn search_call_pins_engines_maps_results_and_audits() {
             base_url: format!("http://{searx_addr}"),
             engines: "bing".into(),
         }),
+        systemone: None,
     };
     let relay = Arc::new(Relay::new(config));
     let app = server::router(relay);
@@ -895,4 +942,206 @@ async fn search_call_pins_engines_maps_results_and_audits() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
+}
+
+// ── #722 — the System One (Jev) decision relay ───────────────────────────────
+
+fn systemone_body() -> Value {
+    json!({
+        "model": "jev-1.13.0",
+        "state": {"message": "今晚吃什么", "sender_tier": "kid"},
+        "questions": {
+            "destination": {
+                "type": "choice",
+                "instructions": "Who should receive `message`?",
+                "criteria": {"chef": "plans meals", "storyteller": "tells stories"}
+            }
+        }
+    })
+}
+
+/// Custody (the TypeSafe key is attached by the gate, the relay key never
+/// leaves), the answer body verbatim, the decide dimension of the meter, and
+/// the GateDecide (op_kind 95) row with counts only.
+#[tokio::test]
+async fn systemone_call_custody_metering_audit() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["answers"]["destination"]["choice"], "chef");
+    assert_eq!(body["answers"]["destination"]["confidence"], 0.81);
+    assert_eq!(body["model"], "jev-1.13.0");
+
+    // The vendor saw the TypeSafe key — not Ark's, not the caller's.
+    let seen = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].0.as_deref(),
+        Some(&format!("Bearer {TYPESAFE_KEY}")[..])
+    );
+    assert_eq!(seen[0].1["questions"]["destination"]["type"], "choice");
+    let raw = serde_json::to_string(&seen[0].1).unwrap();
+    assert!(!raw.contains(RELAY_KEY_1) && !raw.contains(UPSTREAM_KEY));
+
+    // Metered into the shared budget + the decide dimension.
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["used_tokens"], 352);
+    assert_eq!(usage["totals"]["decide_tokens"], 352);
+    assert_eq!(usage["totals"]["decide_turns"], 1);
+    assert_eq!(usage["totals"]["turns"], 0, "a decision is not a chat turn");
+
+    // The audit row: op_kind 95, counts only — never the state text.
+    wait_for(
+        || !gate.audit.envelopes.lock().unwrap().is_empty(),
+        "GateDecide audit row",
+    )
+    .await;
+    let env = gate.audit.envelopes.lock().unwrap()[0].clone();
+    assert_eq!(env["op_kind"], 95);
+    assert_eq!(env["op_body"]["question_count"], 1);
+    assert_eq!(env["op_body"]["input_tokens"], 318);
+    assert_eq!(env["op_body"]["output_tokens"], 34);
+    assert_eq!(env["op_body"]["model"], "jev-1.13.0");
+    assert_eq!(env["op_body"]["outcome"], "ok");
+    let env_raw = env.to_string();
+    assert!(
+        !env_raw.contains("今晚吃什么"),
+        "state text leaked into audit: {env_raw}"
+    );
+}
+
+/// No typesafe family → 503, loud, and the vendor is never contacted (the
+/// contact gate's router reads this as "gate down" and runs its deterministic
+/// tier).
+#[tokio::test]
+async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
+    let (up_addr, upstream) = spawn_upstream().await;
+    let config = GateConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        upstream: UpstreamConfig {
+            base_url: format!("http://{up_addr}/v1"),
+            api_key: UPSTREAM_KEY.into(),
+            model_override: None,
+        },
+        keys: relay_keys(),
+        user_budgets: Default::default(),
+        default_budget_tokens: None,
+        admin_token: None,
+        keys_file: None,
+        audit_url: None,
+        require_audit: false,
+        aws_region: "us-east-1".into(),
+        speech_asr: None,
+        speech_tts: None,
+        search: None,
+        systemone: None,
+    };
+    let relay = Arc::new(Relay::new(config));
+    let app = server::router(relay);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/systemone"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+}
+
+/// A body that is not the shared SystemOneRequest shape is refused here
+/// (400) before any egress; a vendor 5xx is a safe 502 envelope.
+#[tokio::test]
+async fn systemone_rejects_malformed_bodies_and_wraps_vendor_5xx() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let no_questions = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"model": "jev-1.13.0", "state": "hi", "questions": {}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_questions.status().as_u16(), 400);
+    let bad_type = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"model": "jev-1.13.0", "state": "hi",
+            "questions": {"q": {"type": "essay", "instructions": "write"}}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_type.status().as_u16(), 400);
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 0);
+
+    *gate.upstream.mode.lock().unwrap() = "http500".to_string();
+    let resp = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        !body.to_string().contains("vendor exploded"),
+        "5xx body echoed: {body}"
+    );
+}
+
+/// Decisions burn the SAME per-user budget as chat: once exhausted, the next
+/// decision is a deterministic 429 with no egress.
+#[tokio::test]
+async fn systemone_shares_the_user_budget_with_chat() {
+    let gate = spawn_gate(Some(300)).await;
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status().as_u16(), 200); // 0 used < 300
+    let second = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_2)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status().as_u16(), 429); // 352 used ≥ 300
+    let body: Value = second.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "budget_exceeded");
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 1);
+    // …and chat is denied too — one budget.
+    let chat = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat.status().as_u16(), 429);
 }

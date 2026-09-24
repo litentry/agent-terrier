@@ -374,10 +374,12 @@ mod tests {
                 agentkeys_protocol::AppFeed {
                     alias: "chef".into(),
                     channel_id: "family-chat".into(),
+                    blurb: None,
                 },
                 agentkeys_protocol::AppFeed {
                     alias: "doorkeeper".into(),
                     channel_id: "door".into(),
+                    blurb: None,
                 },
             ],
         }

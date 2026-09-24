@@ -88,6 +88,22 @@ const REASON_TEXT: Record<string, string> = {
   operator_grade_reach_denied: 'Money/usage agents can only be granted to the owner tier.',
 };
 
+// #722 — how a turn was routed, as the monitor's suffix: «routed by jev (0.81)»
+// / «asked (0.42)» / «ask reply» / «single reach»; nothing for a typed /alias.
+function routedByLabel(e: { reason: string; routed_by?: string; confidence?: number }): string {
+  const conf = e.confidence == null ? '' : ` (${e.confidence.toFixed(2)})`;
+  if (e.reason === 'router_ask') return ` · asked${conf}`;
+  if (!e.routed_by) return '';
+  const names: Record<string, string> = {
+    jev: 'routed by jev',
+    ask_reply: 'ask reply',
+    single_reach: 'single reach',
+    advisory_router: 'whole-word',
+    sticky_last_alias: 'last app',
+  };
+  return ` · ${names[e.routed_by] ?? e.routed_by}${conf}`;
+}
+
 function reason(r: { reason: string; detail?: string }): string {
   return REASON_TEXT[r.reason] ?? r.detail ?? r.reason;
 }
@@ -197,6 +213,7 @@ function MonitorPanel({ online }: { online: boolean }) {
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.text || '—'}</span>
               <span style={{ flexShrink: 0, color: e.allowed ? 'var(--ok, #1a7f5a)' : 'var(--danger)' }}>
                 {e.allowed ? `✓ → ${e.target ?? '?'}` : `✕ ${e.reason}`}
+                {routedByLabel(e)}
               </span>
             </div>
           ))}
@@ -259,6 +276,7 @@ function HistoryPanel() {
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.text || '—'}</span>
                 <span style={{ flexShrink: 0, color: e.allowed ? 'var(--ok, #1a7f5a)' : 'var(--danger)' }}>
                   {e.allowed ? `✓ → ${e.target ?? '?'}` : `✕ ${e.reason}`}
+                  {routedByLabel(e)}
                 </span>
               </div>
             ))}

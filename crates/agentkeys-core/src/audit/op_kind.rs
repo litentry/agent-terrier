@@ -15,7 +15,7 @@
 //! - 60-69 email family (EmailSend=60, EmailReceive=61; 62-69 reserved)
 //! - 70-79 K3 family (K3EpochAdvance=70; 71-79 reserved)
 //! - 80-89 config family (ConfigPut=80, ConfigGet=81, ConfigTeardown=82; 83-89 reserved)
-//! - 90-99 gate family (GateTurn=90, SpeechAsr=91, SpeechTts=92, GateEmbed=93, GateSearch=94; 95-99 reserved)
+//! - 90-99 gate family (GateTurn=90, SpeechAsr=91, SpeechTts=92, GateEmbed=93, GateSearch=94, GateDecide=95; 96-99 reserved)
 //! - 100-109 channel family (ChannelPublish=100, ChannelSubscribe=101, ChannelTeardown=102, GatewayRelay=103, ContactBind=104, DelegateLifecycle=105; 106-109 reserved)
 //! - 110-255 reserved for future families
 
@@ -79,6 +79,11 @@ pub enum AuditOpKind {
     /// the delegate's `web_search` tool egress, metered + attributed like every
     /// other gate leg; the sandbox never queries search engines directly.
     GateSearch = 94,
+    /// #722 — one typed decision through the gate's System One relay
+    /// (`/v1/systemone`, the Jev model): the household router's pick, metered
+    /// and attributed like every other gate leg. Counts only — the state text
+    /// (a family member's message) never lands in the row.
+    GateDecide = 95,
     /// #406 — a keyed actor PUBLISHED an event into a channel feed
     /// (`docs/spec/agent-channel-decoupling.md`). The channel worker emits this
     /// after the envelope-encrypted event lands durably in `$CHANNEL_BUCKET`.
@@ -143,6 +148,7 @@ impl AuditOpKind {
             92 => Self::SpeechTts,
             93 => Self::GateEmbed,
             94 => Self::GateSearch,
+            95 => Self::GateDecide,
             100 => Self::ChannelPublish,
             101 => Self::ChannelSubscribe,
             102 => Self::ChannelTeardown,
@@ -191,6 +197,7 @@ impl AuditOpKind {
             Self::SpeechTts => "gate.speech_tts",
             Self::GateEmbed => "gate.embed",
             Self::GateSearch => "gate.search",
+            Self::GateDecide => "gate.decide",
             Self::ChannelPublish => "channel.publish",
             Self::ChannelSubscribe => "channel.subscribe",
             Self::ChannelTeardown => "channel.teardown",
@@ -246,6 +253,7 @@ mod tests {
             AuditOpKind::SpeechTts,
             AuditOpKind::GateEmbed,
             AuditOpKind::GateSearch,
+            AuditOpKind::GateDecide,
             AuditOpKind::ChannelPublish,
             AuditOpKind::ChannelSubscribe,
             AuditOpKind::ChannelTeardown,
@@ -267,7 +275,7 @@ mod tests {
     #[test]
     fn unknown_bytes_return_none() {
         for byte in [
-            3u8, 9, 14, 19, 22, 32, 42, 57, 62, 71, 83, 89, 95, 99, 106, 109, 112, 200, 250, 255,
+            3u8, 9, 14, 19, 22, 32, 42, 57, 62, 71, 83, 89, 96, 99, 106, 109, 112, 200, 250, 255,
         ] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),

@@ -18,12 +18,13 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use agentkeys_backend_client::protocol::{
-    compile_app, service_channel_pub, service_channel_sub, validate_template, AppInstallBindings,
-    AppInstanceRow, AppInstanceStatus, AppRegistryDoc, Availability, BoundChannel, CardCommand,
-    CardDocument, ChannelEndpointKind, CompiledApp, ContactSummary, ContactTier,
-    EndpointEnrollment, EndpointGrantDelta, EndpointScope, PresetBundle, PresetSummary,
-    ResourceItemRow, ResourceKind, ResourceRegistryDoc, Sensitivity, ServiceAnnotation,
-    SlotAudience, SlotBinding, TemplateError, APP_REGISTRY_SERVICE, RESOURCE_REGISTRY_SERVICE,
+    compile_app, service_channel_pub, service_channel_sub, validate_template, AppBlurb,
+    AppInstallBindings, AppInstanceRow, AppInstanceStatus, AppRegistryDoc, Availability,
+    BoundChannel, CardCommand, CardDocument, ChannelEndpointKind, CompiledApp, ContactSummary,
+    ContactTier, EndpointEnrollment, EndpointGrantDelta, EndpointScope, PresetBundle,
+    PresetSummary, ResourceItemRow, ResourceKind, ResourceRegistryDoc, Sensitivity,
+    ServiceAnnotation, SlotAudience, SlotBinding, TemplateError, APP_REGISTRY_SERVICE,
+    RESOURCE_REGISTRY_SERVICE,
 };
 use agentkeys_backend_client::protocol::{AppAnchor, ContextSeal, DelegateContextDoc};
 
@@ -149,6 +150,9 @@ pub(crate) struct AppInstallStash {
     /// context at confirm, so a read of `ceremony_context_by_dkh` after the
     /// submit finds nothing (the registry row shipped with `services: []`).
     pub services: Vec<String>,
+    /// #722 — the app's description for the contact gate's router (from the
+    /// template summary), registered with its feed at confirm.
+    pub blurb: Option<AppBlurb>,
     /// The anchor seal the batch carries: the context document stored on the
     /// memory plane after the confirm.
     pub context_seal: Option<ContextSeal>,
@@ -609,6 +613,13 @@ pub async fn app_install_build(
             template_id: template_id.clone(),
             template_version: bundle.manifest.version.clone(),
             template_schema: bundle.manifest.app.schema,
+            blurb: Some(AppBlurb {
+                name: bundle.manifest.name.clone(),
+                name_zh: bundle.manifest.name_zh.clone(),
+                purpose: bundle.manifest.description.clone(),
+                purpose_zh: bundle.manifest.description_zh.clone(),
+                examples: Vec::new(),
+            }),
             label: label.clone(),
             bindings,
             bound_channels,
@@ -958,7 +969,14 @@ pub async fn app_install_submit(
         // Audience → each allowed contact's `reach` gains the app's alias.
         let reach = apply_reach(&state, &stash.label, &stash.audience, true).await;
         // The gate learns WHERE the app listens (`alias → channel`).
-        let app_feeds = apply_app_feeds(&state, &stash.label, &stash.bound_channels, true).await;
+        let app_feeds = apply_app_feeds(
+            &state,
+            &stash.label,
+            &stash.bound_channels,
+            true,
+            stash.blurb.as_ref(),
+        )
+        .await;
         // The anchor: the sealed document, verbatim, into the app's own namespace.
         let context_storage = match &stash.context_seal {
             Some(seal) => {
@@ -1192,7 +1210,7 @@ pub async fn app_uninstall_submit(
                 for alias in &reach_aliases {
                     reach = apply_reach(&state, alias, &audience, false).await;
                 }
-                let app_feeds = apply_app_feeds(&state, &label, &bound_for_gate, false).await;
+                let app_feeds = apply_app_feeds(&state, &label, &bound_for_gate, false, None).await;
                 closed = serde_json::json!({
                     "label": label,
                     "closed": true,
@@ -3215,6 +3233,7 @@ async fn apply_app_feeds(
     label: &str,
     bound: &[BoundChannel],
     add: bool,
+    blurb: Option<&AppBlurb>,
 ) -> serde_json::Value {
     let messaging: Vec<&BoundChannel> = bound
         .iter()
@@ -3231,10 +3250,15 @@ async fn apply_app_feeds(
         );
     }
     let channel = messaging[0].channel_id.clone();
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "alias": label,
         "channel_id": if add { Some(channel.clone()) } else { None },
     });
+    // #722 — the router's description of this app (kept by the gate when
+    // absent, so a rebind without one never erases it).
+    if let (true, Some(b)) = (add, blurb) {
+        body["blurb"] = serde_json::to_value(b).unwrap_or(serde_json::Value::Null);
+    }
     match gateway_admin_call(
         state,
         reqwest::Method::POST,
@@ -3724,7 +3748,7 @@ pub async fn app_rebind_submit(
         .await;
     }
     // 4. the gate: where the app listens now + who may reach it (idempotent)
-    let app_feeds = apply_app_feeds(&state, &label, &stash.bound_channels, true).await;
+    let app_feeds = apply_app_feeds(&state, &label, &stash.bound_channels, true, None).await;
     let reach = apply_reach(&state, &label, &audience, true).await;
     // 4b. the anchor: the sealed document, verbatim, into the app's namespace
     let context_storage = match (&stash.context_seal, memory_ns.is_empty()) {

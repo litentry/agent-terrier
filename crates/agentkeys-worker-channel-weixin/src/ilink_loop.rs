@@ -366,6 +366,7 @@ pub async fn run_with_token(
                         outcome.media_marker,
                         false,
                         &outcome.reach,
+                        &outcome.ask_candidates,
                         outcome.decision.target_alias.as_deref().and_then(|a| {
                             state.app_stage_hint_for_alias(a, relay::unix_secs() * 1000)
                         }),

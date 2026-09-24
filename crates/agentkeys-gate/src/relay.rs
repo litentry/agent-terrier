@@ -20,8 +20,9 @@ use serde_json::Value;
 use tokio_stream::wrappers::ReceiverStream;
 
 use agentkeys_core::audit::{
-    GateEmbedBody, GateSearchBody, GateTurnBody, SpeechAsrBody, SpeechTtsBody,
+    GateDecideBody, GateEmbedBody, GateSearchBody, GateTurnBody, SpeechAsrBody, SpeechTtsBody,
 };
+use agentkeys_protocol::{SystemOneRequest, SystemOneResponse};
 use base64::Engine;
 
 use crate::audit::Auditor;
@@ -49,6 +50,9 @@ pub struct Relay {
     /// #653 — transport for the SearXNG relay (its base/engines live in
     /// `config.search`; `None` config = the leg 503s).
     search_http: reqwest::Client,
+    /// #722 — transport for the System One (Jev) relay; the TypeSafe key and
+    /// base live in `config.systemone` (`None` config = the leg 503s).
+    decide_http: reqwest::Client,
     auditor: Option<Arc<Auditor>>,
 }
 
@@ -147,6 +151,7 @@ impl Relay {
             speech,
             voices,
             search_http: reqwest::Client::new(),
+            decide_http: reqwest::Client::new(),
             auditor,
         }
     }
@@ -358,6 +363,203 @@ impl Relay {
                 tracing::error!(user = %user_omni, error = %e, "GateEmbed audit append failed");
             }
         }
+    }
+
+    fn decide_body(
+        caller: &RelayKey,
+        model: &str,
+        outcome: &str,
+        question_count: u64,
+        usage: &UsageCounters,
+    ) -> GateDecideBody {
+        GateDecideBody {
+            device_id: caller.device_id.clone(),
+            api_key_id: caller.key_id.clone(),
+            model: model.to_string(),
+            outcome: outcome.to_string(),
+            question_count,
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+        }
+    }
+
+    /// Best-effort GateDecide audit for paths that cannot retro-fail the call.
+    async fn audit_decide_best_effort(&self, user_omni: &str, body: GateDecideBody) {
+        if let Some(auditor) = &self.auditor {
+            if let Err(e) = auditor.emit_decide(user_omni, body).await {
+                tracing::error!(user = %user_omni, error = %e, "GateDecide audit append failed");
+            }
+        }
+    }
+
+    /// #722 — the System One (Jev) decision relay: the household router's typed
+    /// pick through the gate-held TypeSafe key. The body is the shared
+    /// [`SystemOneRequest`] (one owner, D7) — anything else is a 400 here, never
+    /// a vendor 422 the caller has to interpret. Same custody, budget gates and
+    /// status triage as chat/embeddings; the answer body is returned verbatim
+    /// (the caller parses the typed answers). Nothing from `state` (a family
+    /// member's message) is logged or audited — counts only.
+    pub async fn handle_systemone(&self, caller: &RelayKey, raw: &[u8]) -> GateResult<TurnOutput> {
+        let Some(ts) = self.config.systemone.clone() else {
+            return Err(GateError::NotConfigured(
+                "systemone relay not configured on this gate (typesafe inference family)".into(),
+            ));
+        };
+        let req: SystemOneRequest = serde_json::from_slice(raw)
+            .map_err(|e| GateError::BadRequest(format!("invalid systemone body: {e}")))?;
+        if req.model.trim().is_empty() {
+            return Err(GateError::BadRequest(
+                "systemone body needs a `model`".into(),
+            ));
+        }
+        if req.questions.is_empty() {
+            return Err(GateError::BadRequest(
+                "systemone body needs at least one question".into(),
+            ));
+        }
+        let model = req.model.clone();
+        let question_count = req.questions.len() as u64;
+
+        // The same two deterministic budget gates as chat/embeddings/search.
+        if let Some(budget) = self.config.budget_for(&caller.user_omni) {
+            let used = self.meter.used_total(&caller.user_omni);
+            if used >= budget {
+                let row = Self::decide_body(
+                    caller,
+                    &model,
+                    "denied:budget_exceeded",
+                    question_count,
+                    &UsageCounters::default(),
+                );
+                self.audit_decide_best_effort(&caller.user_omni, row).await;
+                return Err(GateError::Budget(format!(
+                    "user token budget exhausted ({used}/{budget})"
+                )));
+            }
+        }
+        if let Some(key_budget) = self.keys.budget_for_key(&caller.key_id) {
+            let key_used = self
+                .meter
+                .used_total_for_key(&caller.user_omni, &caller.key_id);
+            if key_used >= key_budget {
+                let row = Self::decide_body(
+                    caller,
+                    &model,
+                    "denied:budget_exceeded",
+                    question_count,
+                    &UsageCounters::default(),
+                );
+                self.audit_decide_best_effort(&caller.user_omni, row).await;
+                return Err(GateError::Budget(format!(
+                    "delegate token budget exhausted ({key_used}/{key_budget} for key {})",
+                    caller.key_id
+                )));
+            }
+        }
+
+        let body = serde_json::to_value(&req)
+            .map_err(|e| GateError::Internal(format!("encoding systemone body: {e}")))?;
+        let resp = match UpstreamClient::systemone_post(
+            &self.decide_http,
+            &ts.base_url,
+            &ts.api_key,
+            &body,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(key = %caller.key_id, error = %e, "systemone upstream unreachable");
+                let row = Self::decide_body(
+                    caller,
+                    &model,
+                    "upstream_error",
+                    question_count,
+                    &UsageCounters::default(),
+                );
+                self.audit_decide_best_effort(&caller.user_omni, row).await;
+                return Err(e);
+            }
+        };
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/json")
+            .to_string();
+        if !status.is_success() {
+            let code = status.as_u16();
+            let upstream_body = resp.bytes().await.unwrap_or_default();
+            let row = Self::decide_body(
+                caller,
+                &model,
+                "upstream_error",
+                question_count,
+                &UsageCounters::default(),
+            );
+            self.audit_decide_best_effort(&caller.user_omni, row).await;
+            if (400..500).contains(&code) {
+                // 401/422/429 carry what the caller needs (a rate limit is the
+                // caller's cue to fall back); the vendor's body has no state echo.
+                tracing::warn!(key = %caller.key_id, status = code, "systemone upstream 4xx forwarded");
+                return Ok(TurnOutput::Full {
+                    status: code,
+                    content_type,
+                    body: upstream_body.to_vec(),
+                });
+            }
+            tracing::error!(
+                key = %caller.key_id,
+                status = code,
+                body = %String::from_utf8_lossy(&upstream_body[..upstream_body.len().min(400)]),
+                "systemone upstream 5xx — operator-logged, safe envelope returned"
+            );
+            return Err(GateError::Upstream(format!(
+                "systemone upstream returned HTTP {code}"
+            )));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| GateError::Upstream(format!("reading systemone response: {e}")))?;
+        // A 2xx that is not the documented answer shape is an upstream fault,
+        // surfaced as 502 so the router falls back instead of guessing.
+        let parsed: SystemOneResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| GateError::Upstream(format!("unparseable systemone response: {e}")))?;
+        let usage = UsageCounters {
+            prompt_tokens: parsed.usage.input_tokens,
+            completion_tokens: parsed.usage.output_tokens,
+            total_tokens: parsed.usage.total(),
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+        };
+
+        // Tokens are burned regardless of audit outcome — record first.
+        self.meter.record_decide(
+            &caller.user_omni,
+            &caller.device_id,
+            &caller.key_id,
+            &caller.label,
+            &usage,
+        );
+        let row = Self::decide_body(caller, &parsed.model, "ok", question_count, &usage);
+        if let Some(auditor) = &self.auditor {
+            if let Err(e) = auditor.emit_decide(&caller.user_omni, row).await {
+                tracing::error!(user = %caller.user_omni, error = %e, "GateDecide audit append failed");
+                if self.config.require_audit {
+                    return Err(GateError::Audit(
+                        "systemone call completed but could not be recorded (require_audit)".into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(TurnOutput::Full {
+            status: 200,
+            content_type,
+            body: bytes.to_vec(),
+        })
     }
 
     fn search_body(

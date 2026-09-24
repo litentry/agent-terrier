@@ -25,6 +25,11 @@ pub struct Counters {
     /// SAME budget as chat; this dimension keeps the split visible).
     pub embed_tokens: u64,
     pub embed_turns: u64,
+    /// #722 — the System One (Jev) slice of `total_tokens`: the household
+    /// router's decisions burn the SAME budget as chat; this keeps the split
+    /// visible ("#332's meter counts the router's calls per user").
+    pub decide_tokens: u64,
+    pub decide_turns: u64,
 }
 
 impl Counters {
@@ -44,6 +49,17 @@ impl Counters {
         self.total_tokens += u.total_tokens;
         self.embed_tokens += u.total_tokens;
         self.embed_turns += 1;
+    }
+
+    /// #722 — one System One decision (input + output tokens as TypeSafe
+    /// reports them; output is free on the vendor's price list but still a
+    /// token count the budget sees).
+    fn add_decide(&mut self, u: &UsageCounters) {
+        self.prompt_tokens += u.prompt_tokens;
+        self.completion_tokens += u.completion_tokens;
+        self.total_tokens += u.total_tokens;
+        self.decide_tokens += u.total_tokens;
+        self.decide_turns += 1;
     }
 }
 
@@ -142,6 +158,29 @@ impl Meter {
         bucket.label = key_label.to_string();
         bucket.device_id = device_id.to_string();
         bucket.counters.add_embed(usage);
+    }
+
+    /// #722 — record one System One decision. Same attribution roots as
+    /// `record`; the tokens land in the shared totals plus the decide dimension.
+    pub fn record_decide(
+        &self,
+        user_omni: &str,
+        device_id: &str,
+        api_key_id: &str,
+        key_label: &str,
+        usage: &UsageCounters,
+    ) {
+        let mut users = self.users.write().expect("meter lock poisoned");
+        let user = users.entry(user_omni.to_string()).or_default();
+        user.totals.add_decide(usage);
+        user.by_device
+            .entry(device_id.to_string())
+            .or_default()
+            .add_decide(usage);
+        let bucket = user.by_key.entry(api_key_id.to_string()).or_default();
+        bucket.label = key_label.to_string();
+        bucket.device_id = device_id.to_string();
+        bucket.counters.add_decide(usage);
     }
 
     /// Tokens already accumulated to the user — the budget comparand.

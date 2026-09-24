@@ -83,6 +83,29 @@ impl UpstreamClient {
             .map_err(|e| GateError::Upstream(format!("search upstream transport: {e}")))
     }
 
+    /// #722 — POST a System One request to TypeSafe (`<base>/v1/systemone`).
+    /// The gate-held TypeSafe key rides here; the caller only ever presented
+    /// its `gk_` relay key. No retry, no fallback — the caller (the contact
+    /// gate's router) owns the deterministic fallback.
+    pub async fn systemone_post(
+        client: &reqwest::Client,
+        base_url: &str,
+        api_key: &str,
+        body: &Value,
+    ) -> GateResult<reqwest::Response> {
+        client
+            .post(format!(
+                "{}{}",
+                base_url.trim_end_matches('/'),
+                agentkeys_protocol::SYSTEMONE_ROUTE
+            ))
+            .bearer_auth(api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| GateError::Upstream(format!("systemone upstream transport: {e}")))
+    }
+
     /// GET /models passthrough (OpenAI clients often list models at boot).
     pub async fn models(&self) -> GateResult<reqwest::Response> {
         self.client
