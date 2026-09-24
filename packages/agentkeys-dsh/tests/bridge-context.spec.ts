@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import WebServer from '@deepseek-ai/dsh-host-webserver';
 import * as bridgePlugin from '../src/bridge.js';
+import * as sessionsPlugin from '../src/sessions.js';
 import { renderContextSections } from '../src/bridge.js';
 
 // #662/#669 — the bridge's context + jobs surface: persona / skills /
@@ -71,6 +72,7 @@ async function boot(withPrompt: boolean) {
   ctx.provide('sessions', {});
   if (withPrompt) ctx.provide('systemPrompt', prompt.service);
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 });
+  await ctx.plugin(sessionsPlugin, {});
   await ctx.plugin(bridgePlugin, { cwd, engine: 'dsh', model: 'mock-model', bridgeToken: BRIDGE_TOKEN });
   await new Promise((r) => setTimeout(r, 20));
   return { base: `http://127.0.0.1:${ctx.webServer.port}`, cwd, agents, prompt };

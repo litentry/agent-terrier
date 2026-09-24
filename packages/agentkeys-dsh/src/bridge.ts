@@ -19,15 +19,20 @@
  *
  * Typed sessions (owner decision 2026-09-23): a `/v1/chat` body that names a
  * `session` runs in that session — a throwaway one for `none` / `event`, the
- * open one for its `thread` / `conversation` key (bridge-sessions.ts). A body
- * without one runs in the legacy resident session, kept for the direct
- * callers that carry no feed (the ESP32 client, the broker's bridge proxy).
+ * open one for its `thread` / `conversation` key. The POLICY (the index in
+ * DSH_HOME, idle expiry, reset scopes, retention, the `onEnded` hook) is the
+ * `agentkeysSessions` service (sessions.ts, plan dsh-plugin-abstraction PR 2);
+ * this plugin is transport plus the live agent handles. A body without a
+ * session runs in the legacy resident session, kept for the direct callers
+ * that carry no feed (the ESP32 client, the broker's bridge proxy). The
+ * deployment's hidden tools (`remember`, #726) are masked by the presets
+ * plugin, not here.
  *
  * Byte-exactness of the wire lives in bridge-frames.ts + bridge-stream.ts
  * (pure, unit-tested). NO default export (dsh postmortem 0001).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
@@ -39,26 +44,14 @@ import type { AgentHandle } from '@deepseek-ai/dsh-agent';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import { chatReply, encodeFrame, healthzBody } from './bridge-frames.js';
 import { exportHome, homeBytes, importHome, settleQuiet } from './bridge-mgmt.js';
-import {
-  endMatching,
-  expireIdle,
-  MAX_LIVE_SESSIONS,
-  newSessionId,
-  parseChatSession,
-  parseResetBody,
-  planTurn,
-  readIndex,
-  removeSessionDirs,
-  retire,
-  touch,
-  writeIndex,
-} from './bridge-sessions.js';
-import type { ChatSessionSpec, ResetSpec, SessionIndex } from './bridge-sessions.js';
+import { MAX_LIVE_SESSIONS, parseChatSession, parseResetBody } from './bridge-sessions.js';
+import type { ChatSessionSpec, ResetSpec } from './bridge-sessions.js';
 import { TurnStreamer } from './bridge-stream.js';
-import { DEFAULT_HIDDEN_TOOLS } from './mapping.js';
+import { SERVICE as SESSIONS_SERVICE } from './sessions.js';
+import type { SessionStore } from './sessions.js';
 
 export const name = 'agentkeys-bridge';
-export const inject = ['agents', 'sessions', 'webServer'];
+export const inject = ['agents', 'sessions', 'webServer', SESSIONS_SERVICE];
 
 export interface Config {
   cwd?: string;
@@ -113,23 +106,6 @@ function currentSelection(ctx: Context, config: Config): ModelSelection | undefi
 }
 
 const SESSION_ID = 'agentkeys-bridge-session';
-
-/** Take the tools this deployment switches off out of an agent's view
- *  (`remember`: OpenViking runs without an extraction model here, #726). The
- *  guard denies them too — a tool registered after setup stays visible but
- *  refused. dsh's restrict() rejects a name no plugin registered yet, so each
- *  name is masked on its own. */
-export function hideTools(agentCtx: Context): void {
-  const tools = (agentCtx as unknown as { tools?: { restrict(filter: { deny: string[] }): () => void } }).tools;
-  if (!tools) return;
-  for (const name of DEFAULT_HIDDEN_TOOLS) {
-    try {
-      tools.restrict({ deny: [name] });
-    } catch {
-      /* not registered (yet) — the guard's deny covers it */
-    }
-  }
-}
 
 /** A context file / skill / knowledge name the bridge will write: one path
  *  segment, no traversal, no hidden files. */
@@ -311,7 +287,7 @@ export function apply(ctx: Context, config: Config): void {
 
   function agentOpts() {
     const selection = currentSelection(ctx, config);
-    return { ...(selection ? { agentOptions: selection } : {}), setup: hideTools };
+    return selection ? { agentOptions: selection } : {};
   }
 
   /** Resume the bridge session's persisted log; undefined when none exists.
@@ -449,20 +425,11 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   // ── typed sessions (owner decision 2026-09-23) ──────────────────────────
+  // Policy = the `agentkeysSessions` service (sessions.ts); here: the live
+  // handles and the one-turn-at-a-time lock every session shares.
+  const store = (ctx as unknown as Record<string, unknown>)[SESSIONS_SERVICE] as SessionStore;
   /** Live typed sessions: dsh session id → handle + last use. */
   const live = new Map<string, { handle: AgentHandle; usedAt: number }>();
-  /** The index, cached; re-read after a home import. */
-  let sessionIndex: SessionIndex | undefined;
-
-  async function loadIndex(): Promise<SessionIndex> {
-    if (!sessionIndex) sessionIndex = await readIndex(home());
-    return sessionIndex;
-  }
-
-  async function saveIndex(next: SessionIndex): Promise<void> {
-    sessionIndex = next;
-    await writeIndex(home(), next);
-  }
 
   async function disposeLive(ids: Iterable<string>): Promise<void> {
     for (const id of [...ids]) {
@@ -472,15 +439,12 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  /** End sessions: dispose their live handles (the memory plugin commits each
-   *  OpenViking session) and retire their logs — the newest few stay. */
-  async function endSessions(ids: readonly string[]): Promise<void> {
-    if (ids.length === 0) return;
-    await disposeLive(ids);
-    const { index, toDelete } = retire(await loadIndex(), ids);
-    await saveIndex(index);
-    for (const id of toDelete) await removeSessionDirs(home(), id);
-  }
+  // A session ends (idle, reset, throwaway, replaced): its live handle goes
+  // first — that dispose is what commits the OpenViking session — then the
+  // store retires its logs. Every store call below runs under `turnLock`, so
+  // the handle cannot be mid-turn here.
+  const offEnded = store.onEnded(({ ids }) => disposeLive(ids));
+  ctx.effect(() => offEnded, 'agentkeys-bridge: dispose live handles when sessions end');
 
   /** Hold at most MAX_LIVE_SESSIONS in memory: the least recently used goes
    *  (it stays open in the index and resumes on its next turn). */
@@ -535,23 +499,15 @@ export function apply(ctx: Context, config: Config): void {
   ): Promise<{ streamer: TurnStreamer; sessionId: string; fresh: boolean }> {
     const run = turnLock.then(async () => {
       const now = Date.now();
-      const swept = expireIdle(await loadIndex(), now);
-      if (swept.ended.length > 0) {
-        await saveIndex(swept.index);
-        await endSessions(swept.ended);
-      }
-      const plan = planTurn(await loadIndex(), spec, now, () =>
-        newSessionId(spec.window, now, randomBytes(4).toString('hex')),
-      );
-      await saveIndex(plan.index);
-      await endSessions(plan.ended);
+      await store.expire(now);
+      const plan = await store.plan(spec, now);
       try {
         const { handle: agent, created } = await ensureTyped(plan.sessionId, plan.fresh);
         const streamer = await runTurnOn(agent, plan.sessionId, text, onFrame, created ? spec.context : undefined);
-        if (!plan.throwaway) await saveIndex(touch(await loadIndex(), plan.sessionId, Date.now()));
+        if (!plan.throwaway) await store.touch(plan.sessionId, Date.now());
         return { streamer, sessionId: plan.sessionId, fresh: created };
       } finally {
-        if (plan.throwaway) await endSessions([plan.sessionId]);
+        if (plan.throwaway) await store.discard(plan.sessionId);
       }
     });
     turnLock = run.catch(() => undefined);
@@ -561,12 +517,9 @@ export function apply(ctx: Context, config: Config): void {
   /** Idle sessions end on time even when no turn arrives. */
   async function sweepIdle(): Promise<number> {
     const run = turnLock.then(async () => {
-      const swept = expireIdle(await loadIndex(), Date.now());
-      if (swept.ended.length === 0) return 0;
-      await saveIndex(swept.index);
-      await endSessions(swept.ended);
-      console.error(`agentkeys-bridge: ended ${swept.ended.length} idle session(s)`);
-      return swept.ended.length;
+      const ended = await store.expire(Date.now());
+      if (ended.length > 0) console.error(`agentkeys-bridge: ended ${ended.length} idle session(s)`);
+      return ended.length;
     });
     turnLock = run.catch(() => undefined);
     return run;
@@ -576,15 +529,13 @@ export function apply(ctx: Context, config: Config): void {
    *  legacy resident session over (its log goes; the next ensure creates). */
   async function resetSessions(reset: ResetSpec): Promise<{ ended: number; legacyReset: boolean }> {
     const run = turnLock.then(async () => {
-      const { index, ended } = endMatching(await loadIndex(), reset);
-      await saveIndex(index);
-      await endSessions(ended);
+      const ended = await store.reset(reset);
       if (reset.scope !== 'app') return { ended: ended.length, legacyReset: false };
       if (handle) {
         await handle.dispose().catch(() => {});
         handle = undefined;
       }
-      await removeSessionDirs(home(), SESSION_ID);
+      await store.removeLogs(SESSION_ID);
       return { ended: ended.length, legacyReset: true };
     });
     turnLock = run.catch(() => undefined);
@@ -906,7 +857,7 @@ export function apply(ctx: Context, config: Config): void {
           jobs: null,
           hermes_home: home(),
           hermes_home_bytes: await homeBytes(home()),
-          open_sessions: (await loadIndex()).open.length,
+          open_sessions: (await store.load()).open.length,
           live_sessions: live.size,
         });
       },
@@ -957,7 +908,7 @@ export function apply(ctx: Context, config: Config): void {
             }
             await settleQuiet(targets);
           });
-          sessionIndex = undefined;
+          store.invalidate();
           sendJson(res, 200, {
             ...outcome,
             agent_restarted: agentRestarted,

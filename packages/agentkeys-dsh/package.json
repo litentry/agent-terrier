@@ -17,7 +17,9 @@
     "./invariant": "./lib/invariant.js",
     "./web-search": "./lib/web-search.js",
     "./actions": "./lib/actions.js",
-    "./daemon-client": "./lib/daemon-client.js"
+    "./daemon-client": "./lib/daemon-client.js",
+    "./presets": "./lib/presets.js",
+    "./sessions": "./lib/sessions.js"
   },
   "files": [
     "lib/",

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Context } from '@deepseek-ai/cordis';
 import WebServer from '@deepseek-ai/dsh-host-webserver';
 import * as bridgePlugin from '../src/bridge.js';
+import * as sessionsPlugin from '../src/sessions.js';
 
 // A controllable fake `agents` service: create() hands back a handle whose
 // followup() lets the test emit session/event frames, and whenIdle() resolves
@@ -106,6 +107,7 @@ async function boot(opts?: {
     ctx.provide('agentDefaultModel', { currentSelection: () => selection });
   }
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 });
+  await ctx.plugin(sessionsPlugin, {});
   await ctx.plugin(bridgePlugin, { cwd: '/tmp', engine: 'dsh', model: 'mock-model', ...(opts?.unarmed ? {} : { bridgeToken: BRIDGE_TOKEN }) });
   const base = `http://127.0.0.1:${ctx.webServer.port}`;
   return { base, fake };

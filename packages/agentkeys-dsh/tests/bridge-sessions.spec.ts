@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import WebServer from '@deepseek-ai/dsh-host-webserver';
 import * as bridgePlugin from '../src/bridge.js';
+import * as sessionsPlugin from '../src/sessions.js';
 import {
   emptyIndex,
   endMatching,
@@ -22,7 +23,6 @@ import {
   writeIndex,
 } from '../src/bridge-sessions.js';
 import type { ChatSessionSpec, SessionIndex } from '../src/bridge-sessions.js';
-import { DEFAULT_HIDDEN_TOOLS } from '../src/mapping.js';
 
 const MIN = 60_000;
 
@@ -243,6 +243,7 @@ async function boot() {
   ctx.provide('sessions', {});
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'ak-typed-'));
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 });
+  await ctx.plugin(sessionsPlugin, { homeDir: home });
   await ctx.plugin(bridgePlugin, { cwd: '/tmp', engine: 'dsh', model: 'mock-model', bridgeToken: 'sbt1_test', homeDir: home });
   await new Promise((r) => setTimeout(r, 20)); // the legacy session is created at activation
   const base = `http://127.0.0.1:${ctx.webServer.port}`;
@@ -346,10 +347,13 @@ describe('typed sessions through the bridge (real HTTP)', () => {
     expect((await readIndex(home)).open).toHaveLength(1);
   });
 
-  it('every agent is set up with the hidden tools masked', async () => {
+  it('the bridge creates agents with no setup hook — masking is the presets plugin’s job (presets.spec.ts)', async () => {
     const { fake, chat } = await boot();
     await chat('hi', { window: 'none', scope: 'schedule:x' });
-    expect(fake.restricted).toEqual(expect.arrayContaining([...DEFAULT_HIDDEN_TOOLS]));
+    // Since plan dsh-plugin-abstraction PR 2 the hidden tools (and every
+    // ungranted class) leave the agent's view through `agentkeys-presets` on
+    // `agent/created`; the bridge no longer restricts anything itself.
+    expect(fake.restricted).toEqual([]);
   });
 
   it('refuses a malformed session with 400 and a GET reset with 405', async () => {
