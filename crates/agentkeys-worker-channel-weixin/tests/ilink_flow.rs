@@ -212,8 +212,11 @@ async fn ilink_loop_relays_replies_persists_and_stops() {
         let ack_text = ack["msg"]["item_list"][0]["text_item"]["text"]
             .as_str()
             .unwrap();
+        // No feed is registered for storyteller on this gate, so the routed
+        // turn cannot land: the reply names the target and says it did not
+        // arrive — never «✅ 已转达».
         assert!(
-            ack_text.contains("已转达给 storyteller"),
+            ack_text.contains("没有送到 storyteller") && !ack_text.contains("已转达"),
             "routed ack names the target: {ack_text}"
         );
         // Each reply echoes THAT message's context token (per-message store-

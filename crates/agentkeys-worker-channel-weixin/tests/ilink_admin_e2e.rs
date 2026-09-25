@@ -462,6 +462,8 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     assert_eq!(grandma["welcomed"], true, "{grandma}");
 
     // The NOW-BOUND contact's turn routes + acks (the full multi-user loop).
+    // No feed is registered for the app on this gate, so the ack says the
+    // message did not arrive (never «✅ 已转达»).
     mock.inbox
         .lock()
         .unwrap()
@@ -471,7 +473,7 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
             b["msg"]["to_user_id"] == "wxid-grandma"
                 && b["msg"]["item_list"][0]["text_item"]["text"]
                     .as_str()
-                    .is_some_and(|t| t.contains("已转达给 storyteller"))
+                    .is_some_and(|t| t.contains("没有送到 storyteller"))
         })
     })
     .await;
@@ -780,7 +782,7 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
                 && b["msg"]["to_user_id"] == WIFE_USER
                 && b["msg"]["item_list"][0]["text_item"]["text"]
                     .as_str()
-                    .is_some_and(|t| t.contains("已转达给 chef"))
+                    .is_some_and(|t| t.contains("没有送到 chef"))
         })
     })
     .await;
@@ -797,7 +799,7 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
             hers.len() == 2
                 && hers[0].contains("绑定成功")
                 && hers[0].contains("/chef")
-                && hers[1].contains("已转达给 chef"),
+                && hers[1].contains("没有送到 chef"),
             "the acknowledgement rides her first message, before the routed ack: {hers:?}"
         );
         assert!(
@@ -848,7 +850,7 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
                     && b["msg"]["context_token"] == "ctx-w2"
                     && b["msg"]["item_list"][0]["text_item"]["text"]
                         .as_str()
-                        .is_some_and(|t| t.contains("已转达给 chef"))
+                        .is_some_and(|t| t.contains("没有送到 chef"))
             })
         },
     )

@@ -197,8 +197,10 @@ async fn telegram_loop_relays_replies_persists_and_stops() {
         let (_, ack) = &sends[0];
         assert_eq!(ack["chat_id"], 1001);
         let ack_text = ack["text"].as_str().unwrap();
+        // No feed is registered for chef on this gate, so the routed turn
+        // cannot land: the reply says it did not arrive — never "Passed along".
         assert!(
-            ack_text.contains("Passed along to chef"),
+            ack_text.contains("Not delivered to chef") && !ack_text.contains("Passed along"),
             "routed ack is ENGLISH and names the target: {ack_text}"
         );
 

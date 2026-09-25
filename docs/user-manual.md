@@ -521,6 +521,14 @@ were never registered here.
 
 **The WeChat contact gate (called the "gateway" until 2026-09-09) lets your family reach agents by chat — one clawbot per family member.** A clawbot is a special contact that lives only in the WeChat account that scanned its QR, so each member gets their own: you first, then everyone you invite. Each family member is a **contact** you add in parent-control with a **tier** (`owner / partner / elder / kid / helper / guest`) and a **reach** (which agents they may talk to; pre-filled per tier, and every app you install later adds itself to the tiers it admits). To route, they either type `/<agent> …` (e.g. `/chef 今晚吃什么`) or just ask — the contact gate's router picks an agent **only from that contact's reach**. When the stack has a decision model (TypeSafe's Jev, reached through the model gate), a plain message goes to the app it belongs to («今晚吃什么» → chef, «讲个故事» → storyteller); the app the member last talked to is context, not a rule, so a follow-up stays with it while a message that clearly asks for another app goes there. When the model isn't sure, the member gets a numbered ask («你是想找 1 chef 还是 2 storyteller？回复 1 或 2，或用 /别名») and their reply — the number, the name, or `/alias` — delivers the original message; an ask expires after ten minutes. When the model is unavailable (no key yet, the gate down), the router falls back to today's rule: a message routes only when it names exactly one of their apps as a word, otherwise it asks them to use `/alias`; the monitor shows which tier answered. It **can never** reach an agent you didn't grant them, no matter how a message is phrased. Privacy note: with the decision model on, the text of each plain message (and the member's tier) is sent to TypeSafe, a US-hosted service, to pick the destination; nothing about the message is stored in the audit trail beyond a hash, the decision and its confidence.
 
+**The reply is a delivery receipt.** «✅ 已转达给 chef» (on Telegram, "✅ Passed along to chef") means the message is on chef's feed, and chef's own answer follows in the same chat. When a message could not be delivered, the member is told so, with the reason. Nothing was passed on in these cases:
+
+- «⚠️ 消息没有送到 chef：它还没有设置好接收聊天消息…» — the contact gate has no chat feed for chef. Either chef's template has no messaging slot (such an app can never take chat, so remove it from the member's reach), or chef was installed before its chat channel was registered with the gate (an install or a rebind registers it). Fix it on chef's page in parent-control: **update to vX** when offered, otherwise **edit bindings** → commit.
+- «⚠️ …微信网关还没有接通…» — the contact gate itself cannot relay yet: it is not enrolled or not connected, or the stack has no channel worker. **applications → endpoints** shows the gate's **feed hop** and why it is not armed.
+- «⚠️ …这次没有发送成功…» — the send failed on the way. Sending again usually works; if it keeps failing, the cause is in the contact gate's log.
+
+A plain message is still routed over the member's whole reach, including an app that has no chat feed (owner decision 2026-09-25). The router never sends a message to a different app just because that app can receive it: the member is told the message did not arrive, and you set the app up or take it out of their reach.
+
 **Connecting is a scan, and the invite is the approval.** In parent-control's Contacts page, step 2 is *you*: mint your code and scan the connect QR with your **own** WeChat — your clawbot appears and you are bound as the owner. Step 3 is the family: mint an invite (name, tier, reach), then open their connect QR when they are with you; they scan it with **their own** WeChat, their clawbot appears, and they are bound with the tier and reach you chose — nothing else to confirm. They get «✅ 绑定成功…» in the new chat: right away when the bot can already reach them, otherwise as the reply to their very first message (a brand-new clawbot cannot speak first). It is sent exactly once; the Contacts page shows who has been told. Their WeChat identity is never shown to you or anyone (you manage them by the name and tier you chose). On the code-based transports (a 公众号 or Telegram) the older flow applies instead: the member texts a 6-digit code to the shared bot and you approve the claim. One thing to know: each member's own WeChat account hosts their bot, and Tencent's policy for personal accounts on this API is undocumented.
 
 Three things the contact gate will not do, by design:
@@ -662,9 +670,11 @@ the permissions you approve. parent-control → **applications**:
 - **WeChat is each member's own iLink clawbot.** The family talks to an app
   through their own clawbot, the one the assistants already use (the iLink
   personal-bot API, one bot per member): text, photos and voice clips all relay, and a voice
-  clip carries WeChat's own transcript. The contact gate's receipt
-  ("已转达给 chef 📷 [photo]") comes back at once; the app's own answer comes
-  back through the same bot.
+  clip carries WeChat's own transcript. The contact gate's receipt comes back
+  at once: «✅ 已转达给 chef 📷 [photo]» once the photo is on chef's feed, or
+  «⚠️ 消息没有送到 chef：…» with the reason when it could not be delivered
+  (see the contact gate section above). The app's own answer comes back
+  through the same bot.
 - **Knowledge.** The **Knowledge** page is the one place for everything your
   household's assistants may know: your canonical memory namespaces and the
   typed items an app binds (the former memory and resources pages). It is

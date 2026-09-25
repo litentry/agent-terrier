@@ -276,12 +276,8 @@ async fn callback_relay(
         // The zh reply the iLink loop would send — surfaced so the mock e2e can
         // assert the #722 ask text and the receipts.
         let reply = outcome.claim_ack.clone().or_else(|| {
-            relay::reply_text_for_turn(
-                &outcome.decision,
-                outcome.media_marker,
+            outcome.reply_text(
                 false,
-                &outcome.reach,
-                &outcome.ask_candidates,
                 outcome
                     .decision
                     .target_alias
@@ -347,12 +343,8 @@ async fn telegram_mock_inbound(
     let media = mock_media(&v);
     let outcome = relay::process_turn(&state, "telegram", &from, &text, media).await;
     let reply = outcome.claim_ack.clone().or_else(|| {
-        relay::reply_text_for_turn(
-            &outcome.decision,
-            outcome.media_marker,
+        outcome.reply_text(
             true,
-            &outcome.reach,
-            &outcome.ask_candidates,
             outcome
                 .decision
                 .target_alias

@@ -340,7 +340,7 @@ pub async fn run_with_token(
             );
             if let Some(f) = outcome.feed.as_ref() {
                 info!(channel = %f.channel_id, event = %f.event_id, media = f.media_event_id.is_some(), "feed hop landed");
-            } else if let Some(e) = outcome.feed_error.as_deref() {
+            } else if let Some(e) = outcome.feed_error.as_ref() {
                 warn!(reason = %e, "allowed turn did NOT reach a feed");
             }
 
@@ -361,12 +361,8 @@ pub async fn run_with_token(
             }
             let mut reply =
                 outcome.claim_ack.clone().or_else(|| {
-                    relay::reply_text_for_turn(
-                        &outcome.decision,
-                        outcome.media_marker,
+                    outcome.reply_text(
                         false,
-                        &outcome.reach,
-                        &outcome.ask_candidates,
                         outcome.decision.target_alias.as_deref().and_then(|a| {
                             state.app_stage_hint_for_alias(a, relay::unix_secs() * 1000)
                         }),

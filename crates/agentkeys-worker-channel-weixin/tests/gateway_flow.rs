@@ -12,7 +12,10 @@ fn write_registry() -> String {
     // A household: an owner who may reach chef+doorkeeper, a kid who may only
     // reach the storyteller, plus a PENDING bind (sent the code, not yet
     // master-confirmed — must NOT resolve).
-    let json = r#"{
+    write_registry_json(DEFAULT_HOUSEHOLD)
+}
+
+const DEFAULT_HOUSEHOLD: &str = r#"{
       "bound": [
         {"contact_id":"c-owner","transport":"weixin","transport_id":"openid-owner",
          "display_name":"妈妈","tier":"owner","reach":["chef","doorkeeper"]},
@@ -28,6 +31,8 @@ fn write_registry() -> String {
         {"alias":"storyteller","channel_id":"stories"}
       ]
     }"#;
+
+fn write_registry_json(json: &str) -> String {
     // UNIQUE per call — the 8 tests spawn in parallel and `fs::write` truncates
     // before writing, so a shared path lets one test's load catch a sibling's
     // half-written file (the "EOF at line 1 column 0" flake).
@@ -78,7 +83,12 @@ fn config(registry_file: String) -> WeixinGatewayConfig {
 }
 
 async fn spawn() -> String {
-    let state = Arc::new(WeixinGatewayState::build(config(write_registry())).unwrap());
+    spawn_on(DEFAULT_HOUSEHOLD).await
+}
+
+async fn spawn_on(household: &str) -> String {
+    let state =
+        Arc::new(WeixinGatewayState::build(config(write_registry_json(household))).unwrap());
     let app = handlers::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -283,6 +293,10 @@ async fn unknown_openid_is_dropped_and_pending_is_not_yet_bound() {
     // A stranger → dropped.
     let (_, stranger) = post_msg(&base, "openid-stranger", "/chef hi").await;
     assert_eq!(stranger["decision"]["reason"], "unknown_contact");
+    assert!(
+        stranger["reply"].is_null(),
+        "a stranger gets no reply: {stranger}"
+    );
     // A PENDING openid (sent the bind code, not yet master-confirmed) is ALSO
     // unknown — the gateway never self-promotes pending→bound (D10 advisory: no
     // registry write without the master's confirm).
@@ -414,6 +428,261 @@ async fn healthz_reports_bound_count_and_no_outbound() {
     assert_eq!(body["outbound_enabled"], false); // no app-secret in the test config
 }
 
+// ── the receipt is a delivery receipt ────────────────────────────────────────
+//
+// «✅ 已转达» goes out only when the feed hop LANDED. The gates above run with no
+// channel worker, so every allowed turn on them is told it did not arrive. The
+// mock stack below plays the two services the hop calls — the broker (the gate
+// device's session + a channel cap) and the channel worker (publish) — so a
+// hop lands, or fails, on demand.
+
+/// The owner reaches an app with NO feed on this gate (`agent-i`: a role with
+/// no messaging slot, or an app not rebound since its bound channel became its
+/// feed) beside one that has a feed (`chef`) — prod's owner on 2026-09-25.
+const UNREGISTERED_HOUSEHOLD: &str = r#"{
+      "bound": [
+        {"contact_id":"c-owner","transport":"weixin","transport_id":"openid-owner",
+         "display_name":"妈妈","tier":"owner","reach":["agent-i","chef"],"welcomed":true},
+        {"contact_id":"c-owner-tg","transport":"telegram","transport_id":"tg-owner",
+         "display_name":"Mom","tier":"owner","reach":["agent-i","chef"],"welcomed":true}
+      ],
+      "apps": [
+        {"alias":"chef","channel_id":"family-chat"}
+      ]
+    }"#;
+
+const UNREGISTERED_AGENT_I: &str =
+    "⚠️ 消息没有送到 agent-i：它还没有设置好接收聊天消息。请管理员在家长控制台打开它的应用页设置。";
+const UNREGISTERED_AGENT_I_EN: &str = "⚠️ Not delivered to agent-i: it isn't set up to receive chat yet. The owner can set it up on its page in Parent Control.";
+const GATE_NOT_READY_CHEF: &str =
+    "⚠️ 消息没有送到 chef：微信网关还没有接通。请管理员在家长控制台检查网关设置。";
+const HOP_FAILED_CHEF: &str =
+    "⚠️ 消息没有送到 chef：这次没有发送成功，请稍后再试；一直不行的话请告诉管理员。";
+
+async fn post_telegram(base: &str, from: &str, text: &str) -> serde_json::Value {
+    reqwest::Client::new()
+        .post(format!("{base}/telegram/mock-inbound"))
+        .json(&serde_json::json!({"from": from, "text": text}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_allowed_turn_that_reached_no_feed_is_never_told_it_was_passed_on() {
+    let base = spawn_on(UNREGISTERED_HOUSEHOLD).await;
+    // `agent-i` is in reach, so L3 allows the turn — but no feed is registered
+    // for it here, so nothing can reach it and the member is told so.
+    let (_, body) = post_msg(&base, "openid-owner", "/agent-i 帮我写封邮件").await;
+    assert_eq!(body["decision"]["allowed"], true, "{body}");
+    assert!(body["feed"].is_null());
+    assert_eq!(body["feed_error"], "app_feed_unregistered:agent-i");
+    assert_eq!(body["reply"], UNREGISTERED_AGENT_I);
+    // `chef` has a feed, but this gate has no channel worker to publish it on.
+    let (_, body) = post_msg(&base, "openid-owner", "/chef 今晚吃什么").await;
+    assert_eq!(body["decision"]["allowed"], true, "{body}");
+    assert!(body["feed"].is_null());
+    assert_eq!(body["reply"], GATE_NOT_READY_CHEF);
+    // The Telegram twin says the same in English.
+    let tg = post_telegram(&base, "tg-owner", "/agent-i draft an email").await;
+    assert_eq!(tg["decision"]["allowed"], true, "{tg}");
+    assert_eq!(tg["reply"], UNREGISTERED_AGENT_I_EN);
+    let tg = post_telegram(&base, "tg-owner", "/chef what's for dinner").await;
+    assert_eq!(
+        tg["reply"],
+        "⚠️ Not delivered to chef: the contact gate isn't connected yet. The owner can check its setup in Parent Control."
+    );
+    // An unknown sender is still dropped silently, on both transports.
+    let (_, stranger) = post_msg(&base, "openid-stranger", "/agent-i hi").await;
+    assert_eq!(stranger["decision"]["reason"], "unknown_contact");
+    assert!(stranger["reply"].is_null(), "{stranger}");
+    let tg = post_telegram(&base, "tg-stranger", "/agent-i hi").await;
+    assert!(tg["reply"].is_null(), "{tg}");
+}
+
+#[tokio::test]
+async fn a_plain_message_still_routes_over_the_whole_reach_including_an_app_with_no_feed() {
+    // Owner decision 2026-09-25: text routing does NOT skip an app with no feed
+    // (photos do, #722). The member is told it did not arrive; nothing lands
+    // at an app the message was not meant for.
+    let base = spawn_on(UNREGISTERED_HOUSEHOLD).await;
+    let (_, body) = post_msg(
+        &base,
+        "openid-owner",
+        "please ask agent-i to draft the email",
+    )
+    .await;
+    assert_eq!(body["decision"]["target_alias"], "agent-i", "{body}");
+    assert_eq!(body["decision"]["routed_by"], "advisory_router");
+    assert_eq!(body["reply"], UNREGISTERED_AGENT_I);
+    // With no app named, the owner reaches TWO apps — `agent-i` still counts —
+    // so the turn is asked back, never sent to `chef` as the only app with a feed.
+    let (_, body) = post_msg(&base, "openid-owner", "hello there").await;
+    assert_eq!(body["decision"]["reason"], "no_alias", "{body}");
+    let reply = body["reply"].as_str().unwrap();
+    assert!(
+        reply.contains("/agent-i") && reply.contains("/chef"),
+        "{reply}"
+    );
+}
+
+/// The broker + channel worker the feed hop calls, on one address.
+#[derive(Clone, Default)]
+struct MockStack {
+    /// Every publish the channel worker accepted.
+    published: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    /// Answer every publish with a 500 (a channel worker outage).
+    down: Arc<std::sync::atomic::AtomicBool>,
+}
+
+async fn mock_resolve() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "session_jwt": "mock.session.jwt",
+        "actor_omni": format!("0x{}", "cd".repeat(32)),
+    }))
+}
+
+async fn mock_cap_mint(
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({"service": body["service"], "mock": true}))
+}
+
+async fn mock_publish(
+    axum::extract::State(stack): axum::extract::State<MockStack>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if stack.down.load(std::sync::atomic::Ordering::SeqCst) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "channel worker down",
+        )
+            .into_response();
+    }
+    let mut published = stack.published.lock().unwrap();
+    published.push(body);
+    axum::Json(serde_json::json!({"event_id": format!("evt-{}", published.len())})).into_response()
+}
+
+async fn mock_blob_put() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({"body_ref": "bots/mock/channel/family-chat.blob/1"}))
+}
+
+/// Serve the mock stack; returns its URL (the broker and the channel worker).
+async fn spawn_stack() -> (String, MockStack) {
+    let stack = MockStack::default();
+    let app = axum::Router::new()
+        .route("/v1/agent/resolve", axum::routing::post(mock_resolve))
+        .route("/v1/cap/channel-pub", axum::routing::post(mock_cap_mint))
+        .route("/v1/channel/publish", axum::routing::post(mock_publish))
+        .route("/v1/channel/blob-put", axum::routing::post(mock_blob_put))
+        .with_state(stack.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stack_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (stack_url, stack)
+}
+
+/// Point `cfg`'s feed hop at the stack, with the gate's device actor enrolled.
+fn arm_feed_hop(cfg: &mut WeixinGatewayConfig, stack_url: &str) {
+    static STACK_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = STACK_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("ak-gw-stack-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let device_state = dir.join("device.json");
+    std::fs::write(
+        &device_state,
+        serde_json::json!({
+            "actor_omni": format!("0x{}", "cd".repeat(32)),
+            "broker_url": stack_url,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    cfg.channel_worker_url = Some(stack_url.to_string());
+    cfg.device = agentkeys_worker_channel_weixin::config::DeviceConfig {
+        broker_url: Some(stack_url.to_string()),
+        key_file: dir.join("k10.hex").to_string_lossy().to_string(),
+        state_file: device_state.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+}
+
+/// A contact gate whose feed hop lands on the mock stack.
+async fn spawn_with_stack(household: &str) -> (String, MockStack) {
+    let (stack_url, stack) = spawn_stack().await;
+    let mut cfg = config(write_registry_json(household));
+    arm_feed_hop(&mut cfg, &stack_url);
+    let state = Arc::new(WeixinGatewayState::build(cfg).unwrap());
+    let app = handlers::build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), stack)
+}
+
+#[tokio::test]
+async fn the_receipt_says_passed_on_only_when_the_hop_landed() {
+    let (base, stack) = spawn_with_stack(UNREGISTERED_HOUSEHOLD).await;
+    // The hop lands on chef's feed: the receipt names the event it made.
+    let (_, body) = post_msg(&base, "openid-owner", "/chef 今晚吃什么").await;
+    assert_eq!(body["feed"]["channel_id"], "family-chat", "{body}");
+    assert_eq!(body["feed"]["event_id"], "evt-1");
+    assert!(body["feed_error"].is_null());
+    assert_eq!(body["reply"], "✅ 已转达给 chef");
+    {
+        let published = stack.published.lock().unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0]["direction"], "in");
+        assert_eq!(published[0]["contact"]["contact_id"], "c-owner");
+    }
+    let tg = post_telegram(&base, "tg-owner", "/chef what's for dinner").await;
+    assert_eq!(tg["reply"], "✅ Passed along to chef", "{tg}");
+    // A photo lands beside the feed; the receipt carries its marker.
+    let photo: serde_json::Value = reqwest::Client::new()
+        .post(format!("{base}/wechat/callback"))
+        .json(&serde_json::json!({
+            "from": "openid-owner", "text": "/chef 冰箱里还有什么",
+            "image_b64": "aGVsbG8=", "content_type": "image/png",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        photo["feed"]["body_ref"], "bots/mock/channel/family-chat.blob/1",
+        "{photo}"
+    );
+    assert_eq!(photo["reply"], "✅ 已转达给 chef 📷 [photo]");
+    assert_eq!(stack.published.lock().unwrap().len(), 4, "image + text");
+    // The same gate, an app with no feed: nothing is published, and the member
+    // is told it did not arrive.
+    let (_, body) = post_msg(&base, "openid-owner", "/agent-i 帮我写封邮件").await;
+    assert!(body["feed"].is_null(), "{body}");
+    assert_eq!(body["reply"], UNREGISTERED_AGENT_I);
+    assert_eq!(stack.published.lock().unwrap().len(), 4);
+    // The channel worker fails: the hop ran and did not land — try again.
+    stack.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_, body) = post_msg(&base, "openid-owner", "/chef 明天呢").await;
+    assert!(body["feed"].is_null(), "{body}");
+    assert!(body["feed_error"]
+        .as_str()
+        .unwrap()
+        .starts_with("text publish:"));
+    assert_eq!(body["reply"], HOP_FAILED_CHEF);
+    let tg = post_telegram(&base, "tg-owner", "/chef and tomorrow?").await;
+    assert_eq!(
+        tg["reply"],
+        "⚠️ Not delivered to chef: it didn't go through this time. Try again in a moment, and tell the owner if it keeps happening."
+    );
+}
+
 // ── #722 — the Jev router tier against a MOCK model gate ─────────────────────
 //
 // The mock plays the gate's `/v1/systemone` relay: it captures every request
@@ -516,7 +785,9 @@ async fn jev_routes_a_plain_message_within_reach_and_the_options_are_exactly_the
     assert_eq!(body["decision"]["routed_by"], "jev");
     assert_eq!(body["router"]["engine"], "jev");
     assert_eq!(body["router"]["confidence"], 0.85);
-    assert_eq!(body["reply"], "✅ 已转达给 chef");
+    // This gate has no channel worker: the turn is routed but cannot land,
+    // and the reply says so — never «✅ 已转达».
+    assert_eq!(body["reply"], GATE_NOT_READY_CHEF);
     assert_eq!(body["routed_event"]["channel_id"], "family-chat");
     // The gate saw the contact gate's OWN relay key and ONE choice whose
     // options are the owner's reach + `unclear` — nothing wider, no /alias.

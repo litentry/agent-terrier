@@ -36,6 +36,50 @@ pub struct FeedReceipt {
     pub body_ref: Option<String>,
 }
 
+/// Why an allowed turn did not land on its app's feed, in the terms the
+/// member's reply uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedMiss {
+    /// No feed is registered for the alias on this gate: the app has no
+    /// messaging slot, or was not installed / rebound since the bound channel
+    /// became its feed. It can receive nothing until the owner sets it up.
+    AppUnregistered,
+    /// The gate itself cannot relay yet: no channel worker, its device not
+    /// configured or not enrolled, or the operator omni not armed.
+    GateNotReady,
+    /// The hop ran and a broker or channel-worker call failed.
+    HopFailed,
+}
+
+/// A feed hop that did not land: the cause, plus the operator-facing detail
+/// (the logs and the mock responses' `feed_error`, serialized as that string).
+#[derive(Debug, Clone)]
+pub struct FeedError {
+    pub cause: FeedMiss,
+    pub detail: String,
+}
+
+impl FeedError {
+    fn new(cause: FeedMiss, detail: impl Into<String>) -> Self {
+        Self {
+            cause,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for FeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl serde::Serialize for FeedError {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.detail)
+    }
+}
+
 /// Everything one inbound turn produced — the decision (for the transport's
 /// reply), the resolved contact (for logs/audit), and the routed event.
 pub struct RelayOutcome {
@@ -54,10 +98,11 @@ pub struct RelayOutcome {
     pub claim_ack: Option<String>,
     /// #667 — the feed hop: `Some` when the turn landed on the app's feed.
     pub feed: Option<FeedReceipt>,
-    /// Why the hop did not run / failed (decision-only gateway, device not
-    /// enrolled, a worker error) — on the mock responses + in the logs. Never
+    /// Why the hop did not run / failed (no feed registered for the alias,
+    /// decision-only gateway, device not enrolled, a worker error) — on the
+    /// mock responses + in the logs, and named in the member's reply. Never
     /// silent: an allowed turn that reached no feed is a LOUD warn.
-    pub feed_error: Option<String>,
+    pub feed_error: Option<FeedError>,
     /// The media marker for the reply text, when an original rode along.
     pub media_marker: Option<&'static str>,
     /// The contact's reach (empty for an unknown sender) — the ask-back names
@@ -73,6 +118,30 @@ pub struct RelayOutcome {
     pub ask_candidates: Vec<String>,
     /// #722 — what the router tier did on this turn (audit + monitor).
     pub router: Option<RouterTrace>,
+}
+
+impl RelayOutcome {
+    /// The reply this turn gets (`None` = a silent drop) — the ONE reply every
+    /// transport sends. An allowed turn says «✅ 已转达» only when its feed hop
+    /// landed; otherwise the member is told the message did not reach the app,
+    /// and why.
+    pub fn reply_text(&self, en: bool, stage_hint: Option<&str>) -> Option<String> {
+        if self.decision.allowed && self.feed.is_none() {
+            return Some(undelivered_text(
+                self.decision.target_alias.as_deref(),
+                self.feed_error.as_ref().map(|e| e.cause),
+                en,
+            ));
+        }
+        reply_text_for_turn(
+            &self.decision,
+            self.media_marker,
+            en,
+            &self.reach,
+            &self.ask_candidates,
+            stage_hint,
+        )
+    }
 }
 
 /// #722 — the router tier's trace for one turn: which engine answered, the
@@ -352,7 +421,10 @@ pub async fn process_turn(
                 contact = %contact_id,
                 "#667 feed hop did NOT land — no channel is registered for this alias on this gate (the app's install / rebind registers it)"
             );
-            feed_error = Some(format!("app_feed_unregistered:{alias}"));
+            feed_error = Some(FeedError::new(
+                FeedMiss::AppUnregistered,
+                format!("app_feed_unregistered:{alias}"),
+            ));
         } else {
             match feed_hop(state, &channel_id, &inbound, media.as_ref(), &stamp).await {
                 Ok(r) => feed = Some(r),
@@ -547,17 +619,19 @@ async fn feed_hop(
     inbound: &GatewayInbound,
     media: Option<&InboundMedia>,
     stamp: &ContactStamp,
-) -> Result<FeedReceipt, String> {
+) -> Result<FeedReceipt, FeedError> {
     if let Some(b) = state.device.hop_blocker() {
-        return Err(b.to_string());
+        return Err(FeedError::new(FeedMiss::GateNotReady, b));
     }
     let operator = state.effective_operator_omni();
     if decode_omni_32(&operator).is_none() {
-        return Err(
-            "operator omni not armed (connect the contact gate from parent-control 微信网关 → 连接)"
-                .to_string(),
-        );
+        return Err(FeedError::new(
+            FeedMiss::GateNotReady,
+            "operator omni not armed (connect the contact gate from parent-control 微信网关 → 连接)",
+        ));
     }
+    let failed =
+        |what: &str, e: anyhow::Error| FeedError::new(FeedMiss::HopFailed, format!("{what}: {e}"));
     let device = &state.device;
     let mut media_event_id = None;
     let mut body_ref = None;
@@ -565,7 +639,7 @@ async fn feed_hop(
         let r = device
             .put_blob(&operator, channel_id, &m.content_type, &m.bytes)
             .await
-            .map_err(|e| format!("blob-put: {e}"))?;
+            .map_err(|e| failed("blob-put", e))?;
         let id = device
             .publish(
                 &operator,
@@ -579,7 +653,7 @@ async fn feed_hop(
                 },
             )
             .await
-            .map_err(|e| format!("media publish: {e}"))?;
+            .map_err(|e| failed("media publish", e))?;
         media_event_id = Some(id);
         body_ref = Some(r);
     }
@@ -600,13 +674,15 @@ async fn feed_hop(
                     },
                 )
                 .await
-                .map_err(|e| format!("text publish: {e}"))?,
+                .map_err(|e| failed("text publish", e))?,
         )
     };
     let event_id = text_event_id
         .clone()
         .or_else(|| media_event_id.clone())
-        .ok_or_else(|| "nothing to relay (no text, no media)".to_string())?;
+        .ok_or_else(|| {
+            FeedError::new(FeedMiss::HopFailed, "nothing to relay (no text, no media)")
+        })?;
     device.remember_correlation(
         &event_id,
         channel_id,
@@ -627,8 +703,10 @@ async fn feed_hop(
 
 /// The in-channel reply for a decision — `None` = SILENT drop (an unknown
 /// sender never learns a policy-bearing bot answered, §9 threat 1; a flooding
-/// contact gets one terse line, not an amplification loop).
-pub fn reply_text_for(decision: &L3Decision) -> Option<String> {
+/// contact gets one terse line, not an amplification loop). The allowed line
+/// is a delivery receipt: only [`RelayOutcome::reply_text`] reaches it, after
+/// the feed hop landed.
+fn reply_text_for(decision: &L3Decision) -> Option<String> {
     if decision.allowed {
         return Some(format!(
             "✅ 已转达给 {}",
@@ -656,7 +734,7 @@ pub fn reply_text_for(decision: &L3Decision) -> Option<String> {
 /// The English twin of [`reply_text_for`] — the Telegram transport's replies
 /// (#444: stack ② is the global/EN stack). SAME decision → reply mapping,
 /// including the unknown-sender SILENT drop; only the language differs.
-pub fn reply_text_for_en(decision: &L3Decision) -> Option<String> {
+fn reply_text_for_en(decision: &L3Decision) -> Option<String> {
     if decision.allowed {
         return Some(format!(
             "✅ Passed along to {}",
@@ -683,10 +761,6 @@ pub fn reply_text_for_en(decision: &L3Decision) -> Option<String> {
     }
 }
 
-/// The reply for a turn that may have carried a media original: the decision
-/// reply, plus the relayed-media marker on an allowed turn (`zh` for the
-/// weixin family, `en` for Telegram). Same decision → reply mapping as the
-/// two functions above (the unknown-sender SILENT drop included).
 /// The neutral hint an UNKNOWN sender gets on the private-bot transports
 /// instead of dead silence — once per sender per [`UNKNOWN_HINT_WINDOW_SECS`].
 /// The L3 decision stays a DROP (nothing is routed, nothing about the household
@@ -715,7 +789,11 @@ pub fn unknown_sender_hint(
     Some(if en { UNKNOWN_HINT_EN } else { UNKNOWN_HINT_ZH })
 }
 
-pub fn reply_text_for_turn(
+/// The reply for a turn that may have carried a media original: the decision
+/// reply, plus the relayed-media marker on an allowed turn (`zh` for the
+/// weixin family, `en` for Telegram). Same decision → reply mapping as the
+/// two functions above (the unknown-sender SILENT drop included).
+fn reply_text_for_turn(
     decision: &L3Decision,
     media_marker: Option<&str>,
     en: bool,
@@ -752,6 +830,38 @@ pub fn reply_text_for_turn(
         }
     }
     Some(out)
+}
+
+/// The reply for an allowed turn whose feed hop did not land, in place of
+/// «✅ 已转达»: the message did not reach the app, why in plain words, and who
+/// can fix it (the owner, in parent-control; a failed send is worth a retry).
+fn undelivered_text(alias: Option<&str>, cause: Option<FeedMiss>, en: bool) -> String {
+    let why = match (cause, en) {
+        (Some(FeedMiss::AppUnregistered), false) => {
+            "它还没有设置好接收聊天消息。请管理员在家长控制台打开它的应用页设置。"
+        }
+        (Some(FeedMiss::AppUnregistered), true) => {
+            "it isn't set up to receive chat yet. The owner can set it up on its page in Parent Control."
+        }
+        (Some(FeedMiss::GateNotReady), false) => {
+            "微信网关还没有接通。请管理员在家长控制台检查网关设置。"
+        }
+        (Some(FeedMiss::GateNotReady), true) => {
+            "the contact gate isn't connected yet. The owner can check its setup in Parent Control."
+        }
+        (_, false) => "这次没有发送成功，请稍后再试；一直不行的话请告诉管理员。",
+        (_, true) => {
+            "it didn't go through this time. Try again in a moment, and tell the owner if it keeps happening."
+        }
+    };
+    if en {
+        format!(
+            "⚠️ Not delivered to {}: {why}",
+            alias.unwrap_or("your assistant")
+        )
+    } else {
+        format!("⚠️ 消息没有送到 {}：{why}", alias.unwrap_or("助手"))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -909,6 +1019,111 @@ mod tests {
             reply_text_for(&decision(false, "operator_grade_requires_session"))
                 .unwrap()
                 .contains("https://pc.local/")
+        );
+    }
+
+    fn outcome(
+        decision: L3Decision,
+        feed: Option<FeedReceipt>,
+        feed_error: Option<FeedError>,
+    ) -> RelayOutcome {
+        RelayOutcome {
+            inbound: GatewayInbound {
+                transport: "weixin".into(),
+                transport_id: "openid-owner".into(),
+                text: "今晚吃什么".into(),
+                alias: Some("chef".into()),
+            },
+            decision,
+            contact_id: "c-owner".into(),
+            tier: "owner".into(),
+            event: None,
+            claim_ack: None,
+            feed,
+            feed_error,
+            media_marker: Some("📷"),
+            reach: vec!["chef".into()],
+            welcome: None,
+            ask_candidates: Vec::new(),
+            router: None,
+        }
+    }
+
+    #[test]
+    fn the_receipt_claims_delivery_only_for_a_landed_hop() {
+        let landed = FeedReceipt {
+            channel_id: "family-chat".into(),
+            event_id: "evt-1".into(),
+            media_event_id: None,
+            body_ref: None,
+        };
+        let ok = outcome(decision(true, "ok"), Some(landed), None);
+        assert_eq!(
+            ok.reply_text(false, Some("loading")).unwrap(),
+            "✅ 已转达给 chef 📷（它还在加载知识，稍等片刻）"
+        );
+        assert_eq!(
+            ok.reply_text(true, None).unwrap(),
+            "✅ Passed along to chef 📷"
+        );
+
+        let missed = |cause| {
+            outcome(
+                decision(true, "ok"),
+                None,
+                Some(FeedError::new(cause, "detail for the logs")),
+            )
+        };
+        let cases = [
+            (
+                FeedMiss::AppUnregistered,
+                "⚠️ 消息没有送到 chef：它还没有设置好接收聊天消息。请管理员在家长控制台打开它的应用页设置。",
+                "⚠️ Not delivered to chef: it isn't set up to receive chat yet. The owner can set it up on its page in Parent Control.",
+            ),
+            (
+                FeedMiss::GateNotReady,
+                "⚠️ 消息没有送到 chef：微信网关还没有接通。请管理员在家长控制台检查网关设置。",
+                "⚠️ Not delivered to chef: the contact gate isn't connected yet. The owner can check its setup in Parent Control.",
+            ),
+            (
+                FeedMiss::HopFailed,
+                "⚠️ 消息没有送到 chef：这次没有发送成功，请稍后再试；一直不行的话请告诉管理员。",
+                "⚠️ Not delivered to chef: it didn't go through this time. Try again in a moment, and tell the owner if it keeps happening.",
+            ),
+        ];
+        for (cause, zh, en) in cases {
+            // The launch-state hint and the media marker belong to a delivered
+            // turn only.
+            assert_eq!(
+                missed(cause).reply_text(false, Some("loading")).unwrap(),
+                zh
+            );
+            assert_eq!(missed(cause).reply_text(true, Some("loading")).unwrap(), en);
+        }
+        // No receipt and no recorded cause still never claims delivery.
+        let unknown = outcome(decision(true, "ok"), None, None);
+        assert!(unknown
+            .reply_text(false, None)
+            .unwrap()
+            .starts_with("⚠️ 消息没有送到 chef"));
+
+        // Refusals are untouched: the stranger stays silent, the rest reply.
+        let stranger = outcome(decision(false, "unknown_contact"), None, None);
+        assert!(stranger.reply_text(false, None).is_none());
+        assert!(stranger.reply_text(true, None).is_none());
+        let refused = outcome(decision(false, "out_of_reach"), None, None);
+        assert_eq!(
+            refused.reply_text(false, None).unwrap(),
+            "⛔ 你没有访问这个助手的权限。"
+        );
+        // The mock responses carry the detail as a plain string.
+        assert_eq!(
+            serde_json::to_value(FeedError::new(
+                FeedMiss::HopFailed,
+                "text publish: HTTP 500"
+            ))
+            .unwrap(),
+            serde_json::json!("text publish: HTTP 500")
         );
     }
 
