@@ -23,6 +23,7 @@ mod knowledge_history;
 mod lifecycle;
 mod master_session;
 mod memory_mirror;
+mod openviking_config;
 mod pairing;
 mod perception;
 mod persona;
@@ -1455,6 +1456,10 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         // /v1/onboarding/state reports session: "expired" and the web app prompts
         // exactly one passkey re-auth.
         ui_bridge::rehydrate_master_session(&state).await;
+        // The OpenViking server config, rendered from the pod env BEFORE the
+        // chat loop (its checkpoint restore touches the marker the engine's
+        // start script waits for) — a host daemon with no engine env is a no-op.
+        openviking_config::render_at_boot();
         // #430 — the in-sandbox delegate chat loop (env-gated: only a spawned
         // sandbox's supervisord env carries the chat vars; a host daemon is a
         // clean no-op).

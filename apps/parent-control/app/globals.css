@@ -945,6 +945,24 @@ a:hover { text-decoration-color: var(--ink); }
 .perm-row.tappable { cursor: pointer; }
 .perm-row.tappable:hover { background: var(--bg-elev); }
 .perm-row.denied { opacity: 0.62; }
+/* The capability that acts with no one asking (tool:schedule, owner ask
+   2026-09-24): highlighted on the install sheet and the app page, and it
+   opens onto the tasks the template will run. */
+.perm-row.perm-attention { display: block; padding: 0; border-left: 3px solid var(--accent); background: var(--accent-soft); }
+.perm-attention-toggle {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; width: 100%; padding: 8px 12px;
+  background: none; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.perm-attention-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.perm-attention-cue { font-size: 11.5px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+.perm-attention-body { padding: 2px 12px 12px 15px; }
+.schedule-task { padding: 8px 0; border-top: 1px solid var(--rule-hair); }
+.schedule-task:first-child { border-top: 0; }
+.schedule-task-when { font-size: 12px; margin-top: 2px; }
+.schedule-task-prompt {
+  margin: 6px 0 0; padding: 6px 10px; border-left: 2px solid var(--rule); background: var(--bg);
+  font-size: 12px; line-height: 1.5; white-space: pre-wrap;
+}
 .perm-icon {
   width: 34px; height: 34px; border: 1px solid var(--rule-soft); display: grid; place-items: center;
   font-family: 'IBM Plex Serif', serif; font-style: italic; font-size: 16px; color: var(--ink); background: var(--bg-elev);

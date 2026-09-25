@@ -1,4 +1,5 @@
 import type { ContextKind } from '@/lib/generated/ContextKind';
+import { CAPABILITY_CATALOG } from '@/lib/generated/capabilityCatalog';
 export type Namespace = 'personal' | 'family' | 'work' | 'travel';
 
 // Two INDEPENDENT per-namespace grants (#339): `read` = `knowledge:<ns>` (read the
@@ -192,14 +193,16 @@ export const orphanedChannels = <C extends { id: string }>(channels: C[], actors
  *  may ATTEMPT, never what data a worker serves. */
 export const isCapabilityService = (svc: string): boolean => /^(tool|plugin):/i.test(svc.trim());
 
-/** #617 — the tool classes an owner can grant from the UI. Lockstep with the
- *  daemon's `CAPABILITY_TOOL_CLASSES` (hash→name recovery) and the runtime
- *  guard's compiled allowlist: a class the owner can toggle here must be one the
- *  guard understands, or the grant would be inert. `plugin:<id>` is deliberately
- *  NOT toggleable — plugins are what an app is BUILT FROM (an install-batch
- *  fact, like an iOS app's frameworks), surfaced read-only as "Built with". */
-export const TOOL_CLASSES = ['web', 'code', 'schedule'] as const;
-export type ToolClass = (typeof TOOL_CLASSES)[number];
+/** #617 — the tool classes an owner can grant from the UI: the capability
+ *  catalog's classes. One owner, `CAPABILITY_CLASSES` in agentkeys-protocol,
+ *  generated into lib/generated/capabilityCatalog.ts; the daemon's hash→name
+ *  recovery and the template validator read the same table, so a class the
+ *  owner can toggle here is one the guard understands. `plugin:<id>` is
+ *  deliberately NOT toggleable — plugins are what an app is BUILT FROM (an
+ *  install-batch fact, like an iOS app's frameworks), surfaced read-only as
+ *  "Built with". */
+export const TOOL_CLASSES: readonly string[] = CAPABILITY_CATALOG.map((c) => c.class);
+export type ToolClass = string;
 
 /** `tool:<class>` for a class the UI offers. */
 export const toolService = (cls: ToolClass): string => `tool:${cls}`;

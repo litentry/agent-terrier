@@ -38,10 +38,10 @@ Every field is additive: a pre-existing role preset (no slots, no resources, no 
 | `name`, `name_zh`, `description`, `description_zh` | bilingual card text | both languages |
 | `slots[]` | the channel endpoints the app needs: `slot` (name your skills use), `kind` (`messaging` · `chat` · `display` · `camera` · `mic` · `speaker` · `sensor`), `direction` (`sub` · `pub` · `duplex`), `required`, `event_kinds`, `audience` (messaging only — the default household tiers allowed to reach the app), `reason` / `reason_zh` | slot names `^[a-z0-9_]{1,32}$`, unique; a required slot must be bound at install |
 | `resources[]` | read-only curated inputs: `name`, `kind` (`document` · `profile` · `dataset` · `gallery`), `tags` (matching hints), `required`, `sensitivity_floor`, `reason` | a `sensitive` floor requires a `disclosure[]` line naming the model path |
-| `tools` | capability classes: `web`, `schedule`, `code` (bare or `tool:` spelling) | **absent = the product default (`web`)**; present = exactly this set |
+| `tools` | capability classes: `web`, `schedule`, `code` (bare or `tool:` spelling) — the classes, and what the install sheet says about each, live in one catalog ([`capability_catalog.rs`](../../crates/agentkeys-protocol/src/capability_catalog.rs)); a new class is a framework change, never a template feature | **absent = the product default (`web`)**; present = exactly this set |
 | `availability` | `always-on` · `wake-on-event` · `scheduled` | a template with `schedule[]` needs `scheduled` (or `always-on`) so its ticks fire |
 | `budgets` | `gate_tokens_per_day`, `gate_turns_per_hour`, `feed_events_per_day` | each ≤ the platform cap |
-| `schedule[]` | `cron` (5-field, household local time), `label`, `label_zh`, `prompt` | requires `tool:schedule`; the runtime fires each entry as a clock turn and replies on the app's opchat feed |
+| `schedule[]` | `cron` (5-field, household local time), `label`, `label_zh`, `prompt` | requires `tool:schedule`; the runtime fires each entry as a clock turn and replies on the app's opchat feed. Never author `when`: the broker's catalog derives it (the cron in plain words, English + 中文) for the install sheet, and a cron with no exact phrase shows raw |
 | `disclosure[]` | "what leaves your home": `data` → `path` (bilingual) | shown on the install sheet verbatim |
 | `context` | which files are the persona / skills / knowledge | every name must exist in the bundle |
 | `hidden` | list only on a test stack (`AGENTKEYS_CATALOG_INCLUDE_HIDDEN=1`) | the conformance template only |

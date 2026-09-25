@@ -36,6 +36,7 @@ use serde_json::Value;
 // contracts: the app template manifest (schema, kind enums, validator,
 // compiler), the card document, and the two policy-class registry docs.
 mod app_template;
+mod capability_catalog;
 mod card;
 mod registries;
 pub mod sandbox_actions;
@@ -43,6 +44,7 @@ mod session_window;
 mod systemone;
 mod worker_url;
 pub use app_template::*;
+pub use capability_catalog::*;
 pub use card::*;
 pub use registries::*;
 pub use session_window::*;
@@ -2600,6 +2602,14 @@ pub struct PresetSchedule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub session: Option<SessionPolicy>,
+    /// DERIVED, never authored: the cron in plain words (English + 中文),
+    /// filled by [`PresetSummary::derive_display_fields`] when the broker
+    /// builds the catalog — the protocol's own cron grammar, so a console
+    /// shows it without parsing cron. Absent from an older broker's catalog:
+    /// a surface shows the raw cron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub when: Option<CronPhrase>,
 }
 
 /// `preset.json` — the manifest half of a repo-resident bundle (also the

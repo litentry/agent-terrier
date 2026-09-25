@@ -53,6 +53,8 @@
 //! WIDEN visibility, and it is never load-bearing — engine down ⇒ the agent
 //! falls back to its built-in memory; the mirror retries next pass.
 
+pub mod server_config;
+
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1933";
 /// OpenViking's home for knowledge (`viking://resources/`, account-global; the
 /// recall's resources bucket searches it alongside the user's own `resources/`).

@@ -2058,6 +2058,41 @@ pub struct Publisher {
     sub_caps: tokio::sync::Mutex<HashMap<String, CapCache>>,
 }
 
+/// A delegate publish body. `direction` is ALWAYS `out`, and no caller can
+/// pass another: a delegate never writes on the owner's (or a contact's) side
+/// of a feed. Owner decision 2026-09-24: a scheduled tick is never published
+/// as `in`, so the owner can always tell what they asked from what the
+/// scheduler asked — the tick stays off the feed, the model's text says it is
+/// a scheduled turn, and the reply is the app's own (`schedule.rs`).
+fn publish_body(
+    cap: impl serde::Serialize,
+    kind: &str,
+    body_b64: String,
+    correlation: &str,
+    partial_seq: Option<u32>,
+    content_type: Option<&str>,
+) -> serde_json::Value {
+    // @backend-fixture: channel_publish_body — the protocol-shaped publish.
+    // The #563 delta markers + the #667 content type are OPTIONAL additive
+    // keys (absent on the plain reply, so the canonical fixture shape is
+    // untouched).
+    let mut body = serde_json::json!({
+        "cap": cap,
+        "kind": kind,
+        "direction": "out",
+        "body_b64": body_b64,
+        "correlation": correlation,
+    });
+    if let Some(seq) = partial_seq {
+        body["partial"] = serde_json::json!(true);
+        body["seq"] = serde_json::json!(seq);
+    }
+    if let Some(ct) = content_type.filter(|c| !c.is_empty()) {
+        body["content_type"] = serde_json::json!(ct);
+    }
+    body
+}
+
 impl Publisher {
     pub(crate) fn new(
         http: reqwest::Client,
@@ -2152,24 +2187,14 @@ impl Publisher {
         content_type: Option<&str>,
     ) -> Result<(), String> {
         let (pub_cap, _) = self.cap_for(channel_id, true).await?;
-        // @backend-fixture: channel_publish_body — the protocol-shaped publish.
-        // The #563 delta markers + the #667 content type are OPTIONAL additive
-        // keys (absent on the plain reply, so the canonical fixture shape is
-        // untouched).
-        let mut body = serde_json::json!({
-            "cap": pub_cap,
-            "kind": kind,
-            "direction": "out",
-            "body_b64": body_b64,
-            "correlation": correlation,
-        });
-        if let Some(seq) = partial_seq {
-            body["partial"] = serde_json::json!(true);
-            body["seq"] = serde_json::json!(seq);
-        }
-        if let Some(ct) = content_type.filter(|c| !c.is_empty()) {
-            body["content_type"] = serde_json::json!(ct);
-        }
+        let body = publish_body(
+            &pub_cap,
+            kind,
+            body_b64,
+            correlation,
+            partial_seq,
+            content_type,
+        );
         let resp = self
             .http
             .post(format!(
@@ -2771,5 +2796,59 @@ mod bridge_chat_body_tests {
                 "session": { "window": "thread", "scope": "ch-family", "party": "grandma", "idle_minutes": 30 }
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod publish_body_tests {
+    use super::publish_body;
+
+    #[test]
+    fn the_delegate_publisher_only_ever_writes_out() {
+        // Owner decision 2026-09-24: nothing the delegate publishes — a
+        // scheduled tick's reply included — speaks from the owner's side.
+        for kind in [
+            "text",
+            "doc",
+            "image",
+            "audio-clip",
+            "frame",
+            "command",
+            "lifecycle",
+        ] {
+            let body = publish_body(
+                serde_json::json!({ "sig": "x" }),
+                kind,
+                "eA==".into(),
+                "clock:schedule-0-morning-plan:1",
+                None,
+                None,
+            );
+            assert_eq!(body["direction"], "out", "{kind}");
+            assert_eq!(body["kind"], kind);
+            assert!(body.get("partial").is_none() && body.get("content_type").is_none());
+        }
+        let delta = publish_body(
+            serde_json::json!({}),
+            "text",
+            String::new(),
+            "c",
+            Some(3),
+            Some("text/plain"),
+        );
+        assert_eq!(delta["direction"], "out");
+        assert_eq!(delta["partial"], true);
+        assert_eq!(delta["seq"], 3);
+        assert_eq!(delta["content_type"], "text/plain");
+        assert!(publish_body(
+            serde_json::json!({}),
+            "text",
+            String::new(),
+            "c",
+            None,
+            Some("")
+        )
+        .get("content_type")
+        .is_none());
     }
 }

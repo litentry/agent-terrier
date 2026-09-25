@@ -4,7 +4,8 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { NAMESPACES } from '@/lib/constants';
 import { Dot, Panel } from './shared';
 import type { Actor, Namespace, ScopeBits, VaultItem } from './types';
-import { capabilityGrantCommit, isCapabilityService, isChannelService, isPluginService, TOOL_CLASSES, toolService, type ToolClass } from './types';
+import { capabilityGrantCommit, isCapabilityService, isChannelService, isPluginService } from './types';
+import { CAPABILITY_CATALOG } from '@/lib/generated/capabilityCatalog';
 import type { ProposedScope } from '@/lib/client/types';
 
 // Segmented control: deny | read | read+write
@@ -93,21 +94,6 @@ const NS_WHY: Record<Namespace, string> = {
 };
 
 // Mobile-style scoped permission list (replaces the table view). The "tables won't scale" ask.
-// #617 — owner-language labels for the tool classes. The rows say what the
-// delegate may DO, never how the runtime enforces it (the state line carries
-// the service string for operators who want it).
-const CAP_ICON: Record<string, string> = { web: '\u2601', code: '\u2328', schedule: '\u23f1' };
-const CAP_TITLE: Record<string, string> = {
-  web: 'Web access',
-  code: 'Code execution',
-  schedule: 'Scheduled reports',
-};
-const CAP_WHY: Record<string, string> = {
-  web: 'let it fetch pages and search the web while working on your task',
-  code: 'let it run code and shell commands inside its own sandbox',
-  schedule: 'let it run on a schedule (a daily report) without you asking each time',
-};
-
 export function PermissionList({
   actor,
   editable,
@@ -177,17 +163,21 @@ export function PermissionList({
       {(editable || capabilityGrants.length > 0) && (
         <PermSection
           title="Capabilities"
-          summary={`${grantedTools.size} of ${TOOL_CLASSES.length} tool classes`}
+          summary={`${grantedTools.size} of ${CAPABILITY_CATALOG.length} tool classes`}
         >
-          {TOOL_CLASSES.map((cls: ToolClass) => {
-            const svc = toolService(cls);
+          {/* One row per class in the capability catalog (the protocol's
+              `CAPABILITY_CLASSES`, generated): the row says what the delegate
+              may DO, never how the runtime enforces it (the state line carries
+              the service string for operators who want it). */}
+          {CAPABILITY_CATALOG.map((info) => {
+            const svc = info.service;
             const on = grantedTools.has(svc.toLowerCase());
             return (
               <PermRow
                 key={svc}
-                icon={CAP_ICON[cls]}
-                title={CAP_TITLE[cls]}
-                why={CAP_WHY[cls]}
+                icon={info.icon}
+                title={info.title}
+                why={info.why}
                 state={`${svc} · in-loop guard · never cap-mintable`}
                 granted={on}
                 control={

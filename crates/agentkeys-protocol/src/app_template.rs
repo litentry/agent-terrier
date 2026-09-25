@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     service_channel_pub, service_channel_sub, service_knowledge, service_plugin, service_proposal,
     service_tool, validate_session_policy, ChannelEventKind, ContactTier, PresetSchedule,
-    PresetSummary, SessionPolicy,
+    PresetSummary, SessionPolicy, SCHEDULE_CLASS, TOOL_CLASSES,
 };
 pub use agentkeys_catalog::Sensitivity;
 
@@ -47,10 +47,8 @@ pub const DEFAULT_TOOL_CLASSES: [&str; 1] = ["web"];
 /// an install names none (the daemon's `DEFAULT_NAMESPACES` reads this).
 pub const DEFAULT_MIRROR_NAMESPACES: [&str; 4] = ["personal", "family", "work", "travel"];
 
-/// The #614 capability-service vocabulary — the tool classes the guard maps
-/// (`tool:<class>`). ONE owner; the daemon's hash→name reverse map and the
-/// validator both read this list.
-pub const TOOL_CLASSES: [&str; 3] = ["web", "code", "schedule"];
+// The #614 tool-class list (`TOOL_CLASSES`) is derived from the capability
+// catalog — `capability_catalog.rs`, the ONE home of every class's metadata.
 
 /// Platform caps a manifest may not exceed — the single source of truth the
 /// validator checks `budgets` and the list lengths against.
@@ -428,6 +426,17 @@ impl PresetSummary {
         !self.app.slots.is_empty() || !self.app.resources.is_empty() || self.app.tools.is_some()
     }
 
+    /// Fill the DERIVED display fields the catalog serves — never authored:
+    /// each schedule entry's `when`, its cron in plain words from the same
+    /// grammar the clock runs ([`describe_cron`]). The broker calls this once
+    /// per template when it builds the catalog, so a console shows the words
+    /// without parsing cron itself (owner ask 2026-09-24).
+    pub fn derive_display_fields(&mut self) {
+        for entry in &mut self.schedule {
+            entry.when = describe_cron(&entry.cron);
+        }
+    }
+
     /// The resolved tool classes (declared, else the product default), bare.
     pub fn tool_classes(&self) -> Vec<String> {
         match &self.app.tools {
@@ -706,7 +715,7 @@ pub fn validate_template(
                     ),
                 ));
             }
-            if class == "schedule" {
+            if class == SCHEDULE_CLASS {
                 wants_schedule = true;
             }
         }
@@ -963,6 +972,149 @@ pub fn cron_matches(expr: &str, minute: u32, hour: u32, dom: u32, month: u32, do
         (false, false) => true,
     };
     mi.contains(&minute) && ho.contains(&hour) && mo.contains(&month) && day_ok
+}
+
+/// A cron expression in plain words, English + 中文 (owner ask 2026-09-24:
+/// the install sheet reads an app's scheduled tasks in words).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct CronPhrase {
+    pub en: String,
+    pub zh: String,
+}
+
+const CRON_PHRASE_MAX_TIMES: usize = 6;
+const WEEKDAY_EN: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAY_ZH: [&str; 7] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+const MONTH_EN: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn join_en(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        n => format!("{} and {}", items[..n - 1].join(", "), items[n - 1]),
+    }
+}
+
+fn weekdays_phrase(days: &[u32]) -> (String, String) {
+    if days == [1, 2, 3, 4, 5] {
+        return ("on weekdays".into(), "工作日".into());
+    }
+    if days == [0, 6] {
+        return ("on weekends".into(), "周末".into());
+    }
+    let mut monday_first = days.to_vec();
+    monday_first.sort_by_key(|d| (d + 6) % 7);
+    let en: Vec<String> = monday_first
+        .iter()
+        .map(|d| WEEKDAY_EN[*d as usize].to_string())
+        .collect();
+    let zh: Vec<&str> = monday_first
+        .iter()
+        .map(|d| WEEKDAY_ZH[*d as usize])
+        .collect();
+    (
+        format!("every {}", join_en(&en)),
+        format!("每{}", zh.join("、")),
+    )
+}
+
+fn month_days_phrase(days: &[u32]) -> (String, String) {
+    let list: Vec<String> = days.iter().map(u32::to_string).collect();
+    let noun = if days.len() == 1 { "day" } else { "days" };
+    (
+        format!("on {noun} {} of every month", join_en(&list)),
+        format!("每月 {} 日", list.join("、")),
+    )
+}
+
+/// [`validate_cron`]'s own grammar, in words — the SAME `parse_cron_field` the
+/// daemon's [`cron_matches`] runs, so the words can never describe a schedule
+/// the clock would not keep. `None` = no exact phrase (more than six times a
+/// day, an hour step under a fixed minute, …): a surface shows the raw cron.
+pub fn describe_cron(expr: &str) -> Option<CronPhrase> {
+    validate_cron(expr).ok()?;
+    let f: Vec<&str> = expr.split_whitespace().collect();
+    let minute = parse_cron_field(f[0], 0, 59).ok()?;
+    let hour = parse_cron_field(f[1], 0, 23).ok()?;
+    let dom = parse_cron_field(f[2], 1, 31).ok()?;
+    let month = parse_cron_field(f[3], 1, 12).ok()?;
+    let dow = parse_cron_field(f[4], 0, 7).ok()?;
+    let wild = |i: usize| f[i] == "*";
+
+    // The time of day; `repeats` = it already says how often, so "every day"
+    // would add nothing.
+    let (time_en, time_zh, repeats) = if !wild(0) && !wild(1) {
+        let times: Vec<String> = hour
+            .iter()
+            .flat_map(|h| minute.iter().map(move |m| format!("{h:02}:{m:02}")))
+            .collect();
+        if times.is_empty() || times.len() > CRON_PHRASE_MAX_TIMES {
+            return None;
+        }
+        (format!("at {}", join_en(&times)), times.join("、"), false)
+    } else if wild(1) {
+        if wild(0) {
+            ("every minute".to_string(), "每分钟".to_string(), true)
+        } else if let Some(step) = f[0].strip_prefix("*/").and_then(|n| n.parse::<u32>().ok()) {
+            if step == 1 {
+                ("every minute".to_string(), "每分钟".to_string(), true)
+            } else {
+                (
+                    format!("every {step} minutes"),
+                    format!("每 {step} 分钟"),
+                    true,
+                )
+            }
+        } else if minute.len() == 1 {
+            (
+                format!("every hour at :{:02}", minute[0]),
+                format!("每小时第 {} 分", minute[0]),
+                true,
+            )
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    let (day_en, day_zh) = match (wild(2), wild(4)) {
+        (true, true) => ("every day".to_string(), "每天".to_string()),
+        (true, false) => weekdays_phrase(&dow),
+        (false, true) => month_days_phrase(&dom),
+        (false, false) => {
+            // cron's rule: when both are restricted, either one fires.
+            let (a, a_zh) = month_days_phrase(&dom);
+            let (b, b_zh) = weekdays_phrase(&dow);
+            (format!("{a} or {b}"), format!("{a_zh}或{b_zh}"))
+        }
+    };
+    let (months_en, months_zh) = if wild(3) {
+        (String::new(), String::new())
+    } else {
+        let en: Vec<String> = month
+            .iter()
+            .map(|m| MONTH_EN[(*m - 1) as usize].to_string())
+            .collect();
+        let zh: Vec<String> = month.iter().map(|m| format!("{m}月")).collect();
+        (
+            format!(" in {}", join_en(&en)),
+            format!("{}，", zh.join("、")),
+        )
+    };
+    if repeats && wild(2) && wild(4) {
+        return Some(CronPhrase {
+            en: format!("{time_en}{months_en}"),
+            zh: format!("{months_zh}{time_zh}"),
+        });
+    }
+    Some(CronPhrase {
+        en: format!("{day_en} {time_en}{months_en}"),
+        zh: format!("{months_zh}{day_zh} {time_zh}"),
+    })
 }
 
 // ── install bindings + the compiler ─────────────────────────────────────────
@@ -1501,6 +1653,113 @@ pub fn compile_app(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn describe_cron_phrases_the_shapes_templates_use_in_both_languages() {
+        let p = |c: &str| describe_cron(c).map(|x| (x.en, x.zh));
+        let s = |en: &str, zh: &str| Some((en.to_string(), zh.to_string()));
+        // every cron the shipped templates use (chef, health-master, watchdog, conformance)
+        assert_eq!(p("0 7 * * *"), s("every day at 07:00", "每天 07:00"));
+        assert_eq!(p("0 16 * * *"), s("every day at 16:00", "每天 16:00"));
+        assert_eq!(p("0 21 * * *"), s("every day at 21:00", "每天 21:00"));
+        assert_eq!(p("*/5 * * * *"), s("every 5 minutes", "每 5 分钟"));
+        // days of the week, days of the month, several times, hourly
+        assert_eq!(p("30 8 * * 1-5"), s("on weekdays at 08:30", "工作日 08:30"));
+        assert_eq!(p("0 9 * * 0,6"), s("on weekends at 09:00", "周末 09:00"));
+        assert_eq!(p("0 9 * * 6,7"), s("on weekends at 09:00", "周末 09:00"));
+        assert_eq!(
+            p("0 7 * * 3,1"),
+            s("every Mon and Wed at 07:00", "每周一、周三 07:00")
+        );
+        assert_eq!(p("0 18 * * 0"), s("every Sun at 18:00", "每周日 18:00"));
+        assert_eq!(
+            p("0 7,16 * * *"),
+            s("every day at 07:00 and 16:00", "每天 07:00、16:00")
+        );
+        assert_eq!(
+            p("0 9 1 * *"),
+            s("on day 1 of every month at 09:00", "每月 1 日 09:00")
+        );
+        assert_eq!(
+            p("0 9 1,15 * *"),
+            s(
+                "on days 1 and 15 of every month at 09:00",
+                "每月 1、15 日 09:00"
+            )
+        );
+        assert_eq!(
+            p("0 9 1 * 1"),
+            s(
+                "on day 1 of every month or every Mon at 09:00",
+                "每月 1 日或每周一 09:00"
+            )
+        );
+        assert_eq!(
+            p("0 9 1 1,7 *"),
+            s(
+                "on day 1 of every month at 09:00 in Jan and Jul",
+                "1月、7月，每月 1 日 09:00"
+            )
+        );
+        assert_eq!(p("15 * * * *"), s("every hour at :15", "每小时第 15 分"));
+        assert_eq!(p("* * * * *"), s("every minute", "每分钟"));
+    }
+
+    #[test]
+    fn describe_cron_says_nothing_it_cannot_say_exactly() {
+        for c in [
+            "0 */2 * * *",
+            "0 7 * *",
+            "61 7 * * *",
+            "0 7 * * 8",
+            "0 5-3 * * *",
+            "0 7 * * mon",
+            "* 7 * * *",
+        ] {
+            assert_eq!(describe_cron(c), None, "{c}");
+        }
+    }
+
+    #[test]
+    fn the_words_match_the_clock() {
+        // Spot-check the one owner: what the phrase says, cron_matches keeps.
+        assert!(
+            cron_matches("0 7,16 * * *", 0, 7, 3, 9, 4)
+                && cron_matches("0 7,16 * * *", 0, 16, 3, 9, 4)
+        );
+        assert!(
+            cron_matches("30 8 * * 1-5", 30, 8, 1, 1, 1)
+                && !cron_matches("30 8 * * 1-5", 30, 8, 1, 1, 6)
+        );
+        assert!(
+            cron_matches("0 9 * * 6,7", 0, 9, 1, 1, 0)
+                && cron_matches("0 9 * * 6,7", 0, 9, 1, 1, 6)
+        );
+    }
+
+    #[test]
+    fn the_catalog_fills_when_for_every_schedule_entry_and_overwrites_an_authored_one() {
+        let mut summary: PresetSummary = serde_json::from_value(serde_json::json!({
+            "id": "t", "version": "1.0.0", "name": "T", "name_zh": "T",
+            "description": "d", "description_zh": "d",
+            "suggested_channels": [], "suggested_context": [],
+            "schedule": [
+                { "cron": "0 7 * * *", "label": "Morning", "label_zh": "早", "prompt": "p",
+                  "when": { "en": "authored nonsense", "zh": "x" } },
+                { "cron": "0 */2 * * *", "label": "Often", "label_zh": "", "prompt": "q" }
+            ]
+        }))
+        .expect("summary parses");
+        summary.derive_display_fields();
+        assert_eq!(
+            summary.schedule[0].when,
+            Some(CronPhrase {
+                en: "every day at 07:00".into(),
+                zh: "每天 07:00".into()
+            })
+        );
+        assert_eq!(summary.schedule[1].when, None);
+    }
+
     use super::*;
 
     fn preset(json: &str) -> PresetSummary {

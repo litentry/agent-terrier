@@ -28,6 +28,8 @@ import type { ContactTier } from '@/lib/generated/ContactTier';
 import type { GatewayDeviceStatus } from '@/lib/generated/GatewayDeviceStatus';
 import type { AppContextView } from '@/lib/generated/AppContextView';
 import type { PresetSummary } from '@/lib/generated/PresetSummary';
+import { scheduleCapability } from '@/lib/client/capabilityView';
+import { AnnotationRows } from './permissionSheet';
 import type { ResourceItemRow } from '@/lib/generated/ResourceItemRow';
 import type { ResourceKind } from '@/lib/generated/ResourceKind';
 import type { ServiceAnnotation } from '@/lib/generated/ServiceAnnotation';
@@ -39,6 +41,9 @@ import { editReaches } from '@/lib/client/knowledge';
 import { FEED_ID_RE, gateRelayNote, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
 
 type View = 'apps' | 'endpoints';
+
+/** The grant a template's schedule entries run under, from the capability catalog. */
+const SCHEDULE_GRANT = scheduleCapability()?.service;
 
 type CreateChannelFn = (input: { id: string; name: string; note?: string; kind?: ChannelDef['kind'] }) => Promise<ChannelDef | null>;
 type WizardStep = 'slots' | 'resources' | 'audience' | 'sheet' | 'done';
@@ -774,29 +779,6 @@ export function ApplicationsPage({
   );
 }
 
-function AnnotationRows({ annotations }: { annotations: ServiceAnnotation[] }) {
-  const data = annotations.filter((a) => a.role !== 'tool' && a.role !== 'plugin');
-  const tools = annotations.filter((a) => a.role === 'tool');
-  const plugins = annotations.filter((a) => a.role === 'plugin');
-  const row = (a: ServiceAnnotation) => (
-    <div key={a.service} className="perm-row" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px' }}>
-      <code style={{ flex: 1 }}>{a.service}</code>
-      <span className="muted" style={{ fontSize: 11 }}>{a.role}{a.slot ? ` · slot ${a.slot}` : ''}{a.resource ? ` · ${a.resource}` : ''}</span>
-      {a.sensitivity === 'sensitive' && <Chip kind="bad">SENSITIVE</Chip>}
-    </div>
-  );
-  return (
-    <>
-      <div className="perm-section-head"><span className="ttl">Data &amp; devices</span><span className="summary">{data.length} grants</span></div>
-      <div className="perm-rows">{data.map(row)}</div>
-      <div className="perm-section-head" style={{ marginTop: 14 }}><span className="ttl">Capabilities</span><span className="summary">{tools.length}</span></div>
-      <div className="perm-rows">{tools.map(row)}</div>
-      <div className="perm-section-head" style={{ marginTop: 14 }}><span className="ttl">Built with</span><span className="summary">{plugins.length}</span></div>
-      <div className="perm-rows">{plugins.map(row)}</div>
-    </>
-  );
-}
-
 function AppDetail({
   app,
   template,
@@ -993,7 +975,7 @@ function AppDetail({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Panel title="── permissions · the sheet the install minted" flush>
             <div style={{ padding: 14 }}>
-              <AnnotationRows annotations={dashboard?.annotations ?? []} />
+              <AnnotationRows annotations={dashboard?.annotations ?? []} schedule={template?.schedule} />
               {template && (template.disclosure ?? []).length > 0 && (
                 <>
                   <div className="perm-section-head" style={{ marginTop: 14 }}><span className="ttl">What leaves your home</span></div>
@@ -1131,7 +1113,7 @@ function AppDetail({
           {template && (template.schedule ?? []).length > 0 && (
             <Panel title="── schedule">
               <dl className="kvs">
-                {template.schedule.map((s) => <div key={s.cron} style={{ display: 'contents' }}><dt><code>{s.cron}</code></dt><dd>{s.label} · <Chip>tool:schedule</Chip></dd></div>)}
+                {template.schedule.map((s) => <div key={s.cron} style={{ display: 'contents' }}><dt title={`cron ${s.cron} · household time`}>{s.when?.en ?? <code>{s.cron}</code>}</dt><dd>{s.label}{s.label_zh ? ` · ${s.label_zh}` : ''}{SCHEDULE_GRANT && <> · <Chip>{SCHEDULE_GRANT}</Chip></>}</dd></div>)}
               </dl>
             </Panel>
           )}
@@ -1308,7 +1290,7 @@ function InstallWizard({
           <p className="muted" style={{ fontSize: 12.5 }}>
             {build ? 'This is everything the app will be able to do — compiled by the broker from the template + your bindings. One Touch ID grants it all; revoke any line later.' : 'Press Install: the broker compiles the sheet from the template + your bindings, then Touch ID signs exactly that sheet.'}
           </p>
-          {build?.annotations && <AnnotationRows annotations={build.annotations} />}
+          {build?.annotations && <AnnotationRows annotations={build.annotations} schedule={tp.schedule} />}
           {!build && (
             <>
               <div className="perm-section-head"><span className="ttl">Bindings</span></div>

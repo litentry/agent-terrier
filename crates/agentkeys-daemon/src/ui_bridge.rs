@@ -4656,9 +4656,9 @@ const SCOPE_NAMESPACES: [&str; 4] = ["personal", "family", "work", "travel"];
 /// recovery (the grant string set itself is open — extend when a new tool class
 /// ships). `plugin:<id>` is unbounded and cannot be enumerated: those names
 /// surface via the binding manifest / `services`, like channel names do via the
-/// registry. Keep in lockstep with the classes the runtime guard consumes
-/// (spec `docs/spec/delegate-runtime-dsh.md` §4.2).
-const CAPABILITY_TOOL_CLASSES: [&str; 3] = ["web", "code", "schedule"];
+/// registry. The list is the protocol's capability catalog (one owner,
+/// `agentkeys-protocol` `capability_catalog.rs`) — never a second copy.
+const CAPABILITY_TOOL_CLASSES: [&str; 3] = agentkeys_backend_client::protocol::TOOL_CLASSES;
 
 /// Mirror the ON-CHAIN scope grant into an actor's `scope` map (the permission
 /// panel's data source). The chain is the source of truth for scope — without

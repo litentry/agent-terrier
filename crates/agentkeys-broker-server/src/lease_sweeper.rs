@@ -513,6 +513,7 @@ mod tests {
             label_zh: String::new(),
             prompt: "plan".into(),
             session: None,
+            when: None,
         }];
         // 2026-09-09 06:50 UTC+8 = 2026-09-08 22:50 UTC.
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-08T22:50:00Z")

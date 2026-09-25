@@ -264,6 +264,7 @@ mod tests {
             label_zh: String::new(),
             prompt: "Publish the plan.".into(),
             session: None,
+            when: None,
         }
     }
 

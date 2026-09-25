@@ -146,8 +146,11 @@ fn registry() -> &'static Result<Vec<(PresetSummary, &'static BuiltinPreset)>, S
     REGISTRY.get_or_init(|| {
         let mut rows = Vec::with_capacity(BUILTINS.len());
         for b in BUILTINS {
-            let summary: PresetSummary = serde_json::from_str(b.manifest_json)
+            let mut summary: PresetSummary = serde_json::from_str(b.manifest_json)
                 .map_err(|e| format!("compiled-in preset manifest failed to parse: {e}"))?;
+            // The catalog carries the DERIVED display fields (each schedule
+            // entry's cron in words) — one owner, the protocol's cron grammar.
+            summary.derive_display_fields();
             rows.push((summary, b));
         }
         Ok(rows)
@@ -256,6 +259,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_shipped_schedule_reads_in_words() {
+        // The install sheet shows each scheduled task's `when`; a shipped
+        // template whose cron has no phrase would show the raw expression.
+        let rows = registry()
+            .as_ref()
+            .expect("all compiled-in manifests parse");
+        let mut phrased = 0;
+        for (summary, _) in rows {
+            for entry in &summary.schedule {
+                assert!(
+                    entry.when.is_some(),
+                    "{}: schedule '{}' ({}) has no plain-words phrase",
+                    summary.id,
+                    entry.label,
+                    entry.cron
+                );
+                phrased += 1;
+            }
+        }
+        assert!(phrased > 0, "the shipped templates schedule something");
+    }
+
+    #[test]
     fn every_builtin_manifest_parses_and_ids_are_unique() {
         let rows = registry()
             .as_ref()
@@ -350,6 +376,8 @@ mod tests {
             .0;
         assert_eq!(bundle.manifest.id, "watchdog");
         assert!(!bundle.manifest.schedule.is_empty());
+        // The catalog derives each entry's cron in words (owner ask 2026-09-24).
+        assert!(bundle.manifest.schedule.iter().all(|e| e.when.is_some()));
 
         let err = get_preset(Path("nope".to_string())).await.unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);

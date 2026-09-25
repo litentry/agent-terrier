@@ -573,6 +573,17 @@ the permissions you approve. parent-control → **applications**:
   review the **sheet** — every grant the app gets, compiled by the broker from
   the template and your choices — and approve with **one Touch ID**. Nothing
   is granted before that tap; an install always creates a fresh delegate.
+- **An app that runs on its own says so on the sheet.** The `tool:schedule`
+  line is highlighted ("runs on its own · 定时运行") with the number of
+  scheduled tasks. Click **read** to see each one: its name, when it runs
+  (for example *every day at 07:00 · 每天 07:00*, in your household's time),
+  and the exact instruction the app is given at that time. The same line on the
+  app's page opens the same way after the install. A scheduled run never speaks
+  as you: nothing is posted in your name, the app is told it is a scheduled
+  turn, and its reply appears in the app's chat as the app's own. The same
+  capability also lets the app set its own reminders while it talks with you;
+  those end when that conversation does. Every other capability line says what
+  it allows in plain words, for example *Web access · 联网访问*.
 - **The family sees it as an alias.** Each allowed household member's reach
   gains the app's name, so `/chef 今晚吃什么` (or a photo with that caption)
   reaches the app through the contact gate. A photo sent without a caption goes to
