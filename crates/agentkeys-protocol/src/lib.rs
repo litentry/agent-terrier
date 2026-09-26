@@ -38,6 +38,7 @@ use serde_json::Value;
 mod app_template;
 mod capability_catalog;
 mod card;
+mod channel_doc;
 mod registries;
 pub mod sandbox_actions;
 mod session_window;
@@ -46,6 +47,7 @@ mod worker_url;
 pub use app_template::*;
 pub use capability_catalog::*;
 pub use card::*;
+pub use channel_doc::*;
 pub use registries::*;
 pub use session_window::*;
 pub use systemone::*;
@@ -693,6 +695,12 @@ pub struct ChannelEvent {
     /// re-publishes (a caption's `text` beside its `image`) — informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_of: Option<String>,
+    /// The app this event is for, on a channel several apps are bound to
+    /// (the contact gate's router names it; `/alias` names it). An app runs
+    /// a turn only for events addressed to it, or unaddressed ones when it is
+    /// the channel's default app. Copied verbatim from the publish body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressee: Option<String>,
 }
 
 /// Broker `POST /v1/cap/channel-sts` response (#541) — short-lived, owner-scoped
@@ -751,6 +759,9 @@ pub struct ChannelPublishBody {
     /// #667 — see [`ChannelEvent::relay_of`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_of: Option<String>,
+    /// See [`ChannelEvent::addressee`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressee: Option<String>,
 }
 
 /// #667 — channel-worker `POST /v1/channel/blob-put`: store one media
@@ -940,8 +951,8 @@ impl ContactTier {
 /// An externally-authenticated, KEYLESS principal in the master-curated registry
 /// (D5). The transport authenticates the human (weixin openid today); the master
 /// maps + tiers them. NEVER an actor: no omni, no keys, no caps; no feed-history
-/// visibility (D13). `reach` is the per-agent `/alias` allowlist this contact may
-/// address (e.g. `["chef", "storyteller"]`).
+/// visibility (D13). What they may address is their rows on the household's
+/// channel documents ([`ChannelDoc`]), never a list on the contact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
     pub contact_id: String,
@@ -953,10 +964,12 @@ pub struct Contact {
     pub transport_id: String,
     pub display_name: String,
     pub tier: ContactTier,
-    /// The agents (by `/alias`) this contact may reach. Empty = reaches nothing
-    /// until the master grants reach (a `guest` default).
-    #[serde(default)]
-    pub reach: Vec<String>,
+    /// Pre-channel rows only (the `/alias` list the member could address):
+    /// migrated into channel documents on load
+    /// ([`ContactRegistry::migrate_legacy`]) and never written again — a
+    /// member's access is their rows on the household's channels.
+    #[serde(default, rename = "reach", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_reach: Vec<String>,
     /// The member has been told, in their own chat, that they are bound and
     /// whom they can talk to (the «✅ 绑定成功» notice). Set when that send
     /// succeeds — at bind/approve time when the transport can already reach
@@ -983,14 +996,16 @@ pub struct ContactRegistry {
     /// bot. `default` keeps pre-#418 registry files parseable unchanged.
     #[serde(default)]
     pub invites: Vec<BindInvite>,
-    /// The apps this gate relays, `alias → channel` (owner decision
-    /// 2026-09-22: the channel an app's messaging slot binds IS its feed — no
-    /// derived `<transport>-<alias>` name). The console writes a row at
-    /// install / rebind and clears it at uninstall through
-    /// `/v1/gateway/admin/apps/update`; `default` keeps older registry files
-    /// parseable (an app with no row is unreachable until it is rebound).
-    #[serde(default)]
+    /// Pre-channel rows (`alias → channel + blurb`, #722): migrated into
+    /// `channels` on load, never written again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<AppFeed>,
+    /// The household's channel documents — the ONE record of what each
+    /// channel is for, who is in it and which apps are bound to it. The
+    /// console writes them (install / rebind / uninstall, the Channels page,
+    /// invites); the gate reads them for every turn.
+    #[serde(default)]
+    pub channels: Vec<ChannelDoc>,
 }
 
 /// One relayed app: the alias contacts address it by (its delegate label)
@@ -1011,9 +1026,9 @@ pub struct AppFeed {
 }
 
 /// #722 — an app's one-paragraph identity for the router: its display names,
-/// a one-line purpose in both languages, and a few example messages. Copied
-/// from the template's `PresetSummary` (name / description / suggested
-/// examples), never free-typed by a contact.
+/// a one-line purpose in both languages, and a few example messages. Built by
+/// `PresetSummary::router_blurb` from the template (name / description /
+/// `route_examples`), never free-typed by a contact.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct AppBlurb {
@@ -1028,6 +1043,12 @@ pub struct AppBlurb {
     /// Example messages this app is the right destination for.
     #[serde(default)]
     pub examples: Vec<String>,
+    /// The event kinds the app's messaging slot takes (the template's
+    /// `event_kinds`): a photo or a voice clip is only offered to an app that
+    /// declared it — and so disclosed which model path it transits. Empty =
+    /// not declared (a row written before this field): takes every kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_kinds: Vec<ChannelEventKind>,
 }
 
 impl ContactRegistry {
@@ -1039,67 +1060,245 @@ impl ContactRegistry {
             .find(|c| c.transport == transport && c.transport_id == transport_id)
     }
 
-    /// The channel `alias` is bound to on this gate (alias case-insensitive).
-    pub fn app_channel(&self, alias: &str) -> Option<&str> {
-        self.apps
-            .iter()
-            .find(|a| a.alias.eq_ignore_ascii_case(alias.trim()))
-            .map(|a| a.channel_id.as_str())
+    pub fn contact(&self, contact_id: &str) -> Option<&Contact> {
+        self.bound.iter().find(|c| c.contact_id == contact_id)
     }
 
-    /// Every alias bound to `channel_id` (normally one — the console refuses
-    /// a channel shared by two apps).
-    pub fn aliases_on_channel(&self, channel_id: &str) -> Vec<String> {
-        self.apps
+    pub fn channel(&self, id: &str) -> Option<&ChannelDoc> {
+        self.channels.iter().find(|d| d.id == id.trim())
+    }
+
+    pub fn channel_mut(&mut self, id: &str) -> Option<&mut ChannelDoc> {
+        self.channels.iter_mut().find(|d| d.id == id.trim())
+    }
+
+    /// The document for `id`, created (named after its id) when absent.
+    pub fn channel_or_new(&mut self, id: &str) -> &mut ChannelDoc {
+        let id = id.trim().to_string();
+        if let Some(i) = self.channels.iter().position(|d| d.id == id) {
+            return &mut self.channels[i];
+        }
+        self.channels.push(ChannelDoc::new(&id, &id));
+        self.channels.last_mut().expect("just pushed")
+    }
+
+    pub fn remove_channel(&mut self, id: &str) -> bool {
+        let before = self.channels.len();
+        self.channels.retain(|d| d.id != id.trim());
+        self.channels.len() != before
+    }
+
+    /// The household default (`#general`), when one is marked.
+    pub fn household_default(&self) -> Option<&ChannelDoc> {
+        self.channels.iter().find(|d| d.household_default)
+    }
+
+    /// The channels this member may publish on — the router's options.
+    pub fn speak_channels(&self, contact_id: &str) -> Vec<&ChannelDoc> {
+        self.channels
             .iter()
-            .filter(|a| a.channel_id == channel_id)
-            .map(|a| a.alias.clone())
+            .filter(|d| d.speaks(contact_id))
             .collect()
     }
 
-    /// Upsert `alias → channel_id` (the alias stored lowercase). A `blurb`
-    /// replaces the stored one; `None` keeps whatever the row already carries
-    /// (a rebind that only moves the channel never erases the description).
-    pub fn set_app_feed(&mut self, alias: &str, channel_id: &str, blurb: Option<AppBlurb>) {
-        let alias = alias.trim().to_lowercase();
-        match self.apps.iter_mut().find(|a| a.alias == alias) {
-            Some(a) => {
-                a.channel_id = channel_id.to_string();
-                if blurb.is_some() {
-                    a.blurb = blurb;
-                }
-            }
-            None => self.apps.push(AppFeed {
-                alias,
-                channel_id: channel_id.to_string(),
-                blurb,
-            }),
+    /// The channels this member receives — what their aggregating transport
+    /// folds into their thread.
+    pub fn read_channels(&self, contact_id: &str) -> Vec<&ChannelDoc> {
+        self.channels
+            .iter()
+            .filter(|d| d.reads(contact_id))
+            .collect()
+    }
+
+    /// Every channel `alias` is bound to.
+    pub fn app_channels(&self, alias: &str) -> Vec<&ChannelDoc> {
+        self.channels
+            .iter()
+            .filter(|d| d.app(alias).is_some())
+            .collect()
+    }
+
+    /// Where `/alias` from this member goes: a household channel they speak
+    /// on that lists the alias, else its operator channel when they speak
+    /// there. `None` = the alias is on no channel of theirs.
+    pub fn alias_channel_for(&self, contact_id: &str, alias: &str) -> Option<&ChannelDoc> {
+        let mine: Vec<&ChannelDoc> = self
+            .speak_channels(contact_id)
+            .into_iter()
+            .filter(|d| d.app(alias).is_some())
+            .collect();
+        mine.iter()
+            .find(|d| !d.is_operator())
+            .or_else(|| mine.first())
+            .copied()
+    }
+
+    /// A member's rows, channel by channel (household channels first).
+    pub fn contact_channels_view(&self, contact_id: &str) -> Vec<ContactChannelView> {
+        let mut rows: Vec<ContactChannelView> = self
+            .channels
+            .iter()
+            .filter_map(|d| {
+                let m = d.member(contact_id)?;
+                Some(ContactChannelView {
+                    channel_id: d.id.clone(),
+                    name: d.display_name().to_string(),
+                    speak: m.speak,
+                    read: m.read,
+                    operator_of: d.operator_of.clone(),
+                })
+            })
+            .collect();
+        rows.sort_by_key(|r| r.operator_of.is_some());
+        rows
+    }
+
+    /// The D13-safe view of a bound contact (no transport id, no history).
+    pub fn summary(&self, c: &Contact) -> ContactSummary {
+        ContactSummary {
+            contact_id: c.contact_id.clone(),
+            display_name: c.display_name.clone(),
+            tier: c.tier,
+            channels: self.contact_channels_view(&c.contact_id),
+            connected: false,
+            welcomed: c.welcomed,
         }
     }
 
-    /// #722 — the router's candidate descriptions for a contact's reach, in
-    /// reach order: `(alias, blurb-if-any)`. Only aliases in `reach` — never an
-    /// app the contact was not granted (D10 by construction).
-    pub fn reach_candidates(&self, reach: &[String]) -> Vec<(String, Option<AppBlurb>)> {
-        reach
+    /// Replace a member's rows with `grants` (a grant on an unknown channel
+    /// is skipped). Returns how many documents changed.
+    pub fn apply_grants(&mut self, contact_id: &str, grants: &[ChannelGrant]) -> usize {
+        let mut changed = 0;
+        for d in self.channels.iter_mut() {
+            let want = grants.iter().find(|g| g.channel_id.trim() == d.id);
+            let did = match want {
+                Some(g) => d.set_member(contact_id, g.speak, g.read),
+                None => d.remove_member(contact_id),
+            };
+            if did {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// A member's rows as grants (what an update request would resend).
+    pub fn grants_of(&self, contact_id: &str) -> Vec<ChannelGrant> {
+        self.channels
             .iter()
-            .map(|alias| {
-                let blurb = self
-                    .apps
-                    .iter()
-                    .find(|a| a.alias.eq_ignore_ascii_case(alias.trim()))
-                    .and_then(|a| a.blurb.clone());
-                (alias.clone(), blurb)
+            .filter_map(|d| {
+                let m = d.member(contact_id)?;
+                Some(ChannelGrant {
+                    channel_id: d.id.clone(),
+                    speak: m.speak,
+                    read: m.read,
+                })
             })
             .collect()
     }
 
-    /// Drop `alias`; `true` when a row went.
-    pub fn remove_app_feed(&mut self, alias: &str) -> bool {
-        let before = self.apps.len();
-        self.apps
-            .retain(|a| !a.alias.eq_ignore_ascii_case(alias.trim()));
-        self.apps.len() != before
+    /// Drop a member from every channel. Returns how many documents changed.
+    pub fn remove_contact_rows(&mut self, contact_id: &str) -> usize {
+        let mut changed = 0;
+        for d in self.channels.iter_mut() {
+            if d.remove_member(contact_id) {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// The channel ids the pre-channel `reach` aliases map to (every channel
+    /// that lists the app).
+    fn channels_of_aliases(&self, aliases: &[String]) -> Vec<String> {
+        let mut ids: Vec<String> = aliases
+            .iter()
+            .flat_map(|a| self.app_channels(a).into_iter().map(|d| d.id.clone()))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Fold a registry written before channel documents into them: each
+    /// `alias → channel + blurb` row becomes the app's row on that channel
+    /// (its blurb line as the description, its declared kinds as `takes`, the
+    /// first app the default); each contact's `reach` becomes `speak + read`
+    /// rows on the channels those apps are bound to (an alias bound nowhere
+    /// was never deliverable and is dropped); an invite's `reach` becomes
+    /// grants the same way; the first household channel is the default when
+    /// none is marked. `now_secs` stamps the documents that changed. Returns
+    /// whether anything moved — the caller persists.
+    pub fn migrate_legacy(&mut self, now_secs: u64) -> bool {
+        let mut changed = false;
+        let legacy_apps = std::mem::take(&mut self.apps);
+        for feed in legacy_apps {
+            changed = true;
+            let alias = feed.alias.trim().to_lowercase();
+            let blurb = feed.blurb.unwrap_or_default();
+            let purpose = if blurb.purpose_zh.trim().is_empty() {
+                blurb.purpose.trim().to_string()
+            } else {
+                blurb.purpose_zh.trim().to_string()
+            };
+            let doc = self.channel_or_new(&feed.channel_id);
+            if doc.purpose.trim().is_empty() {
+                doc.purpose = purpose.clone();
+            }
+            doc.upsert_app(ChannelApp {
+                alias,
+                slot: String::new(),
+                description: purpose,
+                takes: blurb.event_kinds,
+                audience: Vec::new(),
+            });
+            doc.updated_at = now_secs;
+        }
+        let reaches: Vec<(String, Vec<String>)> = self
+            .bound
+            .iter_mut()
+            .filter(|c| !c.legacy_reach.is_empty())
+            .map(|c| (c.contact_id.clone(), std::mem::take(&mut c.legacy_reach)))
+            .collect();
+        for (contact_id, aliases) in reaches {
+            changed = true;
+            for id in self.channels_of_aliases(&aliases) {
+                if let Some(doc) = self.channel_mut(&id) {
+                    if doc.set_member(&contact_id, true, true) {
+                        doc.updated_at = now_secs;
+                    }
+                }
+            }
+        }
+        let invite_reaches: Vec<(String, Vec<String>)> = self
+            .invites
+            .iter_mut()
+            .filter(|i| !i.legacy_reach.is_empty())
+            .map(|i| (i.bind_code.clone(), std::mem::take(&mut i.legacy_reach)))
+            .collect();
+        for (code, aliases) in invite_reaches {
+            changed = true;
+            let grants: Vec<ChannelGrant> = self
+                .channels_of_aliases(&aliases)
+                .into_iter()
+                .map(|channel_id| ChannelGrant {
+                    channel_id,
+                    speak: true,
+                    read: true,
+                })
+                .collect();
+            if let Some(inv) = self.invites.iter_mut().find(|i| i.bind_code == code) {
+                inv.channels = grants;
+            }
+        }
+        if self.household_default().is_none() {
+            if let Some(first) = self.channels.iter_mut().find(|d| !d.is_operator()) {
+                first.household_default = true;
+                first.updated_at = now_secs;
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
@@ -1126,7 +1325,8 @@ pub struct PendingBind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TierProposal {
     pub tier: ContactTier,
-    pub reach: Vec<String>,
+    #[serde(default)]
+    pub channels: Vec<ChannelGrant>,
     /// One-line human-readable rationale (from the invite context) — shown on
     /// the master's confirm card.
     pub rationale: String,
@@ -1135,15 +1335,17 @@ pub struct TierProposal {
 /// The D13-safe view of a contact for the operator's parent-control surface
 /// (#410). The operator has global visibility, but even the operator's view
 /// carries **no transport_id (openid)** and **no history** — those never leave
-/// the gateway/registry. This is `(contact_id, display_name, tier, reach)` only:
-/// the routing policy the operator manages, not the third-party PII.
+/// the gateway/registry. This is `(contact_id, display_name, tier, channels)`
+/// only: the routing policy the operator manages, not the third-party PII.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ContactSummary {
     pub contact_id: String,
     pub display_name: String,
     pub tier: ContactTier,
-    pub reach: Vec<String>,
+    /// Their rows, channel by channel (`ContactRegistry::summary`).
+    #[serde(default)]
+    pub channels: Vec<ContactChannelView>,
     /// This contact's own iLink bot holds a live token on the gate (one bot per
     /// member, 2026-09-11) — false for code-bound contacts on other transports.
     #[serde(default)]
@@ -1152,19 +1354,6 @@ pub struct ContactSummary {
     /// sent with their first message.
     #[serde(default)]
     pub welcomed: bool,
-}
-
-impl From<&Contact> for ContactSummary {
-    fn from(c: &Contact) -> Self {
-        ContactSummary {
-            contact_id: c.contact_id.clone(),
-            display_name: c.display_name.clone(),
-            tier: c.tier,
-            reach: c.reach.clone(),
-            connected: false,
-            welcomed: c.welcomed,
-        }
-    }
 }
 
 // ── gateway admin surface (#418) — operator-driven login + bind ceremony ─────
@@ -1177,7 +1366,7 @@ impl From<&Contact> for ContactSummary {
 /// An OPEN bind invite the master minted (parent-control "邀请家人"). Registry-
 /// resident until an unknown sender echoes `bind_code` to the bot (→ a
 /// `PendingBind` claims it) and the master approves (→ a bound `Contact`).
-/// The invite carries the master's INTENDED identity/tier/reach — the model
+/// The invite carries the master's INTENDED identity/tier/channels — the model
 /// proposal (D10) may suggest, the master's invite + confirm decide.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindInvite {
@@ -1186,8 +1375,12 @@ pub struct BindInvite {
     pub contact_id: String,
     pub display_name: String,
     pub tier: ContactTier,
+    /// The rows the member gets on the household's channels once bound.
     #[serde(default)]
-    pub reach: Vec<String>,
+    pub channels: Vec<ChannelGrant>,
+    /// Pre-channel invites (aliases): migrated into `channels` on load.
+    #[serde(default, rename = "reach", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_reach: Vec<String>,
 }
 
 /// `GET /v1/gateway/admin/status` — the parent-control gateway card.
@@ -1368,8 +1561,9 @@ pub struct GatewayBindInviteRequest {
     pub contact_id: String,
     pub display_name: String,
     pub tier: ContactTier,
+    /// The channels the member joins once bound (speak / read per channel).
     #[serde(default)]
-    pub reach: Vec<String>,
+    pub channels: Vec<ChannelGrant>,
 }
 
 /// The minted invite. `send_text` is the exact message the family member sends
@@ -1391,14 +1585,15 @@ pub struct GatewayPendingBindView {
     pub contact_id: String,
     pub display_name: String,
     pub tier: ContactTier,
-    pub reach: Vec<String>,
+    #[serde(default)]
+    pub channels: Vec<ChannelGrant>,
     /// True once an unknown sender echoed the code (an openid is attached
     /// gateway-side); only a CLAIMED invite can be approved.
     pub claimed: bool,
 }
 
 /// `POST /v1/gateway/admin/bind/approve` — the master's confirm (D5: the master
-/// CONFIRMS every bind; tier/reach here override the invite's when set).
+/// CONFIRMS every bind; tier/channels here override the invite's when set).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct GatewayApproveRequest {
@@ -1406,7 +1601,7 @@ pub struct GatewayApproveRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<ContactTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reach: Option<Vec<String>>,
+    pub channels: Option<Vec<ChannelGrant>>,
 }
 
 /// Approve response — the now-bound contact (D13-safe summary).
@@ -1418,9 +1613,10 @@ pub struct GatewayApproveResponse {
 }
 
 /// `POST /v1/gateway/admin/contacts/update` — the operator edits a BOUND
-/// contact's routing policy (#3 parent-control). Fields left `None` are
-/// unchanged; a tier that may not hold operator-grade reach is rejected if the
-/// (new) reach still names an operator-grade alias.
+/// contact's tier and rows (#3 parent-control). Fields left `None` are
+/// unchanged; `channels` REPLACES the member's rows (a channel left out drops
+/// them from it); a tier that may not speak on an operator-grade app's
+/// channel is rejected.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct GatewayContactUpdateRequest {
@@ -1428,7 +1624,7 @@ pub struct GatewayContactUpdateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<ContactTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reach: Option<Vec<String>>,
+    pub channels: Option<Vec<ChannelGrant>>,
 }
 
 /// `POST /v1/gateway/admin/contacts/revoke` — the operator UNBINDS a contact;
@@ -1439,20 +1635,51 @@ pub struct GatewayContactRevokeRequest {
     pub contact_id: String,
 }
 
-/// `POST /v1/gateway/admin/apps/update` — the console registers the channel
-/// an app's messaging slot binds (`alias → channel_id`); `channel_id` absent
-/// / null clears the row (uninstall).
+/// `POST /v1/gateway/admin/channels/update` — one write to a channel
+/// document: create it (absent = named after its id), change its words, its
+/// household-default / operator marks or its default app, insert or replace
+/// an app's row (`app`), drop one (`remove_app`), set a member's row
+/// (`member`; `speak == read == false` drops it), or delete the whole
+/// document (`remove`). Every field left out is untouched. The document's
+/// `updated_at` is stamped by the gate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayChannelUpdateRequest {
+    pub channel_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub operator_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub household_default: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub app: Option<ChannelApp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub remove_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub member: Option<ChannelMember>,
+    #[serde(default)]
+    pub remove: bool,
+}
+
+/// `GET /v1/gateway/admin/channels` — every channel document on this gate.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct GatewayAppFeedUpdateRequest {
-    pub alias: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub channel_id: Option<String>,
-    /// #722 — the app's description for the router (kept when absent).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub blurb: Option<AppBlurb>,
+pub struct GatewayChannelsResponse {
+    pub ok: bool,
+    pub channels: Vec<ChannelDoc>,
 }
 
 /// `POST /v1/gateway/admin/contacts/welcome` — (re)send a bound contact's
@@ -1492,9 +1719,9 @@ pub struct GatewayBindRejectRequest {
 pub struct GatewayContactsResponse {
     pub ok: bool,
     pub contacts: Vec<ContactSummary>,
-    /// The relayed apps (`alias → channel`), for the console's checks.
+    /// The household's channel documents, for the console's checks.
     #[serde(default)]
-    pub apps: Vec<AppFeed>,
+    pub channels: Vec<ChannelDoc>,
 }
 
 /// One line in the operator's LIVE message monitor (#1) — a single inbound turn
@@ -1516,13 +1743,15 @@ pub struct GatewayMonitorEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub target: Option<String>,
-    /// #722 — how the target was chosen (`jev` / `advisory_router` /
-    /// `ask_reply` / `single_reach` / …); absent = a typed `/alias`.
+    /// #722 — how the target was chosen (`jev` / `jev_follow_up` /
+    /// `advisory_router` / `ask_reply` / `single_reach` / …); absent = a typed
+    /// `/alias`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub routed_by: Option<String>,
-    /// #722 — the router model's confidence in its pick, 0…1 (only when a
-    /// model was consulted).
+    /// #722 — what the decision model's threshold was compared with, 0…1: the
+    /// pick's probability, or the follow-up yes/no for `jev_follow_up` (only
+    /// when a model was consulted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub confidence: Option<f64>,
@@ -1553,6 +1782,165 @@ pub struct GatewayHistoryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub next_before_ts: Option<u64>,
+}
+
+/// #722 — `GET /v1/gateway/admin/router`: the contact gate's router as the
+/// decision model (Kev / Jev) sees it — its settings, the guidance each question
+/// carries, the options per bound contact, the model server, and the last turns
+/// that consulted a model. The turn log is RAM only: a restart empties it.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayRouterView {
+    pub ok: bool,
+    /// `jev` (a System One model routes plain messages) or `deterministic`.
+    pub engine: String,
+    /// The model name the contact gate asks for (and the audit records).
+    pub model: String,
+    /// Where the contact gate reaches the model: the model gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gate_url: Option<String>,
+    /// A pick routes at this probability or above, and above the runner-up.
+    pub threshold: f64,
+    /// A follow-up goes back to the previous app at this `continues` or above.
+    pub continue_threshold: f64,
+    /// How long a numbered ask waits for the member's answer.
+    #[ts(type = "number")]
+    pub ask_ttl_secs: u64,
+    pub describe_photos: bool,
+    /// The photo describer; absent = the model gate's default chat model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub describe_model: Option<String>,
+    pub describe_prompt: String,
+    pub guidance: RouterGuidance,
+    pub contacts: Vec<RouterContactView>,
+    /// The model server behind the model gate (`base_url` + its `/v1/models`
+    /// answer), or `{ "error": … }` when it could not be asked.
+    #[ts(type = "unknown")]
+    pub upstream: Value,
+    /// The last turns that consulted a model, newest first.
+    pub recent: Vec<RouterExchange>,
+}
+
+/// The guidance each System One question carries — the decision model has no
+/// other prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterGuidance {
+    /// The `destination` choice: which channel the message belongs on.
+    pub destination: String,
+    /// What the `unclear` option means.
+    pub unclear: String,
+    /// The `continues` yes/no, asked when the member has a previous channel.
+    pub continues: String,
+    pub continues_yes: String,
+    pub continues_no: String,
+    /// The `addressee` choice, asked for a channel several apps are bound to.
+    pub addressee: String,
+}
+
+/// One bound contact and the options the model picks among for their messages.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterContactView {
+    /// The display name (D13 — never the transport id).
+    pub contact: String,
+    pub tier: String,
+    pub options: Vec<RouterOptionView>,
+    /// The System One request a message from this member is sent as, with a
+    /// placeholder for the message — `state`, the `choice` question with its
+    /// `instructions` and per-option `criteria`, the `noul` follow-up when the
+    /// member has a previous channel, and an `addressee` choice per shared
+    /// channel.
+    #[ts(type = "unknown")]
+    pub request: Value,
+}
+
+/// One channel as an option: the exact line the model reads for it, rendered
+/// from its document alone.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterOptionView {
+    pub channel_id: String,
+    pub name: String,
+    /// The criterion sent for it.
+    pub line: String,
+    pub apps: Vec<RouterAppView>,
+    /// The other members' display names (D13 — never a transport id).
+    pub members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub operator_of: Option<String>,
+    /// The document version the line was rendered from.
+    #[ts(type = "number")]
+    pub updated_at: u64,
+}
+
+/// One app bound to an option channel, as the model reads it.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterAppView {
+    pub alias: String,
+    pub description: String,
+    /// The event kinds its binding takes (what a photo can reach).
+    pub takes: Vec<String>,
+}
+
+/// One turn that consulted a model: what was sent, what came back, how long
+/// each step took.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterExchange {
+    #[ts(type = "number")]
+    pub ts_ms: u64,
+    pub contact: String,
+    pub tier: String,
+    /// What the model read as `message` (a photo's description for a photo).
+    pub text: String,
+    pub photo: bool,
+    /// The channel of the member's previous turn (the follow-up anchor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_channel: Option<String>,
+    /// The System One request body, exactly as sent.
+    #[ts(type = "unknown")]
+    pub request: Value,
+    /// The `destination` probabilities per option channel.
+    pub probabilities: std::collections::BTreeMap<String, f64>,
+    /// The `continues` answer, 0 (new request) … 1 (continues).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub continues: Option<f64>,
+    /// `route` / `follow_up` / `ask` / `malformed` / `unavailable`.
+    pub verdict: String,
+    /// The channel the turn went to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub routed_to: Option<String>,
+    /// The app addressed on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub addressee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub confidence: Option<f64>,
+    /// The model version that answered (empty when none did).
+    pub answered_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub describe_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub decide_ms: Option<u64>,
+    /// From the gate receiving the turn to its reply, the delivery included.
+    #[ts(type = "number")]
+    pub total_ms: u64,
+    /// Whether the turn landed on an app's feed.
+    pub delivered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
 }
 
 /// One CONTROL-plane action on the gateway (#419) — the operator-facing audit
@@ -1599,6 +1987,11 @@ pub struct GatewayInbound {
     /// The `/alias` routing target, if the message began with `/<alias> `.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// The channel the turn is for: set by a channel-native transport (the
+    /// member picked it) or by the aggregating transport's `resolve` (the
+    /// router, an answered ask, `/alias`). `None` = nowhere to publish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 /// The L3 audience decision — may THIS contact reach THAT agent through this
@@ -1610,10 +2003,13 @@ pub struct GatewayInbound {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct L3Decision {
     pub allowed: bool,
-    /// The routed agent alias when `allowed` (deterministic `/alias` only in
-    /// phase 2; the advisory router is phase 5).
+    /// The addressed app when `allowed`: the app row the turn is for on its
+    /// channel (the router's pick, `/alias`, or the channel's default app).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_alias: Option<String>,
+    /// The channel the turn goes to when `allowed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
     /// A stable reason code for audit + the (never-in-channel, D13) parent-control
     /// view: `ok` / `unknown_contact` / `out_of_reach` / `rate_limited` /
     /// `operator_grade_requires_session` / `no_alias`.
@@ -2632,6 +3028,15 @@ pub struct PresetSummary {
     pub suggested_context: Vec<PresetSuggestedContext>,
     #[serde(default)]
     pub schedule: Vec<PresetSchedule>,
+    /// #722 — a few short messages this app is the right destination for
+    /// («今晚吃什么»). The contact gate's router shows them to the decision
+    /// model beside the app's purpose; measured 2026-09-24 on Kev-9B with the
+    /// router eval (`router-eval --no-examples`) they lift automatic routing of
+    /// held-out messages from 68% to 84% and remove its one wrong route.
+    /// Bounded by `platform_caps::MAX_ROUTE_EXAMPLES` /
+    /// `MAX_ROUTE_EXAMPLE_CHARS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_examples: Vec<String>,
     /// #662 — the app template manifest half (schema, slots, resources,
     /// tools, availability, budgets, disclosure, context pointers), flattened
     /// into the same `preset.json`. Every field defaults, so a pre-#662 role
@@ -2639,6 +3044,21 @@ pub struct PresetSummary {
     #[serde(flatten)]
     #[ts(flatten)]
     pub app: AppManifest,
+}
+
+impl PresetSummary {
+    /// #722 — the app's description for the contact gate's router, built from
+    /// the template (ONE builder: install and rebind both call it).
+    pub fn router_blurb(&self) -> AppBlurb {
+        AppBlurb {
+            name: self.name.clone(),
+            name_zh: self.name_zh.clone(),
+            purpose: self.description.clone(),
+            purpose_zh: self.description_zh.clone(),
+            examples: self.route_examples.clone(),
+            event_kinds: self.messaging_event_kinds(),
+        }
+    }
 }
 
 /// One skills doc of a bundle (`presets/<id>/skills/<filename>`).
@@ -3354,12 +3774,10 @@ mod tests {
                 transport_id: "openid-abc".into(),
                 display_name: "小明".into(),
                 tier: ContactTier::Kid,
-                reach: vec!["storyteller".into()],
+                legacy_reach: vec![],
                 welcomed: true,
             }],
-            pending: vec![],
-            invites: vec![],
-            apps: vec![],
+            ..Default::default()
         };
         assert_eq!(
             reg.resolve("weixin", "openid-abc").unwrap().contact_id,
@@ -3369,6 +3787,59 @@ mod tests {
         assert!(reg.resolve("weixin", "openid-stranger").is_none());
         // Right id on the wrong transport → None.
         assert!(reg.resolve("telegram", "openid-abc").is_none());
+    }
+
+    // A registry file from before channel documents: each contact's `reach`
+    // becomes their rows on the channels those apps were bound to, an invite's
+    // reach becomes grants, an alias bound nowhere is dropped, and the file
+    // never carries `reach` again.
+    #[test]
+    fn a_pre_channel_registry_migrates_reach_into_channel_rows() {
+        let mut reg: ContactRegistry = serde_json::from_str(
+            r#"{
+              "bound": [
+                {"contact_id":"c-owner","transport":"weixin","transport_id":"o1",
+                 "display_name":"妈妈","tier":"owner","reach":["chef","agent-i"]},
+                {"contact_id":"c-kid","transport":"weixin","transport_id":"o2",
+                 "display_name":"小明","tier":"kid","reach":["storyteller"]}
+              ],
+              "pending": [],
+              "invites": [{"bind_code":"AK-1","contact_id":"c-new","display_name":"奶奶",
+                           "tier":"elder","reach":["chef"]}],
+              "apps": [
+                {"alias":"chef","channel_id":"family-chat"},
+                {"alias":"storyteller","channel_id":"stories"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        assert!(reg.migrate_legacy(9));
+        let family = reg.channel("family-chat").unwrap();
+        assert!(family.speaks("c-owner") && family.reads("c-owner"));
+        assert!(family.member("c-kid").is_none());
+        assert!(reg.channel("stories").unwrap().speaks("c-kid"));
+        assert!(reg.app_channels("agent-i").is_empty());
+        assert_eq!(reg.speak_channels("c-owner").len(), 1);
+        assert_eq!(reg.invites[0].channels[0].channel_id, "family-chat");
+        assert!(reg.invites[0].channels[0].speak);
+        let json = serde_json::to_string(&reg).unwrap();
+        assert!(!json.contains("\"reach\""));
+        let top: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            top.get("apps").is_none(),
+            "the legacy table is gone: {json}"
+        );
+        // A second load has nothing left to move.
+        let mut again: ContactRegistry = serde_json::from_str(&json).unwrap();
+        assert!(!again.migrate_legacy(10));
+        // The member view and the grant round-trip.
+        let view = reg.contact_channels_view("c-owner");
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].name, "family-chat");
+        let grants = reg.grants_of("c-owner");
+        assert_eq!(reg.apply_grants("c-owner", &grants), 0);
+        assert_eq!(reg.apply_grants("c-owner", &[]), 1);
+        assert!(reg.speak_channels("c-owner").is_empty());
     }
 
     #[test]
@@ -3418,6 +3889,7 @@ mod tests {
             contact: None,
             content_type: None,
             relay_of: None,
+            addressee: None,
         };
         let json = serde_json::to_value(&actor).unwrap();
         assert_eq!(json["producer"]["actor"]["actor_omni"], "0xcam");

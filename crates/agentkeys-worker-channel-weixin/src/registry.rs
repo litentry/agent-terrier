@@ -78,8 +78,18 @@ impl RegistryHandle {
 fn read_file(path: &str) -> anyhow::Result<ContactRegistry> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading contact registry {path}"))?;
-    let reg: ContactRegistry =
+    let mut reg: ContactRegistry =
         serde_json::from_str(&raw).with_context(|| format!("parsing contact registry {path}"))?;
+    // A file from before channel documents: fold its `apps` table and every
+    // `reach` into the documents (persisted by the next mutate — a load never
+    // writes).
+    if reg.migrate_legacy(crate::relay::unix_secs()) {
+        tracing::info!(
+            path,
+            channels = reg.channels.len(),
+            "contact registry: pre-channel rows folded into channel documents"
+        );
+    }
     Ok(reg)
 }
 
@@ -128,7 +138,12 @@ mod tests {
                     contact_id: "c-grandma".into(),
                     display_name: "奶奶".into(),
                     tier: ContactTier::Elder,
-                    reach: vec!["chef".into()],
+                    channels: vec![agentkeys_protocol::ChannelGrant {
+                        channel_id: "family-chat".into(),
+                        speak: true,
+                        read: true,
+                    }],
+                    legacy_reach: vec![],
                 });
                 Ok(())
             })
@@ -174,7 +189,8 @@ mod tests {
                     contact_id: "c-first".into(),
                     display_name: "first".into(),
                     tier: ContactTier::Elder,
-                    reach: vec![],
+                    channels: vec![],
+                    legacy_reach: vec![],
                 });
                 Ok(())
             })

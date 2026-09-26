@@ -1,24 +1,25 @@
-//! #667 / #669 R3 — the OUTBOUND half of the feed hop: an app's reply (or an
-//! unsolicited publish, e.g. the morning plan to the family chat) lands on the
-//! messaging feed as a `direction: out` event; this loop subscribes to every
-//! feed this gateway is granted on and delivers each one back through the
-//! transport.
+//! #667 / #669 R3 / household channels — the OUTBOUND half of the feed hop:
+//! an app's reply (or an unsolicited publish, e.g. the morning plan to the
+//! family chat) lands on a channel's feed as a `direction: out` event; this
+//! loop subscribes to every channel some member READS and delivers each one
+//! back through the transport.
 //!
-//! Which feeds: the channel each reachable app's messaging slot binds — the
-//! registry's `apps` table (`alias → channel`, written by the console at
-//! install / rebind; owner decision 2026-09-22: the bound channel IS the feed,
-//! no `<transport>-<alias>` derivation) joined with every bound contact's
-//! `reach` on this transport. Reach still gates who may talk to an app; the
-//! table says where the app listens (an alias nobody can reach has no feed to
-//! deliver from; a feed the master never granted refuses the sub cap and is
-//! retried later, loudly once).
+//! Which feeds: every channel document that lists a member of this transport
+//! with `read` (the console writes the documents; an app nobody reads has no
+//! feed to deliver from; a feed the master never granted refuses the sub cap
+//! and is retried later, loudly once).
 //!
-//! Who gets it: a reply correlated to an inbound event id goes to THAT contact
-//! (the correlation ring); anything else on the feed is an app-initiated
-//! publish and goes to the feed's AUDIENCE — every bound contact on this
-//! transport whose reach carries the alias. Streamed deltas (`partial`) and
+//! Who gets it: a reply correlated to an inbound event this gate relayed goes
+//! to THAT member (the correlation ring); a reply correlated to another
+//! endpoint's turn (the console's own conversation) goes to no transport;
+//! an uncorrelated event is an app-initiated publish and goes to every
+//! READER of the channel on this transport. Streamed deltas (`partial`) and
 //! the gateway's own `in` events are skipped; only `text` delivers today
 //! (image out is the next leg — the plan's R3 image round-trip).
+//!
+//! What they read: on an aggregating transport (every one today) the text is
+//! labelled `[<channel name>] …` — one thread must say where each message
+//! belongs ([`crate::transport::label`]).
 //!
 //! Cursors persist per feed; a fresh feed starts at its CURRENT tail (never a
 //! replay of history back to a phone).
@@ -38,34 +39,38 @@ const POLL_WAIT_SECONDS: u64 = 20;
 const UNGRANTED_RETRY: Duration = Duration::from_secs(300);
 const ERROR_RETRY: Duration = Duration::from_secs(20);
 
-/// The feeds this gateway should be subscribed to: the bound channel of every
-/// app some contact on this transport can reach (registry `apps` × `reach`).
+/// The feeds this gateway should be subscribed to: every channel some member
+/// on this transport reads.
 pub fn feeds_for_transport(registry: &ContactRegistry, transport: &str) -> Vec<String> {
     let mut feeds: Vec<String> = registry
-        .bound
+        .channels
         .iter()
-        .filter(|c| c.transport == transport)
-        .flat_map(|c| c.reach.iter())
-        .filter_map(|alias| registry.app_channel(alias).map(str::to_string))
+        .filter(|d| {
+            d.members.iter().any(|m| {
+                m.read
+                    && registry
+                        .contact(&m.contact_id)
+                        .is_some_and(|c| c.transport == transport)
+            })
+        })
+        .map(|d| d.id.clone())
         .collect();
     feeds.sort();
     feeds.dedup();
     feeds
 }
 
-/// The contacts an app-initiated publish on `feed` goes to: everyone on this
-/// transport whose reach names an app bound to that channel.
+/// The members an app-initiated publish on `feed` goes to: every reader of
+/// the channel on this transport (their transport ids).
 pub fn audience_for(registry: &ContactRegistry, transport: &str, feed: &str) -> Vec<String> {
-    let aliases = registry.aliases_on_channel(feed);
-    registry
-        .bound
+    let Some(doc) = registry.channel(feed) else {
+        return Vec::new();
+    };
+    doc.members
         .iter()
+        .filter(|m| m.read)
+        .filter_map(|m| registry.contact(&m.contact_id))
         .filter(|c| c.transport == transport)
-        .filter(|c| {
-            c.reach
-                .iter()
-                .any(|r| aliases.iter().any(|a| a.eq_ignore_ascii_case(r)))
-        })
         .map(|c| c.transport_id.clone())
         .collect()
 }
@@ -217,17 +222,33 @@ async fn feed_task(
                     let Some(text) = decode_text(&ev) else {
                         continue;
                     };
-                    let targets: Vec<String> = match ev
-                        .correlation
-                        .as_deref()
-                        .and_then(|c| device.lookup_correlation(c))
-                    {
-                        Some(row) => vec![row.transport_id],
-                        None => audience_for(&state.registry.snapshot(), transport_ns, &feed),
+                    let registry = state.registry.snapshot();
+                    let targets: Vec<String> = match ev.correlation.as_deref() {
+                        // A reply to a turn this gate relayed: back to that member.
+                        Some(c) => match device.lookup_correlation(c) {
+                            Some(row) => vec![row.transport_id],
+                            // A reply to another endpoint's turn (the console's
+                            // own conversation): not for any transport.
+                            None => {
+                                debug!(feed = %feed, event = %ev.event_id, "outbound: a reply to a turn this gate did not relay — not delivered");
+                                Vec::new()
+                            }
+                        },
+                        // An app-initiated publish: every reader of the channel.
+                        None => audience_for(&registry, transport_ns, &feed),
                     };
-                    if targets.is_empty() {
-                        debug!(feed = %feed, event = %ev.event_id, "outbound: no addressee (no correlation, empty audience)");
+                    if targets.is_empty() && ev.correlation.is_none() {
+                        debug!(feed = %feed, event = %ev.event_id, "outbound: no reader on this transport");
                     }
+                    let channel_name = registry
+                        .channel(&feed)
+                        .map(|d| d.display_name().to_string())
+                        .unwrap_or_else(|| feed.clone());
+                    let text = crate::transport::label(
+                        state.config.transport.kind(),
+                        &channel_name,
+                        &text,
+                    );
                     for to in targets {
                         match deliver(&state, &to, &text).await {
                             Ok(()) => {
@@ -335,60 +356,57 @@ pub async fn run(state: SharedWeixinGatewayState, mut shutdown: watch::Receiver<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentkeys_protocol::{ChannelProducer, Contact, ContactTier};
+    use agentkeys_protocol::{ChannelApp, ChannelProducer, Contact, ContactTier};
 
-    fn registry() -> ContactRegistry {
-        ContactRegistry {
-            bound: vec![
-                Contact {
-                    contact_id: "c-owner".into(),
-                    transport: "weixin".into(),
-                    transport_id: "wxid-owner".into(),
-                    display_name: "妈妈".into(),
-                    tier: ContactTier::Owner,
-                    reach: vec!["chef".into(), "Doorkeeper".into()],
-                    welcomed: true,
-                },
-                Contact {
-                    contact_id: "c-kid".into(),
-                    transport: "weixin".into(),
-                    transport_id: "wxid-kid".into(),
-                    display_name: "小明".into(),
-                    tier: ContactTier::Kid,
-                    reach: vec!["chef".into()],
-                    welcomed: true,
-                },
-                Contact {
-                    contact_id: "c-tg".into(),
-                    transport: "telegram".into(),
-                    transport_id: "42".into(),
-                    display_name: "A".into(),
-                    tier: ContactTier::Partner,
-                    reach: vec!["chef".into()],
-                    welcomed: true,
-                },
-            ],
-            pending: vec![],
-            invites: vec![],
-            apps: vec![
-                agentkeys_protocol::AppFeed {
-                    alias: "chef".into(),
-                    channel_id: "family-chat".into(),
-                    blurb: None,
-                },
-                agentkeys_protocol::AppFeed {
-                    alias: "doorkeeper".into(),
-                    channel_id: "door".into(),
-                    blurb: None,
-                },
-            ],
+    fn contact(id: &str, transport: &str, tid: &str, tier: ContactTier) -> Contact {
+        Contact {
+            contact_id: id.into(),
+            transport: transport.into(),
+            transport_id: tid.into(),
+            display_name: id.into(),
+            tier,
+            legacy_reach: vec![],
+            welcomed: true,
         }
     }
 
+    fn registry() -> ContactRegistry {
+        let mut reg = ContactRegistry {
+            bound: vec![
+                contact("c-owner", "weixin", "wxid-owner", ContactTier::Owner),
+                contact("c-kid", "weixin", "wxid-kid", ContactTier::Kid),
+                contact("c-tg", "telegram", "42", ContactTier::Partner),
+            ],
+            ..Default::default()
+        };
+        let family = reg.channel_or_new("family-chat");
+        family.name = "家庭群".into();
+        family.upsert_app(ChannelApp {
+            alias: "chef".into(),
+            ..Default::default()
+        });
+        family.set_member("c-owner", true, true);
+        family.set_member("c-kid", false, true);
+        family.set_member("c-tg", true, true);
+        let door = reg.channel_or_new("door");
+        door.upsert_app(ChannelApp {
+            alias: "doorkeeper".into(),
+            ..Default::default()
+        });
+        door.set_member("c-owner", true, true);
+        let spend = reg.channel_or_new("spend-chat");
+        spend.upsert_app(ChannelApp {
+            alias: "spend".into(),
+            ..Default::default()
+        });
+        reg
+    }
+
     #[test]
-    fn feeds_and_audience_follow_the_apps_table_and_reach_per_transport() {
-        // The bound channel IS the feed (2026-09-22): reach says who may talk
-        // to an app, the apps table says where the app listens.
+    fn feeds_and_audience_are_the_readers_per_transport() {
+        // A channel is a feed to deliver from when a member of the transport
+        // reads it; the audience of an app-initiated publish is its readers,
+        // a reader who cannot speak included, a channel nobody reads excluded.
         assert_eq!(
             feeds_for_transport(&registry(), "weixin"),
             vec!["door".to_string(), "family-chat".to_string()]
@@ -397,6 +415,7 @@ mod tests {
             feeds_for_transport(&registry(), "telegram"),
             vec!["family-chat"]
         );
+        assert!(feeds_for_transport(&registry(), "ilink").is_empty());
         assert_eq!(
             audience_for(&registry(), "weixin", "family-chat"),
             vec!["wxid-owner", "wxid-kid"]
@@ -405,7 +424,64 @@ mod tests {
             audience_for(&registry(), "weixin", "door"),
             vec!["wxid-owner"]
         );
+        assert_eq!(
+            audience_for(&registry(), "telegram", "family-chat"),
+            vec!["42"]
+        );
+        assert!(audience_for(&registry(), "weixin", "spend-chat").is_empty());
         assert!(audience_for(&registry(), "weixin", "weixin-chef").is_empty());
+    }
+
+    #[test]
+    fn a_pre_channel_registry_file_delivers_from_the_migrated_documents() {
+        let mut reg: ContactRegistry = serde_json::from_str(
+            r#"{
+          "bound": [
+            {"contact_id":"c-owner","transport":"weixin","transport_id":"openid-owner",
+             "display_name":"妈妈","tier":"owner","reach":["Chef","doorkeeper"]},
+            {"contact_id":"c-kid","transport":"weixin","transport_id":"openid-kid",
+             "display_name":"小明","tier":"kid","reach":["storyteller","chef"]},
+            {"contact_id":"c-tg","transport":"telegram","transport_id":"1001",
+             "display_name":"Alex","tier":"owner","reach":["chef"]}
+          ],
+          "pending": [],
+          "apps": [
+            {"alias":"chef","channel_id":"family-chat"},
+            {"alias":"doorkeeper","channel_id":"door"},
+            {"alias":"storyteller","channel_id":"stories"},
+            {"alias":"spend","channel_id":"spend-chat"}
+          ]
+        }"#,
+        )
+        .expect("registry json");
+        assert!(reg.migrate_legacy(1));
+        assert_eq!(
+            feeds_for_transport(&reg, "weixin"),
+            vec![
+                "door".to_string(),
+                "family-chat".to_string(),
+                "stories".to_string()
+            ]
+        );
+        assert_eq!(
+            feeds_for_transport(&reg, "telegram"),
+            vec!["family-chat".to_string()]
+        );
+        let mut chef = audience_for(&reg, "weixin", "family-chat");
+        chef.sort();
+        assert_eq!(
+            chef,
+            vec!["openid-kid".to_string(), "openid-owner".to_string()]
+        );
+        assert_eq!(
+            audience_for(&reg, "weixin", "stories"),
+            vec!["openid-kid".to_string()]
+        );
+        // An app nobody reaches has no feed to deliver from.
+        assert!(audience_for(&reg, "weixin", "spend-chat").is_empty());
+        let reg: ContactRegistry = serde_json::from_str(r#"{"bound": [], "pending": []}"#)
+            .expect("pre-2026-09-22 registry json");
+        assert!(feeds_for_transport(&reg, "weixin").is_empty());
     }
 
     #[test]
@@ -430,6 +506,7 @@ mod tests {
                 contact: None,
                 content_type: None,
                 relay_of: None,
+                addressee: None,
             };
         assert!(deliverable(&ev(
             ChannelDirection::Out,
@@ -455,81 +532,5 @@ mod tests {
             decode_text(&ev(ChannelDirection::Out, ChannelEventKind::Text, None)).as_deref(),
             Some("hi")
         );
-    }
-}
-
-#[cfg(test)]
-mod feed_tests {
-    use super::*;
-
-    fn registry() -> ContactRegistry {
-        let json = r#"{
-          "bound": [
-            {"contact_id":"c-owner","transport":"weixin","transport_id":"openid-owner",
-             "display_name":"妈妈","tier":"owner","reach":["Chef","doorkeeper"]},
-            {"contact_id":"c-kid","transport":"weixin","transport_id":"openid-kid",
-             "display_name":"小明","tier":"kid","reach":["storyteller","chef"]},
-            {"contact_id":"c-tg","transport":"telegram","transport_id":"1001",
-             "display_name":"Alex","tier":"owner","reach":["chef"]}
-          ],
-          "pending": [],
-          "apps": [
-            {"alias":"chef","channel_id":"family-chat"},
-            {"alias":"doorkeeper","channel_id":"door"},
-            {"alias":"storyteller","channel_id":"stories"},
-            {"alias":"spend","channel_id":"spend-chat"}
-          ]
-        }"#;
-        serde_json::from_str(json).expect("registry json")
-    }
-
-    #[test]
-    fn feeds_follow_the_apps_table_per_transport_and_dedupe() {
-        let reg = registry();
-        let feeds = feeds_for_transport(&reg, "weixin");
-        assert_eq!(
-            feeds,
-            vec![
-                "door".to_string(),
-                "family-chat".to_string(),
-                "stories".to_string()
-            ]
-        );
-        assert_eq!(
-            feeds_for_transport(&reg, "telegram"),
-            vec!["family-chat".to_string()]
-        );
-        assert!(feeds_for_transport(&reg, "ilink").is_empty());
-        // An app nobody reaches has no feed to deliver from.
-        assert!(!feeds.contains(&"spend-chat".to_string()));
-    }
-
-    #[test]
-    fn an_older_registry_file_without_the_apps_table_still_parses() {
-        let reg: ContactRegistry = serde_json::from_str(r#"{"bound": [], "pending": []}"#)
-            .expect("pre-2026-09-22 registry json");
-        assert!(reg.apps.is_empty());
-        assert!(feeds_for_transport(&reg, "weixin").is_empty());
-    }
-
-    #[test]
-    fn audience_is_reach_bounded_per_transport() {
-        let reg = registry();
-        let mut chef = audience_for(&reg, "weixin", "family-chat");
-        chef.sort();
-        assert_eq!(
-            chef,
-            vec!["openid-kid".to_string(), "openid-owner".to_string()]
-        );
-        assert_eq!(
-            audience_for(&reg, "weixin", "stories"),
-            vec!["openid-kid".to_string()]
-        );
-        assert_eq!(
-            audience_for(&reg, "telegram", "family-chat"),
-            vec!["1001".to_string()]
-        );
-        assert!(audience_for(&reg, "weixin", "spend-chat").is_empty());
-        assert!(audience_for(&reg, "weixin", "weixin-chef").is_empty());
     }
 }

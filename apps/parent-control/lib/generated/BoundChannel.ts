@@ -12,4 +12,10 @@ export type BoundChannel = { slot: string, kind: ChannelEndpointKind, direction:
  * The relaying / rendering endpoint actor (gateway, console) when known —
  * consumers trust a `contact` stamp on this feed only from this actor.
  */
-endpoint_actor_omni?: string, };
+endpoint_actor_omni?: string, 
+/**
+ * Whether this app takes the channel's UNADDRESSED events (the channel
+ * document's default app). `None` = not known (a context written before
+ * channels were shared): take them, as before.
+ */
+default_app?: boolean, };

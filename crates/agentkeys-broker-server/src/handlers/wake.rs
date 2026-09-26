@@ -195,6 +195,7 @@ mod tests {
                 channel_id: (*id).to_string(),
                 event_kinds: vec![],
                 endpoint_actor_omni: None,
+                default_app: None,
             })
             .collect();
         SpawnContext {

@@ -1,3 +1,5 @@
+import type { ChannelDoc } from '../generated/ChannelDoc';
+import type { ChannelGrant } from '../generated/ChannelGrant';
 import type { ContactSummary } from '../generated/ContactSummary';
 import type { ContactTier } from '../generated/ContactTier';
 import type { GatewayPendingBindView } from '../generated/GatewayPendingBindView';
@@ -5,6 +7,8 @@ import type { GatewayPendingBindView } from '../generated/GatewayPendingBindView
 // The Contacts page's flow, as pure functions (unit-tested without React):
 // one bot per household connected ONCE; every member — the owner first —
 // binds by texting an invite code to that bot; the owner approves each bind.
+// A member's access is their rows on the household's CHANNEL DOCUMENTS
+// (speak / read per channel) — never a list of apps.
 
 /** The owner's own invite uses a FIXED contact id so re-minting replaces it. */
 export const SELF_CONTACT_ID = 'self-owner';
@@ -14,50 +18,48 @@ export const TIER_ORDER: ContactTier[] = ['owner', 'partner', 'elder', 'kid', 'h
 
 /** What each tier means, in the words a parent would use. */
 export const TIER_INFO: Record<ContactTier, { zh: string; blurb: string }> = {
-  owner: { zh: '拥有者', blurb: 'You. Every agent, money/usage ones included; every app you install later adds itself.' },
-  partner: { zh: '配偶', blurb: 'Your spouse. The family agents; apps that admit partners add themselves.' },
-  elder: { zh: '长辈', blurb: 'Grandparents. The family agents you pick; never money/usage ones.' },
-  kid: { zh: '孩子', blurb: 'Children. Only the agents you pick; never money/usage ones.' },
-  helper: { zh: '帮手', blurb: 'Nanny, cleaner. Household-task agents you pick.' },
-  guest: { zh: '访客', blurb: 'Visitors. Nothing until you grant a specific agent.' },
+  owner: { zh: '拥有者', blurb: 'You. Every channel, each app’s operator channel included; an app you install later adds its channel here.' },
+  partner: { zh: '配偶', blurb: 'Your spouse. The family channels; an operator channel only when you switch it on.' },
+  elder: { zh: '长辈', blurb: 'Grandparents. The family channels whose apps admit them; never an operator channel by default.' },
+  kid: { zh: '孩子', blurb: 'Children. Only the channels you pick; they can read the family chat without posting.' },
+  helper: { zh: '帮手', blurb: 'Nanny, cleaner. The household channels whose apps admit them.' },
+  guest: { zh: '访客', blurb: 'Visitors. Nothing until you add them to a channel.' },
 };
 
-/** An installed app's messaging audience: the tiers its manifest admits. */
-export interface InstalledAppAudience {
-  label: string;
-  /** The `/alias`es the install wrote into contacts' reach — what a fresh invite
-   *  is pre-filled with (the gate routes on these, never on a display label). */
-  aliases: string[];
-  tiers: ContactTier[];
+/** The channels a member can be given rows on: household channels first,
+ *  each app's operator channel after (the explicit ones). */
+export function grantableChannels(docs: ChannelDoc[]): ChannelDoc[] {
+  return [...docs].sort((a, b) => Number(!!a.operator_of) - Number(!!b.operator_of) || a.id.localeCompare(b.id));
 }
 
-type AppRowLike = {
-  label: string;
-  reach_aliases?: string[];
-  bindings: { audience: Array<{ slot: string; tiers: ContactTier[] }> };
-  bound_channels: Array<{ kind: string }>;
-};
-
-/** Installed apps that have a messaging endpoint, with the union of their admitted tiers. */
-export function appAudiences(rows: AppRowLike[]): InstalledAppAudience[] {
-  return rows
-    .filter((r) => r.bound_channels.some((b) => b.kind === 'messaging'))
-    .map((r) => ({
-      label: r.label,
-      aliases: r.reach_aliases?.length ? r.reach_aliases : [r.label],
-      tiers: Array.from(new Set(r.bindings.audience.flatMap((a) => a.tiers))),
-    }));
+/** The rows a fresh invite starts with — a proposal the owner edits before
+ *  minting: the owner speaks everywhere (operator channels included); a guest
+ *  nothing; every other tier speaks on the household channels whose apps
+ *  admit it (each app row carries its template's audience) and reads the
+ *  household default otherwise. Operator channels are never proposed. Apps
+ *  installed LATER propose their own rows (the daemon's install write-through). */
+export function suggestedGrants(tier: ContactTier, docs: ChannelDoc[]): ChannelGrant[] {
+  const out: ChannelGrant[] = [];
+  for (const d of grantableChannels(docs)) {
+    if (tier === 'owner') {
+      out.push({ channel_id: d.id, speak: true, read: true });
+      continue;
+    }
+    if (tier === 'guest' || d.operator_of) continue;
+    const admitted = d.apps.some((a) => a.audience.includes(tier));
+    if (admitted) out.push({ channel_id: d.id, speak: true, read: true });
+    else if (d.household_default) out.push({ channel_id: d.id, speak: false, read: true });
+  }
+  return out;
 }
 
-/** The reach a fresh invite starts with: the owner reaches every agent that
- *  exists today; a guest nothing; every other tier the installed apps whose
- *  audience admits it. Apps installed LATER add themselves to every contact of
- *  an admitted tier (the daemon's install write-through), so a list only ever
- *  needs today's agents. */
-export function suggestedReach(tier: ContactTier, agents: string[], apps: InstalledAppAudience[]): string[] {
-  if (tier === 'owner') return Array.from(new Set(agents));
-  if (tier === 'guest') return [];
-  return Array.from(new Set(apps.filter((a) => a.tiers.includes(tier)).flatMap((a) => a.aliases)));
+/** One line naming the channels a set of grants covers, as the page shows it. */
+export function describeGrants(grants: { channel_id: string; speak: boolean; read: boolean }[], docs: ChannelDoc[]): string {
+  const name = (id: string) => docs.find((d) => d.id === id)?.name || id;
+  const parts = grants
+    .filter((g) => g.speak || g.read)
+    .map((g) => `${name(g.channel_id)}${g.speak ? '' : ' (read only)'}`);
+  return parts.length ? parts.join(', ') : '—';
 }
 
 /** iLink bots are per member and bound by SCAN (one clawbot per WeChat account);

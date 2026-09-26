@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         upstream = %config.upstream.base_url,
         model_override = ?config.upstream.model_override,
+        default_model = ?config.upstream.default_model,
         keys = config.keys.len(),
         default_budget = ?config.default_budget_tokens,
         "metered key-custody relay configured"

@@ -58,6 +58,7 @@ pub fn parse_slot_bindings(spec: &str) -> Result<Vec<SlotBinding>> {
             slot: slot.trim().to_string(),
             channel_id: channel.trim().to_string(),
             endpoint_actor_omni: None,
+            description: None,
         });
     }
     Ok(out)

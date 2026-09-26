@@ -36,6 +36,18 @@ pub struct GateAdminConfig {
     pub delegate_budget_tokens: Option<u64>,
 }
 
+impl GateAdminConfig {
+    /// The gate's origin for the sandbox daemon's own gate calls (photo
+    /// perception, voice ASR/TTS), which append `/v1/...` themselves. `turn_url`
+    /// is the OpenAI-style base (`https://gate.<zone>/v1`) that `ARK_BASE_URL`
+    /// carries; handing it over as-is made every such call `/v1/v1/...` → 404
+    /// on VE (measured 2026-09-26: `gate completion HTTP 404`).
+    pub fn origin(&self) -> String {
+        let base = self.turn_url.trim_end_matches('/');
+        base.strip_suffix("/v1").unwrap_or(base).to_string()
+    }
+}
+
 /// `None` = gate not configured on this stack (the documented no-op skip).
 /// `Some(Err)` never happens here — partial config (URL without token/turn
 /// URL) is a hard error string so a half-wired stack fails loud, not silent.
@@ -166,4 +178,36 @@ pub async fn deprovision_delegate(
         .await
         .map(|r| r.disabled)
         .map_err(|e| format!("gate deprovision decode: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(turn_url: &str) -> GateAdminConfig {
+        GateAdminConfig {
+            admin_url: "http://127.0.0.1:8077".into(),
+            admin_token: "t".into(),
+            turn_url: turn_url.into(),
+            delegate_budget_tokens: None,
+        }
+    }
+
+    #[test]
+    fn the_sandbox_gate_origin_drops_the_openai_v1_base() {
+        // The VE stack's turn URL: the daemon appends `/v1/chat/completions`.
+        assert_eq!(
+            cfg("https://gate.agentterrier.cn/v1").origin(),
+            "https://gate.agentterrier.cn"
+        );
+        assert_eq!(
+            cfg("https://gate.agentterrier.cn/v1/").origin(),
+            "https://gate.agentterrier.cn"
+        );
+        // A turn URL without the `/v1` base is already the origin.
+        assert_eq!(
+            cfg("http://127.0.0.1:8077").origin(),
+            "http://127.0.0.1:8077"
+        );
+    }
 }

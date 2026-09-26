@@ -8,12 +8,14 @@
  */
 export type GatewayMonitorEvent = { seq: number, ts_ms: number, contact: string, tier: string, text: string, allowed: boolean, reason: string, target?: string, 
 /**
- * #722 — how the target was chosen (`jev` / `advisory_router` /
- * `ask_reply` / `single_reach` / …); absent = a typed `/alias`.
+ * #722 — how the target was chosen (`jev` / `jev_follow_up` /
+ * `advisory_router` / `ask_reply` / `single_reach` / …); absent = a typed
+ * `/alias`.
  */
 routed_by?: string, 
 /**
- * #722 — the router model's confidence in its pick, 0…1 (only when a
- * model was consulted).
+ * #722 — what the decision model's threshold was compared with, 0…1: the
+ * pick's probability, or the follow-up yes/no for `jev_follow_up` (only
+ * when a model was consulted).
  */
 confidence?: number, };

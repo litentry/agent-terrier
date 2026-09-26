@@ -9,12 +9,17 @@
 //! 2. **Verifies** every platform callback (the WeChat signature) — [`signature`].
 //! 3. **Authenticates** each human by transport identity (openid) against the
 //!    master-curated **contact registry** (`policy`-class doc) — [`registry`].
-//! 4. **Enforces L3** BEFORE anything reaches an agent — reach, per-contact rate
-//!    limit, the operator-grade-needs-operator-grade-auth rule — [`l3`].
-//! 5. **Routes** — `/alias` deterministically, else the Jev router tier (#722:
-//!    the decision model picks among the contact's reach through the model gate,
+//! 4. **Enforces L3** BEFORE anything reaches an agent — the member's rows on
+//!    the household's channel documents, per-contact rate limit, the
+//!    operator-grade-needs-operator-grade-auth rule — [`l3`].
+//! 5. **Routes** — `/alias` deterministically, else the Jev router tier (#722 /
+//!    household channels: the decision model picks, through the model gate,
+//!    which of the member's OWN channels the message belongs on — reading the
+//!    channel documents and nothing else — names the app on a shared channel,
 //!    asks the member when unsure, falls back to the whole-word tier) — and
-//!    relays into the target delegate's channel feed, auditing each turn.
+//!    relays onto that channel's feed with the addressee, auditing each turn.
+//!    Every delivery back is labelled `[channel]` (the aggregating transport's
+//!    hook, [`transport`]).
 //!
 //! **A PEP, never an authority** — it holds no master key, mints no grant; a
 //! contact holds no caps and (D13) sees no feed history. The tier proposal at
@@ -48,6 +53,7 @@ pub mod signature;
 pub mod state;
 pub mod telegram;
 pub mod telegram_loop;
+pub mod transport;
 
 pub use config::{WeixinGatewayConfig, WeixinTransport};
 pub use state::WeixinGatewayState;

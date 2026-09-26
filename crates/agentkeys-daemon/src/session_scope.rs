@@ -331,6 +331,7 @@ mod tests {
             direction: SlotDirection::Duplex,
             channel_id: format!("ch-{slot}"),
             endpoint_actor_omni: None,
+            default_app: None,
         }
     }
 

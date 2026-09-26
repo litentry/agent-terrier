@@ -371,6 +371,7 @@ mod tests {
             channel_id: "weixin-chef".into(),
             event_kinds: vec![agentkeys_protocol::ChannelEventKind::Text],
             endpoint_actor_omni: Some("0xgw".into()),
+            default_app: None,
         }])
         .unwrap();
         c.availability = "wake-on-event".into();

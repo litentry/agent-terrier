@@ -32,6 +32,7 @@ pub fn router(relay: Arc<Relay>) -> Router {
         // #722 — the System One (Jev) decision relay: the household router's
         // typed pick through the gate-held TypeSafe key. 503 when unconfigured.
         .route(agentkeys_protocol::SYSTEMONE_ROUTE, post(systemone))
+        .route("/v1/systemone/models", get(systemone_models))
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
         // #519 — the speech relay legs (same gk_ auth; gate-held Doubao app
@@ -257,6 +258,20 @@ fn authenticate_live(
 ) -> Result<crate::config::RelayKey, GateError> {
     let token = auth::bearer(auth_header(headers))?;
     relay.keys.authenticate(token)
+}
+
+/// #722 — `GET /v1/systemone/models`: the decision model's server, for the
+/// contact gate's router view (a live relay key or the admin token).
+async fn systemone_models(State(relay): State<Arc<Relay>>, headers: HeaderMap) -> Response {
+    if authenticate_live(&relay, &headers).is_err()
+        && !auth::is_admin(&relay.config, auth_header(&headers))
+    {
+        return error_response(GateError::Unauthorized("unknown relay key".into()));
+    }
+    match relay.systemone_models().await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => error_response(e),
+    }
 }
 
 async fn models(State(relay): State<Arc<Relay>>, headers: HeaderMap) -> Response {

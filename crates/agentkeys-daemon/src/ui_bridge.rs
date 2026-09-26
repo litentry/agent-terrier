@@ -1531,6 +1531,15 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             post(crate::gateway_device::gateway_enroll_submit),
         )
         .route("/v1/master/gateway/monitor", get(gateway_monitor_proxy))
+        // #722 — the Route page: what the router sends the decision model.
+        .route("/v1/master/gateway/router", get(gateway_router_proxy))
+        // Household channels — the channel documents the router reads: the
+        // Channels page reads and edits them here; every write is live.
+        .route("/v1/master/gateway/channels", get(gateway_channels_proxy))
+        .route(
+            "/v1/master/gateway/channels/update",
+            post(gateway_channels_update_proxy),
+        )
         .route("/v1/master/gateway/history", get(gateway_history_proxy))
         .route("/v1/master/gateway/activity", get(gateway_activity_proxy))
         .route(
@@ -9440,6 +9449,19 @@ async fn gateway_monitor_proxy(
     .await
 }
 
+async fn gateway_router_proxy(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/router",
+        None,
+        None,
+    )
+    .await
+}
+
 async fn gateway_history_proxy(
     State(state): State<SharedUiBridgeState>,
     axum::extract::RawQuery(q): axum::extract::RawQuery,
@@ -9568,6 +9590,39 @@ async fn gateway_contacts_update_proxy(
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
     forward_gateway_mutation(&state, "/v1/gateway/admin/contacts/update", body).await
+}
+
+async fn gateway_channels_proxy(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    forward_to_gateway(
+        &state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/channels",
+        None,
+        None,
+    )
+    .await
+}
+
+/// One write to a channel document from the console. A change of the
+/// channel's default app is also told to the live apps bound there (their
+/// `default_app` flag rides the durable spawn context + the live rebind).
+async fn gateway_channels_update_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let channel_id = body
+        .get("channel_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let default_changed = body.get("default_app").is_some() || body.get("remove_app").is_some();
+    let resp = forward_gateway_mutation(&state, "/v1/gateway/admin/channels/update", body).await;
+    if resp.status().is_success() && default_changed && !channel_id.is_empty() {
+        crate::apps::push_default_app_flags(&state, &channel_id).await;
+    }
+    resp
 }
 
 async fn gateway_contacts_revoke_proxy(
@@ -11761,11 +11816,32 @@ async fn update_channel(
     }
     let updated = reg.channels.iter().find(|c| c.id == idl).cloned();
     match persist_channel_registry(&state, reg).await {
-        Ok(storage) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "channel": updated, "storage": storage })),
-        )
-            .into_response(),
+        Ok(storage) => {
+            // The gate's document carries the same words (its name is the
+            // `[channel]` label members read, its note the router's purpose
+            // line): best-effort, loud — the registry row is the source.
+            if let Some(ch) = updated.as_ref() {
+                let mut doc = serde_json::json!({ "channel_id": ch.id, "name": ch.name });
+                if let Some(note) = ch.note.as_deref() {
+                    doc["purpose"] = serde_json::json!(note);
+                }
+                if let Err(e) = gateway_admin_call(
+                    &state,
+                    reqwest::Method::POST,
+                    "/v1/gateway/admin/channels/update",
+                    Some(doc),
+                )
+                .await
+                {
+                    tracing::info!(id = %ch.id, "channel words not pushed to the contact gate's document — {e}");
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "channel": updated, "storage": storage })),
+            )
+                .into_response()
+        }
         Err(e) => registry_err(
             StatusCode::BAD_GATEWAY,
             &format!("channel registry store failed — nothing changed: {e}"),

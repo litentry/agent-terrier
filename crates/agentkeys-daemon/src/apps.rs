@@ -18,13 +18,14 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use agentkeys_backend_client::protocol::{
-    compile_app, service_channel_pub, service_channel_sub, validate_template, AppBlurb,
-    AppInstallBindings, AppInstanceRow, AppInstanceStatus, AppRegistryDoc, Availability,
-    BoundChannel, CardCommand, CardDocument, ChannelEndpointKind, CompiledApp, ContactSummary,
+    compile_app, opchat_channel_id, opchat_display_name, opchat_purpose, seed_binding_description,
+    service_channel_pub, service_channel_sub, validate_template, AppInstallBindings,
+    AppInstanceRow, AppInstanceStatus, AppRegistryDoc, Availability, BoundChannel, CardCommand,
+    CardDocument, ChannelApp, ChannelDoc, ChannelEndpointKind, CompiledApp, ContactSummary,
     ContactTier, EndpointEnrollment, EndpointGrantDelta, EndpointScope, PresetBundle,
     PresetSummary, ResourceItemRow, ResourceKind, ResourceRegistryDoc, Sensitivity,
     ServiceAnnotation, SlotAudience, SlotBinding, TemplateError, APP_REGISTRY_SERVICE,
-    RESOURCE_REGISTRY_SERVICE,
+    OPCHAT_DESCRIPTION_ZH, OPCHAT_SLOT_NAME, RESOURCE_REGISTRY_SERVICE,
 };
 use agentkeys_backend_client::protocol::{AppAnchor, ContextSeal, DelegateContextDoc};
 
@@ -150,9 +151,6 @@ pub(crate) struct AppInstallStash {
     /// context at confirm, so a read of `ceremony_context_by_dkh` after the
     /// submit finds nothing (the registry row shipped with `services: []`).
     pub services: Vec<String>,
-    /// #722 — the app's description for the contact gate's router (from the
-    /// template summary), registered with its feed at confirm.
-    pub blurb: Option<AppBlurb>,
     /// The anchor seal the batch carries: the context document stored on the
     /// memory plane after the confirm.
     pub context_seal: Option<ContextSeal>,
@@ -491,14 +489,11 @@ pub async fn app_install_build(
     }
     let mut bindings = req.bindings.clone();
     resolve_binding_endpoints(&state, &mut bindings).await;
-    // One messaging channel per app: two apps on one channel would both read
-    // every family message and both reply (the gate relays a channel to
-    // exactly one app).
-    if let Ok(reg) = ensure_app_registry(&state).await {
-        if let Some(rows) = messaging_channels_in_use(&reg, &bundle.manifest, &bindings, &label) {
-            return refused(StatusCode::BAD_REQUEST, "template_bindings_invalid", rows);
-        }
-    }
+    // A channel may be the home of several apps (household channels): the
+    // gate's router names the app on it. Each messaging binding carries its
+    // description — what the app does on that channel — seeded from the
+    // template when the owner wrote none.
+    seed_slot_descriptions(&bundle.manifest, &mut bindings);
     // #663 — ONE Touch ID: the endpoint actors the bindings need but which are
     // not enrolled yet (the channel gateway behind a messaging slot, this
     // console behind a display slot) are claimed NOW and registered in the
@@ -613,13 +608,6 @@ pub async fn app_install_build(
             template_id: template_id.clone(),
             template_version: bundle.manifest.version.clone(),
             template_schema: bundle.manifest.app.schema,
-            blurb: Some(AppBlurb {
-                name: bundle.manifest.name.clone(),
-                name_zh: bundle.manifest.name_zh.clone(),
-                purpose: bundle.manifest.description.clone(),
-                purpose_zh: bundle.manifest.description_zh.clone(),
-                examples: Vec::new(),
-            }),
             label: label.clone(),
             bindings,
             bound_channels,
@@ -673,7 +661,7 @@ async fn plan_enrollments(
     broker: &str,
     j1: &str,
     manifest: &PresetSummary,
-    _app_label: &str,
+    app_label: &str,
     bindings: &mut AppInstallBindings,
     console_unenrolled: bool,
 ) -> Result<
@@ -722,13 +710,18 @@ async fn plan_enrollments(
                             )
                         })?;
                     let gw_label = crate::gateway_device::gateway_label(&st.transport);
-                    // Pub + sub on every channel these slots bind.
+                    // Pub + sub on every channel these slots bind, and on the
+                    // app's operator channel (household channels, R6: a
+                    // member the owner lets speak there reaches the app as
+                    // its operator through the gate).
+                    let opchat = opchat_channel_id(app_label);
                     let scope = targets
                         .iter()
                         .flat_map(|i| {
                             let ch = bindings.slots[*i].channel_id.clone();
                             vec![service_channel_pub(&ch), service_channel_sub(&ch)]
                         })
+                        .chain([service_channel_pub(&opchat), service_channel_sub(&opchat)])
                         .collect::<Vec<_>>()
                         .join(",");
                     let child = claim_child(broker, j1, &start.pairing_code, &gw_label, &scope)
@@ -905,7 +898,7 @@ pub async fn app_install_submit(
             actor_omni: actor_omni.clone(),
             device_key_hash: dkh.clone(),
             memory_ns,
-            chat_channel_id,
+            chat_channel_id: chat_channel_id.clone(),
             bindings: stash.bindings.clone(),
             bound_channels: stash.bound_channels.clone(),
             services,
@@ -963,20 +956,33 @@ pub async fn app_install_submit(
         // rendezvous rows and complete the device side (the gateway proves
         // its binding + gets its messaging row; the console persists itself).
         let enrolled = complete_pending_enrollments(&state, &stash.enrollments).await;
-        // The gateway now exists as an actor: the messaging feeds it relays
-        // need its outbound subscription to know the app's alias — the reach
-        // write below does that through its admin surface.
-        // Audience → each allowed contact's `reach` gains the app's alias.
-        let reach = apply_reach(&state, &stash.label, &stash.audience, true).await;
-        // The gate learns WHERE the app listens (`alias → channel`).
-        let app_feeds = apply_app_feeds(
+        // The channel documents: the app's rows from its bindings, its
+        // operator channel, and the template's audience as the proposed
+        // members of its home channel — then the app learns whether it is
+        // the channel's default app (its flag rides the durable context).
+        let app_feeds = apply_channel_rows(
             &state,
             &stash.label,
             &stash.bound_channels,
+            &stash.bindings,
+            &stash.audience,
+            &chat_channel_id,
             true,
-            stash.blurb.as_ref(),
         )
         .await;
+        let mut reach = serde_json::json!({ "updated": 0 });
+        for a in &stash.audience {
+            if let Some(b) = stash
+                .bound_channels
+                .iter()
+                .find(|b| b.slot == a.slot && b.kind == ChannelEndpointKind::Messaging)
+            {
+                reach = apply_memberships(&state, &b.channel_id, &a.tiers).await;
+            }
+        }
+        let mut flagged = stash.bound_channels.clone();
+        mark_default_apps(&state, &stash.label, &mut flagged).await;
+        let runtime = push_bound_channels(&state, &dkh, &flagged).await;
         // The anchor: the sealed document, verbatim, into the app's own namespace.
         let context_storage = match &stash.context_seal {
             Some(seal) => {
@@ -1004,8 +1010,9 @@ pub async fn app_install_submit(
             "template_id": stash.template_id,
             "actor_omni": actor_omni,
             "registry_storage": storage,
-            "reach": reach,
-            "app_feeds": app_feeds,
+            "memberships": reach,
+            "channel_documents": app_feeds,
+            "runtime": runtime,
             "enrolled": enrolled,
             "anchor": row.anchor,
             "context_storage": context_storage,
@@ -1017,17 +1024,18 @@ pub async fn app_install_submit(
     (StatusCode::OK, Json(out)).into_response()
 }
 
-/// Add (or drop) `alias` on every bound contact whose tier is in the slot
-/// audience — through the gateway's admin surface (the registry's ONE
-/// writer), then snapshot the registry to the Config doc. Best-effort, loud.
-async fn apply_reach(
+/// The rows an install proposes on the app's home channel: every bound
+/// contact whose tier the template's audience names gets `speak + read`
+/// there (the owner changes them on the Channels page; access is per
+/// channel, never per app) — through the gate's admin surface (the
+/// registry's ONE writer), then the registry snapshot to the Config doc.
+/// Best-effort, loud.
+async fn apply_memberships(
     state: &UiBridgeState,
-    alias: &str,
-    audience: &[SlotAudience],
-    add: bool,
+    channel_id: &str,
+    tiers: &[ContactTier],
 ) -> serde_json::Value {
-    let tiers: Vec<ContactTier> = audience.iter().flat_map(|a| a.tiers.clone()).collect();
-    if tiers.is_empty() && add {
+    if tiers.is_empty() {
         return serde_json::json!({ "updated": 0, "skipped": "no messaging audience" });
     }
     let contacts = match gateway_admin_call(
@@ -1040,7 +1048,10 @@ async fn apply_reach(
     {
         Ok(v) => v,
         Err(e) => {
-            tracing::info!(alias, "#664 reach: contact gate unavailable — {e}");
+            tracing::info!(
+                channel_id,
+                "household channels: contact gate unavailable — {e}"
+            );
             return serde_json::json!({ "updated": 0, "skipped": e });
         }
     };
@@ -1050,35 +1061,29 @@ async fn apply_reach(
         .unwrap_or_default();
     let mut updated = 0usize;
     for c in summaries {
-        let allowed = tiers.contains(&c.tier);
-        let has = c.reach.iter().any(|r| r.eq_ignore_ascii_case(alias));
-        let next: Option<Vec<String>> = match (add, allowed, has) {
-            (true, true, false) => {
-                let mut r = c.reach.clone();
-                r.push(alias.to_string());
-                Some(r)
-            }
-            (false, _, true) => Some(
-                c.reach
-                    .iter()
-                    .filter(|r| !r.eq_ignore_ascii_case(alias))
-                    .cloned()
-                    .collect(),
-            ),
-            _ => None,
-        };
-        let Some(reach) = next else { continue };
+        if !tiers.contains(&c.tier) {
+            continue;
+        }
+        if c.channels
+            .iter()
+            .any(|ch| ch.channel_id == channel_id && ch.speak)
+        {
+            continue;
+        }
         match gateway_admin_call(
             state,
             reqwest::Method::POST,
-            "/v1/gateway/admin/contacts/update",
-            Some(serde_json::json!({ "contact_id": c.contact_id, "reach": reach })),
+            "/v1/gateway/admin/channels/update",
+            Some(serde_json::json!({
+                "channel_id": channel_id,
+                "member": { "contact_id": c.contact_id, "speak": true, "read": true },
+            })),
         )
         .await
         {
             Ok(_) => updated += 1,
             Err(e) => {
-                tracing::warn!(contact = %c.contact_id, alias, "#664 reach update failed — {e}")
+                tracing::warn!(contact = %c.contact_id, channel_id, "household channels: member row failed — {e}")
             }
         }
     }
@@ -1086,6 +1091,163 @@ async fn apply_reach(
         sync_gateway_registry_to_config(state).await;
     }
     serde_json::json!({ "updated": updated })
+}
+
+/// Seed each messaging binding's description from the template when the
+/// owner wrote none: the slot's reason plus the template's route examples —
+/// the text the app's row carries on the channel document, and the only text
+/// the router reads about the app.
+fn seed_slot_descriptions(manifest: &PresetSummary, bindings: &mut AppInstallBindings) {
+    for b in bindings.slots.iter_mut() {
+        if b.description
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|d| !d.is_empty())
+        {
+            continue;
+        }
+        let Some(slot) = manifest
+            .app
+            .slots
+            .iter()
+            .find(|s| s.slot == b.slot && s.kind == ChannelEndpointKind::Messaging)
+        else {
+            continue;
+        };
+        let seeded = seed_binding_description(
+            &slot.reason_zh,
+            &slot.reason,
+            &manifest.description_zh,
+            &manifest.description,
+            &manifest.route_examples,
+        );
+        b.description = (!seeded.is_empty()).then_some(seeded);
+    }
+}
+
+/// Mark, on the app's bound messaging channels, whether it is the channel
+/// document's default app (the one that takes unaddressed events) — read
+/// back from the gate after the rows were written. A gate that cannot be
+/// asked leaves the flags unset (the loop then takes them, as before).
+async fn mark_default_apps(state: &UiBridgeState, label: &str, bound: &mut [BoundChannel]) {
+    let docs: Vec<ChannelDoc> = match gateway_admin_call(
+        state,
+        reqwest::Method::GET,
+        "/v1/gateway/admin/channels",
+        None,
+    )
+    .await
+    {
+        Ok(v) => v
+            .get("channels")
+            .and_then(|c| serde_json::from_value(c.clone()).ok())
+            .unwrap_or_default(),
+        Err(e) => {
+            tracing::info!(
+                label,
+                "household channels: default-app flags not read — {e}"
+            );
+            return;
+        }
+    };
+    for b in bound
+        .iter_mut()
+        .filter(|b| b.kind == ChannelEndpointKind::Messaging)
+    {
+        if let Some(doc) = docs.iter().find(|d| d.id == b.channel_id) {
+            b.default_app = Some(
+                doc.default_or_only_app()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(label)),
+            );
+        }
+    }
+}
+
+/// Tell the broker's durable spawn context — and through it the live
+/// runtime — an app's bound channels with their default-app flags.
+async fn push_bound_channels(
+    state: &UiBridgeState,
+    device_key_hash: &str,
+    bound: &[BoundChannel],
+) -> serde_json::Value {
+    let Some(broker) = state.broker_url.clone() else {
+        return serde_json::json!({ "mode": "skipped", "detail": "no broker configured" });
+    };
+    let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
+        _ => return serde_json::json!({ "mode": "skipped", "detail": "no master session" }),
+    };
+    let body = serde_json::json!({
+        "operator_omni": operator_omni,
+        "device_key_hash": device_key_hash,
+        "bound_channels": bound,
+    });
+    let (resp, parsed) = crate::ui_bridge::forward_to_broker_value(
+        &broker,
+        "/v1/agent/spawn/context/update",
+        &j1,
+        &body,
+    )
+    .await;
+    match parsed {
+        Some(v) if resp.status().is_success() => v
+            .get("runtime")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "mode": "unknown" })),
+        Some(v) => serde_json::json!({
+            "mode": "failed",
+            "detail": format!(
+                "spawn context update refused: {}",
+                v.get("error").and_then(|e| e.as_str()).unwrap_or("?")
+            ),
+        }),
+        None => serde_json::json!({
+            "mode": "failed",
+            "detail": format!("spawn context update: HTTP {}", resp.status()),
+        }),
+    }
+}
+
+/// The console changed a channel document's default app (or dropped an app
+/// from it): every live app bound there learns its flag through the durable
+/// context + the live rebind.
+pub(crate) async fn push_default_app_flags(state: &UiBridgeState, channel_id: &str) {
+    let Ok(mut reg) = ensure_app_registry(state).await else {
+        return;
+    };
+    let mut changed = false;
+    let labels: Vec<(String, String, Vec<BoundChannel>)> = reg
+        .live()
+        .filter(|a| {
+            a.bound_channels
+                .iter()
+                .any(|b| b.kind == ChannelEndpointKind::Messaging && b.channel_id == channel_id)
+        })
+        .map(|a| {
+            (
+                a.label.clone(),
+                a.device_key_hash.clone(),
+                a.bound_channels.clone(),
+            )
+        })
+        .collect();
+    for (label, dkh, mut bound) in labels {
+        mark_default_apps(state, &label, &mut bound).await;
+        let runtime = push_bound_channels(state, &dkh, &bound).await;
+        tracing::info!(label, channel_id, runtime = %runtime, "household channels: default-app flag pushed");
+        if let Some(row) = reg.apps.iter_mut().find(|a| a.label == label) {
+            row.bound_channels = bound;
+            changed = true;
+        }
+    }
+    if changed {
+        if let Err(e) = persist_app_registry(state, reg).await {
+            tracing::warn!(
+                channel_id,
+                "household channels: app-registry persist after the flag push failed — {e}"
+            );
+        }
+    }
 }
 
 // ── the uninstall ceremony ──────────────────────────────────────────────────
@@ -1191,32 +1353,30 @@ pub async fn app_uninstall_submit(
                 row.status = AppInstanceStatus::Uninstalled;
                 row.uninstalled_at = Some(now_unix());
                 row.resources_kept = stash.as_ref().map(|s| s.resources_kept);
-                let audience: Vec<SlotAudience> = row
-                    .bound_channels
-                    .iter()
-                    .filter(|b| b.kind == ChannelEndpointKind::Messaging)
-                    .map(|b| SlotAudience {
-                        slot: b.slot.clone(),
-                        tiers: ContactTier::household_template().to_vec(),
-                    })
-                    .collect();
-                let reach_aliases = row.reach_aliases.clone();
                 let bound_for_gate = row.bound_channels.clone();
+                let bindings_for_gate = row.bindings.clone();
+                let chat_for_gate = row.chat_channel_id.clone();
                 let storage = match persist_app_registry(&state, reg.clone()).await {
                     Ok(s) => s.to_string(),
                     Err(e) => format!("failed: {e}"),
                 };
-                let mut reach = serde_json::json!({ "updated": 0 });
-                for alias in &reach_aliases {
-                    reach = apply_reach(&state, alias, &audience, false).await;
-                }
-                let app_feeds = apply_app_feeds(&state, &label, &bound_for_gate, false, None).await;
+                // The app's rows leave its channels and its operator channel
+                // goes; the members' rows stay (access is per channel).
+                let app_feeds = apply_channel_rows(
+                    &state,
+                    &label,
+                    &bound_for_gate,
+                    &bindings_for_gate,
+                    &[],
+                    &chat_for_gate,
+                    false,
+                )
+                .await;
                 closed = serde_json::json!({
                     "label": label,
                     "closed": true,
                     "registry_storage": storage,
-                    "reach": reach,
-                    "app_feeds": app_feeds,
+                    "channel_documents": app_feeds,
                 });
             }
         }
@@ -2162,6 +2322,7 @@ mod tests {
                 channel_id: "kitchen-display".into(),
                 event_kinds: vec![],
                 endpoint_actor_omni: None,
+                default_app: None,
             }],
             services: vec![
                 "channel-pub:opchat-chef".into(),
@@ -2410,6 +2571,16 @@ mod handler_tests {
                 }),
             )
             .route(
+                "/v1/agent/rebind/build",
+                post(|Json(req): Json<serde_json::Value>| async move {
+                    Json(serde_json::json!({
+                        "user_op": { "sender": "0x0", "nonce": "0x1" },
+                        "user_op_hash": "0x9b12",
+                        "services": req["services"],
+                    }))
+                }),
+            )
+            .route(
                 "/v1/agent/archive/build",
                 post(|| async {
                     Json(serde_json::json!({ "ok": true, "user_op": { "sender": "0x0" } }))
@@ -2485,11 +2656,13 @@ mod handler_tests {
                         slot: "probe_chat".into(),
                         channel_id: "conf-chat".into(),
                         endpoint_actor_omni: None,
+                        description: None,
                     },
                     SlotBinding {
                         slot: "probe_display".into(),
                         channel_id: "conf-display".into(),
                         endpoint_actor_omni: None,
+                        description: None,
                     },
                 ],
                 resources: Vec::new(),
@@ -2591,6 +2764,7 @@ mod handler_tests {
             slot: "no_such_slot".into(),
             channel_id: "x".into(),
             endpoint_actor_omni: None,
+            description: None,
         });
         let (status, body) = read(app_install_build(State(state.clone()), Json(req)).await).await;
         assert_eq!(status, 400, "{body}");
@@ -2600,6 +2774,68 @@ mod handler_tests {
         let (status, _) =
             read(app_install_build(State(state), Json(install_req("probe"))).await).await;
         assert_eq!(status, 503);
+    }
+
+    #[tokio::test]
+    async fn rebind_build_with_no_slots_is_the_template_upgrade() {
+        let broker = mock_broker().await;
+        let state = state_with_session(Some(broker)).await;
+        let (status, _) =
+            read(app_install_build(State(state.clone()), Json(install_req("probe"))).await).await;
+        assert_eq!(status, 200);
+        let (status, _) = read(
+            app_install_submit(
+                State(state.clone()),
+                Json(serde_json::json!({ "device_key_hash": DKH })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let upgrade = || AppRebindBuildRequest {
+            slots: Vec::new(),
+            enroll_endpoints: false,
+        };
+        // On the catalog's version already: nothing to change.
+        let (status, body) = read(
+            app_rebind_build(State(state.clone()), Path("probe".into()), Json(upgrade())).await,
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        // Installed at an older version: the empty slot list is the upgrade — what
+        // the console's "update to v…" button sends.
+        state
+            .app_registry
+            .write()
+            .await
+            .as_mut()
+            .expect("the install cached the registry")
+            .apps
+            .iter_mut()
+            .find(|a| a.label == "probe")
+            .expect("the installed row")
+            .template_version = "0.9.0".into();
+        let (status, body) = read(
+            app_rebind_build(State(state.clone()), Path("probe".into()), Json(upgrade())).await,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["changes"][0], "template 0.9.0 → 1.0.0", "{body}");
+        let stash = state.app_rebind_by_label.read().await;
+        let pending = stash
+            .get("probe")
+            .expect("the rebind stash, keyed by label");
+        assert_eq!(pending.template_version.as_deref(), Some("1.0.0"));
+        assert!(
+            pending
+                .bindings
+                .slots
+                .iter()
+                .filter(|s| s.slot == "probe_chat")
+                .all(|s| s.description.as_deref().is_some_and(|d| !d.is_empty())),
+            "the messaging binding carries the description the channel document gets: {:?}",
+            pending.bindings.slots
+        );
     }
 
     #[tokio::test]
@@ -3185,104 +3421,119 @@ async fn complete_pending_enrollments(
     enrolled
 }
 
-/// The messaging channels `bindings` bind that ANOTHER live app already
-/// binds — refused: the contact gate relays a channel to exactly one app
-/// (two apps on one channel would both read every family message and both
-/// reply).
-fn messaging_channels_in_use(
-    reg: &AppRegistryDoc,
-    manifest: &PresetSummary,
-    bindings: &AppInstallBindings,
-    label: &str,
-) -> Option<Vec<TemplateError>> {
-    let mut rows = Vec::new();
-    for b in &bindings.slots {
-        if slot_kind(manifest, &b.slot) != Some(ChannelEndpointKind::Messaging) {
-            continue;
-        }
-        if let Some(other) = reg.live().find(|a| {
-            a.label != label
-                && a.bound_channels.iter().any(|bc| {
-                    bc.kind == ChannelEndpointKind::Messaging && bc.channel_id == b.channel_id
-                })
-        }) {
-            rows.push(TemplateError {
-                row: format!("bindings.slots[{}]", b.slot),
-                code: "messaging_channel_in_use".into(),
-                message: format!(
-                    "'{}' is already the messaging channel of `{}` — the contact gate relays a \
-                     channel to exactly one app; pick another channel",
-                    b.channel_id, other.label
-                ),
-            });
-        }
-    }
-    if rows.is_empty() {
-        None
-    } else {
-        Some(rows)
-    }
-}
-
-/// Tell the contact gate which channel this app's messaging slot binds
-/// (`alias → channel`), so its inbound hop and its outbound subscription follow
-/// the binding (owner decision 2026-09-22: the bound channel IS the feed).
-/// `add = false` clears the row (uninstall). Best-effort, loud.
-async fn apply_app_feeds(
+/// What the contact gate's channel documents say about this app, written
+/// from its bindings: the app's row (its binding description, the slot's
+/// kinds, the template's audience) on each messaging channel it binds — the
+/// document named after the console's registry row when it is new — and its
+/// operator channel (`operator_of`, the owner its first member: the gate
+/// seats every owner-tier contact there). `add = false` drops the rows and
+/// the operator channel (uninstall); a member's rows are never touched —
+/// access is per channel. Best-effort, loud.
+async fn apply_channel_rows(
     state: &UiBridgeState,
     label: &str,
     bound: &[BoundChannel],
+    bindings: &AppInstallBindings,
+    audience: &[SlotAudience],
+    chat_channel_id: &str,
     add: bool,
-    blurb: Option<&AppBlurb>,
 ) -> serde_json::Value {
-    let messaging: Vec<&BoundChannel> = bound
+    let names: std::collections::HashMap<String, (String, Option<String>)> =
+        match ensure_channel_registry(state).await {
+            Ok(reg) => reg
+                .channels
+                .iter()
+                .map(|c| (c.id.clone(), (c.name.clone(), c.note.clone())))
+                .collect(),
+            Err(_) => Default::default(),
+        };
+    let mut writes: Vec<serde_json::Value> = Vec::new();
+    for b in bound
         .iter()
         .filter(|b| b.kind == ChannelEndpointKind::Messaging)
-        .collect();
-    if messaging.is_empty() {
+    {
+        if add {
+            let description = bindings
+                .slots
+                .iter()
+                .find(|s| s.slot == b.slot && s.channel_id == b.channel_id)
+                .and_then(|s| s.description.clone())
+                .unwrap_or_default();
+            let tiers = audience
+                .iter()
+                .find(|a| a.slot == b.slot)
+                .map(|a| a.tiers.clone())
+                .unwrap_or_default();
+            let mut body = serde_json::json!({
+                "channel_id": b.channel_id,
+                "app": ChannelApp {
+                    alias: label.to_string(),
+                    slot: b.slot.clone(),
+                    description,
+                    takes: b.event_kinds.clone(),
+                    audience: tiers,
+                },
+            });
+            if let Some((name, note)) = names.get(&b.channel_id) {
+                body["name"] = serde_json::json!(name);
+                if let Some(n) = note {
+                    body["purpose"] = serde_json::json!(n);
+                }
+            }
+            writes.push(body);
+        } else {
+            writes.push(serde_json::json!({ "channel_id": b.channel_id, "remove_app": label }));
+        }
+    }
+    if !chat_channel_id.trim().is_empty() {
+        writes.push(if add {
+            serde_json::json!({
+                "channel_id": chat_channel_id,
+                "name": opchat_display_name(label),
+                "purpose": opchat_purpose(label),
+                "operator_of": label,
+                "app": ChannelApp {
+                    alias: label.to_string(),
+                    slot: OPCHAT_SLOT_NAME.to_string(),
+                    description: OPCHAT_DESCRIPTION_ZH.to_string(),
+                    takes: Vec::new(),
+                    audience: vec![ContactTier::Owner],
+                },
+            })
+        } else {
+            serde_json::json!({ "channel_id": chat_channel_id, "remove": true })
+        });
+    }
+    if writes.is_empty() {
         return serde_json::json!({ "updated": 0, "skipped": "no messaging slot" });
     }
-    if messaging.len() > 1 {
-        tracing::warn!(
-            label,
-            slots = messaging.len(),
-            "#717 app feeds: more than one messaging slot — the gate keys one channel per alias; the first slot's channel is registered"
-        );
-    }
-    let channel = messaging[0].channel_id.clone();
-    let mut body = serde_json::json!({
-        "alias": label,
-        "channel_id": if add { Some(channel.clone()) } else { None },
-    });
-    // #722 — the router's description of this app (kept by the gate when
-    // absent, so a rebind without one never erases it).
-    if let (true, Some(b)) = (add, blurb) {
-        body["blurb"] = serde_json::to_value(b).unwrap_or(serde_json::Value::Null);
-    }
-    match gateway_admin_call(
-        state,
-        reqwest::Method::POST,
-        "/v1/gateway/admin/apps/update",
-        Some(body),
-    )
-    .await
-    {
-        Ok(_) => {
-            sync_gateway_registry_to_config(state).await;
-            serde_json::json!({
-                "updated": 1,
-                "alias": label,
-                "channel_id": if add { channel } else { String::new() },
-            })
-        }
-        Err(e) => {
-            tracing::warn!(
-                label,
-                "#717 app feed registration failed — the gate cannot relay this app until it lands: {e}"
-            );
-            serde_json::json!({ "updated": 0, "error": e })
+    let mut updated = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    for body in writes {
+        let channel = body["channel_id"].as_str().unwrap_or("").to_string();
+        match gateway_admin_call(
+            state,
+            reqwest::Method::POST,
+            "/v1/gateway/admin/channels/update",
+            Some(body),
+        )
+        .await
+        {
+            Ok(_) => updated += 1,
+            Err(e) => {
+                tracing::warn!(
+                    label,
+                    channel,
+                    "household channels: the channel document was not written — the gate cannot route to this app on it until it lands: {e}"
+                );
+                errors.push(format!("{channel}: {e}"));
+            }
         }
     }
+    if updated > 0 {
+        sync_gateway_registry_to_config(state).await;
+    }
+    serde_json::json!({ "updated": updated, "errors": errors })
 }
 
 // ── the rebind ceremony (#717) ───────────────────────────────────────────────
@@ -3439,9 +3690,6 @@ pub async fn app_rebind_build(
         Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
         _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
     };
-    if req.slots.is_empty() {
-        return pairing_err(StatusCode::BAD_REQUEST, "slots: nothing to change");
-    }
     let row = match ensure_app_registry(&state).await {
         Ok(reg) => match reg.live().find(|a| a.label == label).cloned() {
             Some(r) => r,
@@ -3493,19 +3741,44 @@ pub async fn app_rebind_build(
             .find(|b| b.slot == want.slot)
             .map(|b| b.channel_id.clone())
             .unwrap_or_default();
-        if old == channel {
+        // A new description alone is a change too: it is the app's row on the
+        // channel document (what the router reads about it), and the commit
+        // rewrites the row.
+        let description = want
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_string);
+        let old_description = bindings
+            .slots
+            .iter()
+            .find(|b| b.slot == want.slot)
+            .and_then(|b| b.description.clone());
+        let description_changed = description.is_some() && description != old_description;
+        if old == channel && !description_changed {
             continue;
         }
         match bindings.slots.iter_mut().find(|b| b.slot == want.slot) {
             Some(b) => {
-                b.channel_id = channel.clone();
-                b.endpoint_actor_omni = None;
+                if old != channel {
+                    b.channel_id = channel.clone();
+                    b.endpoint_actor_omni = None;
+                }
+                if description.is_some() {
+                    b.description = description.clone();
+                }
             }
             None => bindings.slots.push(SlotBinding {
                 slot: want.slot.clone(),
                 channel_id: channel.clone(),
                 endpoint_actor_omni: None,
+                description: description.clone(),
             }),
+        }
+        if old == channel {
+            changes.push(format!("{}: description", want.slot));
+            continue;
         }
         changes.push(format!(
             "{}: {} → {}",
@@ -3536,11 +3809,7 @@ pub async fn app_rebind_build(
         );
     }
     resolve_binding_endpoints(&state, &mut bindings).await;
-    if let Ok(reg) = ensure_app_registry(&state).await {
-        if let Some(rows) = messaging_channels_in_use(&reg, &bundle.manifest, &bindings, &label) {
-            return refused(StatusCode::BAD_REQUEST, "template_bindings_invalid", rows);
-        }
-    }
+    seed_slot_descriptions(&bundle.manifest, &mut bindings);
     let mut endpoint_enrollments: Vec<EndpointEnrollment> = Vec::new();
     let mut pending_enrollments: Vec<PendingEnrollment> = Vec::new();
     let mut console_actor: Option<String> = state
@@ -3670,7 +3939,7 @@ pub async fn app_rebind_submit(
         Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
         _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
     };
-    let Some(stash) = state.app_rebind_by_label.write().await.remove(&label) else {
+    let Some(mut stash) = state.app_rebind_by_label.write().await.remove(&label) else {
         return pairing_err(
             StatusCode::CONFLICT,
             "no rebind build pending for this label — build first",
@@ -3686,6 +3955,7 @@ pub async fn app_rebind_submit(
     let mut previous_bound: Vec<BoundChannel> = Vec::new();
     let mut device_key_hash = String::new();
     let mut memory_ns = String::new();
+    let mut chat_channel_id = String::new();
     let mut audience: Vec<SlotAudience> = Vec::new();
     let tx_hash: Option<String> = parsed
         .as_ref()
@@ -3708,6 +3978,7 @@ pub async fn app_rebind_submit(
                 previous_bound = row.bound_channels.clone();
                 device_key_hash = row.device_key_hash.clone();
                 memory_ns = row.memory_ns.clone();
+                chat_channel_id = row.chat_channel_id.clone();
                 audience = row.bindings.audience.clone();
                 row.bindings = stash.bindings.clone();
                 row.bound_channels = stash.bound_channels.clone();
@@ -3747,9 +4018,29 @@ pub async fn app_rebind_submit(
         )
         .await;
     }
-    // 4. the gate: where the app listens now + who may reach it (idempotent)
-    let app_feeds = apply_app_feeds(&state, &label, &stash.bound_channels, true, None).await;
-    let reach = apply_reach(&state, &label, &audience, true).await;
+    // 4. the gate: the app's rows on its channels now (idempotent) + the
+    //    template's audience as proposed members of its home channel
+    let app_feeds = apply_channel_rows(
+        &state,
+        &label,
+        &stash.bound_channels,
+        &stash.bindings,
+        &audience,
+        &chat_channel_id,
+        true,
+    )
+    .await;
+    let mut reach = serde_json::json!({ "updated": 0 });
+    for a in &audience {
+        if let Some(b) = stash
+            .bound_channels
+            .iter()
+            .find(|b| b.slot == a.slot && b.kind == ChannelEndpointKind::Messaging)
+        {
+            reach = apply_memberships(&state, &b.channel_id, &a.tiers).await;
+        }
+    }
+    mark_default_apps(&state, &label, &mut stash.bound_channels).await;
     // 4b. the anchor: the sealed document, verbatim, into the app's namespace
     let context_storage = match (&stash.context_seal, memory_ns.is_empty()) {
         (Some(seal), false) => {
@@ -3868,8 +4159,8 @@ pub async fn app_rebind_submit(
         "previous_bound_channels": previous_bound,
         "bound_channels": stash.bound_channels,
         "enrolled": enrolled,
-        "app_feeds": app_feeds,
-        "reach": reach,
+        "channel_documents": app_feeds,
+        "memberships": reach,
         "anchor": anchor,
         "context_storage": context_storage,
         "runtime": runtime,
@@ -4242,6 +4533,7 @@ mod context_view_tests {
                 channel_id: channel.into(),
                 event_kinds: vec![],
                 endpoint_actor_omni: None,
+                default_app: None,
             }],
             services: vec![],
             availability: Availability::default(),

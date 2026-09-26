@@ -1,10 +1,11 @@
 {
   "id": "watchdog",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Watchdog",
   "name_zh": "看门狗",
   "description": "Watches the front-door camera feed: daily summaries and honest statistics — how many times the dog went out, how long the kids played outside.",
   "description_zh": "盯着门口摄像头：每日总结与真实统计——狗出门几次、孩子在外面玩了多久。",
+  "route_examples": ["孩子回家了吗", "门口有人吗", "狗今天出去了几次"],
   "suggested_channels": [
     {
       "id": "frontdoor-cam",

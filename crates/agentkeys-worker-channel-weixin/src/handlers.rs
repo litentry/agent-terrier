@@ -54,15 +54,21 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
         .route("/v1/gateway/admin/bind/reject", post(admin::bind_reject))
         .route("/v1/gateway/admin/contacts", get(admin::admin_contacts))
         .route("/v1/gateway/admin/monitor", get(admin::monitor))
+        .route("/v1/gateway/admin/router", get(admin::router_view))
         .route("/v1/gateway/admin/history", get(admin::history))
         .route("/v1/gateway/admin/activity", get(admin::activity))
         .route(
             "/v1/gateway/admin/contacts/update",
             post(admin::contacts_update),
         )
-        // 2026-09-22 — the bound channel IS the feed: the console registers
-        // `alias → channel` here at install / rebind (clears it at uninstall).
-        .route("/v1/gateway/admin/apps/update", post(admin::apps_update))
+        // Household channels — the channel documents the router reads: the
+        // console writes them at install / rebind / uninstall and from the
+        // Channels page; every write is live.
+        .route("/v1/gateway/admin/channels", get(admin::channels_list))
+        .route(
+            "/v1/gateway/admin/channels/update",
+            post(admin::channels_update),
+        )
         .route(
             "/v1/gateway/admin/contacts/revoke",
             post(admin::contacts_revoke),
@@ -202,10 +208,10 @@ async fn list_contacts(
     }
     let registry = state.registry.snapshot();
     let contacts: Vec<agentkeys_protocol::ContactSummary> =
-        registry.bound.iter().map(Into::into).collect();
+        registry.bound.iter().map(|c| registry.summary(c)).collect();
     (
         StatusCode::OK,
-        Json(json!({ "ok": true, "contacts": contacts })),
+        Json(json!({ "ok": true, "contacts": contacts, "channels": registry.channels })),
     )
         .into_response()
 }
@@ -280,9 +286,9 @@ async fn callback_relay(
                 false,
                 outcome
                     .decision
-                    .target_alias
+                    .channel_id
                     .as_deref()
-                    .and_then(|a| state.app_stage_hint_for_alias(a, relay::unix_secs() * 1000)),
+                    .and_then(|ch| state.app_stage_hint(ch, relay::unix_secs() * 1000)),
             )
         });
         (
@@ -295,6 +301,7 @@ async fn callback_relay(
                 "routed_event": outcome.event,
                 "reply": reply,
                 "ask_candidates": outcome.ask_candidates,
+                "ask_labels": outcome.ask_labels,
                 "router": outcome.router,
                 "welcome": outcome.welcome,
                 "feed": outcome.feed,
@@ -347,9 +354,9 @@ async fn telegram_mock_inbound(
             true,
             outcome
                 .decision
-                .target_alias
+                .channel_id
                 .as_deref()
-                .and_then(|a| state.app_stage_hint_for_alias(a, relay::unix_secs() * 1000)),
+                .and_then(|ch| state.app_stage_hint(ch, relay::unix_secs() * 1000)),
         )
     });
     // The mock driver IS the delivery surface: a welcome returned here counts as sent.

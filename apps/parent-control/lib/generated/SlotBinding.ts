@@ -12,4 +12,12 @@ export type SlotBinding = { slot: string, channel_id: string,
  * the console): the install batch grants IT the feed's other direction
  * so it can relay in / render + command back. `0x`-omni.
  */
-endpoint_actor_omni?: string, };
+endpoint_actor_omni?: string, 
+/**
+ * What the app does on this channel, in the household's words — the
+ * binding's description, seeded from the template slot's `reason` and
+ * edited under "edit bindings". It becomes the app's row on the channel
+ * document (the only text the router reads about an app). Absent = the
+ * slot's reason as shipped.
+ */
+description?: string, };

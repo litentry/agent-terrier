@@ -55,6 +55,7 @@ mod tests {
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key: "upstream".into(),
                 model_override: None,
+                default_model: None,
             },
             keys: vec![],
             user_budgets: Default::default(),

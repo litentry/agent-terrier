@@ -146,6 +146,13 @@ pub struct UpstreamConfig {
     pub base_url: String,
     pub api_key: String,
     pub model_override: Option<String>,
+    /// The chat model for a caller whose body names none: the ark family's
+    /// `LLM_ENDPOINT_ID`. Ark refuses a chat with no `model` (HTTP 400
+    /// `MissingParameter`, measured 2026-09-25), so a caller that does not
+    /// pick one — the daemon's perception step, the contact gate's photo
+    /// description — runs on the stack's own chat endpoint. A named model
+    /// always rides through; `model_override` still beats both.
+    pub default_model: Option<String>,
 }
 
 /// #653 — the search relay's one upstream (a self-hosted SearXNG; no vendor
@@ -223,6 +230,7 @@ impl GateConfig {
         // lookup_var (not `ark()`): the relay forwards the caller's `model`, so
         // it must not require LLM_ENDPOINT_ID just to resolve a key. Errors here
         // are unreadable/malformed ark.env — fail loud, never skip.
+        let explicit_key_given = explicit_key.is_some();
         let api_key = match explicit_key {
             Some(k) => k,
             None => ark
@@ -235,6 +243,13 @@ impl GateConfig {
                          scripts/operator/secrets/rotate-inference-cred.sh ark) — #338"
                     )
                 })?,
+        };
+        // The family's chat endpoint only when the key is the family's too (an
+        // explicit upstream names its models itself).
+        let default_model = if explicit_key_given {
+            None
+        } else {
+            ark.lookup_var("LLM_ENDPOINT_ID")?.map(|(v, _)| v)
         };
         let base_url = match cli.upstream_base_url {
             Some(b) if !b.is_empty() => b,
@@ -275,6 +290,7 @@ impl GateConfig {
                 base_url: base_url.trim_end_matches('/').to_string(),
                 api_key,
                 model_override: cli.model,
+                default_model,
             },
             keys,
             user_budgets,
@@ -318,6 +334,7 @@ mod tests {
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key: "k".into(),
                 model_override: None,
+                default_model: None,
             },
             keys: vec![],
             user_budgets: budgets.iter().map(|(u, b)| (u.to_string(), *b)).collect(),
@@ -423,6 +440,24 @@ mod tests {
         let ts = cfg.systemone.expect("typesafe family resolved");
         assert_eq!(ts.api_key, "ts-key");
         assert_eq!(ts.base_url, "https://mock.example");
+    }
+
+    #[test]
+    fn the_ark_familys_chat_endpoint_is_the_default_model_only_for_its_own_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("ark.env"),
+            "ARK_API_KEY=file-key\nLLM_ENDPOINT_ID=ep-stack-chat\n",
+        )
+        .unwrap();
+        let cfg =
+            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
+        assert_eq!(cfg.upstream.default_model.as_deref(), Some("ep-stack-chat"));
+        // An explicit upstream key names its own models: no family default.
+        let mut cli = cli_min();
+        cli.upstream_api_key = Some("explicit".into());
+        let cfg = GateConfig::from_cli_with(cli, &resolver_of(&[], Some(tmp.path()))).unwrap();
+        assert!(cfg.upstream.default_model.is_none());
     }
 
     #[test]

@@ -513,15 +513,19 @@ pub struct GatewayRelayBody {
     /// beside the feed; the hash above covers the text only).
     #[serde(default)]
     pub media: bool,
-    /// #722 — how the target was chosen: `jev` (the decision model), `ask_reply`
+    /// #722 — how the target was chosen: `jev` (the decision model's pick),
+    /// `jev_follow_up` (the model read the message as a continuation of the
+    /// member's last app), `ask_reply`
     /// (the member answered a numbered ask), `single_reach`, `advisory_router`
     /// (the whole-word tier, incl. as the model's fallback); absent = a typed
     /// `/alias`, or a refusal before routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routed_by: Option<String>,
-    /// #722 — the decision model's confidence in its pick, in permille (0…1000)
-    /// so the row stays integer-only under canonical CBOR. Present only when a
-    /// model answered (a routed pick, or the ask it fell below threshold on).
+    /// #722 — what the decision model's threshold was compared with (the
+    /// pick's probability, or the follow-up yes/no for `jev_follow_up`), in
+    /// permille (0…1000) so the row stays integer-only
+    /// under canonical CBOR. Present only when a model answered (a routed pick,
+    /// or the ask it fell below threshold on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_permille: Option<u16>,
     /// #722 — the aliases an ask named (the member's own reach, never a

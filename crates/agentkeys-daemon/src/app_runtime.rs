@@ -90,6 +90,7 @@ impl AppRuntimeConfig {
             direction: SlotDirection::Duplex,
             channel_id: chat_channel_id.to_string(),
             endpoint_actor_omni: None,
+            default_app: None,
         }];
         for b in &self.bound_channels {
             if b.channel_id == chat_channel_id || feeds.iter().any(|f| f.channel_id == b.channel_id)
@@ -102,6 +103,7 @@ impl AppRuntimeConfig {
                 direction: b.direction,
                 channel_id: b.channel_id.clone(),
                 endpoint_actor_omni: b.endpoint_actor_omni.clone(),
+                default_app: b.default_app,
             });
         }
         feeds
@@ -184,6 +186,9 @@ pub struct FeedSpec {
     pub direction: SlotDirection,
     pub channel_id: String,
     pub endpoint_actor_omni: Option<String>,
+    /// Whether this app takes the channel's UNADDRESSED events (the channel
+    /// document's default app). `None` = not known: take them, as before.
+    pub default_app: Option<bool>,
 }
 
 /// Fetch the app template's bundle from the broker catalog (unauthenticated,
@@ -283,6 +288,7 @@ mod tests {
                 channel_id: "weixin-chef".into(),
                 event_kinds: vec![],
                 endpoint_actor_omni: Some("0xgw".into()),
+                default_app: None,
             },
             BoundChannel {
                 slot: "kitchen_screen".into(),
@@ -291,6 +297,7 @@ mod tests {
                 channel_id: "kitchen-display".into(),
                 event_kinds: vec![],
                 endpoint_actor_omni: None,
+                default_app: None,
             },
         ])
         .unwrap()
@@ -660,6 +667,7 @@ mod live_bindings_tests {
             channel_id: "family-chat".into(),
             event_kinds: vec![],
             endpoint_actor_omni: None,
+            default_app: None,
         }];
         std::fs::write(&path, serde_json::to_vec(&bound).unwrap()).unwrap();
         assert_eq!(

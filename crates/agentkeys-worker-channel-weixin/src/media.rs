@@ -30,7 +30,7 @@ use anyhow::{anyhow, Context};
 use crate::ilink::CdnMedia;
 
 /// One media original ready for the feed hop.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundMedia {
     pub kind: ChannelEventKind,
     pub content_type: String,

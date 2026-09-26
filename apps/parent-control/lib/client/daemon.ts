@@ -1032,7 +1032,7 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/uninstall/submit`, body);
   }
 
-  async appRebindBuild(label: string, input: { slots: { slot: string; channel_id: string }[] }): Promise<Result<AppRebindBuildResponse>> {
+  async appRebindBuild(label: string, input: { slots: { slot: string; channel_id: string; description?: string }[] }): Promise<Result<AppRebindBuildResponse>> {
     return this.postJson(`/v1/master/apps/${encodeURIComponent(label)}/rebind/build`, input);
   }
 

@@ -1529,7 +1529,11 @@ mod tests {
         let role = plan_spawn(&build_req("watchdog", None)).unwrap();
         assert_eq!(role.services, blank.services);
         assert_eq!(role.template_id, "watchdog");
-        assert_eq!(role.template_version, "1.0.0");
+        // The version rides through from the compiled catalog (read there, so a
+        // preset's own bump never needs this test edited).
+        let (catalog, _) = crate::handlers::presets::find_template("watchdog").unwrap();
+        assert_eq!(role.template_version, catalog.version);
+        assert!(!role.template_version.is_empty());
         // An unknown preset id WITHOUT bindings is tolerated (daemon-side
         // apply reports it); WITH bindings it is an install and refuses.
         assert!(plan_spawn(&build_req("nope", None)).is_ok());
@@ -1628,11 +1632,13 @@ mod tests {
                     slot: "family_chat".into(),
                     channel_id: "family-chat".into(),
                     endpoint_actor_omni: None,
+                    description: None,
                 },
                 SlotBinding {
                     slot: "kitchen_screen".into(),
                     channel_id: "kitchen-display".into(),
                     endpoint_actor_omni: None,
+                    description: None,
                 },
             ],
             resources: vec![ResourceBinding {
@@ -1685,6 +1691,7 @@ mod tests {
             slot: "no_such_slot".into(),
             channel_id: "x".into(),
             endpoint_actor_omni: None,
+            description: None,
         });
         let (status, body) = plan_spawn(&build_req("chef", Some(bad))).unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);

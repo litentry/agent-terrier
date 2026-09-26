@@ -1,10 +1,11 @@
 {
   "id": "kid-bestie",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Kid Bestie",
   "name_zh": "孩子密友",
   "description": "A patient companion for the kids: listens to their day, notices how they feel, and gives parents grounded, gentle education advice.",
   "description_zh": "孩子的耐心伙伴：倾听他们的一天、体察情绪变化，并给家长有依据、温和的教育建议。",
+  "route_examples": ["我今天不开心", "孩子情绪不好怎么办"],
   "suggested_channels": [
     {
       "id": "kids-room",

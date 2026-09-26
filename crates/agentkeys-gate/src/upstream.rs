@@ -106,6 +106,21 @@ impl UpstreamClient {
             .map_err(|e| GateError::Upstream(format!("systemone upstream transport: {e}")))
     }
 
+    /// #722 — GET `<base>/v1/models` on the System One server: Kev reports its
+    /// revision and sampling temperature there. The gate-held key rides here.
+    pub async fn systemone_models_get(
+        client: &reqwest::Client,
+        base_url: &str,
+        api_key: &str,
+    ) -> GateResult<reqwest::Response> {
+        client
+            .get(format!("{}/v1/models", base_url.trim_end_matches('/')))
+            .bearer_auth(api_key)
+            .send()
+            .await
+            .map_err(|e| GateError::Upstream(format!("systemone upstream transport: {e}")))
+    }
+
     /// GET /models passthrough (OpenAI clients often list models at boot).
     pub async fn models(&self) -> GateResult<reqwest::Response> {
         self.client

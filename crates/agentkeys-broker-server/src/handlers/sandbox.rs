@@ -116,9 +116,10 @@ pub async fn provision_delegate_envs(
             Ok(key) => GateProvision {
                 envs: vec![
                     ("ARK_BASE_URL".into(), cfg.turn_url.clone()),
-                    // #519 — the chat loop's voice branch needs the speech relay
-                    // base EXPLICITLY (same gate base) or voice turns refuse.
-                    ("AGENTKEYS_GATE_SPEECH_URL".into(), cfg.turn_url.clone()),
+                    // #519 — the chat loop's voice + photo branches need the
+                    // gate EXPLICITLY or they refuse; they append `/v1/...`
+                    // themselves, so they get the origin, not the `/v1` base.
+                    ("AGENTKEYS_GATE_SPEECH_URL".into(), cfg.origin()),
                     ("ARK_API_KEY".into(), key.secret),
                 ],
                 status: "provisioned".into(),

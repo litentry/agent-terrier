@@ -242,6 +242,7 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
             base_url: format!("http://{up_addr}/v1"),
             api_key: UPSTREAM_KEY.into(),
             model_override: None,
+            default_model: Some("ep-stack-chat".into()),
         },
         keys: relay_keys(),
         user_budgets: Default::default(),
@@ -343,6 +344,30 @@ async fn non_streamed_turn_custody_metering_audit() {
     assert_eq!(envs[0]["op_body"]["total_tokens"], 140);
     assert_eq!(envs[0]["op_body"]["outcome"], "ok");
     assert_eq!(envs[0]["result"], 0);
+}
+
+/// A caller that names no model (the perception step, the contact gate's
+/// photo description) runs on the stack's chat endpoint; a named one rides
+/// through untouched.
+#[tokio::test]
+async fn a_chat_that_names_no_model_runs_on_the_stacks_chat_endpoint() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let mut unnamed = chat_body(false);
+    unnamed.as_object_mut().unwrap().remove("model");
+    for body in [unnamed, chat_body(false)] {
+        let resp = client
+            .post(format!("{}/v1/chat/completions", gate.base))
+            .bearer_auth(RELAY_KEY_1)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    let reqs = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(reqs[0].1["model"], "ep-stack-chat");
+    assert_eq!(reqs[1].1["model"], "ep-doubao");
 }
 
 /// #572 — the embeddings relay: custody (vendor key attached relay-side),
@@ -874,6 +899,7 @@ async fn search_call_pins_engines_maps_results_and_audits() {
             base_url: format!("http://{up_addr}/v1"),
             api_key: UPSTREAM_KEY.into(),
             model_override: None,
+            default_model: None,
         },
         keys: relay_keys(),
         user_budgets: Default::default(),
@@ -1026,6 +1052,42 @@ async fn systemone_call_custody_metering_audit() {
     );
 }
 
+/// #722 — the router view's model card: the gate names the System One server
+/// and relays its `/v1/models` to a live relay key; the vendor key stays here.
+#[tokio::test]
+async fn systemone_models_names_the_server_for_a_relay_key() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/v1/systemone/models", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], 200, "{body}");
+    assert!(
+        body["base_url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("http://127.0.0.1:")),
+        "{body}"
+    );
+    assert!(body["models"]["data"].is_array(), "{body}");
+    assert!(!body.to_string().contains(TYPESAFE_KEY));
+    let seen = gate.upstream.requests.lock().unwrap().clone();
+    assert!(seen.is_empty(), "a models read is not a metered decision");
+    let status = client
+        .get(format!("{}/v1/systemone/models", gate.base))
+        .bearer_auth("gk_unknown")
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 401);
+}
+
 /// No typesafe family → 503, loud, and the vendor is never contacted (the
 /// contact gate's router reads this as "gate down" and runs its deterministic
 /// tier).
@@ -1038,6 +1100,7 @@ async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
             base_url: format!("http://{up_addr}/v1"),
             api_key: UPSTREAM_KEY.into(),
             model_override: None,
+            default_model: None,
         },
         keys: relay_keys(),
         user_budgets: Default::default(),

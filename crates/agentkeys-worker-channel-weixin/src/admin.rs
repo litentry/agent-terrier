@@ -31,8 +31,8 @@ use agentkeys_protocol::{
     GatewayBindInviteRequest, GatewayBindInviteResponse, GatewayBindRejectRequest,
     GatewayContactRevokeRequest, GatewayContactUpdateRequest, GatewayContactsResponse,
     GatewayHistoryResponse, GatewayLoginStartResponse, GatewayLoginStatusResponse,
-    GatewayLoginVerifyRequest, GatewayMonitorResponse, GatewayPendingBindView, GatewayStatusView,
-    PendingBind, TierProposal,
+    GatewayLoginVerifyRequest, GatewayMonitorResponse, GatewayPendingBindView, GatewayRouterView,
+    GatewayStatusView, PendingBind, RouterContactView, RouterOptionView, TierProposal,
 };
 
 use crate::config::WeixinTransport;
@@ -639,23 +639,18 @@ pub(crate) async fn bind_invite(
         )
             .into_response();
     }
-    // L3 rule, enforced at mint too: only `owner` may hold operator-grade reach.
-    if !req.tier.may_hold_operator_grade_reach() {
-        if let Some(bad) = req
-            .reach
-            .iter()
-            .find(|a| state.config.operator_grade_aliases.contains(a))
-        {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({
-                    "ok": false,
-                    "reason": "operator_grade_reach_denied",
-                    "detail": format!("`{bad}` is operator-grade — only the owner tier may hold it")
-                })),
-            )
-                .into_response();
-        }
+    // L3 rule, enforced at mint too: only `owner` may speak where an
+    // operator-grade app is bound.
+    if let Some(bad) = operator_grade_grant(&state, req.tier, &req.channels) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "ok": false,
+                "reason": "operator_grade_reach_denied",
+                "detail": format!("`{bad}` is operator-grade — only the owner tier may speak on its channel")
+            })),
+        )
+            .into_response();
     }
 
     let result = state.registry.mutate(|reg| {
@@ -677,7 +672,8 @@ pub(crate) async fn bind_invite(
             contact_id: req.contact_id.clone(),
             display_name: req.display_name.clone(),
             tier: req.tier,
-            reach: req.reach.clone(),
+            channels: req.channels.clone(),
+            legacy_reach: Vec::new(),
         });
         Ok(code)
     });
@@ -687,7 +683,7 @@ pub(crate) async fn bind_invite(
             state.push_activity(
                 "invite",
                 &req.display_name,
-                &format!("{} · {} agent(s)", req.tier.as_str(), req.reach.len()),
+                &format!("{} · {} channel(s)", req.tier.as_str(), req.channels.len()),
                 false,
             );
             let resp = GatewayBindInviteResponse {
@@ -722,7 +718,7 @@ pub(crate) async fn bind_pending(
             contact_id: i.contact_id.clone(),
             display_name: i.display_name.clone(),
             tier: i.tier,
-            reach: i.reach.clone(),
+            channels: i.channels.clone(),
             claimed: reg.pending.iter().any(|p| p.bind_code == i.bind_code),
         })
         .collect();
@@ -730,8 +726,8 @@ pub(crate) async fn bind_pending(
 }
 
 /// `POST /v1/gateway/admin/bind/approve` — the master's confirm (the actual
-/// bind). Requires a CLAIMED invite; tier/reach overrides re-run the
-/// operator-grade guard.
+/// bind). Requires a CLAIMED invite; tier/channel overrides re-run the
+/// operator-grade guard. The member's rows land on the channel documents.
 pub(crate) async fn bind_approve(
     State(state): State<SharedWeixinGatewayState>,
     headers: HeaderMap,
@@ -755,14 +751,12 @@ pub(crate) async fn bind_approve(
             .ok_or_else(|| anyhow::anyhow!("bind_not_claimed"))?;
 
         let tier = req.tier.unwrap_or(invite.tier);
-        let reach = req.reach.clone().unwrap_or_else(|| invite.reach.clone());
-        if !tier.may_hold_operator_grade_reach() {
-            if let Some(bad) = reach
-                .iter()
-                .find(|a| state.config.operator_grade_aliases.contains(a))
-            {
-                anyhow::bail!("operator_grade_reach_denied:{bad}");
-            }
+        let grants = req
+            .channels
+            .clone()
+            .unwrap_or_else(|| invite.channels.clone());
+        if let Some(bad) = operator_grade_grant_in(reg, &state.config, tier, &grants) {
+            anyhow::bail!("operator_grade_reach_denied:{bad}");
         }
 
         let contact = Contact {
@@ -771,7 +765,7 @@ pub(crate) async fn bind_approve(
             transport_id: pending.transport_id.clone(),
             display_name: invite.display_name.clone(),
             tier,
-            reach,
+            legacy_reach: Vec::new(),
             welcomed: false,
         };
         // Rebind-safe: replace any bound row with the same contact_id OR the
@@ -785,19 +779,29 @@ pub(crate) async fn bind_approve(
             .retain(|i| !i.bind_code.eq_ignore_ascii_case(&req.bind_code));
         reg.pending
             .retain(|p| !p.bind_code.eq_ignore_ascii_case(&req.bind_code));
+        let now = crate::relay::unix_secs();
+        reg.apply_grants(&contact.contact_id, &grants);
+        for d in reg
+            .channels
+            .iter_mut()
+            .filter(|d| d.member(&contact.contact_id).is_some())
+        {
+            d.updated_at = now;
+        }
         Ok(contact)
     });
 
     match approved {
         Ok(contact) => {
+            let snapshot = state.registry.snapshot();
             emit_contact_bind_audit(&state, &contact, "bound").await;
             state.push_activity(
                 "bound",
                 &contact.display_name,
                 &format!(
-                    "{} · {} agent(s)",
+                    "{} · {} channel(s)",
                     contact.tier.as_str(),
-                    contact.reach.len()
+                    snapshot.speak_channels(&contact.contact_id).len()
                 ),
                 state.audit_on_chain(),
             );
@@ -806,7 +810,7 @@ pub(crate) async fn bind_approve(
             // 确认后即可使用" — say so in the chat now, with whom they can talk to.
             // Best-effort through the stored context token (the same path the
             // delayed agent replies use); a failed send is a warn — the bind stands.
-            let notice = bound_notice(&contact);
+            let notice = bound_notice(&contact, &snapshot);
             match crate::outbound::deliver(&state, &contact.transport_id, &notice).await {
                 Ok(()) => {
                     state.mark_welcomed(&contact.contact_id);
@@ -818,7 +822,7 @@ pub(crate) async fn bind_approve(
             }
             let resp = GatewayApproveResponse {
                 ok: true,
-                contact: (&contact).into(),
+                contact: snapshot.summary(&contact),
             };
             (StatusCode::OK, Json(resp)).into_response()
         }
@@ -873,7 +877,7 @@ pub(crate) async fn bind_reject(
                         transport_id: p.transport_id.clone(),
                         display_name: i.display_name.clone(),
                         tier: i.tier,
-                        reach: i.reach.clone(),
+                        legacy_reach: Vec::new(),
                         welcomed: false,
                     })
             });
@@ -938,12 +942,12 @@ pub(crate) async fn admin_contacts(
     let reg = state.registry.snapshot();
     let body = GatewayContactsResponse {
         ok: true,
-        apps: reg.apps.clone(),
+        channels: reg.channels.clone(),
         contacts: reg
             .bound
             .iter()
             .map(|c| {
-                let mut s: agentkeys_protocol::ContactSummary = c.into();
+                let mut s: agentkeys_protocol::ContactSummary = reg.summary(c);
                 // An owner bound before the per-member model has no bot under their
                 // own id — the legacy owner bot (`self-owner`) still serves them.
                 s.connected = state.bot_for_contact(&c.contact_id).is_some()
@@ -982,6 +986,103 @@ pub(crate) async fn monitor(
             ok: true,
             cursor,
             events,
+        }),
+    )
+        .into_response()
+}
+
+/// #722 / household channels — `GET /v1/gateway/admin/router`: the router as
+/// the decision model sees it — settings, the guidance each question carries,
+/// the options per bound contact (their channels, rendered from the channel
+/// documents alone), the model server — and the last turns that consulted a
+/// model.
+pub(crate) async fn router_view(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let cfg = &state.config.router;
+    let registry = state.registry.snapshot();
+    let kind_name = |k: &agentkeys_protocol::ChannelEventKind| {
+        serde_json::to_value(k)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    };
+    let contacts = registry
+        .bound
+        .iter()
+        .map(|c| {
+            let options = crate::jev::channel_options(&registry, &c.contact_id);
+            let last = state
+                .device
+                .last_channel(&c.transport, &c.transport_id)
+                .filter(|l| options.iter().any(|o| &o.id == l));
+            RouterContactView {
+                contact: c.display_name.clone(),
+                tier: c.tier.as_str().to_string(),
+                request: serde_json::to_value(crate::jev::build_request(
+                    &cfg.model,
+                    crate::jev::PREVIEW_MESSAGE,
+                    &c.display_name,
+                    c.tier.as_str(),
+                    last.as_deref(),
+                    &options,
+                ))
+                .unwrap_or(serde_json::Value::Null),
+                options: options
+                    .into_iter()
+                    .map(|o| RouterOptionView {
+                        channel_id: o.id,
+                        name: o.name,
+                        line: o.line,
+                        apps: o
+                            .apps
+                            .iter()
+                            .map(|a| agentkeys_protocol::RouterAppView {
+                                alias: a.alias.clone(),
+                                description: a.description.clone(),
+                                takes: a.takes.iter().map(kind_name).collect(),
+                            })
+                            .collect(),
+                        members: o.members,
+                        operator_of: o.operator_of,
+                        updated_at: o.updated_at,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    let upstream = match state.jev.as_ref() {
+        Some(client) => client.upstream_info().await,
+        None => {
+            json!({ "error": "this contact gate routes without a model (no model gate configured)" })
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(GatewayRouterView {
+            ok: true,
+            engine: if state.jev.is_some() {
+                "jev"
+            } else {
+                "deterministic"
+            }
+            .into(),
+            model: cfg.model.clone(),
+            gate_url: cfg.gate_url.clone(),
+            threshold: cfg.threshold,
+            continue_threshold: cfg.continue_threshold,
+            ask_ttl_secs: cfg.ask_ttl_secs,
+            describe_photos: cfg.describe_photos,
+            describe_model: cfg.describe_model.clone(),
+            describe_prompt: crate::jev::DESCRIBE_PROMPT.to_string(),
+            guidance: crate::jev::guidance(),
+            contacts,
+            upstream,
+            recent: state.router_log(),
         }),
     )
         .into_response()
@@ -1049,9 +1150,11 @@ pub(crate) async fn activity(
         .into_response()
 }
 
-/// `POST /v1/gateway/admin/contacts/update` — operator edits a bound contact's
-/// tier/reach (#3). Unchanged fields stay; an operator-grade alias under a tier
-/// that may not hold one is rejected (same guard as approve). 404 if not bound.
+/// `POST /v1/gateway/admin/contacts/update` — operator edits a bound
+/// contact's tier and rows (#3). Unchanged fields stay; `channels` REPLACES
+/// the member's rows across every document; a tier that may not speak where
+/// an operator-grade app is bound is rejected (same guard as approve). 404 if
+/// not bound.
 pub(crate) async fn contacts_update(
     State(state): State<SharedWeixinGatewayState>,
     headers: HeaderMap,
@@ -1063,28 +1166,50 @@ pub(crate) async fn contacts_update(
     let updated: anyhow::Result<Contact> = state.registry.mutate(|reg| {
         let c = reg
             .bound
-            .iter_mut()
+            .iter()
             .find(|c| c.contact_id == req.contact_id)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("contact_unknown"))?;
-        // Validate the RESULTING policy BEFORE mutating `c`, so a rejected edit
+        // Validate the RESULTING policy BEFORE mutating, so a rejected edit
         // leaves the in-memory registry untouched (mutate only persists on Ok).
         let new_tier = req.tier.unwrap_or(c.tier);
-        let new_reach = req.reach.unwrap_or_else(|| c.reach.clone());
-        if !new_tier.may_hold_operator_grade_reach() {
-            if let Some(bad) = new_reach
-                .iter()
-                .find(|a| state.config.operator_grade_aliases.contains(a))
-            {
-                anyhow::bail!("operator_grade_reach_denied:{bad}");
+        let grants = req
+            .channels
+            .clone()
+            .unwrap_or_else(|| reg.grants_of(&c.contact_id));
+        if let Some(bad) = operator_grade_grant_in(reg, &state.config, new_tier, &grants) {
+            anyhow::bail!("operator_grade_reach_denied:{bad}");
+        }
+        let now = crate::relay::unix_secs();
+        if req.channels.is_some() {
+            let before = reg.grants_of(&c.contact_id);
+            reg.apply_grants(&c.contact_id, &grants);
+            let after = reg.grants_of(&c.contact_id);
+            for d in reg.channels.iter_mut() {
+                let was = before
+                    .iter()
+                    .find(|g| g.channel_id == d.id)
+                    .map(|g| (g.speak, g.read));
+                let is = after
+                    .iter()
+                    .find(|g| g.channel_id == d.id)
+                    .map(|g| (g.speak, g.read));
+                if was != is {
+                    d.updated_at = now;
+                }
             }
         }
+        let c = reg
+            .bound
+            .iter_mut()
+            .find(|c| c.contact_id == req.contact_id)
+            .expect("found above");
         c.tier = new_tier;
-        c.reach = new_reach;
         Ok(c.clone())
     });
     match updated {
         Ok(c) => {
-            let summary: agentkeys_protocol::ContactSummary = (&c).into();
+            let summary = state.registry.snapshot().summary(&c);
             info!(contact = %c.contact_id, "contact routing policy updated by operator");
             (
                 StatusCode::OK,
@@ -1102,6 +1227,35 @@ pub(crate) async fn contacts_update(
             (code, Json(json!({"ok": false, "reason": reason}))).into_response()
         }
     }
+}
+
+/// The operator-grade alias a grant would let a non-owner tier speak to
+/// (`None` = the grants are fine). Operator-grade data needs operator-grade
+/// auth; a tier below owner may not even speak where such an app is bound.
+fn operator_grade_grant_in(
+    reg: &agentkeys_protocol::ContactRegistry,
+    config: &crate::config::WeixinGatewayConfig,
+    tier: agentkeys_protocol::ContactTier,
+    grants: &[agentkeys_protocol::ChannelGrant],
+) -> Option<String> {
+    if tier.may_hold_operator_grade_reach() {
+        return None;
+    }
+    grants
+        .iter()
+        .filter(|g| g.speak)
+        .filter_map(|g| reg.channel(&g.channel_id))
+        .flat_map(|d| d.apps.iter())
+        .find(|a| config.operator_grade_aliases.contains(&a.alias))
+        .map(|a| a.alias.clone())
+}
+
+fn operator_grade_grant(
+    state: &SharedWeixinGatewayState,
+    tier: agentkeys_protocol::ContactTier,
+    grants: &[agentkeys_protocol::ChannelGrant],
+) -> Option<String> {
+    operator_grade_grant_in(&state.registry.snapshot(), &state.config, tier, grants)
 }
 
 /// `POST /v1/gateway/admin/contacts/revoke` — operator UNBINDS a contact (#3):
@@ -1122,6 +1276,12 @@ pub(crate) async fn contacts_revoke(
             .find(|c| c.contact_id == req.contact_id)
             .cloned();
         reg.bound.retain(|c| c.contact_id != req.contact_id);
+        let now = crate::relay::unix_secs();
+        for d in reg.channels.iter_mut() {
+            if d.remove_member(&req.contact_id) {
+                d.updated_at = now;
+            }
+        }
         Ok(found)
     });
     match removed {
@@ -1182,7 +1342,7 @@ pub(crate) async fn contacts_welcome(
         )
             .into_response();
     };
-    let notice = bound_notice(&contact);
+    let notice = bound_notice(&contact, &state.registry.snapshot());
     let resp = match crate::outbound::deliver(&state, &contact.transport_id, &notice).await {
         Ok(()) => {
             state.set_welcomed(&contact.contact_id, true);
@@ -1274,7 +1434,8 @@ pub(crate) async fn registry_import(
         )
             .into_response();
     }
-    let incoming = req.registry;
+    let mut incoming = req.registry;
+    incoming.migrate_legacy(crate::relay::unix_secs());
     let (bound, invites, pending) = (
         incoming.bound.len(),
         incoming.invites.len(),
@@ -1352,7 +1513,7 @@ pub(crate) fn try_claim_bind(
             bind_code: invite.bind_code.clone(),
             proposal: Some(TierProposal {
                 tier: invite.tier,
-                reach: invite.reach.clone(),
+                channels: invite.channels.clone(),
                 rationale: format!("operator invite for {}", invite.display_name),
             }),
         });
@@ -1425,7 +1586,11 @@ async fn emit_contact_bind_audit(
         contact_id: contact.contact_id.clone(),
         outcome: outcome.to_string(),
         tier: contact.tier.as_str().to_string(),
-        reach_count: contact.reach.len() as u32,
+        reach_count: state
+            .registry
+            .snapshot()
+            .speak_channels(&contact.contact_id)
+            .len() as u32,
     };
     match envelope_for(
         op_omni,
@@ -1470,40 +1635,62 @@ mod tests {
 }
 
 /// What the member sees in the chat once the master approves — the other half
-/// of the claim ack. Reach is the alias list they can address; an empty reach
-/// says so instead of implying agents.
-pub(crate) fn bound_notice(c: &agentkeys_protocol::Contact) -> String {
-    crate::relay::bound_notice(c)
+/// of the claim ack: their channels and the apps bound to each; no channel at
+/// all says so instead of implying any.
+pub(crate) fn bound_notice(
+    c: &agentkeys_protocol::Contact,
+    registry: &agentkeys_protocol::ContactRegistry,
+) -> String {
+    crate::relay::bound_notice(c, registry)
 }
 
 #[cfg(test)]
 mod bound_notice_tests {
     use super::bound_notice;
-    use agentkeys_protocol::{Contact, ContactTier};
+    use agentkeys_protocol::{ChannelApp, Contact, ContactRegistry, ContactTier};
 
-    fn contact(reach: &[&str]) -> Contact {
-        Contact {
+    fn household(channels: &[(&str, &str, &[&str])]) -> (Contact, ContactRegistry) {
+        let c = Contact {
             contact_id: "grandma-1".into(),
             transport: "weixin".into(),
             transport_id: "wxid-x".into(),
             display_name: "奶奶".into(),
             tier: ContactTier::Elder,
-            reach: reach.iter().map(|s| s.to_string()).collect(),
+            legacy_reach: vec![],
             welcomed: true,
+        };
+        let mut reg = ContactRegistry::default();
+        reg.bound.push(c.clone());
+        for (id, name, apps) in channels {
+            let d = reg.channel_or_new(id);
+            d.name = name.to_string();
+            for a in *apps {
+                d.upsert_app(ChannelApp {
+                    alias: a.to_string(),
+                    ..Default::default()
+                });
+            }
+            d.set_member("grandma-1", true, true);
         }
+        (c, reg)
     }
 
     #[test]
-    fn bound_notice_names_the_reach_or_its_absence() {
-        let n = bound_notice(&contact(&["chef", "storyteller"]));
+    fn bound_notice_names_the_channels_or_their_absence() {
+        let (c, reg) = household(&[
+            ("family-chat", "家庭群", &["chef"]),
+            ("stories", "故事", &["storyteller"]),
+        ]);
+        let n = bound_notice(&c, &reg);
         assert!(
             n.contains("绑定成功")
                 && n.contains("奶奶（长辈）")
-                && n.contains("/chef、/storyteller")
+                && n.contains("家庭群（chef）、故事（storyteller）")
                 && n.contains("/chef 你好"),
             "{n}"
         );
-        let e = bound_notice(&contact(&[]));
+        let (c, reg) = household(&[]);
+        let e = bound_notice(&c, &reg);
         assert!(
             e.contains("绑定成功") && e.contains("还没有") && !e.contains('/'),
             "{e}"
@@ -1558,9 +1745,10 @@ async fn bind_member_by_scan(
             .iter()
             .find(|c| c.contact_id == contact_id)
             .cloned();
-        let (display_name, tier, reach) = match (&invite, &existing) {
-            (Some(i), _) => (i.display_name.clone(), i.tier, i.reach.clone()),
-            (None, Some(c)) => (c.display_name.clone(), c.tier, c.reach.clone()),
+        let (display_name, tier, grants) = match (&invite, &existing) {
+            (Some(i), _) => (i.display_name.clone(), i.tier, Some(i.channels.clone())),
+            // A re-bind by scan keeps the rows the member already has.
+            (None, Some(c)) => (c.display_name.clone(), c.tier, None),
             (None, None) => anyhow::bail!("invite_unknown"),
         };
         let contact = Contact {
@@ -1569,7 +1757,7 @@ async fn bind_member_by_scan(
             transport_id: transport_id.clone(),
             display_name,
             tier,
-            reach,
+            legacy_reach: Vec::new(),
             welcomed: false,
         };
         reg.bound.retain(|c| {
@@ -1579,6 +1767,17 @@ async fn bind_member_by_scan(
         reg.bound.push(contact.clone());
         reg.invites.retain(|i| i.contact_id != contact_id);
         reg.pending.retain(|p| p.transport_id != transport_id);
+        if let Some(grants) = grants {
+            let now = crate::relay::unix_secs();
+            reg.apply_grants(contact_id, &grants);
+            for d in reg
+                .channels
+                .iter_mut()
+                .filter(|d| d.member(contact_id).is_some())
+            {
+                d.updated_at = now;
+            }
+        }
         Ok(contact)
     })?;
     let persist_err = state
@@ -1603,13 +1802,14 @@ async fn bind_member_by_scan(
         );
     }
     emit_contact_bind_audit(state, &contact, "bound").await;
+    let snapshot = state.registry.snapshot();
     state.push_activity(
         "bound",
         &contact.display_name,
         &format!(
-            "{} · {} agent(s) · by scan",
+            "{} · {} channel(s) · by scan",
             contact.tier.as_str(),
-            contact.reach.len()
+            snapshot.speak_channels(&contact.contact_id).len()
         ),
         state.audit_on_chain(),
     );
@@ -1617,7 +1817,7 @@ async fn bind_member_by_scan(
     // a reply token for the member (a re-login of the same bot); a fresh bot has
     // none, `deliver` refuses (never a token-less or another bot's token), and
     // the relay sends it with the member's first message (`RelayOutcome::welcome`).
-    let notice = bound_notice(&contact);
+    let notice = bound_notice(&contact, &snapshot);
     match crate::outbound::deliver(state, &contact.transport_id, &notice).await {
         Ok(()) => {
             state.mark_welcomed(contact_id);
@@ -1630,57 +1830,155 @@ async fn bind_member_by_scan(
     Ok((contact, persist_err))
 }
 
-/// `POST /v1/gateway/admin/apps/update` — the console registers (or clears)
-/// the channel an app's messaging slot binds: `alias → channel_id`; a `null` /
-/// absent channel removes the row. The outbound subscription and the inbound
-/// hop both key on this table (owner decision 2026-09-22: the bound channel
-/// IS the feed — no `<transport>-<alias>` derivation).
-pub(crate) async fn apps_update(
+/// `GET /v1/gateway/admin/channels` — every channel document on this gate.
+pub(crate) async fn channels_list(
     State(state): State<SharedWeixinGatewayState>,
     headers: HeaderMap,
-    Json(req): Json<agentkeys_protocol::GatewayAppFeedUpdateRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = admin_gate(&state, &headers) {
         return resp;
     }
-    let alias = req.alias.trim().to_lowercase();
-    if alias.is_empty() {
+    let reg = state.registry.snapshot();
+    (
+        StatusCode::OK,
+        Json(agentkeys_protocol::GatewayChannelsResponse {
+            ok: true,
+            channels: reg.channels,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /v1/gateway/admin/channels/update` — one write to a channel
+/// document (the console at install / rebind / uninstall, the Channels page,
+/// the plain-delegate action): create it, change its words or marks, insert
+/// or drop an app's row, set or drop a member's row, or delete it. Every
+/// write stamps `updated_at`; a write that changes nothing answers
+/// `changed:false`.
+pub(crate) async fn channels_update(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_protocol::GatewayChannelUpdateRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let id = req.channel_id.trim().to_string();
+    if id.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"ok": false, "reason": "alias_empty"})),
+            Json(json!({"ok": false, "reason": "channel_id_empty"})),
         )
             .into_response();
     }
-    let channel = req
-        .channel_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .map(str::to_string);
-    let result = state.registry.mutate(|reg| {
-        Ok(match &channel {
-            Some(c) => {
-                reg.set_app_feed(&alias, c, req.blurb.clone());
-                true
+    if req.remove {
+        let result = state.registry.mutate(|reg| Ok(reg.remove_channel(&id)));
+        return match result {
+            Ok(changed) => {
+                info!(channel = %id, changed, "channel document removed by operator");
+                (
+                    StatusCode::OK,
+                    Json(
+                        json!({"ok": true, "channel_id": id, "changed": changed, "removed": true}),
+                    ),
+                )
+                    .into_response()
             }
-            None => reg.remove_app_feed(&alias),
-        })
-    });
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "reason": e.to_string()})),
+            )
+                .into_response(),
+        };
+    }
+    let now = crate::relay::unix_secs();
+    let result: anyhow::Result<(bool, agentkeys_protocol::ChannelDoc)> =
+        state.registry.mutate(|reg| {
+            let mut changed = !reg.channels.iter().any(|d| d.id == id);
+            if let Some(true) = req.household_default {
+                for d in reg.channels.iter_mut().filter(|d| d.id != id) {
+                    if d.household_default {
+                        d.household_default = false;
+                        d.updated_at = now;
+                        changed = true;
+                    }
+                }
+            }
+            let doc = reg.channel_or_new(&id);
+            if let Some(name) = req.name.as_deref().map(str::trim) {
+                if !name.is_empty() && doc.name != name {
+                    doc.name = name.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(purpose) = req.purpose.as_deref().map(str::trim) {
+                if doc.purpose != purpose {
+                    doc.purpose = purpose.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(op) = req.operator_of.as_deref().map(str::trim) {
+                let next = (!op.is_empty()).then(|| op.to_lowercase());
+                if doc.operator_of != next {
+                    doc.operator_of = next;
+                    changed = true;
+                }
+            }
+            if let Some(hd) = req.household_default {
+                if doc.household_default != hd {
+                    doc.household_default = hd;
+                    changed = true;
+                }
+            }
+            if let Some(app) = req.app.clone() {
+                if app.alias.trim().is_empty() {
+                    anyhow::bail!("app_alias_empty");
+                }
+                changed |= doc.upsert_app(app);
+            }
+            if let Some(alias) = req.remove_app.as_deref() {
+                changed |= doc.remove_app(alias);
+            }
+            if let Some(default_app) = req.default_app.as_deref().map(str::trim) {
+                let next = (!default_app.is_empty()).then(|| default_app.to_lowercase());
+                if let Some(a) = next.as_deref() {
+                    if doc.app(a).is_none() {
+                        anyhow::bail!("default_app_not_on_channel:{a}");
+                    }
+                }
+                if doc.default_app != next {
+                    doc.default_app = next;
+                    changed = true;
+                }
+            }
+            if let Some(m) = req.member.as_ref() {
+                if m.contact_id.trim().is_empty() {
+                    anyhow::bail!("member_contact_id_empty");
+                }
+                changed |= doc.set_member(m.contact_id.trim(), m.speak, m.read);
+            }
+            if changed {
+                doc.updated_at = now;
+            }
+            Ok((changed, doc.clone()))
+        });
     match result {
-        Ok(changed) => {
-            info!(alias = %alias, channel = ?channel, "app feed registered by operator");
+        Ok((changed, doc)) => {
+            info!(channel = %id, changed, apps = doc.apps.len(), members = doc.members.len(), "channel document written by operator");
             (
                 StatusCode::OK,
-                Json(
-                    json!({"ok": true, "alias": alias, "channel_id": channel, "changed": changed}),
-                ),
+                Json(json!({"ok": true, "channel_id": id, "changed": changed, "channel": doc})),
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "reason": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            let reason = e.to_string();
+            let code = if reason.starts_with("registry") {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({"ok": false, "reason": reason}))).into_response()
+        }
     }
 }

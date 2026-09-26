@@ -66,6 +66,10 @@ pub mod platform_caps {
     /// (a week) — a template cannot turn a window back into a resident
     /// session.
     pub const MAX_SESSION_IDLE_MINUTES: u32 = 7 * 24 * 60;
+    /// #722 — routing examples a template may declare, and each one's length:
+    /// they ride every routing request, so they stay a handful of short lines.
+    pub const MAX_ROUTE_EXAMPLES: usize = 8;
+    pub const MAX_ROUTE_EXAMPLE_CHARS: usize = 60;
 }
 
 /// The closed channel-kind vocabulary a slot binds by (plan §4.3 / §4.8 —
@@ -437,6 +441,25 @@ impl PresetSummary {
         }
     }
 
+    /// #722 — every event kind the app's messaging slots take, in declaration
+    /// order (what the contact gate may deliver to it).
+    pub fn messaging_event_kinds(&self) -> Vec<ChannelEventKind> {
+        let mut kinds = Vec::new();
+        for slot in self
+            .app
+            .slots
+            .iter()
+            .filter(|s| s.kind == ChannelEndpointKind::Messaging)
+        {
+            for kind in &slot.event_kinds {
+                if !kinds.contains(kind) {
+                    kinds.push(*kind);
+                }
+            }
+        }
+        kinds
+    }
+
     /// The resolved tool classes (declared, else the product default), bare.
     pub fn tool_classes(&self) -> Vec<String> {
         match &self.app.tools {
@@ -718,6 +741,32 @@ pub fn validate_template(
             if class == SCHEDULE_CLASS {
                 wants_schedule = true;
             }
+        }
+    }
+
+    // route examples (#722)
+    if summary.route_examples.len() > platform_caps::MAX_ROUTE_EXAMPLES {
+        errs.push(TemplateError::new(
+            "route_examples",
+            "too_many_route_examples",
+            format!(
+                "{} route examples exceed the platform cap of {}",
+                summary.route_examples.len(),
+                platform_caps::MAX_ROUTE_EXAMPLES
+            ),
+        ));
+    }
+    for (i, e) in summary.route_examples.iter().enumerate() {
+        let chars = e.trim().chars().count();
+        if chars == 0 || chars > platform_caps::MAX_ROUTE_EXAMPLE_CHARS {
+            errs.push(TemplateError::new(
+                format!("route_examples[{i}]"),
+                "route_example_length",
+                format!(
+                    "a route example must be 1–{} characters, got {chars}",
+                    platform_caps::MAX_ROUTE_EXAMPLE_CHARS
+                ),
+            ));
         }
     }
 
@@ -1134,6 +1183,14 @@ pub struct SlotBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub endpoint_actor_omni: Option<String>,
+    /// What the app does on this channel, in the household's words — the
+    /// binding's description, seeded from the template slot's `reason` and
+    /// edited under "edit bindings". It becomes the app's row on the channel
+    /// document (the only text the router reads about an app). Absent = the
+    /// slot's reason as shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
 }
 
 /// One resource request → curated item binding chosen at install. The daemon
@@ -1189,6 +1246,12 @@ pub struct BoundChannel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub endpoint_actor_omni: Option<String>,
+    /// Whether this app takes the channel's UNADDRESSED events (the channel
+    /// document's default app). `None` = not known (a context written before
+    /// channels were shared): take them, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_app: Option<bool>,
 }
 
 /// What one compiled grant line IS, for the sheet (data vs capability, which
@@ -1433,10 +1496,17 @@ pub fn compile_app(
             }
             if let Some(actor) = b.endpoint_actor_omni.as_deref().filter(|a| !a.is_empty()) {
                 // The endpoint mirrors the app: it writes what the app reads
-                // and reads what the app writes.
+                // and reads what the app writes. A messaging endpoint (the
+                // contact gate) also gets the app's operator channel, so a
+                // member the owner lets speak there reaches the app as its
+                // operator (household channels, R6).
                 let mut add: Vec<String> = Vec::new();
                 add.push(service_channel_pub(&feed));
                 add.push(service_channel_sub(&feed));
+                if slot.kind == ChannelEndpointKind::Messaging {
+                    add.push(service_channel_pub(&chat_channel_id));
+                    add.push(service_channel_sub(&chat_channel_id));
+                }
                 match endpoint_grants.iter_mut().find(|g| g.actor_omni == actor) {
                     Some(g) => {
                         for s in add {
@@ -1456,6 +1526,7 @@ pub fn compile_app(
                 channel_id: feed,
                 event_kinds: slot.event_kinds.clone(),
                 endpoint_actor_omni: b.endpoint_actor_omni.clone(),
+                default_app: None,
             });
         }
     }
@@ -1793,11 +1864,13 @@ mod tests {
                     slot: "family_chat".into(),
                     channel_id: "family-chat".into(),
                     endpoint_actor_omni: Some("0xgateway".into()),
+                    description: None,
                 },
                 SlotBinding {
                     slot: "kitchen_screen".into(),
                     channel_id: "kitchen-display".into(),
                     endpoint_actor_omni: None,
+                    description: None,
                 },
             ],
             resources: vec![
@@ -1877,7 +1950,12 @@ mod tests {
         assert_eq!(c.endpoint_grants[0].actor_omni, "0xgateway");
         assert_eq!(
             c.endpoint_grants[0].add,
-            vec!["channel-pub:family-chat", "channel-sub:family-chat"]
+            vec![
+                "channel-pub:family-chat",
+                "channel-sub:family-chat",
+                "channel-pub:opchat-chef",
+                "channel-sub:opchat-chef"
+            ]
         );
         // Bound channels = what the sandbox polls / publishes.
         assert_eq!(c.bound_channels.len(), 2);
@@ -2104,6 +2182,71 @@ mod tests {
     }
 
     #[test]
+    fn route_examples_are_bounded_and_feed_the_router_blurb() {
+        let mut p = preset(CHEF);
+        p.route_examples = vec!["今晚吃什么".into(), "冰箱里还有什么菜".into()];
+        assert!(validate_template(&p, &[], &[]).is_ok());
+        let b = p.router_blurb();
+        assert_eq!(b.examples, p.route_examples);
+        assert_eq!(b.name_zh, "家庭厨师");
+        assert_eq!(b.purpose_zh, p.description_zh);
+        // What the contact gate may deliver: the messaging slot's kinds only
+        // (the display slot's `doc` is not a thing a member sends).
+        assert_eq!(
+            b.event_kinds,
+            vec![ChannelEventKind::Text, ChannelEventKind::Image]
+        );
+        // A registry written before channel documents folds its rows into
+        // them on load: the blurb becomes the app's row on the channel it was
+        // bound to, its declared kinds `takes`; a row with no kinds takes
+        // every kind; an app bound nowhere is no option at all.
+        let mut registry = crate::ContactRegistry {
+            apps: vec![
+                crate::AppFeed {
+                    alias: "chef".into(),
+                    channel_id: "family-chat".into(),
+                    blurb: Some(b),
+                },
+                crate::AppFeed {
+                    alias: "doorkeeper".into(),
+                    channel_id: "door".into(),
+                    blurb: None,
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(registry.migrate_legacy(7));
+        assert!(registry.apps.is_empty());
+        let family = registry.channel("family-chat").unwrap();
+        assert!(family.takes("chef", ChannelEventKind::Image));
+        assert!(!family.takes("chef", ChannelEventKind::AudioClip));
+        assert_eq!(family.default_app.as_deref(), Some("chef"));
+        assert_eq!(family.purpose, p.description_zh);
+        assert!(family.household_default);
+        assert_eq!(family.updated_at, 7);
+        let door = registry.channel("door").unwrap();
+        assert!(door.takes("doorkeeper", ChannelEventKind::Image));
+        assert!(!door.household_default);
+        assert!(registry.app_channels("unknown").is_empty());
+        let mut p = preset(CHEF);
+        p.route_examples = vec!["今晚吃什么".into(); platform_caps::MAX_ROUTE_EXAMPLES + 1];
+        assert!(
+            codes(validate_template(&p, &[], &[])).contains(&"too_many_route_examples".to_string())
+        );
+        let mut p = preset(CHEF);
+        p.route_examples = vec![
+            " ".into(),
+            "长".repeat(platform_caps::MAX_ROUTE_EXAMPLE_CHARS + 1),
+        ];
+        let c = codes(validate_template(&p, &[], &[]));
+        assert_eq!(
+            c.iter().filter(|x| *x == "route_example_length").count(),
+            2,
+            "{c:?}"
+        );
+    }
+
+    #[test]
     fn negative_budgets_over_cap() {
         let mut p = preset(CHEF);
         p.app.budgets.gate_tokens_per_day = Some(platform_caps::GATE_TOKENS_PER_DAY + 1);
@@ -2181,6 +2324,7 @@ mod tests {
                 slot: "nope".into(),
                 channel_id: "x".into(),
                 endpoint_actor_omni: None,
+                description: None,
             }],
             ..Default::default()
         };
@@ -2203,6 +2347,7 @@ mod tests {
             slot: "kitchen_screen".into(),
             channel_id: "second-display".into(),
             endpoint_actor_omni: None,
+            description: None,
         });
         b.audience.push(SlotAudience {
             slot: "kitchen_screen".into(),
@@ -2253,7 +2398,12 @@ mod tests {
             .contains(&"channel-pub:kitchen-family".to_string()));
         assert_eq!(
             c.endpoint_grants[0].add,
-            vec!["channel-pub:kitchen-family", "channel-sub:kitchen-family"]
+            vec![
+                "channel-pub:kitchen-family",
+                "channel-sub:kitchen-family",
+                "channel-pub:opchat-chef",
+                "channel-sub:opchat-chef"
+            ]
         );
         assert!(c.services.iter().all(|s| !s.contains("weixin-")));
     }

@@ -63,6 +63,10 @@ interface WizardState {
   label: string;
   step: WizardStep;
   bindings: Record<string, string | null>;
+  /** Per messaging slot: what the app does on the channel it binds — the
+   *  binding's description, the app's row on the channel document. Empty =
+   *  the template's slot reason + route examples (the daemon seeds it). */
+  descriptions: Record<string, string>;
   resources: Record<string, string | null>;
   audience: Record<string, Record<ContactTier, boolean>>;
   built?: AppInstallBuildResponse;
@@ -78,13 +82,17 @@ function newWizard(tp: PresetSummary): WizardState {
       audience[s.slot] = Object.fromEntries(TIERS.map((t) => [t, on.has(t)])) as Record<ContactTier, boolean>;
     }
   }
-  return { templateId: tp.id, label: tp.id, step: 'slots', bindings: {}, resources: {}, audience, busy: null, error: null };
+  return { templateId: tp.id, label: tp.id, step: 'slots', bindings: {}, descriptions: {}, resources: {}, audience, busy: null, error: null };
 }
 
 function toBindings(tp: PresetSummary, w: WizardState, resourceItems: ResourceItemRow[]): AppInstallBindings {
   const slots = (tp.slots ?? [])
     .filter((s) => w.bindings[s.slot])
-    .map((s) => ({ slot: s.slot, channel_id: w.bindings[s.slot] as string }));
+    .map((s) => ({
+      slot: s.slot,
+      channel_id: w.bindings[s.slot] as string,
+      ...(w.descriptions[s.slot]?.trim() ? { description: w.descriptions[s.slot].trim() } : {}),
+    }));
   const resources = (tp.resources ?? [])
     .filter((r) => w.resources[r.name])
     .map((r) => {
@@ -103,6 +111,9 @@ function toBindings(tp: PresetSummary, w: WizardState, resourceItems: ResourceIt
   }));
   return { slots, resources, audience, tz_offset_minutes: -new Date().getTimezoneOffset() };
 }
+
+/** One slot of a rebind: the channel to bind, and the binding's description. */
+type RebindSlot = { channel_id: string; description?: string };
 
 const statusOf = (a: AppInstanceRow): { dot: 'ok' | 'warn' | 'muted'; text: string } =>
   a.status === 'installed' ? { dot: 'ok', text: 'installed' } : a.status === 'uninstalled' ? { dot: 'muted', text: 'uninstalled' } : { dot: 'warn', text: String(a.status) };
@@ -354,10 +365,12 @@ export function ApplicationsPage({
   // ── the rebind ceremony (#717): build → ONE Touch ID → submit; the app
   // keeps running and re-sources its feeds — a commit, not a reinstall.
   const rebind = useCallback(
-    async (app: AppInstanceRow, slots: Record<string, string>) => {
+    async (app: AppInstanceRow, slots: Record<string, RebindSlot>) => {
       if (!client.appRebindBuild || !client.appRebindSubmit) return;
       setRebinding('Compiling the new sheet…');
-      const built = await client.appRebindBuild(app.label, { slots: Object.entries(slots).map(([slot, channel_id]) => ({ slot, channel_id })) });
+      const built = await client.appRebindBuild(app.label, {
+        slots: Object.entries(slots).map(([slot, s]) => ({ slot, channel_id: s.channel_id, ...(s.description?.trim() ? { description: s.description.trim() } : {}) })),
+      });
       if (!built.ok) {
         setRebinding(null);
         showToast(`rebind build failed — ${built.status?.detail ?? 'error'}`, true);
@@ -817,8 +830,8 @@ function AppDetail({
   asking?: { entry: string; since: number; note: string } | null;
   /** "Ask for the card now" — run a schedule entry's prompt as a turn. */
   onAskCard?: (entry: { label: string; prompt: string }) => void;
-  /** #717 — commit new channel bindings in place: one Touch ID, no reinstall. */
-  onRebind?: (slots: Record<string, string>) => void;
+  /** #717 — commit new channel bindings (or a binding's description) in place: one Touch ID, no reinstall. */
+  onRebind?: (slots: Record<string, RebindSlot>) => void;
   /** The rebind ceremony's current step, while one runs. */
   rebinding?: string | null;
   channels: ChannelDef[];
@@ -833,11 +846,17 @@ function AppDetail({
   const st = statusOf(app);
   const [editingBindings, setEditingBindings] = useState(false);
   const [draft, setDraft] = useState<Record<string, string | null>>({});
+  const [descDraft, setDescDraft] = useState<Record<string, string>>({});
   const channelSlots = template?.slots ?? [];
   const currentOf = (slot: string) => app.bound_channels.find((b) => b.slot === slot)?.channel_id ?? null;
   const changedSlots = channelSlots.filter((s) => {
     const v = draft[s.slot];
     return typeof v === 'string' && v !== currentOf(s.slot);
+  });
+  // A description edit alone is a change: it is the app's row on the channel document.
+  const changedDescriptions = channelSlots.filter((s) => {
+    const v = descDraft[s.slot];
+    return s.kind === 'messaging' && typeof v === 'string' && v.trim() !== (app.bindings.slots.find((b) => b.slot === s.slot)?.description ?? '') && !!currentOf(s.slot);
   });
   const display = app.bound_channels.find((b) => b.kind === 'display');
   const asks = cardAsks(template?.schedule);
@@ -996,6 +1015,11 @@ function AppDetail({
                     <code>{b.channel_id}</code> · {b.kind} · {b.direction}
                     {b.kind === 'messaging' && (b.endpoint_actor_omni ? ' · relayed by the contact gate' : ' · no contact gate on it — rebind to enroll one')}
                     {b.kind !== 'messaging' && b.endpoint_actor_omni ? ` · actor ${b.endpoint_actor_omni.slice(0, 10)}…` : ''}
+                    {b.kind === 'messaging' && (
+                      <div className="muted" style={{ fontSize: 11.5 }}>
+                        {app.bindings.slots.find((s) => s.slot === b.slot)?.description ?? 'no description yet — what the app does on this channel (edit bindings)'}
+                      </div>
+                    )}
                   </dd>
                 </div>
               ))}
@@ -1048,6 +1072,8 @@ function AppDetail({
                     gateway={gateway}
                     value={draft[s.slot] !== undefined ? draft[s.slot] : currentOf(s.slot)}
                     onPick={(id) => setDraft({ ...draft, [s.slot]: id })}
+                    description={descDraft[s.slot] ?? app.bindings.slots.find((b) => b.slot === s.slot)?.description ?? ''}
+                    onDescription={(d) => setDescDraft({ ...descDraft, [s.slot]: d })}
                     onGoChannels={onGoChannels}
                     onGoEndpoints={onGoEndpoints}
                   />
@@ -1055,12 +1081,19 @@ function AppDetail({
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <button
                     className="btn sm primary"
-                    disabled={changedSlots.length === 0 || !!rebinding}
-                    onClick={() => onRebind(Object.fromEntries(changedSlots.map((s) => [s.slot, draft[s.slot] as string])))}
+                    disabled={(changedSlots.length === 0 && changedDescriptions.length === 0) || !!rebinding}
+                    onClick={() =>
+                      onRebind(
+                        Object.fromEntries([
+                          ...changedSlots.map((s) => [s.slot, { channel_id: draft[s.slot] as string, description: descDraft[s.slot] }] as const),
+                          ...changedDescriptions.filter((s) => !changedSlots.includes(s)).map((s) => [s.slot, { channel_id: currentOf(s.slot) as string, description: descDraft[s.slot] }] as const),
+                        ]),
+                      )
+                    }
                   >
-                    {rebinding ?? `commit ${changedSlots.length} change${changedSlots.length === 1 ? '' : 's'} (one Touch ID)`}
+                    {rebinding ?? `commit ${changedSlots.length + changedDescriptions.filter((s) => !changedSlots.includes(s)).length} change${changedSlots.length + changedDescriptions.length === 1 ? '' : 's'} (one Touch ID)`}
                   </button>
-                  <button className="btn sm" disabled={!!rebinding} onClick={() => { setEditingBindings(false); setDraft({}); }}>cancel</button>
+                  <button className="btn sm" disabled={!!rebinding} onClick={() => { setEditingBindings(false); setDraft({}); setDescDraft({}); }}>cancel</button>
                 </div>
               </div>
             )}
@@ -1229,6 +1262,8 @@ function InstallWizard({
               gateway={gateway}
               value={w.bindings[s.slot]}
               onPick={(id) => setW({ ...w, bindings: { ...w.bindings, [s.slot]: id } })}
+              description={w.descriptions[s.slot] ?? ''}
+              onDescription={(d) => setW({ ...w, descriptions: { ...w.descriptions, [s.slot]: d } })}
               onCreateChannel={onCreateChannel}
               onGoChannels={onGoChannels}
               onGoEndpoints={onGoEndpoints}
@@ -1337,6 +1372,8 @@ function SlotChooser({
   gateway,
   value,
   onPick,
+  description,
+  onDescription,
   onCreateChannel,
   onGoChannels,
   onGoEndpoints,
@@ -1348,6 +1385,10 @@ function SlotChooser({
   gateway: GatewayDeviceStatus | null;
   value: string | null | undefined;
   onPick: (id: string | null) => void;
+  /** Messaging slots: the binding's description — what the app does on the
+   *  channel it binds, the app's row on the channel document. */
+  description?: string;
+  onDescription?: (d: string) => void;
   onCreateChannel?: CreateChannelFn;
   onGoChannels: () => void;
   onGoEndpoints: () => void;
@@ -1450,6 +1491,17 @@ function SlotChooser({
           </div>
         )}
       </div>
+      {slot.kind === 'messaging' && onDescription && (
+        <div style={{ marginTop: 6 }}>
+          <input
+            style={{ ...INPUT, width: '100%' }}
+            value={description ?? ''}
+            placeholder={`what ${label} does on this channel — the router reads this line (blank = the template's: ${slot.reason_zh || slot.reason || '…'})`}
+            onChange={(e) => onDescription(e.target.value)}
+            aria-label={`binding description for ${slot.slot}`}
+          />
+        </div>
+      )}
       {slot.reason && <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>{slot.reason}</div>}
     </div>
   );

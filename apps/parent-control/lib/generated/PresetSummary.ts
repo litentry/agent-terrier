@@ -15,6 +15,16 @@ import type { PresetSuggestedContext } from "./PresetSuggestedContext";
  */
 export type PresetSummary = { id: string, version: string, name: string, name_zh: string, description: string, description_zh: string, suggested_channels: Array<PresetSuggestedChannel>, suggested_context: Array<PresetSuggestedContext>, schedule: Array<PresetSchedule>, 
 /**
+ * #722 — a few short messages this app is the right destination for
+ * («今晚吃什么»). The contact gate's router shows them to the decision
+ * model beside the app's purpose; measured 2026-09-24 on Kev-9B with the
+ * router eval (`router-eval --no-examples`) they lift automatic routing of
+ * held-out messages from 68% to 84% and remove its one wrong route.
+ * Bounded by `platform_caps::MAX_ROUTE_EXAMPLES` /
+ * `MAX_ROUTE_EXAMPLE_CHARS`.
+ */
+route_examples: Array<string>, 
+/**
  * Manifest schema version (F3). Absent = [`APP_TEMPLATE_SCHEMA_DEFAULT`].
  */
 schema: number, publisher: string, slots: Array<AppSlot>, resources: Array<AppResourceRequest>, 

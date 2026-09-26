@@ -8,6 +8,11 @@ description = "WeChat gateway worker (#407 / docs/spec/agent-channel-decoupling.
 name = "agentkeys-worker-channel-weixin"
 path = "src/main.rs"
 
+# #722 — operator-run: the router's labeled eval against a System One server.
+[[bin]]
+name = "router-eval"
+path = "src/bin/router_eval.rs"
+
 [lib]
 name = "agentkeys_worker_channel_weixin"
 path = "src/lib.rs"

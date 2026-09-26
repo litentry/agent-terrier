@@ -399,6 +399,26 @@ impl Relay {
     /// status triage as chat/embeddings; the answer body is returned verbatim
     /// (the caller parses the typed answers). Nothing from `state` (a family
     /// member's message) is logged or audited — counts only.
+    /// #722 — the System One server the router's decisions go to: its base URL
+    /// and its own `/v1/models` answer (not metered — no tokens are spent).
+    pub async fn systemone_models(&self) -> GateResult<Value> {
+        let Some(ts) = self.config.systemone.clone() else {
+            return Err(GateError::NotConfigured(
+                "systemone relay not configured on this gate (typesafe inference family)".into(),
+            ));
+        };
+        let resp =
+            UpstreamClient::systemone_models_get(&self.decide_http, &ts.base_url, &ts.api_key)
+                .await?;
+        let status = resp.status().as_u16();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        Ok(serde_json::json!({
+            "base_url": ts.base_url,
+            "status": status,
+            "models": body,
+        }))
+    }
+
     pub async fn handle_systemone(&self, caller: &RelayKey, raw: &[u8]) -> GateResult<TurnOutput> {
         let Some(ts) = self.config.systemone.clone() else {
             return Err(GateError::NotConfigured(
@@ -897,6 +917,14 @@ impl Relay {
 
         if let Some(model) = &self.config.upstream.model_override {
             body["model"] = Value::String(model.clone());
+        } else if body
+            .get("model")
+            .and_then(Value::as_str)
+            .is_none_or(|m| m.trim().is_empty())
+        {
+            if let Some(model) = &self.config.upstream.default_model {
+                body["model"] = Value::String(model.clone());
+            }
         }
         let model = body
             .get("model")

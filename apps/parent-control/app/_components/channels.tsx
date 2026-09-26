@@ -14,11 +14,18 @@
 //     daemon write (`POST /v1/channels/clear-orphaned`); rows in use are kept.
 //
 // The registry is a master-only, signer-encrypted Config-class doc
-// (`config/channel-registry.enc`); the WeChat contact gate + family live on the
+// (`config/channel-registry.enc`). The contact gate keeps the CHANNEL DOCUMENT
+// for each id — what the channel is for, the apps bound to it (each with its
+// binding's description), the members' rows, the default app — which is the
+// router's only input; this page edits those documents live (no Touch ID: a
+// document grants nothing). The WeChat contact gate + family live on the
 // Contacts page.
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useState, type CSSProperties } from 'react';
 
 import { useClient } from '@/lib/ClientProvider';
+import { gatewayClient } from '@/lib/gatewayClient';
+import type { ChannelDoc } from '@/lib/generated/ChannelDoc';
+import type { ContactSummary } from '@/lib/generated/ContactSummary';
 import { ChatPanel } from './chat';
 import { PageHead, Panel } from './shared';
 import type { Actor } from './types';
@@ -137,6 +144,18 @@ function ChannelList({ registry }: { registry: ChannelRegistryProps }) {
   // gate holds no grant on is readable here but delivered to nobody — say so.
   const client = useClient();
   const [gate, setGate] = useState<GateFacts | null>(null);
+  // The channel documents + the contacts (for the members' names), from the
+  // contact gate; absent when no gate is wired (a dev daemon).
+  const [docs, setDocs] = useState<ChannelDoc[]>([]);
+  const [contacts, setContacts] = useState<ContactSummary[]>([]);
+  const loadDocs = useCallback(async () => {
+    const [d, c] = await Promise.all([gatewayClient.channels(), gatewayClient.contacts()]);
+    if (d.ok) setDocs(d.value.channels);
+    if (c.ok) setContacts(c.value.contacts);
+  }, []);
+  useEffect(() => {
+    void loadDocs();
+  }, [loadDocs, registry.channels]);
   useEffect(() => {
     if (!client.gatewayDeviceStatus) return;
     let alive = true;
@@ -158,7 +177,17 @@ function ChannelList({ registry }: { registry: ChannelRegistryProps }) {
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       {registry.channels.map((c) => (
-        <ChannelRow key={c.id} channel={c} registry={registry} gate={gate} />
+        <ChannelRow key={c.id} channel={c} registry={registry} gate={gate} doc={docs.find((d) => d.id === c.id) ?? null} contacts={contacts} onDocChanged={loadDocs} />
+      ))}
+      {docs.filter((d) => !registry.channels.some((c) => c.id === d.id)).map((d) => (
+        <div key={`doc-${d.id}`} className="pair-req" style={{ padding: 14 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="chip mono">{d.id}</span>
+            <span style={{ fontWeight: 600 }}>{d.name}</span>
+            <span className="muted" style={{ fontSize: 11.5 }}>a document the contact gate holds with no registry row here (an operator channel, or a channel registered on another console)</span>
+          </div>
+          <DocumentPanel doc={d} contacts={contacts} onChanged={loadDocs} />
+        </div>
       ))}
     </div>
   );
@@ -169,7 +198,7 @@ type GateFacts = { transport: string; actorOmni: string | null };
 
 const normOmni = (s: string | null | undefined): string => (s ?? '').trim().toLowerCase().replace(/^0x/, '');
 
-function ChannelRow({ channel, registry, gate }: { channel: ChannelDef; registry: ChannelRegistryProps; gate: GateFacts | null }) {
+function ChannelRow({ channel, registry, gate, doc, contacts, onDocChanged }: { channel: ChannelDef; registry: ChannelRegistryProps; gate: GateFacts | null; doc: ChannelDoc | null; contacts: ContactSummary[]; onDocChanged: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(channel.name);
   const [note, setNote] = useState(channel.note ?? '');
@@ -248,7 +277,9 @@ function ChannelRow({ channel, registry, gate }: { channel: ChannelDef; registry
           )}
         </span>
       </div>
-      {channel.kind && <div style={{ marginTop: 6 }}><span className="chip">{channel.kind}</span></div>}
+      {channel.kind && <div style={{ marginTop: 6 }}><span className="chip">{channel.kind}</span>{doc?.household_default && <span className="chip ok" style={{ marginLeft: 6 }}>household default</span>}{doc?.operator_of && <span className="chip" style={{ marginLeft: 6 }}>operator channel of {doc.operator_of}</span>}</div>}
+      {doc && <DocumentPanel doc={doc} contacts={contacts} onChanged={onDocChanged} />}
+      {!doc && channel.kind === 'messaging' && <div className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>No channel document on the contact gate yet — an app installed on it, or a member added to it, writes one.</div>}
       {unservedMessaging && (
         <div className="banner warn" style={{ marginTop: 8 }}>
           <span className="lbl">not relayed</span>
@@ -269,6 +300,82 @@ function ChannelRow({ channel, registry, gate }: { channel: ChannelDef; registry
       <div className="muted" style={{ fontSize: 10.5, marginTop: 6 }}>
         created {channel.createdAt ? new Date(channel.createdAt * 1000).toLocaleString() : '—'} · grants: <span className="mono">channel-pub:{channel.id}</span> · <span className="mono">channel-sub:{channel.id}</span>
       </div>
+    </div>
+  );
+}
+
+/** The channel document as the contact gate holds it — what the router
+ *  reads: the purpose, the apps bound here with their binding descriptions,
+ *  the members' rows, the default app. Every edit is live (no Touch ID). */
+function DocumentPanel({ doc, contacts, onChanged }: { doc: ChannelDoc; contacts: ContactSummary[]; onChanged: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [purpose, setPurpose] = useState(doc.purpose);
+  useEffect(() => setPurpose(doc.purpose), [doc.purpose, doc.updated_at]);
+  const name = (id: string) => contacts.find((c) => c.contact_id === id)?.display_name ?? id;
+  const write = async (what: string, req: Parameters<typeof gatewayClient.channelUpdate>[0]) => {
+    setBusy(what);
+    const r = await gatewayClient.channelUpdate(req);
+    setBusy(null);
+    if (!r.ok) window.alert(`${what} failed: ${r.reason}${r.detail ? ` — ${r.detail}` : ''}`);
+    onChanged();
+  };
+  const rowOf = (m: { speak: boolean; read: boolean }) => (m.speak ? 'speaks' : m.read ? 'reads' : '—');
+  const others = contacts.filter((c) => !doc.members.some((m) => m.contact_id === c.contact_id));
+  return (
+    <div style={{ marginTop: 10, display: 'grid', gap: 8, fontSize: 12.5 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="muted" style={{ minWidth: 70 }}>purpose</span>
+        <input value={purpose} placeholder="what this channel is for — the first line the router reads" onChange={(e) => setPurpose(e.target.value)} style={{ ...INPUT, flex: '1 1 260px' }} />
+        {purpose.trim() !== doc.purpose && (
+          <button className="btn sm primary" disabled={!!busy} onClick={() => void write('purpose', { channel_id: doc.id, purpose: purpose.trim() })}>save</button>
+        )}
+        {!doc.operator_of && (
+          <label className="muted" style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <input type="checkbox" checked={doc.household_default} disabled={!!busy} onChange={(e) => void write('household default', { channel_id: doc.id, household_default: e.target.checked })} /> household default
+          </label>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <span className="muted" style={{ minWidth: 70 }}>apps</span>
+        <div style={{ flex: 1 }}>
+          {doc.apps.length === 0 && <span className="muted">none bound here</span>}
+          {doc.apps.map((a) => (
+            <div key={a.alias} style={{ marginBottom: 2 }}>
+              <code>{a.alias}</code> <span className="muted">· {a.slot || '—'}</span>{doc.default_app === a.alias && <span className="chip ok" style={{ marginLeft: 6 }}>default</span>}
+              <div className="muted" style={{ fontSize: 11.5 }}>{a.description || 'no description — set it under the app’s bindings'}{a.takes.length ? ` · takes ${a.takes.join(', ')}` : ''}</div>
+            </div>
+          ))}
+          {doc.apps.length > 1 && (
+            <div style={{ marginTop: 4 }}>
+              <span className="muted">unaddressed events go to </span>
+              <select value={doc.default_app ?? ''} disabled={!!busy} onChange={(e) => void write('default app', { channel_id: doc.id, default_app: e.target.value })} style={INPUT}>
+                <option value="">(none)</option>
+                {doc.apps.map((a) => <option key={a.alias} value={a.alias}>{a.alias}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <span className="muted" style={{ minWidth: 70 }}>members</span>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {doc.members.length === 0 && <span className="muted">nobody yet</span>}
+          {doc.members.map((m) => (
+            <span key={m.contact_id} className="chip" title="tap to change: speaks → reads → out">
+              <button type="button" className="btn sm" disabled={!!busy} onClick={() => void write('member', { channel_id: doc.id, member: { contact_id: m.contact_id, speak: false, read: m.speak } })}>
+                {name(m.contact_id)} · {rowOf(m)}
+              </button>
+            </span>
+          ))}
+          {others.length > 0 && (
+            <select value="" disabled={!!busy} onChange={(e) => { if (e.target.value) void write('member', { channel_id: doc.id, member: { contact_id: e.target.value, speak: true, read: true } }); }} style={INPUT}>
+              <option value="">+ add a member (speaks)</option>
+              {others.map((c) => <option key={c.contact_id} value={c.contact_id}>{c.display_name} · {c.tier}</option>)}
+            </select>
+          )}
+        </div>
+      </div>
+      <div className="muted" style={{ fontSize: 10.5 }}>document v{doc.updated_at} · the router reads exactly this: purpose, the apps and what each does here, who is in it</div>
     </div>
   );
 }

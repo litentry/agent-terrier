@@ -144,6 +144,10 @@ pub struct PublishRequest {
     pub content_type: Option<String>,
     #[serde(default)]
     pub relay_of: Option<String>,
+    /// The addressed app on a shared channel (see `ChannelEvent::addressee`),
+    /// copied verbatim like `relay_of`.
+    #[serde(default)]
+    pub addressee: Option<String>,
 }
 
 fn direction_in() -> ChannelDirection {
@@ -338,6 +342,7 @@ async fn channel_publish_inner(
         contact: req.contact.clone(),
         content_type: req.content_type.clone(),
         relay_of: req.relay_of.clone(),
+        addressee: req.addressee.clone(),
     };
     let plaintext =
         serde_json::to_vec(&event).map_err(|e| err_500(e.to_string(), "channel_event_encode"))?;

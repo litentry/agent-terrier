@@ -398,6 +398,7 @@ mod lifecycle_feed_tests {
             direction,
             channel_id: channel.into(),
             endpoint_actor_omni: None,
+            default_app: None,
         }
     }
 

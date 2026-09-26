@@ -62,9 +62,15 @@ pub struct DevicePersist {
     pub feed_cursors: HashMap<String, String>,
     #[serde(default)]
     pub correlations: VecDeque<CorrelationRow>,
-    /// `<transport>:<transport_id>` → the alias the contact last reached.
+    /// `<transport>:<transport_id>` → the channel the member's last turn went
+    /// to (the router's follow-up anchor). Pre-channel files kept an alias
+    /// under `last_alias`; such a value matches no channel and simply expires.
+    #[serde(default, alias = "last_alias")]
+    pub last_channel: HashMap<String, String>,
+    /// `<transport>:<transport_id>` → the app the member's last turn was
+    /// addressed to (a follow-up on a shared channel stays with it).
     #[serde(default)]
-    pub last_alias: HashMap<String, String>,
+    pub last_addressee: HashMap<String, String>,
 }
 
 /// One relayed inbound turn: which contact it came from (so the app's reply,
@@ -95,6 +101,9 @@ pub struct PublishArgs {
     pub contact: Option<ContactStamp>,
     pub relay_of: Option<String>,
     pub correlation: Option<String>,
+    /// The app the turn is for on a shared channel (see
+    /// `ChannelEvent::addressee`).
+    pub addressee: Option<String>,
 }
 
 pub struct GatewayDevice {
@@ -511,8 +520,8 @@ impl GatewayDevice {
             .cap_mint(
                 op,
                 CapMintRequest {
-                    operator_omni: operator_omni.to_string(),
-                    actor_omni,
+                    operator_omni: agentkeys_protocol::normalize_omni_0x(operator_omni),
+                    actor_omni: agentkeys_protocol::normalize_omni_0x(&actor_omni),
                     service: service.clone(),
                     device_key_hash,
                     ttl_seconds: CAP_TTL_SECS,
@@ -574,6 +583,9 @@ impl GatewayDevice {
             }
             if let Some(r) = &args.relay_of {
                 body["relay_of"] = serde_json::json!(r);
+            }
+            if let Some(a) = &args.addressee {
+                body["addressee"] = serde_json::json!(a);
             }
             let resp = self
                 .http
@@ -716,12 +728,21 @@ impl GatewayDevice {
             .cloned()
     }
 
-    pub fn set_last_alias(&self, transport: &str, transport_id: &str, alias: &str) {
+    pub fn set_last_turn(
+        &self,
+        transport: &str,
+        transport_id: &str,
+        channel: &str,
+        addressee: &str,
+    ) {
         let key = format!("{transport}:{transport_id}");
         let changed = {
             let mut p = self.persist.lock().expect("device lock");
-            p.last_alias.get(&key).map(String::as_str) != Some(alias) && {
-                p.last_alias.insert(key, alias.to_string());
+            let same = p.last_channel.get(&key).map(String::as_str) == Some(channel)
+                && p.last_addressee.get(&key).map(String::as_str) == Some(addressee);
+            !same && {
+                p.last_channel.insert(key.clone(), channel.to_string());
+                p.last_addressee.insert(key, addressee.to_string());
                 true
             }
         };
@@ -730,11 +751,21 @@ impl GatewayDevice {
         }
     }
 
-    pub fn last_alias(&self, transport: &str, transport_id: &str) -> Option<String> {
+    pub fn last_channel(&self, transport: &str, transport_id: &str) -> Option<String> {
         self.persist
             .lock()
             .expect("device lock")
-            .last_alias
+            .last_channel
+            .get(&format!("{transport}:{transport_id}"))
+            .cloned()
+    }
+
+    /// The app the member's last turn was addressed to.
+    pub fn last_addressee(&self, transport: &str, transport_id: &str) -> Option<String> {
+        self.persist
+            .lock()
+            .expect("device lock")
+            .last_addressee
             .get(&format!("{transport}:{transport_id}"))
             .cloned()
     }
@@ -789,8 +820,15 @@ mod tests {
         assert!(d.hop_blocker().unwrap().contains("no channel worker"));
         let d = GatewayDevice::load(DeviceConfig::default(), Some("http://w".into()));
         assert!(d.hop_blocker().unwrap().contains("not configured"));
-        d.set_last_alias("weixin", "wxid-1", "chef");
-        assert_eq!(d.last_alias("weixin", "wxid-1").as_deref(), Some("chef"));
+        d.set_last_turn("weixin", "wxid-1", "family-chat", "chef");
+        assert_eq!(
+            d.last_channel("weixin", "wxid-1").as_deref(),
+            Some("family-chat")
+        );
+        assert_eq!(
+            d.last_addressee("weixin", "wxid-1").as_deref(),
+            Some("chef")
+        );
     }
 
     #[test]

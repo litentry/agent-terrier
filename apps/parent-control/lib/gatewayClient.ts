@@ -20,6 +20,11 @@ import type { GatewayContactWelcomeResponse } from '@/lib/generated/GatewayConta
 import type { GatewayMonitorResponse } from '@/lib/generated/GatewayMonitorResponse';
 import type { GatewayHistoryResponse } from '@/lib/generated/GatewayHistoryResponse';
 import type { GatewayActivityResponse } from '@/lib/generated/GatewayActivityResponse';
+import type { GatewayRouterView } from '@/lib/generated/GatewayRouterView';
+import type { GatewayContactsResponse } from '@/lib/generated/GatewayContactsResponse';
+import type { GatewayChannelsResponse } from '@/lib/generated/GatewayChannelsResponse';
+import type { GatewayChannelUpdateRequest } from '@/lib/generated/GatewayChannelUpdateRequest';
+import type { ChannelDoc } from '@/lib/generated/ChannelDoc';
 
 const DEFAULT_BASE_URL = 'http://localhost:3114';
 
@@ -174,13 +179,26 @@ export const gatewayClient = {
       bind_code: bindCode,
     } satisfies GatewayBindRejectRequest),
 
-  contacts: () =>
-    call<{ ok: boolean; contacts: ContactSummary[] }>('GET', '/v1/master/gateway/contacts'),
+  contacts: () => call<GatewayContactsResponse>('GET', '/v1/master/gateway/contacts'),
+
+  // Household channels — the channel documents the router reads (what each
+  // channel is for, the apps bound to it, the members' rows). One write per
+  // call; every field left out is untouched; every write is live.
+  channels: () => call<GatewayChannelsResponse>('GET', '/v1/master/gateway/channels'),
+  channelUpdate: (req: Partial<GatewayChannelUpdateRequest> & { channel_id: string }) =>
+    call<{ ok: boolean; changed?: boolean; channel?: ChannelDoc }>('POST', '/v1/master/gateway/channels/update', {
+      remove: false,
+      ...req,
+    }),
 
   // Live message monitor (#1) — poll with the last cursor; returns turns with
   // seq >= after + the next cursor. A fresh poll (after=0) returns the ring.
   monitor: (after: number) =>
     call<GatewayMonitorResponse>('GET', `/v1/master/gateway/monitor?after=${after}`),
+
+  // #722 — the Route page: what the router sends the decision model (Kev /
+  // Jev), the model server, and the last turns that consulted it.
+  router: () => call<GatewayRouterView>('GET', '/v1/master/gateway/router'),
 
   // Durable message history (#419) — newest-first, backward-paginated. Omit
   // `before` for the newest page; pass the response's `next_before_ts` to page
@@ -199,8 +217,8 @@ export const gatewayClient = {
       `/v1/master/gateway/activity?limit=${limit}${before ? `&before=${before}` : ''}`,
     ),
 
-  // Operator edits a bound contact's routing policy (tier/reach); omit a field
-  // to leave it unchanged.
+  // Operator edits a bound contact's tier and channel rows; omit a field to
+  // leave it unchanged (`channels` replaces the member's rows).
   contactsUpdate: (req: GatewayContactUpdateRequest) =>
     call<{ ok: boolean; contact?: ContactSummary }>(
       'POST',

@@ -1,13 +1,15 @@
-//! L3 — the audience PEP (§5). Answers "may THIS contact reach THAT agent
-//! through this contact gate, and at what grain?" — computed BEFORE anything reaches
-//! an agent. The decision is data (a routing verdict), never an authorization:
-//! grants stay master-signed + chain-verified; this only gates whether the
-//! gateway relays a keyless contact's message at all.
+//! L3 — the audience PEP (§5). Answers "may THIS member publish on THAT
+//! channel, addressed to THAT app, through this contact gate?" — computed
+//! BEFORE anything reaches an app. The decision is data (a routing verdict),
+//! never an authorization: grants stay master-signed + chain-verified; this
+//! only gates whether the gateway relays a keyless member's message at all.
 //!
 //! The order matters (fail-closed, cheapest first): unknown contact → DROP;
-//! rate-limited → refuse; no `/alias` → ask-back (phase 5 router will pick);
-//! operator-grade ask → deep-link (never data over the gateway, regardless of
-//! tier); out-of-reach → refuse; else → route.
+//! rate-limited → refuse; no channel resolved → refuse (`no_channel`: the
+//! transport's `resolve` — the router, an answered ask, `/alias` — found
+//! nowhere, so the relay asks); a channel the member does not speak on →
+//! refuse; an addressee not bound there → refuse; an operator-grade app →
+//! deep-link (never data over the gateway, regardless of tier); else → route.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -51,7 +53,10 @@ impl RateLimiter {
 }
 
 /// The pure L3 decision, given whether the rate check already passed. Kept pure
-/// (no clock, no I/O) so every branch is unit-testable.
+/// (no clock, no I/O) so every branch is unit-testable. `inbound.channel` is
+/// what the transport resolved (`None` = nothing yet); `inbound.alias` is the
+/// addressee when one was named (`/alias`, the router's pick) — absent, the
+/// channel's default app takes the turn.
 pub fn decide(
     config: &WeixinGatewayConfig,
     registry: &ContactRegistry,
@@ -69,51 +74,59 @@ pub fn decide(
         return refuse("rate_limited");
     }
 
-    // 3. Routing: `/alias` deterministic override first; otherwise the ADVISORY
-    //    router (#410) picks among THIS contact's reachable agents (never wider).
-    //    Router says ask-back (ambiguous / no match / disabled) → refuse no_alias.
-    let (alias, routed_by) = match inbound.alias.as_deref() {
-        Some(a) => (a.to_lowercase(), None),
-        None => match crate::router::advisory_route(
-            &inbound.text,
-            &contact.reach,
-            config.router_enabled,
-        ) {
-            crate::router::RouteVerdict::Route(a) => {
-                (a.to_lowercase(), Some("advisory_router".to_string()))
-            }
-            crate::router::RouteVerdict::AskBack => return refuse("no_alias"),
+    // 3. The channel: resolved by the transport, never guessed here. Nothing
+    //    resolved → the relay asks the member (`no_channel`).
+    let Some(doc) = inbound
+        .channel
+        .as_deref()
+        .and_then(|id| registry.channel(id))
+    else {
+        return refuse("no_channel");
+    };
+
+    // 4. Membership: may this member publish on this channel at all? The
+    //    options were built from their rows, but a `/alias` or an answered
+    //    ask is re-checked here (defense-in-depth against a stale ask).
+    if !doc.speaks(&contact.contact_id) {
+        return refuse("no_membership");
+    }
+
+    // 5. The addressee: the named app must be bound to this channel; unnamed,
+    //    the channel's default app; a shared channel with no default and no
+    //    name is not decidable here (the relay asked, or asks).
+    let addressee = match inbound.alias.as_deref() {
+        Some(a) => match doc.app(a) {
+            Some(row) => row.alias.clone(),
+            None => return refuse("app_not_on_channel"),
+        },
+        None => match doc.default_or_only_app() {
+            Some(a) => a.to_string(),
+            None => return refuse("addressee_unclear"),
         },
     };
 
-    // 4. Operator-grade guard: operator-grade data (spend/usage/audit) requires
+    // 6. Operator-grade guard: operator-grade data (spend/usage/audit) requires
     //    operator-grade auth — NEVER a matching openid alone. Even an `owner`
     //    gets the parent-control deep-link, not the data, over the gateway
-    //    (§5/§8). This check is BEFORE reach so it fires even if the alias were
-    //    (mis)configured into a contact's reach.
-    if config.is_operator_grade(&alias) {
+    //    (§5/§8).
+    if config.is_operator_grade(&addressee) {
         return L3Decision {
             allowed: false,
             target_alias: None,
+            channel_id: None,
             reason: "operator_grade_requires_session".to_string(),
             operator_grade_deeplink: Some(config.parent_control_deeplink.clone()),
             routed_by: None,
         };
     }
 
-    // 5. Reach: may this contact address this alias at all? (Defense-in-depth —
-    //    the router already picks from reach, but a `/alias` override is checked
-    //    here, and this guards a future router change.)
-    if !contact.reach.iter().any(|r| r.to_lowercase() == alias) {
-        return refuse("out_of_reach");
-    }
-
     L3Decision {
         allowed: true,
-        target_alias: Some(alias),
+        target_alias: Some(addressee),
+        channel_id: Some(doc.id.clone()),
         reason: "ok".to_string(),
         operator_grade_deeplink: None,
-        routed_by,
+        routed_by: None,
     }
 }
 
@@ -121,6 +134,7 @@ fn refuse(reason: &str) -> L3Decision {
     L3Decision {
         allowed: false,
         target_alias: None,
+        channel_id: None,
         reason: reason.to_string(),
         operator_grade_deeplink: None,
         routed_by: None,
@@ -130,7 +144,7 @@ fn refuse(reason: &str) -> L3Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentkeys_protocol::{Contact, ContactTier};
+    use agentkeys_protocol::{ChannelApp, Contact, ContactTier};
 
     fn cfg() -> WeixinGatewayConfig {
         WeixinGatewayConfig {
@@ -169,7 +183,7 @@ mod tests {
     }
 
     fn registry() -> ContactRegistry {
-        ContactRegistry {
+        let mut reg = ContactRegistry {
             bound: vec![
                 Contact {
                     contact_id: "c-owner".into(),
@@ -177,7 +191,7 @@ mod tests {
                     transport_id: "openid-owner".into(),
                     display_name: "妈妈".into(),
                     tier: ContactTier::Owner,
-                    reach: vec!["chef".into(), "doorkeeper".into()],
+                    legacy_reach: vec![],
                     welcomed: true,
                 },
                 Contact {
@@ -186,36 +200,79 @@ mod tests {
                     transport_id: "openid-kid".into(),
                     display_name: "小明".into(),
                     tier: ContactTier::Kid,
-                    reach: vec!["storyteller".into()],
+                    legacy_reach: vec![],
                     welcomed: true,
                 },
             ],
-            pending: vec![],
-            invites: vec![],
-            apps: vec![],
-        }
+            ..Default::default()
+        };
+        let family = reg.channel_or_new("family-chat");
+        family.upsert_app(ChannelApp {
+            alias: "chef".into(),
+            ..Default::default()
+        });
+        family.upsert_app(ChannelApp {
+            alias: "doorkeeper".into(),
+            ..Default::default()
+        });
+        family.set_member("c-owner", true, true);
+        family.set_member("c-kid", false, true);
+        let spend = reg.channel_or_new("money");
+        spend.upsert_app(ChannelApp {
+            alias: "spend".into(),
+            ..Default::default()
+        });
+        spend.set_member("c-owner", true, true);
+        let stories = reg.channel_or_new("stories");
+        stories.upsert_app(ChannelApp {
+            alias: "storyteller".into(),
+            ..Default::default()
+        });
+        stories.set_member("c-kid", true, true);
+        reg
     }
 
-    fn inbound(openid: &str, alias: Option<&str>, text: &str) -> GatewayInbound {
+    fn inbound(
+        openid: &str,
+        channel: Option<&str>,
+        alias: Option<&str>,
+        text: &str,
+    ) -> GatewayInbound {
         GatewayInbound {
             transport: "weixin".into(),
             transport_id: openid.into(),
             text: text.into(),
             alias: alias.map(|s| s.to_string()),
+            channel: channel.map(|s| s.to_string()),
         }
     }
 
     #[test]
-    fn bound_contact_reaching_allowed_agent_is_routed() {
+    fn a_member_speaking_on_their_channel_is_routed_to_the_named_or_default_app() {
         let d = decide(
             &cfg(),
             &registry(),
-            &inbound("openid-owner", Some("chef"), "晚饭吃什么"),
+            &inbound(
+                "openid-owner",
+                Some("family-chat"),
+                Some("doorkeeper"),
+                "门口有人吗",
+            ),
+            true,
+        );
+        assert!(d.allowed);
+        assert_eq!(d.target_alias.as_deref(), Some("doorkeeper"));
+        assert_eq!(d.channel_id.as_deref(), Some("family-chat"));
+        assert_eq!(d.reason, "ok");
+        // Unnamed on a shared channel: the default (the first app bound).
+        let d = decide(
+            &cfg(),
+            &registry(),
+            &inbound("openid-owner", Some("family-chat"), None, "晚饭吃什么"),
             true,
         );
         assert!(d.allowed);
         assert_eq!(d.target_alias.as_deref(), Some("chef"));
-        assert_eq!(d.reason, "ok");
     }
 
     #[test]
@@ -223,7 +280,7 @@ mod tests {
         let d = decide(
             &cfg(),
             &registry(),
-            &inbound("openid-stranger", Some("chef"), "hi"),
+            &inbound("openid-stranger", Some("family-chat"), Some("chef"), "hi"),
             true,
         );
         assert!(!d.allowed);
@@ -231,26 +288,44 @@ mod tests {
     }
 
     #[test]
-    fn kid_reaching_out_of_reach_agent_is_refused() {
-        // The kid may only reach `storyteller`; `chef` is out of reach.
+    fn a_reader_cannot_publish_and_an_app_not_on_the_channel_is_refused() {
+        // The kid only reads the family chat.
         let d = decide(
             &cfg(),
             &registry(),
-            &inbound("openid-kid", Some("chef"), "cook"),
+            &inbound("openid-kid", Some("family-chat"), Some("chef"), "cook"),
             true,
         );
         assert!(!d.allowed);
-        assert_eq!(d.reason, "out_of_reach");
+        assert_eq!(d.reason, "no_membership");
+        // The kid speaks on stories, but chef is not bound there.
+        let d = decide(
+            &cfg(),
+            &registry(),
+            &inbound("openid-kid", Some("stories"), Some("chef"), "cook"),
+            true,
+        );
+        assert!(!d.allowed);
+        assert_eq!(d.reason, "app_not_on_channel");
+        // A channel that does not exist resolves to nothing.
+        let d = decide(
+            &cfg(),
+            &registry(),
+            &inbound("openid-owner", Some("nowhere"), None, "hi"),
+            true,
+        );
+        assert_eq!(d.reason, "no_channel");
     }
 
     #[test]
     fn operator_grade_ask_gets_deeplink_even_for_owner() {
-        // The owner asking `/spend` gets the parent-control deep-link, NOT the
-        // data — operator-grade requires operator-grade auth (§8).
+        // The owner asking spend on its channel gets the parent-control
+        // deep-link, NOT the data — operator-grade requires operator-grade
+        // auth (§8).
         let d = decide(
             &cfg(),
             &registry(),
-            &inbound("openid-owner", Some("spend"), "本周花了多少"),
+            &inbound("openid-owner", Some("money"), None, "本周花了多少"),
             true,
         );
         assert!(!d.allowed);
@@ -262,15 +337,28 @@ mod tests {
     }
 
     #[test]
-    fn no_alias_is_ask_back() {
+    fn no_channel_resolved_is_the_ask_back() {
         let d = decide(
             &cfg(),
             &registry(),
-            &inbound("openid-owner", None, "just chatting"),
+            &inbound("openid-owner", None, None, "just chatting"),
             true,
         );
         assert!(!d.allowed);
-        assert_eq!(d.reason, "no_alias");
+        assert_eq!(d.reason, "no_channel");
+    }
+
+    #[test]
+    fn a_shared_channel_with_no_default_needs_an_addressee() {
+        let mut reg = registry();
+        reg.channel_mut("family-chat").unwrap().default_app = None;
+        let d = decide(
+            &cfg(),
+            &reg,
+            &inbound("openid-owner", Some("family-chat"), None, "hi"),
+            true,
+        );
+        assert_eq!(d.reason, "addressee_unclear");
     }
 
     #[test]
@@ -278,7 +366,7 @@ mod tests {
         let d = decide(
             &cfg(),
             &registry(),
-            &inbound("openid-owner", Some("chef"), "spam"),
+            &inbound("openid-owner", Some("family-chat"), Some("chef"), "spam"),
             false,
         );
         assert!(!d.allowed);

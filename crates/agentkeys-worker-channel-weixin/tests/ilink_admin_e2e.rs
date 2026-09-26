@@ -170,7 +170,7 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     let ilink_base = spawn_mock(mock.clone()).await;
 
     let registry_file = temp("registry.json");
-    std::fs::write(&registry_file, r#"{"bound":[],"pending":[]}"#).unwrap();
+    std::fs::write(&registry_file, r#"{"bound":[],"pending":[],"channels":[{"id":"stories","name":"故事","apps":[{"alias":"storyteller"}]},{"id":"family-chat","name":"家庭群","household_default":true,"apps":[{"alias":"chef"}]}]}"#).unwrap();
     let secrets_file = temp("secrets.env");
     std::fs::write(
         &secrets_file,
@@ -329,7 +329,7 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
     let invite: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/bind/invite")))
         .json(&json!({
             "contact_id": "c-grandma", "display_name": "奶奶",
-            "tier": "elder", "reach": ["storyteller"]
+            "tier": "elder", "channels": [{"channel_id": "stories", "speak": true, "read": true}]
         }))
         .send()
         .await
@@ -503,7 +503,7 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
     let mock = Arc::new(MockIlink::default());
     let ilink_base = spawn_mock(mock.clone()).await;
     let registry_file = temp("m-registry.json");
-    std::fs::write(&registry_file, r#"{"bound":[],"pending":[]}"#).unwrap();
+    std::fs::write(&registry_file, r#"{"bound":[],"pending":[],"channels":[{"id":"stories","name":"故事","apps":[{"alias":"storyteller"}]},{"id":"family-chat","name":"家庭群","household_default":true,"apps":[{"alias":"chef"}]}]}"#).unwrap();
     let secrets_file = temp("m-secrets.env");
     std::fs::write(&secrets_file, "AGENTKEYS_WEIXIN_OPERATOR_OMNI=0xfeed\n").unwrap();
     let state_file = temp("m-state.json");
@@ -602,7 +602,10 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
 
     // ③ invite 太太 (partner, reach chef), then a login FOR that invite.
     let inv: Value = bearer(http.post(format!("{gw}/v1/gateway/admin/bind/invite")))
-        .json(&json!({ "contact_id": "c-wife", "display_name": "太太", "tier": "partner", "reach": ["chef"] }))
+        .json(
+            &json!({ "contact_id": "c-wife", "display_name": "太太", "tier": "partner",
+            "channels": [{"channel_id": "family-chat", "speak": true, "read": true}] }),
+        )
         .send()
         .await
         .unwrap()
@@ -664,7 +667,8 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
         .find(|c| c["contact_id"] == "c-wife")
         .expect("wife bound");
     assert_eq!(row["tier"], "partner");
-    assert_eq!(row["reach"], json!(["chef"]));
+    assert_eq!(row["channels"][0]["channel_id"], "family-chat");
+    assert_eq!(row["channels"][0]["speak"], true);
     assert_eq!(row["connected"], true);
     assert_eq!(
         row["welcomed"], false,

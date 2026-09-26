@@ -101,11 +101,16 @@ fn write_registry() -> String {
     let json = r#"{
       "bound": [
         {"contact_id":"c-owner","transport":"telegram","transport_id":"1001",
-         "display_name":"Alex","tier":"owner","reach":["chef"],"welcomed":true},
+         "display_name":"Alex","tier":"owner","reach":["chef","spend"],"welcomed":true},
         {"contact_id":"c-kid","transport":"telegram","transport_id":"1002",
          "display_name":"Sam","tier":"kid","reach":["storyteller"],"welcomed":true}
       ],
-      "pending": []
+      "pending": [],
+      "apps": [
+        {"alias":"chef","channel_id":"family-chat"},
+        {"alias":"storyteller","channel_id":"stories"},
+        {"alias":"spend","channel_id":"money"}
+      ]
     }"#;
     let path = std::env::temp_dir().join(format!("ak-tg-reg-{}.json", std::process::id()));
     std::fs::write(&path, json).unwrap();
@@ -210,8 +215,8 @@ async fn telegram_loop_relays_replies_persists_and_stops() {
             refusal["text"]
                 .as_str()
                 .unwrap()
-                .contains("don't have access"),
-            "out-of-reach ask is refused in-channel: {refusal:?}"
+                .contains("none of your channels"),
+            "an app on none of the member's channels is refused in-channel: {refusal:?}"
         );
 
         let (_, deeplink) = &sends[2];

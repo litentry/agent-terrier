@@ -93,10 +93,16 @@ pub struct WeixinGatewayState {
     /// #722 — numbered asks waiting for a reply, keyed `transport:id`. MEMORY
     /// ONLY (the member's original text rides here until they answer or the
     /// TTL passes; it never reaches disk or audit — D13).
-    pending_asks: Mutex<HashMap<String, crate::jev::PendingAsk>>,
+    pending_asks: Mutex<HashMap<String, VecDeque<crate::jev::PendingAsk>>>,
     /// The live-monitor ring the operator polls (`/admin/monitor`, #1).
     monitor: Mutex<MonitorRing>,
+    /// #722 — the last turns that consulted a model, for the router view. RAM
+    /// only, like the monitor: a restart empties it.
+    router_log: Mutex<VecDeque<agentkeys_protocol::RouterExchange>>,
 }
+
+/// How many model-consulting turns the router view keeps.
+pub const ROUTER_LOG_CAP: usize = 30;
 
 pub type SharedWeixinGatewayState = Arc<WeixinGatewayState>;
 
@@ -130,20 +136,6 @@ impl WeixinGatewayState {
     pub fn app_stage_hint(&self, feed: &str, now_millis: u64) -> Option<&'static str> {
         let (stage, ts) = self.app_stage.read().ok()?.get(feed).cloned()?;
         stage_hint(&stage, now_millis.saturating_sub(ts))
-    }
-
-    /// The channel an app alias is bound to on this gate (registry `apps`).
-    pub fn app_feed_for_alias(&self, alias: &str) -> Option<String> {
-        self.registry
-            .snapshot()
-            .app_channel(alias)
-            .map(str::to_string)
-    }
-
-    /// [`Self::app_stage_hint`] keyed by the app's alias.
-    pub fn app_stage_hint_for_alias(&self, alias: &str, now_millis: u64) -> Option<&'static str> {
-        let feed = self.app_feed_for_alias(alias)?;
-        self.app_stage_hint(&feed, now_millis)
     }
 
     pub fn build(config: WeixinGatewayConfig) -> anyhow::Result<Self> {
@@ -200,45 +192,135 @@ impl WeixinGatewayState {
             jev,
             pending_asks: Mutex::new(HashMap::new()),
             monitor: Mutex::new(MonitorRing::default()),
+            router_log: Mutex::new(VecDeque::new()),
         })
     }
 
-    /// #722 — file a numbered ask for this contact (a newer ask replaces it).
-    pub fn set_pending_ask(
+    /// #722 — keep one model-consulting turn for the router view (newest first).
+    pub fn record_router_exchange(&self, x: agentkeys_protocol::RouterExchange) {
+        let mut log = self.router_log.lock().expect("router log lock");
+        log.push_front(x);
+        log.truncate(ROUTER_LOG_CAP);
+    }
+
+    pub fn router_log(&self) -> Vec<agentkeys_protocol::RouterExchange> {
+        self.router_log
+            .lock()
+            .expect("router log lock")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// #722 — queue a numbered ask for this contact, behind any that wait.
+    /// Returns the OLDEST waiting ask's labels when this one queues behind it
+    /// (`None` = this is the question the member sees now).
+    pub fn queue_ask(
         &self,
         transport: &str,
         transport_id: &str,
         ask: crate::jev::PendingAsk,
-    ) {
-        self.pending_asks
-            .lock()
-            .expect("pending asks lock")
-            .insert(format!("{transport}:{transport_id}"), ask);
+    ) -> Option<Vec<String>> {
+        let mut asks = self.pending_asks.lock().expect("pending asks lock");
+        let queue = asks
+            .entry(format!("{transport}:{transport_id}"))
+            .or_default();
+        let oldest = queue.front().map(|a| a.labels.clone());
+        queue.push_back(ask);
+        oldest
     }
 
-    /// #722 — the next message from a contact with a live ask: when it answers
-    /// the ask (a number, the alias, `/alias`) → `(chosen alias, ORIGINAL text)`;
-    /// otherwise the ask is dropped (a new message starts fresh) and `None`.
-    /// An expired ask is dropped either way.
+    /// #722 — the next message from a contact against their ask queue. Asks
+    /// that ran out are dropped first (counted, so the reply can say so). A
+    /// message that answers the OLDEST live ask (a number, a channel's id or
+    /// its label) → `Answered` with that ask's ORIGINAL text and media; a
+    /// cancel word → `Cancelled`; anything else → `Waiting`, and the queue
+    /// stays as it is.
     pub fn take_ask_reply(
         &self,
         transport: &str,
         transport_id: &str,
         text: &str,
         now_secs: u64,
-    ) -> Option<(String, String)> {
+    ) -> (crate::jev::AskReply, crate::jev::ExpiredAsks) {
+        use crate::jev::AskReply;
         let key = format!("{transport}:{transport_id}");
         let mut asks = self.pending_asks.lock().expect("pending asks lock");
-        let ask = asks.remove(&key)?;
-        if ask.expires_at_secs < now_secs {
-            return None;
+        let mut expired = crate::jev::ExpiredAsks::default();
+        let Some(queue) = asks.get_mut(&key) else {
+            return (AskReply::NoAsk, expired);
+        };
+        while queue.front().is_some_and(|a| a.expires_at_secs < now_secs) {
+            if let Some(gone) = queue.pop_front() {
+                expired.messages += 1;
+                expired.media += gone.media.len();
+            }
         }
-        crate::jev::parse_ask_reply(text, &ask.candidates).map(|alias| (alias, ask.original_text))
+        let oldest = queue
+            .front()
+            .map(|a| (a.candidates.clone(), a.labels.clone()));
+        let reply = match oldest {
+            None => AskReply::NoAsk,
+            Some(_) if crate::jev::is_cancel(text) => {
+                let gone = queue.pop_front().expect("the oldest ask");
+                AskReply::Cancelled {
+                    released_media: gone.media.len(),
+                    next: queue.front().map(|a| a.labels.clone()),
+                }
+            }
+            Some((candidates, labels)) => {
+                match crate::jev::parse_ask_reply(text, &candidates, &labels) {
+                    Some(i) => {
+                        let ask = queue.pop_front().expect("the oldest ask");
+                        AskReply::Answered {
+                            channel: ask.candidates[i].clone(),
+                            addressee: ask.addressees.get(i).cloned().flatten(),
+                            original_text: ask.original_text,
+                            media: ask.media,
+                            description: ask.description,
+                            next: queue.front().map(|a| a.labels.clone()),
+                        }
+                    }
+                    None => AskReply::Waiting { oldest: labels },
+                }
+            }
+        };
+        if queue.is_empty() {
+            asks.remove(&key);
+        }
+        (reply, expired)
     }
 
-    /// #722 — live asks (healthz).
+    /// #722 — a photo or clip sent while the NEWEST ask already holds media
+    /// joins that batch (the same question) when it arrives within
+    /// `PHOTO_BATCH_WINDOW_SECS` of that ask, so a multi-photo send is never
+    /// split or lost. `Some((labels, held))` when it joined; `None` = no such
+    /// ask (the turn routes on its own; waiting asks stay queued).
+    pub fn hold_media_with_ask(
+        &self,
+        transport: &str,
+        transport_id: &str,
+        media: crate::media::InboundMedia,
+        now_secs: u64,
+    ) -> Option<(Vec<String>, usize)> {
+        let key = format!("{transport}:{transport_id}");
+        let mut asks = self.pending_asks.lock().expect("pending asks lock");
+        let ask = asks.get_mut(&key)?.back_mut()?;
+        if !crate::jev::joins_photo_batch(ask, now_secs) {
+            return None;
+        }
+        ask.media.push(media);
+        Some((ask.labels.clone(), ask.media.len()))
+    }
+
+    /// #722 — live asks across every contact's queue (healthz).
     pub fn pending_ask_count(&self) -> usize {
-        self.pending_asks.lock().expect("pending asks lock").len()
+        self.pending_asks
+            .lock()
+            .expect("pending asks lock")
+            .values()
+            .map(VecDeque::len)
+            .sum()
     }
 
     /// Record one inbound turn + its L3 decision in the live-monitor ring (#1).

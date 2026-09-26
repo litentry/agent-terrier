@@ -33,11 +33,14 @@ import type { ContactTier } from '@/lib/generated/ContactTier';
 import type { GatewayMonitorEvent } from '@/lib/generated/GatewayMonitorEvent';
 import type { GatewayActivityEvent } from '@/lib/generated/GatewayActivityEvent';
 import type { AgentKeysClient } from '@/lib/client/types';
+import type { ChannelDoc } from '@/lib/generated/ChannelDoc';
+import type { ChannelGrant } from '@/lib/generated/ChannelGrant';
 import {
   SELF_CONTACT_ID,
   SELF_DISPLAY_NAME,
   TIER_INFO,
-  appAudiences,
+  describeGrants,
+  grantableChannels,
   defaultTab,
   inviteState,
   nextStepHint,
@@ -45,8 +48,7 @@ import {
   scanTransport,
   selfState,
   sendText,
-  suggestedReach,
-  type InstalledAppAudience,
+  suggestedGrants,
   type SelfState,
 } from '@/lib/client/contactFlow';
 
@@ -85,21 +87,23 @@ const REASON_TEXT: Record<string, string> = {
   daemon_unreachable: 'The local daemon isn’t reachable — is it running?',
   no_active_login: 'The login session expired — start again.',
   bind_not_claimed: 'No one has sent this code to the bot yet — it can’t be approved until they do.',
-  operator_grade_reach_denied: 'Money/usage agents can only be granted to the owner tier.',
+  operator_grade_reach_denied: 'Only the owner tier may speak where a money/usage app is bound.',
 };
 
 // #722 — how a turn was routed, as the monitor's suffix: «routed by jev (0.81)»
-// / «asked (0.42)» / «ask reply» / «single reach»; nothing for a typed /alias.
+// / «asked (0.42)» / «ask reply» / «single channel»; nothing for a typed /alias.
 function routedByLabel(e: { reason: string; routed_by?: string; confidence?: number }): string {
   const conf = e.confidence == null ? '' : ` (${e.confidence.toFixed(2)})`;
   if (e.reason === 'router_ask') return ` · asked${conf}`;
   if (!e.routed_by) return '';
   const names: Record<string, string> = {
     jev: 'routed by jev',
+    jev_follow_up: 'follow-up',
     ask_reply: 'ask reply',
-    single_reach: 'single reach',
+    single_channel: 'single channel',
+    single_media_channel: 'the one channel taking it',
     advisory_router: 'whole-word',
-    sticky_last_alias: 'last app',
+    sticky_last_channel: 'last channel',
   };
   return ` · ${names[e.routed_by] ?? e.routed_by}${conf}`;
 }
@@ -413,12 +417,15 @@ function GatewayDebugToggle() {
 }
 
 // ── Contacts page (data-section="contacts", hue 330) — the family ──────────────
-export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string[]; client?: AgentKeysClient }) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function ContactsPage({ client: _client }: { client?: AgentKeysClient }) {
   const { status, statusErr, notConfigured, refreshStatus } = useGatewayStatus(false);
   const { toast, flash } = useToast();
   const [contacts, setContacts] = useState<ContactSummary[]>([]);
   const [pending, setPending] = useState<GatewayPendingBindView[]>([]);
-  const [apps, setApps] = useState<InstalledAppAudience[]>([]);
+  // The household's channel documents: what a member can be given rows on,
+  // and what an invite gets pre-filled from (each app row's audience).
+  const [docs, setDocs] = useState<ChannelDoc[]>([]);
   const refresh = useCallback(async () => {
     const ok = await refreshStatus();
     if (!ok) {
@@ -427,16 +434,12 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
       return;
     }
     const [c, p] = await Promise.all([gatewayClient.contacts(), gatewayClient.bindPending()]);
-    if (c.ok) setContacts(c.value.contacts);
-    if (p.ok) setPending(p.value.pending);
-    if (client?.listApps) {
-      // Installed apps carry their messaging audience (the tiers each admits):
-      // the tier a new invite gets pre-filled from. Best-effort — the page
-      // works without it (the owner still reaches every agent).
-      const a = await client.listApps();
-      if (a.ok) setApps(appAudiences(a.data.apps));
+    if (c.ok) {
+      setContacts(c.value.contacts);
+      setDocs(c.value.channels ?? []);
     }
-  }, [refreshStatus, client]);
+    if (p.ok) setPending(p.value.pending);
+  }, [refreshStatus]);
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -453,7 +456,6 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
   // household default (iLink, scan) and every mint is held until step 1 is fixed.
   const reachable = status !== null;
   const scan = scanTransport(status?.transport);
-  const agents = deeplinkReach ?? [];
   const self = selfState(pending, contacts);
   // The owner's connect QR is minted FOR their registry row: the bound owner's own
   // id when one exists (a code-bound owner re-binds by scan — their own phone
@@ -531,7 +533,7 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
             title="you — the owner"
             right={<span className="muted" style={{ fontSize: 12, color: hint?.tab === 'connection' && online ? 'var(--accent)' : undefined }}>{ownerState}</span>}
           >
-            <SelfBindCard self={self} pending={pending} contacts={contacts} agents={agents} apps={apps} online={online} reachable={reachable} scan={scan} onChange={() => void refresh()} onFlash={flash} />
+            <SelfBindCard self={self} pending={pending} contacts={contacts} docs={docs} online={online} reachable={reachable} scan={scan} onChange={() => void refresh()} onFlash={flash} />
           </Panel>
           <details style={{ marginTop: 4 }}>
             <summary className="muted" style={{ cursor: 'pointer', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase' }}>diagnostics · activity · monitor · history</summary>
@@ -546,7 +548,7 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
         <>
           {scan ? (
             <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>
-              Mint an invite (name, tier, reach), then open their connect QR from the row when they are with you — they scan it with <strong>their own</strong> WeChat and their clawbot appears, bound with the tier and reach you chose. The mint is your approval; nothing else to confirm. They are told in their chat with their first message.
+              Mint an invite (name, tier, the channels they join), then open their connect QR from the row when they are with you — they scan it with <strong>their own</strong> WeChat and their clawbot appears, bound with the tier and channels you chose. The mint is your approval; nothing else to confirm. They are told in their chat with their first message.
             </p>
           ) : (
             <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>
@@ -554,12 +556,12 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
               they text the code to it in a <strong>private</strong> chat from <strong>their own</strong> account (groups are ignored, and the bot cannot message first), you approve. Each invite below shows where it stands.
             </p>
           )}
-          <InvitePanel agents={agents} apps={apps} online={scan ? reachable : online} scan={scan} onInvited={() => void refresh()} onFlash={flash} />
-          <InvitesTable pending={familyPending} scan={scan} onChange={() => void refresh()} onFlash={flash} />
+          <InvitePanel docs={docs} online={scan ? reachable : online} scan={scan} onInvited={() => void refresh()} onFlash={flash} />
+          <InvitesTable pending={familyPending} docs={docs} scan={scan} onChange={() => void refresh()} onFlash={flash} />
         </>
       )}
 
-      {activeTab === 'contacts' && <ContactsPanel contacts={contacts} onChange={() => void refresh()} onFlash={flash} />}
+      {activeTab === 'contacts' && <ContactsPanel contacts={contacts} docs={docs} onChange={() => void refresh()} onFlash={flash} />}
     </>
   );
 }
@@ -569,13 +571,12 @@ export function ContactsPage({ deeplinkReach, client }: { deeplinkReach?: string
 // own clawbot), on 公众号/Telegram a code texted to the shared bot. The card is the
 // state machine in one place:
 // mint → the code, right here, with the send text → the bot received it →
-// approve → bound (with the reach that was granted).
+// approve → bound (with the rows that were granted).
 function SelfBindCard({
   self,
   pending,
   contacts,
-  agents,
-  apps,
+  docs,
   online,
   reachable,
   scan,
@@ -585,8 +586,7 @@ function SelfBindCard({
   self: SelfState;
   pending: GatewayPendingBindView[];
   contacts: ContactSummary[];
-  agents: string[];
-  apps: InstalledAppAudience[];
+  docs: ChannelDoc[];
   online: boolean;
   reachable: boolean;
   scan: boolean;
@@ -597,10 +597,11 @@ function SelfBindCard({
   const [scanOpen, setScanOpen] = useState(false);
   const mine = pending.find((p) => p.contact_id === SELF_CONTACT_ID) ?? pending.find((p) => p.tier === 'owner');
   const me = contacts.find((c) => c.tier === 'owner');
-  const reach = suggestedReach('owner', agents, apps);
+  // The owner speaks on every channel, each app's operator channel included.
+  const grants = suggestedGrants('owner', docs);
   const mint = async () => {
     setBusy(true);
-    const r = await gatewayClient.bindInvite({ contact_id: SELF_CONTACT_ID, display_name: SELF_DISPLAY_NAME, tier: 'owner', reach });
+    const r = await gatewayClient.bindInvite({ contact_id: SELF_CONTACT_ID, display_name: SELF_DISPLAY_NAME, tier: 'owner', channels: grants });
     setBusy(false);
     if (!r.ok) {
       onFlash(`Minting your code failed — ${reason(r)}`);
@@ -611,7 +612,7 @@ function SelfBindCard({
   const approve = async () => {
     if (!mine) return;
     setBusy(true);
-    const r = await gatewayClient.bindApprove({ bind_code: mine.bind_code, tier: null, reach: null });
+    const r = await gatewayClient.bindApprove({ bind_code: mine.bind_code, tier: null, channels: null });
     setBusy(false);
     if (!r.ok) {
       onFlash(`Approve failed — ${reason(r)}`);
@@ -623,10 +624,10 @@ function SelfBindCard({
   if (self === 'bound' && me) {
     return (
       <div style={{ fontSize: 13, lineHeight: 1.7 }}>
-        ✓ Bound as <strong>{me.display_name}</strong> · owner · reach: {me.reach.length ? me.reach.join(', ') : '—'}
+        ✓ Bound as <strong>{me.display_name}</strong> · owner · channels: {describeGrants(me.channels, docs)}
         {scan && (me.connected ? <span> · your clawbot is connected</span> : <span style={{ color: 'var(--danger)' }}> · no clawbot on your own WeChat yet — ⊕ connect in the card above and scan with your own phone</span>)}
         {!me.welcomed && <div className="muted" style={{ fontSize: 12 }}>The «✅ 绑定成功» acknowledgement reaches you with your first message to the bot.</div>}
-        <div className="muted" style={{ fontSize: 12 }}>Apps you install later add themselves here automatically.</div>
+        <div className="muted" style={{ fontSize: 12 }}>Apps you install later add their channels here automatically.</div>
       </div>
     );
   }
@@ -635,7 +636,7 @@ function SelfBindCard({
       <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
         <div>
           Scan a connect QR with <strong>your own</strong> WeChat — your clawbot appears as a contact there, linked to this household, and you are bound as the owner
-          {reach.length ? ` reaching ${reach.length} agent${reach.length === 1 ? '' : 's'}` : ''}.
+          {grants.length ? ` on ${grants.length} channel${grants.length === 1 ? '' : 's'}` : ''}.
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <button
@@ -673,7 +674,7 @@ function SelfBindCard({
         <div>Mint your own code, then text it to the shared bot in a private chat from your <strong>own</strong> account.</div>
         <div>
           <button className="btn primary" disabled={busy || !online} onClick={() => void mint()}>
-            {busy ? 'minting…' : `⊕ mint my code · owner · ${reach.length ? `${reach.length} agent${reach.length === 1 ? '' : 's'}` : 'no agents yet'}`}
+            {busy ? 'minting…' : `⊕ mint my code · owner · ${grants.length ? `${grants.length} channel${grants.length === 1 ? '' : 's'}` : 'no channels yet'}`}
           </button>
           {!online && <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>connect the bot first</span>}
         </div>
@@ -687,7 +688,7 @@ function SelfBindCard({
         <div>Text this to the bot from your <strong>daily</strong> WeChat:</div>
         <CodeLine code={mine.bind_code} onCopied={() => onFlash('Copied — paste it into the chat with the bot')} />
         <div className="muted" style={{ fontSize: 12 }}>
-          reach when bound: {mine.reach.length ? mine.reach.join(', ') : '—'} · waiting for the bot to receive it (this page refreshes by itself) ·{' '}
+          channels when bound: {describeGrants(mine.channels, docs)} · waiting for the bot to receive it (this page refreshes by itself) ·{' '}
           <button className="btn sm" disabled={busy} onClick={() => void mint()}>re-mint</button>
         </div>
       </div>
@@ -695,7 +696,7 @@ function SelfBindCard({
   }
   return (
     <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
-      <div>The bot received your code. Approving binds <strong>that</strong> WeChat as the owner · reach: {mine.reach.length ? mine.reach.join(', ') : '—'}.</div>
+      <div>The bot received your code. Approving binds <strong>that</strong> WeChat as the owner · channels: {describeGrants(mine.channels, docs)}.</div>
       <div className="muted" style={{ fontSize: 12 }}>The sender's WeChat identity is never shown (D13). If you did not send this code yourself, reject it.</div>
       <div style={{ display: 'flex', gap: 8 }}>
         <button className="btn primary" disabled={busy} onClick={() => void approve()}>{busy ? 'approving…' : '✓ approve — bind me'}</button>
@@ -728,11 +729,13 @@ function CodeLine({ code, onCopied }: { code: string; onCopied: () => void }) {
 // ── step 3: the family invites, each with its state ───────────────────────────
 function InvitesTable({
   pending,
+  docs,
   scan,
   onChange,
   onFlash,
 }: {
   pending: GatewayPendingBindView[];
+  docs: ChannelDoc[];
   scan: boolean;
   onChange: () => void;
   onFlash: (m: string) => void;
@@ -747,8 +750,8 @@ function InvitesTable({
         <span className="summary">{claimed.length > 0 ? `${claimed.length} to approve` : `${minted.length} waiting`}</span>
       </div>
       <div style={{ display: 'grid', gap: 6 }}>
-        {claimed.map((p) => <InviteRow key={p.bind_code} p={p} scan={scan} onChange={onChange} onFlash={onFlash} />)}
-        {minted.map((p) => <InviteRow key={p.bind_code} p={p} scan={scan} onChange={onChange} onFlash={onFlash} />)}
+        {claimed.map((p) => <InviteRow key={p.bind_code} p={p} docs={docs} scan={scan} onChange={onChange} onFlash={onFlash} />)}
+        {minted.map((p) => <InviteRow key={p.bind_code} p={p} docs={docs} scan={scan} onChange={onChange} onFlash={onFlash} />)}
       </div>
     </div>
   );
@@ -756,11 +759,13 @@ function InvitesTable({
 
 function InviteRow({
   p,
+  docs,
   scan,
   onChange,
   onFlash,
 }: {
   p: GatewayPendingBindView;
+  docs: ChannelDoc[];
   scan: boolean;
   onChange: () => void;
   onFlash: (m: string) => void;
@@ -772,7 +777,7 @@ function InviteRow({
   const approve = async () => {
     setBusy(true);
     setErr(null);
-    const r = await gatewayClient.bindApprove({ bind_code: p.bind_code, tier: null, reach: null });
+    const r = await gatewayClient.bindApprove({ bind_code: p.bind_code, tier: null, channels: null });
     setBusy(false);
     if (!r.ok) {
       setErr(reason(r));
@@ -794,7 +799,7 @@ function InviteRow({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span>
           <strong>{p.display_name}</strong> · <span className="muted">{p.tier} · {tierLabel(p.tier)}</span>
-          <span className="muted" style={{ fontSize: 12 }}> · reach: {p.reach.length ? p.reach.join(', ') : '—'}</span>
+          <span className="muted" style={{ fontSize: 12 }}> · channels: {describeGrants(p.channels, docs)}</span>
         </span>
         <span style={pill}>{state === 'claimed' ? '② code received — approve' : scan ? '① invite minted — scan pending' : '① code minted — waiting'}</span>
       </div>
@@ -825,7 +830,7 @@ function InviteRow({
       ) : (
         <div style={{ display: 'grid', gap: 6, fontSize: 12.5 }}>
           <div>
-            Someone sent {p.display_name}'s code to the bot. Approving binds <strong>that</strong> WeChat to <strong>{p.display_name}</strong> as {p.tier} · {tierLabel(p.tier)}, reaching {p.reach.length ? p.reach.join(', ') : 'no agent yet'}.
+            Someone sent {p.display_name}'s code to the bot. Approving binds <strong>that</strong> WeChat to <strong>{p.display_name}</strong> as {p.tier} · {tierLabel(p.tier)}, on {describeGrants(p.channels, docs)}.
           </div>
           <div className="muted" style={{ fontSize: 12 }}>The sender's WeChat identity is never shown (D13) — if you did not hand this code to {p.display_name}, reject it.</div>
           {err && <div className="muted" style={{ color: 'var(--danger)', fontSize: 12 }}>⚠ {err}</div>}
@@ -1146,66 +1151,75 @@ function ConnectModal({
 
 // ── invite ──────────────────────────────────────────────────────────────────
 
-// A toggle chip (reach selector). Selected = filled accent; unselected = outline.
-const CHIP = (on: boolean): CSSProperties => ({
+// A three-state row chip: not a member · listens (reads) · speaks (posts + reads).
+type Row = 'none' | 'listen' | 'speak';
+const rowOf = (g: ChannelGrant | undefined): Row => (!g || (!g.speak && !g.read) ? 'none' : g.speak ? 'speak' : 'listen');
+const grantOf = (channel_id: string, r: Row): ChannelGrant => ({ channel_id, speak: r === 'speak', read: r !== 'none' });
+const nextRow = (r: Row): Row => (r === 'none' ? 'listen' : r === 'listen' ? 'speak' : 'none');
+const CHIP = (r: Row): CSSProperties => ({
   padding: '4px 11px',
   borderRadius: 999,
   fontSize: 12,
   cursor: 'pointer',
-  border: `1px solid ${on ? 'var(--accent, #1a7f5a)' : 'var(--border, #d8d8cf)'}`,
-  background: on ? 'var(--accent, #1a7f5a)' : 'transparent',
-  color: on ? '#fff' : 'inherit',
+  border: `1px solid ${r !== 'none' ? 'var(--accent, #1a7f5a)' : 'var(--border, #d8d8cf)'}`,
+  background: r === 'speak' ? 'var(--accent, #1a7f5a)' : 'transparent',
+  color: r === 'speak' ? '#fff' : r === 'listen' ? 'var(--accent, #1a7f5a)' : 'inherit',
 });
 
+/** The channel rows editor: one chip per channel — tap to cycle none → listens →
+ *  speaks. Household channels first; each app's operator channel after, marked
+ *  (the explicit ones: never pre-filled for anyone but the owner). */
+function RowsEditor({ docs, grants, onChange }: { docs: ChannelDoc[]; grants: ChannelGrant[]; onChange: (g: ChannelGrant[]) => void }) {
+  const get = (id: string) => rowOf(grants.find((g) => g.channel_id === id));
+  const set = (id: string, r: Row) => onChange([...grants.filter((g) => g.channel_id !== id), ...(r === 'none' ? [] : [grantOf(id, r)])]);
+  const ordered = grantableChannels(docs);
+  if (ordered.length === 0) return <span className="muted" style={{ fontSize: 12 }}>No channel yet — install an app or create one on the channels page.</span>;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+      {ordered.map((d) => {
+        const r = get(d.id);
+        return (
+          <button type="button" key={d.id} onClick={() => set(d.id, nextRow(r))} style={CHIP(r)} title={`${d.purpose || d.id} — tap to change: none → listens → speaks`}>
+            {r === 'speak' ? '✓ ' : r === 'listen' ? '◔ ' : ''}{d.name || d.id}{d.operator_of ? ' · operator' : ''}{r === 'listen' ? ' (reads)' : ''}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function InvitePanel({
-  agents,
-  apps,
+  docs,
   online,
   scan,
   onInvited,
   onFlash,
 }: {
-  agents: string[];
-  apps: InstalledAppAudience[];
+  docs: ChannelDoc[];
   online: boolean;
   scan: boolean;
   onInvited: () => void;
   onFlash: (m: string) => void;
 }) {
-  const options = agents;
   const [displayName, setDisplayName] = useState('');
   const [tier, setTier] = useState<ContactTier>('kid');
-  const [reach, setReach] = useState<Set<string>>(new Set());
-  const [reachText, setReachText] = useState('');
+  const [grants, setGrants] = useState<ChannelGrant[]>([]);
   const [busy, setBusy] = useState(false);
   const [minted, setMinted] = useState<{ code: string; sendText: string; name: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const allSelected = options.length > 0 && options.every((a) => reach.has(a));
-  // A tier change re-seeds the chips with what that tier usually gets.
-  const optionsKey = options.join(',');
+  // A tier change re-seeds the rows with what that tier usually gets.
+  const docsKey = docs.map((d) => `${d.id}:${d.updated_at}`).join(',');
   useEffect(() => {
-    setReach(new Set(suggestedReach(tier, options, apps)));
+    setGrants(suggestedGrants(tier, docs));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tier, optionsKey, apps]);
-  const toggle = (a: string) =>
-    setReach((prev) => {
-      const n = new Set(prev);
-      if (n.has(a)) n.delete(a);
-      else n.add(a);
-      return n;
-    });
-  const toggleAll = () => setReach(allSelected ? new Set() : new Set(options));
+  }, [tier, docsKey]);
 
   const submit = async () => {
     setErr(null);
     setBusy(true);
-    const reachList =
-      options.length > 0
-        ? Array.from(reach)
-        : reachText.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
     const contactId = `${displayName.trim().toLowerCase().replace(/\s+/g, '-')}-${Math.random().toString(36).slice(2, 6)}`;
-    const r = await gatewayClient.bindInvite({ contact_id: contactId, display_name: displayName.trim(), tier, reach: reachList });
+    const r = await gatewayClient.bindInvite({ contact_id: contactId, display_name: displayName.trim(), tier, channels: grants });
     setBusy(false);
     if (!r.ok) {
       setErr(reason(r));
@@ -1214,15 +1228,14 @@ function InvitePanel({
     if (scan) onFlash(`Invite for ${displayName.trim()} minted — open their connect QR from the row below when they're ready`);
     else setMinted({ code: r.value.bind_code, sendText: r.value.send_text, name: displayName.trim() });
     setDisplayName('');
-    setReach(new Set());
-    setReachText('');
+    setGrants(suggestedGrants(tier, docs));
     onInvited();
   };
 
   return (
     <div>
       <div className="perm-section-head"><span className="ttl">mint an invite</span></div>
-      <div style={{ display: 'grid', gap: 10, maxWidth: 520 }}>
+      <div style={{ display: 'grid', gap: 10, maxWidth: 560 }}>
         <Field label="name">
           <input style={INPUT_STYLE} placeholder="奶奶 / Emma" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </Field>
@@ -1232,21 +1245,10 @@ function InvitePanel({
           </select>
           <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{TIER_INFO[tier].blurb}</div>
         </Field>
-        <Field label={<>reach <span className="muted">(which agents they may talk to)</span></>}>
-          {options.length > 0 ? (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <button type="button" onClick={toggleAll} style={CHIP(allSelected)}>{allSelected ? '✓ all' : 'all'}</button>
-              {options.map((a) => (
-                <button type="button" key={a} onClick={() => toggle(a)} style={CHIP(reach.has(a))}>
-                  {reach.has(a) ? '✓ ' : ''}{a}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <input style={INPUT_STYLE} placeholder="chef, storyteller" value={reachText} onChange={(e) => setReachText(e.target.value)} />
-          )}
+        <Field label={<>channels <span className="muted">(where they may speak, or only read)</span></>}>
+          <RowsEditor docs={docs} grants={grants} onChange={setGrants} />
           <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-            Pre-filled with what this tier usually gets. Apps you install later add themselves to every contact whose tier they admit, so this only needs today's agents.
+            Pre-filled with what this tier usually gets: the channels whose apps admit it, the family chat read-only otherwise. An app&apos;s operator channel is never pre-filled — switch it on here or on the contact&apos;s row when you mean it. Apps you install later propose their own rows.
           </div>
         </Field>
         {err && <div className="muted" style={{ color: 'var(--danger)' }}>⚠ {err}</div>}
@@ -1345,10 +1347,12 @@ function RejectButton({
 
 function ContactsPanel({
   contacts,
+  docs,
   onChange,
   onFlash,
 }: {
   contacts: ContactSummary[];
+  docs: ChannelDoc[];
   onChange: () => void;
   onFlash: (m: string) => void;
 }) {
@@ -1362,46 +1366,48 @@ function ContactsPanel({
             <tr>
               <th style={{ textAlign: 'left' }}>name</th>
               <th style={{ textAlign: 'left' }}>tier</th>
-              <th style={{ textAlign: 'left' }}>reach</th>
+              <th style={{ textAlign: 'left' }}>channels</th>
               <th style={{ textAlign: 'left' }}>acknowledged</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {contacts.map((c) => (
-              <ContactRow key={c.contact_id} contact={c} onChange={onChange} onFlash={onFlash} />
+              <ContactRow key={c.contact_id} contact={c} docs={docs} onChange={onChange} onFlash={onFlash} />
             ))}
           </tbody>
         </table>
       )}
       <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-        Contacts have no chat history here (and their WeChat identity is never shown) — D13: you have full visibility in the audit feed, they have none in-chat.
+        A member&apos;s access is their rows on the household&apos;s channels: <strong>speaks</strong> = may post there (the router picks among these), <strong>reads</strong> = receives what lands there. An app&apos;s operator channel is switched on per member, by you. Contacts have no chat history here (and their WeChat identity is never shown) — D13.
       </div>
     </Panel>
   );
 }
 
-// One contact row — read-only until you hit `edit`, then a tier picker + reach
-// editor (comma/space separated) that POSTs the new routing policy; `revoke`
-// unbinds. Both refresh the list on success.
+// One contact row — read-only until you hit `edit`, then a tier picker + the
+// channel rows editor that POSTs the new rows (replacing the member's rows);
+// `revoke` unbinds. Both refresh the list on success.
 function ContactRow({
   contact,
+  docs,
   onChange,
   onFlash,
 }: {
   contact: ContactSummary;
+  docs: ChannelDoc[];
   onChange: () => void;
   onFlash: (m: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [tier, setTier] = useState<ContactTier>(contact.tier);
-  const [reachText, setReachText] = useState(contact.reach.join(', '));
+  const current = (): ChannelGrant[] => contact.channels.map((c) => ({ channel_id: c.channel_id, speak: c.speak, read: c.read }));
+  const [grants, setGrants] = useState<ChannelGrant[]>(current);
   const [busy, setBusy] = useState(false);
 
   const save = async () => {
     setBusy(true);
-    const reach = reachText.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
-    const r = await gatewayClient.contactsUpdate({ contact_id: contact.contact_id, tier, reach });
+    const r = await gatewayClient.contactsUpdate({ contact_id: contact.contact_id, tier, channels: grants });
     setBusy(false);
     if (r.ok) {
       setEditing(false);
@@ -1429,7 +1435,7 @@ function ContactRow({
   };
 
   const revoke = async () => {
-    if (!window.confirm(`Unbind ${contact.display_name}? They can no longer reach any agent through the bot.`)) return;
+    if (!window.confirm(`Unbind ${contact.display_name}? They leave every channel and can no longer reach the household through the bot.`)) return;
     setBusy(true);
     const r = await gatewayClient.contactsRevoke(contact.contact_id);
     setBusy(false);
@@ -1453,12 +1459,7 @@ function ContactRow({
           </select>
         </td>
         <td>
-          <input
-            value={reachText}
-            onChange={(e) => setReachText(e.target.value)}
-            placeholder="chef, storyteller"
-            style={{ ...INPUT_STYLE, width: '100%' }}
-          />
+          <RowsEditor docs={docs} grants={grants} onChange={setGrants} />
         </td>
         <td />
         <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
@@ -1469,7 +1470,7 @@ function ContactRow({
             onClick={() => {
               setEditing(false);
               setTier(contact.tier);
-              setReachText(contact.reach.join(', '));
+              setGrants(current());
             }}
           >
             cancel
@@ -1483,13 +1484,13 @@ function ContactRow({
     <tr>
       <td>{contact.display_name}</td>
       <td>{contact.tier} · <span className="muted">{tierLabel(contact.tier)}</span></td>
-      <td className="muted">{contact.reach.length ? contact.reach.join(', ') : '—'}</td>
+      <td className="muted">{describeGrants(contact.channels, docs)}</td>
       <td className="muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
         {contact.welcomed ? '✓ told in their chat' : 'with their next message'}{' '}
         <button className="btn sm" disabled={busy} onClick={() => void resendAck()} title="Send the «✅ 绑定成功» acknowledgement again — now if their bot can, else with their next message">↻ resend</button>
       </td>
       <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
-        <button className="btn sm" disabled={busy} onClick={() => setEditing(true)}>edit</button>{' '}
+        <button className="btn sm" disabled={busy} onClick={() => { setGrants(current()); setEditing(true); }}>edit</button>{' '}
         <button className="btn sm" disabled={busy} onClick={() => void revoke()} style={{ color: 'var(--danger)' }}>revoke</button>
       </td>
     </tr>

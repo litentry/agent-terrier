@@ -49,15 +49,127 @@ describe('gatewayClient', () => {
         seenBody = (i?.body as string) ?? '';
       }),
     );
-    const r = await gatewayClient.bindInvite({ contact_id: 'c-1', display_name: '奶奶', tier: 'elder', reach: ['chef'] });
-    expect(JSON.parse(seenBody)).toMatchObject({ contact_id: 'c-1', tier: 'elder', reach: ['chef'] });
+    const r = await gatewayClient.bindInvite({ contact_id: 'c-1', display_name: '奶奶', tier: 'elder', channels: [{ channel_id: 'family-chat', speak: true, read: true }] });
+    expect(JSON.parse(seenBody)).toMatchObject({ contact_id: 'c-1', tier: 'elder', channels: [{ channel_id: 'family-chat', speak: true, read: true }] });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.value.bind_code).toBe('123456');
   });
 
+  it('GET channels reads the household channel documents from the daemon proxy', async () => {
+    let seenUrl = '';
+    let seenMethod = '';
+    const doc = {
+      id: 'family-chat',
+      name: '家庭群',
+      purpose: '',
+      household_default: true,
+      operator_of: null,
+      members: [{ contact_id: 'c-1', speak: true, read: true }],
+      apps: [{ alias: 'chef', slot: 'family_chat', description: '回答今晚吃什么', takes: ['text', 'image'], audience: ['owner', 'partner'] }],
+      default_app: 'chef',
+      updated_at: 1,
+    };
+    vi.stubGlobal(
+      'fetch',
+      mockFetch(200, { ok: true, channels: [doc] }, (u, i) => {
+        seenUrl = u;
+        seenMethod = i?.method ?? 'GET';
+      }),
+    );
+    const r = await gatewayClient.channels();
+    expect(seenUrl.endsWith('/v1/master/gateway/channels')).toBe(true);
+    expect(seenMethod).toBe('GET');
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.channels).toHaveLength(1);
+      expect(r.value.channels[0].default_app).toBe('chef');
+      expect(r.value.channels[0].apps[0].audience).toContain('partner');
+    }
+  });
+
+  it('POST channels/update sends ONE channel write, never a whole-document replace', async () => {
+    let seenUrl = '';
+    let seenBody = '';
+    vi.stubGlobal(
+      'fetch',
+      mockFetch(200, { ok: true, changed: true }, (u, i) => {
+        seenUrl = u;
+        seenBody = (i?.body as string) ?? '';
+      }),
+    );
+    const r = await gatewayClient.channelUpdate({ channel_id: 'family-chat', member: { contact_id: 'c-2', speak: false, read: true } });
+    expect(seenUrl.endsWith('/v1/master/gateway/channels/update')).toBe(true);
+    const body = JSON.parse(seenBody);
+    expect(body).toMatchObject({ channel_id: 'family-chat', remove: false, member: { contact_id: 'c-2', speak: false, read: true } });
+    // Fields left out stay out — the gate leaves them untouched.
+    expect(body).not.toHaveProperty('name');
+    expect(body).not.toHaveProperty('default_app');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.changed).toBe(true);
+  });
+
+  it('GET router reads the Route page view (per-member channel options + the last exchanges)', async () => {
+    let seenUrl = '';
+    let seenMethod = '';
+    const view = {
+      ok: true,
+      engine: 'jev',
+      model: 'kev-9b',
+      threshold: 0.5,
+      continue_threshold: 0.7,
+      ask_ttl_secs: 600,
+      describe_photos: true,
+      describe_prompt: '',
+      guidance: { destination: '', unclear: '', continues: '', continues_yes: '', continues_no: '', addressee: '' },
+      contacts: [
+        {
+          contact: '奶奶',
+          tier: 'elder',
+          options: [{ channel_id: 'family-chat', name: '家庭群', line: '', apps: [{ alias: 'chef', description: '', takes: ['text'] }], members: ['奶奶'], updated_at: 1 }],
+          request: null,
+        },
+      ],
+      upstream: null,
+      recent: [
+        {
+          ts_ms: 1,
+          contact: '奶奶',
+          tier: 'elder',
+          text: '今晚吃什么',
+          photo: false,
+          request: null,
+          probabilities: { 'family-chat/chef': 0.9 },
+          verdict: 'route',
+          routed_to: 'family-chat',
+          addressee: 'chef',
+          confidence: 0.9,
+          answered_by: 'jev',
+          total_ms: 120,
+          delivered: true,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      'fetch',
+      mockFetch(200, view, (u, i) => {
+        seenUrl = u;
+        seenMethod = i?.method ?? 'GET';
+      }),
+    );
+    const r = await gatewayClient.router();
+    expect(seenUrl.endsWith('/v1/master/gateway/router')).toBe(true);
+    expect(seenMethod).toBe('GET');
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.contacts[0].options[0].channel_id).toBe('family-chat');
+      expect(r.value.recent[0].routed_to).toBe('family-chat');
+      expect(r.value.recent[0].addressee).toBe('chef');
+    }
+  });
+
   it('decodes an {ok:false, reason, detail} error envelope even on a 200', async () => {
     vi.stubGlobal('fetch', mockFetch(200, { ok: false, reason: 'bind_not_claimed', detail: 'no one sent it yet' }));
-    const r = await gatewayClient.bindApprove({ bind_code: 'AK-X', tier: null, reach: null });
+    const r = await gatewayClient.bindApprove({ bind_code: 'AK-X', tier: null, channels: null });
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toBe('bind_not_claimed');

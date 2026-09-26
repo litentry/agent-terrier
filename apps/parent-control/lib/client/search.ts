@@ -56,6 +56,7 @@ export const PAGE_ENTRIES: SearchEntry[] = [
   { kind: 'page', id: 'channels', label: 'channels', hint: 'the registry', keywords: ['feeds'] },
   { kind: 'page', id: 'contacts', label: 'contacts', hint: 'WeChat · family', keywords: ['wechat', 'weixin', 'family', 'bot', 'gate'] },
   { kind: 'page', id: 'applications', label: 'applications', hint: 'installed apps · catalog', keywords: ['apps', 'install', 'chef'] },
+  { kind: 'page', id: 'route', label: 'route', hint: 'how messages are routed', keywords: ['router', 'kev', 'jev', 'model', 'routing'] },
   { kind: 'page', id: 'audit', label: 'audit feed', hint: 'tier-1 stream', keywords: ['events', 'log', 'decode'] },
   { kind: 'page', id: 'chain', label: 'chain', hint: 'contracts · anchors', keywords: ['heima', 'rpc', 'contracts'] },
 ];

@@ -73,7 +73,7 @@ fn seeded_registry() -> ContactRegistry {
             transport_id: "openid-grandma".into(),
             display_name: "奶奶".into(),
             tier: ContactTier::Elder,
-            reach: vec!["chef".into()],
+            legacy_reach: vec![],
             welcomed: true,
         }],
         pending: vec![],
@@ -83,8 +83,10 @@ fn seeded_registry() -> ContactRegistry {
             contact_id: "c-kid".into(),
             display_name: "小明".into(),
             tier: ContactTier::Kid,
-            reach: vec![],
+            channels: vec![],
+            legacy_reach: vec![],
         }],
+        channels: vec![],
     }
 }
 

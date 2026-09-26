@@ -776,6 +776,7 @@ mod device_client_tests {
                 contact: None,
                 content_type: None,
                 relay_of: None,
+                addressee: None,
             })
             .await
             .unwrap();

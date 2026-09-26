@@ -59,6 +59,20 @@ impl WeixinTransport {
             WeixinTransport::Telegram => "telegram",
         }
     }
+
+    /// Every transport configured today folds a member's channels into one
+    /// thread (see [`crate::transport`]).
+    pub fn kind(&self) -> crate::transport::TransportKind {
+        crate::transport::TransportKind::Aggregating
+    }
+
+    /// The registry-facing identity namespace contacts bind under.
+    pub fn namespace(&self) -> &'static str {
+        match self {
+            WeixinTransport::Telegram => "telegram",
+            _ => "weixin",
+        }
+    }
 }
 
 /// Per-contact rate limit defaults (a crude anti-flood + anti-Sybil guard, §9
@@ -523,10 +537,22 @@ impl WeixinGatewayConfig {
                     "AGENTKEYS_WEIXIN_ROUTER_ASK_TTL_SECS",
                     defaults.ask_ttl_secs,
                 ),
-                last_agent_weight: f64_var(
-                    "AGENTKEYS_WEIXIN_ROUTER_LAST_AGENT_WEIGHT",
-                    defaults.last_agent_weight,
+                continue_threshold: f64_var(
+                    "AGENTKEYS_WEIXIN_ROUTER_CONTINUE_THRESHOLD",
+                    defaults.continue_threshold,
+                )
+                .clamp(0.0, 1.0),
+                describe_photos: var("AGENTKEYS_WEIXIN_ROUTER_DESCRIBE_PHOTOS")
+                    .map(|v| !matches!(v.trim(), "0" | "false" | "off"))
+                    .unwrap_or(defaults.describe_photos),
+                describe_timeout_ms: u64_var(
+                    "AGENTKEYS_WEIXIN_ROUTER_DESCRIBE_TIMEOUT_MS",
+                    defaults.describe_timeout_ms,
                 ),
+                describe_model: var("AGENTKEYS_WEIXIN_ROUTER_DESCRIBE_MODEL")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
             };
             match (cfg.engine, cfg.jev_active()) {
                 (RouterEngine::Deterministic, _) => eprintln!(
@@ -535,11 +561,17 @@ impl WeixinGatewayConfig {
                 ),
                 (_, true) => eprintln!(
                     "==> agentkeys-worker-channel-weixin: router engine = jev via the model gate at {} \
-                     (model {}, threshold {}, ask TTL {} s) — #722",
+                     (model {}, threshold {}, follow-up {}, ask TTL {} s, photos {}) — #722",
                     cfg.gate_url.as_deref().unwrap_or("?"),
                     cfg.model,
                     cfg.threshold,
-                    cfg.ask_ttl_secs
+                    cfg.continue_threshold,
+                    cfg.ask_ttl_secs,
+                    match (cfg.describe_photos, cfg.describe_model.as_deref()) {
+                        (false, _) => "by declared kinds".to_string(),
+                        (true, Some(m)) => format!("described by {m}, then routed"),
+                        (true, None) => "described by the stack's chat model, then routed".to_string(),
+                    }
                 ),
                 (RouterEngine::Jev, false) => eprintln!(
                     "==> ⚠️  agentkeys-worker-channel-weixin: AGENTKEYS_WEIXIN_ROUTER_ENGINE=jev but the \

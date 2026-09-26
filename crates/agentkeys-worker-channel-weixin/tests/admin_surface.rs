@@ -16,7 +16,12 @@ fn write_registry() -> String {
         {"contact_id":"c-kid","transport":"weixin","transport_id":"openid-kid",
          "display_name":"小明","tier":"kid","reach":["storyteller"]}
       ],
-      "pending": []
+      "pending": [],
+      "apps": [
+        {"alias":"chef","channel_id":"family-chat"},
+        {"alias":"doorkeeper","channel_id":"door"},
+        {"alias":"storyteller","channel_id":"stories"}
+      ]
     }"#;
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -188,7 +193,8 @@ async fn contact_update_and_revoke_change_the_registry_the_console_reads_back() 
         &base,
         "/v1/gateway/admin/contacts/update",
         Some("admin-secret"),
-        serde_json::json!({ "contact_id": "c-kid", "tier": "partner", "reach": ["chef"] }),
+        serde_json::json!({ "contact_id": "c-kid", "tier": "partner",
+            "channels": [{ "channel_id": "family-chat", "speak": true, "read": true }] }),
     )
     .await;
     assert_eq!(status, 200, "{upd}");
@@ -201,7 +207,9 @@ async fn contact_update_and_revoke_change_the_registry_the_console_reads_back() 
         .unwrap()
         .clone();
     assert_eq!(kid["tier"], "partner");
-    assert_eq!(kid["reach"], serde_json::json!(["chef"]));
+    assert_eq!(kid["channels"][0]["channel_id"], "family-chat");
+    assert_eq!(kid["channels"][0]["speak"], true);
+    assert_eq!(kid["channels"].as_array().unwrap().len(), 1, "{kid}");
     // An unknown contact is a 404, never a silent no-op.
     let (status, _) = post(
         &base,

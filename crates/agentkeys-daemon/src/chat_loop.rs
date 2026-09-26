@@ -78,6 +78,15 @@ pub struct ChatLoopConfig {
 impl ChatLoopConfig {
     /// Env-gated: all of the chat vars present ⇒ `Some`. A PARTIAL set is a
     /// loud warn (a mis-wired spawn should not silently mean "no chat").
+    /// The app's label (its alias on the channel documents), from its
+    /// operator channel `opchat-<label>`.
+    pub fn app_label(&self) -> String {
+        self.chat_channel_id
+            .strip_prefix("opchat-")
+            .unwrap_or(&self.chat_channel_id)
+            .to_string()
+    }
+
     pub fn from_env() -> Option<Self> {
         // The channel worker URL is NOT in this required set — it is DERIVED from
         // the broker's domain + the worker name (the `derive_worker_url`
@@ -1032,6 +1041,20 @@ async fn event_bytes(
     Err("event carries neither body nor body_ref".into())
 }
 
+/// Whether an event on a feed is this app's to answer: addressed to it, or
+/// unaddressed on a channel where it is the default app (or where nobody
+/// said — a context written before channels were shared).
+pub(crate) fn addressed_to_us(
+    addressee: Option<&str>,
+    label: &str,
+    default_app: Option<bool>,
+) -> bool {
+    match addressee.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => a.eq_ignore_ascii_case(label),
+        None => default_app != Some(false),
+    }
+}
+
 /// The dispatcher (the four verbs' "perceive → act" hop): one inbound event
 /// from one feed → the right per-kind path → the reply on the SAME feed.
 async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
@@ -1048,6 +1071,22 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
     let contact_tier = event.contact.as_ref().map(|c| c.tier.as_str());
     // #693 — a lifecycle report is never a turn (ours or a sibling's).
     if event.kind == ChannelEventKind::Lifecycle {
+        return;
+    }
+    // Household channels: on a channel several apps are bound to, an event
+    // addressed to another app is theirs, not ours; an unaddressed one is the
+    // channel's default app's (a context that never said = take it, as before).
+    if !addressed_to_us(
+        event.addressee.as_deref(),
+        &cfg.app_label(),
+        feed.default_app,
+    ) {
+        tracing::debug!(
+            channel,
+            event = %event.event_id,
+            addressee = event.addressee.as_deref().unwrap_or("(none)"),
+            "not addressed to this app — skipped"
+        );
         return;
     }
     // Typed sessions: which session this trigger's turn runs in — its type's

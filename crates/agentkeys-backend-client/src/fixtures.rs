@@ -227,6 +227,7 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         contact: None,
         content_type: None,
         relay_of: None,
+        addressee: None,
     };
     let channel_poll = ChannelPollBody {
         cap: json!("<cap-token>"),

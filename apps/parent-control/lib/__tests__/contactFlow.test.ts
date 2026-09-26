@@ -1,32 +1,33 @@
 import { describe, expect, it } from 'vitest';
 import type { ContactSummary } from '../generated/ContactSummary';
 import type { GatewayPendingBindView } from '../generated/GatewayPendingBindView';
-import { SELF_CONTACT_ID, appAudiences, defaultTab, inviteState, nextStepHint, scanTransport, selfState, sendText, suggestedReach } from '../client/contactFlow';
+import type { ChannelDoc } from '../generated/ChannelDoc';
+import { SELF_CONTACT_ID, defaultTab, describeGrants, inviteState, nextStepHint, scanTransport, selfState, sendText, suggestedGrants } from '../client/contactFlow';
 
 const pend = (contact_id: string, tier: GatewayPendingBindView['tier'], claimed: boolean): GatewayPendingBindView => ({
-  bind_code: '123456', contact_id, display_name: contact_id, tier, reach: [], claimed,
+  bind_code: '123456', contact_id, display_name: contact_id, tier, channels: [], claimed,
 });
-const bound = (contact_id: string, tier: ContactSummary['tier']): ContactSummary => ({ contact_id, display_name: contact_id, tier, reach: [], connected: false, welcomed: true });
+const bound = (contact_id: string, tier: ContactSummary['tier']): ContactSummary => ({ contact_id, display_name: contact_id, tier, channels: [], connected: false, welcomed: true });
 
 describe('contacts flow', () => {
-  const apps = appAudiences([
-    { label: 'Family chef', reach_aliases: ['chef'], bindings: { audience: [{ slot: 'family_chat', tiers: ['owner', 'partner', 'elder', 'helper'] }] }, bound_channels: [{ kind: 'messaging' }, { kind: 'display' }] },
-    { label: 'storyteller', bindings: { audience: [{ slot: 'chat', tiers: ['owner', 'kid'] }] }, bound_channels: [{ kind: 'messaging' }] },
-    { label: 'watchdog', bindings: { audience: [{ slot: 'x', tiers: ['owner'] }] }, bound_channels: [{ kind: 'camera' }] }, // no messaging endpoint
-  ]);
+  const doc = (id: string, extra: Partial<ChannelDoc>): ChannelDoc => ({ id, name: id, purpose: '', household_default: false, members: [], apps: [], updated_at: 0, ...extra });
+  const docs: ChannelDoc[] = [
+    doc('opchat-chef', { operator_of: 'chef', apps: [{ alias: 'chef', slot: 'opchat', description: '', takes: [], audience: ['owner'] }] }),
+    doc('stories', { apps: [{ alias: 'storyteller', slot: 'story_chat', description: '', takes: [], audience: ['owner', 'kid'] }] }),
+    doc('family-chat', { name: '家庭群', household_default: true, apps: [{ alias: 'chef', slot: 'family_chat', description: '', takes: [], audience: ['owner', 'partner', 'elder', 'helper'] }] }),
+  ];
 
-  it('only apps with a messaging endpoint have an audience; the pre-fill vocabulary is the install\'s reach aliases', () => {
-    expect(apps.map((a) => a.label)).toEqual(['Family chef', 'storyteller']);
-    expect(apps.map((a) => a.aliases)).toEqual([['chef'], ['storyteller']]);
-  });
-
-  it('suggested reach: owner = every agent today; tiers = the apps that admit them; guest = nothing', () => {
-    const agents = ['chef', 'storyteller', 'agent-i', 'chef'];
-    expect(suggestedReach('owner', agents, apps)).toEqual(['chef', 'storyteller', 'agent-i']);
-    expect(suggestedReach('partner', agents, apps)).toEqual(['chef']);
-    expect(suggestedReach('kid', agents, apps)).toEqual(['storyteller']);
-    expect(suggestedReach('elder', agents, apps)).toEqual(['chef']);
-    expect(suggestedReach('guest', agents, apps)).toEqual([]);
+  it('suggested rows: owner speaks everywhere; a tier speaks where an app admits it and reads the default otherwise; guest nothing; operator channels never proposed', () => {
+    expect(suggestedGrants('owner', docs).map((g) => g.channel_id)).toEqual(['family-chat', 'stories', 'opchat-chef']);
+    expect(suggestedGrants('partner', docs)).toEqual([{ channel_id: 'family-chat', speak: true, read: true }]);
+    expect(suggestedGrants('kid', docs)).toEqual([
+      { channel_id: 'family-chat', speak: false, read: true },
+      { channel_id: 'stories', speak: true, read: true },
+    ]);
+    expect(suggestedGrants('elder', docs)).toEqual([{ channel_id: 'family-chat', speak: true, read: true }]);
+    expect(suggestedGrants('guest', docs)).toEqual([]);
+    expect(describeGrants(suggestedGrants('kid', docs), docs)).toBe('家庭群 (read only), stories');
+    expect(describeGrants([], docs)).toBe('—');
   });
 
   it('the owner bind walks none → minted → claimed → bound, and the page follows it', () => {

@@ -119,7 +119,8 @@ fn write_registry() -> String {
         {"contact_id":"c-kid","transport":"weixin","transport_id":"wxid-kid",
          "display_name":"小明","tier":"kid","reach":["storyteller"],"welcomed":true}
       ],
-      "pending": []
+      "pending": [],
+      "apps": [{"alias":"storyteller","channel_id":"stories"}]
     }"#;
     let path = std::env::temp_dir().join(format!("ak-ilink-reg-{}.json", std::process::id()));
     std::fs::write(&path, json).unwrap();
@@ -231,8 +232,8 @@ async fn ilink_loop_relays_replies_persists_and_stops() {
             .as_str()
             .unwrap();
         assert!(
-            refusal_text.contains("没有访问"),
-            "out-of-reach ask is refused in-channel: {refusal_text}"
+            refusal_text.contains("没有这个助手"),
+            "an app on none of the member's channels is refused in-channel: {refusal_text}"
         );
 
         let gu_auth = mock.getupdates_auth.lock().unwrap();

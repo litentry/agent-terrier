@@ -359,15 +359,16 @@ pub async fn run_with_token(
                     }
                 }
             }
-            let mut reply =
-                outcome.claim_ack.clone().or_else(|| {
-                    outcome.reply_text(
-                        false,
-                        outcome.decision.target_alias.as_deref().and_then(|a| {
-                            state.app_stage_hint_for_alias(a, relay::unix_secs() * 1000)
-                        }),
-                    )
-                });
+            let mut reply = outcome.claim_ack.clone().or_else(|| {
+                outcome.reply_text(
+                    false,
+                    outcome
+                        .decision
+                        .channel_id
+                        .as_deref()
+                        .and_then(|ch| state.app_stage_hint(ch, relay::unix_secs() * 1000)),
+                )
+            });
             if reply.is_none() && state.config.unknown_sender_hint {
                 let now = relay::unix_secs();
                 if let Some(hint) = relay::unknown_sender_hint(
