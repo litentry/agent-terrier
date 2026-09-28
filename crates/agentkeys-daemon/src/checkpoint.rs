@@ -39,6 +39,9 @@ use crate::lifecycle::LifecycleHub;
 /// (the daemon often starts before the bridge finishes its ACP handshake).
 const RESTORE_RETRY_WINDOW_SECS: u64 = 180;
 const RESTORE_RETRY_INTERVAL_SECS: u64 = 5;
+/// How many times the engine-workspace object is fetched before the restore
+/// gives up on it (a transient body-stream failure, never a 4xx).
+const WORKSPACE_GET_ATTEMPTS: u8 = 4;
 /// First periodic save runs this soon after the restore phase — early enough
 /// that a freshly-migrated home becomes durable quickly, late enough to stay
 /// clear of the boot burst.
@@ -475,33 +478,52 @@ async fn workspace_restore(
     }
     let client = cfg.backend_client(bearer, credential);
     let service = service_knowledge(&cfg.namespace);
-    let cap = client
-        .cap_mint(
-            CapMintOp::MemoryGet,
-            CapMintRequest {
-                operator_omni: normalize_omni_0x(&cfg.chat.operator_omni),
-                actor_omni: normalize_omni_0x(&cfg.chat.actor_omni),
-                service: service.clone(),
-                device_key_hash: credential.device_key_hash(),
-                ttl_seconds: 300,
-            },
-            bearer,
-        )
-        .await
-        .map_err(|e| format!("cap-mint: {e}"))?;
-    let got = match client
-        .memory_get(MemoryGetInput {
-            cap,
-            namespace: service,
-            object_key: Some(OV_WORKSPACE_OBJECT_KEY.to_string()),
-        })
-        .await
-    {
-        Ok(g) => g,
-        Err(BackendError::Http { status: 404, .. }) => {
-            return Ok("no engine workspace checkpoint (first spawn?)".into())
+    // The workspace object is the biggest thing the restore reads; a dropped
+    // body stream on the worker's side (`502 s3_body`, measured once on
+    // 2026-09-27) is transient — retry it a few times, a fresh cap each time,
+    // before the workspace is declared not restored. A 4xx is definitive.
+    let mut attempt = 0u8;
+    let got = loop {
+        attempt += 1;
+        let cap = client
+            .cap_mint(
+                CapMintOp::MemoryGet,
+                CapMintRequest {
+                    operator_omni: normalize_omni_0x(&cfg.chat.operator_omni),
+                    actor_omni: normalize_omni_0x(&cfg.chat.actor_omni),
+                    service: service.clone(),
+                    device_key_hash: credential.device_key_hash(),
+                    ttl_seconds: 300,
+                },
+                bearer,
+            )
+            .await
+            .map_err(|e| format!("cap-mint: {e}"))?;
+        match client
+            .memory_get(MemoryGetInput {
+                cap,
+                namespace: service.clone(),
+                object_key: Some(OV_WORKSPACE_OBJECT_KEY.to_string()),
+            })
+            .await
+        {
+            Ok(g) => break g,
+            Err(BackendError::Http { status: 404, .. }) => {
+                return Ok("no engine workspace checkpoint (first spawn?)".into())
+            }
+            Err(BackendError::Http { status, .. }) if (400..500).contains(&status) => {
+                return Err(format!("memory-get: HTTP {status}"))
+            }
+            Err(e) if attempt < WORKSPACE_GET_ATTEMPTS => {
+                tracing::warn!(
+                    error = %e,
+                    attempt,
+                    "#694 checkpoint: engine workspace get failed on a transient error — retrying"
+                );
+                tokio::time::sleep(Duration::from_secs(RESTORE_RETRY_INTERVAL_SECS)).await;
+            }
+            Err(e) => return Err(format!("memory-get: {e}")),
         }
-        Err(e) => return Err(format!("memory-get: {e}")),
     };
     let bytes = STANDARD
         .decode(&got.plaintext_b64)
@@ -895,6 +917,8 @@ mod tests {
             speech_url: None,
             speech_bearer: None,
             stream_flush_ms: 1000,
+            wake_since_ms: None,
+            tz_offset_minutes: 0,
         }
     }
 

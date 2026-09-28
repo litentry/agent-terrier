@@ -29,6 +29,14 @@ use crate::handlers::cap::{call_get_device, ChainContracts};
 use crate::jwt::issue::mint_agent_session_jwt;
 use crate::state::SharedState;
 
+/// How long a delegate resolve waits on its sandbox ensure before answering
+/// with the session alone; the ensure runs on its own task and continues. The
+/// in-sandbox daemon resolves with a 40 s client timeout (`chat_loop.rs`), and
+/// a veFaaS cold-start adopt runs minutes: on 2026-09-28 chef's replacement
+/// sandbox resolved in a loop for 150 s while its own adopt held the ensure,
+/// and its checkpoint restore gives up after 180 s without a session.
+const RESOLVE_ENSURE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[derive(Debug, Deserialize)]
 pub struct ResolveBody {
     /// The device's K10 EVM address (`0x` + 40 hex).
@@ -135,13 +143,23 @@ pub async fn agent_resolve(
         );
         None
     } else {
-        crate::handlers::sandbox::ensure_for_delegate(
+        let ensure = crate::handlers::sandbox::ensure_for_delegate(
             &state,
             &device_key_hash,
             &device.actor_omni,
             &device.operator_omni,
-        )
-        .await
+        );
+        match tokio::time::timeout(RESOLVE_ENSURE_WAIT, ensure).await {
+            Ok(provision) => provision,
+            Err(_) => {
+                tracing::info!(
+                    device_key_hash = %device_key_hash,
+                    wait_secs = RESOLVE_ENSURE_WAIT.as_secs(),
+                    "resolve answered with the session while the sandbox ensure runs on (a create or cold-start adopt in flight)"
+                );
+                crate::handlers::sandbox::SandboxProvision::still_starting(&state)
+            }
+        }
     };
     let (agent_url, sandbox) = match &provision {
         Some(p) => (json!(p.agent_url), p.to_json()),

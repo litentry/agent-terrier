@@ -39,13 +39,15 @@ describe('contacts flow', () => {
     expect(selfState([pend('grandma-1', 'elder', true)], [])).toBe('none');
   });
 
-  it('the default tab follows the flow; the next-step hint names the tab it lives on', () => {
-    expect(defaultTab(false, 'bound', 0)).toBe('connection');
-    expect(defaultTab(true, 'minted', 2)).toBe('connection');
+  it('the default tab follows the flow; the next-step hint names where it lives (the transport page for the bot and the owner)', () => {
+    // the gate or the owner's own bind is missing: nothing to approve yet, the hint points at the transport page
+    expect(defaultTab(false, 'bound', 0)).toBe('invitations');
+    expect(defaultTab(true, 'minted', 2)).toBe('invitations');
     expect(defaultTab(true, 'bound', 2)).toBe('invitations');
     expect(defaultTab(true, 'bound', 0)).toBe('contacts');
-    expect(nextStepHint(false, 'none', true, 0, 0, false)?.tab).toBe('connection');
-    expect(nextStepHint(true, 'minted', true, 0, 0, false)?.tab).toBe('connection');
+    expect(nextStepHint(false, 'none', true, 0, 0, false)?.tab).toBe('transport');
+    expect(nextStepHint(true, 'minted', true, 0, 0, false)?.tab).toBe('transport');
+    expect(nextStepHint(true, 'bound', true, 0, 0, false)?.tab).toBe('transport');
     // bound, but the owner's own WeChat has no clawbot yet (the legacy spare bot serves them)
     expect(nextStepHint(true, 'bound', true, 0, 0, false)?.text).toContain('your own WeChat');
     expect(nextStepHint(true, 'bound', true, 1, 0, true)?.tab).toBe('invitations');

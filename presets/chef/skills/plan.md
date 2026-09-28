@@ -10,7 +10,9 @@ Inputs, and where each one lives:
   `viking://resources/<namespace>/<item>/<item>.md` URI it returns.
 - Today's meals are your own memory files under
   `viking://user/default/memories/events/<YYYY-MM-DD>/` (diary.md) — list the
-  day's folder with `mcp__openviking__list`.
+  day's folder with `mcp__openviking__list`. Today is the date on the
+  `[now · YYYY-MM-DD …]` line that opens the turn — never a guess; the card's
+  `subtitle` carries that same date.
 - The fridge is `viking://user/default/memories/entities/fridge/inventory.md`
   (fridge.md) — read it.
 - `nutrition-basics.md` is in your prompt's Knowledge section.
@@ -30,7 +32,9 @@ Output ONE card (the #670 card contract, `card: 1`) published to the
   - `meal.completed`: "Completed" / "已完成" — the next meal on the card is done.
   - `meal.ready`: "Ready for the next meal" / "准备下一餐" — plan the meal after it now.
   - `meal.swap`: "Another dish" / "换一道" — the next-best dish for the same meal.
-  - `fridge.request-photo`: "Fridge photo" / "拍冰箱" — ask the family chat for a photo.
+  - `fridge.request-photo`: "Ask for a fridge photo" / "请家人拍冰箱" — ask the
+    family chat to send a photo of the fridge. That photo is what fills the
+    "Fridge" section, so the button stays on every card, the empty one most of all.
 
 ## When a button is tapped
 

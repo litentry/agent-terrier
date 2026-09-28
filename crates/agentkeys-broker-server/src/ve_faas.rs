@@ -149,12 +149,17 @@ pub struct VeFaasConfig {
     pub create_timeout_secs: u32,
     /// #589 — after a `CreateSandbox` 408 `function_cold_start_timeout`, keep
     /// polling the named instance for up to this many seconds and ADOPT it
-    /// once Ready (`AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS`, default 120,
+    /// once Ready (`AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS`, default 240,
     /// bounds 0..=600; 0 disables the resume). veFaaS caps the synchronous
     /// create at ~29s but the pod keeps booting server-side, and a blind retry
     /// CREATES A DUPLICATE — a booting instance is invisible to the reuse
     /// pre-check (measured 2026-08-01: 3 creates → 3 Ready instances → 3 chat
-    /// loops on one channel).
+    /// loops on one channel). The instance reads `Failed` right after the 408
+    /// and turns Ready later — measured on VE prod after the 408: ~50 s
+    /// (09-17), 55 s (09-19), 90 s (09-22), 45 s (09-25), and on 09-28 still
+    /// `Failed` when the old 120 s budget ran out, listed Ready 8 s later (the
+    /// update failed on those 8 s). 240 s is twice the slowest recovery seen
+    /// and keeps a rotate (29 s + adopt + import) inside nginx's 300 s.
     pub coldstart_wait_secs: u32,
     /// Refuse to create past this many instances under the application
     /// (`AGENTKEYS_VEFAAS_MAX_INSTANCES`, default 20) — bounds the blast
@@ -233,7 +238,7 @@ impl VeFaasConfig {
                 "AGENTKEYS_VEFAAS_CREATE_TIMEOUT_SECS must be 15..=600, got {create_timeout_secs}"
             );
         }
-        let coldstart_wait_secs = parse_u32("AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS", 120)?;
+        let coldstart_wait_secs = parse_u32("AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS", 240)?;
         if coldstart_wait_secs > 600 {
             bail!(
                 "AGENTKEYS_VEFAAS_COLDSTART_WAIT_SECS must be 0..=600, got {coldstart_wait_secs}"
@@ -409,11 +414,11 @@ pub struct VeFaasClient {
     /// (loud warn in the sandbox log — never a failure).
     openviking_embed_model: Option<String>,
     openviking_embed_dimension: Option<String>,
-    /// Spawns are serialized so two concurrent resolves for the same (or
-    /// different) delegates can't race list→create into duplicates. Spawn is
-    /// a rare event (pair / device boot); one lock is simpler than a
-    /// per-device map and the contention is irrelevant at this rate.
-    ensure_lock: tokio::sync::Mutex<()>,
+    /// One list→create at a time PER DELEGATE, so two concurrent ensures for
+    /// the same delegate can't race into duplicates while other delegates
+    /// proceed (see [`crate::sandbox_backend::DelegateLocks`] for the 150 s
+    /// stall a single broker-wide lock caused).
+    ensure_locks: crate::sandbox_backend::DelegateLocks,
     /// Instances this broker created or adopted, per delegate label — the
     /// list view's lag bridge (see [`VeFaasConfig::recent_instance_secs`]).
     recent_instances: std::sync::Mutex<HashMap<String, (String, std::time::Instant)>>,
@@ -483,7 +488,7 @@ impl VeFaasClient {
             openviking_embed_dimension: std::env::var("OPENVIKING_EMBED_DIMENSION")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            ensure_lock: tokio::sync::Mutex::new(()),
+            ensure_locks: crate::sandbox_backend::DelegateLocks::default(),
             recent_instances: std::sync::Mutex::new(HashMap::new()),
         }))
     }
@@ -1503,10 +1508,34 @@ impl VeFaasClient {
         base_envs: &[(String, String)],
         on_create: crate::sandbox_backend::CreateEnvProvider,
     ) -> Result<EnsureOutcome> {
-        let _guard = self.ensure_lock.lock().await;
+        let _guard = self.ensure_locks.lock(device_key_hash).await;
 
         let all = self.list_instances::<&str>(None).await?;
         let listed = pick_live_for_device(&all, device_key_hash).cloned();
+        // #669 — one delegate, one instance: a duplicate (a cancelled wake's
+        // create, a restart's lost memo) answers every turn twice and — its
+        // relay key rotated by the newer create — with `401 unknown relay key`.
+        // Keep the newest, retire the rest, loudly.
+        if let Some(keep) = listed.as_ref() {
+            for dup in all
+                .iter()
+                .filter(|i| i.is_live() && i.labeled_for(device_key_hash) && i.id != keep.id)
+            {
+                tracing::warn!(
+                    sandbox_id = %dup.id,
+                    keep = %keep.id,
+                    device_key_hash = %device_key_hash,
+                    "#669 duplicate live instance for one delegate — retiring the older one (the newest holds the relay key the gate provisioned last)"
+                );
+                if let Err(e) = self.kill(&dup.id).await {
+                    tracing::warn!(
+                        sandbox_id = %dup.id,
+                        error = %format!("{e:#}"),
+                        "duplicate instance retire failed — the next ensure retries"
+                    );
+                }
+            }
+        }
         let mine = match listed {
             Some(m) => Some(m),
             None => self.remembered_live_instance(device_key_hash).await,
@@ -1525,6 +1554,10 @@ impl VeFaasClient {
             });
         }
 
+        // Counted under this delegate's lock only: creates for different
+        // delegates in flight at once can pass together, so the cap may be
+        // exceeded by at most that concurrency — it bounds a label-matching
+        // runaway, which one delegate's serialized ensures cannot multiply.
         let live_total = all.iter().filter(|i| i.is_live()).count();
         if live_total >= self.config.max_instances {
             bail!(
@@ -1717,12 +1750,27 @@ fn parse_metadata(v: &serde_json::Value) -> HashMap<String, String> {
 }
 
 /// Pure quota decision: the delegate's live instance among `rows`, if any.
+/// Several live (a duplicate create — #669's cancelled wakes, a restart's lost
+/// memo): the NEWEST, the one whose relay key the gate holds (every create
+/// provisions the key afresh, so an older twin's key is already rotated out);
+/// `ExpireAt` orders them (one lifetime, one format from one API — the lexical
+/// max is the newest), a tie keeps the first listed. The ensure retires the
+/// rest.
 fn pick_live_for_device<'a>(
     rows: &'a [SandboxInstance],
     device_key_hash: &str,
 ) -> Option<&'a SandboxInstance> {
-    rows.iter()
-        .find(|i| i.is_live() && i.labeled_for(device_key_hash))
+    let mut best: Option<&SandboxInstance> = None;
+    for i in rows
+        .iter()
+        .filter(|i| i.is_live() && i.labeled_for(device_key_hash))
+    {
+        match best {
+            Some(b) if i.expire_at <= b.expire_at => {}
+            _ => best = Some(i),
+        }
+    }
+    best
 }
 
 /// Parse `Result.Images[]` rows (#568) — the live shape pinned in
@@ -1892,6 +1940,30 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         }
+    }
+
+    /// #669 — two live instances for one delegate (a cancelled wake's create
+    /// beside the next wake's): the newest — the one the gate provisioned the
+    /// relay key for last — is the delegate's; a tie keeps the first listed.
+    #[test]
+    fn pick_live_prefers_the_newest_twin() {
+        let mk = |id: &str, expire_at: &str| SandboxInstance {
+            id: id.into(),
+            status: "Ready".into(),
+            expire_at: expire_at.into(),
+            metadata: HashMap::from([
+                (LABEL_DEVICE_KEY_HASH.to_string(), label_value("0xabcd")),
+                (LABEL_MANAGED_BY.to_string(), MANAGED_BY_VALUE.to_string()),
+            ]),
+        };
+        let rows = vec![
+            mk("first", "2026-09-28 13:10:17 +0800 CST"),
+            mk("second", "2026-09-28 13:10:37 +0800 CST"),
+            mk("third", "2026-09-28 13:10:37 +0800 CST"),
+        ];
+        assert_eq!(pick_live_for_device(&rows, "0xabcd").unwrap().id, "second");
+        let same = vec![mk("a", ""), mk("b", "")];
+        assert_eq!(pick_live_for_device(&same, "0xabcd").unwrap().id, "a");
     }
 
     #[test]

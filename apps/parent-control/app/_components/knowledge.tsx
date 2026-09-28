@@ -1221,7 +1221,7 @@ export function KnowledgeItemModal({
           <button className={`btn sm${mode === 'upload' ? ' primary' : ''}`} onClick={() => setMode('upload')}>upload a file</button>
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 10 }}>
         <label className="muted" style={{ fontSize: 12 }}>id<input style={INPUT} value={id} disabled={!!edit} onChange={(e) => setId(e.target.value.trim().toLowerCase())} placeholder="food-preferences" /></label>
         <label className="muted" style={{ fontSize: 12 }}>namespace<input style={INPUT} value={ns} disabled={!!edit || !!curate} onChange={(e) => setNs(e.target.value)} /></label>
         <label className="muted" style={{ fontSize: 12 }}>name<input style={INPUT} value={name} onChange={(e) => setName(e.target.value)} /></label>

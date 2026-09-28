@@ -73,6 +73,16 @@ pub struct AppState {
     /// seam (veFaaS on VE, ECS/Fargate on AWS). `None` when the host carries
     /// no sandbox config, and every hook site is then a no-op.
     pub sandbox: Option<Arc<crate::sandbox_backend::SandboxBackend>>,
+    /// #669 — cold-creates in flight per delegate (`device_key_hash` → when it
+    /// started). A wake whose delegate is here JOINS instead of creating: the
+    /// channel worker's wake call gives up after 20 s while a veFaaS create
+    /// takes ~20-30 s, so the create runs detached from the request, and a
+    /// second feed event meanwhile must not create again (measured 2026-09-27:
+    /// two wakes 7 s apart → two live instances of one app, the second's
+    /// relay-key provisioning rotating the key under the first →
+    /// `401 unknown relay key` on every turn the first one took).
+    pub wake_creates_in_flight:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// #427 spawn/archive ceremony context, build → submit (IN-MEMORY by
     /// design — the pending-spawn row carries the delegate K10 secret, which
     /// must never sit at rest; see `handlers::spawn`).

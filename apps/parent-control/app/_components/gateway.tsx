@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Reac
 import { QRCodeSVG } from 'qrcode.react';
 
 import { PageHead, Panel, Modal, Dot, Tabs } from './shared';
+import { RoutePage } from './route';
 import {
   gatewayClient,
   gatewayDebugEnabled,
@@ -32,7 +33,6 @@ import type { ContactSummary } from '@/lib/generated/ContactSummary';
 import type { ContactTier } from '@/lib/generated/ContactTier';
 import type { GatewayMonitorEvent } from '@/lib/generated/GatewayMonitorEvent';
 import type { GatewayActivityEvent } from '@/lib/generated/GatewayActivityEvent';
-import type { AgentKeysClient } from '@/lib/client/types';
 import type { ChannelDoc } from '@/lib/generated/ChannelDoc';
 import type { ChannelGrant } from '@/lib/generated/ChannelGrant';
 import {
@@ -164,9 +164,9 @@ function Toast({ toast }: { toast: string | null }) {
 
 // (#404 IA: the "channels" page is now the channel REGISTRY — `channels.tsx`
 // (id-anchored definitions: create / rename / delete). Devices pair on the
-// devices page (`devices.tsx`). This file owns the WeChat gateway + contacts
-// surface — its ConnectPanel / monitor / history / activity render inside
-// ContactsPage below.)
+// devices page (`devices.tsx`). This file owns the transport + contacts
+// surface: TransportPage (the method's connection, the owner's own bind, the
+// route / monitor / history / activity tabs) and ContactsPage (invites, the family).)
 
 // ── live monitor (#1) ───────────────────────────────────────────────────────────
 // Polls /v1/master/gateway/monitor every 3 s while the bot is online, appending
@@ -416,11 +416,13 @@ function GatewayDebugToggle() {
   );
 }
 
-// ── Contacts page (data-section="contacts", hue 330) — the family ──────────────
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function ContactsPage({ client: _client }: { client?: AgentKeysClient }) {
+// ── the household's shared state ─────────────────────────────────────────────
+// The contact gate page (the bot, the owner's own bind, the router, the live
+// turns) and the contacts page (invites, the bound family) read the same
+// status / contacts / pending / channel documents: one hook, one refresh, one
+// poll while anything is in flight.
+function useHousehold() {
   const { status, statusErr, notConfigured, refreshStatus } = useGatewayStatus(false);
-  const { toast, flash } = useToast();
   const [contacts, setContacts] = useState<ContactSummary[]>([]);
   const [pending, setPending] = useState<GatewayPendingBindView[]>([]);
   // The household's channel documents: what a member can be given rows on,
@@ -453,7 +455,7 @@ export function ContactsPage({ client: _client }: { client?: AgentKeysClient }) 
   }, [inFlight, refresh]);
   const online = !!status?.online;
   // No status = the gate is unreachable (401/offline): the steps still read as the
-  // household default (iLink, scan) and every mint is held until step 1 is fixed.
+  // household default (iLink, scan) and every mint is held until the gate is fixed.
   const reachable = status !== null;
   const scan = scanTransport(status?.transport);
   const self = selfState(pending, contacts);
@@ -464,13 +466,38 @@ export function ContactsPage({ client: _client }: { client?: AgentKeysClient }) 
   const familyPending = pending.filter((p) => p.contact_id !== SELF_CONTACT_ID);
   const me = contacts.find((c) => c.tier === 'owner');
   const familyBound = contacts.filter((c) => c.tier !== 'owner').length;
-  // Three tabs. The page opens on the one the flow points at; a tab the user
-  // picked stays picked. The "Next:" line names the single thing to do and
-  // jumps to its tab, so the numbered step frames are no longer needed.
-  const suggestedTab = defaultTab(online, self, familyPending.length);
-  const [pickedTab, setPickedTab] = useState<ContactsTab | null>(null);
-  const activeTab: ContactsTab = pickedTab ?? suggestedTab;
+  // The single thing to do next, and where it lives (the gate page or a contacts tab).
   const hint = nextStepHint(online, self, scan, familyPending.length, familyBound, !!me?.connected);
+  return { status, statusErr, notConfigured, refresh, contacts, pending, docs, online, reachable, scan, self, selfContactId, familyPending, me, familyBound, hint };
+}
+
+// ── Transport page (data-section="contacts") — how the family reaches the household ──
+// The messaging METHOD this stack runs (WeChat via iLink, or Telegram; a
+// dedicated app later) and the contact gate behind it — the relayer that owns
+// no channel: the method's connection and the owner's own bind, the router
+// (what the decision model is sent and how it answered), the live turns, the
+// durable record and the contact audit. The people — invites, the bound family
+// and their channel rows — are the contacts page. (Replaced the "contact gate"
+// tab, owner direction 2026-09-26: a transport is a method, never a channel.)
+export type TransportTab = 'connection' | 'route' | 'monitor' | 'history' | 'activity';
+
+/** The methods a household can reach its channels through, and which this stack runs. */
+function methodRows(transport: string | undefined, online: boolean, notConfigured: boolean): { name: string; kind: string; state: string; here: boolean }[] {
+  const t = (transport ?? '').toLowerCase();
+  const wechatHere = t === 'ilink' || t === 'oa' || t === 'weixin';
+  const telegramHere = t === 'telegram';
+  const state = notConfigured ? 'no contact gate on this stack' : online ? 'connected' : 'offline';
+  return [
+    { name: 'WeChat · iLink', kind: 'aggregating — one thread per member', state: wechatHere ? state : 'on a stack that runs it', here: wechatHere },
+    { name: 'Telegram (a DM)', kind: 'aggregating — one thread per member', state: telegramHere ? state : 'on a stack that runs it', here: telegramHere },
+    { name: 'Dedicated app', kind: 'channel-native — a thread per channel', state: 'later', here: false },
+  ];
+}
+
+export function TransportPage({ onGoContacts }: { onGoContacts: () => void }) {
+  const { status, statusErr, notConfigured, refresh, contacts, pending, docs, online, reachable, scan, self, selfContactId, me, hint } = useHousehold();
+  const { toast, flash } = useToast();
+  const [tab, setTab] = useState<TransportTab>('connection');
   const botsOnline = status?.bots_online ?? 0;
   const ownerState = self === 'bound'
     ? (scan ? (me?.connected ? 'bound · your clawbot is connected' : 'bound · no clawbot on your own WeChat yet') : 'bound')
@@ -484,9 +511,9 @@ export function ContactsPage({ client: _client }: { client?: AgentKeysClient }) 
   return (
     <>
       <PageHead
-        crumb="household / contacts"
-        title="Contacts"
-        desc="Every family member — you first — gets their own clawbot: a connect QR minted here, scanned with their own WeChat. Nothing binds without an invite you minted, and no one's WeChat identity is ever shown (D13)."
+        crumb="household / transport"
+        title="Transport"
+        desc="How your family reaches the household's channels: the messaging method this stack runs, and the contact gate behind it — a relayer that owns no channel. Connect the method here and bind yourself as the owner; the route tab shows what the router sends the decision model for each message and how it answered; monitor, history and activity are the live turns, the durable record and the contact audit. Invites and the family's channel rows live on the contacts page."
         actions={
           <>
             <GatewayDebugToggle />
@@ -501,22 +528,40 @@ export function ContactsPage({ client: _client }: { client?: AgentKeysClient }) 
             key: 'connection',
             label: 'connection',
             badge: notConfigured ? 'no gate' : online ? `${botsOnline} bot${botsOnline === 1 ? '' : 's'} online` : 'offline',
-            attention: hint?.tab === 'connection',
+            attention: hint?.tab === 'transport',
           },
-          { key: 'invitations', label: 'invitations', badge: familyPending.length, attention: hint?.tab === 'invitations' },
-          { key: 'contacts', label: 'contacts', badge: contacts.length },
+          { key: 'route', label: 'route' },
+          { key: 'monitor', label: 'monitor', badge: online ? 'live' : undefined },
+          { key: 'history', label: 'history' },
+          { key: 'activity', label: 'activity' },
         ]}
-        active={activeTab}
-        onChange={setPickedTab}
+        active={tab}
+        onChange={setTab}
       />
       {hint && (
         <div className="tab-hint muted">
-          Next: <button type="button" onClick={() => setPickedTab(hint.tab)}>{hint.text}</button>
+          Next: <button type="button" onClick={() => (hint.tab === 'transport' ? setTab('connection') : onGoContacts())}>{hint.text}</button>
         </div>
       )}
 
-      {activeTab === 'connection' && (
+      {tab === 'connection' && (
         <>
+          <Panel title="methods" flush>
+            <table className="tab" style={{ margin: 0 }}>
+              <tbody>
+                {methodRows(status?.transport, online, notConfigured).map((m) => (
+                  <tr key={m.name}>
+                    <td style={{ fontWeight: m.here ? 500 : 400 }}>{m.name}</td>
+                    <td className="muted">{m.kind}</td>
+                    <td className="muted">{m.here ? <strong>this stack · {m.state}</strong> : m.state}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="muted" style={{ fontSize: 11.5, margin: '8px 16px 12px' }}>
+              A method is not a channel: the contact gate relays the household&apos;s channels through it and holds one grant per channel it relays — nothing of its own.
+            </p>
+          </Panel>
           {scan ? (
             <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>
               A clawbot lives only in the WeChat account that scanned its QR — there is no sharing. Every member, you first, connects their <strong>own</strong> WeChat; each bot is linked to this household and routes to the same agents.
@@ -531,17 +576,52 @@ export function ContactsPage({ client: _client }: { client?: AgentKeysClient }) 
           <ConnectPanel status={status} statusErr={statusErr} notConfigured={notConfigured} selfContactId={selfContactId} onChange={() => void refresh()} onFlash={flash} />
           <Panel
             title="you — the owner"
-            right={<span className="muted" style={{ fontSize: 12, color: hint?.tab === 'connection' && online ? 'var(--accent)' : undefined }}>{ownerState}</span>}
+            right={<span className="muted" style={{ fontSize: 12, color: hint?.tab === 'transport' && online ? 'var(--accent)' : undefined }}>{ownerState}</span>}
           >
             <SelfBindCard self={self} pending={pending} contacts={contacts} docs={docs} online={online} reachable={reachable} scan={scan} onChange={() => void refresh()} onFlash={flash} />
           </Panel>
-          <details style={{ marginTop: 4 }}>
-            <summary className="muted" style={{ cursor: 'pointer', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase' }}>diagnostics · activity · monitor · history</summary>
-            <ActivityPanel auditOff={online && status?.audit_on_chain === false} />
-            <MonitorPanel online={online} />
-            <HistoryPanel />
-          </details>
         </>
+      )}
+      {tab === 'route' && <RoutePage embedded />}
+      {tab === 'monitor' && <MonitorPanel online={online} />}
+      {tab === 'history' && <HistoryPanel />}
+      {tab === 'activity' && <ActivityPanel auditOff={online && status?.audit_on_chain === false} />}
+    </>
+  );
+}
+
+// ── Contacts page (data-section="contacts", hue 330) — the family ─────────────
+export function ContactsPage({ onGoTransport }: { onGoTransport: () => void }) {
+  const { refresh, contacts, docs, online, reachable, scan, self, familyPending, hint } = useHousehold();
+  const { toast, flash } = useToast();
+  // Two tabs. The page opens on the one the flow points at; a tab the user
+  // picked stays picked. The "Next:" line names the single thing to do and
+  // jumps to it — the transport page when the bot or the owner's own bind
+  // is what's missing.
+  const suggestedTab = defaultTab(online, self, familyPending.length);
+  const [pickedTab, setPickedTab] = useState<ContactsTab | null>(null);
+  const activeTab: ContactsTab = pickedTab ?? suggestedTab;
+  return (
+    <>
+      <PageHead
+        crumb="household / contacts"
+        title="Contacts"
+        desc="Every family member — you first — gets their own clawbot: a connect QR minted here, scanned with their own WeChat. Nothing binds without an invite you minted, and no one's WeChat identity is ever shown (D13)."
+        actions={<button className="btn sm" onClick={() => void refresh()}>↻ refresh</button>}
+      />
+      <Toast toast={toast} />
+      <Tabs
+        items={[
+          { key: 'invitations', label: 'invitations', badge: familyPending.length, attention: hint?.tab === 'invitations' },
+          { key: 'contacts', label: 'contacts', badge: contacts.length },
+        ]}
+        active={activeTab}
+        onChange={setPickedTab}
+      />
+      {hint && (
+        <div className="tab-hint muted">
+          Next: <button type="button" onClick={() => (hint.tab === 'transport' ? onGoTransport() : setPickedTab(hint.tab))}>{hint.text}</button>
+        </div>
       )}
 
       {activeTab === 'invitations' && (

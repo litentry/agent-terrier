@@ -288,6 +288,7 @@ async fn main() -> anyhow::Result<()> {
         wallet_store: boot_artifacts.wallet_store,
         nonce_store: boot_artifacts.nonce_store,
         spawn_context_store: boot_artifacts.spawn_context_store,
+        wake_creates_in_flight: Default::default(),
         identity_link_store: boot_artifacts.identity_link_store,
         pairing_request_store: boot_artifacts.pairing_request_store,
         agent_delegation_store: boot_artifacts.agent_delegation_store,

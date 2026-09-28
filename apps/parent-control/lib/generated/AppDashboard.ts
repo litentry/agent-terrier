@@ -30,4 +30,9 @@ non_card_docs: number,
 /**
  * The head of the newest such document.
  */
-last_doc_preview?: string, };
+last_doc_preview?: string, 
+/**
+ * Why the newest such document is not a card (the contract's parse
+ * error) — the same words the publish tool refuses the app with.
+ */
+non_card_reason?: string, };

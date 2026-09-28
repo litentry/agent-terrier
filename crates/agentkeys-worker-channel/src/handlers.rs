@@ -249,10 +249,17 @@ async fn channel_publish(
             let owner = normalize_omni(&req.cap.payload.operator_omni);
             let state2 = state.clone();
             let channel = channel_id.clone();
+            // The event id is `<ts_millis>-<seq>`: its timestamp is the
+            // woken app's replay window (#669).
+            let event_ts_ms = event_id
+                .split('-')
+                .next()
+                .and_then(|t| t.parse::<u64>().ok())
+                .unwrap_or(0);
             let _ = minter;
             tokio::spawn(async move {
                 if let Some(m) = state2.sts_minter.as_ref() {
-                    m.wake(&owner, &channel).await;
+                    m.wake(&owner, &channel, event_ts_ms).await;
                 }
             });
         }

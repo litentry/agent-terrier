@@ -34,6 +34,11 @@ grants**, not by the agent's choices:
   that sandbox (checkpointed, so an update or relaunch keeps them) and never
   reach another application. The engine's automatic extraction (`remember`)
   is not enabled in the sandbox, so the files the agent writes are its memory.
+  Dated memories (chef's diary: `events/<YYYY-MM-DD>/`) use the household's
+  local date, which opens every turn the agent receives as
+  `[now · 2026-09-28 Mon 19:08 · UTC+08:00]`, in the time zone set at install.
+  Images before the 2026-09-28 fix gave the agent no year, so it guessed: chef
+  filed meals under an invented day and its plan then found "no meals today".
 - **A learning crosses to you as a proposal.** When the agent judges a
   learning durable — a standing preference you stated, a household fact — it
   sends it with its `propose_to_owner` tool into your review queue (rate- and
@@ -278,6 +283,13 @@ agent's sandbox in place:
 - **Guarded:** if the agent has background jobs running, the update refuses
   and tells you — click **"update anyway"** only if losing their output is
   acceptable.
+- **Slow cloud starts:** now and then the cloud takes minutes to start the new
+  sandbox (it answers `function_cold_start_timeout` first). The update waits
+  up to about four minutes for it. If it still reports `re-create FAILED`,
+  look at the card's runtime row a minute later before clicking again: the
+  sandbox usually finishes starting and the agent's next message picks it up.
+  The open-conversation hand-off is lost in that case, and the agent resumes
+  from its last saved checkpoint (saved every 15 minutes when anything changed).
 
 The button reads its own state. **"✓ up to date"** (disabled): the agent
 already runs the current image — nothing to do, and its sandbox is replaced
@@ -506,7 +518,8 @@ accept card won't let you (a device with no channel is inert). Pairing a device
   use are kept, and the toast says which. It is greyed out when nothing is
   orphaned, and the app refuses (just retry) until it has re-read your
   fleet from the chain, so a chain hiccup can never wipe the registry.
-- **contacts** — the WeChat contact gate + your family (tiers, reach, invites).
+- **transport** — how your family reaches the household's channels: the messaging method this stack runs (WeChat via iLink; Telegram on a stack that runs it; a dedicated app later) with its connection and your own clawbot, and the contact gate behind it — a relayer that owns no channel — with the **route** tab (what the router sends the decision model for each message, and how it answered), the live monitor, the history and the contact audit.
+- **contacts** — your family: invites, and each member's rows on the household's channels (speak / read).
 
 If you claim a device and then look on the delegates page, you'll find a
 banner pointing you to devices — device claims never render there. Every
@@ -527,11 +540,11 @@ were never registered here.
 - «⚠️ …微信网关还没有接通…» — the contact gate itself cannot relay yet: it is not enrolled or not connected, or the stack has no channel worker. **applications → endpoints** shows the gate's **feed hop** and why it is not armed.
 - «⚠️ …这次没有发送成功…» — the send failed on the way. Sending again usually works; if it keeps failing, the cause is in the contact gate's log.
 
-**See what the router sends.** Parent Control's **route** page shows it: the guidance every request carries (the decision model has no other prompt), the options each member's messages are chosen among (each app's line exactly as sent), the model and the server it runs on, and the last 30 decisions with the model's probabilities, the verdict, whether the message landed, and how long each step took — describing a photo, the decision, the whole turn. The recent decisions include the message text and live only in the contact gate's memory: a restart clears them.
+**See what the router sends.** Parent Control's **transport** page shows it on its **route** tab: the guidance every request carries (the decision model has no other prompt), the options each member's messages are chosen among (each app's line exactly as sent), the model and the server it runs on, and the last 30 decisions with the model's probabilities, the verdict, whether the message landed, and how long each step took — describing a photo, the decision, the whole turn. The recent decisions include the message text and live only in the contact gate's memory: a restart clears them.
 
 A plain message is routed over the member's channels only (owner direction 2026-09-26: the router reads channel documents, never an app list). The router never sends a message to a different channel just because that one can take it: below its threshold it asks the member.
 
-**Connecting is a scan, and the invite is the approval.** In parent-control's Contacts page, step 2 is *you*: mint your code and scan the connect QR with your **own** WeChat — your clawbot appears and you are bound as the owner. Step 3 is the family: mint an invite (name, tier, the channels they join — speak or read only), then open their connect QR when they are with you; they scan it with **their own** WeChat, their clawbot appears, and they are bound with the tier and channels you chose — nothing else to confirm. They get «✅ 绑定成功…» in the new chat: right away when the bot can already reach them, otherwise as the reply to their very first message (a brand-new clawbot cannot speak first). It is sent exactly once; the Contacts page shows who has been told. Their WeChat identity is never shown to you or anyone (you manage them by the name and tier you chose). On the code-based transports (a 公众号 or Telegram) the older flow applies instead: the member texts a 6-digit code to the shared bot and you approve the claim. One thing to know: each member's own WeChat account hosts their bot, and Tencent's policy for personal accounts on this API is undocumented.
+**Connecting is a scan, and the invite is the approval.** On parent-control's **transport** page, step 2 is *you*: mint your code and scan the connect QR with your **own** WeChat — your clawbot appears and you are bound as the owner. Step 3, on the **contacts** page, is the family: mint an invite (name, tier, the channels they join — speak or read only), then open their connect QR when they are with you; they scan it with **their own** WeChat, their clawbot appears, and they are bound with the tier and channels you chose — nothing else to confirm. They get «✅ 绑定成功…» in the new chat: right away when the bot can already reach them, otherwise as the reply to their very first message (a brand-new clawbot cannot speak first). It is sent exactly once; the Contacts page shows who has been told. Their WeChat identity is never shown to you or anyone (you manage them by the name and tier you chose). On the code-based transports (a 公众号 or Telegram) the older flow applies instead: the member texts a 6-digit code to the shared bot and you approve the claim. One thing to know: each member's own WeChat account hosts their bot, and Tencent's policy for personal accounts on this API is undocumented.
 
 Three things the contact gate will not do, by design:
 
@@ -609,7 +622,13 @@ the permissions you approve. parent-control → **applications**:
   the kitchen screen shows; tapping a button publishes a command from **this
   console's own device actor** — the first install that binds a display slot
   enrolls the console in the same Touch ID as the install (a console never
-  enrolled publishes taps as you, the master). **Ask for the card now**: the
+  enrolled publishes taps as you, the master). A button stays disabled while
+  its tap is being sent, so a double click sends one command. Chef's buttons:
+  *Completed* logs the card's next meal as eaten, *Ready for the next meal*
+  plans the one after it, *Another dish* swaps the dish, and *Ask for a fridge
+  photo* (请家人拍冰箱) asks the family chat for a photo of the fridge — the
+  photo someone sends there is what fills the card's Fridge section, which is
+  why the button stays on an empty card. **Ask for the card now**: the
   panel offers one button per schedule entry of the app's template (chef:
   *Morning plan*, *Dinner plan*; an app without a schedule gets one generic
   ask). A click sends that entry's prompt to the app as a turn — exactly what

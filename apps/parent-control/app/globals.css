@@ -440,6 +440,13 @@ a:hover { text-decoration-color: var(--ink); }
 .panel-body { padding: 16px; }
 .panel-body.flush { padding: 0; }
 
+/* Two equal columns that can never push each other off the page: minmax(0)
+   lets a column shrink below its content (a chat bubble's long token, a
+   <pre>), and the columns stack when the page is narrower than both. */
+.cols-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.cols-2 > * { min-width: 0; }
+@media (max-width: 900px) { .cols-2 { grid-template-columns: minmax(0, 1fr); } }
+
 /* ─── Tables ──────────────────────────────────────────────────── */
 
 .tab {
@@ -996,6 +1003,17 @@ a:hover { text-decoration-color: var(--ink); }
 .perm-switch.on { background: var(--ink); border-color: var(--ink); }
 .perm-switch.on::after { transform: translateX(18px); background: var(--bg); }
 .perm-switch.locked { opacity: 0.55; cursor: not-allowed; }
+/* A single-choice row (a slot binds ONE channel): a radio mark, never a
+   switch — a switch reads as an independent on/off (owner report 2026-09-26). */
+.perm-radio {
+  width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--rule); background: var(--bg-elev);
+  position: relative; flex-shrink: 0; transition: border-color 0.15s ease;
+}
+.perm-radio::after {
+  content: ""; position: absolute; inset: 4px; border-radius: 50%; background: transparent; transition: background 0.15s ease;
+}
+.perm-radio.on { border-color: var(--ink); }
+.perm-radio.on::after { background: var(--ink); }
 .perm-readonly {
   font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-dim);
   border: 1px solid var(--rule-soft); padding: 4px 9px; white-space: nowrap;

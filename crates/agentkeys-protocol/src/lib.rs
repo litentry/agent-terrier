@@ -3370,6 +3370,12 @@ pub mod sandbox_env {
     /// probes (the app's own namespace + every bound resource namespace + the
     /// household defaults). OPTIONAL — absent, the mirror probes its defaults.
     pub const MEMORY_NAMESPACES: &str = "AGENTKEYS_MEMORY_NAMESPACES";
+    /// #669 — a cold-create by the WAKE path: the unix-ms the woken sandbox
+    /// replays its feeds from (the waking event, minus a margin). Absent on
+    /// every other create (the ceremony spawn, a resolve, the sweeper's
+    /// rotation), where the boot fast-forward stands — a restart never
+    /// replay-answers the transcript. OPTIONAL.
+    pub const WAKE_SINCE_MS: &str = "AGENTKEYS_WAKE_SINCE_MS";
     /// #669 (R4) — the household's UTC offset in minutes for `schedule[]`
     /// cron evaluation. OPTIONAL — absent = UTC.
     pub const APP_TZ_OFFSET_MINUTES: &str = "AGENTKEYS_APP_TZ_OFFSET_MINUTES";

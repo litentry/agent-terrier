@@ -73,6 +73,15 @@ pub struct ChatLoopConfig {
     /// channel publish (an S3 object + an encrypt), so this trades feed churn
     /// against perceived latency; 1000 ms ≈ a sentence per bubble update.
     pub stream_flush_ms: u64,
+    /// #669 — set on a sandbox the WAKE path cold-created: the unix-ms its
+    /// feeds replay from (the waking event minus a margin). The boot
+    /// fast-forward would otherwise skip the very event that woke it.
+    pub wake_since_ms: Option<u64>,
+    /// The household's UTC offset in minutes, taken from the app runtime
+    /// ([`AppRuntimeConfig::tz_offset_minutes`]) when the loop starts; 0 = UTC
+    /// for a delegate without one. Every turn opens with the local date and
+    /// time in it ([`turn_clock_line`]).
+    pub tz_offset_minutes: i64,
 }
 
 impl ChatLoopConfig {
@@ -187,6 +196,10 @@ impl ChatLoopConfig {
             speech_bearer: std::env::var("ARK_API_KEY")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            wake_since_ms: read(env_names::WAKE_SINCE_MS)
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|v| *v > 0),
+            tz_offset_minutes: 0,
             stream_flush_ms: std::env::var("AGENTKEYS_CHAT_STREAM_FLUSH_MS")
                 .ok()
                 .and_then(|v| v.trim().parse().ok())
@@ -570,8 +583,11 @@ async fn run(cfg: ChatLoopConfig) {
         .timeout(Duration::from_secs(40))
         .build()
         .expect("reqwest client");
-    let cfg = Arc::new(cfg);
     let app = Arc::new(AppRuntimeConfig::from_env());
+    let cfg = Arc::new(ChatLoopConfig {
+        tz_offset_minutes: app.tz_offset_minutes,
+        ..cfg
+    });
     let session = Arc::new(SessionHandle::new(
         http.clone(),
         cfg.clone(),
@@ -626,6 +642,7 @@ async fn run(cfg: ChatLoopConfig) {
                 chat_channel_id: cfg.chat_channel_id.clone(),
                 http: http.clone(),
                 publisher: publisher.clone(),
+                hub: Some(hub.clone()),
             };
             tokio::spawn(crate::schedule::run(rt));
         }
@@ -897,6 +914,14 @@ async fn poll_feed(
     let mut cursor = String::new();
     let mut fast_forwarded = false;
     let mut backoff = Duration::from_secs(2);
+    // #669 — a wake-created sandbox reads a window of the feed at boot and
+    // replays what arrived since the wake; any other boot reads one event
+    // (the true end) and fast-forwards past it.
+    let boot_tail: u32 = if cfg.wake_since_ms.is_some() {
+        WAKE_REPLAY_TAIL
+    } else {
+        1
+    };
     // #563 — cap reuse: caps carry a 300 s TTL yet were re-minted every poll
     // round, which under #552 remote-PoP custody meant one signer round-trip
     // per delegate per ~26 s poll. Reuse until the refresh margin; any worker
@@ -946,7 +971,7 @@ async fn poll_feed(
                 }
             },
         };
-        let poll_body = poll_request_body(&sub_cap, &cursor, fast_forwarded);
+        let poll_body = poll_request_body(&sub_cap, &cursor, fast_forwarded, boot_tail);
         let poll: PollResponse = match http
             .post(format!(
                 "{}/v1/channel/poll",
@@ -988,9 +1013,28 @@ async fn poll_feed(
             cursor = poll.cursor.clone();
         }
         if !fast_forwarded {
+            fast_forwarded = true;
+            if let Some(since) = cfg.wake_since_ms {
+                // #669 — woken by a feed event: the events since the wake
+                // window ARE the reason this sandbox exists; replay them.
+                let total = poll.events.len();
+                let replay = wake_replay(poll.events, since);
+                tracing::info!(
+                    replayed = replay.len(),
+                    of = total,
+                    since_ms = since,
+                    slot = %feed.slot,
+                    "#669 chat loop: woken by a feed event — replaying the feed from the wake window instead of fast-forwarding past it"
+                );
+                for event in replay {
+                    if tx.send((feed.clone(), event)).await.is_err() {
+                        return;
+                    }
+                }
+                continue;
+            }
             // Boot fast-forward: adopt the current cursor WITHOUT replying —
             // a restart must never replay-answer the transcript.
-            fast_forwarded = true;
             if !poll.events.is_empty() {
                 tracing::info!(
                     skipped = poll.events.len(),
@@ -1096,6 +1140,9 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
     else {
         return;
     };
+    // What the app publishes itself on this channel during the turn decides
+    // whether the turn's final text is still owed (`reply_needed`).
+    let tool_publishes_before = tool_text_publishes(channel);
     match event.kind {
         ChannelEventKind::Lifecycle => {} // returned above — never a turn
         // #519 — a voice turn on the OPERATOR chat feed (a device conversation):
@@ -1299,7 +1346,13 @@ async fn handle_event(rt: &LoopRuntime, feed: &FeedSpec, event: &ChannelEvent) {
                     }
                 }
             };
-            if let Err(e) = publisher
+            if !reply_needed(tool_publishes_before, tool_text_publishes(channel)) {
+                tracing::info!(
+                    channel,
+                    event = %event.event_id,
+                    "#670 chat loop: the app already published its reply on this channel during the turn — the turn text is not published a second time"
+                );
+            } else if let Err(e) = publisher
                 .publish_text_out(channel, &reply, &event.event_id)
                 .await
             {
@@ -1453,6 +1506,7 @@ async fn perceive_and_turn(
     }
     let turn = crate::perception::agent_turn_text(&feed.slot, kind, contact_tier, None, &result);
     let session = session_with_context(rt, feed, event, session).await;
+    let tool_publishes_before = tool_text_publishes(channel);
     let reply = match bridge_chat(&rt.http, &rt.cfg, &turn, Some(&session)).await {
         Ok(r) => {
             mark_sent(rt, &session).await;
@@ -1463,7 +1517,13 @@ async fn perceive_and_turn(
             format!("(agent error: {e})")
         }
     };
-    if let Err(e) = rt
+    if !reply_needed(tool_publishes_before, tool_text_publishes(channel)) {
+        tracing::info!(
+            channel,
+            event = %event.event_id,
+            "#670 chat loop: the app already published its reply on this channel during the media turn — the turn text is not published a second time"
+        );
+    } else if let Err(e) = rt
         .publisher
         .publish_text_out(channel, &reply, &event.event_id)
         .await
@@ -1712,18 +1772,38 @@ async fn bridge_chat(
         cfg.bridge_token.as_deref(),
         text,
         session,
+        cfg.tz_offset_minutes,
     )
     .await
 }
 
-/// The bridge `/v1/chat` body: the turn text, plus the typed session it runs
-/// in (absent = the bridge's legacy resident session).
+/// The line every turn opens with: the household's local date, weekday, time
+/// and UTC offset — the only date the agent may write down or plan by. No
+/// turn used to carry a year: on 2026-09-28 (VE prod) chef filed the family's
+/// lunch and dinner under a date it invented (`events/2024-05-20/`), and its
+/// Morning plan read "today" as 2024-09-28 and published "no meals recorded".
+pub(crate) fn turn_clock_line(now_unix: i64, tz_offset_minutes: i64) -> String {
+    let local =
+        chrono::DateTime::from_timestamp(now_unix + tz_offset_minutes * 60, 0).unwrap_or_default();
+    let sign = if tz_offset_minutes < 0 { '-' } else { '+' };
+    let offset = tz_offset_minutes.abs();
+    format!(
+        "[now · {} · UTC{sign}{:02}:{:02}]",
+        local.format("%Y-%m-%d %a %H:%M"),
+        offset / 60,
+        offset % 60
+    )
+}
+
+/// The bridge `/v1/chat` body: the turn text under its clock line, plus the
+/// typed session it runs in (absent = the bridge's legacy resident session).
 fn bridge_chat_body(
     text: &str,
     stream: bool,
     session: Option<&BridgeChatSession>,
+    clock_line: &str,
 ) -> serde_json::Value {
-    let mut body = serde_json::json!({ "text": text, "stream": stream });
+    let mut body = serde_json::json!({ "text": format!("{clock_line}\n{text}"), "stream": stream });
     if let Some(session) = session {
         body["session"] = serde_json::to_value(session).unwrap_or(serde_json::Value::Null);
     }
@@ -1735,6 +1815,10 @@ fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn now_unix_secs() -> i64 {
+    (now_millis() / 1000) as i64
 }
 
 /// Typed sessions: the first turn this boot sends into an open session
@@ -1897,11 +1981,13 @@ pub(crate) async fn bridge_chat_at(
     bridge_token: Option<&str>,
     text: &str,
     session: Option<&BridgeChatSession>,
+    tz_offset_minutes: i64,
 ) -> Result<String, String> {
+    let clock_line = turn_clock_line(now_unix_secs(), tz_offset_minutes);
     let mut req = http
         .post(format!("{}/v1/chat", bridge_url.trim_end_matches('/')))
         .timeout(Duration::from_secs(180))
-        .json(&bridge_chat_body(text, false, session));
+        .json(&bridge_chat_body(text, false, session, &clock_line));
     if let Some(token) = bridge_token {
         req = req.bearer_auth(token);
     }
@@ -2462,10 +2548,11 @@ async fn bridge_chat_stream(
     channel_id: &str,
     correlation: &str,
 ) -> Result<String, String> {
+    let clock_line = turn_clock_line(now_unix_secs(), cfg.tz_offset_minutes);
     let mut req = http
         .post(format!("{}/v1/chat", cfg.bridge_url.trim_end_matches('/')))
         .timeout(Duration::from_secs(300))
-        .json(&bridge_chat_body(text, true, session));
+        .json(&bridge_chat_body(text, true, session, &clock_line));
     if let Some(token) = &cfg.bridge_token {
         req = req.bearer_auth(token);
     }
@@ -2771,14 +2858,54 @@ mod tests {
     }
 }
 
+/// Text publishes the app made ITSELF (`publish_to_slot`), per channel, so a
+/// member's turn is answered once: when the app already posted its reply on
+/// the turn's own channel through the tool, the loop does not publish the
+/// model's final text there again (chef, 2026-09-27: "记下了：…" from the tool
+/// and "已经记下您的晚餐…" from the turn, both on family-chat, both delivered
+/// to the family).
+static TOOL_TEXT_PUBLISHES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Called by the publish tool after a successful publish.
+pub(crate) fn note_tool_publish(channel: &str, kind: &str) {
+    if kind != "text" {
+        return;
+    }
+    if let Ok(mut m) = TOOL_TEXT_PUBLISHES.lock() {
+        *m.entry(channel.to_string()).or_insert(0) += 1;
+    }
+}
+
+fn tool_text_publishes(channel: &str) -> u64 {
+    TOOL_TEXT_PUBLISHES
+        .lock()
+        .ok()
+        .and_then(|m| m.get(channel).copied())
+        .unwrap_or(0)
+}
+
+/// Pure: the turn's own reply is published only when the app did not already
+/// post one on the channel during the turn.
+pub(crate) fn reply_needed(tool_publishes_before: u64, tool_publishes_after: u64) -> bool {
+    tool_publishes_after == tool_publishes_before
+}
+
+/// How many trailing events a wake-created sandbox reads at boot — the window
+/// the replay filters by time; a household feed sees a handful of events per
+/// wake, never hundreds.
+const WAKE_REPLAY_TAIL: u32 = 50;
+
 /// One poll's body (pure — unit-tested). The FIRST poll after boot is the
-/// fast-forward: a TAIL read of one event walks every page of the feed, so the
+/// fast-forward: a TAIL read (`boot_tail` events — one on an ordinary boot,
+/// the replay window on a #669 wake) walks every page of the feed, so the
 /// returned cursor is the feed's true end (the worker's cursor = the last
 /// event it returned). Later polls continue from the cursor and long-poll.
 fn poll_request_body<C: serde::Serialize>(
     cap: &C,
     cursor: &str,
     fast_forwarded: bool,
+    boot_tail: u32,
 ) -> serde_json::Value {
     // @backend-fixture: channel_poll_body — compiled from the protocol type
     // family (cap + after + wait_seconds + tail), never a drifting hand-rolled shape.
@@ -2788,37 +2915,110 @@ fn poll_request_body<C: serde::Serialize>(
         "wait_seconds": if fast_forwarded { 25 } else { 0 },
     });
     if !fast_forwarded {
-        body["tail"] = serde_json::json!(1);
+        body["tail"] = serde_json::json!(boot_tail.max(1));
     }
     body
 }
 
+/// #669 — the events a woken sandbox handles at boot: the inbound turns that
+/// arrived at or after the wake window. Its own and its siblings' replies
+/// (direction out) and lifecycle reports are never turns; older inbound
+/// events were the previous instance's to answer.
+fn wake_replay(events: Vec<ChannelEvent>, since_ms: u64) -> Vec<ChannelEvent> {
+    events
+        .into_iter()
+        .filter(|e| {
+            matches!(
+                e.direction,
+                agentkeys_backend_client::protocol::ChannelDirection::In
+            ) && e.kind != ChannelEventKind::Lifecycle
+                && e.ts_millis >= since_ms
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod boot_fast_forward_tests {
-    use super::poll_request_body;
+    use super::{
+        note_tool_publish, poll_request_body, reply_needed, tool_text_publishes, wake_replay,
+        WAKE_REPLAY_TAIL,
+    };
+    use agentkeys_backend_client::protocol::ChannelEvent;
 
     #[test]
     fn the_boot_fast_forward_reads_the_true_end_of_the_feed() {
-        let boot = poll_request_body(&"cap", "", false);
+        let boot = poll_request_body(&"cap", "", false, 1);
         assert_eq!(boot["tail"], 1);
         assert_eq!(boot["wait_seconds"], 0);
         assert_eq!(boot["after"], "");
-        let steady = poll_request_body(&"cap", "k-0042", true);
+        let steady = poll_request_body(&"cap", "k-0042", true, 1);
         assert!(steady.get("tail").is_none());
         assert_eq!(steady["wait_seconds"], 25);
         assert_eq!(steady["after"], "k-0042");
+        // a wake-created sandbox reads the replay window at boot
+        let woken = poll_request_body(&"cap", "", false, WAKE_REPLAY_TAIL);
+        assert_eq!(woken["tail"], WAKE_REPLAY_TAIL);
+        assert_eq!(poll_request_body(&"cap", "", false, 0)["tail"], 1);
+    }
+
+    fn ev(id: &str, direction: &str, kind: &str, ts_millis: u64) -> ChannelEvent {
+        serde_json::from_value(serde_json::json!({
+            "event_id": id,
+            "channel_id": "family-chat",
+            "direction": direction,
+            "producer": { "actor": { "actor_omni": "0xgateway" } },
+            "kind": kind,
+            "ts_millis": ts_millis,
+        }))
+        .expect("a minimal channel event")
+    }
+
+    /// A tool publish on the turn's channel makes the turn's own reply redundant.
+    #[test]
+    fn a_turn_answered_through_the_publish_tool_is_not_answered_twice() {
+        assert!(reply_needed(3, 3));
+        assert!(!reply_needed(3, 4));
+        note_tool_publish("family-chat", "doc");
+        let n = tool_text_publishes("family-chat");
+        note_tool_publish("family-chat", "text");
+        assert_eq!(tool_text_publishes("family-chat"), n + 1);
+        assert!(!reply_needed(n, tool_text_publishes("family-chat")));
+    }
+
+    /// #669 — the photo and the text that woke the app (2026-09-27) are
+    /// replayed; the previous instance's turns, the app's own replies and
+    /// the lifecycle reports around them are not.
+    #[test]
+    fn a_woken_sandbox_replays_the_inbound_turns_since_the_wake_window() {
+        let since = 1_790_485_812_236;
+        let events = vec![
+            ev("old-turn", "in", "text", since - 60_000),
+            ev("photo", "in", "image", since + 5_000),
+            ev("lunch", "in", "text", since + 12_447),
+            ev("own-reply", "out", "text", since + 20_000),
+            ev("boot-lifecycle", "out", "lifecycle", since + 30_000),
+            ev("sibling-lifecycle", "in", "lifecycle", since + 31_000),
+        ];
+        let ids: Vec<String> = wake_replay(events, since)
+            .into_iter()
+            .map(|e| e.event_id)
+            .collect();
+        assert_eq!(ids, vec!["photo", "lunch"]);
     }
 }
 
 #[cfg(test)]
 mod bridge_chat_body_tests {
-    use super::bridge_chat_body;
+    use super::{bridge_chat_body, turn_clock_line};
     use agentkeys_backend_client::protocol::{BridgeChatSession, SessionWindow};
 
     #[test]
     fn a_typed_turn_names_its_session_and_a_legacy_turn_names_none() {
-        let legacy = bridge_chat_body("hi", false, None);
-        assert_eq!(legacy, serde_json::json!({ "text": "hi", "stream": false }));
+        let legacy = bridge_chat_body("hi", false, None, "[now]");
+        assert_eq!(
+            legacy,
+            serde_json::json!({ "text": "[now]\nhi", "stream": false })
+        );
         let session = BridgeChatSession {
             window: SessionWindow::Thread,
             scope: "ch-family".into(),
@@ -2826,15 +3026,41 @@ mod bridge_chat_body_tests {
             idle_minutes: Some(30),
             context: None,
         };
-        let typed = bridge_chat_body("hi", true, Some(&session));
+        let typed = bridge_chat_body("hi", true, Some(&session), "[now]");
         assert_eq!(
             typed,
             serde_json::json!({
-                "text": "hi",
+                "text": "[now]\nhi",
                 "stream": true,
                 "session": { "window": "thread", "scope": "ch-family", "party": "grandma", "idle_minutes": 30 }
             })
         );
+    }
+
+    #[test]
+    fn every_turn_carries_the_households_full_local_date() {
+        // 2026-09-28 11:08:09 UTC — the family's lunch message, UTC+8.
+        let lunch = 1_790_593_689;
+        assert_eq!(
+            turn_clock_line(lunch, 480),
+            "[now · 2026-09-28 Mon 19:08 · UTC+08:00]"
+        );
+        assert_eq!(
+            turn_clock_line(lunch, 0),
+            "[now · 2026-09-28 Mon 11:08 · UTC+00:00]"
+        );
+        assert_eq!(
+            turn_clock_line(lunch, -330),
+            "[now · 2026-09-28 Mon 05:38 · UTC-05:30]"
+        );
+    }
+
+    #[test]
+    fn the_local_date_turns_over_at_the_households_midnight() {
+        // 16:30 UTC is already the next day at UTC+8.
+        let late = 1_790_613_000;
+        assert!(turn_clock_line(late, 0).starts_with("[now · 2026-09-28 Mon 16:30"));
+        assert!(turn_clock_line(late, 480).starts_with("[now · 2026-09-29 Tue 00:30"));
     }
 }
 

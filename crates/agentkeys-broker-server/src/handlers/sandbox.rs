@@ -53,6 +53,19 @@ impl SandboxProvision {
             "agent_url": self.agent_url,
         })
     }
+
+    /// A caller stopped waiting while the ensure runs on (a create or a
+    /// cold-start adopt in flight): no instance id yet, `Starting`, and the
+    /// backend's static URL when it has one.
+    pub fn still_starting(state: &SharedState) -> Option<Self> {
+        let backend = state.sandbox.as_ref()?;
+        Some(Self {
+            agent_url: backend.static_agent_url(),
+            sandbox_id: None,
+            status: Some("Starting".to_string()),
+            error: None,
+        })
+    }
 }
 
 /// The gate-provisioning outcome for a delegate CREATE — the SINGLE owner of the
@@ -406,6 +419,20 @@ pub async fn ensure_for_delegate(
     actor_omni: &str,
     operator_omni: &str,
 ) -> Option<SandboxProvision> {
+    ensure_for_delegate_extra(state, device_key_hash, actor_omni, operator_omni, &[]).await
+}
+
+/// [`ensure_for_delegate`] with create-only extras appended to the identity +
+/// app-runtime env set — the #669 wake's replay window
+/// (`AGENTKEYS_WAKE_SINCE_MS`), which a REUSED instance never sees (its env is
+/// fixed at create; the reuse path delivers through the running loop).
+pub async fn ensure_for_delegate_extra(
+    state: &SharedState,
+    device_key_hash: &str,
+    actor_omni: &str,
+    operator_omni: &str,
+    extra_envs: &[(String, String)],
+) -> Option<SandboxProvision> {
     let ctx = match state.spawn_context_store.get(device_key_hash) {
         Ok(c) => c,
         Err(e) => {
@@ -453,6 +480,7 @@ pub async fn ensure_for_delegate(
             // #660 — the app-runtime set rides every re-create too (a
             // re-created Chef must poll its WeChat feed, not just opchat).
             envs.extend(app_runtime_envs(c));
+            envs.extend(extra_envs.iter().cloned());
             (envs, c.label.clone())
         }
         None => (Vec::new(), String::new()),
@@ -494,9 +522,41 @@ pub async fn ensure_for_delegate_with_envs(
     base_envs: &[(String, String)],
     on_create: crate::sandbox_backend::CreateEnvProvider,
 ) -> Option<SandboxProvision> {
-    let backend = state.sandbox.as_ref()?;
+    let backend = state.sandbox.clone()?;
+    let static_agent_url = backend.static_agent_url();
+    let ensured = crate::sandbox_backend::run_detached(ensure_on_backend(
+        backend,
+        device_key_hash.to_string(),
+        actor_omni.to_string(),
+        operator_omni.to_string(),
+        base_envs.to_vec(),
+        on_create,
+    ))
+    .await;
+    Some(ensured.unwrap_or_else(|e| SandboxProvision {
+        agent_url: static_agent_url,
+        sandbox_id: None,
+        status: None,
+        error: Some(format!("{e:#}")),
+    }))
+}
+
+/// The ensure itself, on owned inputs so it runs on its own task
+/// ([`crate::sandbox_backend::run_detached`]): the create, its audit emit and
+/// its log line finish even when the request that started them is gone.
+async fn ensure_on_backend(
+    backend: std::sync::Arc<SandboxBackend>,
+    device_key_hash: String,
+    actor_omni: String,
+    operator_omni: String,
+    base_envs: Vec<(String, String)>,
+    on_create: crate::sandbox_backend::CreateEnvProvider,
+) -> SandboxProvision {
+    let device_key_hash = device_key_hash.as_str();
+    let (actor_omni, operator_omni) = (actor_omni.as_str(), operator_omni.as_str());
+    let backend = backend.as_ref();
     match backend
-        .ensure_for_delegate_with_envs(device_key_hash, actor_omni, base_envs, on_create)
+        .ensure_for_delegate_with_envs(device_key_hash, actor_omni, &base_envs, on_create)
         .await
     {
         Ok(outcome) => {
@@ -518,12 +578,12 @@ pub async fn ensure_for_delegate_with_envs(
                 )
                 .await;
             }
-            Some(SandboxProvision {
+            SandboxProvision {
                 agent_url: outcome.agent_url.or_else(|| backend.static_agent_url()),
                 sandbox_id: Some(outcome.sandbox_id),
                 status: Some(outcome.status),
                 error: None,
-            })
+            }
         }
         Err(e) => {
             // Surfaced, never swallowed: the device still gets its JWT (the
@@ -538,12 +598,12 @@ pub async fn ensure_for_delegate_with_envs(
                 error = %chain,
                 "#377/#440 delegate sandbox ensure FAILED — device keeps its session; talk path may 500 no_ready_instance"
             );
-            Some(SandboxProvision {
+            SandboxProvision {
                 agent_url: backend.static_agent_url(),
                 sandbox_id: None,
                 status: None,
                 error: Some(chain),
-            })
+            }
         }
     }
 }

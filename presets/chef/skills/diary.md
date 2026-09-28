@@ -5,7 +5,11 @@ which your sandbox checkpoints — written with `mcp__openviking__write`
 (`mode: "replace"`, so a second photo of the same meal updates it):
 
 - uri: `viking://user/default/memories/events/<YYYY-MM-DD>/<HH-MM>-<who>.md`
-- content: a one-line title, then the JSON `{ "when": "…", "who": ["…"], "dishes": [{ "name": "…", "portion": "…" }], "source": "photo" | "text" | "voice" | "button", "confidence": 0.0 }`
+  — the date and time come from the `[now · YYYY-MM-DD Www HH:MM · UTC±hh:mm]`
+  line that opens every turn: that is the household's local date. A meal the
+  message places elsewhere ("昨晚", "lunch") keeps that day and meal time,
+  counted from the `now` line. Never guess a date or a year.
+- content: a one-line title, then the JSON `{ "when": "YYYY-MM-DD HH:MM", "who": ["…"], "dishes": [{ "name": "…", "portion": "…" }], "source": "photo" | "text" | "voice" | "button", "confidence": 0.0 }`
   (`button` = the family tapped **Completed** on the card: log the card's
   meal with `confidence: 1.0` and no `portion`, since nobody measured it)
 - `remember` is not available in this runtime (it needs the engine's

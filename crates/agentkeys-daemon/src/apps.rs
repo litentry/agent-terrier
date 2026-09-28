@@ -949,6 +949,7 @@ pub async fn app_install_submit(
                     b.slot,
                     b.kind.as_str()
                 ),
+                Some(b.kind),
             )
             .await;
         }
@@ -1447,6 +1448,11 @@ pub struct AppDashboard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_doc_preview: Option<String>,
+    /// Why the newest such document is not a card (the contract's parse
+    /// error) — the same words the publish tool refuses the app with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub non_card_reason: Option<String>,
 }
 
 /// Poll a feed as the master (the operator's global visibility, D13) and
@@ -1509,6 +1515,7 @@ pub(crate) struct DisplayFeedView {
     pub commands: Vec<serde_json::Value>,
     pub non_card_docs: u32,
     pub last_doc_preview: Option<String>,
+    pub non_card_reason: Option<String>,
 }
 
 /// Fold a display feed's events (oldest first) into a [`DisplayFeedView`] —
@@ -1536,9 +1543,11 @@ pub(crate) fn fold_display_feed(events: &[serde_json::Value]) -> DisplayFeedView
                         view.card = Some((c, id));
                         view.non_card_docs = 0;
                         view.last_doc_preview = None;
+                        view.non_card_reason = None;
                     }
-                    Err(_) => {
+                    Err(reason) => {
                         view.non_card_docs += 1;
+                        view.non_card_reason = Some(reason);
                         let text = String::from_utf8_lossy(&bytes);
                         view.last_doc_preview = Some(text.chars().take(160).collect::<String>());
                     }
@@ -1604,6 +1613,13 @@ mod display_feed_tests {
         let view = fold_display_feed(&events);
         assert_eq!(view.card.as_ref().map(|(_, id)| id.as_str()), Some("e1"));
         assert_eq!(view.non_card_docs, 2);
+        assert!(
+            view.non_card_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("card")),
+            "{:?}",
+            view.non_card_reason
+        );
         assert!(view
             .last_doc_preview
             .as_deref()
@@ -1616,6 +1632,7 @@ mod display_feed_tests {
         assert_eq!(view.card.as_ref().map(|(_, id)| id.as_str()), Some("e5"));
         assert_eq!(view.non_card_docs, 0);
         assert!(view.last_doc_preview.is_none());
+        assert!(view.non_card_reason.is_none());
     }
 }
 
@@ -1661,6 +1678,7 @@ pub async fn app_dashboard(
         commands,
         non_card_docs,
         last_doc_preview,
+        non_card_reason,
     } = match &display {
         Some(d) if row.status != AppInstanceStatus::Uninstalled => {
             latest_card(&state, &d.channel_id).await
@@ -1686,6 +1704,7 @@ pub async fn app_dashboard(
             commands,
             non_card_docs,
             last_doc_preview,
+            non_card_reason,
         }),
     )
         .into_response()
@@ -4015,6 +4034,7 @@ pub async fn app_rebind_submit(
                 b.slot,
                 b.kind.as_str()
             ),
+            Some(b.kind),
         )
         .await;
     }

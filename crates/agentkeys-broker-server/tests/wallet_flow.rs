@@ -110,6 +110,7 @@ async fn spawn_broker() -> Harness {
         wallet_store,
         nonce_store,
         spawn_context_store: Arc::new(SpawnContextStore::open_in_memory().unwrap()),
+        wake_creates_in_flight: Default::default(),
         identity_link_store: Arc::new(IdentityLinkStore::open_in_memory().unwrap()),
         pairing_request_store: Arc::new(
             agentkeys_broker_server::storage::PairingRequestStore::open_in_memory().unwrap(),

@@ -57,6 +57,25 @@ pub struct PublishInput {
     pub content_type: Option<String>,
 }
 
+/// The card contract in one line — what a refused `doc` publish tells the app.
+pub(crate) const CARD_CONTRACT_HINT: &str = "The card contract (schema 1): {\"card\": 1, \"title\": \"…\", \"title_zh\": \"…\", \"subtitle\": \"…\", \"metrics\": [{\"label\", \"label_zh\", \"value\", \"unit\"?, \"progress\"?}], \"sections\": [{\"title\", \"title_zh\", \"items\": [{\"text\", \"text_zh\"?, \"detail\"?}]}], \"alerts\": [{\"level\": \"info\"|\"warn\"|\"danger\", \"text\", \"text_zh\"?}], \"actions\": [{\"id\", \"label\", \"label_zh\", \"command\"}]} — every section item is {\"text\": …}, never {\"name\": …}; fix the JSON and publish again.";
+
+/// #670 — a `doc` IS a card by contract. Validate it where the tool can tell
+/// the app what is wrong, instead of letting a malformed document land on the
+/// screen's feed: the renderer keeps the last real card and the console counts
+/// "newer, not a card" (chef, 2026-09-27: 23 documents without `card: 1`,
+/// items as `{name, time, duration}`). Other kinds pass.
+pub(crate) fn validate_doc_body(kind: &str, bytes: &[u8]) -> Result<(), String> {
+    if kind != "doc" {
+        return Ok(());
+    }
+    agentkeys_backend_client::protocol::parse_card(bytes)
+        .map(|_| ())
+        .map_err(|reason| {
+            format!("publish: the doc is not a card — {reason}. {CARD_CONTRACT_HINT}")
+        })
+}
+
 /// The media type a kind implies when the caller names none.
 pub fn default_content_type(kind: &str) -> String {
     match kind {
@@ -105,6 +124,7 @@ pub async fn publish_once(
     if input.bytes.is_empty() {
         anyhow::bail!("publish: the body is empty — nothing to publish");
     }
+    validate_doc_body(&kind, &input.bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
     let app = AppRuntimeConfig::from_env();
     let channel_id = app.resolve_publish_target(&slot, &cfg.chat_channel_id);
     let http = reqwest::Client::builder()
@@ -146,6 +166,7 @@ pub async fn publish_once(
         .await
         .map_err(|e| anyhow::anyhow!("publish: {e}"))?;
     let bytes = input.bytes.len();
+    crate::chat_loop::note_tool_publish(&channel_id, &kind);
     Ok(serde_json::json!({
         "outcome": "published",
         "slot": slot,
@@ -170,6 +191,19 @@ mod tests {
                 .find(|(kk, _)| *kk == k)
                 .map(|(_, v)| v.to_string())
         }
+    }
+
+    /// The document chef improvised (no `card: 1`, `{name, time, duration}`
+    /// items) is refused with the contract; a real card and a text pass.
+    #[test]
+    fn a_doc_that_is_not_a_card_is_refused_with_the_contract() {
+        let improvised = r#"{"title": "家庭厨师 · 今天", "subtitle": "09-27 · 今日暂未记录餐食", "metrics": [], "sections": [{"title": "下一餐", "items": [{"name": "炒面筋配时蔬", "time": "今晚"}]}]}"#.as_bytes();
+        let err = validate_doc_body("doc", improvised).unwrap_err();
+        assert!(err.contains("not a card"), "{err}");
+        assert!(err.contains("\"card\": 1"), "{err}");
+        let card = r#"{"card": 1, "title": "Chef · today", "title_zh": "家庭厨师 · 今天", "sections": [{"title": "Next meal", "items": [{"text": "炒面筋配时蔬", "detail": "今晚 · 30分钟"}]}]}"#.as_bytes();
+        assert!(validate_doc_body("doc", card).is_ok());
+        assert!(validate_doc_body("text", improvised).is_ok());
     }
 
     #[test]

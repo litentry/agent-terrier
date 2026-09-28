@@ -4,11 +4,12 @@ import type { ContactSummary } from '../generated/ContactSummary';
 import type { ContactTier } from '../generated/ContactTier';
 import type { GatewayPendingBindView } from '../generated/GatewayPendingBindView';
 
-// The Contacts page's flow, as pure functions (unit-tested without React):
-// one bot per household connected ONCE; every member — the owner first —
-// binds by texting an invite code to that bot; the owner approves each bind.
-// A member's access is their rows on the household's CHANNEL DOCUMENTS
-// (speak / read per channel) — never a list of apps.
+// The household flow, as pure functions (unit-tested without React): one bot
+// per household connected ONCE (the transport page); every member — the
+// owner first — binds by texting an invite code to that bot or scanning their
+// own connect QR; the owner approves each bind (the contacts page). A member's
+// access is their rows on the household's CHANNEL DOCUMENTS (speak / read per
+// channel) — never a list of apps.
 
 /** The owner's own invite uses a FIXED contact id so re-minting replaces it. */
 export const SELF_CONTACT_ID = 'self-owner';
@@ -85,18 +86,26 @@ export function selfState(pending: GatewayPendingBindView[], contacts: ContactSu
   return mine.claimed ? 'claimed' : 'minted';
 }
 
-export type ContactsTab = 'connection' | 'invitations' | 'contacts';
+/** The contacts page's tabs: the people. The method's connection and the
+ *  owner's own bind live on the transport page. */
+export type ContactsTab = 'invitations' | 'contacts';
+/** Where a flow step lives: a contacts-page tab, or the transport page. */
+export type FlowTarget = ContactsTab | 'transport';
 
-/** The tab the page opens on: the gate and the owner's own bot come first,
- *  then open invites, then the bound household. A tab the user picked wins. */
+/** The contacts tab the page opens on: open invites first, else the bound
+ *  household; while the gate or the owner's own bind is still missing the
+ *  invites tab (nothing to approve yet — the hint points at the gate page).
+ *  A tab the user picked wins. */
 export function defaultTab(online: boolean, self: SelfState, openInvites: number): ContactsTab {
-  if (!online || self !== 'bound') return 'connection';
+  if (!online || self !== 'bound') return 'invitations';
   if (openInvites > 0) return 'invitations';
   return 'contacts';
 }
 
-/** The ONE thing to do next, naming the tab it lives on — null once the household
- *  is settled (owner bound with their own bot, no open invites, a member bound). */
+/** The ONE thing to do next, naming where it lives — the transport page for
+ *  the bot and the owner's own bind, a contacts tab for the family — null once
+ *  the household is settled (owner bound with their own bot, no open invites, a
+ *  member bound). */
 export function nextStepHint(
   online: boolean,
   self: SelfState,
@@ -104,10 +113,10 @@ export function nextStepHint(
   openInvites: number,
   familyBound: number,
   ownerConnected: boolean,
-): { text: string; tab: ContactsTab } | null {
-  if (!online) return { text: scan ? 'connect your own WeChat — scan the QR from the connection card' : 'connect the household bot', tab: 'connection' };
-  if (self !== 'bound') return { text: scan ? 'bind yourself as the owner — connect my WeChat' : 'bind yourself as the owner — mint your code and text it to the bot', tab: 'connection' };
-  if (scan && !ownerConnected) return { text: 'your own WeChat has no clawbot yet — connect it from the connection card', tab: 'connection' };
+): { text: string; tab: FlowTarget } | null {
+  if (!online) return { text: scan ? 'connect your own WeChat — scan the QR on the transport page' : 'connect the household bot on the transport page', tab: 'transport' };
+  if (self !== 'bound') return { text: scan ? 'bind yourself as the owner — connect my WeChat (transport page)' : 'bind yourself as the owner — mint your code on the transport page and text it to the bot', tab: 'transport' };
+  if (scan && !ownerConnected) return { text: 'your own WeChat has no clawbot yet — connect it on the transport page', tab: 'transport' };
   if (openInvites > 0) return { text: `${openInvites} open invite${openInvites === 1 ? '' : 's'} — ${scan ? 'show the connect QR when they are with you' : 'they text the code, you approve'}`, tab: 'invitations' };
   if (familyBound === 0) return { text: 'invite your first family member', tab: 'invitations' };
   return null;

@@ -160,7 +160,7 @@ pub struct UiBridgeState {
     pub gateway_enroll_pending: RwLock<Option<crate::gateway_device::GatewayEnrollPending>>,
     /// #667 — when the messaging endpoint row was last synced from the
     /// gateway's device status (unix secs; throttles the status-proxy hook).
-    pub gateway_endpoint_synced_at: std::sync::atomic::AtomicU64,
+    pub gateway_transport_row_checked_at: std::sync::atomic::AtomicU64,
     /// #424 — the scope-commit stash: `user_op_hash` (from `/v1/scope/build`) →
     /// `(actor_omni, services)`, consumed by `scope_submit_proxy` on a confirmed
     /// commit to upsert the binding manifest with the NAMES the set-replace
@@ -1767,7 +1767,7 @@ pub fn build_state(
         console_session: RwLock::new(None),
         console_enroll_pending: RwLock::new(None),
         gateway_enroll_pending: RwLock::new(None),
-        gateway_endpoint_synced_at: std::sync::atomic::AtomicU64::new(0),
+        gateway_transport_row_checked_at: std::sync::atomic::AtomicU64::new(0),
         scope_services_by_op_hash: RwLock::new(HashMap::new()),
         gateway_registry_synced: std::sync::atomic::AtomicBool::new(false),
         stacks: parse_stacks_json(std::env::var("AGENTKEYS_STACKS_JSON").ok().as_deref()),
@@ -7417,6 +7417,7 @@ pub(crate) async fn spawn_submit_core(
                     &chat_id,
                     &format!("Chat · {display}"),
                     "auto-registered at spawn (#430 operator chat)",
+                    Some(agentkeys_backend_client::protocol::ChannelEndpointKind::Chat),
                 )
                 .await;
             }
@@ -7924,7 +7925,20 @@ async fn list_inheritable_namespaces(
 /// alone yields a raw-id chip). Insert-if-absent; best-effort loud. (Until
 /// 2026-09-22 every caller stamped "operator chat" — an app's family-chat feed
 /// read as one on the channels page.)
-pub(crate) async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: &str, note: &str) {
+/// Insert-if-absent a channel-registry row with its endpoint KIND (#664 — the
+/// closed vocabulary an app slot binds by). An existing row keeps its name and
+/// note but GAINS the kind when it has none: the rows the install / rebind /
+/// spawn paths auto-registered before this carried no kind, so the slot
+/// chooser folded the household's own channels under "other channels" while
+/// the contact gate's endpoint row stood alone as the only `messaging` option
+/// (owner report, 2026-09-26).
+pub(crate) async fn ensure_channel_named(
+    state: &UiBridgeState,
+    id: &str,
+    name: &str,
+    note: &str,
+    kind: Option<agentkeys_backend_client::protocol::ChannelEndpointKind>,
+) {
     if !valid_channel_id(id) {
         return;
     }
@@ -7938,7 +7952,14 @@ pub(crate) async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: 
             return;
         }
     };
-    if registry.channels.iter().any(|c| c.id == id) {
+    if let Some(row) = registry.channels.iter_mut().find(|c| c.id == id) {
+        if row.kind.is_none() && kind.is_some() {
+            row.kind = kind;
+            match persist_channel_registry(state, registry).await {
+                Ok(storage) => tracing::info!(id, storage, "channel row gained its kind"),
+                Err(e) => tracing::warn!(id, "channel kind backfill persist FAILED — {e}"),
+            }
+        }
         return;
     }
     registry.channels.push(ApiChannel {
@@ -7946,7 +7967,7 @@ pub(crate) async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: 
         name: name.to_string(),
         note: Some(note.to_string()),
         created_at: now_unix(),
-        kind: None,
+        kind,
         endpoint_actor_omni: None,
     });
     match persist_channel_registry(state, registry).await {
@@ -7955,61 +7976,71 @@ pub(crate) async fn ensure_channel_named(state: &UiBridgeState, id: &str, name: 
     }
 }
 
-/// #667 — upsert a channel-registry row for an ENDPOINT (the gateway's
-/// transport, a paired display): its kind + its device actor. A new row is
-/// created named `name`; an existing one only gains/updates the two fields.
-/// Best-effort, loud (the registry is the install wizard's endpoint list).
-pub(crate) async fn ensure_channel_endpoint_row(
-    state: &UiBridgeState,
-    id: &str,
-    name: &str,
-    kind: agentkeys_backend_client::protocol::ChannelEndpointKind,
-    actor_omni: &str,
-) {
-    if !valid_channel_id(id) || actor_omni.trim().is_empty() {
+/// A transport is NOT a channel (owner rule 2026-09-26): the contact gate
+/// relays the household's channels and owns none. #667 used to register a
+/// channel-registry row named after the transport (`weixin` | `telegram`,
+/// kind messaging, the gate's device actor as its endpoint) for an app slot
+/// to bind — the pre-2026-09-22 relay model — and the slot chooser then offered
+/// it as the one `messaging` option. That row is retired: the gate's device
+/// actor holds grants on the household channels it relays (granted per
+/// install), and the chooser lists household channels only. Idempotent and
+/// best-effort, loud. A row a LIVE app still binds (the legacy model) is left
+/// in place with a warning until the app is rebound onto a household channel.
+pub(crate) async fn retire_transport_row(state: &UiBridgeState, transport: &str, actor_omni: &str) {
+    let id = transport.trim().to_ascii_lowercase();
+    if !valid_channel_id(&id) {
         return;
     }
+    let norm = |s: &str| s.trim().trim_start_matches("0x").to_ascii_lowercase();
     let mut registry = match ensure_channel_registry(state).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(id, "channel registry LOAD failed for endpoint row — {e}");
+            tracing::warn!(
+                id,
+                "channel registry LOAD failed for the transport-row retire — {e}"
+            );
             return;
         }
     };
-    let mut changed = false;
-    match registry.channels.iter_mut().find(|c| c.id == id) {
-        Some(row) => {
-            if row.kind != Some(kind) {
-                row.kind = Some(kind);
-                changed = true;
-            }
-            if row.endpoint_actor_omni.as_deref() != Some(actor_omni) {
-                row.endpoint_actor_omni = Some(actor_omni.to_string());
-                changed = true;
-            }
-        }
-        None => {
-            registry.channels.push(ApiChannel {
-                id: id.to_string(),
-                name: name.to_string(),
-                note: Some(
-                    "auto-registered endpoint (#667 — the contact gate's device actor)".to_string(),
-                ),
-                created_at: now_unix(),
-                kind: Some(kind),
-                endpoint_actor_omni: Some(actor_omni.to_string()),
-            });
-            changed = true;
-        }
-    }
-    if !changed {
+    let Some(row) = registry.channels.iter().find(|c| c.id == id) else {
+        return;
+    };
+    let gate_actor = norm(actor_omni);
+    let carries_gate_actor = !gate_actor.is_empty()
+        && row
+            .endpoint_actor_omni
+            .as_deref()
+            .is_some_and(|a| norm(a) == gate_actor);
+    let auto_registered = row
+        .note
+        .as_deref()
+        .is_some_and(|n| n.starts_with("auto-registered endpoint (#667"));
+    if !carries_gate_actor && !auto_registered {
+        // A row that merely shares the transport's name and was made by hand
+        // is the owner's; leave it.
         return;
     }
+    if let Ok(apps) = crate::apps::ensure_app_registry(state).await {
+        let users: Vec<String> = apps
+            .live()
+            .filter(|a| a.bindings.slots.iter().any(|b| b.channel_id == id))
+            .map(|a| a.label.clone())
+            .collect();
+        if !users.is_empty() {
+            tracing::warn!(
+                id,
+                apps = %users.join(","),
+                "transport row kept: a live app still binds it — rebind the app onto a household channel; a transport is not a channel"
+            );
+            return;
+        }
+    }
+    registry.channels.retain(|c| c.id != id);
     match persist_channel_registry(state, registry).await {
         Ok(storage) => {
-            tracing::info!(id, storage, actor = %actor_omni, "endpoint channel row upserted")
+            tracing::info!(id, storage, "transport row retired — a transport is not a channel (the gate relays household channels, owns none)")
         }
-        Err(e) => tracing::warn!(id, "endpoint channel row persist FAILED — {e}"),
+        Err(e) => tracing::warn!(id, "transport row retire persist FAILED — {e}"),
     }
 }
 
@@ -9370,13 +9401,13 @@ async fn gateway_status_proxy(
         None,
     )
     .await;
-    // #667 — keep the messaging endpoint row (kind + the gateway's device
-    // actor) current with the gateway; throttled, best-effort, off the
-    // request path.
+    // A transport is not a channel: retire the #667 transport row the gate's
+    // enrollment used to register, once it is known which actor the gate is;
+    // throttled, best-effort, off the request path.
     if resp.status().is_success() {
         let st = state.clone();
         tokio::spawn(async move {
-            crate::gateway_device::sync_endpoint_row(&st).await;
+            crate::gateway_device::retire_transport_row_throttled(&st).await;
         });
     }
     resp
@@ -13482,7 +13513,49 @@ pub(crate) async fn plant_master_memory_with_history(
                     .await
                 {
                     Ok(Some((d, h))) => (d, h),
-                    Ok(None) => (Vec::new(), String::new()),
+                    Ok(None) => {
+                        // The worker knows no blob for this namespace. A brand-new
+                        // namespace has no resource rows either; rows the registry
+                        // holds for it were written AFTER their bodies were
+                        // planted, so rows + no blob = the blob is missing, not
+                        // new — a fresh write would silently orphan every item
+                        // the request does not carry (owner report 2026-09-26: a
+                        // curated item's row survived while its body vanished from
+                        // the namespace). Refuse loudly instead.
+                        let requested: std::collections::BTreeSet<&str> =
+                            entries.iter().map(|e| e.key.as_str()).collect();
+                        let orphaned: Vec<String> = match crate::apps::ensure_resource_registry(
+                            state,
+                        )
+                        .await
+                        {
+                            Ok(reg) => reg
+                                .items
+                                .iter()
+                                .filter(|r| r.ns == *ns && !requested.contains(r.id.as_str()))
+                                .map(|r| r.id.clone())
+                                .collect(),
+                            Err(e) => {
+                                return Err((
+                                    axum::http::StatusCode::BAD_GATEWAY,
+                                    format!(
+                                        "plant aborted: knowledge:{ns} has no durable blob and the resource registry could not be read ({e}) — not writing a fresh blob blind"
+                                    ),
+                                ));
+                            }
+                        };
+                        if !orphaned.is_empty() {
+                            return Err((
+                                axum::http::StatusCode::CONFLICT,
+                                format!(
+                                    "plant aborted: knowledge:{ns} has no durable blob on the memory worker, yet the resource registry lists {} item(s) in it ({}) — a fresh blob would orphan them; check the memory plane (bucket prefix, versions) before planting",
+                                    orphaned.len(),
+                                    orphaned.join(", ")
+                                ),
+                            ));
+                        }
+                        (Vec::new(), String::new())
+                    }
                     Err(e) => {
                         return Err((
                                 axum::http::StatusCode::BAD_GATEWAY,
@@ -16092,6 +16165,78 @@ mod tests {
         assert_eq!(normalize_data_class("").unwrap(), "credentials");
         assert_eq!(normalize_data_class("Memory").unwrap(), "memory");
         assert!(normalize_data_class("payments").is_err());
+    }
+
+    /// A transport is not a channel (owner rule 2026-09-26): the #667 row
+    /// named after the transport and carrying the gate's device actor is
+    /// retired; a household channel and a hand-made row sharing a transport's
+    /// name stay. Idempotent.
+    #[tokio::test]
+    async fn the_gates_transport_row_is_retired_household_rows_stay() {
+        let state = make_state();
+        let row = |id: &str,
+                   kind: Option<agentkeys_backend_client::protocol::ChannelEndpointKind>,
+                   note: Option<&str>,
+                   actor: Option<&str>| ApiChannel {
+            id: id.into(),
+            name: id.into(),
+            note: note.map(str::to_string),
+            created_at: 1,
+            kind,
+            endpoint_actor_omni: actor.map(str::to_string),
+        };
+        use agentkeys_backend_client::protocol::ChannelEndpointKind as K;
+        *state.channel_registry.write().await = Some(ChannelRegistry {
+            version: 1,
+            channels: vec![
+                row(
+                    "weixin",
+                    Some(K::Messaging),
+                    Some("auto-registered endpoint (#667 — the contact gate's device actor)"),
+                    Some("4e7830e3ce81"),
+                ),
+                row(
+                    "family-chat",
+                    Some(K::Messaging),
+                    Some("auto-registered at rebind — chef's `family_chat` slot (messaging)"),
+                    None,
+                ),
+                row(
+                    "telegram",
+                    Some(K::Messaging),
+                    Some("made by hand"),
+                    Some("0xdeadbeef"),
+                ),
+            ],
+        });
+        // the gate reports its actor 0x-prefixed; the row stored it bare — same actor
+        retire_transport_row(&state, "weixin", "0x4E7830E3CE81").await;
+        retire_transport_row(&state, "telegram", "0x4e7830e3ce81").await;
+        retire_transport_row(&state, "family-chat", "0x4e7830e3ce81").await;
+        let ids: Vec<String> = state
+            .channel_registry
+            .read()
+            .await
+            .clone()
+            .unwrap()
+            .channels
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["family-chat", "telegram"]);
+        // idempotent
+        retire_transport_row(&state, "weixin", "0x4e7830e3ce81").await;
+        assert_eq!(
+            state
+                .channel_registry
+                .read()
+                .await
+                .clone()
+                .unwrap()
+                .channels
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

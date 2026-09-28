@@ -365,18 +365,29 @@ pub async fn agent_update(
         .ok()
         .and_then(|b| b.try_into().ok())
         .unwrap_or([0u8; 32]);
-    match rotate_delegate_runtime(
-        &state,
-        &backend,
-        &req.device_key_hash,
-        &actor_omni,
-        &operator_omni_0x,
-        session_bytes32,
-        req.force,
-        "update",
-    )
+    // The rotate kills the old instance before it creates the new one, so it
+    // must finish even when the request is gone (nginx's 300 s cut, a closed
+    // console tab) — the create, the adopt and the home import run on their
+    // own task.
+    let rotate_state = state.clone();
+    let device_key_hash = req.device_key_hash.clone();
+    let force = req.force;
+    let rotated = crate::sandbox_backend::run_detached(async move {
+        rotate_delegate_runtime(
+            &rotate_state,
+            &backend,
+            &device_key_hash,
+            &actor_omni,
+            &operator_omni_0x,
+            session_bytes32,
+            force,
+            "update",
+        )
+        .await
+    })
     .await
-    {
+    .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    match rotated {
         Ok(outcome) => Ok(Json(AgentUpdateResponse {
             device_key_hash: req.device_key_hash,
             old_sandbox_ids: outcome.old_sandbox_ids,

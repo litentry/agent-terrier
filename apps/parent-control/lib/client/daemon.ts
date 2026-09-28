@@ -1121,7 +1121,7 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson('/v1/master/gateway/device/enroll/build', {});
   }
 
-  async gatewayEnrollSubmit(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; transport: string; channel_id: string }>> {
+  async gatewayEnrollSubmit(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; transport: string }>> {
     return this.postJson('/v1/master/gateway/device/enroll/submit', body);
   }
 }

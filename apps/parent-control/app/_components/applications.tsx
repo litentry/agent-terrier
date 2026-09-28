@@ -19,6 +19,8 @@ import { akLog } from '@/lib/debug';
 import { getMasterCredId } from '@/lib/identityStore';
 import { getAssertionOverHash } from '@/lib/webauthn';
 import type { AgentKeysClient, ChannelDef } from '@/lib/client/types';
+import type { ChannelDoc } from '@/lib/generated/ChannelDoc';
+import { gatewayClient } from '@/lib/gatewayClient';
 import type { AppDashboard } from '@/lib/generated/AppDashboard';
 import type { AppInstallBindings } from '@/lib/generated/AppInstallBindings';
 import type { AppInstallBuildResponse } from '@/lib/generated/AppInstallBuildResponse';
@@ -38,7 +40,7 @@ import { ChatPanel } from './chat';
 import { cardAsks, onDemandTurnText } from '@/lib/client/askCard';
 import { KnowledgeItemModal } from './knowledge';
 import { editReaches } from '@/lib/client/knowledge';
-import { FEED_ID_RE, gateRelayNote, partitionResourceOptions, partitionSlotOptions, suggestedFeedId } from '@/lib/client/slotOptions';
+import { FEED_ID_RE, gateRelayNote, partitionResourceOptions, partitionSlotOptions, suggestedFeedId, bindingDescriptionDefault } from '@/lib/client/slotOptions';
 
 type View = 'apps' | 'endpoints';
 
@@ -159,6 +161,10 @@ export function ApplicationsPage({
   const [addingResource, setAddingResource] = useState<null | { kind?: ResourceKind; slot?: string; edit?: ResourceItemRow }>(null);
   const [console_, setConsole] = useState<ConsoleDeviceStatus | null>(null);
   const [gateway, setGateway] = useState<GatewayDeviceStatus | null>(null);
+  // The household's channel documents (the contact gate's): what a messaging
+  // slot chooses among — the default channel first, each with its purpose
+  // and members. Empty when no gate is configured.
+  const [docs, setDocs] = useState<ChannelDoc[]>([]);
   /** #717 — the rebind ceremony's current step, while one runs. */
   const [rebinding, setRebinding] = useState<string | null>(null);
   /** The anchor ceremonies (seal existing · re-hydrate): the current step + the last outcome. */
@@ -193,6 +199,8 @@ export function ApplicationsPage({
         setGatewayError(null);
       } else setGatewayError(g.status?.detail ?? 'contact gate unavailable');
     }
+    const d = await gatewayClient.channels();
+    setDocs(d.ok ? d.value.channels : []);
   }, [client]);
 
   useEffect(() => {
@@ -591,7 +599,7 @@ export function ApplicationsPage({
             <div className="stat"><div className="v">{resources.length}</div><div className="k">bindable knowledge items</div></div>
             <div className="stat"><div className="v">{console_?.enrolled ? '✓' : '—'}</div><div className="k">console device actor</div></div>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: 16, marginTop: 16 }}>
+          <div className="cols-2" style={{ marginTop: 16 }}>
             <Panel title="── installed" flush>
               {live.length === 0 && <div className="muted" style={{ padding: 16 }}>Nothing installed yet — pick a template from the catalog.</div>}
               <div className="device-grid" style={{ padding: live.length ? 14 : 0 }}>
@@ -640,7 +648,7 @@ export function ApplicationsPage({
               template={selectedTemplate}
               dashboard={dashboard}
               error={dashError}
-              onCardAction={(a) => void onCardAction(selectedRow.label, dashboard?.card_channel_id, dashboard?.card?.updated_at, a)}
+              onCardAction={(a) => onCardAction(selectedRow.label, dashboard?.card_channel_id, dashboard?.card?.updated_at, a)}
               onUninstall={() => setUninstalling(selectedRow)}
               onRefresh={() => void openApp(selectedRow.label)}
               resources={resources}
@@ -655,6 +663,7 @@ export function ApplicationsPage({
               onReloadContext={() => void loadContext(selectedRow.label)}
               channels={channels}
               gateway={gateway}
+              docs={docs}
               onGoChannels={onGoChannels}
               onGoEndpoints={() => setView('endpoints')}
             />
@@ -663,7 +672,7 @@ export function ApplicationsPage({
       )}
 
       {view === 'endpoints' && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        <div className="cols-2">
           <Panel title="── this console · device actor (#541)">
             <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
               A card tap on this console publishes a <code>command</code> event from the console&apos;s OWN device actor — the same event a kitchen screen publishes. The first install that binds a display slot enrolls this console in the SAME Touch ID; this button is the standalone way.
@@ -725,6 +734,7 @@ export function ApplicationsPage({
             channels={channels}
             resources={resources}
             gateway={gateway}
+            docs={docs}
             setW={setWizard}
             onInstall={(w) => void install(w, tp)}
             onOpen={(label) => { setWizard(null); setView('apps'); void openApp(label); }}
@@ -809,6 +819,7 @@ function AppDetail({
   rebinding,
   channels,
   gateway,
+  docs = [],
   onGoChannels,
   onGoEndpoints,
   context,
@@ -817,9 +828,11 @@ function AppDetail({
 }: {
   app: AppInstanceRow;
   template?: PresetSummary;
+  /** The household's channel documents — what a messaging slot chooses among. */
+  docs?: ChannelDoc[];
   dashboard: AppDashboard | null;
   error: string | null;
-  onCardAction: (a: CardViewAction) => void;
+  onCardAction: (a: CardViewAction) => void | Promise<void>;
   onUninstall: () => void;
   onRefresh: () => void;
   /** The registry rows (to edit a bound item in place) and the live apps (to say who else reads it). */
@@ -849,6 +862,26 @@ function AppDetail({
   const [descDraft, setDescDraft] = useState<Record<string, string>>({});
   const channelSlots = template?.slots ?? [];
   const currentOf = (slot: string) => app.bound_channels.find((b) => b.slot === slot)?.channel_id ?? null;
+  const currentDescription = (slot: string) => app.bindings.slots.find((b) => b.slot === slot)?.description;
+  // What the next commit writes as a messaging binding's description when the
+  // owner wrote none: the template's slot reason + route examples (the daemon's
+  // seed rule, mirrored). An app installed before the rule carries none until
+  // then — shown as the pending default, and pre-filled into the editor.
+  const descriptionDefault = (slot: string): string => {
+    const spec = channelSlots.find((x) => x.slot === slot);
+    return spec && template ? bindingDescriptionDefault(spec, template) : '';
+  };
+  const openBindingsEditor = () => {
+    setDraft({});
+    setDescDraft(
+      Object.fromEntries(
+        channelSlots
+          .filter((x) => x.kind === 'messaging' && !currentDescription(x.slot) && descriptionDefault(x.slot))
+          .map((x) => [x.slot, descriptionDefault(x.slot)]),
+      ),
+    );
+    setEditingBindings(true);
+  };
   const changedSlots = channelSlots.filter((s) => {
     const v = draft[s.slot];
     return typeof v === 'string' && v !== currentOf(s.slot);
@@ -896,7 +929,7 @@ function AppDetail({
           </button>
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div className="cols-2">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {display && (
             <Panel title={`── on ${display.channel_id} · interactive`}>
@@ -910,7 +943,7 @@ function AppDetail({
                     <div className="banner warn" style={{ marginTop: 8 }}>
                       <span className="lbl">newer, not a card</span>
                       <span>
-                        The app published {dashboard!.non_card_docs} newer document{dashboard!.non_card_docs === 1 ? '' : 's'} on this feed that {dashboard!.non_card_docs === 1 ? 'is' : 'are'} not in the card format, so the screen keeps the last real card. That is what an app running without its skills does — wake or update its runtime on the Delegates page, then ask again.
+                        The app published {dashboard!.non_card_docs} newer document{dashboard!.non_card_docs === 1 ? '' : 's'} on this feed that {dashboard!.non_card_docs === 1 ? 'is' : 'are'} not in the card format{dashboard!.non_card_reason ? ` (${dashboard!.non_card_reason})` : ''}, so the screen keeps the last real card. The app is told exactly this when it publishes — its publish tool refuses a document that is not a card — so its next run republishes a real one: ask for the card again below.
                         {dashboard!.last_doc_preview ? ` Newest starts: ${dashboard!.last_doc_preview}` : ''}
                       </span>
                     </div>
@@ -924,7 +957,7 @@ function AppDetail({
                     <div className="banner warn" style={{ marginTop: 8 }}>
                       <span className="lbl">newer, not a card</span>
                       <span>
-                        The app published {dashboard!.non_card_docs} newer document{dashboard!.non_card_docs === 1 ? '' : 's'} on this feed that {dashboard!.non_card_docs === 1 ? 'is' : 'are'} not in the card format, so the screen keeps the last real card. That is what an app running without its skills does — wake or update its runtime on the Delegates page, then ask again.
+                        The app published {dashboard!.non_card_docs} newer document{dashboard!.non_card_docs === 1 ? '' : 's'} on this feed that {dashboard!.non_card_docs === 1 ? 'is' : 'are'} not in the card format{dashboard!.non_card_reason ? ` (${dashboard!.non_card_reason})` : ''}, so the screen keeps the last real card. The app is told exactly this when it publishes — its publish tool refuses a document that is not a card — so its next run republishes a real one: ask for the card again below.
                         {dashboard!.last_doc_preview ? ` Newest starts: ${dashboard!.last_doc_preview}` : ''}
                       </span>
                     </div>
@@ -1005,7 +1038,7 @@ function AppDetail({
           </Panel>
           <Panel
             title="── bindings"
-            right={onRebind && app.status !== 'uninstalled' && !editingBindings ? <button className="btn sm" onClick={() => { setDraft({}); setEditingBindings(true); }}>edit bindings</button> : undefined}
+            right={onRebind && app.status !== 'uninstalled' && !editingBindings ? <button className="btn sm" onClick={openBindingsEditor}>edit bindings</button> : undefined}
           >
             <dl className="kvs">
               {app.bound_channels.map((b) => (
@@ -1017,7 +1050,14 @@ function AppDetail({
                     {b.kind !== 'messaging' && b.endpoint_actor_omni ? ` · actor ${b.endpoint_actor_omni.slice(0, 10)}…` : ''}
                     {b.kind === 'messaging' && (
                       <div className="muted" style={{ fontSize: 11.5 }}>
-                        {app.bindings.slots.find((s) => s.slot === b.slot)?.description ?? 'no description yet — what the app does on this channel (edit bindings)'}
+                        {currentDescription(b.slot) ??
+                          (descriptionDefault(b.slot) ? (
+                            <>
+                              not on the channel document yet — the next commit writes the template&apos;s: <em>{descriptionDefault(b.slot)}</em> (edit bindings to change it)
+                            </>
+                          ) : (
+                            'no description yet — what the app does on this channel (edit bindings)'
+                          ))}
                       </div>
                     )}
                   </dd>
@@ -1070,6 +1110,8 @@ function AppDetail({
                     label={app.label}
                     channels={channels}
                     gateway={gateway}
+                    docs={docs}
+                    current={currentOf(s.slot)}
                     value={draft[s.slot] !== undefined ? draft[s.slot] : currentOf(s.slot)}
                     onPick={(id) => setDraft({ ...draft, [s.slot]: id })}
                     description={descDraft[s.slot] ?? app.bindings.slots.find((b) => b.slot === s.slot)?.description ?? ''}
@@ -1171,6 +1213,7 @@ function InstallWizard({
   w,
   tp,
   channels,
+  docs = [],
   resources,
   gateway,
   setW,
@@ -1185,6 +1228,8 @@ function InstallWizard({
   w: WizardState;
   tp: PresetSummary;
   channels: ChannelDef[];
+  /** The household's channel documents — what a messaging slot chooses among. */
+  docs?: ChannelDoc[];
   resources: ResourceItemRow[];
   /** The contact gate's device status — the ONLY option a messaging slot may bind. */
   gateway: GatewayDeviceStatus | null;
@@ -1260,6 +1305,7 @@ function InstallWizard({
               label={w.label}
               channels={channels}
               gateway={gateway}
+              docs={docs}
               value={w.bindings[s.slot]}
               onPick={(id) => setW({ ...w, bindings: { ...w.bindings, [s.slot]: id } })}
               description={w.descriptions[s.slot] ?? ''}
@@ -1370,6 +1416,8 @@ function SlotChooser({
   label,
   channels,
   gateway,
+  docs = [],
+  current = null,
   value,
   onPick,
   description,
@@ -1383,6 +1431,11 @@ function SlotChooser({
   label: string;
   channels: ChannelDef[];
   gateway: GatewayDeviceStatus | null;
+  /** The household's channel documents (the contact gate's): a messaging slot
+   *  lists these first, each with its purpose and members. */
+  docs?: ChannelDoc[];
+  /** The channel the slot binds today (a rebind), to mark its row. */
+  current?: string | null;
   value: string | null | undefined;
   onPick: (id: string | null) => void;
   /** Messaging slots: the binding's description — what the app does on the
@@ -1397,9 +1450,12 @@ function SlotChooser({
   const [showOthers, setShowOthers] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newId, setNewId] = useState(() => suggestedFeedId(slot.slot));
-  const { matching, others } = useMemo(() => partitionSlotOptions(channels, slot.kind, query), [channels, slot.kind, query]);
-  const selectedRow = channels.find((c) => c.id === value);
-  const selectedIsOther = !!selectedRow && selectedRow.kind !== slot.kind;
+  const { matching, others } = useMemo(() => partitionSlotOptions(channels, slot.kind, query, docs), [channels, slot.kind, query, docs]);
+  const docOf = (id: string) => docs.find((d) => d.id === id);
+  // The pick sits under the folded "other channels" (its hint says so) only
+  // when the partition put it there — a household channel with no registry
+  // kind is in the main list now, not an "other".
+  const selectedIsOther = !!value && others.some((c) => c.id === value);
   const canCreate = !!onCreateChannel && FEED_ID_RE.test(newId) && !channels.some((c) => c.id === newId);
   const create = async () => {
     if (!onCreateChannel || !canCreate) return;
@@ -1411,21 +1467,33 @@ function SlotChooser({
       setCreating(false);
     }
   };
-  const row = (c: ChannelDef) => (
-    <div
-      key={c.id}
-      role="radio"
-      aria-checked={value === c.id}
-      className="perm-row"
-      style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', cursor: 'pointer' }}
-      onClick={() => onPick(c.id)}
-    >
-      <span style={{ flex: 1 }}>
-        {c.name} <span className="muted" style={{ fontSize: 11 }}><code>{c.id}</code> · {c.kind ?? 'unkinded'}</span>
-      </span>
-      <span className={`perm-switch ${value === c.id ? 'on' : ''}`} />
-    </div>
-  );
+  const row = (c: ChannelDef) => {
+    const doc = docOf(c.id);
+    return (
+      <div
+        key={c.id}
+        role="radio"
+        aria-checked={value === c.id}
+        className="perm-row"
+        style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', cursor: 'pointer' }}
+        onClick={() => onPick(c.id)}
+      >
+        <span className={`perm-radio ${value === c.id ? 'on' : ''}`} aria-hidden="true" />
+        <span style={{ flex: 1, minWidth: 0 }}>
+          {doc?.name || c.name} <span className="muted" style={{ fontSize: 11 }}><code>{c.id}</code>{doc ? '' : ` · ${c.kind ?? 'unkinded'}`}</span>
+          {current === c.id && <> <Chip kind="ok">current</Chip></>}
+          {doc?.household_default && <> <Chip>household default</Chip></>}
+          {doc?.operator_of && <> <Chip>operator channel · {doc.operator_of}</Chip></>}
+          {doc && (
+            <div className="muted" style={{ fontSize: 11 }}>
+              {doc.purpose ? `${doc.purpose} · ` : ''}{doc.members.length} member{doc.members.length === 1 ? '' : 's'}
+              {doc.apps.length ? ` · apps: ${doc.apps.map((a) => a.alias).join(', ')}` : ''}
+            </div>
+          )}
+        </span>
+      </div>
+    );
+  };
   return (
     <div style={{ marginBottom: 14 }}>
       <div className="perm-section-head">
@@ -1434,7 +1502,7 @@ function SlotChooser({
       </div>
       {slot.kind === 'messaging' && (
         <div className="muted" style={{ fontSize: 11.5, marginBottom: 6 }}>
-          {gateRelayNote(gateway, label)}
+          One channel per slot: the app&apos;s row lives on that channel&apos;s document, and the router sends a member&apos;s message there. Members aggregate on their side — their WeChat shows every channel they read, each message prefixed <code>[channel]</code>. {gateRelayNote(gateway, label)}
           {!gateway?.configured && <>{' '}<button className="btn sm" type="button" onClick={onGoEndpoints}>set up the contact gate</button></>}
         </div>
       )}
@@ -1486,8 +1554,8 @@ function SlotChooser({
             style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', cursor: 'pointer' }}
             onClick={() => onPick(null)}
           >
+            <span className={`perm-radio ${value === null ? 'on' : ''}`} aria-hidden="true" />
             <span className="muted" style={{ flex: 1 }}>skip for now</span>
-            <span className={`perm-switch ${value === null ? 'on' : ''}`} />
           </div>
         )}
       </div>

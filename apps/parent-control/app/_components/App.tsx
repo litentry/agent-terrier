@@ -32,9 +32,8 @@ import { DelegatesPage } from './pairing';
 import { ArchiveAgentDialog, SpawnAgentModal } from './spawn';
 import { DevicesPage } from './devices';
 import { ChannelRegistryPage } from './channels';
-import { ContactsPage } from './gateway';
+import { ContactsPage, TransportPage } from './gateway';
 import { ApplicationsPage } from './applications';
-import { RoutePage } from './route';
 import { getAssertionOverHash } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
@@ -52,9 +51,11 @@ const looksSessionExpired = (detail?: string): boolean =>
   !!detail && /session expired|re-?authenticate/i.test(detail);
 
 // #404 IA: household = delegates (sandbox agents) / devices (channel endpoints)
-// / channels (the id-anchored registry) / contacts (the WeChat contact gate + family).
+// / channels (the id-anchored registry) / transport (the method the family
+// reaches the household through + the contact gate behind it: the bot, the
+// router, the live turns) / contacts (the family).
 // The former top-level 'pairing' page became 'delegates'.
-type Page = 'actors' | 'detail' | 'knowledge' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'contacts' | 'applications' | 'route' | 'audit' | 'decode' | 'chain' | 'logo';
+type Page = 'actors' | 'detail' | 'knowledge' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'transport' | 'contacts' | 'applications' | 'audit' | 'decode' | 'chain' | 'logo';
 
 type PendingAction =
   | { kind: 'revoke-device'; actor: Actor; intent: Intent }
@@ -1328,7 +1329,7 @@ export function App() {
     : page === 'delegates' ? 'pairing'
     : page === 'devices' ? 'channels'
     : page === 'applications' ? 'pairing'
-    : page === 'route' ? 'contacts'
+    : page === 'transport' ? 'contacts'
     : ((['audit', 'knowledge', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
 
   // ─── Onboarding gate (workflow 1) ──────────────────────────────
@@ -1448,14 +1449,14 @@ export function App() {
         <button className={`app-nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
           channels<span className="count">{channels.length || '∅'}</span>
         </button>
+        <button className={`app-nav-item ${page === 'transport' ? 'active' : ''}`} onClick={() => go('transport')}>
+          transport
+        </button>
         <button className={`app-nav-item ${page === 'contacts' ? 'active' : ''}`} onClick={() => go('contacts')}>
           contacts
         </button>
         <button className={`app-nav-item ${page === 'applications' ? 'active' : ''}`} onClick={() => go('applications')}>
           applications
-        </button>
-        <button className={`app-nav-item ${page === 'route' ? 'active' : ''}`} onClick={() => go('route')}>
-          route
         </button>
         <span className="app-nav-sep" aria-hidden="true" />
         <button className={`app-nav-item ${page === 'audit' || page === 'decode' ? 'active' : ''}`} onClick={() => go('audit')}>
@@ -1555,21 +1556,21 @@ export function App() {
             }}
           />
         )}
+        {page === 'transport' && (
+          // How the family reaches the household: the method this stack runs
+          // (its connection, the owner's own bind) and the contact gate behind
+          // it — the router (#722), the live turns, the record, the contact audit.
+          <TransportPage onGoContacts={() => go('contacts')} />
+        )}
         {page === 'contacts' && (
-          // A member's access is their rows on the household's channel
-          // documents (speak / read per channel), read from the contact gate.
-          <ContactsPage client={client} />
+          // The family: invites, and each member's rows on the household's
+          // channel documents (speak / read per channel), read from the contact gate.
+          <ContactsPage onGoTransport={() => go('transport')} />
         )}
         {page === 'applications' && (
           // #682 — install / inspect / uninstall against the real registries
           // (epic #660 stage 1). Channels feed the wizard's slot options.
           <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} />
-        )}
-        {page === 'route' && (
-          // #722 — what the contact gate's router sends the decision model (Kev /
-          // Jev) and how it answered: the guidance, each member's options, the
-          // model server, recent decisions with their timings.
-          <RoutePage />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}

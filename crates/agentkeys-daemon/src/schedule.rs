@@ -112,6 +112,37 @@ pub struct ScheduleRuntime {
     pub chat_channel_id: String,
     pub http: reqwest::Client,
     pub publisher: Arc<crate::chat_loop::Publisher>,
+    /// The launch lifecycle (#693): a tick due while the sandbox is still
+    /// booting waits for the bridge to answer, bounded like a chat turn —
+    /// a cold-created app's first tick used to hit the bridge before dsh was
+    /// up and publish `(scheduled turn … failed: bridge HTTP 502)` (measured
+    /// 2026-09-27).
+    pub hub: Option<Arc<crate::lifecycle::LifecycleHub>>,
+}
+
+/// A tick's turn is retried this many times on a transient bridge failure
+/// (a 502/503/504 or a transport error — dsh restarting, the bridge's
+/// nginx up before its upstream), a pause apart, before the failure is
+/// published. A definitive refusal (4xx, a bridge error body) is not retried.
+const SCHEDULE_TICK_ATTEMPTS: u8 = 4;
+const SCHEDULE_TICK_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Is a bridge failure worth retrying? The gateway statuses and transport
+/// errors are; a definitive answer is not.
+pub(crate) fn is_transient_bridge_error(e: &str) -> bool {
+    let lower = e.to_ascii_lowercase();
+    if lower.contains("http 502") || lower.contains("http 503") || lower.contains("http 504") {
+        return true;
+    }
+    if lower.contains("http ") {
+        return false;
+    }
+    lower.contains("connect")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("error sending request")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
 }
 
 fn now_unix() -> i64 {
@@ -225,19 +256,37 @@ pub async fn run(rt: ScheduleRuntime) {
                 let correlation = clock_correlation(i, entry, now);
                 tracing::info!(label = %entry.label, "#669 schedule: tick — running the scheduled turn");
                 let session = crate::session_scope::schedule_session(&entry.label, entry.session);
-                let reply = match crate::chat_loop::bridge_chat_at(
-                    &rt.http,
-                    &rt.bridge_url,
-                    rt.bridge_token.as_deref(),
-                    &text,
-                    Some(&session),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(error = %e, label = %entry.label, "#669 schedule: scheduled turn failed");
-                        format!("(scheduled turn `{}` failed: {e})", entry.label)
+                // A tick due mid-boot waits for the bridge (bounded), then a
+                // transient bridge failure is retried a few times before it
+                // is published as the turn's outcome.
+                if let Some(h) = &rt.hub {
+                    let _ = h.wait_ready().await;
+                }
+                let mut attempt = 0u8;
+                let reply = loop {
+                    attempt += 1;
+                    match crate::chat_loop::bridge_chat_at(
+                        &rt.http,
+                        &rt.bridge_url,
+                        rt.bridge_token.as_deref(),
+                        &text,
+                        Some(&session),
+                        rt.tz_offset_minutes,
+                    )
+                    .await
+                    {
+                        Ok(r) => break r,
+                        Err(e)
+                            if attempt < SCHEDULE_TICK_ATTEMPTS
+                                && is_transient_bridge_error(&e) =>
+                        {
+                            tracing::warn!(error = %e, label = %entry.label, attempt, "#669 schedule: scheduled turn hit a transient bridge failure — retrying");
+                            tokio::time::sleep(SCHEDULE_TICK_RETRY).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, label = %entry.label, attempt, "#669 schedule: scheduled turn failed");
+                            break format!("(scheduled turn `{}` failed: {e})", entry.label);
+                        }
                     }
                 };
                 if let Err(e) = rt
@@ -256,6 +305,28 @@ pub async fn run(rt: ScheduleRuntime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bridge's gateway statuses and transport errors are retried; a
+    /// definitive answer (a 4xx, an error body) is published as-is.
+    #[test]
+    fn a_transient_bridge_failure_is_worth_a_retry() {
+        for e in [
+            "bridge HTTP 502 Bad Gateway",
+            "bridge HTTP 503 Service Unavailable",
+            "bridge send: error sending request for url (http://127.0.0.1:8090/v1/chat): connection refused",
+            "bridge send: operation timed out",
+        ] {
+            assert!(is_transient_bridge_error(e), "{e}");
+        }
+        for e in [
+            "bridge HTTP 401 Unauthorized",
+            "bridge HTTP 400 Bad Request",
+            "bridge HTTP 500 Internal Server Error",
+            "agent error: 401: unknown relay key",
+        ] {
+            assert!(!is_transient_bridge_error(e), "{e}");
+        }
+    }
 
     fn entry(cron: &str, label: &str) -> PresetSchedule {
         PresetSchedule {

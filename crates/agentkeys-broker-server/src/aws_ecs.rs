@@ -192,8 +192,8 @@ pub struct EcsSandboxClient {
     /// rotation lands without a broker restart.
     inference: agentkeys_inference_creds::Resolver,
     search_model: Option<String>,
-    /// Spawns serialized — same rationale as the VE driver's ensure_lock.
-    ensure_lock: tokio::sync::Mutex<()>,
+    /// Spawns serialized per delegate — same rationale as the VE driver's.
+    ensure_locks: crate::sandbox_backend::DelegateLocks,
 }
 
 impl EcsSandboxClient {
@@ -212,7 +212,7 @@ impl EcsSandboxClient {
             search_model: std::env::var("SEARCH_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            ensure_lock: tokio::sync::Mutex::new(()),
+            ensure_locks: crate::sandbox_backend::DelegateLocks::default(),
         }
     }
 
@@ -385,7 +385,7 @@ impl EcsSandboxClient {
         base_envs: &[(String, String)],
         on_create: crate::sandbox_backend::CreateEnvProvider,
     ) -> Result<crate::sandbox_backend::EnsureOutcome> {
-        let _guard = self.ensure_lock.lock().await;
+        let _guard = self.ensure_locks.lock(device_key_hash).await;
 
         let all = self.list_managed_tasks().await?;
         if let Some(mine) = pick_live_for_device(&all, device_key_hash) {

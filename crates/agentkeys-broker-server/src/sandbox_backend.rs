@@ -10,10 +10,69 @@
 //! hard error (no-silent-override — a broker guessing between two spawn
 //! targets is a mis-provisioned host, not a preference).
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use anyhow::{bail, Result};
 
 use crate::aws_ecs::{EcsSandboxClient, EcsSandboxConfig};
 use crate::ve_faas::VeFaasClient;
+
+/// Spawn serialization PER DELEGATE — the #377 one-delegate-one-instance
+/// invariant needs one list→create at a time for a delegate, never a
+/// broker-wide queue. The earlier single lock let one slow create hold every
+/// other ensure for its whole cold-start adopt: measured 2026-09-28 on VE
+/// prod, chef's `CreateSandbox` 408 + 120 s adopt kept agent-i's update
+/// waiting 150 s and chef's own new sandbox without a session (every resolve
+/// runs an ensure). Keys ignore `0x` and case, so the resolve path (`0x…`) and
+/// the lease sweeper (bare hex) share one lock.
+#[derive(Default)]
+pub struct DelegateLocks {
+    locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl DelegateLocks {
+    pub async fn lock(&self, device_key_hash: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let key = device_key_hash
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X")
+            .to_ascii_lowercase();
+        let delegate_lock = {
+            let mut locks = self
+                .locks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // An entry only the map still references has no holder and no
+            // waiter — drop it so the map stays one row per active delegate.
+            locks.retain(|_, held| Arc::strong_count(held) > 1);
+            locks.entry(key).or_default().clone()
+        };
+        delegate_lock.lock_owned().await
+    }
+
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.locks
+            .lock()
+            .map(|locks| locks.len())
+            .unwrap_or_default()
+    }
+}
+
+/// Run a spawn-path future to completion on its own task. The caller still
+/// awaits the outcome, but a caller that goes away — the in-sandbox daemon's
+/// 40 s resolve timeout, nginx's 300 s proxy cut — can no longer cancel a
+/// `CreateSandbox` or a rotate halfway: measured 2026-09-28, a resolve whose
+/// client gave up abandoned a create mid-flight, and the instance booted
+/// orphaned until the #669 duplicate reaper retired it.
+pub(crate) async fn run_detached<T: Send + 'static>(
+    work: impl std::future::Future<Output = T> + Send + 'static,
+) -> Result<T> {
+    tokio::spawn(work)
+        .await
+        .map_err(|e| anyhow::anyhow!("sandbox task ended abnormally: {e}"))
+}
 
 /// #543 fail-closed direct-ark guard, shared by both drivers: a create whose
 /// `extra_envs` carry no gate-provisioned `ARK_API_KEY` would inject the
@@ -340,6 +399,57 @@ mod tests {
 
     fn envs(keys: &[&str]) -> Vec<(String, String)> {
         keys.iter().map(|k| (k.to_string(), "v".into())).collect()
+    }
+
+    #[tokio::test]
+    async fn one_delegate_serializes_whatever_the_hash_spelling() {
+        let locks = DelegateLocks::default();
+        let held = locks.lock("0xAB12").await;
+        let second =
+            tokio::time::timeout(std::time::Duration::from_millis(50), locks.lock("ab12")).await;
+        assert!(
+            second.is_err(),
+            "the bare-hex spelling must wait on the 0x holder"
+        );
+        drop(held);
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), locks.lock("ab12"))
+            .await
+            .expect("a released lock is free");
+    }
+
+    #[tokio::test]
+    async fn a_slow_delegate_never_blocks_another() {
+        let locks = DelegateLocks::default();
+        let _chef = locks.lock("0xaaaa").await;
+        tokio::time::timeout(std::time::Duration::from_millis(50), locks.lock("0xbbbb"))
+            .await
+            .expect("a different delegate must not queue behind a held create");
+    }
+
+    #[tokio::test]
+    async fn idle_delegates_leave_no_lock_behind() {
+        let locks = DelegateLocks::default();
+        drop(locks.lock("0xaaaa").await);
+        drop(locks.lock("0xbbbb").await);
+        let _held = locks.lock("0xcccc").await;
+        assert_eq!(locks.tracked(), 1, "only the held delegate stays tracked");
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_goes_away_does_not_cancel_the_work() {
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        let caller = tokio::spawn(run_detached(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        caller.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the create must run to completion after its caller is dropped"
+        );
     }
 
     #[test]

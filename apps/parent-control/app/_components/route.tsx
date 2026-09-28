@@ -144,7 +144,9 @@ function verdictChip(x: RouterExchange) {
   return <Chip kind="bad">{x.verdict}</Chip>;
 }
 
-export function RoutePage() {
+/** The router's page. `embedded` renders it as the contact gate page's
+ *  route tab: a one-line lead and the refresh button instead of a page head. */
+export function RoutePage({ embedded = false }: { embedded?: boolean } = {}) {
   const [view, setView] = useState<GatewayRouterView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notConfigured, setNotConfigured] = useState(false);
@@ -183,12 +185,21 @@ export function RoutePage() {
 
   return (
     <div>
-      <PageHead
-        crumb="route"
-        title="How messages are routed"
-        desc="What the contact gate sends the decision model for each WeChat message, and how it answered. The turn log lives in the gate's memory — a restart clears it."
-        actions={<button className="btn" onClick={() => void refresh()}>refresh</button>}
-      />
+      {embedded ? (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', margin: '0 0 12px' }}>
+          <span className="muted" style={{ fontSize: 12.5, flex: 1 }}>
+            What the contact gate sends the decision model for each WeChat message, and how it answered. The turn log lives in the gate&apos;s memory — a restart clears it.
+          </span>
+          <button className="btn sm" onClick={() => void refresh()}>refresh</button>
+        </div>
+      ) : (
+        <PageHead
+          crumb="route"
+          title="How messages are routed"
+          desc="What the contact gate sends the decision model for each WeChat message, and how it answered. The turn log lives in the gate's memory — a restart clears it."
+          actions={<button className="btn" onClick={() => void refresh()}>refresh</button>}
+        />
+      )}
       {notConfigured && (
         <div className="banner" style={{ marginBottom: 12 }}>
           <span className="lbl">not set up</span>

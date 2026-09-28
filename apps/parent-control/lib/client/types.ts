@@ -890,7 +890,7 @@ export interface AgentKeysClient {
   consoleEnrollSubmit?(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; label: string }>>;
   gatewayDeviceStatus?(): Promise<Result<GatewayDeviceStatus>>;
   gatewayEnrollBuild?(input: Record<string, never>): Promise<Result<DeviceEnrollBuild>>;
-  gatewayEnrollSubmit?(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; transport: string; channel_id: string }>>;
+  gatewayEnrollSubmit?(body: unknown): Promise<Result<{ ok: boolean; actor_omni: string; transport: string }>>;
 }
 
 /** The broker's accept envelope for a device-actor enrollment (+ the daemon's

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { CardView, cardAge, cardText } from '@agentkeys/design-system/react';
+import { CardView, CARD_TAP_HOLD_MS, cardAge, cardTapGate, cardText } from '@agentkeys/design-system/react';
 import type { CardViewDocument } from '@agentkeys/design-system/react';
 import type { CardDocument } from '../generated/CardDocument';
 
@@ -56,5 +56,43 @@ describe('CardView golden fixtures (#670)', () => {
     expect(cardAge(100, 130)).toBe('just now');
     expect(cardAge(100, 100 + 15 * 60)).toBe('15 min ago');
     expect(cardAge(100, 100 + 3 * 3600)).toBe('3 h ago');
+  });
+});
+
+describe('a card tap sends one command (the double-click guard)', () => {
+  it('refuses a second tap while the first is still sending', () => {
+    let clock = 1_000;
+    const gate = cardTapGate(CARD_TAP_HOLD_MS, () => clock);
+    expect(gate.begin()).toBe(true);
+    clock += 150;
+    expect(gate.begin()).toBe(false);
+  });
+
+  it('keeps refusing for the hold after a send that returned at once', () => {
+    let clock = 1_000;
+    const gate = cardTapGate(800, () => clock);
+    expect(gate.begin()).toBe(true);
+    clock += 50;
+    expect(gate.end()).toBe(750);
+    clock += 100;
+    expect(gate.begin()).toBe(false);
+    clock += 700;
+    expect(gate.begin()).toBe(true);
+  });
+
+  it('takes the next tap as soon as a slow send settles past the hold', () => {
+    let clock = 1_000;
+    const gate = cardTapGate(800, () => clock);
+    expect(gate.begin()).toBe(true);
+    clock += 2_000;
+    expect(gate.end()).toBe(0);
+    expect(gate.begin()).toBe(true);
+  });
+
+  it('an idle card renders its buttons enabled', () => {
+    const card = JSON.parse(readFileSync(join(FIXTURES, 'chef-day.json'), 'utf8')) as CardDocument;
+    const html = render(card, 'en');
+    expect(html).not.toContain('disabled');
+    expect(html).not.toContain('aria-busy');
   });
 });

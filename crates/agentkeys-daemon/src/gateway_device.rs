@@ -13,9 +13,11 @@
 //! then on each install's batch grants the gateway actor pub + sub on the
 //! app's messaging feed, and the gateway's feed hop relays contact turns.
 //!
-//! The enrollment also writes the CHANNEL-REGISTRY row an app slot binds to:
-//! `id = <transport>` (`weixin` | `telegram`), `kind = messaging`,
-//! `endpoint_actor_omni = <the gateway actor>`.
+//! A transport is NOT a channel (owner rule 2026-09-26): the enrollment used
+//! to write a channel-registry row named after the transport (`weixin` |
+//! `telegram`) for an app slot to bind; the gate relays the household's
+//! channels and owns none, so that row is retired (`retire_transport_row`) and
+//! never written again.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -23,12 +25,12 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use agentkeys_backend_client::protocol::{
-    ChannelEndpointKind, GatewayDevicePairingDone, GatewayDevicePairingStart, GatewayDeviceStatus,
+    GatewayDevicePairingDone, GatewayDevicePairingStart, GatewayDeviceStatus,
 };
 
 use crate::console_device::{device_accept_build, device_accept_submit, nominal_device_scope};
 use crate::ui_bridge::{
-    ensure_channel_endpoint_row, gateway_admin_call, invalidate_fleet_sync, now_unix, pairing_err,
+    gateway_admin_call, invalidate_fleet_sync, now_unix, pairing_err, retire_transport_row,
     upsert_binding_manifest_entry, BindingManifestEntry, SharedUiBridgeState, UiBridgeState,
 };
 
@@ -40,15 +42,6 @@ pub(crate) struct GatewayEnrollPending {
     pub child_omni: String,
     pub device_key_hash: String,
     pub transport: String,
-}
-
-/// The channel-registry row name for a transport namespace.
-pub(crate) fn transport_display_name(transport: &str) -> String {
-    match transport {
-        "weixin" => "微信 · WeChat".to_string(),
-        "telegram" => "Telegram".to_string(),
-        other => other.to_string(),
-    }
 }
 
 /// The device label the gateway's actor is claimed under.
@@ -141,14 +134,7 @@ pub(crate) async fn finish_gateway_enrollment(
         },
     )
     .await;
-    ensure_channel_endpoint_row(
-        state,
-        &pending.transport,
-        &transport_display_name(&pending.transport),
-        ChannelEndpointKind::Messaging,
-        &actor_omni,
-    )
-    .await;
+    retire_transport_row(state, &pending.transport, &actor_omni).await;
     *state.gateway_enroll_pending.write().await = None;
     invalidate_fleet_sync(state);
     tracing::info!(actor = %actor_omni, transport = %pending.transport, "#667 contact gate ENROLLED as a device actor");
@@ -157,49 +143,43 @@ pub(crate) async fn finish_gateway_enrollment(
         "actor_omni": actor_omni,
         "label": pending.label,
         "transport": pending.transport,
-        "channel_id": pending.transport,
         "device_key_hash": done.device_key_hash,
         "session_proven": done.session_proven,
     }))
 }
 
-/// Keep the messaging endpoint row current with the gateway's actor —
-/// throttled to once a minute (called from the status proxy the web app
-/// polls). Best-effort, loud.
-pub(crate) async fn sync_endpoint_row(state: &UiBridgeState) {
+/// Retire the transport row the gate's enrollment used to register, once the
+/// gate's actor is known — throttled to once a minute (called from the status
+/// proxy the web app polls). Best-effort, loud. A transport is not a channel.
+pub(crate) async fn retire_transport_row_throttled(state: &UiBridgeState) {
     use std::sync::atomic::Ordering;
     let now = now_unix();
-    let last = state.gateway_endpoint_synced_at.load(Ordering::Relaxed);
+    let last = state
+        .gateway_transport_row_checked_at
+        .load(Ordering::Relaxed);
     if now.saturating_sub(last) < 60 {
         return;
     }
     state
-        .gateway_endpoint_synced_at
+        .gateway_transport_row_checked_at
         .store(now, Ordering::Relaxed);
     match fetch_device_status(state).await {
         Ok(st) => {
             if let Some(actor) = st.actor_omni.as_deref().filter(|a| !a.is_empty()) {
                 if !st.transport.is_empty() {
-                    ensure_channel_endpoint_row(
-                        state,
-                        &st.transport,
-                        &transport_display_name(&st.transport),
-                        ChannelEndpointKind::Messaging,
-                        actor,
-                    )
-                    .await;
+                    retire_transport_row(state, &st.transport, actor).await;
                 }
             }
         }
         Err(e) => tracing::debug!(
             target: "agentkeys.daemon.ui_bridge",
-            "contact gate endpoint row sync skipped ({e})"
+            "contact gate transport-row check skipped ({e})"
         ),
     }
 }
 
-/// GET /v1/master/gateway/device — the gateway's device-actor status (and the
-/// endpoint row upsert when it is enrolled).
+/// GET /v1/master/gateway/device — the gateway's device-actor status (and,
+/// throttled, the retire of the transport row an older enrollment wrote).
 pub async fn gateway_device_status(
     State(state): State<SharedUiBridgeState>,
 ) -> axum::response::Response {
@@ -210,14 +190,7 @@ pub async fn gateway_device_status(
         Ok(st) => {
             if let Some(actor) = st.actor_omni.as_deref().filter(|a| !a.is_empty()) {
                 if !st.transport.is_empty() {
-                    ensure_channel_endpoint_row(
-                        &state,
-                        &st.transport,
-                        &transport_display_name(&st.transport),
-                        ChannelEndpointKind::Messaging,
-                        actor,
-                    )
-                    .await;
+                    retire_transport_row(&state, &st.transport, actor).await;
                 }
             }
             (StatusCode::OK, Json(st)).into_response()
@@ -339,7 +312,6 @@ mod tests {
         assert!(agentkeys_backend_client::protocol::is_valid_label(
             &gateway_label("weixin")
         ));
-        assert_eq!(transport_display_name("telegram"), "Telegram");
     }
 
     /// Without a master session the status read is refused; with one but no

@@ -109,11 +109,15 @@ impl ChannelStsMinter {
     /// fire-and-forget from the publish path: a wake failure is logged, never
     /// surfaced to the publisher (the durable feed already holds the event;
     /// the broker's sweeper / the next event retries).
-    pub async fn wake(&self, owner_omni: &str, channel_id: &str) {
+    pub async fn wake(&self, owner_omni: &str, channel_id: &str, event_ts_ms: u64) {
         let url = format!("{}/v1/sandbox/wake", self.broker_url);
+        // #669 — the waking event's timestamp: the window a cold-created
+        // sandbox replays its feed from (its boot fast-forward would otherwise
+        // skip the very event that woke it).
         let body = serde_json::json!({
             "owner_omni": format!("0x{}", owner_omni.trim_start_matches("0x")),
             "channel_id": channel_id,
+            "event_ts_ms": event_ts_ms,
         });
         match self
             .http

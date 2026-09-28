@@ -239,6 +239,7 @@ export function ChatPanel({
           maxHeight: 360,
           minHeight: 160,
           overflowY: 'auto',
+          minWidth: 0,
           border: '1px solid var(--rule)',
           borderRadius: 8,
           padding: 10,
@@ -264,6 +265,7 @@ export function ChatPanel({
               background: b.direction === 'in' ? 'var(--accent)' : 'var(--bg)',
               border: b.direction === 'status' ? '1px dashed var(--rule-soft)' : '1px solid var(--rule)',
               whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
               fontSize: b.direction === 'status' ? 11.5 : 14,
             }}
             title={`${b.direction === 'in' ? 'you' : 'agent'} · ${new Date(b.ts_millis).toLocaleString()}`}
