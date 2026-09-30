@@ -624,15 +624,23 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
-            // The engine starts after this daemon (supervisord priority): give
-            // its first `/health` a bounded wait before judging it, so the
-            // first report is `ready`, not a `degraded` that stands for a
-            // whole interval.
+            // The engine starts after this daemon (supervisord priority), and
+            // again whenever the checkpoint lets it go after holding it for
+            // its workspace restore: give that `/health` a bounded wait before
+            // judging it, so the report is `ready`, not a `degraded` that
+            // stands for a whole interval.
+            let released_for = cfg
+                .hub
+                .as_ref()
+                .and_then(|h| h.engine_released_at())
+                .map(|t| t.elapsed());
             if first_pass_waits_for_engine(
                 first_pass,
                 first_pass_started.elapsed(),
                 cfg.first_pass_engine_wait,
-            ) {
+            ) || released_for.is_some_and(|waited| {
+                first_pass_waits_for_engine(true, waited, cfg.first_pass_engine_wait)
+            }) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -752,7 +760,8 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
     }
 }
 
-/// The inter-pass wait — cut short by "sync now" (#693).
+/// The inter-pass wait — cut short by "sync now" (#693), or by the engine
+/// being let go after its workspace restore (#694).
 async fn wait_interval_or_sync(cfg: &MirrorConfig) {
     match &cfg.hub {
         Some(h) => {
@@ -760,6 +769,9 @@ async fn wait_interval_or_sync(cfg: &MirrorConfig) {
                 _ = tokio::time::sleep(cfg.interval) => {}
                 _ = h.sync_now.notified() => {
                     tracing::info!("#693 lifecycle: sync now — pulling immediately");
+                }
+                _ = h.engine_wake.notified() => {
+                    tracing::info!("#694 memory mirror: the engine was let go after its workspace restore — waiting for it");
                 }
             }
         }

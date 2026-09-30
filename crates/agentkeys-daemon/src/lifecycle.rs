@@ -64,6 +64,15 @@ pub struct LifecycleHub {
     mirror_enabled: AtomicBool,
     restore_done: AtomicBool,
     first_pass_done: AtomicBool,
+    /// #594 — a checkpoint restore that has not concluded
+    /// ([`LifecycleHub::set_checkpoint_note`]).
+    checkpoint_note: std::sync::Mutex<Option<String>>,
+    /// #694 — when the checkpoint last let the engine go
+    /// ([`LifecycleHub::engine_released`]).
+    engine_released_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Wakes the mirror's inter-pass wait when the engine is let go after the
+    /// boot restore phase.
+    pub engine_wake: Notify,
 }
 
 fn report(stage: LifecycleStage, detail: impl Into<String>) -> DelegateLifecycle {
@@ -102,6 +111,9 @@ impl LifecycleHub {
             mirror_enabled: AtomicBool::new(true),
             restore_done: AtomicBool::new(false),
             first_pass_done: AtomicBool::new(false),
+            checkpoint_note: std::sync::Mutex::new(None),
+            engine_released_at: std::sync::Mutex::new(None),
+            engine_wake: Notify::new(),
         })
     }
 
@@ -139,9 +151,10 @@ impl LifecycleHub {
         !self.restore_done.load(Ordering::Acquire)
     }
 
-    /// The checkpoint's restore phase ended (restored, nothing to restore, or
-    /// gave up) — the mirror may now judge the engine, or, without one, we are
-    /// ready.
+    /// The checkpoint's boot restore phase ended — restored, nothing to
+    /// restore, or still pending (the checkpoint loop keeps retrying and
+    /// [`Self::set_checkpoint_note`] says so) — the mirror may now judge the
+    /// engine, or, without one, we are ready.
     pub fn restore_finished(&self, detail: &str) {
         self.restore_done.store(true, Ordering::Release);
         if !self.mirror_enabled.load(Ordering::Acquire) {
@@ -149,6 +162,64 @@ impl LifecycleHub {
         } else {
             self.stage(LifecycleStage::Syncing, detail);
         }
+    }
+
+    /// #594 — mark (or, with `None`, clear) a checkpoint restore that has not
+    /// concluded. The note rides the detail of EVERY published report until
+    /// cleared, so a later pull pass's report cannot hide it; a change
+    /// republishes the current stage at once.
+    pub fn set_checkpoint_note(&self, note: Option<String>) {
+        {
+            let mut current = self
+                .checkpoint_note
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if *current == note {
+                return;
+            }
+            *current = note;
+        }
+        let mut ev = self.current();
+        ev.ts_millis = now_millis();
+        let _ = self.events.try_send(ev);
+    }
+
+    /// #694 — the checkpoint let the engine go (its workspace restore left
+    /// pending, or the hold reached its bound): the engine starts now, so the
+    /// mirror waits out its `/health` like a first pass instead of reporting
+    /// it down until the next interval — woken at once after the boot phase.
+    pub fn engine_released(&self) {
+        *self
+            .engine_released_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
+        if !self.restore_pending() {
+            self.engine_wake.notify_one();
+        }
+    }
+
+    pub fn engine_released_at(&self) -> Option<std::time::Instant> {
+        *self
+            .engine_released_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A report as it leaves the daemon: the checkpoint note after the detail.
+    fn published(&self, mut ev: DelegateLifecycle) -> DelegateLifecycle {
+        let note = self
+            .checkpoint_note
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(note) = note {
+            ev.detail = if ev.detail.is_empty() {
+                note
+            } else {
+                format!("{} · {note}", ev.detail)
+            };
+        }
+        ev
     }
 
     pub fn first_pass_pending(&self) -> bool {
@@ -291,10 +362,10 @@ pub fn spawn_publisher(
     };
     tokio::spawn(async move {
         let now = current(&feeds);
-        publish_all(&publisher, &now, &hub.current()).await;
+        publish_all(&publisher, &now, &hub.published(hub.current())).await;
         while let Some(ev) = rx.recv().await {
             let now = current(&feeds);
-            publish_all(&publisher, &now, &ev).await;
+            publish_all(&publisher, &now, &hub.published(ev)).await;
         }
     });
 }
@@ -395,6 +466,69 @@ mod tests {
         hub.pass_finished(2, 0, 0, 30, vec!["fetch travel: 502".into()], false);
         assert_eq!(hub.current().stage, LifecycleStage::Degraded);
         assert_eq!(hub.current().errors.len(), 1);
+    }
+
+    /// #594 — a checkpoint restore still pending past the boot window must stay
+    /// visible: the next pull pass's report would otherwise replace the detail.
+    #[test]
+    fn a_pending_restore_rides_every_published_report_until_it_concludes() {
+        let hub = LifecycleHub::new(Duration::from_secs(1));
+        let mut rx = hub.take_events().expect("events");
+        let pending = "checkpoint restore pending (no delegate session) — saves paused";
+        hub.set_checkpoint_note(Some(pending.into()));
+        let republished = rx.try_recv().expect("a note change republishes the stage");
+        assert_eq!(republished.stage, LifecycleStage::Booting);
+        assert_eq!(
+            hub.published(republished).detail,
+            format!("daemon up · {pending}")
+        );
+        hub.set_checkpoint_note(Some(pending.into()));
+        assert!(
+            rx.try_recv().is_err(),
+            "an unchanged note republishes nothing"
+        );
+
+        hub.restore_finished("");
+        assert_eq!(hub.published(hub.current()).detail, pending);
+        hub.pass_finished(2, 10, 0, 300, vec![], false);
+        let ready = hub.published(hub.current());
+        assert_eq!(ready.stage, LifecycleStage::Ready, "chat never waits on it");
+        assert_eq!(
+            ready.detail,
+            format!("2 namespace(s) · 10 line(s) mirrored · 300 ms · {pending}")
+        );
+
+        hub.set_checkpoint_note(None);
+        assert_eq!(
+            hub.published(hub.current()).detail,
+            "2 namespace(s) · 10 line(s) mirrored · 300 ms"
+        );
+        assert_eq!(
+            hub.current().detail,
+            "2 namespace(s) · 10 line(s) mirrored · 300 ms"
+        );
+    }
+
+    /// #694 — the engine let go by the checkpoint's hold is waited out by the
+    /// mirror; after the boot phase the mirror is also woken from its
+    /// inter-pass wait (during it, the mirror is not sleeping there).
+    #[tokio::test]
+    async fn a_released_engine_wakes_the_mirror_only_after_the_boot_phase() {
+        let hub = LifecycleHub::new(Duration::from_secs(1));
+        assert!(hub.engine_released_at().is_none());
+        hub.engine_released();
+        assert!(hub.engine_released_at().is_some());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), hub.engine_wake.notified())
+                .await
+                .is_err(),
+            "no wake during the boot restore phase"
+        );
+        hub.restore_finished("");
+        hub.engine_released();
+        tokio::time::timeout(Duration::from_millis(200), hub.engine_wake.notified())
+            .await
+            .expect("woken after the boot phase");
     }
 
     #[test]

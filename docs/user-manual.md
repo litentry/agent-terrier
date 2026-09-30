@@ -330,6 +330,27 @@ expires). You don't have to do anything about it:
   the latest checkpoint at boot. Only the agent itself can read or write its
   checkpoint — it lives under the same permission your pairing grant already
   gave it, encrypted at rest.
+- **A slow start never overwrites the checkpoint.** If a fresh sandbox cannot
+  reach its storage while it boots (a busy broker, a storage outage), the
+  agent answers anyway on an empty workspace and keeps retrying the restore —
+  for its first three minutes, then at every checkpoint (the first two
+  minutes later, then every 15 minutes by default; every 30 seconds while
+  the engine waits, below). Until the restore lands it saves nothing over
+  the stored checkpoint, and its stage (on its card and in its chat) says
+  **checkpoint restore pending**. When the restore lands, the agent restarts
+  once on its restored workspace; a file it changed in the meantime that the
+  checkpoint also holds goes back to the checkpoint's version.
+- **Its engine memory waits for its own restore.** The knowledge engine —
+  where the `memories/` files above live — holds its start until its stored
+  memory is back, for up to 30 minutes by default (your operator's
+  `AGENTKEYS_OV_RESTORE_PENDING_MAX_SECS`). Meanwhile the stage reads
+  **degraded** with **engine workspace restore pending … the engine waits for
+  it**: the agent answers without its knowledge and says so. When the restore
+  lands, the engine starts on the restored memory. Only a restore slower than
+  that bound lets the engine start without it; the stage then says **engine
+  workspace restore held** — the stored engine memory is kept untouched and
+  comes back at the next relaunch (or **⟳ update runtime**), and what the
+  agent adds to its engine memory in that sandbox is not saved.
 - **Open conversations carry over.** A planned move hands the open sessions
   over directly, as an update does. When a sandbox died instead, the new one
   restores them from the latest checkpoint (saved every 15 minutes by

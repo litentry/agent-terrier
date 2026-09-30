@@ -12,6 +12,15 @@
 //! instance runs the mirror image: fetch the checkpoint and import it BEFORE
 //! the first periodic save can overwrite it with a fresh (empty) home.
 //!
+//! A restore that does not CONCLUDE inside the boot window stays pending — a
+//! timeout is not a conclusion: the stored object may exist and simply was
+//! not read. Every tick then retries it instead of saving, and nothing is
+//! saved over that object until its restore concludes (restored, nothing
+//! stored, or refused for good). The engine workspace (#694) has one more
+//! outcome, HELD: the engine filled its workspace before the restore could
+//! land, so the stored workspace is kept for the next respawn — never
+//! unpacked over a live engine, never saved over.
+//!
 //! Authority is the delegate's own: the sandbox mints its own `MemoryPut`/
 //! `MemoryGet` caps (#552 signer PoP) over its own granted service — the
 //! broker cannot write a checkpoint and never holds one at rest (D2/D4), and
@@ -37,15 +46,24 @@ use crate::lifecycle::LifecycleHub;
 
 /// How long the boot restore keeps retrying while the bridge / broker come up
 /// (the daemon often starts before the bridge finishes its ACP handshake).
+/// Past it the lifecycle moves on (chat never waits on a restore) and a
+/// restore still pending is retried every tick — the saves wait for it.
 const RESTORE_RETRY_WINDOW_SECS: u64 = 180;
 const RESTORE_RETRY_INTERVAL_SECS: u64 = 5;
-/// How many times the engine-workspace object is fetched before the restore
-/// gives up on it (a transient body-stream failure, never a 4xx).
+/// How many times one workspace restore attempt fetches the engine-workspace
+/// object before it answers pending (a transient body-stream failure, never
+/// a 4xx) — the next tick retries it.
 const WORKSPACE_GET_ATTEMPTS: u8 = 4;
-/// First periodic save runs this soon after the restore phase — early enough
-/// that a freshly-migrated home becomes durable quickly, late enough to stay
-/// clear of the boot burst.
+/// The first tick (a save, or a retry of a restore still pending) runs this
+/// soon after the restore phase — early enough that a freshly-migrated home
+/// becomes durable quickly, late enough to stay clear of the boot burst.
 const FIRST_TICK_DELAY_SECS: u64 = 120;
+/// While the engine is held for its workspace restore, a tick comes this often
+/// (the engine and the knowledge wait on every attempt).
+const ENGINE_HOLD_RETRY_SECS: u64 = 30;
+/// The engine hold's bound (`AGENTKEYS_OV_RESTORE_PENDING_MAX_SECS` — the
+/// start script reads the same knob with the same default).
+const DEFAULT_ENGINE_HOLD_MAX_SECS: u64 = 1800;
 
 pub struct CheckpointConfig {
     pub chat: ChatLoopConfig,
@@ -72,9 +90,19 @@ pub struct CheckpointConfig {
     /// The mirror's ingest manifest — it travels inside the workspace object
     /// so a restored index is also a restored "already mirrored" set.
     pub manifest: std::path::PathBuf,
-    /// Touched once the workspace restore ended (restored, nothing, or gave
-    /// up): the engine's start script waits for it (`AGENTKEYS_OV_RESTORE_MARKER`).
+    /// Touched once the workspace restore CONCLUDED (restored, nothing stored,
+    /// or refused for good) — never on a timeout: the engine's start script
+    /// waits for it (`AGENTKEYS_OV_RESTORE_MARKER`), and a restarted daemon
+    /// that finds it knows the live workspace descends from that conclusion.
     pub marker: std::path::PathBuf,
+    /// How long the engine may be held for a workspace restore in flight
+    /// (`<marker>.pending`, `AGENTKEYS_OV_RESTORE_PENDING_MAX_SECS`, default
+    /// 1800, 0 = never held). The start script stops waiting at the same bound,
+    /// so a crashed daemon cannot keep the engine down.
+    pub engine_hold_max: Duration,
+    /// When the engine hold went up ([`CheckpointConfig::hold_engine_now`]);
+    /// `None` = the engine is not held.
+    pub engine_held_since: Option<std::time::Instant>,
     /// #693 — the lifecycle hub (`restoring` → the restore outcome).
     pub hub: Option<Arc<LifecycleHub>>,
     /// The stack's data-plane credential provider (`AGENTKEYS_STS_PROVIDER`,
@@ -172,6 +200,10 @@ impl CheckpointConfig {
                     .to_string_lossy()
                     .into_owned()
             }));
+        let engine_hold_max = read("AGENTKEYS_OV_RESTORE_PENDING_MAX_SECS")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&s| s <= 86_400)
+            .unwrap_or(DEFAULT_ENGINE_HOLD_MAX_SECS);
         Some(Self {
             chat,
             memory_worker_url,
@@ -183,9 +215,24 @@ impl CheckpointConfig {
             workspace,
             manifest: agentkeys_memory_openviking::ingest_manifest_from_env(),
             marker,
+            engine_hold_max: Duration::from_secs(engine_hold_max),
+            engine_held_since: None,
             hub: None,
             sts_provider: read(env_names::STS_PROVIDER).map(|v| v.trim().to_ascii_lowercase()),
         })
+    }
+
+    /// #694 — put the engine hold up now. The chat loop calls this BEFORE its
+    /// credential bootstrap, which can stall on the signer while the engine's
+    /// start script only waits its own bound for a hold to appear.
+    pub fn hold_engine_now(&mut self) {
+        self.engine_held_since = hold_engine(self).then(std::time::Instant::now);
+    }
+
+    /// Nothing will restore the workspace (the chat loop could not start): let
+    /// the engine go at once.
+    pub fn release_engine_now(&self) {
+        release_engine(&self.marker);
     }
 
     /// Whether this checkpoint mints at the signer: the stack said `ve` AND a
@@ -264,102 +311,399 @@ async fn run_loop(cfg: CheckpointConfig, credential: Arc<DelegateCredential>) {
         );
     }
 
-    // Phase 1 — restore. MUST complete (or conclusively give up) before the
-    // first save: a fresh instance's near-empty home saved first would
-    // overwrite the very checkpoint we came to restore.
+    // #694 — the engine workspace (index + manifest) restores BEFORE the engine
+    // starts, so the first pull is a delta: the start script waits for the
+    // marker a conclusion touches, and past its own bound too while the engine
+    // is held (`<marker>.pending`, up to `engine_hold_max`, put up by the chat
+    // loop before its credential bootstrap) — so a restore that lands late
+    // still lands into an empty workspace.
+    let mut engine_hold = cfg.engine_held_since;
+
+    // Phase 1 — restore both objects inside the boot window. Nothing is saved
+    // over an object until its restore CONCLUDES: a fresh instance's near-empty
+    // home saved first would overwrite the very checkpoint we came to restore.
     let deadline = std::time::Instant::now() + Duration::from_secs(RESTORE_RETRY_WINDOW_SECS);
-    let mut restore_outcome = String::from("restore skipped");
+    let mut home = RestoreState::Pending("not attempted yet".into());
+    let mut workspace = RestoreState::Pending("not attempted yet".into());
     loop {
-        let bearer = match ensure_session(&http, &cfg, &credential, &mut session).await {
-            Some(b) => b,
-            None => {
-                if past(deadline, "restore gave up: no delegate session") {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_secs(RESTORE_RETRY_INTERVAL_SECS)).await;
-                continue;
-            }
-        };
-        match restore_once(&http, &cfg, &credential, &bearer).await {
-            Ok(outcome) => {
-                tracing::info!(outcome = %outcome, "#594 checkpoint: restore phase done");
-                restore_outcome = outcome;
-                break;
-            }
-            Err(RestoreError::SessionExpired) => session = None,
-            Err(RestoreError::Retryable(e)) => {
-                if past(deadline, &format!("restore gave up: {e}")) {
-                    break;
-                }
-            }
-            Err(RestoreError::Fatal(e)) => {
-                tracing::warn!(error = %e, "#594 checkpoint: restore skipped (not retryable)");
-                break;
-            }
+        attempt_pending(
+            &http,
+            &cfg,
+            &credential,
+            &mut session,
+            &mut home,
+            &mut workspace,
+        )
+        .await;
+        engine_hold = keep_engine_hold(engine_hold, &workspace, &cfg);
+        if !home.retries() && !workspace.retries() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                home = ?home,
+                workspace = ?workspace,
+                engine_held = engine_hold.is_some(),
+                "#594 checkpoint: restore window elapsed with a restore still PENDING — \
+                 retried every tick; nothing is saved over a stored object until its \
+                 restore concludes"
+            );
+            break;
         }
         tokio::time::sleep(Duration::from_secs(RESTORE_RETRY_INTERVAL_SECS)).await;
     }
-
-    // #694 — the engine workspace (index + manifest) restores BEFORE the engine
-    // starts (its start script waits for the marker), so the first pull is a
-    // delta. Bounded like the home restore; the marker is touched either way.
-    let ws_outcome = match ensure_session(&http, &cfg, &credential, &mut session).await {
-        Some(bearer) => match workspace_restore(&cfg, &credential, &bearer).await {
-            Ok(o) => o,
-            Err(e) => format!("engine workspace not restored: {e}"),
-        },
-        None => "engine workspace not restored: no delegate session".to_string(),
-    };
-    tracing::info!(outcome = %ws_outcome, "#694 checkpoint: engine workspace restore done");
-    touch_marker(&cfg.marker);
     if let Some(h) = &cfg.hub {
-        h.restore_finished(&format!("{restore_outcome}; {ws_outcome}"));
+        h.set_checkpoint_note(restore_note(&home, &workspace, engine_hold.is_some()));
+        h.restore_finished(&concluded_summary(&home, &workspace));
     }
 
-    // Phase 2 — periodic save.
+    // Phase 2 — each tick retries a restore still pending, else saves.
     let mut last_saved_hash: Option<[u8; 32]> = None;
     let mut last_workspace_fp: Option<[u8; 32]> = None;
-    tokio::time::sleep(Duration::from_secs(FIRST_TICK_DELAY_SECS)).await;
+    let mut first_tick = true;
     loop {
-        if let Some(bearer) = ensure_session(&http, &cfg, &credential, &mut session).await {
-            match workspace_save(&cfg, &credential, &bearer, &mut last_workspace_fp).await {
-                Ok(SaveOutcome::Saved { bytes }) => {
-                    tracing::info!(bytes, "#694 checkpoint: engine workspace saved")
+        tokio::time::sleep(next_tick_delay(
+            engine_hold.is_some(),
+            first_tick,
+            cfg.interval,
+        ))
+        .await;
+        first_tick = false;
+        if home.retries() || workspace.retries() {
+            attempt_pending(
+                &http,
+                &cfg,
+                &credential,
+                &mut session,
+                &mut home,
+                &mut workspace,
+            )
+            .await;
+            engine_hold = keep_engine_hold(engine_hold, &workspace, &cfg);
+            for (restore, state) in [("runtime home", &home), ("engine workspace", &workspace)] {
+                if let RestoreState::Pending(why) = state {
+                    tracing::warn!(
+                        restore,
+                        reason = %why,
+                        "#594 checkpoint: restore still pending — retrying next tick; \
+                         nothing is saved over the stored object meanwhile"
+                    );
                 }
-                Ok(SaveOutcome::Unchanged) => {}
-                Ok(SaveOutcome::TooLarge { bytes }) => tracing::warn!(
-                    bytes,
-                    cap = cfg.max_bytes,
-                    "#694 checkpoint: engine workspace exceeds the size cap — NOT saved"
-                ),
-                Err(SaveError::SessionExpired) => session = None,
-                Err(SaveError::Failed(e)) => {
-                    tracing::warn!(error = %e, "#694 checkpoint: engine workspace save failed — retrying next tick")
+            }
+            if let Some(h) = &cfg.hub {
+                h.set_checkpoint_note(restore_note(&home, &workspace, engine_hold.is_some()));
+            }
+        }
+        if workspace.saves() {
+            if let Some(bearer) = ensure_session(&http, &cfg, &credential, &mut session).await {
+                match workspace_save(&cfg, &credential, &bearer, &mut last_workspace_fp).await {
+                    Ok(SaveOutcome::Saved { bytes }) => {
+                        tracing::info!(bytes, "#694 checkpoint: engine workspace saved")
+                    }
+                    Ok(SaveOutcome::Unchanged) => {}
+                    Ok(SaveOutcome::TooLarge { bytes }) => tracing::warn!(
+                        bytes,
+                        cap = cfg.max_bytes,
+                        "#694 checkpoint: engine workspace exceeds the size cap — NOT saved"
+                    ),
+                    Err(SaveError::SessionExpired) => session = None,
+                    Err(SaveError::Failed(e)) => {
+                        tracing::warn!(error = %e, "#694 checkpoint: engine workspace save failed — retrying next tick")
+                    }
                 }
             }
         }
-        if let Some(bearer) = ensure_session(&http, &cfg, &credential, &mut session).await {
-            match save_once(&http, &cfg, &credential, &bearer, &mut last_saved_hash).await {
-                Ok(SaveOutcome::Saved { bytes }) => {
-                    tracing::info!(bytes, namespace = %cfg.namespace, "#594 checkpoint: saved")
-                }
-                Ok(SaveOutcome::Unchanged) => {
-                    tracing::debug!("#594 checkpoint: home unchanged — nothing to save")
-                }
-                Ok(SaveOutcome::TooLarge { bytes }) => tracing::warn!(
-                    bytes,
-                    cap = cfg.max_bytes,
-                    "#594 checkpoint: export exceeds the size cap — NOT saved (trim \
-                     the runtime home or raise AGENTKEYS_CHECKPOINT_MAX_BYTES)"
-                ),
-                Err(SaveError::SessionExpired) => session = None,
-                Err(SaveError::Failed(e)) => {
-                    tracing::warn!(error = %e, "#594 checkpoint: save failed — retrying next tick")
+        if home.saves() {
+            if let Some(bearer) = ensure_session(&http, &cfg, &credential, &mut session).await {
+                match save_once(&http, &cfg, &credential, &bearer, &mut last_saved_hash).await {
+                    Ok(SaveOutcome::Saved { bytes }) => {
+                        tracing::info!(bytes, namespace = %cfg.namespace, "#594 checkpoint: saved")
+                    }
+                    Ok(SaveOutcome::Unchanged) => {
+                        tracing::debug!("#594 checkpoint: home unchanged — nothing to save")
+                    }
+                    Ok(SaveOutcome::TooLarge { bytes }) => tracing::warn!(
+                        bytes,
+                        cap = cfg.max_bytes,
+                        "#594 checkpoint: export exceeds the size cap — NOT saved (trim \
+                         the runtime home or raise AGENTKEYS_CHECKPOINT_MAX_BYTES)"
+                    ),
+                    Err(SaveError::SessionExpired) => session = None,
+                    Err(SaveError::Failed(e)) => {
+                        tracing::warn!(error = %e, "#594 checkpoint: save failed — retrying next tick")
+                    }
                 }
             }
         }
-        tokio::time::sleep(cfg.interval).await;
     }
+}
+
+/// The wait before the next tick: short while the engine is held (it waits on
+/// every restore attempt), the first-tick delay once, then the save cadence.
+fn next_tick_delay(engine_held: bool, first_tick: bool, interval: Duration) -> Duration {
+    if engine_held {
+        Duration::from_secs(ENGINE_HOLD_RETRY_SECS).min(interval)
+    } else if first_tick {
+        Duration::from_secs(FIRST_TICK_DELAY_SECS)
+    } else {
+        interval
+    }
+}
+
+/// `<marker>.pending` — the engine hold (the start script derives the same
+/// name from `AGENTKEYS_OV_RESTORE_MARKER`).
+fn pending_marker(marker: &std::path::Path) -> std::path::PathBuf {
+    let mut name = marker.as_os_str().to_owned();
+    name.push(".pending");
+    name.into()
+}
+
+/// The workspace restore would unpack into an empty workspace: an engine
+/// workspace on this box, empty (or absent), and no restore concluded yet.
+fn workspace_awaits_restore(workspace: Option<&std::path::Path>, marker: &std::path::Path) -> bool {
+    workspace.is_some_and(|ws| !marker.exists() && !dir_has_entries(ws))
+}
+
+/// #694 — hold the engine while its workspace restore is in flight: write
+/// `<marker>.pending` when the restore would unpack into an empty workspace,
+/// else clear a stale one (a crashed run's). Returns whether the engine is held.
+fn hold_engine(cfg: &CheckpointConfig) -> bool {
+    if cfg.engine_hold_max.is_zero()
+        || !workspace_awaits_restore(cfg.workspace.as_deref(), &cfg.marker)
+    {
+        release_engine(&cfg.marker);
+        return false;
+    }
+    let pending = pending_marker(&cfg.marker);
+    if let Some(parent) = pending.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(&pending, now_unix().to_string()) {
+        Ok(()) => {
+            tracing::info!(
+                pending = ?pending,
+                hold_max_secs = cfg.engine_hold_max.as_secs(),
+                "#694 checkpoint: engine held until its workspace restore concludes"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, pending = ?pending, "#694 checkpoint: engine hold not declared — the engine starts after its own wait");
+            false
+        }
+    }
+}
+
+/// The engine stays held while its workspace restore is still pending, up to
+/// the bound the start script also stops at.
+fn engine_stays_held(workspace: &RestoreState, held_for: Duration, hold_max: Duration) -> bool {
+    workspace.retries() && held_for < hold_max
+}
+
+/// Keep the engine hold, or let the engine go — the hold file removed after
+/// any marker a conclusion touched, and the mirror told to wait out the start.
+fn keep_engine_hold(
+    hold: Option<std::time::Instant>,
+    workspace: &RestoreState,
+    cfg: &CheckpointConfig,
+) -> Option<std::time::Instant> {
+    let since = hold?;
+    if engine_stays_held(workspace, since.elapsed(), cfg.engine_hold_max) {
+        return Some(since);
+    }
+    release_engine(&cfg.marker);
+    if let Some(h) = &cfg.hub {
+        h.engine_released();
+    }
+    None
+}
+
+fn release_engine(marker: &std::path::Path) {
+    let pending = pending_marker(marker);
+    match std::fs::remove_file(&pending) {
+        Ok(()) => tracing::info!(pending = ?pending, "#694 checkpoint: engine hold released"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            error = %e,
+            pending = ?pending,
+            "#694 checkpoint: engine hold file not removed — the start script stops waiting at its own bound"
+        ),
+    }
+}
+
+/// Where one restore (the runtime home, or the engine workspace) stands. Only
+/// a CONCLUDED restore lets the periodic save write its object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestoreState {
+    /// Not concluded — no session, a transport error, a 5xx, a throttle, a
+    /// failed unpack, or the boot window ran out: retried every tick, never
+    /// saved over.
+    Pending(String),
+    /// Restored, nothing stored (404), skipped as stale, or refused for good:
+    /// the periodic save owns the object from here.
+    Concluded(String),
+    /// Engine workspace only: the engine filled its workspace before the
+    /// restore could land while a stored one exists. Kept for the next
+    /// respawn — never unpacked over a live engine, never saved over, not
+    /// retried (it cannot land in this sandbox).
+    Held,
+}
+
+impl RestoreState {
+    /// The periodic save may write this restore's object.
+    fn saves(&self) -> bool {
+        matches!(self, RestoreState::Concluded(_))
+    }
+
+    /// The next tick retries this restore.
+    fn retries(&self) -> bool {
+        matches!(self, RestoreState::Pending(_))
+    }
+}
+
+/// A restore attempt's definitive answer.
+enum Restored {
+    Done(String),
+    /// See [`RestoreState::Held`].
+    Held,
+}
+
+/// The decision over one restore attempt: only a definitive answer concludes.
+fn decide(attempt: Result<Restored, RestoreError>) -> RestoreState {
+    match attempt {
+        Ok(Restored::Done(outcome)) => RestoreState::Concluded(outcome),
+        Ok(Restored::Held) => RestoreState::Held,
+        Err(RestoreError::Fatal(e)) => RestoreState::Concluded(format!("not restored: {e}")),
+        Err(RestoreError::NoSession) => RestoreState::Pending("no delegate session".into()),
+        Err(RestoreError::SessionExpired) => {
+            RestoreState::Pending("delegate session expired".into())
+        }
+        Err(RestoreError::Retryable(e)) => RestoreState::Pending(e),
+    }
+}
+
+/// Attempt whichever restores are still pending; a workspace restore that
+/// concludes touches the engine's marker. A resolve that just failed is not
+/// repeated within the same pass (a stalled broker is not asked twice).
+async fn attempt_pending(
+    http: &reqwest::Client,
+    cfg: &CheckpointConfig,
+    credential: &DelegateCredential,
+    session: &mut Option<String>,
+    home: &mut RestoreState,
+    workspace: &mut RestoreState,
+) {
+    let mut resolve_failed = false;
+    if home.retries() {
+        let attempt = match ensure_session(http, cfg, credential, session).await {
+            Some(bearer) => restore_once(http, cfg, credential, &bearer)
+                .await
+                .map(Restored::Done),
+            None => {
+                resolve_failed = true;
+                Err(RestoreError::NoSession)
+            }
+        };
+        *home = settle("runtime home", attempt, session);
+    }
+    if workspace.retries() {
+        let attempt = match workspace_settled_locally(cfg.workspace.as_deref(), &cfg.marker) {
+            Some(outcome) => Ok(Restored::Done(outcome)),
+            None if resolve_failed => Err(RestoreError::NoSession),
+            None => match ensure_session(http, cfg, credential, session).await {
+                Some(bearer) => workspace_restore(cfg, credential, &bearer).await,
+                None => Err(RestoreError::NoSession),
+            },
+        };
+        *workspace = settle("engine workspace", attempt, session);
+        if workspace.saves() {
+            touch_marker(&cfg.marker);
+        }
+    }
+}
+
+/// Log one attempt's definitive answer, drop an expired session, decide.
+fn settle(
+    restore: &str,
+    attempt: Result<Restored, RestoreError>,
+    session: &mut Option<String>,
+) -> RestoreState {
+    match &attempt {
+        Ok(Restored::Done(outcome)) => {
+            tracing::info!(restore, outcome = %outcome, "#594 checkpoint: restore concluded")
+        }
+        Ok(Restored::Held) => tracing::warn!(
+            restore,
+            "#694 checkpoint: the engine filled its workspace before the restore could \
+             land — the stored workspace is KEPT for the next respawn; this sandbox's \
+             workspace is not checkpointed"
+        ),
+        Err(RestoreError::Fatal(e)) => tracing::warn!(
+            restore,
+            error = %e,
+            "#594 checkpoint: not restored (definitive) — periodic saves own the object"
+        ),
+        Err(RestoreError::SessionExpired) => *session = None,
+        Err(RestoreError::NoSession) | Err(RestoreError::Retryable(_)) => {}
+    }
+    decide(attempt)
+}
+
+/// The boot restore's concluded outcomes, one line (a pending or held one
+/// rides the checkpoint note instead).
+fn concluded_summary(home: &RestoreState, workspace: &RestoreState) -> String {
+    [home, workspace]
+        .into_iter()
+        .filter_map(|state| match state {
+            RestoreState::Concluded(outcome) => Some(outcome.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The console's line for a restore that has not concluded — it rides every
+/// lifecycle report's detail until the restore concludes
+/// ([`LifecycleHub::set_checkpoint_note`]). `None` = nothing outstanding.
+fn restore_note(
+    home: &RestoreState,
+    workspace: &RestoreState,
+    engine_held: bool,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let RestoreState::Pending(why) = home {
+        parts.push(format!(
+            "checkpoint restore pending ({}) — saves paused",
+            brief(why)
+        ));
+    }
+    match workspace {
+        RestoreState::Pending(why) if engine_held => parts.push(format!(
+            "engine workspace restore pending ({}) — the engine waits for it, saves paused",
+            brief(why)
+        )),
+        RestoreState::Pending(why) => parts.push(format!(
+            "engine workspace restore pending ({}) — saves paused",
+            brief(why)
+        )),
+        RestoreState::Held => parts.push(
+            "engine workspace restore held (the engine started first) — the stored one \
+             returns at the next respawn"
+                .to_string(),
+        ),
+        RestoreState::Concluded(_) => {}
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// A reason short enough for one console line (the log keeps the full one).
+fn brief(reason: &str) -> String {
+    const MAX_CHARS: usize = 96;
+    if reason.chars().count() <= MAX_CHARS {
+        return reason.to_string();
+    }
+    let head: String = reason.chars().take(MAX_CHARS).collect();
+    format!("{head}…")
 }
 
 fn touch_marker(marker: &std::path::Path) {
@@ -463,25 +807,73 @@ async fn untar_gz(dir: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// #694 — unpack a stored workspace archive into the empty (or absent)
+/// workspace ATOMICALLY: extract into a sibling staging dir, then swap it in
+/// with one rename. A failed extract leaves nothing behind; a workspace that
+/// filled meanwhile (a live engine) is never replaced — `Ok(false)`.
+async fn unpack_workspace(ws: &std::path::Path, archive: &[u8]) -> Result<bool, String> {
+    let (Some(parent), Some(name)) = (ws.parent(), ws.file_name()) else {
+        return Err(format!("workspace path {} has no parent", ws.display()));
+    };
+    let mut staging_name = name.to_owned();
+    staging_name.push(".restoring");
+    let staging = parent.join(staging_name);
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("mkdir {}: {e}", staging.display()))?;
+    if let Err(e) = untar_gz(&staging, archive).await {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("unpack: {e}"));
+    }
+    if dir_has_entries(ws) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Ok(false);
+    }
+    if let Err(e) = std::fs::rename(&staging, ws) {
+        let _ = std::fs::remove_dir_all(&staging);
+        if dir_has_entries(ws) {
+            return Ok(false);
+        }
+        return Err(format!("swap into {}: {e}", ws.display()));
+    }
+    Ok(true)
+}
+
+/// #694 — the workspace restore's answers that need no stored object: no
+/// engine on this box, or a restore that already concluded in this sandbox
+/// (a restarted daemon finds the marker its conclusion touched). A populated
+/// workspace WITHOUT the marker is not one of them: the engine starts on its
+/// own after a bounded wait, so its workspace says nothing about the stored one.
+fn workspace_settled_locally(
+    workspace: Option<&std::path::Path>,
+    marker: &std::path::Path,
+) -> Option<String> {
+    match workspace {
+        None => Some("no engine workspace on this box".into()),
+        Some(_) if marker.exists() => {
+            Some("engine workspace restore already concluded in this sandbox".into())
+        }
+        Some(_) => None,
+    }
+}
+
 /// #694 — fetch the engine workspace object and unpack it into an EMPTY
-/// workspace; a populated one (a live engine) is never clobbered.
+/// workspace. A populated one (a live engine) is never unpacked over — and
+/// with a stored object present it is HELD: never saved over it either.
 async fn workspace_restore(
     cfg: &CheckpointConfig,
     credential: &DelegateCredential,
     bearer: &str,
-) -> Result<String, String> {
+) -> Result<Restored, RestoreError> {
     let Some(ws) = &cfg.workspace else {
-        return Ok("no engine workspace on this box".into());
+        return Ok(Restored::Done("no engine workspace on this box".into()));
     };
-    if dir_has_entries(ws) {
-        return Ok("engine workspace already populated — left untouched".into());
-    }
     let client = cfg.backend_client(bearer, credential);
     let service = service_knowledge(&cfg.namespace);
     // The workspace object is the biggest thing the restore reads; a dropped
     // body stream on the worker's side (`502 s3_body`, measured once on
     // 2026-09-27) is transient — retry it a few times, a fresh cap each time,
-    // before the workspace is declared not restored. A 4xx is definitive.
+    // before this attempt answers pending (the next tick retries it). A 4xx
+    // is definitive.
     let mut attempt = 0u8;
     let got = loop {
         attempt += 1;
@@ -498,7 +890,7 @@ async fn workspace_restore(
                 bearer,
             )
             .await
-            .map_err(|e| format!("cap-mint: {e}"))?;
+            .map_err(|e| classify_restore(e, "cap-mint"))?;
         match client
             .memory_get(MemoryGetInput {
                 cap,
@@ -509,27 +901,37 @@ async fn workspace_restore(
         {
             Ok(g) => break g,
             Err(BackendError::Http { status: 404, .. }) => {
-                return Ok("no engine workspace checkpoint (first spawn?)".into())
+                return Ok(Restored::Done(
+                    "no engine workspace checkpoint (first spawn?)".into(),
+                ))
             }
-            Err(BackendError::Http { status, .. }) if (400..500).contains(&status) => {
-                return Err(format!("memory-get: HTTP {status}"))
-            }
-            Err(e) if attempt < WORKSPACE_GET_ATTEMPTS => {
-                tracing::warn!(
-                    error = %e,
-                    attempt,
-                    "#694 checkpoint: engine workspace get failed on a transient error — retrying"
-                );
-                tokio::time::sleep(Duration::from_secs(RESTORE_RETRY_INTERVAL_SECS)).await;
-            }
-            Err(e) => return Err(format!("memory-get: {e}")),
+            Err(e) => match classify_restore(e, "memory-get") {
+                RestoreError::Retryable(why) if attempt < WORKSPACE_GET_ATTEMPTS => {
+                    tracing::warn!(
+                        error = %why,
+                        attempt,
+                        "#694 checkpoint: engine workspace get failed on a transient error — retrying"
+                    );
+                    tokio::time::sleep(Duration::from_secs(RESTORE_RETRY_INTERVAL_SECS)).await;
+                }
+                refusal => return Err(refusal),
+            },
         }
     };
+    if dir_has_entries(ws) {
+        return Ok(Restored::Held);
+    }
     let bytes = STANDARD
         .decode(&got.plaintext_b64)
-        .map_err(|e| format!("workspace b64: {e}"))?;
-    std::fs::create_dir_all(ws).map_err(|e| format!("mkdir {}: {e}", ws.display()))?;
-    untar_gz(ws, &bytes).await?;
+        .map_err(|e| RestoreError::Fatal(format!("workspace b64: {e}")))?;
+    // A failed unpack is local (permissions, disk) and leaves nothing behind —
+    // the next attempt retries it.
+    if !unpack_workspace(ws, &bytes)
+        .await
+        .map_err(RestoreError::Retryable)?
+    {
+        return Ok(Restored::Held);
+    }
     let snap = ws.join(MANIFEST_SNAPSHOT);
     if snap.is_file() {
         if let Some(parent) = cfg.manifest.parent() {
@@ -539,10 +941,10 @@ async fn workspace_restore(
             tracing::warn!(error = %e, "#694 checkpoint: manifest snapshot not restored — the first pull re-mirrors");
         }
     }
-    Ok(format!(
+    Ok(Restored::Done(format!(
         "engine workspace restored ({} bytes) — the first pull is a delta",
         bytes.len()
-    ))
+    )))
 }
 
 /// #694 — archive the engine workspace (with a snapshot of the manifest) into
@@ -601,18 +1003,6 @@ async fn workspace_save(
     }
     *last_fp = Some(fp);
     Ok(SaveOutcome::Saved { bytes: bytes.len() })
-}
-
-fn past(deadline: std::time::Instant, reason: &str) -> bool {
-    if std::time::Instant::now() >= deadline {
-        tracing::warn!(
-            reason = %reason,
-            "#594 checkpoint: restore window elapsed — continuing with a fresh home \
-             (periodic saves start anyway)"
-        );
-        return true;
-    }
-    false
 }
 
 /// Resolve (or reuse) the delegate session; `None` = resolve failed (logged).
@@ -789,10 +1179,13 @@ fn now_unix() -> u64 {
 }
 
 enum RestoreError {
+    /// No delegate session could be resolved — nothing was read.
+    NoSession,
     SessionExpired,
-    /// Transport-ish — worth retrying inside the boot window.
+    /// Transport, a 5xx, a throttle, a failed unpack — the stored object may
+    /// exist unread, so this never concludes the restore.
     Retryable(String),
-    /// Definitive — retrying cannot help (bad envelope, bridge refused).
+    /// Definitive — retrying cannot help (bad envelope, a 4xx refusal).
     Fatal(String),
 }
 
@@ -865,11 +1258,7 @@ async fn restore_once(
     let status = resp.status();
     let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
     if !status.is_success() {
-        // 404 = mgmt surface not armed on the bridge — definitive here, since
-        // both processes read the same instance env.
-        return Err(RestoreError::Fatal(format!(
-            "bridge import HTTP {status}: {v}"
-        )));
+        return Err(import_refusal(status.as_u16(), &v));
     }
     if v.get("applied").and_then(|a| a.as_bool()) == Some(false) {
         return Ok(format!(
@@ -888,13 +1277,35 @@ async fn restore_once(
     ))
 }
 
+/// Transient by HTTP semantics — a server error, a request timeout (408) or
+/// throttling (429): never a conclusion.
+fn transient_status(status: u16) -> bool {
+    status >= 500 || status == 408 || status == 429
+}
+
 fn classify_restore(e: BackendError, stage: &str) -> RestoreError {
     match e {
         BackendError::Http { status: 401, .. } => RestoreError::SessionExpired,
-        BackendError::Http { status, body } if (400..500).contains(&status) => {
+        BackendError::Http { status, body }
+            if (400..500).contains(&status) && !transient_status(status) =>
+        {
             RestoreError::Fatal(format!("{stage}: HTTP {status}: {body}"))
         }
         other => RestoreError::Retryable(format!("{stage}: {other}")),
+    }
+}
+
+/// The bridge refused the import. A 4xx is definitive — 404 = the mgmt
+/// surface not armed, 403 = a bearer skew, 400 = a snapshot it rejects (both
+/// processes read the same instance env). A 5xx is not: a write may have
+/// half-landed, and a save now would put that half-restored home over the
+/// checkpoint.
+fn import_refusal(status: u16, body: &serde_json::Value) -> RestoreError {
+    let refusal = format!("bridge import HTTP {status}: {body}");
+    if transient_status(status) {
+        RestoreError::Retryable(refusal)
+    } else {
+        RestoreError::Fatal(refusal)
     }
 }
 
@@ -1034,5 +1445,327 @@ mod tests {
         let cfg = CheckpointConfig::from_lookup(&base, chat("opchat-watchdog")).expect("cfg");
         assert_eq!(cfg.object_key, CHECKPOINT_OBJECT_KEY);
         assert_eq!(cfg.object_key, "checkpoint/dsh-home");
+    }
+
+    /// The decision: only a definitive answer concludes a restore. A missing
+    /// session, an expired one or a transient failure never does — the stored
+    /// object may exist unread, and a save would overwrite it.
+    #[test]
+    fn only_a_definitive_answer_concludes_a_restore() {
+        for definitive in [
+            Ok(Restored::Done(
+                "restored 12 file(s) from the checkpoint saved at 1759000000".into(),
+            )),
+            Ok(Restored::Done("no checkpoint stored (first spawn?)".into())),
+            Ok(Restored::Done(
+                "skipped as stale (a fresher import already applied)".into(),
+            )),
+            Err(RestoreError::Fatal(
+                "checkpoint version 2 unsupported".into(),
+            )),
+        ] {
+            let state = decide(definitive);
+            assert!(state.saves() && !state.retries(), "{state:?}");
+        }
+        for not_yet in [
+            Err(RestoreError::NoSession),
+            Err(RestoreError::SessionExpired),
+            Err(RestoreError::Retryable(
+                "memory-get: backend HTTP error (502): s3_get".into(),
+            )),
+        ] {
+            let state = decide(not_yet);
+            assert!(!state.saves() && state.retries(), "{state:?}");
+        }
+        let held = decide(Ok(Restored::Held));
+        assert_eq!(held, RestoreState::Held);
+        assert!(
+            !held.saves() && !held.retries(),
+            "kept: never saved over, never retried"
+        );
+    }
+
+    /// The 2026-09-28 shape: no session for the whole boot window. The loop's
+    /// order per tick — retry while pending, save once concluded — writes
+    /// nothing until a later tick's restore lands.
+    #[test]
+    fn a_timed_out_restore_saves_only_after_a_later_tick_concludes_it() {
+        let mut attempts = vec![
+            Err(RestoreError::NoSession),
+            Err(RestoreError::Retryable(
+                "cap-mint: backend transport error: timed out".into(),
+            )),
+            Ok(Restored::Done(
+                "restored 12 file(s) from the checkpoint saved at 1759000000".into(),
+            )),
+        ]
+        .into_iter();
+        let mut home = RestoreState::Pending("not attempted yet".into());
+        let mut saved_on_tick = Vec::new();
+        for tick in 0..5 {
+            if home.retries() {
+                home = decide(attempts.next().expect("one attempt per pending tick"));
+            }
+            if home.saves() {
+                saved_on_tick.push(tick);
+            }
+        }
+        assert_eq!(saved_on_tick, vec![2, 3, 4]);
+        assert!(
+            attempts.next().is_none(),
+            "a concluded restore is never retried"
+        );
+    }
+
+    #[test]
+    fn a_server_error_or_throttle_never_concludes_a_restore() {
+        let http = |status: u16| BackendError::Http {
+            status,
+            body: "{}".into(),
+        };
+        for status in [500, 502, 503, 504, 408, 429] {
+            assert!(
+                matches!(
+                    classify_restore(http(status), "memory-get"),
+                    RestoreError::Retryable(_)
+                ),
+                "worker {status}"
+            );
+            assert!(
+                matches!(
+                    import_refusal(status, &serde_json::Value::Null),
+                    RestoreError::Retryable(_)
+                ),
+                "bridge {status}: a write may have half-landed"
+            );
+        }
+        assert!(matches!(
+            classify_restore(BackendError::Transport("timed out".into()), "cap-mint"),
+            RestoreError::Retryable(_)
+        ));
+        assert!(matches!(
+            classify_restore(http(401), "cap-mint"),
+            RestoreError::SessionExpired
+        ));
+        for status in [400, 403] {
+            assert!(
+                matches!(
+                    classify_restore(http(status), "cap-mint"),
+                    RestoreError::Fatal(_)
+                ),
+                "worker {status}"
+            );
+        }
+        for status in [400, 403, 404, 413] {
+            assert!(
+                matches!(
+                    import_refusal(status, &serde_json::Value::Null),
+                    RestoreError::Fatal(_)
+                ),
+                "bridge {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_console_sees_every_restore_that_has_not_concluded() {
+        let done = RestoreState::Concluded("restored".into());
+        assert_eq!(restore_note(&done, &done, false), None);
+        assert_eq!(concluded_summary(&done, &done), "restored; restored");
+
+        let no_session = RestoreState::Pending("no delegate session".into());
+        let note = restore_note(&no_session, &done, false).expect("pending → note");
+        assert_eq!(
+            note,
+            "checkpoint restore pending (no delegate session) — saves paused"
+        );
+        assert_eq!(concluded_summary(&no_session, &done), "restored");
+
+        let note = restore_note(&done, &RestoreState::Held, false).expect("held → note");
+        assert!(note.starts_with("engine workspace restore held"), "{note}");
+
+        assert_eq!(
+            restore_note(&done, &no_session, true).as_deref(),
+            Some(
+                "engine workspace restore pending (no delegate session) — the engine waits \
+                 for it, saves paused"
+            ),
+            "a held engine says why it is down"
+        );
+
+        let long = RestoreState::Pending(format!("memory-get: {}", "x".repeat(400)));
+        let note = restore_note(&long, &no_session, false).expect("both pending");
+        assert!(
+            note.contains("checkpoint restore pending (memory-get: "),
+            "{note}"
+        );
+        assert!(
+            note.contains("…) — saves paused; engine workspace restore pending"),
+            "{note}"
+        );
+        assert!(note.chars().count() < 250, "one console line: {note}");
+    }
+
+    /// A populated workspace WITHOUT the marker is not a conclusion: the engine
+    /// starts on its own after its bounded wait, so only a stored-object read
+    /// can settle it. The marker (touched only by a conclusion) can.
+    #[test]
+    fn a_workspace_settles_locally_only_without_an_engine_or_after_a_conclusion() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path().join("workspace");
+        let marker = dir.path().join(".workspace-restored");
+        assert_eq!(
+            workspace_settled_locally(None, &marker).as_deref(),
+            Some("no engine workspace on this box")
+        );
+        assert_eq!(workspace_settled_locally(Some(&ws), &marker), None);
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        std::fs::write(ws.join("vectordb.bin"), b"a fresh engine's index").expect("write");
+        assert_eq!(
+            workspace_settled_locally(Some(&ws), &marker),
+            None,
+            "the engine may have started on its own — read the stored object first"
+        );
+        touch_marker(&marker);
+        assert!(
+            workspace_settled_locally(Some(&ws), &marker).is_some(),
+            "a restarted daemon finds its own conclusion"
+        );
+    }
+
+    /// #694 — the engine hold: one name shared with the start script, declared
+    /// only while the restore would unpack into an empty workspace, and a stale
+    /// hold file (a crashed run's) cleared otherwise.
+    #[test]
+    fn the_engine_is_held_only_while_its_restore_would_unpack_into_an_empty_workspace() {
+        assert_eq!(
+            pending_marker(std::path::Path::new(
+                "/opt/agentkeys/openviking/.workspace-restored"
+            )),
+            std::path::PathBuf::from("/opt/agentkeys/openviking/.workspace-restored.pending"),
+            "the start script's \"${{AGENTKEYS_OV_RESTORE_MARKER}}.pending\""
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path().join("workspace");
+        let marker = dir.path().join(".workspace-restored");
+        let pending = pending_marker(&marker);
+        let (ws_env, marker_env) = (
+            ws.to_string_lossy().into_owned(),
+            marker.to_string_lossy().into_owned(),
+        );
+        let pairs = [
+            ("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x"),
+            ("OPENVIKING_WORKSPACE", ws_env.as_str()),
+            ("AGENTKEYS_OV_RESTORE_MARKER", marker_env.as_str()),
+        ];
+        let mut cfg =
+            CheckpointConfig::from_lookup(&lookup(&pairs), chat("opchat-chef")).expect("cfg");
+        assert_eq!(cfg.engine_hold_max, Duration::from_secs(1800));
+        assert!(cfg.engine_held_since.is_none());
+
+        cfg.hold_engine_now();
+        assert!(
+            cfg.engine_held_since.is_some(),
+            "no workspace yet, no marker → held"
+        );
+        assert!(pending.is_file());
+        cfg.release_engine_now();
+        assert!(!pending.exists(), "a chat loop that cannot start lets go");
+
+        assert!(hold_engine(&cfg), "no workspace yet, no marker → held");
+        assert!(pending.is_file());
+
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        std::fs::write(ws.join("vectordb.bin"), b"a live engine").expect("write");
+        assert!(
+            !hold_engine(&cfg),
+            "a populated workspace is never unpacked over"
+        );
+        assert!(!pending.exists(), "the stale hold is cleared");
+
+        std::fs::remove_file(ws.join("vectordb.bin")).expect("rm");
+        touch_marker(&marker);
+        std::fs::write(&pending, b"a crashed run's").expect("write");
+        assert!(!hold_engine(&cfg), "a concluded restore holds nothing");
+        assert!(!pending.exists());
+
+        std::fs::remove_file(&marker).expect("rm");
+        let off = [
+            ("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x"),
+            ("OPENVIKING_WORKSPACE", ws_env.as_str()),
+            ("AGENTKEYS_OV_RESTORE_MARKER", marker_env.as_str()),
+            ("AGENTKEYS_OV_RESTORE_PENDING_MAX_SECS", "0"),
+        ];
+        let cfg = CheckpointConfig::from_lookup(&lookup(&off), chat("opchat-chef")).expect("cfg");
+        assert!(!hold_engine(&cfg), "0 turns the hold off");
+        assert!(!pending.exists());
+    }
+
+    #[test]
+    fn a_held_engine_is_let_go_once_its_restore_leaves_pending_or_the_bound_passes() {
+        let max = Duration::from_secs(1800);
+        let pending = RestoreState::Pending("no delegate session".into());
+        assert!(engine_stays_held(&pending, Duration::from_secs(1799), max));
+        assert!(
+            !engine_stays_held(&pending, max, max),
+            "the start script stops waiting at the same bound"
+        );
+        assert!(!engine_stays_held(
+            &RestoreState::Concluded("engine workspace restored (10 bytes)".into()),
+            Duration::ZERO,
+            max
+        ));
+        assert!(!engine_stays_held(&RestoreState::Held, Duration::ZERO, max));
+
+        let interval = Duration::from_secs(900);
+        assert_eq!(
+            next_tick_delay(true, true, interval),
+            Duration::from_secs(ENGINE_HOLD_RETRY_SECS),
+            "the engine waits on every attempt"
+        );
+        assert_eq!(
+            next_tick_delay(true, false, interval),
+            Duration::from_secs(ENGINE_HOLD_RETRY_SECS)
+        );
+        assert_eq!(
+            next_tick_delay(false, true, interval),
+            Duration::from_secs(FIRST_TICK_DELAY_SECS)
+        );
+        assert_eq!(next_tick_delay(false, false, interval), interval);
+    }
+
+    /// A late restore lands whole or not at all: a failed extract leaves the
+    /// workspace as it was (retryable, never half-restored — the engine would
+    /// start on it), and a workspace that filled meanwhile is never replaced.
+    #[tokio::test]
+    async fn a_workspace_unpack_swaps_in_whole_or_not_at_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stored = dir.path().join("stored");
+        std::fs::create_dir_all(stored.join("memories")).expect("mkdir");
+        std::fs::write(stored.join("memories/diary.md"), b"hotpot on Jinli").expect("write");
+        let archive = tar_gz(&stored).await.expect("tar");
+        let ws = dir.path().join("workspace");
+        let staging = dir.path().join("workspace.restoring");
+
+        assert!(unpack_workspace(&ws, b"not a gzip").await.is_err());
+        assert!(
+            !dir_has_entries(&ws),
+            "a failed extract leaves nothing behind"
+        );
+        assert!(!staging.exists());
+
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        assert_eq!(unpack_workspace(&ws, &archive).await, Ok(true));
+        assert_eq!(
+            std::fs::read(ws.join("memories/diary.md")).expect("restored"),
+            b"hotpot on Jinli"
+        );
+        assert!(!staging.exists());
+
+        assert_eq!(
+            unpack_workspace(&ws, &archive).await,
+            Ok(false),
+            "a populated workspace is never replaced"
+        );
     }
 }

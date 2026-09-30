@@ -553,7 +553,17 @@ pub(crate) struct LoopRuntime {
 }
 
 async fn run(cfg: ChatLoopConfig) {
+    // #594 — the checkpoint config first: its engine hold (#694) goes up before
+    // the credential bootstrap, which can stall on the signer while the
+    // engine's start script only waits its own bound for a hold to appear.
+    let mut checkpoint_cfg = crate::checkpoint::CheckpointConfig::from_chat_env(cfg.clone());
+    if let Some(c) = checkpoint_cfg.as_mut() {
+        c.hold_engine_now();
+    }
     let Some(credential) = build_credential(&cfg).await else {
+        if let Some(c) = &checkpoint_cfg {
+            c.release_engine_now();
+        }
         return;
     };
     let credential = std::sync::Arc::new(credential);
@@ -571,9 +581,7 @@ async fn run(cfg: ChatLoopConfig) {
     }
     // #594 — the runtime checkpoint (restore-on-boot + periodic durable save),
     // same isolation posture as the mirror: own session, shared credential.
-    if let Some(mut checkpoint_cfg) =
-        crate::checkpoint::CheckpointConfig::from_chat_env(cfg.clone())
-    {
+    if let Some(mut checkpoint_cfg) = checkpoint_cfg {
         checkpoint_cfg.hub = Some(hub.clone());
         crate::checkpoint::spawn(checkpoint_cfg, credential.clone());
     } else {
