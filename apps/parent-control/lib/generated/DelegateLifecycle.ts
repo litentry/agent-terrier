@@ -24,4 +24,10 @@ ms: number,
 /**
  * Stage-tagged errors of the last pass (`"fetch travel: …"`).
  */
-errors: Array<string>, ts_millis: number, };
+errors: Array<string>, ts_millis: number, 
+/**
+ * The receipt of the pass's durable audit row (op_kind 105): the
+ * `envelope_hash` the audit worker answered, so a reader fetches the REAL
+ * row by hash. Only on the report that ends a pull pass whose row landed.
+ */
+audit_envelope_hash?: string, };

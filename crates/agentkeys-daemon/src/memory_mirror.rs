@@ -349,14 +349,19 @@ pub fn summarize(reports: &[NamespaceReport]) -> PassSummary {
     s
 }
 
+/// How long a pass report waits for its audit row's receipt before it is
+/// published without one — the row is best effort, the report is not.
+const AUDIT_RECEIPT_WAIT: Duration = Duration::from_secs(15);
+
 /// #693 — the ONE durable row per pass (op_kind 105), on the delegate's own
 /// authority, best effort: a missing audit plane is a warn, never a stall.
+/// Answers the row's receipt (the audit worker's `envelope_hash`).
 pub async fn audit_pass(
     cfg: &MirrorConfig,
     reports: &[NamespaceReport],
     pass_ms: u64,
     boot: bool,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let s = summarize(reports);
     let stage = if s.errors.is_empty() {
         "ready"
@@ -530,11 +535,11 @@ fn mirror_units(blob: &str) -> Vec<MirrorItem> {
 
 /// Machine-readable report for `--memory-mirror-once` (and the e2e steps that
 /// assert on it): per-namespace outcome + `ms` (#693), the pass wall time, and
-/// whether the lifecycle audit row landed.
+/// whether the lifecycle audit row landed — with its receipt when it did.
 pub fn report_json(
     reports: &[NamespaceReport],
     pass_ms: u64,
-    audit: Option<Result<(), String>>,
+    audit: Option<Result<String, String>>,
 ) -> serde_json::Value {
     let namespaces: Vec<serde_json::Value> = reports
         .iter()
@@ -578,7 +583,7 @@ pub fn report_json(
         "deleted": summary.deleted,
         "errors": summary.errors,
         "audit": audit.map(|a| match a {
-            Ok(()) => serde_json::json!({ "appended": true }),
+            Ok(hash) => serde_json::json!({ "appended": true, "envelope_hash": hash }),
             Err(e) => serde_json::json!({ "appended": false, "error": e }),
         }),
     })
@@ -639,7 +644,14 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
                 engine_down_logged = true;
             }
             if let Some(h) = &cfg.hub {
-                h.pass_finished(cfg.namespaces.len() as u32, 0, 0, 0, Vec::new(), true);
+                h.publish_pass(h.pass_finished(
+                    cfg.namespaces.len() as u32,
+                    0,
+                    0,
+                    0,
+                    Vec::new(),
+                    true,
+                ));
             }
             wait_interval_or_sync(&cfg).await;
             continue;
@@ -699,9 +711,10 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
             session = None;
             continue; // re-resolve immediately, no interval wait
         }
-        // #693 — the stage the pass ended in + the ONE durable row per pass.
+        // #693 — the stage the pass ended in + the ONE durable row per pass;
+        // the pass's feed report names that row by its receipt.
         let summary = summarize(&reports);
-        if let Some(h) = &cfg.hub {
+        let pass_report = cfg.hub.as_ref().map(|h| {
             h.pass_finished(
                 summary.namespaces,
                 summary.mirrored,
@@ -709,10 +722,30 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
                 pass_ms,
                 summary.errors.clone(),
                 false,
-            );
-        }
-        if let Err(e) = audit_pass(&cfg, &reports, pass_ms, first_pass).await {
-            tracing::warn!(error = %e, "#693 lifecycle: audit row not appended (best effort)");
+            )
+        });
+        let receipt = match tokio::time::timeout(
+            AUDIT_RECEIPT_WAIT,
+            audit_pass(&cfg, &reports, pass_ms, first_pass),
+        )
+        .await
+        {
+            Ok(Ok(hash)) => Some(hash),
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "#693 lifecycle: audit row not appended (best effort)");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    wait_secs = AUDIT_RECEIPT_WAIT.as_secs(),
+                    "#693 lifecycle: audit row append timed out — the pass report goes out without its receipt"
+                );
+                None
+            }
+        };
+        if let (Some(h), Some(mut report)) = (&cfg.hub, pass_report) {
+            report.audit_envelope_hash = receipt;
+            h.publish_pass(report);
         }
         first_pass = false;
         wait_interval_or_sync(&cfg).await;

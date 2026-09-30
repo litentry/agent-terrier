@@ -744,8 +744,12 @@ the permissions you approve. parent-control → **applications**:
   waits for `ready` at most `AGENTKEYS_KNOWLEDGE_READY_WAIT_SECS` (60 s by
   default). **sync now** on the app's page makes it pull at once. Every pull
   leaves one audit row (`delegate.lifecycle`: namespaces, lines, ms, errors),
-  never a log stream. A respawned app restores its engine index with its
-  checkpoint, so its first pull is a delta.
+  never a log stream. To see them, pick the app's delegate in the **audit
+  feed**'s actor filter (or **all rows in the audit feed →** on its actor
+  page): one row per pull pass, and a click opens the stored row itself. A
+  delegate on an older sandbox image shows its passes without that stored
+  row until its next **update runtime**. A respawned app restores its engine
+  index with its checkpoint, so its first pull is a delta.
 - **Uninstall** revokes every permission (the delegate's, and the contact gate's
   and console's on the app's feeds), returns the agent slot, and tears the
   sandbox down. Keeping the app's memory lets a reinstall inherit it.

@@ -22,7 +22,7 @@
 //! the web app launcher (`dev.sh`) always passes one, so the onboarding
 //! ceremony is NOT deferred.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -88,6 +88,10 @@ pub struct UiBridgeState {
     pub caps: RwLock<HashMap<String, Vec<ApiCapToken>>>,
     pub audit: RwLock<VecDeque<ApiAuditEvent>>,
     pub audit_tx: broadcast::Sender<ApiAuditEvent>,
+    /// #693 — each delegate's recent pull passes, read from its feed when the
+    /// audit feed is filtered to it and keyed by pass time; kept apart from
+    /// `audit` so passes every few minutes never evict the console's own rows.
+    pub delegate_passes: RwLock<HashMap<String, BTreeMap<u64, ApiAuditEvent>>>,
     pub workers: RwLock<HashMap<String, ApiWorker>>,
     pub anchor: RwLock<ApiAnchorStatus>,
     /// Master-actor memory entries, keyed by content_hash for idempotent
@@ -1748,6 +1752,7 @@ pub fn build_state(
         caps: RwLock::new(HashMap::new()),
         audit: RwLock::new(VecDeque::with_capacity(AUDIT_BUFFER_CAP)),
         audit_tx,
+        delegate_passes: RwLock::new(HashMap::new()),
         workers: RwLock::new(HashMap::new()),
         anchor: RwLock::new(ApiAnchorStatus::default()),
         master_memory: RwLock::new(HashMap::new()),
@@ -3782,12 +3787,15 @@ pub(crate) fn now_unix() -> u64 {
 }
 
 fn now_ts_hms() -> String {
-    // HH:MM:SS in UTC for audit event timestamps. Operator-facing only —
-    // chain timestamps are independent.
-    let now = now_unix();
-    let h = (now / 3600) % 24;
-    let m = (now / 60) % 60;
-    let s = now % 60;
+    ts_hms_utc(now_unix())
+}
+
+// HH:MM:SS in UTC for audit event timestamps. Operator-facing only — chain
+// timestamps are independent.
+fn ts_hms_utc(unix_secs: u64) -> String {
+    let h = (unix_secs / 3600) % 24;
+    let m = (unix_secs / 60) % 60;
+    let s = unix_secs % 60;
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
@@ -4415,7 +4423,10 @@ async fn sandbox_self_audit(
         .audit_append(req.op_kind, req.op_body, req.result, req.intent_text)
         .await
     {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Ok(envelope_hash) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "envelope_hash": envelope_hash })),
+        ),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "error": e })),
@@ -5906,18 +5917,30 @@ async fn list_recent_audit(
     axum::extract::Query(q): axum::extract::Query<ListRecentAuditQuery>,
 ) -> impl IntoResponse {
     let limit = q.limit.unwrap_or(50).min(AUDIT_BUFFER_CAP);
-    let guard = state.audit.read().await;
-    let mut events: Vec<ApiAuditEvent> = guard
+    // #693 — filtered to a delegate, the feed also shows its pull passes.
+    if let Some(actor_id) = q.actor_id.as_deref() {
+        refresh_delegate_passes(&state, actor_id).await;
+    }
+    let mut events: Vec<ApiAuditEvent> = state
+        .audit
+        .read()
+        .await
         .iter()
         .rev()
         .filter(|e| q.actor_id.as_deref().is_none_or(|a| e.actor_id == a))
         .take(limit)
         .cloned()
         .collect();
-    // Reverse-rev: newest first, which is the natural iteration order
-    // when we push_back + iter().rev(). Already in that order; ensure stable.
-    // (Re-sort by ts descending as a safety belt for ties.)
+    if let Some(passes) = match q.actor_id.as_deref() {
+        Some(actor_id) => state.delegate_passes.read().await.get(actor_id).cloned(),
+        None => None,
+    } {
+        events.extend(passes.into_values());
+    }
+    // Newest first (the ring iterates newest-first already; the sort merges the
+    // pass rows and is a safety belt for ties).
     events.sort_by(|a, b| b.ts.cmp(&a.ts));
+    events.truncate(limit);
     Json(serde_json::json!({ "events": events }))
 }
 
@@ -6366,9 +6389,20 @@ async fn decode_audit_event(
     State(state): State<SharedUiBridgeState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    let event = {
+    let in_ring = {
         let guard = state.audit.read().await;
         guard.iter().find(|e| e.id == id).cloned()
+    };
+    let event = match in_ring {
+        Some(e) => Some(e),
+        None => state
+            .delegate_passes
+            .read()
+            .await
+            .values()
+            .flat_map(|passes| passes.values())
+            .find(|e| e.id == id)
+            .cloned(),
     }
     .ok_or_else(|| {
         err(
@@ -8609,102 +8643,329 @@ async fn master_agent_lifecycle(
         )
             .into_response();
     }
-    let (cap, coords) = match master_channel_cap(
-        &state,
-        format!("channel-sub:{}", q.channel_id),
-        agentkeys_backend_client::protocol::CapMintOp::ChannelSubscribe,
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response()
-        }
+    let events = match master_feed_tail(&state, &q.channel_id, 40).await {
+        Ok(events) => events,
+        Err(resp) => return resp,
     };
-    let worker = match channel_worker_url(&coords.broker) {
-        Ok(u) => u,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response()
-        }
-    };
-    // The protocol's poll body with its #693 optional `tail` — the worker
-    // decrypts only the last events of the window.
-    let body = serde_json::json!({
-        "cap": cap,
-        "after": "",
-        "wait_seconds": 0,
-        "tail": 40,
-    });
-    let resp = match reqwest::Client::new()
-        .post(format!("{worker}/v1/channel/poll"))
-        .timeout(worker_poll_budget(0))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("channel worker poll: {e}") })),
-            )
-                .into_response()
-        }
-    };
-    if !resp.status().is_success() {
-        let st = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let txt = resp.text().await.unwrap_or_default();
-        return (
-            st,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            txt,
-        )
-            .into_response();
-    }
-    let v: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("poll parse: {e}") })),
-            )
-                .into_response()
-        }
-    };
-    let latest = v
-        .get("events")
-        .and_then(|e| e.as_array())
-        .and_then(|events| {
-            events
-                .iter()
-                .rev()
-                .find(|e| e.get("kind").and_then(|k| k.as_str()) == Some("lifecycle"))
-        })
-        .and_then(|e| {
-            use base64::{engine::general_purpose::STANDARD, Engine};
-            let b64 = e.get("body")?.as_str()?;
-            let bytes = STANDARD.decode(b64).ok()?;
-            let report: agentkeys_backend_client::protocol::DelegateLifecycle =
-                serde_json::from_slice(&bytes).ok()?;
-            Some((
-                report,
-                e.get("ts_millis").and_then(|t| t.as_u64()).unwrap_or(0),
-            ))
-        });
+    let latest = lifecycle_reports(&events).pop();
     Json(serde_json::json!({
         "channel_id": q.channel_id,
         "lifecycle": latest.as_ref().map(|(r, _)| r),
         "event_ts_millis": latest.as_ref().map(|(_, t)| t),
     }))
     .into_response()
+}
+
+/// The last `tail` events of a feed, oldest first, read with the master's
+/// subscribe cap — the worker decrypts only that window (the #693 optional
+/// `tail` on the poll body), never a replay of the transcript.
+async fn master_feed_tail(
+    state: &UiBridgeState,
+    channel_id: &str,
+    tail: u32,
+) -> Result<Vec<serde_json::Value>, axum::response::Response> {
+    let failed = |status: StatusCode, error: String| {
+        (status, Json(serde_json::json!({ "error": error }))).into_response()
+    };
+    let (cap, coords) = master_channel_cap(
+        state,
+        format!("channel-sub:{channel_id}"),
+        agentkeys_backend_client::protocol::CapMintOp::ChannelSubscribe,
+    )
+    .await
+    .map_err(|e| failed(StatusCode::BAD_GATEWAY, e))?;
+    let worker = channel_worker_url(&coords.broker)
+        .map_err(|e| failed(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let body = serde_json::json!({
+        "cap": cap,
+        "after": "",
+        "wait_seconds": 0,
+        "tail": tail,
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{worker}/v1/channel/poll"))
+        .timeout(worker_poll_budget(0))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| failed(StatusCode::BAD_GATEWAY, format!("channel worker poll: {e}")))?;
+    if !resp.status().is_success() {
+        let st = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let txt = resp.text().await.unwrap_or_default();
+        return Err((
+            st,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            txt,
+        )
+            .into_response());
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| failed(StatusCode::BAD_GATEWAY, format!("poll parse: {e}")))?;
+    Ok(v.get("events")
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// The `lifecycle` reports in a feed window, oldest first, each with its event
+/// stamp; a body that does not parse is skipped.
+fn lifecycle_reports(
+    events: &[serde_json::Value],
+) -> Vec<(agentkeys_backend_client::protocol::DelegateLifecycle, u64)> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    events
+        .iter()
+        .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("lifecycle"))
+        .filter_map(|e| {
+            let bytes = STANDARD.decode(e.get("body")?.as_str()?).ok()?;
+            let report = serde_json::from_slice(&bytes).ok()?;
+            Some((
+                report,
+                e.get("ts_millis").and_then(|t| t.as_u64()).unwrap_or(0),
+            ))
+        })
+        .collect()
+}
+
+/// How many of a delegate's latest feed events a pass-row refresh reads, and
+/// how many pass rows the audit feed keeps per delegate.
+const PASS_FEED_TAIL: u32 = 100;
+const PASS_ROWS_PER_DELEGATE: usize = 50;
+
+/// The feed a delegate publishes its lifecycle on — the console's
+/// `opchat-<label>`; `None` for the master and for devices (the chain tier's
+/// `kind`; a row without one is judged by its role).
+fn delegate_feed(actor: &ApiActor) -> Option<String> {
+    let delegate = match actor.kind.as_deref() {
+        Some(kind) => kind == "delegate",
+        None => actor.role == "agent",
+    };
+    let label = actor.label.trim_end_matches(" (revoked)");
+    (delegate && !label.is_empty()).then(|| format!("opchat-{label}"))
+}
+
+/// #693 — one pull pass as an audit-feed row, keyed by the pass time. It names
+/// the pass's durable op_kind 105 row by its receipt when the delegate
+/// published one, so the decode view shows the REAL envelope.
+fn pass_audit_row(
+    actor: &ApiActor,
+    lc: &agentkeys_backend_client::protocol::DelegateLifecycle,
+) -> Option<(u64, ApiAuditEvent)> {
+    if !crate::lifecycle::is_pass_report(lc) {
+        return None;
+    }
+    let ok = lc.stage == agentkeys_backend_client::protocol::LifecycleStage::Ready;
+    let detail = if ok {
+        format!(
+            "pull pass · {} namespace(s) · {} mirrored · {} deleted · {} ms",
+            lc.total, lc.mirrored, lc.deleted, lc.ms
+        )
+    } else {
+        format!(
+            "pull pass failed · {} · {} ms",
+            lc.errors.first().unwrap_or(&lc.detail),
+            lc.ms
+        )
+    };
+    Some((
+        lc.ts_millis,
+        ApiAuditEvent {
+            id: format!("pass-{}-{}", actor.id, lc.ts_millis),
+            ts: ts_hms_utc(lc.ts_millis / 1000),
+            actor_id: actor.id.clone(),
+            actor: actor.label.clone(),
+            kind: agentkeys_core::audit::AuditOpKind::DelegateLifecycle
+                .label()
+                .to_string(),
+            detail,
+            chip: "memory".into(),
+            sev: if ok { "ok" } else { "warn" }.into(),
+            tx_hash: None,
+            audit_envelope_hashes: lc.audit_envelope_hash.clone().map(|h| vec![h]),
+        },
+    ))
+}
+
+/// Merge freshly read pass rows: a row read again keeps the receipt it already
+/// had, the newest [`PASS_ROWS_PER_DELEGATE`] stay.
+fn merge_pass_rows(kept: &mut BTreeMap<u64, ApiAuditEvent>, rows: Vec<(u64, ApiAuditEvent)>) {
+    for (at, row) in rows {
+        let keeps_receipt = kept.get(&at).is_some_and(|old| {
+            old.audit_envelope_hashes.is_some() && row.audit_envelope_hashes.is_none()
+        });
+        if !keeps_receipt {
+            kept.insert(at, row);
+        }
+    }
+    while kept.len() > PASS_ROWS_PER_DELEGATE {
+        kept.pop_first();
+    }
+}
+
+/// Re-read a delegate's recent pull passes from its feed. Best effort: without
+/// a master session, a feed or a worker, the rows read before stay.
+async fn refresh_delegate_passes(state: &UiBridgeState, actor_id: &str) {
+    let Some(actor) = state.actors.read().await.get(actor_id).cloned() else {
+        return;
+    };
+    let Some(feed) = delegate_feed(&actor) else {
+        return;
+    };
+    let events = match master_feed_tail(state, &feed, PASS_FEED_TAIL).await {
+        Ok(events) => events,
+        Err(resp) => {
+            tracing::debug!(actor_id, feed = %feed, status = %resp.status(), "#693 audit: pull passes not refreshed");
+            return;
+        }
+    };
+    let rows = lifecycle_reports(&events)
+        .iter()
+        .filter_map(|(lc, _)| pass_audit_row(&actor, lc))
+        .collect();
+    merge_pass_rows(
+        state
+            .delegate_passes
+            .write()
+            .await
+            .entry(actor_id.to_string())
+            .or_default(),
+        rows,
+    );
+}
+
+#[cfg(test)]
+mod pass_row_tests {
+    use super::*;
+    use agentkeys_backend_client::protocol::{DelegateLifecycle, LifecycleStage};
+
+    fn actor(id: &str, label: &str, kind: Option<&str>) -> ApiActor {
+        ApiActor {
+            runtime: None,
+            kind: kind.map(str::to_string),
+            id: id.into(),
+            omni: "0x1".into(),
+            omni_hex: "0x1".into(),
+            label: label.into(),
+            role: "agent".into(),
+            parent: Some("master".into()),
+            derivation: String::new(),
+            device: String::new(),
+            device_pubkey: String::new(),
+            last_active: String::new(),
+            status: "ok".into(),
+            vendor: String::new(),
+            k11: false,
+            device_key_hash: None,
+            scope: None,
+            scope_unknown_service_ids: None,
+            scope_channel_service_ids: None,
+            scope_capability_service_ids: None,
+            payment_cap: None,
+            time_window: None,
+            services: None,
+            account_address: None,
+            account_type: None,
+            preset_id: None,
+            memory_ns: None,
+        }
+    }
+
+    fn report(stage: LifecycleStage, ms: u64, receipt: Option<&str>) -> DelegateLifecycle {
+        DelegateLifecycle {
+            stage,
+            detail: "engine unreachable".into(),
+            done: 2,
+            total: 2,
+            mirrored: 3,
+            deleted: 1,
+            ms,
+            errors: Vec::new(),
+            ts_millis: 1_790_000_000_000 + ms,
+            audit_envelope_hash: receipt.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_delegate_reads_its_opchat_and_a_device_has_none() {
+        assert_eq!(
+            delegate_feed(&actor("agent-chef", "chef", Some("delegate"))).as_deref(),
+            Some("opchat-chef")
+        );
+        assert_eq!(
+            delegate_feed(&actor("agent-old", "old (revoked)", Some("delegate"))).as_deref(),
+            Some("opchat-old")
+        );
+        assert!(delegate_feed(&actor("agent-cam", "cam", Some("device"))).is_none());
+        let mut master = actor("master", "owner", None);
+        master.role = "master".into();
+        assert!(delegate_feed(&master).is_none());
+    }
+
+    #[test]
+    fn each_pass_report_is_one_row_that_names_its_durable_receipt() {
+        let chef = actor("agent-chef", "chef", Some("delegate"));
+        let (at, row) =
+            pass_audit_row(&chef, &report(LifecycleStage::Ready, 812, Some("0xfeed"))).unwrap();
+        assert_eq!(at, 1_790_000_000_812);
+        assert_eq!(row.actor_id, "agent-chef");
+        assert_eq!(row.kind, "delegate.lifecycle");
+        assert_eq!(row.sev, "ok");
+        assert!(row
+            .detail
+            .contains("2 namespace(s) · 3 mirrored · 1 deleted · 812 ms"));
+        assert_eq!(row.audit_envelope_hashes, Some(vec!["0xfeed".to_string()]));
+        let mut failed = report(LifecycleStage::Degraded, 90, None);
+        failed.errors = vec!["fetch travel: 502".into()];
+        let (_, row) = pass_audit_row(&chef, &failed).unwrap();
+        assert_eq!(row.sev, "warn");
+        assert!(row.detail.contains("fetch travel: 502"));
+        assert!(row.audit_envelope_hashes.is_none());
+        assert!(
+            pass_audit_row(&chef, &report(LifecycleStage::Degraded, 0, None)).is_none(),
+            "the engine-down notice is no pass"
+        );
+        assert!(pass_audit_row(&chef, &report(LifecycleStage::Pulling, 0, None)).is_none());
+    }
+
+    #[test]
+    fn a_re_read_keeps_the_receipt_and_the_newest_rows() {
+        let chef = actor("agent-chef", "chef", Some("delegate"));
+        let row = |ms: u64, receipt: Option<&str>| {
+            pass_audit_row(&chef, &report(LifecycleStage::Ready, ms, receipt)).unwrap()
+        };
+        let mut kept = BTreeMap::new();
+        merge_pass_rows(&mut kept, vec![row(5, Some("0xa"))]);
+        merge_pass_rows(&mut kept, vec![row(5, None), row(6, None)]);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(
+            kept.values().next().unwrap().audit_envelope_hashes,
+            Some(vec!["0xa".to_string()])
+        );
+        merge_pass_rows(&mut kept, (100..160).map(|ms| row(ms, None)).collect());
+        assert_eq!(kept.len(), PASS_ROWS_PER_DELEGATE);
+        assert_eq!(*kept.keys().next_back().unwrap(), 1_790_000_000_159);
+    }
+
+    #[test]
+    fn the_feed_window_yields_its_lifecycle_reports_in_order() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let event = |kind: &str, body: &[u8], ts: u64| serde_json::json!({ "kind": kind, "body": STANDARD.encode(body), "ts_millis": ts });
+        let pass = serde_json::to_vec(&report(LifecycleStage::Ready, 812, Some("0xfeed"))).unwrap();
+        let pulling = serde_json::to_vec(&report(LifecycleStage::Pulling, 0, None)).unwrap();
+        let events = vec![
+            event("lifecycle", &pulling, 1),
+            event("text", b"hello", 2),
+            event("lifecycle", b"not json", 3),
+            event("lifecycle", &pass, 4),
+        ];
+        let reports = lifecycle_reports(&events);
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].0.stage, LifecycleStage::Pulling);
+        assert_eq!(reports[1].1, 4);
+        assert_eq!(reports[1].0.audit_envelope_hash.as_deref(), Some("0xfeed"));
+    }
 }
 
 /// `POST /v1/master/agent/chat/poll` — the transcript read (D13: operator

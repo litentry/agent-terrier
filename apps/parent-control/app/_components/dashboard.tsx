@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { CHIP_STYLES, NAMESPACES } from '@/lib/constants';
+import type { AuditActorOption } from '@/lib/client/auditFilter';
 import type { ConnectionStatus } from '@/lib/client/types';
 import { AgentTabsPanel } from './agent_tabs';
 import { AutoDistributePanel, StagedPermissionEditor } from './permissions';
@@ -236,6 +237,7 @@ export function ActorDetail({
   onConfirmProposal,
   onConfirmSafe,
   onResetMaster,
+  onOpenAudit,
 }: {
   actor: Actor;
   onBack: () => void;
@@ -259,6 +261,8 @@ export function ActorDetail({
   onConfirmSafe: (a: Actor, ps: ProposedScope[]) => void;
   /** #225 E7: unbind the master (local + on-chain) so a fresh passkey re-binds. Master only. */
   onResetMaster?: () => void;
+  /** #693 — the audit feed filtered to this actor (a delegate's pull passes too). */
+  onOpenAudit?: (actorId: string) => void;
 }) {
   const events = recentEvents.filter((e) => e.actorId === actor.id).slice(0, 6);
   const isMaster = actor.role === 'master';
@@ -383,7 +387,13 @@ export function ActorDetail({
         />
       )}
 
-      <Panel title={`── recent activity · ${actor.label}`} flush>
+      <Panel
+        title={`── recent activity · ${actor.label}`}
+        right={onOpenAudit && (
+          <button className="btn sm" onClick={() => onOpenAudit(actor.id)}>all rows in the audit feed →</button>
+        )}
+        flush
+      >
         {events.length === 0 ? (
           <div style={{ padding: 20 }} className="muted">no activity in this window.</div>
         ) : (
@@ -408,18 +418,31 @@ export function AuditFeed({
   onPick,
   paused,
   onPause,
+  actorOptions,
+  actorFilter,
+  onActorFilter,
+  actorRows,
 }: {
   events: AuditEvent[];
   status: ConnectionStatus;
   onPick: (e: AuditEvent) => void;
   paused: boolean;
   onPause: () => void;
+  /** #693 — filter to one actor; a delegate's rows include one row per pull
+   *  pass, read from its feed. */
+  actorOptions: AuditActorOption[];
+  actorFilter: string;
+  onActorFilter: (actorId: string) => void;
+  /** The filtered actor's rows — null until the first read answers. */
+  actorRows: AuditEvent[] | null;
 }) {
   const [filter, setFilter] = useState<string>('all');
-  const filtered = filter === 'all' ? events : events.filter((e) => e.chip === filter);
+  const scoped = actorFilter === 'all' ? events : actorRows ?? [];
+  const filtered = filter === 'all' ? scoped : scoped.filter((e) => e.chip === filter);
   const filters: (ChipKind | 'all')[] = ['all', 'memory', 'creds', 'payment', 'audit', 'chain', 'broker'];
+  const reading = actorFilter !== 'all' && actorRows === null;
 
-  if (events.length === 0) {
+  if (events.length === 0 && actorOptions.length === 0) {
     return (
       <>
         <PageHead
@@ -447,7 +470,18 @@ export function AuditFeed({
       <Panel
         title="── stream · newest first · click to decode"
         right={
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <select
+              value={actorFilter}
+              onChange={(e) => onActorFilter(e.target.value)}
+              aria-label="filter by actor"
+              style={{ padding: '4px 8px', fontSize: 12.5 }}
+            >
+              <option value="all">all actors</option>
+              {actorOptions.map((o) => (
+                <option key={o.id} value={o.id}>{o.label}</option>
+              ))}
+            </select>
             {filters.map((f) => (
               <button key={f} className={`btn sm ${filter === f ? 'primary' : ''}`} onClick={() => setFilter(f)}>{f}</button>
             ))}
@@ -464,7 +498,11 @@ export function AuditFeed({
               <span className={CHIP_STYLES[e.chip] ?? 'chip'}>{e.chip}</span>
             </div>
           ))}
-          {filtered.length === 0 && <div style={{ padding: 40, textAlign: 'center' }} className="muted">no events match this filter.</div>}
+          {filtered.length === 0 && (
+            <div style={{ padding: 40, textAlign: 'center' }} className="muted">
+              {reading ? 'reading this actor’s rows and pull passes…' : 'no events match this filter.'}
+            </div>
+          )}
         </div>
       </Panel>
     </>

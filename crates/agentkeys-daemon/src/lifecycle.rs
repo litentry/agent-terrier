@@ -77,7 +77,16 @@ fn report(stage: LifecycleStage, detail: impl Into<String>) -> DelegateLifecycle
         ms: 0,
         errors: Vec::new(),
         ts_millis: now_millis(),
+        audit_envelope_hash: None,
     }
+}
+
+/// The report that ENDS a pull pass ([`LifecycleHub::pass_finished`] with the
+/// engine up) — the one a reader turns into the pass's audit row. Every other
+/// report (a stage change, the engine-down notice, `syncing k/n`) carries no
+/// pass duration.
+pub fn is_pass_report(ev: &DelegateLifecycle) -> bool {
+    matches!(ev.stage, LifecycleStage::Ready | LifecycleStage::Degraded) && ev.ms > 0
 }
 
 impl LifecycleHub {
@@ -147,7 +156,10 @@ impl LifecycleHub {
     }
 
     /// The end of a pull pass decides the stage: `ready`, or `degraded` when
-    /// the engine was down or any namespace failed to fetch.
+    /// the engine was down or any namespace failed to fetch. The watch flips
+    /// NOW (a waiting turn answers at once); the caller publishes the returned
+    /// report with [`Self::publish_pass`] once the pass's audit row has its
+    /// receipt, so a pass stays ONE feed event.
     #[allow(clippy::too_many_arguments)]
     pub fn pass_finished(
         &self,
@@ -157,7 +169,7 @@ impl LifecycleHub {
         ms: u64,
         errors: Vec<String>,
         engine_down: bool,
-    ) {
+    ) -> DelegateLifecycle {
         self.first_pass_done.store(true, Ordering::Release);
         let (stage, detail) = if engine_down {
             (
@@ -175,7 +187,7 @@ impl LifecycleHub {
                 format!("{total} namespace(s) · {mirrored} line(s) mirrored · {ms} ms"),
             )
         };
-        self.set(DelegateLifecycle {
+        let ev = DelegateLifecycle {
             stage,
             detail,
             done: total,
@@ -185,7 +197,24 @@ impl LifecycleHub {
             ms,
             errors,
             ts_millis: now_millis(),
+            audit_envelope_hash: None,
+        };
+        self.state.send_replace(ev.clone());
+        ev
+    }
+
+    /// Publish a [`Self::pass_finished`] report — with the receipt of the
+    /// pass's audit row when it landed. The watch takes the receipt too unless
+    /// a newer report replaced the pass meanwhile.
+    pub fn publish_pass(&self, ev: DelegateLifecycle) {
+        self.state.send_if_modified(|cur| {
+            let same_pass = cur.ts_millis == ev.ts_millis && cur.stage == ev.stage;
+            if same_pass {
+                *cur = ev.clone();
+            }
+            same_pass
         });
+        let _ = self.events.try_send(ev);
     }
 
     /// Wait for the knowledge up to the bound; a turn NEVER waits forever.
@@ -366,6 +395,45 @@ mod tests {
         hub.pass_finished(2, 0, 0, 30, vec!["fetch travel: 502".into()], false);
         assert_eq!(hub.current().stage, LifecycleStage::Degraded);
         assert_eq!(hub.current().errors.len(), 1);
+    }
+
+    #[test]
+    fn a_pass_is_one_feed_event_that_carries_its_audit_receipt() {
+        let hub = LifecycleHub::new(Duration::from_secs(1));
+        let mut rx = hub.take_events().expect("receiver");
+        let mut ev = hub.pass_finished(2, 3, 1, 420, vec![], false);
+        assert_eq!(
+            hub.current().stage,
+            LifecycleStage::Ready,
+            "the watch flips before the receipt"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing reaches the feed before publish_pass"
+        );
+        ev.audit_envelope_hash = Some("0xabc".into());
+        hub.publish_pass(ev);
+        let sent = rx.try_recv().expect("the pass report");
+        assert_eq!(sent.audit_envelope_hash.as_deref(), Some("0xabc"));
+        assert!(rx.try_recv().is_err(), "exactly one event per pass");
+        assert_eq!(hub.current().audit_envelope_hash.as_deref(), Some("0xabc"));
+    }
+
+    #[test]
+    fn only_the_report_that_ends_a_pull_pass_is_a_pass_report() {
+        let hub = LifecycleHub::new(Duration::from_secs(1));
+        let pulled = hub.pass_finished(2, 3, 0, 420, vec![], false);
+        assert!(is_pass_report(&pulled));
+        let failed = hub.pass_finished(2, 0, 0, 90, vec!["fetch travel: 502".into()], false);
+        assert!(is_pass_report(&failed));
+        let engine_down = hub.pass_finished(2, 0, 0, 0, vec![], true);
+        assert!(!is_pass_report(&engine_down));
+        hub.stage(LifecycleStage::Pulling, "periodic pull");
+        assert!(!is_pass_report(&hub.current()));
+        hub.restore_finished("restored");
+        assert!(!is_pass_report(&hub.current()));
+        hub.set_mirror_enabled(false);
+        assert!(!is_pass_report(&hub.current()));
     }
 
     #[test]

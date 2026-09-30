@@ -25,6 +25,7 @@ import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import { KnowledgePage } from './knowledge';
 import { HeaderSearch } from './search';
 import { PAGE_ENTRIES, type SearchEntry } from '@/lib/client/search';
+import { actorAuditRows, auditActorOptions } from '@/lib/client/auditFilter';
 import { decodeBase64Utf8, errorJson } from '@/lib/client/diff';
 import { DiffView } from './shared';
 import { CredentialsPage } from './credentials';
@@ -76,6 +77,9 @@ export function App() {
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [archiveActor, setArchiveActor] = useState<Actor | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  // #693 — the audit feed filtered to one actor, and that actor's rows.
+  const [auditActor, setAuditActor] = useState<string>('all');
+  const [auditActorRows, setAuditActorRows] = useState<AuditEvent[] | null>(null);
   const [page, setPage] = useState<Page>('actors');
   const [actorId, setActorId] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
@@ -424,6 +428,24 @@ export function App() {
     );
     return stop;
   }, [onboarded, paused, client]);
+
+  // #693 — filtered to one actor, the feed reads that actor's rows from the
+  // daemon; for a delegate that includes one row per pull pass from its feed.
+  useEffect(() => {
+    if (page !== 'audit' || auditActor === 'all') return;
+    let alive = true;
+    const read = async () => {
+      const r = await client.listRecentAuditEvents({ actorId: auditActor, limit: 100 });
+      if (alive && r.ok) setAuditActorRows(r.data);
+    };
+    setAuditActorRows(null);
+    void read();
+    const t = setInterval(() => void read(), 30_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [client, page, auditActor]);
 
   const showToast = (msg: string, sticky = false, action?: { label: string; fn: () => void }) => {
     setToast({ msg, sticky, action });
@@ -1508,7 +1530,7 @@ export function App() {
         )}
         {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {page === 'detail' && currentActor && (
-          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} />
+          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} onOpenAudit={(id) => { setAuditActor(id); go('audit'); }} />
         )}
         {page === 'knowledge' && (
           // 2026-09-13 — ONE page over canonical memory + the curated, bindable items
@@ -1572,7 +1594,19 @@ export function App() {
           // (epic #660 stage 1). Channels feed the wizard's slot options.
           <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} />
         )}
-        {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
+        {page === 'audit' && (
+          <AuditFeed
+            events={events}
+            status={status}
+            onPick={(e) => { setEventDetail(e); go('decode'); }}
+            paused={paused}
+            onPause={() => setPaused((p) => !p)}
+            actorOptions={auditActorOptions(actors, events)}
+            actorFilter={auditActor}
+            onActorFilter={setAuditActor}
+            actorRows={auditActorRows && actorAuditRows(auditActorRows, events, auditActor)}
+          />
+        )}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
         {page === 'chain' && <ChainPage />}
         {page === 'logo' && <LogoPage />}

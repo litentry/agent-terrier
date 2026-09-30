@@ -126,14 +126,15 @@ impl SelfBackend {
         ))
     }
 
-    /// Append one runtime-audit row as the delegate.
+    /// Append one runtime-audit row as the delegate; answers the row's receipt
+    /// (the audit worker's `envelope_hash`).
     pub(crate) async fn audit_append(
         &self,
         op_kind: u8,
         op_body: serde_json::Value,
         result: u8,
         intent_text: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         self.client()
             .audit_append(AuditAppendInput {
                 operator_omni: normalize_omni_0x(&self.cfg.operator_omni),
@@ -144,7 +145,7 @@ impl SelfBackend {
                 intent_text,
             })
             .await
-            .map(|_| ())
+            .map(|appended| appended.envelope_hash)
             .map_err(|e| format!("audit append: {e}"))
     }
 

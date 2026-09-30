@@ -596,6 +596,12 @@ pub struct DelegateLifecycle {
     pub errors: Vec<String>,
     #[ts(type = "number")]
     pub ts_millis: u64,
+    /// The receipt of the pass's durable audit row (op_kind 105): the
+    /// `envelope_hash` the audit worker answered, so a reader fetches the REAL
+    /// row by hash. Only on the report that ends a pull pass whose row landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub audit_envelope_hash: Option<String>,
 }
 
 /// #694 — the reserved keyed object holding a checkpoint of the delegate's
