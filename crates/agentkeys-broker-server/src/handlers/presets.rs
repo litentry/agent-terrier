@@ -106,6 +106,37 @@ const BUILTINS: &[BuiltinPreset] = &[
             include_str!("../../../../presets/chef/knowledge/nutrition-basics.md"),
         )],
     },
+    // Painter — the kids' drawing application (2026-09-26): a photo + spoken
+    // wishes become one copyable picture the app authors itself as an SVG
+    // `image` event on its display slot; a finished picture is published last
+    // so the kids' screen keeps it full-screen. No tool class at all — the
+    // sheet grants feeds, one optional profile, and the plugin; nothing else.
+    BuiltinPreset {
+        manifest_json: include_str!("../../../../presets/painter/preset.json"),
+        soul_md: include_str!("../../../../presets/painter/SOUL.md"),
+        skills: &[
+            (
+                "perception.md",
+                include_str!("../../../../presets/painter/skills/perception.md"),
+            ),
+            (
+                "canvas.md",
+                include_str!("../../../../presets/painter/skills/canvas.md"),
+            ),
+            (
+                "draw.md",
+                include_str!("../../../../presets/painter/skills/draw.md"),
+            ),
+            (
+                "screen.md",
+                include_str!("../../../../presets/painter/skills/screen.md"),
+            ),
+        ],
+        knowledge: &[(
+            "drawing-for-kids.md",
+            include_str!("../../../../presets/painter/knowledge/drawing-for-kids.md"),
+        )],
+    },
     // #671 — the synthetic CONFORMANCE template the framework suite installs
     // (hidden: listed only with AGENTKEYS_CATALOG_INCLUDE_HIDDEN=1 on a test
     // stack; always fetchable by id). Exercises every slot kind the suite
@@ -353,6 +384,54 @@ mod tests {
         assert!(template_schedule("nope").is_empty());
     }
 
+    /// Painter — the kids' drawing application: listed to the household, an
+    /// application with NO tool class (its `tools` is present and empty, so
+    /// the product default `web` is not granted), a display slot that carries
+    /// the picture (`image`) beside the card, and voice + photos on its chat.
+    #[test]
+    fn painter_is_a_toolless_application_that_draws_on_its_display_slot() {
+        use agentkeys_protocol::{Availability, ChannelEndpointKind, ChannelEventKind};
+        let (summary, bundle) = find_template("painter").expect("painter is compiled in");
+        assert!(summary.is_application());
+        assert!(!summary.app.hidden);
+        assert_eq!(summary.app.tools, Some(vec![]));
+        assert!(summary.tool_classes().is_empty(), "no tool class at all");
+        assert_eq!(summary.app.availability, Availability::WakeOnEvent);
+        assert!(summary.schedule.is_empty());
+        let kinds: Vec<ChannelEndpointKind> = summary.app.slots.iter().map(|s| s.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                ChannelEndpointKind::Messaging,
+                ChannelEndpointKind::Display,
+                ChannelEndpointKind::Mic
+            ]
+        );
+        let screen = &summary.app.slots[1];
+        assert!(screen.required && screen.direction.reads() && screen.direction.writes());
+        assert_eq!(
+            screen.event_kinds,
+            [
+                ChannelEventKind::Image,
+                ChannelEventKind::Doc,
+                ChannelEventKind::Command
+            ]
+        );
+        // What the contact gate may deliver to it: the photo that starts a
+        // picture and the voice that shapes it.
+        assert_eq!(
+            summary.messaging_event_kinds(),
+            [
+                ChannelEventKind::Image,
+                ChannelEventKind::AudioClip,
+                ChannelEventKind::Text
+            ]
+        );
+        assert!(bundle.perception_prompt().is_some());
+        assert_eq!(bundle.skill_filenames().len(), 4);
+        assert_eq!(bundle.knowledge_filenames(), ["drawing-for-kids.md"]);
+    }
+
     #[tokio::test]
     async fn catalog_lists_and_fetch_roundtrips_unknown_404s() {
         let catalog = list_presets().await.expect("catalog").0;
@@ -367,6 +446,7 @@ mod tests {
             .count();
         assert_eq!(catalog.presets.len(), visible);
         assert!(catalog.presets.iter().any(|p| p.id == "chef"));
+        assert!(catalog.presets.iter().any(|p| p.id == "painter"));
         assert!(catalog.presets.iter().all(|p| p.id != "conformance"));
         assert!(!catalog.catalog_version.is_empty());
 

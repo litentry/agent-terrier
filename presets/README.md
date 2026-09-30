@@ -40,6 +40,9 @@ disclosure · context pointers (all additive — a role preset parses unchanged)
 and the bundle may carry `knowledge/*.md`. Installing one from the console
 compiles exactly the sheet the owner signs. Authoring guide:
 [`docs/wiki/family-application-templates.md`](../docs/wiki/family-application-templates.md).
-`chef/` is the reference application; `conformance/` is the hidden synthetic
-template the framework suite installs. `scripts/utils/check-template-content-only.sh`
+`chef/` is the reference application; `painter/` is the kids' drawing
+application (a photo + spoken wishes → one copyable picture the app authors
+itself as an SVG `image` event on its display slot; `tools: []` — no
+capability class at all); `conformance/` is the hidden synthetic template the
+framework suite installs. `scripts/utils/check-template-content-only.sh`
 gates that a template is content only (F0/F1).

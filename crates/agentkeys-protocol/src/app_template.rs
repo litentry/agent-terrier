@@ -1980,6 +1980,114 @@ mod tests {
         );
     }
 
+    /// The SHIPPED painter manifest (the kids' drawing application,
+    /// 2026-09-26), pinned as compiled in: the sheet is feeds + one optional
+    /// profile + the plugin and nothing else — `tools: []` grants NO tool
+    /// class (not even the product default `web`), the display slot is duplex
+    /// (the picture and the card go out, the taps come back), the console and
+    /// the contact gate get their mirror grants, and the voice slots override
+    /// their throwaway default with one shared half-hour conversation, so a
+    /// child's wishes build on one another.
+    #[test]
+    fn painter_compiles_to_feeds_and_a_profile_with_no_tool_class() {
+        use crate::session_window::{SessionPolicy, SessionWindow};
+        const PAINTER: &str = include_str!("../../../presets/painter/preset.json");
+        let p = preset(PAINTER);
+        assert!(p.is_application());
+        let skills: Vec<String> = ["perception.md", "canvas.md", "draw.md", "screen.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        validate_template(&p, &skills, &["drawing-for-kids.md".to_string()])
+            .expect("painter is valid against its bundle");
+        assert_eq!(
+            p.app.slots[0].session,
+            Some(SessionPolicy::new(SessionWindow::Conversation, Some(30)))
+        );
+        assert_eq!(p.app.slots[1].session, None);
+        assert_eq!(
+            p.app.slots[2].session,
+            Some(SessionPolicy::new(SessionWindow::Conversation, Some(30)))
+        );
+        let bindings = AppInstallBindings {
+            slots: vec![
+                SlotBinding {
+                    slot: "kids_chat".into(),
+                    channel_id: "kids-chat".into(),
+                    endpoint_actor_omni: Some("0xgateway".into()),
+                    description: None,
+                },
+                SlotBinding {
+                    slot: "kids_screen".into(),
+                    channel_id: "kids-display".into(),
+                    endpoint_actor_omni: Some("0xconsole".into()),
+                    description: None,
+                },
+                SlotBinding {
+                    slot: "kids_mic".into(),
+                    channel_id: "kids-mic".into(),
+                    endpoint_actor_omni: None,
+                    description: None,
+                },
+            ],
+            resources: vec![ResourceBinding {
+                name: "drawing-profile".into(),
+                item_id: "kids-1".into(),
+                ns: "household-kids".into(),
+                kind: ResourceKind::Profile,
+                sensitivity: Sensitivity::Safe,
+            }],
+            audience: vec![],
+            tz_offset_minutes: 480,
+        };
+        let c = compile_app(&p, "painter", None, &bindings).expect("painter compiles");
+        assert_eq!(
+            c.services,
+            vec![
+                "channel-pub:opchat-painter",
+                "channel-sub:opchat-painter",
+                "knowledge:app-painter",
+                "channel-sub:kids-chat",
+                "channel-pub:kids-chat",
+                "channel-sub:kids-display",
+                "channel-pub:kids-display",
+                "channel-sub:kids-mic",
+                "knowledge:household-kids",
+                "proposal:app-painter",
+                "plugin:openviking",
+            ]
+        );
+        assert!(
+            c.services.iter().all(|s| !s.starts_with("tool:")),
+            "the painter asks for no capability class"
+        );
+        assert_eq!(c.availability, Availability::WakeOnEvent);
+        assert_eq!(c.bound_channels.len(), 3);
+        assert_eq!(c.bound_channels[2].kind, ChannelEndpointKind::Mic);
+        assert_eq!(c.resource_namespaces, vec!["household-kids"]);
+        assert_eq!(
+            c.audience[0].tiers,
+            vec![ContactTier::Owner, ContactTier::Partner, ContactTier::Kid]
+        );
+        // The contact gate mirrors the chat (+ the operator channel); the
+        // console mirrors the screen so it can render the card and tap it.
+        assert_eq!(c.endpoint_grants.len(), 2);
+        assert_eq!(
+            c.endpoint_grants[0].add,
+            vec![
+                "channel-pub:kids-chat",
+                "channel-sub:kids-chat",
+                "channel-pub:opchat-painter",
+                "channel-sub:opchat-painter"
+            ]
+        );
+        assert_eq!(c.endpoint_grants[1].actor_omni, "0xconsole");
+        assert_eq!(
+            c.endpoint_grants[1].add,
+            vec!["channel-pub:kids-display", "channel-sub:kids-display"]
+        );
+    }
+
     #[test]
     fn audience_override_replaces_the_template_default() {
         let p = preset(CHEF);

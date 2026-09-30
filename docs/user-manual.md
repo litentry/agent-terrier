@@ -656,6 +656,30 @@ the permissions you approve. parent-control → **applications**:
   its clock does at the cron minute, tagged as asked from the console — and
   the panel watches the display feed for the card. The app's answer is in its
   chat; if no card lands within three minutes the panel says so.
+- **Painter — a drawing friend for the children.** Install the *Painter*
+  template with a kids' screen (a paired display, see the kitchen display
+  section) and the channel your children reach it on (the family chat, or a
+  kids channel; the audience defaults to owner, partner and kid). **A picture
+  always starts with a photo**: the child sends a photo of what they want to
+  draw — a toy, the cat, their own scribble — and the painter draws a simple,
+  bold version of it (thick outlines, a few big shapes, a few bright colors)
+  and puts it on the screen with four buttons: *Finished!*, *Show me how*,
+  *Put it back*, *New picture*. Every voice message (or typed line) after
+  that changes the picture — "add a rainbow", "make the dog purple", "bigger"
+  — and everything the child did not mention stays exactly where it was, so
+  they can keep copying. "Show me how" turns it into numbered steps. When the
+  child says **done** (画好了 · finished · I'm done) or taps *Finished!*, the
+  picture fills the whole screen and stays there, always lit, until the next
+  picture starts — that is the picture they draw from. What the painter will
+  not do: draw a real child's face or body from a photo (a person becomes a
+  friendly cartoon character that looks like nobody), draw anything scary,
+  write anything but a short title in a picture, or start drawing from words
+  alone. It reads no web, runs no schedule and needs no tool grant at all —
+  its sheet is the channels you bind, an optional "drawing profile" (ages,
+  favorites) from your Knowledge page, and the memory plugin. The photos go to
+  the stack's vision model and the voice to its speech-to-text model, as the
+  sheet discloses; the finished pictures are kept in the painter's own memory
+  as a gallery, one per day-and-time.
 - **Template updates.** When the catalog carries a newer version of an
   installed app's template, the app's page shows **update to vX**. One Touch
   ID applies the new version's permissions and slot directions over your
@@ -796,4 +820,5 @@ A shared screen (a kitchen tablet, an old phone on the fridge) shows your househ
 - The code is valid for 10 minutes; tap *New code* if it expired. A paired display re-connects on its own after a reboot (no code needed).
 - *Settings* on the tablet changes the broker, feed or label; *Forget this device* wipes its key — pair again afterwards (the old device stays listed until you revoke it in the console).
 - Nothing on the tablet can read your memory, credentials or other feeds: its grants are exactly the two channel attachments you approved.
-- Use the browser's *Add to Home Screen* for a full-screen kiosk; the *Full screen* button also asks the tablet to keep the screen awake.
+- Use the browser's *Add to Home Screen* for a full-screen kiosk; the *Full screen* button hides the browser's own bars. A paired display asks the tablet to **keep the screen awake** by itself, for as long as the page is showing (the tablet's own sleep setting still wins if the browser refuses; most kiosk tablets let you disable sleep).
+- **Pictures.** An app can put a picture on the screen as well as a card (the Painter does: the children's drawing). The screen shows whatever the app published last: a card newer than the picture is drawn beside it with its buttons; a picture newer than the card fills the whole screen by itself and stays until the next picture — a finished drawing stays up for the child to copy. Tap the picture to show the menu (settings, full screen); it hides again after a few seconds.

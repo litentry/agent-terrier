@@ -26,7 +26,7 @@ presets/<id>/
   knowledge/*.md       # reference the app may cite; distributed as `knowledge` context
 ```
 
-A template is registered in the broker catalog (`crates/agentkeys-broker-server/src/handlers/presets.rs`, the `BUILTINS` table) and compiled in; a new bundle is a broker redeploy, no client release. The reference application is [`presets/chef/preset.json`](../../presets/chef/preset.json); the synthetic template the conformance suite installs is [`presets/conformance/preset.json`](../../presets/conformance/preset.json).
+A template is registered in the broker catalog (`crates/agentkeys-broker-server/src/handlers/presets.rs`, the `BUILTINS` table) and compiled in; a new bundle is a broker redeploy, no client release. The reference application is [`presets/chef/preset.json`](../../presets/chef/preset.json); the kids' drawing application [`presets/painter/preset.json`](../../presets/painter/preset.json) is the reference for a display slot that carries pictures and for a template with no tool class; the synthetic template the conformance suite installs is [`presets/conformance/preset.json`](../../presets/conformance/preset.json).
 
 ## The manifest
 
@@ -61,6 +61,10 @@ A media event (a photo, a voice clip) becomes a **pre-turn** the runtime runs be
 ## The card — `doc` events on a display slot
 
 An app publishes one versioned, bilingual **card** document (`card: 1`, `application/vnd.agentkeys.card+json`) to its display slot: `title`, `metrics` (with an optional `progress`), `sections` of items, `alerts`, and `actions`. Every renderer — the console, a shared kitchen tablet, the ESP32 — draws the same card and publishes a tapped action back as a `command` event **from its own device actor**; the app receives it as a turn (`command:<name>`). The schema's one owner is `crates/agentkeys-protocol/src/card.rs`; the golden fixtures under `e2e/fixtures/cards/` are rendered by every renderer's test. Publish with `publish-to-slot <display_slot> doc application/vnd.agentkeys.card+json < card.json`.
+
+## The picture — `image` events on a display slot
+
+A display slot also carries pictures: an app publishes an `image` event (`publish_to_slot` with `kind: image` and the real `content_type` — `image/svg+xml`, `image/png`, …; the body is the bytes, so an SVG is the SVG text verbatim, under the channel's inline ceiling of 1 MiB). The device-mode display keeps the **latest card** and the **latest picture** and shows whichever the app published **last**: a card newer than the picture is drawn beside it (that is where the buttons live); a picture newer than the card fills the screen alone and stays there, with the screen kept awake, until the next event. That rule is kind-level — the renderer never reads what a picture is about — so a template chooses the mode by publish ORDER: picture then card while something is in progress; the finished picture last when it should stay. The renderer hands the bytes to an `<img>` (never to the page), so a script inside an SVG never runs and nothing external loads; a picture that rides by reference (above the inline ceiling) is skipped. The reference is [`presets/painter/`](../../presets/painter/preset.json): a photo plus spoken wishes become one copyable picture the app **authors itself as an SVG** (its `skills/draw.md` is the drawing contract — bold outlines, a handful of shapes and colors, no `script` / `image` / `href`); it asks for no tool class at all (`tools: []`).
 
 ## Testing a template
 

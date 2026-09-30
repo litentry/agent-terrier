@@ -5,8 +5,8 @@ import type { CardViewAction, CardViewDocument } from '@agentkeys/design-system/
 import { DEFAULT_SETTINGS, loadSettings, normalizeBrokerUrl, normalizeId, saveSettings } from '../lib/settings';
 import type { Settings } from '../lib/settings';
 import { loadOrCreateSecretHex } from '../lib/identity';
-import { initialFeed, reduceFeed } from '../lib/feed';
-import type { FeedState } from '../lib/feed';
+import { initialFeed, pictureDataUrl, reduceFeed, showsPictureOnly } from '../lib/feed';
+import type { FeedPicture, FeedState } from '../lib/feed';
 import {
   describeError,
   isExpired,
@@ -32,12 +32,18 @@ import type { DeviceClient, FeedCaps } from '../lib/client';
 // The kitchen display (#675): this tablet is its OWN device actor. Boot →
 // resolve (bound? session) or pair (code + QR the owner claims in parent-control
 // → Devices, approves with one Touch ID) → subscribe the display feed → render
-// the latest card (the design system's CardView, the console's renderer) →
-// taps publish `command` events attributed to this device.
+// the latest card (the design system's CardView, the console's renderer) and
+// the latest picture (an `image` event — the painter's drawing) → taps publish
+// `command` events attributed to this device. Whichever the app published
+// last wins the screen: a card is drawn beside the picture; a picture newer
+// than the card fills the screen alone and stays, with the screen kept awake,
+// until the next event (feed.ts).
 
 const T = {
   en: {
     title: 'Kitchen display',
+    pictureAlt: 'The picture on the family screen',
+    showMenu: 'Tap the picture for the menu',
     settings: 'Settings',
     save: 'Save',
     cancel: 'Cancel',
@@ -60,6 +66,8 @@ const T = {
   },
   zh: {
     title: '厨房屏',
+    pictureAlt: '家庭屏幕上的画',
+    showMenu: '点一下画面显示菜单',
     settings: '设置',
     save: '保存',
     cancel: '取消',
@@ -108,6 +116,11 @@ export function DisplayApp() {
   const [phase, setPhase] = useState<Phase>({ kind: 'booting' });
   const [editing, setEditing] = useState(false);
   const [card, setCard] = useState<CardViewDocument | null>(null);
+  const [picture, setPicture] = useState<FeedPicture | null>(null);
+  // The picture is the newest visual on the feed: it fills the screen alone
+  // and the chrome hides until a tap asks for it.
+  const [pictureOnly, setPictureOnly] = useState(false);
+  const [menuShown, setMenuShown] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const clientRef = useRef<DeviceClient | null>(null);
@@ -144,6 +157,8 @@ export function DisplayApp() {
     const run = async () => {
       setPhase({ kind: 'booting' });
       setCard(null);
+      setPicture(null);
+      setPictureOnly(false);
       feedRef.current = initialFeed();
       capsRef.current = null;
       try {
@@ -240,6 +255,7 @@ export function DisplayApp() {
           if (cancelled) return;
           const next = reduceFeed(feedRef.current, events, cursor);
           const changed = next.latestDocId !== feedRef.current.latestDocId;
+          const pictureChanged = next.latestPicture?.eventId !== feedRef.current.latestPicture?.eventId;
           feedRef.current = next;
           if (changed && next.latestDocJson) {
             try {
@@ -248,6 +264,8 @@ export function DisplayApp() {
               say(`card rejected: ${describeError(e).message}`);
             }
           }
+          if (pictureChanged) setPicture(next.latestPicture);
+          setPictureOnly(showsPictureOnly(next));
         } catch (e) {
           if (cancelled) return;
           const d = describeError(e);
@@ -269,6 +287,42 @@ export function DisplayApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase.kind === 'bound' ? phase.session.session_jwt : null, settings.feedId]);
+
+  // ── bound: keep the screen awake (a paired display is always lit) ──
+  // The Wake Lock API needs no gesture, only a visible page; the OS releases
+  // it whenever the tab hides, so it is re-requested on every return.
+  useEffect(() => {
+    if (phase.kind !== 'bound') return;
+    let released = false;
+    let sentinel: { release: () => Promise<void> } | null = null;
+    const request = () => {
+      if (released || document.visibilityState !== 'visible') return;
+      const nav = navigator as Navigator & {
+        wakeLock?: { request: (k: 'screen') => Promise<{ release: () => Promise<void> }> };
+      };
+      nav.wakeLock
+        ?.request('screen')
+        .then((s) => {
+          if (released) void s.release();
+          else sentinel = s;
+        })
+        .catch(() => undefined);
+    };
+    request();
+    document.addEventListener('visibilitychange', request);
+    return () => {
+      released = true;
+      document.removeEventListener('visibilitychange', request);
+      void sentinel?.release().catch(() => undefined);
+    };
+  }, [phase.kind]);
+
+  // The menu a tap on a full-screen picture reveals hides again by itself.
+  useEffect(() => {
+    if (!menuShown) return;
+    const timer = window.setTimeout(() => setMenuShown(false), 8000);
+    return () => window.clearTimeout(timer);
+  }, [menuShown]);
 
   const onAction = useCallback(
     async (a: CardViewAction) => {
@@ -303,9 +357,29 @@ export function DisplayApp() {
 
   if (!mounted) return null;
 
+  const fullscreenPicture = phase.kind === 'bound' && pictureOnly && picture !== null;
+  const chromeShown = !fullscreenPicture || menuShown || editing;
+
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', gap: 16, padding: 20 }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', gap: 16, padding: fullscreenPicture ? 0 : 20 }}>
+      {fullscreenPicture && (
+        <img
+          src={pictureDataUrl(picture)}
+          alt={t.pictureAlt}
+          data-testid="picture"
+          onClick={() => setMenuShown((v) => !v)}
+          style={{ position: 'fixed', inset: 0, width: '100vw', height: '100vh', objectFit: 'contain', background: '#15130f', cursor: 'pointer' }}
+        />
+      )}
+      <header
+        style={{
+          display: chromeShown ? 'flex' : 'none',
+          alignItems: 'center',
+          gap: 12,
+          flexWrap: 'wrap',
+          ...(fullscreenPicture ? { position: 'relative' as const, zIndex: 1, padding: 20, background: 'rgba(21, 19, 15, 0.86)' } : {}),
+        }}
+      >
         <span style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20 }}>{t.title}</span>
         <span className="dd-code" style={{ fontSize: 12, opacity: 0.7 }}>{settings.label} · {settings.feedId}</span>
         <StatusPill phase={phase} label={t.bound} />
@@ -316,17 +390,21 @@ export function DisplayApp() {
       </header>
 
       {editing || phase.kind === 'unconfigured' ? (
-        <SettingsForm
-          settings={settings}
-          t={t}
-          onCancel={() => setEditing(false)}
-          onSave={(s) => {
-            setSettings(s);
-            saveSettings(storage(), s);
-            setEditing(false);
-            setTick((n) => n + 1);
-          }}
-        />
+        // Above the full-screen picture (a fixed <img> paints over any
+        // non-positioned sibling), so the form stays reachable from the menu.
+        <div style={fullscreenPicture ? { position: 'relative', zIndex: 1, padding: '0 20px 20px' } : undefined}>
+          <SettingsForm
+            settings={settings}
+            t={t}
+            onCancel={() => setEditing(false)}
+            onSave={(s) => {
+              setSettings(s);
+              saveSettings(storage(), s);
+              setEditing(false);
+              setTick((n) => n + 1);
+            }}
+          />
+        </div>
       ) : null}
 
       {phase.kind === 'booting' && <p style={{ opacity: 0.7 }}>{t.booting}</p>}
@@ -357,14 +435,25 @@ export function DisplayApp() {
         </section>
       )}
 
-      {phase.kind === 'bound' && (
-        <section style={{ display: 'flex', justifyContent: 'center', flex: 1, alignItems: 'flex-start' }}>
+      {phase.kind === 'bound' && !fullscreenPicture && (
+        <section style={{ display: 'flex', justifyContent: 'center', flex: 1, alignItems: 'flex-start', gap: 24, flexWrap: 'wrap' }}>
+          {picture && (
+            <img
+              src={pictureDataUrl(picture)}
+              alt={t.pictureAlt}
+              data-testid="picture"
+              style={{ flex: '1 1 480px', minWidth: 0, maxWidth: '100%', maxHeight: 'calc(100vh - 120px)', objectFit: 'contain', borderRadius: 16, background: '#fff7e6' }}
+            />
+          )}
           {card ? (
             <CardView card={card} locale={settings.locale} big onAction={onAction} />
           ) : (
-            <p style={{ opacity: 0.7 }}>{t.waiting}</p>
+            !picture && <p style={{ opacity: 0.7 }}>{t.waiting}</p>
           )}
         </section>
+      )}
+      {fullscreenPicture && chromeShown && (
+        <p style={{ position: 'relative', zIndex: 1, margin: 0, padding: '0 20px', opacity: 0.7, fontSize: 12 }}>{t.showMenu}</p>
       )}
 
       {toast && (

@@ -1,0 +1,69 @@
+{
+  "id": "painter",
+  "version": "1.0.0",
+  "schema": 1,
+  "publisher": "agentkeys",
+  "name": "Painter",
+  "name_zh": "小画家",
+  "description": "Turns a child's photo and spoken wishes into one simple, bold picture they can copy by hand — kept full-screen on the kids' screen once they say it is done.",
+  "description_zh": "把孩子的一张照片和一句句语音愿望画成一幅线条简单、颜色明亮、能照着画的画；孩子说画好了，就满屏一直亮在孩子屏上。",
+  "route_examples": ["给我画一只恐龙", "把天空画成蓝色", "画好了", "draw me a rocket"],
+  "slots": [
+    {
+      "slot": "kids_chat",
+      "kind": "messaging",
+      "direction": "duplex",
+      "required": true,
+      "event_kinds": ["image", "audio-clip", "text"],
+      "audience": ["owner", "partner", "kid"],
+      "session": { "window": "conversation", "idle_minutes": 30 },
+      "reason": "A photo starts the picture; each voice message changes it; the painter's short replies come back here.",
+      "reason_zh": "一张照片开始一幅画；每条语音改一处；小画家的简短回复从这里回去。"
+    },
+    {
+      "slot": "kids_screen",
+      "kind": "display",
+      "direction": "duplex",
+      "required": true,
+      "event_kinds": ["image", "doc", "command"],
+      "reason": "Shows the picture while it is drawn, with its buttons; a finished picture stays full-screen until the next one. Taps come back as commands.",
+      "reason_zh": "画的过程连同按钮显示在这里；画完后满屏一直亮着，直到下一幅。按钮点击作为指令回传。"
+    },
+    {
+      "slot": "kids_mic",
+      "kind": "mic",
+      "direction": "sub",
+      "required": false,
+      "event_kinds": ["audio-clip"],
+      "session": { "window": "conversation", "idle_minutes": 30 },
+      "reason": "A voice device in the kids' room can send the wishes too; the painter's one-line reply goes back on the same feed.",
+      "reason_zh": "孩子房间的语音设备也可以说愿望；小画家的一句回复从同一频道回去。"
+    }
+  ],
+  "resources": [
+    {
+      "name": "drawing-profile",
+      "kind": "profile",
+      "tags": ["kids", "drawing", "favorites", "age"],
+      "required": false,
+      "reason": "Ages and favorite things — how simple the picture should be and what to suggest. Optional.",
+      "reason_zh": "年龄和喜欢的东西——决定画多简单、建议画什么。可选。"
+    }
+  ],
+  "tools": [],
+  "availability": "wake-on-event",
+  "budgets": { "gate_tokens_per_day": 400000, "gate_turns_per_hour": 90, "feed_events_per_day": 600 },
+  "schedule": [],
+  "disclosure": [
+    { "data": "The photos the children send", "data_zh": "孩子发来的照片", "path": "gate → vision model", "path_zh": "网关 → 视觉模型" },
+    { "data": "Voice messages", "data_zh": "语音消息", "path": "gate → speech-to-text model", "path_zh": "网关 → 语音转文字模型" },
+    { "data": "Drawing wishes and the picture itself", "data_zh": "画画的愿望与画本身", "path": "gate → model", "path_zh": "网关 → 模型" }
+  ],
+  "context": {
+    "persona": "SOUL.md",
+    "skills": ["perception.md", "canvas.md", "draw.md", "screen.md"],
+    "knowledge": ["drawing-for-kids.md"]
+  },
+  "suggested_channels": [],
+  "suggested_context": []
+}
