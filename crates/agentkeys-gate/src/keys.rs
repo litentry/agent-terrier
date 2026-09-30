@@ -16,6 +16,56 @@ use rand_core::RngCore;
 use crate::config::{GateConfig, KeysFile, RelayKey, UserBudget};
 use crate::error::{GateError, GateResult};
 
+/// The ONE spelling of a relay key id. The broker keys a delegate's relay key
+/// by its `device_key_hash`, which reaches the gate spelled two ways — `0x…`
+/// from the session paths, bare hex from spawn-context-driven creates (the
+/// #669 wake: that store keeps the bare form) — and an exact-match upsert gave
+/// each spelling its OWN live row, so a re-provision under one left the other
+/// secret live and an archive disabled only one (measured on VE prod
+/// 2026-09-29: two delegates each held two live rows). A 32-byte hex id
+/// folds to `0x` + lowercase; any other id (`contact-gate-…`, `k1`) is kept.
+pub fn canonical_key_id(id: &str) -> String {
+    let trimmed = id.trim();
+    let hex = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        format!("0x{}", hex.to_ascii_lowercase())
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Boot rows spelled the pre-canonical way fold onto one id. Their secrets
+/// all still authenticate (a live sandbox keeps working through the upgrade);
+/// the next provision or disable of the id collapses them.
+fn canonicalize_boot_keys(keys: &[RelayKey]) -> Vec<RelayKey> {
+    let keys: Vec<RelayKey> = keys
+        .iter()
+        .cloned()
+        .map(|mut k| {
+            k.key_id = canonical_key_id(&k.key_id);
+            k.device_id = canonical_key_id(&k.device_id);
+            k
+        })
+        .collect();
+    let mut live: std::collections::BTreeMap<&str, usize> = Default::default();
+    for k in keys.iter().filter(|k| !k.disabled) {
+        *live.entry(k.key_id.as_str()).or_default() += 1;
+    }
+    for (key_id, live_rows) in live.into_iter().filter(|(_, n)| *n > 1) {
+        tracing::warn!(
+            key_id,
+            live_rows,
+            "relay key id holds more than one live secret (a 0x/bare spelling split from \
+             before ids were canonical) — each still authenticates until the next provision \
+             or disable of this id collapses them to one"
+        );
+    }
+    keys
+}
+
 /// Constant-time byte comparison (same rationale as `auth::ct_eq`).
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -76,7 +126,7 @@ impl KeyStore {
             }
         };
         Self {
-            keys: RwLock::new(config.keys.clone()),
+            keys: RwLock::new(canonicalize_boot_keys(&config.keys)),
             persist,
         }
     }
@@ -95,7 +145,9 @@ impl KeyStore {
 
     /// #427 spawn provisioning: mint (or re-mint) the key for `key_id` —
     /// upsert semantics, so a re-provision rotates the secret + re-enables a
-    /// disabled key (the idempotent-retry posture the broker relies on).
+    /// disabled key (the idempotent-retry posture the broker relies on). The
+    /// id is canonical first, and every other row of it is superseded — ONE
+    /// live secret per id, whichever spelling the caller sent.
     #[allow(clippy::too_many_arguments)]
     pub fn provision(
         &self,
@@ -111,46 +163,68 @@ impl KeyStore {
                 "key_id and user_omni are required".into(),
             ));
         }
+        let key_id = canonical_key_id(key_id);
         let mut secret_bytes = [0u8; 32];
         rand_core::OsRng.fill_bytes(&mut secret_bytes);
         let secret = format!("gk_{}", hex_encode(&secret_bytes));
-        {
+        let superseded = {
             let mut keys = self.keys.write().expect("key store lock poisoned");
             let record = RelayKey {
                 key: secret.clone(),
-                key_id: key_id.to_string(),
+                key_id: key_id.clone(),
                 user_omni: agentkeys_protocol::normalize_omni_0x(user_omni),
-                device_id: device_id.to_string(),
+                device_id: canonical_key_id(device_id),
                 label: label.to_string(),
                 delegate_omni: delegate_omni.map(|d| agentkeys_protocol::normalize_omni_0x(&d)),
                 budget_tokens,
                 disabled: false,
             };
-            match keys.iter_mut().find(|k| k.key_id == key_id) {
-                Some(existing) => *existing = record,
-                None => keys.push(record),
+            let before = keys.len();
+            let mut placed = false;
+            keys.retain_mut(|k| {
+                if k.key_id != key_id {
+                    return true;
+                }
+                if placed {
+                    return false;
+                }
+                *k = record.clone();
+                placed = true;
+                true
+            });
+            let superseded = before - keys.len();
+            if !placed {
+                keys.push(record);
             }
+            superseded
+        };
+        if superseded > 0 {
+            tracing::info!(
+                key_id = %key_id,
+                superseded,
+                "relay key re-provisioned — its other rows (a 0x/bare spelling split) are removed"
+            );
         }
         self.write_through()?;
-        Ok(ProvisionedKey {
-            key_id: key_id.to_string(),
-            secret,
-        })
+        Ok(ProvisionedKey { key_id, secret })
     }
 
-    /// #427 archive deprovisioning: disable by key_id. `Ok(true)` = a live
-    /// key was disabled; `Ok(false)` = unknown or already disabled
-    /// (idempotent — the archive retry posture).
+    /// #427 archive deprovisioning: disable EVERY live row of the (canonical)
+    /// key_id. `Ok(true)` = a live key was disabled; `Ok(false)` = unknown or
+    /// already disabled (idempotent — the archive retry posture).
     pub fn disable(&self, key_id: &str) -> GateResult<bool> {
+        let key_id = canonical_key_id(key_id);
         let changed = {
             let mut keys = self.keys.write().expect("key store lock poisoned");
-            match keys.iter_mut().find(|k| k.key_id == key_id && !k.disabled) {
-                Some(k) => {
-                    k.disabled = true;
-                    true
-                }
-                None => false,
+            let mut changed = false;
+            for k in keys
+                .iter_mut()
+                .filter(|k| k.key_id == key_id && !k.disabled)
+            {
+                k.disabled = true;
+                changed = true;
             }
+            changed
         };
         if changed {
             self.write_through()?;
@@ -161,6 +235,7 @@ impl KeyStore {
     /// The caller's per-key budget, read live (the record may have been
     /// re-provisioned since authentication).
     pub fn budget_for_key(&self, key_id: &str) -> Option<u64> {
+        let key_id = canonical_key_id(key_id);
         self.keys
             .read()
             .expect("key store lock poisoned")
@@ -346,5 +421,72 @@ mod tests {
         k.disabled = true;
         let store = KeyStore::from_config(&cfg(vec![k], None));
         assert!(store.authenticate("gk_dead").is_err());
+    }
+
+    const DKH: &str = "5eed00c0ffee5eed00c0ffee5eed00c0ffee5eed00c0ffee5eed00c0ffee5eed";
+
+    #[test]
+    fn a_hex_id_has_one_spelling_and_other_ids_are_kept() {
+        let canonical = format!("0x{DKH}");
+        assert_eq!(canonical_key_id(DKH), canonical);
+        assert_eq!(canonical_key_id(&canonical), canonical);
+        assert_eq!(
+            canonical_key_id(&format!("0X{}", DKH.to_uppercase())),
+            canonical
+        );
+        assert_eq!(canonical_key_id(&format!(" {DKH} ")), canonical);
+        for kept in ["k1", "contact-gate-router", "esp32-01", "0xabc", ""] {
+            assert_eq!(canonical_key_id(kept), kept);
+        }
+    }
+
+    /// The VE prod shape (2026-09-29): one delegate, two live rows — `0x…`
+    /// from the resolve path, bare hex from the #669 wake.
+    fn split_rows() -> Vec<RelayKey> {
+        let mut prefixed = boot_key("gk_from_resolve", &format!("0x{DKH}"));
+        prefixed.device_id = format!("0x{DKH}");
+        let mut bare = boot_key("gk_from_wake", DKH);
+        bare.device_id = DKH.to_string();
+        vec![prefixed, bare]
+    }
+
+    #[test]
+    fn a_split_delegate_keeps_both_secrets_until_its_id_is_touched() {
+        let store = KeyStore::from_config(&cfg(split_rows(), None));
+        // An upgrade breaks no live sandbox: both secrets still authenticate,
+        // and both now attribute to the one canonical id.
+        for secret in ["gk_from_resolve", "gk_from_wake"] {
+            let caller = store.authenticate(secret).unwrap();
+            assert_eq!(caller.key_id, format!("0x{DKH}"));
+            assert_eq!(caller.device_id, format!("0x{DKH}"));
+        }
+    }
+
+    #[test]
+    fn archive_under_either_spelling_disables_every_row() {
+        let store = KeyStore::from_config(&cfg(split_rows(), None));
+        assert!(store.disable(DKH).unwrap());
+        assert!(store.authenticate("gk_from_resolve").is_err());
+        assert!(store.authenticate("gk_from_wake").is_err());
+        assert!(!store.disable(&format!("0x{DKH}")).unwrap());
+    }
+
+    #[test]
+    fn a_reprovision_under_either_spelling_leaves_one_live_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("gate-keys.json");
+        let store = KeyStore::from_config(&cfg(split_rows(), Some(path.clone())));
+        let minted = store
+            .provision(DKH, &"bb".repeat(32), None, DKH, "app", None)
+            .unwrap();
+        assert_eq!(minted.key_id, format!("0x{DKH}"));
+        assert!(store.authenticate(&minted.secret).is_ok());
+        assert!(store.authenticate("gk_from_resolve").is_err());
+        assert!(store.authenticate("gk_from_wake").is_err());
+        let reread: KeysFile =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(reread.keys.len(), 1);
+        assert_eq!(reread.keys[0].key_id, format!("0x{DKH}"));
+        assert_eq!(reread.keys[0].device_id, format!("0x{DKH}"));
     }
 }

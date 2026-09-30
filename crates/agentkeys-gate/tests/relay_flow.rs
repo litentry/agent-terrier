@@ -89,8 +89,21 @@ async fn upstream_chat(
             Json(json!({"error": {"message": "model not found", "type": "invalid_request_error"}})),
         )
             .into_response(),
+        "overdue" => ark_account_overdue(),
         other => panic!("unknown upstream mode {other}"),
     }
+}
+
+/// What Ark answered EVERY call on VE prod 2026-09-29 — chat and embeddings
+/// alike, whatever key — while its account had an overdue balance.
+const ARK_ACCOUNT_OVERDUE: &str = r#"{"error":{"code":"AccountOverdueError","message":"The request failed because your account has an overdue balance. Request id: 021790685392088bfe35b6525b6a24c7ddbea7b420bd5585f179e","param":"","type":"Forbidden"}}"#;
+
+fn ark_account_overdue() -> Response {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "application/json")
+        .body(Body::from(ARK_ACCOUNT_OVERDUE))
+        .unwrap()
 }
 
 async fn upstream_models() -> Response {
@@ -110,6 +123,9 @@ async fn upstream_embeddings(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     state.requests.lock().unwrap().push((auth, body.clone()));
+    if state.mode.lock().unwrap().as_str() == "overdue" {
+        return ark_account_overdue();
+    }
     let input_count = match body.get("input") {
         Some(Value::Array(a)) => a.len(),
         Some(Value::String(_)) => 1,
@@ -172,6 +188,7 @@ async fn spawn_upstream() -> (SocketAddr, UpstreamState) {
     let app = Router::new()
         .route("/v1/chat/completions", post(upstream_chat))
         .route("/v1/embeddings", post(upstream_embeddings))
+        .route("/v1/embeddings/multimodal", post(upstream_embeddings))
         .route("/v1/systemone", post(upstream_systemone))
         .route("/v1/models", get(upstream_models))
         .with_state(state.clone());
@@ -617,6 +634,88 @@ async fn upstream_4xx_is_forwarded_verbatim() {
     assert_eq!(resp.status(), 404);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["message"], "model not found");
+
+    // A refusal of THIS request says nothing about the account: still ready.
+    let resp = client
+        .get(format!("{}/readyz", gate.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// VE prod 2026-09-28/29: an overdue upstream account refused every chat and
+/// every embedding with 403 `AccountOverdueError`, for every key. The caller
+/// still gets the upstream's own answer; the gate reports the ACCOUNT on
+/// `/readyz` (liveness stays 200) until the upstream answers 2xx again.
+async fn readyz(client: &reqwest::Client, base: &str) -> (reqwest::StatusCode, Value) {
+    let resp = client.get(format!("{base}/readyz")).send().await.unwrap();
+    let status = resp.status();
+    (status, resp.json::<Value>().await.unwrap())
+}
+
+#[tokio::test]
+async fn an_account_refusal_is_forwarded_and_holds_readyz_until_a_2xx() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let (status, body) = readyz(&client, &gate.base).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ready");
+
+    *gate.upstream.mode.lock().unwrap() = "overdue".into();
+    let resp = client
+        .post(format!("{}/v1/embeddings/multimodal", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"model": "ep-embed", "input": [{"type": "text", "text": "rice"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "AccountOverdueError");
+    // A different key, a different route — the same account refusal.
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_2)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let (status, body) = readyz(&client, &gate.base).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["status"], "unready");
+    let refused = &body["upstream_account_refused"];
+    assert_eq!(refused["code"], "AccountOverdueError");
+    assert_eq!(refused["status"], 403);
+    assert_eq!(refused["route"], "/chat/completions");
+    assert_eq!(refused["refusals"], 2);
+    assert!(refused["first_seen_unix"].as_u64().unwrap() > 0);
+    assert!(
+        refused.get("message").is_none(),
+        "the public readiness body names the code, never the upstream message"
+    );
+    let resp = client
+        .get(format!("{}/healthz", gate.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "liveness is not readiness");
+
+    // The account is paid up: the next real call is the proof, and clears it.
+    *gate.upstream.mode.lock().unwrap() = "ok".into();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (status, body) = readyz(&client, &gate.base).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ready");
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! HTTP transport. The OpenAI-compatible caller routes (`/v1/chat/completions`,
 //! `/v1/embeddings`, `/v1/models`, `/v1/usage`) + the speech/voices legs +
-//! `/healthz` for the load balancer.
+//! `/healthz` (liveness) and `/readyz` (the upstream account answers).
 
 use std::sync::Arc;
 
@@ -21,6 +21,7 @@ use crate::relay::{Relay, TurnOutput};
 pub fn router(relay: Arc<Relay>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/v1/chat/completions", post(chat_completions))
         // #572 — the embeddings relay (same gk_ auth + budgets; the
         // in-sandbox OpenViking engine's metered embedding egress).
@@ -112,6 +113,24 @@ async fn audio_voices(State(relay): State<Arc<Relay>>, headers: HeaderMap) -> Re
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Readiness, the broker's `/healthz` + `/readyz` split: 503 while the latest
+/// upstream answer refused the ACCOUNT (every relayed call fails, whatever key
+/// sends it — `refusal.rs`), 200 otherwise. It clears on the next upstream
+/// 2xx; a restart starts ready, since nothing is known until a call is made.
+async fn readyz(State(relay): State<Arc<Relay>>) -> Response {
+    match relay.upstream_account.current() {
+        None => Json(serde_json::json!({ "status": "ready" })).into_response(),
+        Some(refusal) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "unready",
+                "upstream_account_refused": refusal,
+            })),
+        )
+            .into_response(),
+    }
 }
 
 fn auth_header(headers: &HeaderMap) -> Option<&str> {

@@ -25,6 +25,7 @@ pub mod error;
 pub mod keys;
 pub mod meter;
 pub mod openai;
+pub mod refusal;
 pub mod relay;
 pub mod server;
 pub mod speech;

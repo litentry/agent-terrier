@@ -7,6 +7,17 @@ use serde_json::Value;
 use crate::config::UpstreamConfig;
 use crate::error::{GateError, GateResult};
 
+/// The upstream paths the relay calls — also the `route` its refusal logs name.
+pub const CHAT_PATH: &str = "/chat/completions";
+
+pub fn embeddings_path(multimodal: bool) -> &'static str {
+    if multimodal {
+        "/embeddings/multimodal"
+    } else {
+        "/embeddings"
+    }
+}
+
 pub struct UpstreamClient {
     client: reqwest::Client,
     base_url: String,
@@ -26,7 +37,7 @@ impl UpstreamClient {
     /// raw response — the caller owns status triage and (for streams) the tee.
     pub async fn chat(&self, body: &Value) -> GateResult<reqwest::Response> {
         self.client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(format!("{}{CHAT_PATH}", self.base_url))
             .bearer_auth(&self.api_key)
             .json(body)
             .send()
@@ -46,13 +57,8 @@ impl UpstreamClient {
         body: &Value,
         multimodal: bool,
     ) -> GateResult<reqwest::Response> {
-        let path = if multimodal {
-            "/embeddings/multimodal"
-        } else {
-            "/embeddings"
-        };
         self.client
-            .post(format!("{}{}", self.base_url, path))
+            .post(format!("{}{}", self.base_url, embeddings_path(multimodal)))
             .bearer_auth(&self.api_key)
             .json(body)
             .send()

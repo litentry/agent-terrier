@@ -39,16 +39,42 @@ conversation (its only body mutations: the optional model override, and
 |---|---|---|
 | `POST /v1/chat/completions` | relay key | the proxied turn (streamed + non-streamed) |
 | `POST /v1/embeddings` | relay key | #572 embeddings relay (the in-sandbox OpenViking engine points `OPENVIKING_EMBED_API_BASE` here; no raw vendor key in the sandbox) |
+| `POST /v1/embeddings/multimodal` | relay key | #639 the multimodal twin — what OpenViking calls for the doubao-embedding-vision family; same auth, metering and budgets |
 | `POST /v1/systemone` | relay key | #722 the System One (TypeSafe **Jev**) decision relay — the household router's typed pick (`agentkeys_protocol::SystemOneRequest` in, the vendor's answer body out, verbatim). Metered into the same budgets (`decide_tokens` / `decide_turns`), audited as `GateDecide` (op 95, counts only — never the `state` text). **503 until the `typesafe` family is provisioned**; the contact gate then runs its deterministic tier |
 | `GET /v1/models` | relay key or admin | upstream passthrough |
 | `GET /v1/usage` | relay key → own user; admin → `?user_omni=` or all | the rollup summary |
 | `POST /v1/admin/keys` | admin | #427 provision/rotate a relay key (broker spawn-finalize; secret returned ONCE) |
 | `POST /v1/admin/keys/:key_id/disable` | admin | #427 deprovision (idempotent; usage history + row retained) |
-| `GET /healthz` | none | liveness |
+| `GET /healthz` | none | liveness — the process answers |
+| `GET /readyz` | none | readiness — `503` while the latest upstream answer refused the ACCOUNT (below), `200` otherwise. The fleet board probes this one for the `gate` row |
 
 Admin mutations write-through to the keys file (0600, atomic tmp+rename) so
 restarts re-hydrate; with no keys file configured they are in-memory only and
 the boot log WARNs.
+
+A relay key id has ONE spelling: a 32-byte hex id (a delegate's
+`device_key_hash`) folds to `0x` + lowercase, whichever spelling the broker
+sent, so one delegate is one row — a re-provision rotates THE secret and an
+archive disables it. Before this, the resolve path (`0x…`) and the #669 wake
+(bare hex — the spawn-context store's form) each minted their own live row
+(VE prod 2026-09-29: two delegates held two each). Rows written the old way
+still authenticate after an upgrade — a live sandbox keeps working — and the
+boot log WARNs per split id until its next provision or disable collapses it.
+
+## Reading an upstream refusal
+
+Every refusal is logged with what was refused and why: `route` (the upstream
+path), `model`, `status`, and the upstream's own `code` + `message`. A 4xx is
+forwarded to the caller verbatim either way.
+
+| Log line | Meaning → action |
+|---|---|
+| `WARN … upstream 4xx forwarded … code=InvalidParameter` (any code not below) | THIS request was refused — the caller's body, model or budget. Other callers are unaffected |
+| `ERROR … upstream 4xx forwarded — the upstream refused the ACCOUNT … code=AccountOverdueError` | the vendor account behind the ark family key has an overdue balance: Ark answers **every** chat and embedding with 403, whatever key calls (measured VE prod 2026-09-21 and 2026-09-28). Top up the Volcano Engine account; nothing to restart — the next upstream 2xx clears `/readyz` (logged `… standing account refusal is cleared`). `GET /v1/models` answers 200 throughout, so it proves nothing |
+
+Account-scoped codes are listed in `src/refusal.rs` (`ACCOUNT_SCOPED_CODES`) —
+add one only with a measured answer. Readiness is process-local: a restart
+starts `ready`, because nothing is known until a call is made.
 
 ## Configuration (env-first; every flag has a `--` form)
 
@@ -121,7 +147,8 @@ sudoedit /var/lib/agentkeys/gate/gate-keys.json                 # add relay keys
                                                                 # (delegate keys are minted by the
                                                                 #  broker at spawn — #427/#543)
 sudo systemctl enable --now agentkeys-gate                      # (re)start after either change
-curl -s https://$VE_GATE_HOST/healthz                           # → {"ok":true,...}
+curl -s https://$VE_GATE_HOST/healthz                           # → ok
+curl -s https://$VE_GATE_HOST/readyz                            # → {"status":"ready"}
 ```
 
 No audit worker runs on VE yet, so `AGENTKEYS_AUDIT_URL` is deliberately unset

@@ -9,7 +9,10 @@
 //!
 //! Upstream status triage ("no silent fallback", and the #308-review rule):
 //! - 2xx → forward; meter + audit.
-//! - 4xx → forward the upstream error verbatim (the caller needs it) + log.
+//! - 4xx → forward the upstream error verbatim (the caller needs it) + log the
+//!   route, model and the upstream's own code/message. An ACCOUNT-scoped code
+//!   (`refusal.rs` — every caller refused alike) is an operator alarm: ERROR,
+//!   and `/readyz` answers 503 until the next upstream 2xx.
 //! - 5xx / transport → operator-log the FULL body, return a safe 502 envelope
 //!   (upstream internals are never echoed to callers).
 
@@ -30,10 +33,11 @@ use crate::config::{GateConfig, RelayKey};
 use crate::error::{GateError, GateResult};
 use crate::meter::Meter;
 use crate::openai::{extract_usage, SseUsageScanner, UsageCounters};
+use crate::refusal::{now_unix, UpstreamAccountState, UpstreamErrorDetail};
 use crate::speech::{
     SpeakRequest, SpeakResponse, SpeechClient, TranscribeRequest, TranscribeResponse,
 };
-use crate::upstream::UpstreamClient;
+use crate::upstream::{embeddings_path, UpstreamClient, CHAT_PATH};
 
 pub struct Relay {
     pub config: GateConfig,
@@ -54,6 +58,9 @@ pub struct Relay {
     /// base live in `config.systemone` (`None` config = the leg 503s).
     decide_http: reqwest::Client,
     auditor: Option<Arc<Auditor>>,
+    /// The standing ACCOUNT-scoped upstream refusal, if the latest answer was
+    /// one — what `/readyz` reports (process-local, like the meter).
+    pub upstream_account: UpstreamAccountState,
 }
 
 /// What the HTTP layer turns into a response.
@@ -153,6 +160,76 @@ impl Relay {
             search_http: reqwest::Client::new(),
             decide_http: reqwest::Client::new(),
             auditor,
+            upstream_account: UpstreamAccountState::default(),
+        }
+    }
+
+    /// Log one upstream non-2xx with what was refused and why. An
+    /// ACCOUNT-scoped code refuses every caller and model alike, so it is an
+    /// operator alarm (ERROR + `/readyz`), never read as this key's problem.
+    fn note_upstream_refusal(
+        &self,
+        caller: &RelayKey,
+        route: &str,
+        model: &str,
+        status: u16,
+        body: &[u8],
+    ) {
+        let detail = UpstreamErrorDetail::parse(body);
+        let code = detail.code.as_deref().unwrap_or("-");
+        let standing = detail.is_account_scoped().then(|| {
+            self.upstream_account
+                .refused(code, status, route, now_unix())
+        });
+        if !(400..500).contains(&status) {
+            tracing::error!(
+                key = %caller.key_id,
+                route,
+                model,
+                status,
+                code,
+                account_refused = standing.is_some(),
+                body = %String::from_utf8_lossy(body),
+                "upstream 5xx — full body operator-logged, safe envelope returned"
+            );
+            return;
+        }
+        match standing {
+            Some(s) => tracing::error!(
+                key = %caller.key_id,
+                route,
+                model,
+                status,
+                code,
+                refusals = s.refusals,
+                since_unix = s.first_seen_unix,
+                message = %detail.message,
+                "upstream 4xx forwarded — the upstream refused the ACCOUNT, not this key: every \
+                 relayed call fails until the vendor account is fixed (AccountOverdueError = top \
+                 up the Volcano Engine account); /readyz answers 503 until an upstream 2xx"
+            ),
+            None => tracing::warn!(
+                key = %caller.key_id,
+                route,
+                model,
+                status,
+                code,
+                message = %detail.message,
+                "upstream 4xx forwarded"
+            ),
+        }
+    }
+
+    /// An upstream 2xx: a standing account refusal is over (logged once).
+    fn note_upstream_answered(&self, route: &str) {
+        if let Some(cleared) = self.upstream_account.answered() {
+            tracing::info!(
+                route,
+                code = %cleared.code,
+                refusals = cleared.refusals,
+                since_unix = cleared.first_seen_unix,
+                "upstream answered 2xx again — the standing account refusal is cleared"
+            );
         }
     }
 
@@ -848,24 +925,25 @@ impl Relay {
                 &UsageCounters::default(),
             );
             self.audit_embed_best_effort(&caller.user_omni, row).await;
+            self.note_upstream_refusal(
+                caller,
+                embeddings_path(multimodal),
+                &model,
+                code,
+                &upstream_body,
+            );
             if (400..500).contains(&code) {
-                tracing::warn!(key = %caller.key_id, status = code, "upstream 4xx forwarded");
                 return Ok(TurnOutput::Full {
                     status: code,
                     content_type,
                     body: upstream_body.to_vec(),
                 });
             }
-            tracing::error!(
-                key = %caller.key_id,
-                status = code,
-                body = %String::from_utf8_lossy(&upstream_body),
-                "upstream 5xx — full body operator-logged, safe envelope returned"
-            );
             return Err(GateError::Upstream(format!(
                 "upstream returned HTTP {code}"
             )));
         }
+        self.note_upstream_answered(embeddings_path(multimodal));
 
         let bytes = resp
             .bytes()
@@ -1023,24 +1101,19 @@ impl Relay {
                 &UsageCounters::default(),
             );
             self.audit_best_effort(&caller.user_omni, turn).await;
+            self.note_upstream_refusal(caller, CHAT_PATH, &model, code, &upstream_body);
             if (400..500).contains(&code) {
-                tracing::warn!(key = %caller.key_id, status = code, "upstream 4xx forwarded");
                 return Ok(TurnOutput::Full {
                     status: code,
                     content_type,
                     body: upstream_body.to_vec(),
                 });
             }
-            tracing::error!(
-                key = %caller.key_id,
-                status = code,
-                body = %String::from_utf8_lossy(&upstream_body),
-                "upstream 5xx — full body operator-logged, safe envelope returned"
-            );
             return Err(GateError::Upstream(format!(
                 "upstream returned HTTP {code}"
             )));
         }
+        self.note_upstream_answered(CHAT_PATH);
 
         if streamed {
             return Ok(self.stream_turn(caller, model, content_type, resp).await);
