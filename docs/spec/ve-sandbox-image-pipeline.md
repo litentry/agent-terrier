@@ -18,7 +18,13 @@ For a **dsh version bump** (the pin moves — #619), the multi-phase routine aro
 bash scripts/operator/ship-dsh.sh          # status (default) · ship · verify
 ```
 
-It delegates every mutation to the scripts on this page and gates on observables (PR state, the pin-encoded `base/dsh:<pins>` tag in the CR, precache status, the live unit's `CR_IMAGE`); merging the bump PR stays a human step — a moved `ApprovalOutcome`/`ApprovalPolicy`/`ToolGuard` contract STOPS the bump outright (#619). Also the fleet console's **"ship dsh bump · CEREMONY"** item.
+It delegates every mutation to the scripts on this page and gates on observables: the drift and contract-diff report, the pin-encoded `base/dsh:<pins>` tag in the CR, the pins of the commit that `CR_IMAGE`'s tag names, whether `origin/<branch>` carries `CR_IMAGE`, and (for `verify`) the live unit's `CR_IMAGE`. It does not read precache status. Merging the bump PR stays a human step — a moved `ApprovalOutcome`/`ApprovalPolicy`/`ToolGuard` contract STOPS the bump outright (#619). Also the fleet console's **"ship dsh bump · CEREMONY"** item.
+
+**How `ship` decides to build an image.** The *pin set* is the three Dockerfile ARGs the foreign base bakes in (`DSH_VERSION`, `OV_PLUGIN_VERSION`, `OPENVIKING_PIP`), written `<dsh>-ovp<plugin>-ov<pip>`. That is the same string the base tag carries, and `scripts/operator/lib/dsh-pins.sh` is its one owner. Every cycle tags its image `v<stamp>-g<sha8>` with HEAD's sha (the sha the image's `build-manifest.json` records too). It refuses a `VE_BASE_DSH` seeded for another pin set, and it refuses a push when HEAD does not carry the working tree's pins. The commit a tag names is therefore the image's provenance: `ship` reads that commit's Dockerfile and runs the cycle unless its pin set equals the checkout's.
+- It compares values, not ancestry: an image built from the bump PR's own commit carries the same pins as main's squash commit, though neither commit descends from the other.
+- A tag without `-g<sha>`, or a commit this clone does not have, proves nothing, so `ship` builds.
+- An unset `CR_IMAGE` stops the run instead, because the seed and the cycle derive the CR registry and namespace from it.
+- After the cycle, `ship` stops for the env commit (G2). It flips only once `origin/<branch>` carries the new `CR_IMAGE`, the same line the flip's own gate checks.
 
 ## Why the work is split across two machines
 
@@ -44,10 +50,10 @@ Builds the Dockerfile's **stage 1 (`foreign`)** — the only steps that reach th
 | Env key | What it is |
 |---|---|
 | `VE_BASE_DSH` | the published `foreign` stage — Node + dsh + OV plugin + openviking preinstalled |
-| `VE_BASE_DSH_FLAT` | the #598 ONE-layer republication (`setup-image.sh --flatten-base --family dsh`, on the broker) — builds prefer it once set. **Discovered, never hand-carried** (2026-09-17): the laptop cycle derives the ref from `VE_BASE_DSH` (`<repo>-flat:<same tag>`), asks the CR (bounded, 90 s), records it in the laptop's env file and pulls it once — the value the flatten writes on the broker never has to be copied |
+| `VE_BASE_DSH_FLAT` | the #598 ONE-layer republication (`setup-image.sh --flatten-base --family dsh`, on the broker) — builds prefer it while it is the flat twin of the current `VE_BASE_DSH`. A re-seed moves `VE_BASE_DSH` and leaves the old line behind; the cycle ignores that stale line (it names the previous pin set's base) and looks the twin up again. **Discovered, never hand-carried** (2026-09-17): the laptop cycle derives the ref from `VE_BASE_DSH` (`<repo>-flat:<same tag>`), asks the CR (bounded, 90 s), records it in the laptop's env file and pulls it once — the value the flatten writes on the broker never has to be copied |
 | `VE_BASE_AIO` | CR mirror of the AIO sandbox base the Dockerfile builds FROM |
 
-Run this **only on a deliberate pin bump** (the #619 gate files the PR). The published tag ENCODES all three pins (`<dsh>-ovp<plugin>-ov<pip>`), so a bump cannot silently reuse the old base, and the final stage re-asserts the installed dsh version so a stale or wrong base fails the build loudly.
+Run this **only on a deliberate pin bump** (the #619 gate files the PR). The published tag ENCODES all three pins (`<dsh>-ovp<plugin>-ov<pip>`), so a bump cannot silently reuse the old base, and the final stage re-asserts the installed dsh version so a stale or wrong base fails the build loudly. That re-assert covers dsh only. The plugin and openviking pins are guarded by the cycle, which refuses a `VE_BASE_DSH` whose tag names another pin set. Tags are compared whole, since `0.1.1` is a substring of `0.1.1-rc.2`.
 
 ## Phase 2 — the cycle (EVERY code push)
 
