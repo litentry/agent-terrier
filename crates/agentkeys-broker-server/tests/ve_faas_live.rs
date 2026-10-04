@@ -118,3 +118,49 @@ async fn sandbox_lifecycle_spawn_is_idempotent_and_teardown_kills() {
     );
     println!("--- no live labeled instance after teardown ✓");
 }
+
+/// Live and mutation-free: the boot precache for an ALREADY-registered
+/// `CR_IMAGE` submits nothing and adds no row (the 2026-09-30..10-04
+/// duplicate-row leak). It refuses to call `precache_image()` unless the URL
+/// is registered first, so it can never register anything — only List calls
+/// reach VE. Needs VOLCENGINE_ACCESS_KEY/_SECRET_KEY + SANDBOX_FUNCTION_ID +
+/// SANDBOX_GATEWAY_URL + CR_IMAGE set to a registered tag:
+/// ```text
+/// cargo test -p agentkeys-broker-server --test ve_faas_live precache_never_adds -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "live VE call — needs VOLCENGINE_ACCESS_KEY/_SECRET_KEY + SANDBOX_FUNCTION_ID + a registered CR_IMAGE"]
+async fn precache_never_adds_a_row_for_a_registered_url() {
+    let client = VeFaasClient::from_env()
+        .expect("veFaaS config invalid — see error")
+        .expect("SANDBOX_FUNCTION_ID must be set for the live test");
+    let image = client.config.image.trim().to_string();
+    assert!(!image.is_empty(), "set CR_IMAGE to a REGISTERED tag");
+    let rows_for = |rows: &[agentkeys_broker_server::ve_faas::SandboxImage]| {
+        rows.iter().filter(|r| r.image_url.trim() == image).count()
+    };
+
+    let before = client.list_sandbox_images().await.expect("list");
+    let registered = rows_for(&before);
+    assert!(
+        registered >= 1,
+        "CR_IMAGE {image} has no registration — refusing to run (precache_image would REGISTER it)"
+    );
+
+    let ticket = client.precache_image().await.expect("precache_image");
+    assert!(
+        ticket.is_empty(),
+        "precache_image SUBMITTED a registration (ticket {ticket}) for a URL that already had {registered}"
+    );
+    let after = client.list_sandbox_images().await.expect("re-list");
+    assert_eq!(
+        rows_for(&after),
+        registered,
+        "the registration count for {image} changed"
+    );
+    println!(
+        "--- {image}: {registered} registration(s) before and after; precache_image added none \
+         ({} rows on the account)",
+        after.len()
+    );
+}

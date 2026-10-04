@@ -285,14 +285,15 @@ impl SandboxBackend {
         }
     }
 
-    /// #577 — the current pre-cache registration for this broker's `CR_IMAGE`
-    /// (what a create issued now would freeze). `Ok(None)` = no comparable
+    /// #577 — every pre-cache registration of this broker's `CR_IMAGE`, newest
+    /// first (a create issued now freezes one of them). Empty = no comparable
     /// registry on this backend (ECS pulls the tag at task start, so a
-    /// re-created task always runs current bits) or `CR_IMAGE` unset.
-    pub async fn current_image_registration(&self) -> Result<Option<crate::ve_faas::SandboxImage>> {
+    /// re-created task always runs current bits), `CR_IMAGE` unset, or no
+    /// registration yet.
+    pub async fn current_image_registrations(&self) -> Result<Vec<crate::ve_faas::SandboxImage>> {
         match self {
-            Self::VeFaas(c) => c.current_image_registration().await,
-            Self::AwsEcs(_) => Ok(None),
+            Self::VeFaas(c) => c.current_image_registrations().await,
+            Self::AwsEcs(_) => Ok(Vec::new()),
         }
     }
 

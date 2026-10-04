@@ -90,6 +90,21 @@ pub fn label_value(hash: &str) -> String {
 /// reuse, never duplicate. `Paused` is veFaaS hibernation (wakes on traffic).
 const LIVE_STATUSES: &[&str] = &["ready", "running", "starting", "paused"];
 
+/// Pre-cache registrations one veFaaS account may hold. **30, measured** on
+/// VE prod 2026-10-04: `PrecacheSandboxImages` was refused `403
+/// InvalidOperation: sandbox image quota is reached` while
+/// `ListSandboxImages {ImageType: private}` held exactly 30 rows. The console
+/// banner (沙箱镜像, read 2026-08-11) had said 20; the measurement supersedes
+/// it. Reporting only — the vendor enforces the real limit, this constant
+/// just says how much room is left.
+pub const PRECACHE_ACCOUNT_CAP: usize = 30;
+
+/// Default age, in days, past which the #598 GC sweeps a registration — the
+/// "默认保留 15 天" (default 15-day retention) of the same console banner. The
+/// broker verb's default; `setup-image.sh --prune-stale` passes a value only
+/// when the operator gives one, so this stays the one owner of the number.
+pub const PRECACHE_DEFAULT_RETENTION_DAYS: i64 = 15;
+
 /// How long [`VeFaasClient::refresh_precache`] waits for a deleted pre-cache
 /// registration to actually VANISH from `ListSandboxImages` before declaring
 /// the delete silently failed (#568 — deletion is not synchronous, and a 200
@@ -332,7 +347,7 @@ impl SandboxInstance {
 /// One pre-cache registration row from `ListSandboxImages` (#568) — the
 /// console 沙箱镜像 table. Field names are the live wire spelling (probed
 /// 2026-07-24); see [`VeFaasClient::list_sandbox_images`] for the contract.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxImage {
     /// veFaaS-minted registration id (console 镜像ID, e.g. `gqgjhemfmf`) —
     /// the `DeleteSandboxImage` handle. NOT a CR artifact id.
@@ -342,6 +357,11 @@ pub struct SandboxImage {
     /// `"success"` = console 已预热; failures carry a reason.
     pub precache_status: String,
     pub precache_status_reason: String,
+    /// RFC3339, normalized at the parse boundary by [`normalize_expire_at`]:
+    /// the vendor emits Go's `time.Time` here as it does for `ExpireAt` (live
+    /// 2026-10-04: `2026-09-30 05:18:11.76 +0000 UTC`). An unrecognized shape
+    /// passes through unchanged, and the GC ([`plan_precache_prune`]) refuses
+    /// to age a row it cannot read.
     pub update_time: String,
 }
 
@@ -349,10 +369,10 @@ pub struct SandboxImage {
 /// ImageInfo` — the pre-cache REGISTRATION id the instance froze (`Id`, the
 /// same handle `DeleteSandboxImage` pins on, probed live 2026-07-24) plus the
 /// CR tag it was spawned from (`SourceImageUrl`). Because a precache refresh
-/// (#568) mints a NEW registration id for the same tag, `frozen id ≠ current
-/// registration id` is exactly "this instance runs older bits than the
-/// pre-cache serves" — the staleness signal the API's digest-less List cannot
-/// give any other way.
+/// (#568) deletes the tag's registrations and mints a NEW one, `frozen id ∉ the
+/// tag's current registration ids` is exactly "this instance runs older bits
+/// than the pre-cache serves" — the staleness signal the API's digest-less
+/// List cannot give any other way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceImageInfo {
     /// The pre-cache registration id frozen at spawn (`ImageInfo.Id`).
@@ -362,22 +382,109 @@ pub struct InstanceImageInfo {
 }
 
 /// Pure #577 staleness verdict: does a live instance run OLDER bits than the
-/// current pre-cache registration for the broker's `CR_IMAGE`?
+/// pre-cache now serves for the broker's `CR_IMAGE`?
 ///
-/// `None` = unknowable (the instance runs the app's console-default image, or
-/// there is no current registration to compare against) — surfaced as
-/// "unknown", never guessed. `Some(true)` when the frozen registration id
-/// differs from the current one (a refresh re-registered the tag since this
-/// instance spawned) OR the tag ref itself changed (`CR_IMAGE` moved).
-pub fn image_stale(
-    booted: Option<&InstanceImageInfo>,
-    current: Option<&SandboxImage>,
-) -> Option<bool> {
-    let (booted, current) = (booted?, current?);
-    if booted.source_image_url.trim() != current.image_url.trim() {
+/// `current` = every registration of the current URL, newest first
+/// ([`VeFaasClient::current_image_registrations`]). `None` = unknowable (the
+/// instance runs the app's console-default image, or the URL has no
+/// registration) — surfaced as "unknown", never guessed. `Some(true)` when the
+/// tag ref itself changed (`CR_IMAGE` moved) OR the frozen registration id is
+/// none of the URL's registrations (a refresh deleted it and re-registered the
+/// tag since this instance spawned).
+///
+/// ANY registration of the URL counts as current. A versioned tag is
+/// immutable, so its rows hold the same bits, and one URL can hold several:
+/// the 2026-09-30..10-04 boot precache minted a duplicate per broker restart
+/// (measured). Judging against the newest row alone marks an instance stale as
+/// soon as a newer duplicate appears. A mutable tag's rows could differ, which
+/// is why the refresh removes every row of the URL before it re-adds one.
+pub fn image_stale(booted: Option<&InstanceImageInfo>, current: &[SandboxImage]) -> Option<bool> {
+    let booted = booted?;
+    let newest = current.first()?;
+    if booted.source_image_url.trim() != newest.image_url.trim() {
         return Some(true);
     }
-    Some(booted.registration_id.trim() != current.image_id.trim())
+    let frozen = booted.registration_id.trim();
+    Some(!current.iter().any(|r| r.image_id.trim() == frozen))
+}
+
+/// The registration to SHOW as current when the URL holds several: the newest
+/// preheated (`success`) row, else the newest. Display only — staleness is
+/// [`image_stale`] over all of them.
+pub fn preferred_registration(current: &[SandboxImage]) -> Option<&SandboxImage> {
+    current
+        .iter()
+        .find(|r| precache_terminal(&r.precache_status) == Some(true))
+        .or_else(|| current.first())
+}
+
+/// Registrations left before [`PRECACHE_ACCOUNT_CAP`] at which every precache
+/// call warns in the journal — the refusal on 2026-10-04 was the first sign.
+const PRECACHE_HEADROOM_WARN: usize = 3;
+
+/// What a registration request for `image` should do, decided from the
+/// account's registrations ([`VeFaasClient::precache_image`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrecacheDecision {
+    /// `CR_IMAGE` unset — spawns use the app's console image.
+    NoImage,
+    /// The URL has no registration — submit one.
+    Register,
+    /// The URL is registered — never add another row, whatever state the
+    /// existing one(s) are in. Every registration of the URL, newest first.
+    AlreadyRegistered(Vec<SandboxImage>),
+}
+
+/// Pure: decide [`PrecacheDecision`] from a `ListSandboxImages` answer.
+pub fn decide_precache(rows: &[SandboxImage], image: &str) -> PrecacheDecision {
+    let image = image.trim();
+    if image.is_empty() {
+        return PrecacheDecision::NoImage;
+    }
+    let existing = registrations_for(rows, image);
+    if existing.is_empty() {
+        PrecacheDecision::Register
+    } else {
+        PrecacheDecision::AlreadyRegistered(existing.into_iter().cloned().collect())
+    }
+}
+
+/// Journal what the precache found for a registered URL, at the level its
+/// state deserves. `existing` is non-empty, newest first.
+fn log_existing_registrations(image: &str, existing: &[SandboxImage]) {
+    let ids: Vec<&str> = existing.iter().map(|r| r.image_id.as_str()).collect();
+    if existing.len() > 1 {
+        tracing::warn!(
+            image = %image, registrations = ?ids,
+            "veFaaS precache: CR_IMAGE holds {} registrations — duplicates (the boot precache \
+             minted one per broker restart 2026-09-30..10-04); adding none. They count against \
+             the {PRECACHE_ACCOUNT_CAP}-registration cap until the URL stops being current, then \
+             `setup-image.sh --prune-stale` sweeps them",
+            existing.len()
+        );
+    }
+    let Some(shown) = preferred_registration(existing) else {
+        return;
+    };
+    match precache_terminal(&shown.precache_status) {
+        Some(true) => tracing::info!(
+            image = %image, registration = %shown.image_id, updated = %shown.update_time,
+            "veFaaS precache: CR_IMAGE already registered and preheated — no new row (idempotent \
+             no-op). If the tag was re-pushed since, run `setup-image.sh --refresh-only` (#568): \
+             a same-tag re-push does NOT re-cache"
+        ),
+        None => tracing::info!(
+            image = %image, registration = %shown.image_id, status = %shown.precache_status,
+            "veFaaS precache: CR_IMAGE already registered, preheat in flight — no new row"
+        ),
+        Some(false) => tracing::warn!(
+            image = %image, registration = %shown.image_id, status = %shown.precache_status,
+            reason = %shown.precache_status_reason,
+            "veFaaS precache: CR_IMAGE is registered but its preheat FAILED — not re-registering \
+             (a second row only spends the cap); fix the cause, then refresh it: \
+             `setup-image.sh --refresh-only` (delete + re-add)"
+        ),
+    }
 }
 
 /// Outcome of [`VeFaasClient::ensure_for_delegate`].
@@ -640,38 +747,73 @@ impl VeFaasClient {
     /// landed the API answered `400 MissingParameter.ImageUrls`. Two stacked
     /// faults, the outer one masking the inner — hence no silent fallbacks here:
     /// every precache failure is surfaced with the VE `{Code, Message}` pair.
+    ///
+    /// **Lists first, and never registers a URL that already has a row**, in
+    /// whatever state ([`decide_precache`], pure). Through 2026-09-29 veFaaS
+    /// answered `already exists` for a registered URL (journal: `image URL
+    /// already registered (idempotent no-op)`). From 2026-09-30 05:15 UTC it
+    /// accepted the duplicate as a NEW row instead — measured: every 24 h broker
+    /// restart added one (six rows for one URL by 10-04, and the flip's restart
+    /// minted one 29 minutes after the URL's own preheat) until the account hit
+    /// [`PRECACHE_ACCOUNT_CAP`] and refused a real ship's registration. Why the
+    /// vendor stopped deduplicating is unknown (hypothesis, unverified: a
+    /// server-side change). A failing List is an error, never a blind
+    /// registration; `already exists` stays handled as a second guard, for a
+    /// registration the List has not shown yet.
+    ///
+    /// Registration only: a registered URL is never refreshed here. A
+    /// re-pushed or failed registration is [`Self::refresh_precache`]'s job
+    /// (delete + re-add, run by `setup-image.sh --refresh-only`) — the List
+    /// exposes no digest (probed 2026-07-24), so a moved tag is undetectable
+    /// from here anyway.
     pub async fn precache_image(&self) -> Result<String> {
-        if self.config.image.trim().is_empty() {
+        let image = self.config.image.trim();
+        if image.is_empty() {
             return Ok(String::new());
         }
+        let rows = self.list_sandbox_images().await.context(
+            "ListSandboxImages failed — the precache lists before it registers, so a registered \
+             URL never gets a second row, and it does NOT register blind (is \
+             vefaas:ListSandboxImages granted to this identity? #568 policy)",
+        )?;
+        if PRECACHE_ACCOUNT_CAP.saturating_sub(rows.len()) <= PRECACHE_HEADROOM_WARN {
+            tracing::warn!(
+                registrations = rows.len(),
+                cap = PRECACHE_ACCOUNT_CAP,
+                "veFaaS pre-cache is nearly full — a registration past the cap is refused \
+                 `quota is reached`; sweep stale rows on the broker: \
+                 bash scripts/operator/setup-image.sh --prune-stale"
+            );
+        }
+        match decide_precache(&rows, image) {
+            PrecacheDecision::NoImage => return Ok(String::new()),
+            PrecacheDecision::AlreadyRegistered(existing) => {
+                log_existing_registrations(image, &existing);
+                return Ok(String::new());
+            }
+            PrecacheDecision::Register => {}
+        }
         let body = serde_json::json!({
-            "ImageUrls": [self.config.image],
+            "ImageUrls": [image],
             "Region": self.config.region,
         });
-        // "already exists" is the IDEMPOTENT case, not a failure: veFaaS 400s when
-        // the image URL is already registered in the precache list, which is the
-        // normal state on every boot after the first. Treating it as an error made
-        // a healthy broker log a scary WARN at every start (and buried the two REAL
-        // faults underneath it — the missing IAM grant and the wrong field name).
-        // NOTE for the operator: "already exists" says the URL is registered, NOT
-        // that it holds the latest bits. A re-push to the SAME tag does not
-        // re-register; refresh it after every push — [`Self::refresh_precache`]
-        // (the `agentkeys-broker-server precache-refresh` verb, run by
-        // setup-image.sh post-push) — or the sandbox keeps booting the
-        // previously cached content. The List response exposes NO digest
-        // (probed 2026-07-24), so staleness is NOT detectable from the API:
-        // the boot precache cannot self-heal a moved tag, only register an
-        // absent one. Refresh is therefore an explicit post-push step.
         let v = match self.vefaas_call("PrecacheSandboxImages", body).await {
             Ok(v) => v,
             Err(e) if e.to_string().contains("already exists") => {
                 tracing::info!(
-                    image = %self.config.image,
-                    "veFaaS precache: image URL already registered (idempotent no-op). If the \
-                     tag was re-pushed since it was registered, run `agentkeys-broker-server \
-                     precache-refresh` (#568) — a same-tag re-push does NOT re-cache."
+                    image = %image,
+                    "veFaaS precache: `already exists` — registered since the List a moment ago; \
+                     no new row"
                 );
                 return Ok(String::new());
+            }
+            Err(e) if e.to_string().contains("quota is reached") => {
+                let listed = rows.len();
+                return Err(e.context(format!(
+                    "the account is at its pre-cache cap ({listed} registrations listed; \
+                     {PRECACHE_ACCOUNT_CAP} measured) — sweep stale rows on the broker, then \
+                     retry: bash scripts/operator/setup-image.sh --prune-stale"
+                )));
             }
             Err(e) => return Err(e),
         };
@@ -690,7 +832,9 @@ impl VeFaasClient {
     /// images) or `"public"` (the vefaas-public catalog); an empty value 400s
     /// `InvalidParameter: sandbox image type is empty`, a capitalized one 400s
     /// `… type is invalid`. Optional `PageSize`/`PageNumber`/`Filters[{Key,Values[]}]`.
-    /// One page of 100 always suffices: the account pre-cache cap is 20 images.
+    /// One page of 100 always suffices: the account holds at most 30
+    /// registrations (measured on VE prod 2026-10-04 — the console banner's
+    /// "20" was superseded).
     ///
     /// Response: `Result.Images[] { ImageGroup, ImageId, ImageUrl,
     /// PrecacheStatus, PrecacheStatusReason, UpdateTime, Description? }` +
@@ -813,17 +957,22 @@ impl VeFaasClient {
         }))
     }
 
-    /// The current pre-cache registration row for this broker's `CR_IMAGE`
-    /// (#577 staleness anchor): what a CREATE issued right now would freeze.
-    /// `Ok(None)` when `CR_IMAGE` is unset (spawns use the app default) or the
-    /// tag has no registration yet.
-    pub async fn current_image_registration(&self) -> Result<Option<SandboxImage>> {
+    /// Every pre-cache registration of this broker's `CR_IMAGE`, newest first
+    /// (#577 staleness anchor): a CREATE issued now freezes one of them. Empty
+    /// when `CR_IMAGE` is unset (spawns use the app default) or the tag has no
+    /// registration yet. Several rows are duplicates of one URL
+    /// ([`registrations_for`]); [`image_stale`] treats any of them as current
+    /// and [`preferred_registration`] picks the one to show.
+    pub async fn current_image_registrations(&self) -> Result<Vec<SandboxImage>> {
         let image = self.config.image.trim();
         if image.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let rows = self.list_sandbox_images().await?;
-        Ok(find_sandbox_image(&rows, image).cloned())
+        Ok(registrations_for(&rows, image)
+            .into_iter()
+            .cloned()
+            .collect())
     }
 
     /// The delegate's LIVE labeled instances (#577) — the same match
@@ -858,14 +1007,155 @@ impl VeFaasClient {
         .await
     }
 
-    /// #568 — the post-push precache REFRESH: List → Delete the entry for
-    /// `CR_IMAGE` → **verify it is GONE** → Precache → poll until the fresh
-    /// registration reports `PrecacheStatus success` (已预热) or `poll_timeout`
-    /// elapses.
+    /// #598 GC — remove the pre-cache registrations versioned tags leave
+    /// behind, so the account never walks into the [`PRECACHE_ACCOUNT_CAP`]
+    /// refusal on a future ship.
+    ///
+    /// Policy is [`plan_precache_prune`] (pure, unit-tested); this method is
+    /// the I/O around it: list, plan, delete, then OBSERVE. Every row is
+    /// logged with its verdict — kept rows too — because a GC that prints only
+    /// its deletions cannot be audited. A delete is counted only once the row
+    /// is observed absent from List: a 200 from `DeleteSandboxImage` proves
+    /// nothing on its own (#568).
+    ///
+    /// A row a live instance pins is NOT a failure: `DeleteSandboxImage`
+    /// refuses it (`Result.Status=failed`, probed 2026-07-24) and that refusal
+    /// is the authoritative pin check, so it is reported as a skip and the
+    /// sweep continues. Deliberately never kills pinners — a GC is background
+    /// hygiene and must not take a delegate down; freeing a pinned
+    /// registration is the `--kill-pinners` refresh, an explicit operator act.
+    pub async fn prune_stale_precache(
+        &self,
+        retention_days: i64,
+        dry_run: bool,
+    ) -> Result<PruneReport> {
+        let rows = self.list_sandbox_images().await.context(
+            "ListSandboxImages failed — cannot see the pre-cache registrations to sweep \
+             (is vefaas:ListSandboxImages granted to this identity? #568 policy)",
+        )?;
+        let plan = plan_precache_prune(
+            &rows,
+            self.config.image.trim(),
+            chrono::Utc::now(),
+            retention_days,
+        );
+        for row in &plan {
+            let (id, url) = (&row.image_id, &row.image_url);
+            match &row.verdict {
+                PruneVerdict::Prune { age_days } => {
+                    tracing::info!(image_id = %id, image_url = %url, age_days, "precache-gc: PRUNE")
+                }
+                PruneVerdict::Current => tracing::info!(
+                    image_id = %id, image_url = %url,
+                    "precache-gc: keep (the current CR_IMAGE)"
+                ),
+                PruneVerdict::WithinRetention => tracing::info!(
+                    image_id = %id, image_url = %url,
+                    "precache-gc: keep (within the {retention_days}-day retention)"
+                ),
+                PruneVerdict::KeptByFloor => tracing::info!(
+                    image_id = %id, image_url = %url,
+                    "precache-gc: keep (keep-one floor — retention applies only while more than \
+                     one registration exists)"
+                ),
+                PruneVerdict::AgeUnreadable => tracing::warn!(
+                    image_id = %id, image_url = %url,
+                    "precache-gc: keep (UpdateTime did not normalize to RFC3339 — refusing to age \
+                     a row we cannot read; the vendor's timestamp shape may have moved)"
+                ),
+            }
+        }
+
+        let targets: Vec<String> = plan
+            .iter()
+            .filter(|r| matches!(r.verdict, PruneVerdict::Prune { .. }))
+            .map(|r| r.image_id.clone())
+            .collect();
+        let mut report = PruneReport {
+            listed: rows.len(),
+            plan,
+            targets: targets.clone(),
+            deleted: Vec::new(),
+            skipped: Vec::new(),
+            still_listed: Vec::new(),
+            remaining: rows.len(),
+        };
+        if dry_run || targets.is_empty() {
+            return Ok(report);
+        }
+
+        let mut answered = Vec::new();
+        for id in targets {
+            match self.delete_sandbox_image(&id).await {
+                Ok(()) => answered.push(id),
+                // The in-use refusal is the expected skip: a delegate spawned
+                // before the last flip still runs this registration. The next
+                // sweep gets it once that delegate updates (#577).
+                Err(e) => {
+                    let why = format!("{e:#}");
+                    tracing::warn!(
+                        image_id = %id, error = %why,
+                        "precache-gc: skipped (delete refused — pinned by a live instance, or a \
+                         transient API error); the next sweep retries it"
+                    );
+                    report.skipped.push((id, why));
+                }
+            }
+        }
+
+        // Observe every answered delete (#568: deletion is not synchronous, and
+        // a body without Region once answered 200 deleting nothing). Until a
+        // List succeeds, every answered delete counts as unobserved.
+        report.still_listed = answered.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DELETE_GONE_SECS);
+        loop {
+            match self.list_sandbox_images().await {
+                Ok(after) => {
+                    report.remaining = after.len();
+                    report.still_listed = answered
+                        .iter()
+                        .filter(|id| after.iter().any(|r| &r.image_id == *id))
+                        .cloned()
+                        .collect();
+                    if report.still_listed.is_empty() {
+                        break;
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "ListSandboxImages poll failed — retrying"),
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+        report.deleted = answered
+            .into_iter()
+            .filter(|id| !report.still_listed.contains(id))
+            .collect();
+        for id in &report.deleted {
+            tracing::info!(image_id = %id, "precache-gc: deleted (observed absent)");
+        }
+        for id in &report.still_listed {
+            tracing::warn!(
+                image_id = %id,
+                "precache-gc: DeleteSandboxImage answered success but the row is STILL LISTED \
+                 (or no List succeeded) after {DELETE_GONE_SECS}s — not counted as deleted; the \
+                 next sweep retries it"
+            );
+        }
+        Ok(report)
+    }
+
+    /// #568 — the post-push precache REFRESH: List → Delete EVERY registration
+    /// of `CR_IMAGE` → **verify they are GONE** → Precache → poll until the
+    /// fresh registration reports `PrecacheStatus success` (已预热) or
+    /// `poll_timeout` elapses.
     ///
     /// Exists because veFaaS spawns the PRE-CACHED copy of a tag, not what the
-    /// registry serves: a same-tag re-push is invisible, `PrecacheSandboxImages`
-    /// answers `already exists` without re-pulling, and the API exposes no
+    /// registry serves: a same-tag re-push is invisible, re-registering a
+    /// registered URL never refreshes it (`already exists` through 2026-09-29;
+    /// since 2026-09-30 a duplicate row beside the old one, measured — and
+    /// [`Self::precache_image`] now refuses to add one), and the API exposes no
     /// digest to compare — so the ONLY way to make a pushed tag live is
     /// delete + re-add (preheat is tag-only and always pulls current content;
     /// proven in the 2026-07-23 silent-chat incident, automated here).
@@ -898,7 +1188,8 @@ impl VeFaasClient {
             "ListSandboxImages failed — cannot see the current pre-cache registrations \
              (is vefaas:ListSandboxImages granted to this identity? #568 policy)",
         )?;
-        if let Some(row) = find_sandbox_image(&rows, image) {
+        let existing = registrations_for(&rows, image);
+        if let Some(row) = existing.first() {
             // RESUME, never RESTART (#568 follow-up, 2026-07-26). An entry that
             // is still non-terminal (`caching`) was registered by an EARLIER
             // refresh — i.e. after the push — so it is already pulling the
@@ -998,26 +1289,38 @@ impl VeFaasClient {
                     }
                 }
             }
-            tracing::info!(
-                image_id = %row.image_id, status = %row.precache_status,
-                updated = %row.update_time,
-                "precache refresh: deleting the existing registration (移除)"
-            );
-            self.delete_sandbox_image(&row.image_id)
-                .await
-                .with_context(|| format!("DeleteSandboxImage {} ({image})", row.image_id))?;
+            // EVERY registration of the URL goes. One URL can hold several (the
+            // 2026-09-30..10-04 boot precache minted a duplicate per restart);
+            // deleting only the newest left the rest listed, so the GONE gate
+            // below could only time out.
+            if existing.len() > 1 {
+                tracing::info!(
+                    registrations = existing.len(),
+                    "precache refresh: this URL holds duplicate registrations — deleting all of them"
+                );
+            }
+            for reg in &existing {
+                tracing::info!(
+                    image_id = %reg.image_id, status = %reg.precache_status,
+                    updated = %reg.update_time,
+                    "precache refresh: deleting the existing registration (移除)"
+                );
+                self.delete_sandbox_image(&reg.image_id)
+                    .await
+                    .with_context(|| format!("DeleteSandboxImage {} ({image})", reg.image_id))?;
+            }
 
             // GONE gate — a 200 from Delete proves nothing (see the method
-            // docs). Poll until the entry vanishes from List; if it survives
-            // the window, the delete silently failed and re-adding would
-            // `already exists` over the stale content.
+            // docs). Poll until no registration of the URL is listed; if one
+            // survives the window, a delete silently failed and the re-add
+            // would leave stale content beside the fresh row.
             let gone_deadline =
                 std::time::Instant::now() + std::time::Duration::from_secs(DELETE_GONE_SECS);
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 match self.list_sandbox_images().await {
                     Ok(rows) => {
-                        if find_sandbox_image(&rows, image).is_none() {
+                        if registrations_for(&rows, image).is_empty() {
                             tracing::info!("registration removed (observed absent) — re-adding");
                             break;
                         }
@@ -1050,15 +1353,17 @@ impl VeFaasClient {
             .await
             .context("PrecacheSandboxImages (the re-add half) failed — the entry was deleted; re-run this refresh (or restart the broker: boot re-registers) so spawns don't 404 ResourceNotFound")?;
         if ticket.is_empty() {
-            // precache_image maps `already exists` to Ok("") — but the GONE
-            // gate above OBSERVED the registration absent, so an
-            // `already exists` here means veFaaS resurrected/never-freed the
-            // old entry and the re-pull did NOT happen. False green — refuse.
+            // precache_image submits nothing when the URL is (again) registered
+            // — but the GONE gate above OBSERVED it absent, so a registration
+            // reappeared in between (a concurrent boot or refresh, or veFaaS
+            // resurrected the old entry) and THIS run's re-pull did NOT happen.
+            // False green — refuse.
             bail!(
-                "PrecacheSandboxImages answered `already exists` AFTER the registration was \
-                 observed absent — veFaaS did not accept a fresh registration for {image}, so \
-                 the cached content was NOT refreshed. Re-run precache-refresh; if it \
-                 persists, check the entry in the console (沙箱镜像) and the CR instance."
+                "no fresh registration was submitted for {image}: the URL was registered again \
+                 AFTER its registrations were observed absent (a concurrent broker boot or \
+                 refresh, or veFaaS resurrected the old entry), so this run did NOT refresh the \
+                 cached content. Re-run precache-refresh; if it persists, check the entries in \
+                 the console (沙箱镜像) and the CR instance."
             );
         }
         tracing::info!(ticket = %ticket, "precache re-add submitted — polling until Preheated (已预热)");
@@ -1786,13 +2091,202 @@ fn parse_sandbox_images(v: &serde_json::Value) -> Vec<SandboxImage> {
             image_url: s(&r["ImageUrl"]),
             precache_status: s(&r["PrecacheStatus"]),
             precache_status_reason: s(&r["PrecacheStatusReason"]),
-            update_time: s(&r["UpdateTime"]),
+            update_time: normalize_expire_at(&s(&r["UpdateTime"])),
         })
         .collect()
 }
 
-/// The registration row for `image` (exact TAG-ref match — veFaaS registers
-/// the URL verbatim, so no normalization beyond trim).
+/// One row's disposition under the #598 pre-cache GC, with the reason that
+/// produced it — every row is accounted for, so a report can never say
+/// "deleted 3" with nothing said about the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PruneVerdict {
+    /// A registration of the URL `CR_IMAGE` names. Never pruned at any age.
+    Current,
+    /// Younger than the retention window.
+    WithinRetention,
+    /// Old enough, but pruning it would leave the account with no
+    /// registration at all — the keep-one floor.
+    KeptByFloor,
+    /// `UpdateTime` did not normalize to RFC3339, so the row has no age we can
+    /// stand behind. Fail-closed: never pruned, always reported.
+    AgeUnreadable,
+    /// Prune it.
+    Prune { age_days: i64 },
+}
+
+/// A row plus its verdict.
+#[derive(Debug, Clone)]
+pub struct PruneRow {
+    pub image_id: String,
+    pub image_url: String,
+    pub verdict: PruneVerdict,
+}
+
+/// What one [`VeFaasClient::prune_stale_precache`] sweep did.
+#[derive(Debug, Clone)]
+pub struct PruneReport {
+    /// Registrations listed before the sweep.
+    pub listed: usize,
+    /// Every listed row with its verdict.
+    pub plan: Vec<PruneRow>,
+    /// The ids the plan prunes (on a dry run: what a real sweep would delete).
+    pub targets: Vec<String>,
+    /// Ids whose delete answered success AND that were then observed absent.
+    pub deleted: Vec<String>,
+    /// `(id, error)` for refused deletes — a live instance pinning the
+    /// registration is the expected case.
+    pub skipped: Vec<(String, String)>,
+    /// Ids whose delete answered success but were still listed after the
+    /// observation window, or never observed because no List succeeded — not
+    /// counted as deleted.
+    pub still_listed: Vec<String>,
+    /// Registrations listed after the sweep (before it, on a dry run).
+    pub remaining: usize,
+}
+
+impl PruneReport {
+    /// The sweep's one-line stdout verdict (per-row verdicts go to stderr).
+    /// Says what was NOT done as plainly as what was.
+    pub fn summary(&self, retention_days: i64, dry_run: bool) -> String {
+        let mut out = if dry_run {
+            format!(
+                "precache-gc DRY RUN — would prune {} of {} registration(s) older than \
+                 {retention_days} days; nothing deleted",
+                self.targets.len(),
+                self.listed
+            )
+        } else {
+            format!(
+                "precache-gc OK — pruned {} of {} registration(s) older than {retention_days} days",
+                self.deleted.len(),
+                self.listed
+            )
+        };
+        if !self.skipped.is_empty() {
+            out.push_str(&format!(
+                "; {} skipped (delete refused — pinned by a live delegate, or a transient error)",
+                self.skipped.len()
+            ));
+        }
+        if !self.still_listed.is_empty() {
+            out.push_str(&format!(
+                "; {} answered success but are still listed or unobserved (not counted as deleted)",
+                self.still_listed.len()
+            ));
+        }
+        let unreadable = self
+            .plan
+            .iter()
+            .filter(|r| r.verdict == PruneVerdict::AgeUnreadable)
+            .count();
+        if unreadable > 0 {
+            out.push_str(&format!(
+                "; {unreadable} kept with an unreadable UpdateTime (the vendor's timestamp shape \
+                 may have moved)"
+            ));
+        }
+        out.push_str(&format!(
+            "; {} of the account's {PRECACHE_ACCOUNT_CAP} registrations in use ({} free). The \
+             current CR_IMAGE and the last row standing are never swept; per-row verdicts on \
+             stderr.",
+            self.remaining,
+            PRECACHE_ACCOUNT_CAP.saturating_sub(self.remaining)
+        ));
+        out
+    }
+}
+
+/// Pure #598 GC policy — decide, without touching the network, which pre-cache
+/// registrations may be removed.
+///
+/// The account holds at most [`PRECACHE_ACCOUNT_CAP`] registrations (30,
+/// measured 2026-10-04). Versioned tags (#598) mint a NEW registration per
+/// cycle by design — that is what lets live delegates keep serving while a new
+/// image preheats — so without a GC the set only grows, and the refusal lands
+/// on a *future* ship rather than on the cycle that filled the last slot.
+///
+/// Three rules, in order:
+///
+/// 1. **Never the current image.** Every row registered for the URL
+///    `CR_IMAGE` names is what new spawns boot; its age is irrelevant. That
+///    includes a URL's duplicate rows (the 2026-09-30..10-04 boot precache
+///    minted one per boot): they leave once the URL stops being current.
+/// 2. **Never a row whose age is unreadable.** An `UpdateTime` that does not
+///    normalize gets [`PruneVerdict::AgeUnreadable`], never a guessed age — the
+///    #604 lesson, where a vendor timestamp assumed to be RFC3339 misread by
+///    14 hours in one consumer and fail-closed in another.
+/// 3. **Keep at least one.** Retention applies only while more than one
+///    registration exists: candidates are pruned oldest-first and the sweep
+///    stops with one row standing. An account pruned to zero has nothing
+///    pre-cached, which is a cold-start regression, not a tidy account.
+///
+/// Pinned rows are NOT filtered here — `DeleteSandboxImage` refuses a
+/// registration a live instance runs, and that refusal is the authoritative
+/// pin check (probed 2026-07-24). The caller treats it as a skip, not a
+/// failure.
+pub fn plan_precache_prune(
+    rows: &[SandboxImage],
+    current_image: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    retention_days: i64,
+) -> Vec<PruneRow> {
+    let current = current_image.trim();
+    let mut planned: Vec<PruneRow> = rows
+        .iter()
+        .map(|r| {
+            let verdict = if !current.is_empty() && r.image_url.trim() == current {
+                PruneVerdict::Current
+            } else {
+                match chrono::DateTime::parse_from_rfc3339(r.update_time.trim()) {
+                    Err(_) => PruneVerdict::AgeUnreadable,
+                    Ok(updated) => {
+                        let age_days = (now - updated.with_timezone(&chrono::Utc)).num_days();
+                        if age_days >= retention_days {
+                            PruneVerdict::Prune { age_days }
+                        } else {
+                            PruneVerdict::WithinRetention
+                        }
+                    }
+                }
+            };
+            PruneRow {
+                image_id: r.image_id.clone(),
+                image_url: r.image_url.clone(),
+                verdict,
+            }
+        })
+        .collect();
+
+    // Rule 3 — the keep-one floor. Order the prunable rows OLDEST first; when
+    // nothing else would survive the sweep, the youngest of them stays.
+    let mut prunable: Vec<usize> = (0..planned.len())
+        .filter(|&i| matches!(planned[i].verdict, PruneVerdict::Prune { .. }))
+        .collect();
+    prunable.sort_by_key(|&i| match planned[i].verdict {
+        PruneVerdict::Prune { age_days } => -age_days,
+        _ => 0,
+    });
+    if planned.len() == prunable.len() {
+        if let Some(&youngest) = prunable.last() {
+            planned[youngest].verdict = PruneVerdict::KeptByFloor;
+        }
+    }
+    planned
+}
+
+/// Every registration row for `image` (exact TAG-ref match — veFaaS registers
+/// the URL verbatim, so no normalization beyond trim), in listed order: newest
+/// first, as veFaaS lists them (measured 2026-10-04). One URL can hold several
+/// rows — from 2026-09-30 the vendor accepted a duplicate registration instead
+/// of answering `already exists`.
+fn registrations_for<'a>(rows: &'a [SandboxImage], image: &str) -> Vec<&'a SandboxImage> {
+    let want = image.trim();
+    rows.iter().filter(|r| r.image_url.trim() == want).collect()
+}
+
+/// The NEWEST registration row for `image` — what the preheat poll waits on
+/// after a re-add. Every row of the URL: [`registrations_for`].
 fn find_sandbox_image<'a>(rows: &'a [SandboxImage], image: &str) -> Option<&'a SandboxImage> {
     let want = image.trim();
     rows.iter().find(|r| r.image_url.trim() == want)
@@ -2107,6 +2601,265 @@ mod tests {
         assert_eq!(m[LABEL_MANAGED_BY], MANAGED_BY_VALUE);
     }
 
+    // ---- #598 pre-cache GC policy ----------------------------------------
+
+    fn img(id: &str, url: &str, updated: &str) -> SandboxImage {
+        SandboxImage {
+            image_id: id.into(),
+            image_url: url.into(),
+            precache_status: "success".into(),
+            precache_status_reason: String::new(),
+            update_time: updated.into(),
+        }
+    }
+
+    fn at(iso: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(iso)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn verdicts(plan: &[PruneRow]) -> Vec<(&str, &PruneVerdict)> {
+        plan.iter()
+            .map(|r| (r.image_id.as_str(), &r.verdict))
+            .collect()
+    }
+
+    const LIVE_CURRENT: &str =
+        "agent-terrier-1-cn-beijing.cr.volces.com/agentkeys/dsh-sandbox:v202610041337-gc831d3d1";
+    const LIVE_PREVIOUS: &str =
+        "agent-terrier-1-cn-beijing.cr.volces.com/agentkeys/dsh-sandbox:v202609281137-ga88fc16c";
+
+    /// The exact `ListSandboxImages` answer measured on VE prod 2026-10-04
+    /// 16:30 UTC: 19 rows, newest first. Six are one URL (`…ga88fc16c`): its
+    /// cycle preheat on 09-28, then one per 24 h broker restart 09-30..10-04,
+    /// each minted by the boot precache. Two are the current URL
+    /// (`…gc831d3d1`): the cycle preheat, and a second the flip's restart
+    /// minted 29 minutes later.
+    fn live_listing_2026_10_04() -> Vec<SandboxImage> {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../testdata/vefaas-list-sandbox-images-2026-10-04.json"
+        ))
+        .unwrap();
+        parse_sandbox_images(&v)
+    }
+
+    #[test]
+    fn gc_never_prunes_the_current_image_however_old() {
+        let rows = vec![
+            img(
+                "cur",
+                "cr/ns/dsh-sandbox:v202601010000-gaaaaaaaa",
+                "2026-01-01T00:00:00Z",
+            ),
+            img(
+                "old",
+                "cr/ns/dsh-sandbox:v202601020000-gbbbbbbbb",
+                "2026-01-02T00:00:00Z",
+            ),
+        ];
+        let plan = plan_precache_prune(
+            &rows,
+            "cr/ns/dsh-sandbox:v202601010000-gaaaaaaaa",
+            at("2026-06-01T00:00:00Z"),
+            15,
+        );
+        assert_eq!(
+            verdicts(&plan),
+            vec![
+                ("cur", &PruneVerdict::Current),
+                ("old", &PruneVerdict::Prune { age_days: 150 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn gc_keeps_rows_inside_the_retention_window() {
+        let rows = vec![
+            img("cur", "cr/x:cur", "2026-06-01T00:00:00Z"),
+            img("fresh", "cr/x:a", "2026-05-30T00:00:00Z"),
+            img("stale", "cr/x:b", "2026-05-01T00:00:00Z"),
+        ];
+        let plan = plan_precache_prune(&rows, "cr/x:cur", at("2026-06-01T00:00:00Z"), 15);
+        assert_eq!(plan[1].verdict, PruneVerdict::WithinRetention);
+        assert_eq!(plan[2].verdict, PruneVerdict::Prune { age_days: 31 });
+    }
+
+    #[test]
+    fn gc_retention_applies_only_while_more_than_one_registration_exists() {
+        // A single ancient row is still the only thing pre-cached: sweeping it
+        // buys a cold start, not a tidy account.
+        let rows = vec![img("only", "cr/x:a", "2020-01-01T00:00:00Z")];
+        let plan = plan_precache_prune(&rows, "", at("2026-06-01T00:00:00Z"), 15);
+        assert_eq!(verdicts(&plan), vec![("only", &PruneVerdict::KeptByFloor)]);
+        assert!(plan_precache_prune(&[], "", at("2026-06-01T00:00:00Z"), 15).is_empty());
+    }
+
+    #[test]
+    fn gc_keep_one_floor_spares_the_youngest_when_every_row_is_prunable() {
+        // No current image and all three past retention: exactly one stays —
+        // the YOUNGEST, since the oldest go first.
+        let rows = vec![
+            img("oldest", "cr/x:a", "2026-01-01T00:00:00Z"),
+            img("newest", "cr/x:c", "2026-03-01T00:00:00Z"),
+            img("middle", "cr/x:b", "2026-02-01T00:00:00Z"),
+        ];
+        let plan = plan_precache_prune(&rows, "", at("2026-06-01T00:00:00Z"), 15);
+        assert!(matches!(plan[0].verdict, PruneVerdict::Prune { .. }));
+        assert_eq!(plan[1].verdict, PruneVerdict::KeptByFloor);
+        assert!(matches!(plan[2].verdict, PruneVerdict::Prune { .. }));
+    }
+
+    #[test]
+    fn gc_refuses_to_age_a_row_whose_timestamp_did_not_normalize() {
+        // #604 in miniature: never guess an age from a shape we do not read.
+        let rows = vec![
+            img("cur", "cr/x:cur", "2026-06-01T00:00:00Z"),
+            img("weird", "cr/x:a", "whenever o'clock"),
+            img("stale", "cr/x:b", "2026-01-01T00:00:00Z"),
+        ];
+        let plan = plan_precache_prune(&rows, "cr/x:cur", at("2026-06-01T00:00:00Z"), 15);
+        assert_eq!(plan[1].verdict, PruneVerdict::AgeUnreadable);
+        assert!(matches!(plan[2].verdict, PruneVerdict::Prune { .. }));
+    }
+
+    #[test]
+    fn gc_reads_the_vendors_go_timestamp_through_the_parse_boundary() {
+        // UpdateTime arrives as Go's time.Time, is normalized by
+        // parse_sandbox_images, and the planner therefore ages it instead of
+        // fail-closing on it.
+        let v = serde_json::json!({
+            "Result": { "Images": [
+                { "ImageId": "keep", "ImageUrl": "cr/x:cur",
+                  "PrecacheStatus": "success", "PrecacheStatusReason": "",
+                  "UpdateTime": "2026-07-23 12:13:50.112 +0000 UTC" },
+                { "ImageId": "sweep", "ImageUrl": "cr/x:old",
+                  "PrecacheStatus": "success", "PrecacheStatusReason": "",
+                  "UpdateTime": "2026-07-01 07:00:00 +0800 CST" }
+            ] }
+        });
+        let rows = parse_sandbox_images(&v);
+        assert_eq!(rows[0].update_time, "2026-07-23T12:13:50.112+00:00");
+        let plan = plan_precache_prune(&rows, "cr/x:cur", at("2026-08-01T00:00:00Z"), 15);
+        assert_eq!(plan[0].verdict, PruneVerdict::Current);
+        // 2026-06-30T23:00Z → 31 days; reading the clock as UTC (dropping
+        // +0800) would say 30.
+        assert_eq!(plan[1].verdict, PruneVerdict::Prune { age_days: 31 });
+    }
+
+    #[test]
+    fn gc_plans_the_measured_live_listing() {
+        let rows = live_listing_2026_10_04();
+        assert_eq!(rows.len(), 19);
+        for r in &rows {
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&r.update_time).is_ok(),
+                "{} UpdateTime {:?} did not normalize",
+                r.image_id,
+                r.update_time
+            );
+        }
+        // The day it was measured, no row was 15 days old yet.
+        let today = plan_precache_prune(&rows, LIVE_CURRENT, at("2026-10-05T00:00:00Z"), 15);
+        assert!(today.iter().all(|r| matches!(
+            r.verdict,
+            PruneVerdict::Current | PruneVerdict::WithinRetention
+        )));
+        // By 2026-10-20 every row of a non-current URL has aged out — each of
+        // the six duplicates of the previous image on its own clock — and both
+        // rows of the current URL stay.
+        let later = plan_precache_prune(&rows, LIVE_CURRENT, at("2026-10-20T00:00:00Z"), 15);
+        for r in &later {
+            if r.image_url == LIVE_CURRENT {
+                assert_eq!(r.verdict, PruneVerdict::Current, "{}", r.image_id);
+            } else {
+                assert!(
+                    matches!(r.verdict, PruneVerdict::Prune { .. }),
+                    "{} {:?}",
+                    r.image_id,
+                    r.verdict
+                );
+            }
+        }
+        assert_eq!(
+            later
+                .iter()
+                .filter(|r| r.image_url == LIVE_PREVIOUS)
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn prune_report_summary_says_what_was_and_was_not_done() {
+        let plan = vec![
+            PruneRow {
+                image_id: "a".into(),
+                image_url: "cr/x:a".into(),
+                verdict: PruneVerdict::Prune { age_days: 20 },
+            },
+            PruneRow {
+                image_id: "p".into(),
+                image_url: "cr/x:p".into(),
+                verdict: PruneVerdict::Prune { age_days: 18 },
+            },
+            PruneRow {
+                image_id: "w".into(),
+                image_url: "cr/x:w".into(),
+                verdict: PruneVerdict::AgeUnreadable,
+            },
+        ];
+        let dry = PruneReport {
+            listed: 25,
+            plan: plan.clone(),
+            targets: vec!["a".into(), "p".into()],
+            deleted: Vec::new(),
+            skipped: Vec::new(),
+            still_listed: Vec::new(),
+            remaining: 25,
+        };
+        let s = dry.summary(15, true);
+        assert!(
+            s.starts_with("precache-gc DRY RUN — would prune 2 of 25"),
+            "{s}"
+        );
+        assert!(s.contains("nothing deleted"), "{s}");
+        assert!(s.contains("1 kept with an unreadable UpdateTime"), "{s}");
+        assert!(
+            s.contains("25 of the account's 30 registrations in use (5 free)"),
+            "{s}"
+        );
+
+        let real = PruneReport {
+            deleted: vec!["a".into()],
+            skipped: vec![("p".into(), "Result.Status=failed".into())],
+            remaining: 24,
+            ..dry
+        };
+        let s = real.summary(15, false);
+        assert!(s.starts_with("precache-gc OK — pruned 1 of 25"), "{s}");
+        assert!(s.contains("1 skipped (delete refused"), "{s}");
+        assert!(
+            s.contains("24 of the account's 30 registrations in use (6 free)"),
+            "{s}"
+        );
+
+        // A delete that answered success but was never observed gone is NOT
+        // counted — and the line says so.
+        let unobserved = PruneReport {
+            deleted: Vec::new(),
+            still_listed: vec!["a".into()],
+            remaining: 25,
+            ..real
+        };
+        let s = unobserved.summary(15, false);
+        assert!(s.starts_with("precache-gc OK — pruned 0 of 25"), "{s}");
+        assert!(
+            s.contains("1 answered success but are still listed or unobserved"),
+            "{s}"
+        );
+    }
+
     #[test]
     fn parse_sandbox_images_reads_the_probed_live_shape() {
         // The EXACT response observed live 2026-07-24 (ListSandboxImages,
@@ -2177,26 +2930,152 @@ mod tests {
         let url = "cr.example/ns/repo:latest";
         // Same registration → current bits.
         assert_eq!(
-            image_stale(Some(&booted("reg1", url)), Some(&reg("reg1", url))),
+            image_stale(Some(&booted("reg1", url)), &[reg("reg1", url)]),
             Some(false)
         );
-        // A refresh minted a NEW registration for the same tag → stale.
+        // A refresh replaced the tag's registration → stale.
         assert_eq!(
-            image_stale(Some(&booted("reg1", url)), Some(&reg("reg2", url))),
+            image_stale(Some(&booted("reg1", url)), &[reg("reg2", url)]),
             Some(true)
         );
         // The tag ref itself moved (CR_IMAGE changed) → stale regardless of id.
         assert_eq!(
             image_stale(
                 Some(&booted("reg1", url)),
-                Some(&reg("reg1", "cr.example/ns/repo:v2"))
+                &[reg("reg1", "cr.example/ns/repo:v2")]
             ),
             Some(true)
         );
         // Unknowable sides stay unknown — never guessed.
-        assert_eq!(image_stale(None, Some(&reg("reg1", url))), None);
-        assert_eq!(image_stale(Some(&booted("reg1", url)), None), None);
-        assert_eq!(image_stale(None, None), None);
+        assert_eq!(image_stale(None, &[reg("reg1", url)]), None);
+        assert_eq!(image_stale(Some(&booted("reg1", url)), &[]), None);
+        assert_eq!(image_stale(None, &[]), None);
+    }
+
+    // ---- the boot precache never duplicates a registered URL -------------
+
+    #[test]
+    fn decide_precache_never_adds_a_row_for_a_registered_url() {
+        let row = |id: &str, url: &str, status: &str| SandboxImage {
+            precache_status: status.into(),
+            ..img(id, url, "2026-10-04T00:00:00Z")
+        };
+        let url = "cr/ns/dsh-sandbox:v202610040000-gaaaaaaaa";
+        // Unset CR_IMAGE: nothing to register, whatever is listed.
+        assert_eq!(
+            decide_precache(&[row("x", url, "success")], "  "),
+            PrecacheDecision::NoImage
+        );
+        // No row for the URL (none at all, or only other URLs): register it.
+        assert_eq!(decide_precache(&[], url), PrecacheDecision::Register);
+        assert_eq!(
+            decide_precache(
+                &[row("o", "cr/ns/dsh-sandbox:vOTHER-gbbbbbbbb", "success")],
+                url
+            ),
+            PrecacheDecision::Register
+        );
+        // A digest ref never matches a tag registration (veFaaS registers tags).
+        assert_eq!(
+            decide_precache(&[row("x", url, "success")], "cr/ns/dsh-sandbox@sha256:abcd"),
+            PrecacheDecision::Register
+        );
+        // Registered in ANY state — preheated, in flight, or failed — no new
+        // row: a failed registration is the refresh's to replace, and a second
+        // row only spends the cap.
+        for status in ["success", "caching", "failed"] {
+            assert_eq!(
+                decide_precache(&[row("r1", url, status)], &format!(" {url} ")),
+                PrecacheDecision::AlreadyRegistered(vec![row("r1", url, status)]),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_precache_on_the_measured_live_listing() {
+        // The answer the duplicating boots produced: the fixed boot path finds
+        // the current URL registered twice and the previous one six times, and
+        // adds nothing for either.
+        let rows = live_listing_2026_10_04();
+        match decide_precache(&rows, LIVE_CURRENT) {
+            PrecacheDecision::AlreadyRegistered(existing) => assert_eq!(
+                existing
+                    .iter()
+                    .map(|r| r.image_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["236q8uknk6", "ea8t84fdan"],
+                "newest first, as listed"
+            ),
+            other => panic!("current URL must be AlreadyRegistered, got {other:?}"),
+        }
+        match decide_precache(&rows, LIVE_PREVIOUS) {
+            PrecacheDecision::AlreadyRegistered(existing) => assert_eq!(existing.len(), 6),
+            other => panic!("previous URL must be AlreadyRegistered, got {other:?}"),
+        }
+        assert_eq!(
+            decide_precache(
+                &rows,
+                "agent-terrier-1-cn-beijing.cr.volces.com/agentkeys/dsh-sandbox:v202610050000-gdeadbeef"
+            ),
+            PrecacheDecision::Register
+        );
+    }
+
+    #[test]
+    fn image_stale_counts_any_registration_of_the_url_as_current() {
+        let rows = live_listing_2026_10_04();
+        let current: Vec<SandboxImage> = registrations_for(&rows, LIVE_CURRENT)
+            .into_iter()
+            .cloned()
+            .collect();
+        assert_eq!(current.len(), 2);
+        let booted = |id: &str, url: &str| InstanceImageInfo {
+            registration_id: id.into(),
+            source_image_url: url.into(),
+        };
+        // An instance frozen on the OLDER duplicate runs the same immutable
+        // tag: current — judging against the newest row alone said stale.
+        assert_eq!(
+            image_stale(Some(&booted("ea8t84fdan", LIVE_CURRENT)), &current),
+            Some(false)
+        );
+        assert_eq!(
+            image_stale(Some(&booted("236q8uknk6", LIVE_CURRENT)), &current),
+            Some(false)
+        );
+        // A registration no longer listed for the URL (a refresh deleted it) → stale.
+        assert_eq!(
+            image_stale(Some(&booted("gone000000", LIVE_CURRENT)), &current),
+            Some(true)
+        );
+        // An instance still on the previous image, on any of its six rows → stale.
+        assert_eq!(
+            image_stale(Some(&booted("ayc2tcvm9l", LIVE_PREVIOUS)), &current),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn preferred_registration_shows_the_newest_preheated_row() {
+        let rows = live_listing_2026_10_04();
+        let current: Vec<SandboxImage> = registrations_for(&rows, LIVE_CURRENT)
+            .into_iter()
+            .cloned()
+            .collect();
+        // The newest row is still `caching`; the preheated one is shown.
+        assert_eq!(current[0].precache_status, "caching");
+        assert_eq!(
+            preferred_registration(&current).map(|r| r.image_id.as_str()),
+            Some("ea8t84fdan")
+        );
+        // Nothing preheated → the newest; nothing at all → none.
+        let in_flight = vec![current[0].clone()];
+        assert_eq!(
+            preferred_registration(&in_flight).map(|r| r.image_id.as_str()),
+            Some("236q8uknk6")
+        );
+        assert!(preferred_registration(&[]).is_none());
     }
 
     #[test]

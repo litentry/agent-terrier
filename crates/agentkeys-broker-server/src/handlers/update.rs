@@ -22,9 +22,11 @@
 //! `POST /v1/agent/image-status` (same auth) is the staleness signal: veFaaS
 //! exposes no image digest, but an instance FREEZES the pre-cache
 //! registration id it spawned from (`DescribeSandbox.ImageInfo.Id`) while a
-//! #568 refresh mints a NEW registration id for the same tag — so
-//! `frozen ≠ current` is exactly "this delegate runs old bits", now visible
-//! in parent-control instead of via a shell probe.
+//! #568 refresh replaces the tag's registrations with a NEW one — so `frozen ∉
+//! current` is exactly "this delegate runs old bits", now visible in
+//! parent-control instead of via a shell probe. "Current" is every
+//! registration of the tag: one URL can hold duplicates (the 2026-09-30..10-04
+//! boot precache), and any of them serves the same bits.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -99,10 +101,11 @@ pub struct ImageStatusResponse {
     /// The broker's configured `CR_IMAGE` tag ref (`null` = app default /
     /// no registration-based backend).
     pub image: Option<String>,
-    /// The CURRENT pre-cache registration id for `image` — what a create
-    /// issued now would freeze.
+    /// A CURRENT pre-cache registration id for `image`. When the tag holds
+    /// several (duplicates), the newest preheated one — display only; `stale`
+    /// counts any registration of the tag as current.
     pub current_registration_id: Option<String>,
-    /// The current registration's preheat state (`success` = 已预热).
+    /// That registration's preheat state (`success` = 已预热).
     pub precache_status: Option<String>,
     pub delegates: Vec<DelegateImageStatus>,
 }
@@ -135,8 +138,8 @@ pub struct DelegateImageStatus {
     pub agent_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// `true` = running older bits than the current registration; `null` =
-    /// unknowable (no live instance / default image / no registration).
+    /// `true` = running older bits than the tag's current registrations;
+    /// `null` = unknowable (no live instance / default image / no registration).
     pub stale: Option<bool>,
     /// Per-delegate probe failure (chain probe, describe) — the row is still
     /// returned so one bad hash never hides the rest.
@@ -702,10 +705,11 @@ pub async fn agent_image_status(
     let (cfg, _broker_sk) =
         load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
 
-    let current = backend
-        .current_image_registration()
+    let current_rows = backend
+        .current_image_registrations()
         .await
         .map_err(|e| aerr(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let current = crate::ve_faas::preferred_registration(&current_rows);
 
     let mut delegates = Vec::with_capacity(req.device_key_hashes.len());
     for dkh in &req.device_key_hashes {
@@ -737,8 +741,7 @@ pub async fn agent_image_status(
                     row.expire_at = Some(first.expire_at.clone()).filter(|s| !s.trim().is_empty());
                     match backend.booted_image_info(&first.id).await {
                         Ok(booted) => {
-                            row.stale =
-                                crate::ve_faas::image_stale(booted.as_ref(), current.as_ref());
+                            row.stale = crate::ve_faas::image_stale(booted.as_ref(), &current_rows);
                             if let Some(b) = booted {
                                 row.booted_registration_id = Some(b.registration_id);
                                 row.booted_image_url = Some(b.source_image_url);
@@ -763,11 +766,10 @@ pub async fn agent_image_status(
 
     Ok(Json(ImageStatusResponse {
         image: current
-            .as_ref()
             .map(|c| c.image_url.clone())
             .or_else(|| backend.current_image_tag()),
-        current_registration_id: current.as_ref().map(|c| c.image_id.clone()),
-        precache_status: current.as_ref().map(|c| c.precache_status.clone()),
+        current_registration_id: current.map(|c| c.image_id.clone()),
+        precache_status: current.map(|c| c.precache_status.clone()),
         delegates,
     }))
 }
