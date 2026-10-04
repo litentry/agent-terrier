@@ -494,7 +494,9 @@ impl OpenVikingClient {
     ///
     /// The manifest is one file shared by the concurrent namespace tasks (#694):
     /// the network work runs unlocked, then this namespace's rows are swapped
-    /// in under the manifest lock in one read-modify-write.
+    /// in under the manifest lock in one read-modify-write
+    /// ([`swap_namespace_rows`]). A swap that cannot persist is reported in
+    /// [`ReconcileStats::manifest_error`] — the next pass re-mirrors those items.
     pub async fn reconcile_items(
         &self,
         namespace: &str,
@@ -588,42 +590,21 @@ impl OpenVikingClient {
                 }
             }
         }
-        // Swap this namespace's rows in, keeping every other namespace's.
-        let mut lines: Vec<String> = Vec::new();
-        for row in &rows {
-            match row {
-                ManifestRow::Item { namespace: ns, .. }
-                | ManifestRow::Legacy { namespace: ns, .. }
-                    if ns == namespace =>
-                {
-                    continue
-                }
-                ManifestRow::Item {
-                    namespace: ns,
-                    segment,
-                    hash,
-                } => lines.push(row_line(ns, segment, hash)),
-                ManifestRow::Legacy {
-                    namespace: ns,
-                    hash,
-                } => lines.push(format!("{ns}\t{hash}")),
-                ManifestRow::Other(line) => {
-                    if !line.trim().is_empty() {
-                        lines.push(line.clone());
-                    }
-                }
-            }
-        }
         let mut own: Vec<(String, String)> = next_rows.into_iter().collect();
         own.sort();
-        for (segment, hash) in own {
-            lines.push(row_line(namespace, &segment, &hash));
+        if let Err(err) = swap_namespace_rows(manifest, namespace, &own, &legacy_kept) {
+            stats.note_manifest_error(manifest, &err);
         }
-        for hash in legacy_kept {
-            lines.push(format!("{namespace}\t{hash}"));
-        }
-        rewrite_manifest(manifest, &lines);
         stats
+    }
+}
+
+fn row_namespace(row: &ManifestRow) -> Option<&str> {
+    match row {
+        ManifestRow::Item { namespace, .. } | ManifestRow::Legacy { namespace, .. } => {
+            Some(namespace)
+        }
+        ManifestRow::Other(_) => None,
     }
 }
 
@@ -653,11 +634,25 @@ pub struct ReconcileStats {
     /// The first failure's reason (uri + engine answer) — a count without its
     /// reason is undebuggable (suite-7 once died on "1 write(s) failed" alone).
     pub first_error: Option<String>,
+    /// The manifest swap failed (`<path>: <error>`): this pass's rows were not
+    /// recorded, so the next pass re-mirrors — re-embeds — these items. On VE
+    /// prod this was only a WARN while every pass reported `ready` and
+    /// re-embedded chef's household item (~11 embedding calls every 5 min).
+    pub manifest_error: Option<String>,
 }
 
 impl ReconcileStats {
     pub fn is_noop(&self) -> bool {
-        self.mirrored == 0 && self.write_failed == 0 && self.deleted == 0 && self.delete_failed == 0
+        self.mirrored == 0
+            && self.write_failed == 0
+            && self.deleted == 0
+            && self.delete_failed == 0
+            && self.manifest_error.is_none()
+    }
+
+    fn note_manifest_error(&mut self, path: &std::path::Path, err: &std::io::Error) {
+        tracing::warn!(path = ?path, error = %err, "openviking manifest not persisted — this namespace is re-mirrored (re-embedded) next pass");
+        self.manifest_error = Some(format!("{}: {err}", path.display()));
     }
 
     fn note_error(&mut self, what: &str, uri: &str, err: &OpenVikingError) {
@@ -668,25 +663,48 @@ impl ReconcileStats {
     }
 }
 
-/// Manifest path for [`OpenVikingClient::reconcile_items`]:
-/// `AGENTKEYS_OV_INGEST_MANIFEST`, else `$HOME/.agentkeys/ov-ingested.txt`.
+/// Manifest path for [`OpenVikingClient::reconcile_items`], from the process
+/// env (see [`ingest_manifest_path`]); the home is [`std::env::home_dir`] —
+/// `$HOME`, else the running account's home from the password database.
 /// Lives in the SANDBOX filesystem on purpose — a respawn wipes it (or the
 /// #694 workspace checkpoint restores it beside the engine index), and the
 /// next pass rebuilds from canonical.
+///
+/// A veFaaS pod starts the daemon with NO `HOME` (the pod env is the function
+/// template + instance envs, and supervisord's `user=` switch sets none —
+/// measured, the #651 class). The old `$HOME`-else-`"."` default therefore
+/// resolved `./.agentkeys/ov-ingested.txt` against the daemon's cwd `/`, which
+/// `gem` cannot create: no rows were ever recorded, and every pass rewrote —
+/// and the engine re-embedded — every granted item (VE prod, to 2026-10-04).
 pub fn ingest_manifest_from_env() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("AGENTKEYS_OV_INGEST_MANIFEST") {
-        if !p.trim().is_empty() {
-            return std::path::PathBuf::from(p);
-        }
+    ingest_manifest_path(
+        std::env::var("AGENTKEYS_OV_INGEST_MANIFEST")
+            .ok()
+            .as_deref(),
+        std::env::home_dir().as_deref(),
+        &std::env::temp_dir(),
+    )
+}
+
+/// The manifest path, pure: `explicit` (`AGENTKEYS_OV_INGEST_MANIFEST`) wins;
+/// else `<home>/.agentkeys/ov-ingested.txt` for an absolute `home`; else
+/// `<temp>/agentkeys/ov-ingested.txt`. Never relative to the working directory.
+pub fn ingest_manifest_path(
+    explicit: Option<&str>,
+    home: Option<&std::path::Path>,
+    temp: &std::path::Path,
+) -> std::path::PathBuf {
+    if let Some(path) = explicit.map(str::trim).filter(|p| !p.is_empty()) {
+        return std::path::PathBuf::from(path);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::Path::new(&home)
-        .join(".agentkeys")
-        .join("ov-ingested.txt")
+    match home.filter(|h| h.is_absolute()) {
+        Some(home) => home.join(".agentkeys").join("ov-ingested.txt"),
+        None => temp.join("agentkeys").join("ov-ingested.txt"),
+    }
 }
 
 /// #694 — namespaces of one pass reconcile concurrently; the manifest is ONE
-/// file, so each read / rewrite holds this lock (short, filesystem-only).
+/// file, so each read / swap holds this lock (short, filesystem-only).
 static MANIFEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn manifest_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -700,22 +718,56 @@ fn read_manifest(path: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn rewrite_manifest(path: &std::path::Path, entries: &[String]) {
+/// Swap ONE namespace's rows into the manifest. The file is re-read under the
+/// lock, so a concurrent namespace task's rows (#694) are never dropped by
+/// this task's snapshot from before its network work. Nothing is written when
+/// the content would not change (a converged pass does no I/O); a write is
+/// tmp + rename, so a reader (the checkpoint's snapshot copy) never sees half
+/// a file.
+fn swap_namespace_rows(
+    path: &std::path::Path,
+    namespace: &str,
+    own: &[(String, String)],
+    legacy_kept: &[String],
+) -> std::io::Result<()> {
     let _guard = manifest_guard();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut body = entries.join("\n");
+    let current = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err),
+    };
+    let mut lines: Vec<String> = current
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| row_namespace(&parse_row(line)) != Some(namespace))
+        .map(str::to_string)
+        .collect();
+    lines.extend(
+        own.iter()
+            .map(|(segment, hash)| row_line(namespace, segment, hash)),
+    );
+    lines.extend(
+        legacy_kept
+            .iter()
+            .map(|hash| format!("{namespace}\t{hash}")),
+    );
+    let mut body = lines.join("\n");
     if !body.is_empty() {
         body.push('\n');
     }
-    if let Err(err) = std::fs::write(path, &body) {
-        // Non-fatal: the engine already holds the new state, so the next pass
-        // re-issues writes that answer "exists" / deletes that 404 (both counted
-        // as done). Surfacing the I/O error is what matters — a silent failure
-        // looks like a stuck mirror.
-        tracing::warn!(error = %err, path = ?path, "openviking manifest rewrite failed — this namespace is re-reconciled next pass");
+    if body == current {
+        return Ok(());
     }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, &body)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 #[cfg(test)]
@@ -848,6 +900,62 @@ mod tests {
         assert!(matches!(parse_row("garbage"), ManifestRow::Other(_)));
     }
 
+    #[test]
+    fn the_manifest_path_never_resolves_against_the_working_directory() {
+        use std::path::{Path, PathBuf};
+        let temp = Path::new("/tmp");
+        // The veFaaS pod: no HOME, so the account's home answers.
+        assert_eq!(
+            ingest_manifest_path(None, Some(Path::new("/home/gem")), temp),
+            PathBuf::from("/home/gem/.agentkeys/ov-ingested.txt")
+        );
+        assert_eq!(
+            ingest_manifest_path(Some(" /var/ov.txt "), Some(Path::new("/home/gem")), temp),
+            PathBuf::from("/var/ov.txt"),
+            "the explicit override wins"
+        );
+        // No usable home (none, or relative like the old "." fallback) → the
+        // temp dir, never a path the cwd decides.
+        for home in [None, Some(Path::new(".")), Some(Path::new("rel/home"))] {
+            assert_eq!(
+                ingest_manifest_path(Some("  "), home, temp),
+                PathBuf::from("/tmp/agentkeys/ov-ingested.txt"),
+                "{home:?}"
+            );
+        }
+    }
+
+    /// The pod condition itself: the env wrapper, run in a child process with
+    /// `HOME` removed (what veFaaS + supervisord hand the daemon), resolves an
+    /// absolute path — the old default answered `./.agentkeys/ov-ingested.txt`.
+    #[test]
+    fn a_home_less_process_resolves_an_absolute_manifest() {
+        const PROBE: &str = "AGENTKEYS_OV_MANIFEST_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            println!("<<{}>>", ingest_manifest_from_env().display());
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_home_less_process_resolves_an_absolute_manifest",
+                "--nocapture",
+            ])
+            .env_remove("HOME")
+            .env_remove("AGENTKEYS_OV_INGEST_MANIFEST")
+            .env(PROBE, "1")
+            .output()
+            .expect("re-run this test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let path = stdout
+            .split_once("<<")
+            .and_then(|(_, rest)| rest.split_once(">>"))
+            .map(|(path, _)| std::path::PathBuf::from(path))
+            .unwrap_or_else(|| panic!("the child printed no path: {stdout}"));
+        assert!(path.is_absolute(), "{path:?}");
+        assert!(path.ends_with("ov-ingested.txt"), "{path:?}");
+    }
+
     // ── the engine stub ──────────────────────────────────────────────────────
 
     /// What the stub records: `(method, uri, mode-or-recursive)`.
@@ -862,6 +970,24 @@ mod tests {
         delete_status: u16,
         exists_on_create: bool,
     ) -> (String, Log) {
+        spawn_stub_slowing(
+            write_status,
+            write_body,
+            delete_status,
+            exists_on_create,
+            None,
+        )
+        .await
+    }
+
+    /// [`spawn_stub`], with every write under `slow.0` answered after `slow.1`.
+    async fn spawn_stub_slowing(
+        write_status: u16,
+        write_body: &'static str,
+        delete_status: u16,
+        exists_on_create: bool,
+        slow: Option<(&'static str, std::time::Duration)>,
+    ) -> (String, Log) {
         use axum::extract::Query;
         use axum::http::StatusCode;
         let log: Log = Default::default();
@@ -874,6 +1000,11 @@ mod tests {
                     async move {
                         let uri = body["uri"].as_str().unwrap_or_default().to_string();
                         let mode = body["mode"].as_str().unwrap_or_default().to_string();
+                        if let Some((prefix, delay)) = slow {
+                            if uri.starts_with(prefix) {
+                                tokio::time::sleep(delay).await;
+                            }
+                        }
                         let seen_before = log
                             .lock()
                             .unwrap()
@@ -1218,5 +1349,111 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, OpenVikingError::Http { status: 200, .. }));
+    }
+
+    /// VE prod to 2026-10-04: the manifest could not be written, every pass
+    /// rewrote the item (the engine re-embeds on every write) and reported
+    /// `ready`. The failure is now in the stats, with its path and reason.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_manifest_that_cannot_persist_is_reported_with_its_cost() {
+        let (endpoint, log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        // The pod's shape — the read answers NotFound, the parent cannot be
+        // created (`/.agentkeys` for `gem`) — without relying on permissions
+        // (CI may run as root): the parent is a dangling symlink.
+        let parent = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("gone/x"), &parent).unwrap();
+        let manifest = parent.join("ov-ingested.txt");
+        let c = client(endpoint);
+        let first = c
+            .reconcile_items("household", &items()[..1], &manifest)
+            .await;
+        assert_eq!(first.mirrored, 1);
+        let reason = first
+            .manifest_error
+            .clone()
+            .expect("a manifest that cannot persist is reported");
+        assert!(reason.contains("ov-ingested.txt"), "{reason}");
+        assert!(!first.is_noop());
+        let second = c
+            .reconcile_items("household", &items()[..1], &manifest)
+            .await;
+        assert_eq!(
+            (second.mirrored, writes(&log).len()),
+            (1, 6),
+            "unrecorded, the item is written again — three more engine writes"
+        );
+        assert!(second.manifest_error.is_some());
+        // A namespace with nothing recorded and nothing to record never
+        // touches the file, so it never fails on it.
+        assert!(c
+            .reconcile_items("personal", &[], &manifest)
+            .await
+            .is_noop());
+    }
+
+    /// #694 runs namespaces concurrently. Each swap re-reads the file under
+    /// the lock, so a namespace that read the manifest before its (slow)
+    /// writes never drops the rows another namespace recorded meanwhile —
+    /// a dropped row is a re-embed on the next pass.
+    #[tokio::test]
+    async fn concurrent_namespaces_never_drop_each_others_rows() {
+        let (endpoint, _log) = spawn_stub_slowing(
+            200,
+            "{}",
+            200,
+            false,
+            Some((
+                "viking://resources/slow/",
+                std::time::Duration::from_millis(300),
+            )),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        let all = items();
+        let (slow_items, fast_items) = all.split_at(1);
+        let (slow, fast) = tokio::join!(c.reconcile_items("slow", slow_items, &manifest), async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            c.reconcile_items("fast", fast_items, &manifest).await
+        });
+        assert_eq!((slow.mirrored, fast.mirrored), (1, 1));
+        let rows = manifest_lines(&manifest);
+        assert!(rows.iter().any(|r| r.starts_with("slow\t")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.starts_with("fast\t")), "{rows:?}");
+        assert!(c
+            .reconcile_items("slow", slow_items, &manifest)
+            .await
+            .is_noop());
+        assert!(c
+            .reconcile_items("fast", fast_items, &manifest)
+            .await
+            .is_noop());
+    }
+
+    /// A converged pass does no manifest I/O: no rewrite, so the file keeps
+    /// its inode (a write is tmp + rename).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_converged_pass_leaves_the_manifest_untouched() {
+        use std::os::unix::fs::MetadataExt;
+        let (endpoint, _log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        c.reconcile_items("family", &items(), &manifest).await;
+        let inode = std::fs::metadata(&manifest).unwrap().ino();
+        assert!(c
+            .reconcile_items("family", &items(), &manifest)
+            .await
+            .is_noop());
+        assert!(c.reconcile_items("work", &[], &manifest).await.is_noop());
+        assert_eq!(std::fs::metadata(&manifest).unwrap().ino(), inode);
+        assert!(
+            !dir.path().join("ov-ingested.txt.tmp").exists(),
+            "no temp file left behind"
+        );
     }
 }

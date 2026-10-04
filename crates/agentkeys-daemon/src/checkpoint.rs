@@ -718,6 +718,27 @@ fn touch_marker(marker: &std::path::Path) {
 /// The manifest's snapshot name inside the workspace archive.
 const MANIFEST_SNAPSHOT: &str = ".agentkeys-ov-ingested.txt";
 
+/// Refresh the manifest's snapshot in the workspace only when its content
+/// changed: a copy stamps a fresh mtime, and [`dir_fingerprint`] (path, size,
+/// mtime) would call every tick a change and re-upload an unchanged
+/// workspace. A snapshot that cannot be written is logged once — the restore
+/// then re-mirrors once, nothing worse.
+fn snapshot_manifest(manifest: &std::path::Path, ws: &std::path::Path) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Ok(current) = std::fs::read(manifest) else {
+        return;
+    };
+    let snap = ws.join(MANIFEST_SNAPSHOT);
+    if std::fs::read(&snap).is_ok_and(|held| held == current) {
+        return;
+    }
+    if let Err(e) = std::fs::write(&snap, &current) {
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(error = %e, snapshot = ?snap, "#694 checkpoint: manifest snapshot not written — a restore re-mirrors once");
+        }
+    }
+}
+
 fn dir_has_entries(dir: &std::path::Path) -> bool {
     std::fs::read_dir(dir)
         .map(|mut d| d.next().is_some())
@@ -933,18 +954,31 @@ async fn workspace_restore(
         return Ok(Restored::Held);
     }
     let snap = ws.join(MANIFEST_SNAPSHOT);
+    let mut manifest_restored = false;
     if snap.is_file() {
         if let Some(parent) = cfg.manifest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::copy(&snap, &cfg.manifest) {
-            tracing::warn!(error = %e, "#694 checkpoint: manifest snapshot not restored — the first pull re-mirrors");
+        match std::fs::copy(&snap, &cfg.manifest) {
+            Ok(_) => manifest_restored = true,
+            Err(e) => {
+                tracing::warn!(error = %e, "#694 checkpoint: manifest snapshot not restored — the first pull re-mirrors")
+            }
         }
     }
-    Ok(Restored::Done(format!(
-        "engine workspace restored ({} bytes) — the first pull is a delta",
-        bytes.len()
-    )))
+    // An archive without the manifest (saved while it could not persist) is
+    // an index the mirror cannot see: its first pull rewrites every item.
+    Ok(Restored::Done(if manifest_restored {
+        format!(
+            "engine workspace restored ({} bytes) — the first pull is a delta",
+            bytes.len()
+        )
+    } else {
+        format!(
+            "engine workspace restored ({} bytes) without a manifest snapshot — the first pull re-mirrors every item once",
+            bytes.len()
+        )
+    }))
 }
 
 /// #694 — archive the engine workspace (with a snapshot of the manifest) into
@@ -961,9 +995,7 @@ async fn workspace_save(
     if !dir_has_entries(ws) {
         return Ok(SaveOutcome::Unchanged);
     }
-    if cfg.manifest.is_file() {
-        let _ = std::fs::copy(&cfg.manifest, ws.join(MANIFEST_SNAPSHOT));
-    }
+    snapshot_manifest(&cfg.manifest, ws);
     let fp = dir_fingerprint(ws);
     if Some(fp) == *last_fp {
         return Ok(SaveOutcome::Unchanged);
@@ -1631,6 +1663,47 @@ mod tests {
             workspace_settled_locally(Some(&ws), &marker).is_some(),
             "a restarted daemon finds its own conclusion"
         );
+    }
+
+    /// #694 — the manifest snapshot moves only when the manifest's CONTENT
+    /// changed: a copy every tick stamped a fresh mtime, the fingerprint called
+    /// it a change, and an unchanged workspace was re-uploaded every tick.
+    #[test]
+    fn the_manifest_snapshot_moves_only_when_the_manifest_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        std::fs::write(ws.join("vectordb.bin"), b"index").expect("write");
+        let manifest = dir.path().join("ov-ingested.txt");
+        let snap = ws.join(MANIFEST_SNAPSHOT);
+        snapshot_manifest(&manifest, &ws);
+        assert!(!snap.exists(), "no manifest yet, no snapshot");
+        std::fs::write(&manifest, "household\tfood-preferences\tabcd\n").expect("write");
+        snapshot_manifest(&manifest, &ws);
+        assert_eq!(
+            std::fs::read_to_string(&snap).expect("snapshot"),
+            "household\tfood-preferences\tabcd\n"
+        );
+        let pinned = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&snap)
+            .and_then(|f| f.set_modified(pinned))
+            .expect("pin mtime");
+        let fp = dir_fingerprint(&ws);
+        snapshot_manifest(&manifest, &ws);
+        assert_eq!(
+            std::fs::metadata(&snap).and_then(|m| m.modified()).ok(),
+            Some(pinned),
+            "an unchanged manifest leaves the snapshot alone"
+        );
+        assert_eq!(dir_fingerprint(&ws), fp);
+        std::fs::write(&manifest, "household\tfood-preferences\tef01\n").expect("write");
+        snapshot_manifest(&manifest, &ws);
+        assert!(std::fs::read_to_string(&snap)
+            .expect("snapshot")
+            .ends_with("ef01\n"));
+        assert_ne!(dir_fingerprint(&ws), fp);
     }
 
     /// #694 — the engine hold: one name shared with the start script, declared

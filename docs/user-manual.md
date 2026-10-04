@@ -783,7 +783,9 @@ the permissions you approve. parent-control → **applications**:
 - **Launching.** An installed app goes through `booting → restoring →
   syncing k/n → ready` on its card (and on its delegate's card, and as a
   status line in its chat), read from the app's own feed. `degraded` means
-  the knowledge engine is down or a pull failed — the app still answers, from
+  the knowledge engine is down, a pull failed, or the app could not record
+  what it already holds (its next pull would re-read everything — the audit
+  row's error names the file and the reason) — the app still answers, from
   what it has, and says so in front of its reply; a family member who writes
   to it meanwhile gets the receipt "still loading its knowledge". A reply
   waits for `ready` at most `AGENTKEYS_KNOWLEDGE_READY_WAIT_SECS` (60 s by

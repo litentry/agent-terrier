@@ -326,27 +326,41 @@ pub fn summarize(reports: &[NamespaceReport]) -> PassSummary {
             NamespaceOutcome::Reconciled(st) => {
                 s.mirrored += st.mirrored as u64;
                 s.deleted += st.deleted as u64;
-                if st.write_failed > 0 || st.delete_failed > 0 {
-                    s.errors.push(format!(
-                        "engine {}: {} write(s) / {} delete(s) failed{}",
-                        r.ns,
-                        st.write_failed,
-                        st.delete_failed,
-                        st.first_error
-                            .as_deref()
-                            .map(|e| format!(" — first: {e}"))
-                            .unwrap_or_default()
-                    ));
-                }
+                s.errors.extend(engine_errors(&r.ns, st));
             }
             NamespaceOutcome::Denied { stats, .. } | NamespaceOutcome::Absent(stats) => {
                 s.deleted += stats.deleted as u64;
+                s.errors.extend(engine_errors(&r.ns, stats));
             }
             NamespaceOutcome::SessionExpired => s.session_expired = true,
             NamespaceOutcome::FetchError(e) => s.errors.push(format!("fetch {}: {e}", r.ns)),
         }
     }
     s
+}
+
+/// What a namespace's reconcile failed to converge — each one makes the pass
+/// `degraded`. A manifest that cannot persist was once only a WARN while every
+/// pass reported `ready` and re-embedded the granted items (VE prod, chef).
+fn engine_errors(ns: &str, st: &ReconcileStats) -> Vec<String> {
+    let mut out = Vec::new();
+    if st.write_failed > 0 || st.delete_failed > 0 {
+        out.push(format!(
+            "engine {ns}: {} write(s) / {} delete(s) failed{}",
+            st.write_failed,
+            st.delete_failed,
+            st.first_error
+                .as_deref()
+                .map(|e| format!(" — first: {e}"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(e) = &st.manifest_error {
+        out.push(format!(
+            "engine {ns}: ingest manifest not persisted ({e}) — every pass re-mirrors (re-embeds) its items"
+        ));
+    }
+    out
 }
 
 /// How long a pass report waits for its audit row's receipt before it is
@@ -610,6 +624,7 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
         namespaces = %cfg.namespaces.join(","),
         interval_secs = cfg.interval.as_secs(),
         engine = %cfg.engine_endpoint,
+        manifest = %cfg.manifest.display(),
         "#566 memory mirror: starting (ingest-time gate bound)"
     );
     let mut session: Option<String> = None;
@@ -862,6 +877,67 @@ mod tests {
         // an array of numbers carries no memory text — line-split, never empty
         let units = mirror_units("[1, 2, 3]");
         assert!(!units.is_empty());
+    }
+
+    /// VE prod to 2026-10-04: chef's household item was re-mirrored every pass
+    /// (its manifest could not be written) while every pass said `ready`.
+    #[test]
+    fn a_pass_whose_manifest_did_not_persist_is_degraded_not_ready() {
+        let report = |ns: &str, outcome| NamespaceReport {
+            ns: ns.to_string(),
+            outcome,
+            ms: 1,
+        };
+        let unpersisted = ReconcileStats {
+            mirrored: 1,
+            manifest_error: Some("./.agentkeys/ov-ingested.txt: No such file or directory".into()),
+            ..Default::default()
+        };
+        let s = summarize(&[
+            report("household", NamespaceOutcome::Reconciled(unpersisted)),
+            report(
+                "personal",
+                NamespaceOutcome::Denied {
+                    stats: ReconcileStats::default(),
+                    denied_at: "cap-mint",
+                    detail: "service_not_in_scope".into(),
+                },
+            ),
+        ]);
+        assert_eq!(s.mirrored, 1);
+        assert_eq!(s.errors.len(), 1, "{:?}", s.errors);
+        assert!(
+            s.errors[0].contains("household") && s.errors[0].contains("ov-ingested.txt"),
+            "{}",
+            s.errors[0]
+        );
+        // A revocation whose delete-through failed leaves unauthorized content
+        // in the engine — degraded too, not a quiet `ready`.
+        let stuck = ReconcileStats {
+            delete_failed: 1,
+            first_error: Some("delete viking://resources/family/a: http 500".into()),
+            ..Default::default()
+        };
+        let s = summarize(&[report(
+            "family",
+            NamespaceOutcome::Denied {
+                stats: stuck,
+                denied_at: "canonical-get",
+                detail: "grant revoked".into(),
+            },
+        )]);
+        assert_eq!(s.errors.len(), 1, "{:?}", s.errors);
+        assert!(
+            s.errors[0].contains("1 delete(s) failed"),
+            "{}",
+            s.errors[0]
+        );
+        // Converged namespaces report nothing.
+        let s = summarize(&[report(
+            "household",
+            NamespaceOutcome::Reconciled(ReconcileStats::default()),
+        )]);
+        assert!(s.errors.is_empty());
     }
 
     #[test]
