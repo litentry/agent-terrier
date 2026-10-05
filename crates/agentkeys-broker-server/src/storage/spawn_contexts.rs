@@ -113,6 +113,10 @@ impl SpawnContext {
     }
 }
 
+/// Columns an earlier schema had and the current one must not: dropped in
+/// place on open (see `init_schema`).
+const RETIRED_COLUMNS: [&str; 2] = ["operator_omni", "actor_omni"];
+
 /// SQLite-backed durable spawn-context store (#546).
 pub struct SpawnContextStore {
     conn: Mutex<Connection>,
@@ -227,6 +231,39 @@ impl SpawnContextStore {
                         "migrate spawn-contexts ({col}): {e}"
                     )))
                 }
+            }
+        }
+        // The #546 branch's first schema (d372deb3, 2026-07-23) carried
+        // `operator_omni` / `actor_omni TEXT NOT NULL`. It never reached main,
+        // but CI deploys PR heads to the test brokers, and 77f351ca dropped the
+        // columns from the CREATE without a migration. A table created by that
+        // binary refused every later upsert (`NOT NULL constraint failed:
+        // spawn_contexts.operator_omni`): measured on the AWS test slot
+        // 2026-10-04, 19 failed persists, so no install there could be sealed
+        // again. The row carries no omnis by design (D1), so exactly these
+        // retired columns are dropped in place — never "every column the
+        // current schema lacks", which an older binary after a rollback would
+        // turn into dropping a newer column.
+        for col in RETIRED_COLUMNS {
+            let conn = self.lock()?;
+            let present = conn
+                .prepare("SELECT 1 FROM pragma_table_info('spawn_contexts') WHERE name = ?1")
+                .and_then(|mut stmt| stmt.exists(params![col]))
+                .map_err(|e| {
+                    BrokerError::Internal(format!("inspect spawn-contexts ({col}): {e}"))
+                })?;
+            if present {
+                conn.execute(&format!("ALTER TABLE spawn_contexts DROP COLUMN {col}"), [])
+                    .map_err(|e| {
+                        BrokerError::Internal(format!(
+                            "drop retired spawn-contexts column {col}: {e}"
+                        ))
+                    })?;
+                tracing::warn!(
+                    column = col,
+                    "spawn-contexts: dropped a retired NOT NULL column left by a pre-squash #546 \
+                     build — every upsert into this table had been failing"
+                );
             }
         }
         Ok(())
@@ -441,6 +478,68 @@ mod tests {
             store.get(&"bb".repeat(32)).unwrap().unwrap().k10_address,
             "0xabcd"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The AWS test slot's table (created by the pre-squash #546 build,
+    /// d372deb3) had `operator_omni` / `actor_omni TEXT NOT NULL`, and every
+    /// upsert failed `NOT NULL constraint failed: spawn_contexts.operator_omni`
+    /// (measured 2026-10-04). Opening drops exactly those columns, keeps the
+    /// legacy rows, and upserts work again.
+    #[test]
+    fn open_drops_the_retired_omni_columns_so_upserts_work_again() {
+        let path = std::env::temp_dir().join(format!(
+            "agentkeys-spawn-ctx-retired-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE spawn_contexts (
+                    device_key_hash TEXT PRIMARY KEY,
+                    operator_omni   TEXT NOT NULL,
+                    actor_omni      TEXT NOT NULL,
+                    label           TEXT NOT NULL,
+                    chat_channel_id TEXT NOT NULL,
+                    k10_secret_hex  TEXT NOT NULL,
+                    created_at      INTEGER NOT NULL
+                 );
+                 INSERT INTO spawn_contexts VALUES ('aa', '0xop', '0xac', 'w', 'opchat-w', '0xdead', 1);",
+            )
+            .unwrap();
+        }
+        let store = SpawnContextStore::open(&path).unwrap();
+        let columns: Vec<String> = store
+            .lock()
+            .unwrap()
+            .prepare("SELECT name FROM pragma_table_info('spawn_contexts')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for retired in RETIRED_COLUMNS {
+            assert!(
+                !columns.iter().any(|c| c == retired),
+                "{retired} still present: {columns:?}"
+            );
+        }
+        let legacy = store.get("aa").unwrap().expect("the legacy row survives");
+        assert_eq!(
+            (legacy.label.as_str(), legacy.k10_secret_hex.as_str()),
+            ("w", "0xdead")
+        );
+        store.upsert(&ctx(&"bb".repeat(32))).unwrap();
+        assert_eq!(
+            store.get(&"bb".repeat(32)).unwrap().unwrap().label,
+            "watchdog"
+        );
+        // A second open finds nothing to drop.
+        drop(store);
+        let store = SpawnContextStore::open(&path).unwrap();
+        store.upsert(&ctx(&"cc".repeat(32))).unwrap();
+        assert_eq!(store.list().unwrap().len(), 3);
         let _ = std::fs::remove_file(&path);
     }
 
