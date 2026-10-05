@@ -1,13 +1,15 @@
 //! Per-family isolated loading of the **inference** credential families (#338): the three
 //! Volcano ones — **ARK** (LLM, Bearer `ARK_API_KEY`), **ASR** and **TTS** (app-token
-//! `*_APP_ID` / `*_ACCESS_TOKEN`) — plus **TYPESAFE** (#722: the Jev decision model behind
-//! the household router, Bearer `TYPESAFE_API_KEY`; a US-hosted vendor, not Volcano). The
-//! Volcengine IAM AK/SK family (sandbox/storage, V4-signed) is NOT handled here — that is
-//! the broker STS-relay path (#337).
+//! `*_APP_ID` / `*_ACCESS_TOKEN`) — plus the two decision-model providers behind the
+//! household router (#722, both US-hosted, not Volcano): **TYPESAFE** (TypeSafe's hosted
+//! Jev, Bearer `TYPESAFE_API_KEY`) and **KEV** (the open model with Jev's API on a
+//! self-hosted server, Bearer `KEV_API_KEY` at `KEV_BASE_URL`). The Volcengine IAM AK/SK
+//! family (sandbox/storage, V4-signed) is NOT handled here — that is the broker STS-relay
+//! path (#337).
 //!
 //! Isolation contract (the point of this crate):
 //! - Each family resolves from its OWN two sources only: the family's process-env vars,
-//!   then the family's env file `<creds-dir>/{ark,asr,tts,typesafe}.env`. A loader never
+//!   then the family's env file `<creds-dir>/{ark,asr,tts,typesafe,kev}.env`. A loader never
 //!   opens another family's file and never reads another family's vars — a leaked or
 //!   rotated key in one family has zero blast radius on the others.
 //! - Precedence, identical everywhere: **process env > family file > built-in default**.
@@ -21,7 +23,7 @@
 //!   `docker run --env-file`, and this loader identically. The loader tolerates
 //!   `export ` prefixes and surrounding quotes defensively; writers must not rely on it.
 //!
-//! Rotate one family with `scripts/operator/secrets/rotate-inference-cred.sh <ark|asr|tts|typesafe>`;
+//! Rotate one family with `scripts/operator/secrets/rotate-inference-cred.sh <ark|asr|tts|typesafe|kev>`;
 //! inspect what resolves from where (without printing secrets) with `volcano-probe creds`.
 
 use std::collections::HashMap;
@@ -55,12 +57,21 @@ pub enum Family {
     Ark,
     Asr,
     Tts,
-    /// #722 — the Jev decision model (TypeSafe), the household router's engine.
+    /// #722 — TypeSafe's hosted Jev, one of the household router's decision models.
     Typesafe,
+    /// Kev — the open model with Jev's API, on a self-hosted server: the other
+    /// decision model. Its own key and server, never TypeSafe's.
+    Kev,
 }
 
 impl Family {
-    pub const ALL: [Family; 4] = [Family::Ark, Family::Asr, Family::Tts, Family::Typesafe];
+    pub const ALL: [Family; 5] = [
+        Family::Ark,
+        Family::Asr,
+        Family::Tts,
+        Family::Typesafe,
+        Family::Kev,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -68,6 +79,7 @@ impl Family {
             Family::Asr => "asr",
             Family::Tts => "tts",
             Family::Typesafe => "typesafe",
+            Family::Kev => "kev",
         }
     }
 
@@ -77,6 +89,7 @@ impl Family {
             Family::Asr => "asr.env",
             Family::Tts => "tts.env",
             Family::Typesafe => "typesafe.env",
+            Family::Kev => "kev.env",
         }
     }
 
@@ -87,6 +100,7 @@ impl Family {
             Family::Asr => ASR_FIELDS,
             Family::Tts => TTS_FIELDS,
             Family::Typesafe => TYPESAFE_FIELDS,
+            Family::Kev => KEV_FIELDS,
         }
     }
 
@@ -96,6 +110,7 @@ impl Family {
             "asr" => Some(Family::Asr),
             "tts" => Some(Family::Tts),
             "typesafe" | "jev" => Some(Family::Typesafe),
+            "kev" => Some(Family::Kev),
             _ => None,
         }
     }
@@ -149,6 +164,23 @@ const TYPESAFE_FIELDS: &[FieldSpec] = &[
         required: false,
         secret: false,
         default: Some(DEFAULT_TYPESAFE_BASE),
+    },
+];
+
+/// The Kev family: a self-hosted server, so its base URL is required — there
+/// is no vendor default to fall back to (Kev's own server reads `KEV_API_KEY`).
+const KEV_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        var: "KEV_API_KEY",
+        required: true,
+        secret: true,
+        default: None,
+    },
+    FieldSpec {
+        var: "KEV_BASE_URL",
+        required: true,
+        secret: false,
+        default: None,
     },
 ];
 
@@ -239,11 +271,12 @@ pub struct ArkCreds {
     pub base_url: String,
 }
 
-/// #722 — the `typesafe` family: the one TypeSafe key the gate custodies for
-/// the `/v1/systemone` relay (the contact gate and the console present their
-/// `gk_` relay keys instead; this key never leaves the gate host).
+/// #722 — a decision-model provider's key + server (the `typesafe` family for
+/// Jev, the `kev` family for Kev): what the gate custodies for the
+/// `/v1/systemone` relay (the contact gate and the console present their `gk_`
+/// relay keys instead; this key never leaves the gate host).
 #[derive(Clone, Debug)]
-pub struct TypesafeCreds {
+pub struct SystemOneCreds {
     pub api_key: String,
     pub base_url: String,
 }
@@ -339,14 +372,28 @@ impl Resolver {
         })
     }
 
-    /// #722 — the Jev decision model's key (+ base). `Missing` when the family
-    /// is simply not provisioned yet (the gate's `/v1/systemone` then 503s).
-    pub fn typesafe(&self) -> Result<TypesafeCreds, Error> {
+    /// #722 — Jev's key (+ base). `Missing` when the family is simply not
+    /// provisioned yet (the gate's `/v1/systemone` then 503s for `jev-*`).
+    pub fn typesafe(&self) -> Result<SystemOneCreds, Error> {
         let mut vals = self.required_values(Family::Typesafe)?;
-        Ok(TypesafeCreds {
+        Ok(SystemOneCreds {
             api_key: vals.remove("TYPESAFE_API_KEY").unwrap(),
             base_url: vals
                 .remove("TYPESAFE_BASE_URL")
+                .unwrap()
+                .trim_end_matches('/')
+                .to_string(),
+        })
+    }
+
+    /// Kev's key + server. `Missing` until both are provisioned (the gate's
+    /// `/v1/systemone` then 503s for `kev-*`).
+    pub fn kev(&self) -> Result<SystemOneCreds, Error> {
+        let mut vals = self.required_values(Family::Kev)?;
+        Ok(SystemOneCreds {
+            api_key: vals.remove("KEV_API_KEY").unwrap(),
+            base_url: vals
+                .remove("KEV_BASE_URL")
                 .unwrap()
                 .trim_end_matches('/')
                 .to_string(),
@@ -577,6 +624,51 @@ mod tests {
             other => panic!("expected Missing, got {other:?}"),
         }
         assert_eq!(Family::from_str_loose("jev"), Some(Family::Typesafe));
+    }
+
+    #[test]
+    fn kev_needs_its_own_key_and_server_and_never_reads_typesafe() {
+        let tmp = tempfile::tempdir().unwrap();
+        // TypeSafe's key next to it is not Kev's.
+        write_family(tmp.path(), Family::Typesafe, "TYPESAFE_API_KEY=ts-key\n");
+        let r = Resolver::with(env_of(&[]), Some(tmp.path().to_path_buf()));
+        assert!(matches!(
+            r.kev(),
+            Err(Error::Missing {
+                family: Family::Kev,
+                var: "KEV_API_KEY",
+                ..
+            })
+        ));
+        // A key alone is not enough: a self-hosted server has no default base.
+        let r = Resolver::with(
+            env_of(&[("KEV_API_KEY", "kev-env")]),
+            Some(tmp.path().to_path_buf()),
+        );
+        assert!(matches!(
+            r.kev(),
+            Err(Error::Missing {
+                family: Family::Kev,
+                var: "KEV_BASE_URL",
+                ..
+            })
+        ));
+        write_family(
+            tmp.path(),
+            Family::Kev,
+            "KEV_API_KEY=kev-file\nKEV_BASE_URL=https://kev.example/kev/\n",
+        );
+        let r = Resolver::with(env_of(&[]), Some(tmp.path().to_path_buf()));
+        let kev = r.kev().unwrap();
+        assert_eq!(kev.api_key, "kev-file");
+        assert_eq!(kev.base_url, "https://kev.example/kev");
+        // ...and TypeSafe still resolves its own key, untouched by Kev's.
+        assert_eq!(r.typesafe().unwrap().api_key, "ts-key");
+        assert_eq!(Family::from_str_loose("KEV"), Some(Family::Kev));
+        assert_eq!(
+            r.lookup_var("KEV_BASE_URL").unwrap().unwrap().0,
+            "https://kev.example/kev/"
+        );
     }
 
     #[test]

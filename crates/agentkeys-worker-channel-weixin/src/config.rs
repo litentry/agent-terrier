@@ -521,15 +521,40 @@ impl WeixinGatewayConfig {
                     .filter(|v| *v > 0)
                     .unwrap_or(d)
             };
+            // The models the household may switch between: the default first,
+            // then every other listed one. Each must name its provider — the
+            // model gate routes by it, and Kev answers whatever name it is sent.
+            let default_model = var("AGENTKEYS_WEIXIN_ROUTER_MODEL")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(defaults.default_model);
+            let mut models = vec![default_model.clone()];
+            for m in var("AGENTKEYS_WEIXIN_ROUTER_MODELS")
+                .unwrap_or_default()
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|m| !m.is_empty())
+            {
+                if !models.iter().any(|x| x == m) {
+                    models.push(m.to_string());
+                }
+            }
+            if let Some(bad) = models
+                .iter()
+                .find(|m| agentkeys_protocol::DecisionProvider::of_model(m).is_none())
+            {
+                bail!(
+                    "router model `{bad}` names no decision-model provider — the model gate sends \
+                     `kev-*` to the Kev server and `jev-*` to TypeSafe \
+                     (AGENTKEYS_WEIXIN_ROUTER_MODEL / AGENTKEYS_WEIXIN_ROUTER_MODELS)"
+                );
+            }
             let cfg = RouterConfig {
                 engine,
                 gate_url,
                 gate_key,
-                model: var("AGENTKEYS_WEIXIN_ROUTER_MODEL")
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(defaults.model),
+                default_model,
+                models,
                 threshold: f64_var("AGENTKEYS_WEIXIN_ROUTER_THRESHOLD", defaults.threshold)
                     .clamp(0.0, 1.0),
                 timeout_ms: u64_var("AGENTKEYS_WEIXIN_ROUTER_TIMEOUT_MS", defaults.timeout_ms),
@@ -561,9 +586,11 @@ impl WeixinGatewayConfig {
                 ),
                 (_, true) => eprintln!(
                     "==> agentkeys-worker-channel-weixin: router engine = jev via the model gate at {} \
-                     (model {}, threshold {}, follow-up {}, ask TTL {} s, photos {}) — #722",
+                     (default model {}, the console may switch among [{}]; threshold {}, follow-up {}, \
+                     ask TTL {} s, photos {}) — #722",
                     cfg.gate_url.as_deref().unwrap_or("?"),
-                    cfg.model,
+                    cfg.default_model,
+                    cfg.models.join(", "),
                     cfg.threshold,
                     cfg.continue_threshold,
                     cfg.ask_ttl_secs,
@@ -829,6 +856,35 @@ mod from_lookup_tests {
         .expect("telegram config from file");
         assert_eq!(c.telegram_bot_token.as_deref(), Some("from-file"));
         std::fs::remove_file(&f).ok();
+    }
+
+    #[test]
+    fn the_offered_models_start_with_the_default_and_each_names_its_provider() {
+        let oa = [
+            ("AGENTKEYS_WEIXIN_TOKEN", "tok"),
+            ("AGENTKEYS_WEIXIN_APP_ID", "wx1"),
+        ];
+        let c = cfg(&with_base(&oa)).unwrap();
+        assert_eq!(c.router.default_model, agentkeys_protocol::JEV_PINNED_MODEL);
+        assert_eq!(c.router.models, vec![agentkeys_protocol::JEV_PINNED_MODEL]);
+        let mut pairs = oa.to_vec();
+        pairs.push(("AGENTKEYS_WEIXIN_ROUTER_MODEL", "kev-9b@2629c06"));
+        pairs.push((
+            "AGENTKEYS_WEIXIN_ROUTER_MODELS",
+            "jev-1.13.0, kev-9b@2629c06 jev-1.13.0",
+        ));
+        let c = cfg(&with_base(&pairs)).unwrap();
+        assert_eq!(c.router.default_model, "kev-9b@2629c06");
+        assert_eq!(
+            c.router.models,
+            vec!["kev-9b@2629c06", "jev-1.13.0"],
+            "the default first, each once"
+        );
+        assert!(c.router.offers("jev-1.13.0") && !c.router.offers("jev-latest"));
+        let mut pairs = oa.to_vec();
+        pairs.push(("AGENTKEYS_WEIXIN_ROUTER_MODELS", "kev-9b,gpt-4o"));
+        let err = cfg(&with_base(&pairs)).unwrap_err();
+        assert!(format!("{err:#}").contains("`gpt-4o`"), "{err:#}");
     }
 
     #[test]

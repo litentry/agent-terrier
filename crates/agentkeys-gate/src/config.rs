@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use agentkeys_inference_creds::{AsrCreds, Resolver, TtsCreds, TypesafeCreds};
-use agentkeys_protocol::normalize_omni_0x;
+use agentkeys_inference_creds::{AsrCreds, Family, Resolver, SystemOneCreds, TtsCreds};
+use agentkeys_protocol::{normalize_omni_0x, DecisionProvider};
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -189,11 +189,38 @@ pub struct GateConfig {
     pub speech_tts: Option<TtsCreds>,
     /// #653 web-search relay — `None` = leg unconfigured (503, loud at boot).
     pub search: Option<SearchConfig>,
-    /// #722 — the System One (Jev) relay: the gate-held TypeSafe key + base,
-    /// resolved from the `typesafe` inference family. `None` = the leg is
-    /// unconfigured on this gate (`/v1/systemone` refuses 503, loud at boot,
-    /// and the contact gate's router falls back to its deterministic tier).
-    pub systemone: Option<TypesafeCreds>,
+    /// #722 — the System One relay's providers: one gate-held key + server
+    /// per decision model (Jev, Kev), each from its own inference family. An
+    /// unprovisioned provider refuses its models with 503 (loud at boot), and
+    /// the contact gate's router falls back to its deterministic tier.
+    pub decision: DecisionUpstreams,
+}
+
+/// #722 — where `/v1/systemone` sends a request: the provider its `model`
+/// names ([`DecisionProvider::of_model`]), with that provider's key.
+#[derive(Debug, Clone, Default)]
+pub struct DecisionUpstreams {
+    /// TypeSafe's hosted Jev — the `typesafe` family.
+    pub jev: Option<SystemOneCreds>,
+    /// The self-hosted Kev — the `kev` family.
+    pub kev: Option<SystemOneCreds>,
+}
+
+impl DecisionUpstreams {
+    pub fn get(&self, provider: DecisionProvider) -> Option<&SystemOneCreds> {
+        match provider {
+            DecisionProvider::Jev => self.jev.as_ref(),
+            DecisionProvider::Kev => self.kev.as_ref(),
+        }
+    }
+
+    /// The inference family that arms a provider.
+    pub fn family(provider: DecisionProvider) -> Family {
+        match provider {
+            DecisionProvider::Jev => Family::Typesafe,
+            DecisionProvider::Kev => Family::Kev,
+        }
+    }
 }
 
 /// Missing vars = the family is legitimately unconfigured (None). A family
@@ -302,7 +329,10 @@ impl GateConfig {
             aws_region: cli.aws_region,
             speech_asr: optional_family(ark.asr())?,
             speech_tts: optional_family(ark.tts())?,
-            systemone: optional_family(ark.typesafe())?,
+            decision: DecisionUpstreams {
+                jev: optional_family(ark.typesafe())?,
+                kev: optional_family(ark.kev())?,
+            },
             search: cli
                 .search_url
                 .filter(|u| !u.trim().is_empty())
@@ -347,7 +377,7 @@ mod tests {
             speech_asr: None,
             speech_tts: None,
             search: None,
-            systemone: None,
+            decision: DecisionUpstreams::default(),
         }
     }
 
@@ -421,14 +451,14 @@ mod tests {
     }
 
     #[test]
-    fn typesafe_family_arms_the_systemone_leg_and_absence_is_a_loud_none() {
+    fn each_decision_provider_is_armed_by_its_own_family_and_absence_is_a_loud_none() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("ark.env"), "ARK_API_KEY=file-key\n").unwrap();
         let cfg =
             GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
         assert!(
-            cfg.systemone.is_none(),
-            "no typesafe.env → leg unconfigured"
+            cfg.decision.jev.is_none() && cfg.decision.kev.is_none(),
+            "no typesafe.env / kev.env → both providers unconfigured"
         );
         std::fs::write(
             tmp.path().join("typesafe.env"),
@@ -437,9 +467,28 @@ mod tests {
         .unwrap();
         let cfg =
             GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
-        let ts = cfg.systemone.expect("typesafe family resolved");
+        let ts = cfg.decision.jev.expect("typesafe family resolved");
         assert_eq!(ts.api_key, "ts-key");
         assert_eq!(ts.base_url, "https://mock.example");
+        assert!(cfg.decision.kev.is_none(), "TypeSafe's key never arms Kev");
+        std::fs::write(
+            tmp.path().join("kev.env"),
+            "KEV_API_KEY=kev-key\nKEV_BASE_URL=https://kev.example/kev\n",
+        )
+        .unwrap();
+        let cfg =
+            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
+        let kev = cfg.decision.get(DecisionProvider::Kev).expect("kev family");
+        assert_eq!(kev.api_key, "kev-key");
+        assert_eq!(kev.base_url, "https://kev.example/kev");
+        assert_eq!(
+            cfg.decision.get(DecisionProvider::Jev).unwrap().api_key,
+            "ts-key"
+        );
+        assert_eq!(
+            DecisionUpstreams::family(DecisionProvider::Kev).file_name(),
+            "kev.env"
+        );
     }
 
     #[test]

@@ -89,7 +89,8 @@ pub struct WeixinGatewayState {
     /// The in-flight admin QR-login session, if any.
     pub admin_login: tokio::sync::Mutex<Option<AdminLogin>>,
     /// #722 — the Jev router tier's client (`None` = the whole-word tier only).
-    pub jev: Option<crate::jev::JevClient>,
+    /// Shared with compare-mode tasks, which answer off the turn's path.
+    pub jev: Option<Arc<crate::jev::JevClient>>,
     /// #722 — numbered asks waiting for a reply, keyed `transport:id`. MEMORY
     /// ONLY (the member's original text rides here until they answer or the
     /// TTL passes; it never reaches disk or audit — D13).
@@ -97,12 +98,76 @@ pub struct WeixinGatewayState {
     /// The live-monitor ring the operator polls (`/admin/monitor`, #1).
     monitor: Mutex<MonitorRing>,
     /// #722 — the last turns that consulted a model, for the router view. RAM
-    /// only, like the monitor: a restart empties it.
-    router_log: Mutex<VecDeque<agentkeys_protocol::RouterExchange>>,
+    /// only, like the monitor: a restart empties it. Shared with compare-mode
+    /// tasks, whose answers attach to their turn when they arrive.
+    pub router_log: Arc<RouterLog>,
 }
 
 /// How many model-consulting turns the router view keeps.
 pub const ROUTER_LOG_CAP: usize = 30;
+
+/// The router view's turn log: the last [`ROUTER_LOG_CAP`] model-consulting
+/// turns, newest first, each numbered. A compare-mode answer can arrive before
+/// its turn is recorded (the turn is recorded once its reply is decided) — it
+/// waits in `early` and joins the turn then. Memory only (D13).
+#[derive(Default)]
+pub struct RouterLog {
+    inner: Mutex<RouterLogInner>,
+}
+
+#[derive(Default)]
+struct RouterLogInner {
+    next_id: u64,
+    ring: VecDeque<agentkeys_protocol::RouterExchange>,
+    early: std::collections::BTreeMap<u64, Vec<agentkeys_protocol::RouterAnswer>>,
+}
+
+impl RouterLog {
+    /// The number the next model-consulting turn is recorded under.
+    pub fn next_id(&self) -> u64 {
+        let mut inner = self.inner.lock().expect("router log lock");
+        inner.next_id += 1;
+        inner.next_id
+    }
+
+    /// Keep one model-consulting turn (newest first), with any compare-mode
+    /// answers that already arrived for it.
+    pub fn record(&self, mut x: agentkeys_protocol::RouterExchange) {
+        let mut inner = self.inner.lock().expect("router log lock");
+        if let Some(early) = inner.early.remove(&x.id) {
+            x.compared.extend(early);
+        }
+        inner.ring.push_front(x);
+        inner.ring.truncate(ROUTER_LOG_CAP);
+    }
+
+    /// A compare-mode answer for turn `id`: onto the turn when it is kept,
+    /// else held until the turn is recorded (turns finish out of order, so an
+    /// older id may still be in flight). The held set is bounded: the oldest
+    /// ids go first.
+    pub fn attach(&self, id: u64, answer: agentkeys_protocol::RouterAnswer) {
+        let mut inner = self.inner.lock().expect("router log lock");
+        if let Some(x) = inner.ring.iter_mut().find(|x| x.id == id) {
+            x.compared.push(answer);
+            return;
+        }
+        inner.early.entry(id).or_default().push(answer);
+        while inner.early.len() > ROUTER_LOG_CAP {
+            inner.early.pop_first();
+        }
+    }
+
+    /// The kept turns, newest first.
+    pub fn snapshot(&self) -> Vec<agentkeys_protocol::RouterExchange> {
+        self.inner
+            .lock()
+            .expect("router log lock")
+            .ring
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
 
 pub type SharedWeixinGatewayState = Arc<WeixinGatewayState>;
 
@@ -168,11 +233,11 @@ impl WeixinGatewayState {
             &config.router.gate_url,
             &config.router.gate_key,
         ) {
-            (true, Some(url), Some(key)) => Some(crate::jev::JevClient::new(
+            (true, Some(url), Some(key)) => Some(Arc::new(crate::jev::JevClient::new(
                 url,
                 key,
                 config.router.timeout_ms,
-            )),
+            ))),
             _ => None,
         };
         Ok(WeixinGatewayState {
@@ -192,24 +257,17 @@ impl WeixinGatewayState {
             jev,
             pending_asks: Mutex::new(HashMap::new()),
             monitor: Mutex::new(MonitorRing::default()),
-            router_log: Mutex::new(VecDeque::new()),
+            router_log: Arc::new(RouterLog::default()),
         })
     }
 
     /// #722 — keep one model-consulting turn for the router view (newest first).
     pub fn record_router_exchange(&self, x: agentkeys_protocol::RouterExchange) {
-        let mut log = self.router_log.lock().expect("router log lock");
-        log.push_front(x);
-        log.truncate(ROUTER_LOG_CAP);
+        self.router_log.record(x);
     }
 
     pub fn router_log(&self) -> Vec<agentkeys_protocol::RouterExchange> {
-        self.router_log
-            .lock()
-            .expect("router log lock")
-            .iter()
-            .cloned()
-            .collect()
+        self.router_log.snapshot()
     }
 
     /// #722 — queue a numbered ask for this contact, behind any that wait.
@@ -726,5 +784,89 @@ impl WeixinGatewayState {
     /// Subscribe to loop-restart signals (the supervisor holds one).
     pub fn subscribe_ilink_restart(&self) -> watch::Receiver<u64> {
         self.ilink_restart_tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod router_log_tests {
+    use super::*;
+    use agentkeys_protocol::{RouterAnswer, RouterExchange};
+
+    fn turn(id: u64) -> RouterExchange {
+        RouterExchange {
+            id,
+            ts_ms: id,
+            contact: "妈妈".into(),
+            tier: "owner".into(),
+            text: "今晚吃什么".into(),
+            photo: false,
+            last_channel: None,
+            request: serde_json::Value::Null,
+            probabilities: Default::default(),
+            continues: None,
+            verdict: "route".into(),
+            routed_to: Some("family-chat".into()),
+            addressee: None,
+            confidence: Some(0.9),
+            answered_by: "kev-9b".into(),
+            describe_ms: None,
+            decide_ms: Some(200),
+            input_tokens: None,
+            output_tokens: None,
+            total_ms: 300,
+            delivered: true,
+            error: None,
+            compared: Vec::new(),
+        }
+    }
+
+    fn answer(model: &str) -> RouterAnswer {
+        RouterAnswer {
+            model: model.into(),
+            answered_by: model.into(),
+            probabilities: Default::default(),
+            continues: None,
+            verdict: "route".into(),
+            routed_to: Some("family-chat".into()),
+            addressee: None,
+            confidence: Some(0.8),
+            decide_ms: 650,
+            input_tokens: Some(300),
+            output_tokens: Some(20),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn a_compared_answer_joins_its_turn_whichever_arrives_first() {
+        let log = RouterLog::default();
+        let (a, b) = (log.next_id(), log.next_id());
+        assert!(b > a);
+        // b's turn is recorded first; a's answer arrives while a is in flight.
+        log.record(turn(b));
+        log.attach(a, answer("jev-1.13.0"));
+        log.record(turn(a));
+        // b's answer arrives after its turn.
+        log.attach(b, answer("jev-1.13.0"));
+        let kept = log.snapshot();
+        assert_eq!(kept.iter().map(|x| x.id).collect::<Vec<_>>(), vec![a, b]);
+        assert!(kept.iter().all(|x| x.compared.len() == 1), "{kept:?}");
+    }
+
+    #[test]
+    fn the_log_and_the_held_answers_stay_bounded() {
+        let log = RouterLog::default();
+        for _ in 0..(ROUTER_LOG_CAP + 5) {
+            let id = log.next_id();
+            log.record(turn(id));
+        }
+        assert_eq!(log.snapshot().len(), ROUTER_LOG_CAP);
+        for id in 1000..(1000 + 2 * ROUTER_LOG_CAP as u64) {
+            log.attach(id, answer("jev-1.13.0"));
+        }
+        assert!(log.inner.lock().unwrap().early.len() <= ROUTER_LOG_CAP);
+        // An answer for a turn long gone never lands on a kept one.
+        log.attach(1, answer("jev-1.13.0"));
+        assert!(log.snapshot().iter().all(|x| x.compared.is_empty()));
     }
 }

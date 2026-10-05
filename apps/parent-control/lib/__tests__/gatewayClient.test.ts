@@ -115,6 +115,12 @@ describe('gatewayClient', () => {
       ok: true,
       engine: 'jev',
       model: 'kev-9b',
+      default_model: 'kev-9b',
+      compare: false,
+      models: [
+        { model: 'kev-9b', provider: 'kev', active: true, stack_default: true, server: { configured: true, status: 200 } },
+        { model: 'jev-1.13.0', provider: 'jev', active: false, stack_default: false, server: { configured: false } },
+      ],
       threshold: 0.5,
       continue_threshold: 0.7,
       ask_ttl_secs: 600,
@@ -129,9 +135,9 @@ describe('gatewayClient', () => {
           request: null,
         },
       ],
-      upstream: null,
       recent: [
         {
+          id: 1,
           ts_ms: 1,
           contact: '奶奶',
           tier: 'elder',
@@ -146,6 +152,7 @@ describe('gatewayClient', () => {
           answered_by: 'jev',
           total_ms: 120,
           delivered: true,
+          compared: [],
         },
       ],
     };
@@ -165,6 +172,37 @@ describe('gatewayClient', () => {
       expect(r.value.recent[0].routed_to).toBe('family-chat');
       expect(r.value.recent[0].addressee).toBe('chef');
     }
+  });
+
+  it('POST router/settings switches the decision model and compare mode', async () => {
+    let seenUrl = '';
+    let seenMethod = '';
+    let seenBody: unknown;
+    vi.stubGlobal(
+      'fetch',
+      mockFetch(200, { ok: true, model: 'jev-1.13.0', compare: true, changed: true }, (u, i) => {
+        seenUrl = u;
+        seenMethod = i?.method ?? 'GET';
+        seenBody = JSON.parse(String(i?.body));
+      }),
+    );
+    const r = await gatewayClient.routerSettings({ model: 'jev-1.13.0', compare: true });
+    expect(seenUrl.endsWith('/v1/master/gateway/router/settings')).toBe(true);
+    expect(seenMethod).toBe('POST');
+    expect(seenBody).toEqual({ model: 'jev-1.13.0', compare: true });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.model).toBe('jev-1.13.0');
+      expect(r.value.changed).toBe(true);
+    }
+    // A model the gate does not offer comes back as the gate's own reason.
+    vi.stubGlobal(
+      'fetch',
+      mockFetch(400, { ok: false, reason: 'model_not_offered', detail: 'this contact gate offers kev-9b' }),
+    );
+    const refused = await gatewayClient.routerSettings({ model: 'gpt-4o' });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toBe('model_not_offered');
   });
 
   it('decodes an {ok:false, reason, detail} error envelope even on a 200', async () => {

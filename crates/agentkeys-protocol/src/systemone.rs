@@ -1,8 +1,10 @@
 //! TypeSafe "System One" wire shapes (#689 / #722) — the typed-decision model
-//! (Jev) behind the household router. ONE owner (D7): the model gate relays
-//! this body to `https://api.typesafe.ai/v1/systemone`, the contact gate builds
-//! it, and the daemon will build the same shape for the console's picks — every
-//! caller compiles against these structs, so a drifted field is a compile error.
+//! behind the household router. Two providers serve the same wire
+//! ([`DecisionProvider`]): TypeSafe's hosted **Jev** and **Kev**, the open
+//! model a self-hosted server runs. ONE owner (D7): the model gate relays this
+//! body to the provider the `model` names, the contact gate builds it, and the
+//! daemon will build the same shape for the console's picks — every caller
+//! compiles against these structs, so a drifted field is a compile error.
 //!
 //! Shape source: TypeSafe's API reference (<https://docs.typesafe.ai/api.md>).
 //! A request is a `state` (string / object / array) plus a map of typed
@@ -19,8 +21,88 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The gate route that relays a System One request (the caller presents its
-/// `gk_` relay key; the gate attaches the TypeSafe key).
+/// `gk_` relay key; the gate attaches the provider's key).
 pub const SYSTEMONE_ROUTE: &str = "/v1/systemone";
+
+/// The gate route that reports each provider's server ([`DecisionModelsReport`]).
+pub const SYSTEMONE_MODELS_ROUTE: &str = "/v1/systemone/models";
+
+/// Who runs the model a System One request names. Both serve the same wire;
+/// the model gate holds one key per provider and sends each request to the
+/// provider its `model` belongs to ([`DecisionProvider::of_model`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub enum DecisionProvider {
+    /// TypeSafe's hosted Jev (`jev-*`) — the `typesafe` inference family.
+    Jev,
+    /// Kev, the open model with Jev's API, on a self-hosted server (`kev-*`)
+    /// — the `kev` inference family.
+    Kev,
+}
+
+impl DecisionProvider {
+    pub const ALL: [DecisionProvider; 2] = [DecisionProvider::Kev, DecisionProvider::Jev];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            DecisionProvider::Jev => "jev",
+            DecisionProvider::Kev => "kev",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DecisionProvider::Jev => "Jev",
+            DecisionProvider::Kev => "Kev",
+        }
+    }
+
+    /// The provider a model id belongs to: the id's family, the text before
+    /// its first `-` (`jev-1.13.0` → Jev, `kev-9b@2629c06` → Kev). `None` for
+    /// any other name — never a guess, since Kev answers whatever name it is
+    /// sent and a misfiled id would audit one model's answers as the other's.
+    pub fn of_model(model: &str) -> Option<Self> {
+        let family = model.trim().split('-').next().unwrap_or_default();
+        Self::ALL
+            .into_iter()
+            .find(|p| family.eq_ignore_ascii_case(p.id()))
+    }
+}
+
+/// `GET /v1/systemone/models` — each provider's server as the model gate sees
+/// it, keyed by [`DecisionProvider::id`]. Every provider is listed, armed or
+/// not, so the console can say what is missing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct DecisionModelsReport {
+    pub providers: BTreeMap<String, DecisionServerReport>,
+}
+
+/// One provider's server: whether the model gate holds its key, where it
+/// runs, and what its own `/v1/models` answered.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct DecisionServerReport {
+    /// The model gate holds this provider's key (its inference family resolved).
+    pub configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_url: Option<String>,
+    /// The HTTP status of the server's `/v1/models`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<u16>,
+    /// The server's own `/v1/models` answer (Kev reports its revision and
+    /// sampling temperature; TypeSafe lists its model aliases).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
+    pub models: Option<Value>,
+    /// Why the server could not be asked, or what arms the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
 
 /// The Jev version the router pins by default. Thresholds tuned against one
 /// version belong to it (TypeSafe moves the `jev-latest` alias without notice),
@@ -219,6 +301,40 @@ mod tests {
         assert!(resp.choice("is_urgent").is_none(), "a noul is not a choice");
         assert_eq!(resp.usage.total(), 352);
         assert_eq!(serde_json::to_value(&resp).unwrap(), raw);
+    }
+
+    #[test]
+    fn a_model_id_names_its_provider_by_family_and_anything_else_names_none() {
+        use DecisionProvider::*;
+        assert_eq!(DecisionProvider::of_model("jev-1.13.0"), Some(Jev));
+        assert_eq!(DecisionProvider::of_model("jev-latest"), Some(Jev));
+        assert_eq!(DecisionProvider::of_model(" JEV-preview "), Some(Jev));
+        assert_eq!(DecisionProvider::of_model("kev-9b@2629c06"), Some(Kev));
+        assert_eq!(DecisionProvider::of_model("kev"), Some(Kev));
+        assert_eq!(DecisionProvider::of_model(JEV_PINNED_MODEL), Some(Jev));
+        for other in ["", "gpt-4o", "router-v2", "jevx-1", "kevin"] {
+            assert_eq!(DecisionProvider::of_model(other), None, "{other}");
+        }
+        assert_eq!(
+            serde_json::to_value(Kev).unwrap(),
+            json!("kev"),
+            "the wire id is the provider id"
+        );
+    }
+
+    #[test]
+    fn the_models_report_lists_every_provider_armed_or_not() {
+        let raw = json!({
+            "providers": {
+                "jev": {"configured": false, "error": "no TYPESAFE_API_KEY"},
+                "kev": {"configured": true, "base_url": "https://kev.test/kev", "status": 200,
+                        "models": {"data": [{"id": "kev-9b", "revision": "2629c06"}]}}
+            }
+        });
+        let report: DecisionModelsReport = serde_json::from_value(raw.clone()).unwrap();
+        assert!(!report.providers["jev"].configured);
+        assert_eq!(report.providers["kev"].status, Some(200));
+        assert_eq!(serde_json::to_value(&report).unwrap(), raw);
     }
 
     #[test]

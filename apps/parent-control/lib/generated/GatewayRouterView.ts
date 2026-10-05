@@ -2,22 +2,48 @@
 import type { RouterContactView } from "./RouterContactView";
 import type { RouterExchange } from "./RouterExchange";
 import type { RouterGuidance } from "./RouterGuidance";
+import type { RouterModelView } from "./RouterModelView";
 
 /**
  * #722 — `GET /v1/gateway/admin/router`: the contact gate's router as the
- * decision model (Kev / Jev) sees it — its settings, the guidance each question
- * carries, the options per bound contact, the model server, and the last turns
- * that consulted a model. The turn log is RAM only: a restart empties it.
+ * decision model (Kev / Jev) sees it — its settings, the models the household
+ * may switch between, the guidance each question carries, the options per
+ * bound contact, and the last turns that consulted a model. The turn log is
+ * RAM only: a restart empties it.
  */
 export type GatewayRouterView = { ok: boolean, 
 /**
- * `jev` (a System One model routes plain messages) or `deterministic`.
+ * `jev` (a System One model — Kev or Jev — routes plain messages) or
+ * `deterministic`.
  */
 engine: string, 
 /**
- * The model name the contact gate asks for (and the audit records).
+ * The model that routes now: the household's pick, else the stack's
+ * default. The contact gate sends it; the audit records what answered.
  */
 model: string, 
+/**
+ * The stack's default (`AGENTKEYS_WEIXIN_ROUTER_MODEL`).
+ */
+default_model: string, 
+/**
+ * Every other offered model answers each turn too (never acted on).
+ */
+compare: boolean, 
+/**
+ * The models the household may switch between, with each one's server.
+ */
+models: Array<RouterModelView>, 
+/**
+ * When the household last changed the choice (unix seconds); absent =
+ * never — the stack's default routes.
+ */
+chosen_at?: number, 
+/**
+ * Why the household's choice is not what routes (it names a model this
+ * gate no longer offers), when it is not.
+ */
+notice?: string, 
 /**
  * Where the contact gate reaches the model: the model gate.
  */
@@ -38,11 +64,6 @@ ask_ttl_secs: number, describe_photos: boolean,
  * The photo describer; absent = the model gate's default chat model.
  */
 describe_model?: string, describe_prompt: string, guidance: RouterGuidance, contacts: Array<RouterContactView>, 
-/**
- * The model server behind the model gate (`base_url` + its `/v1/models`
- * answer), or `{ "error": … }` when it could not be asked.
- */
-upstream: unknown, 
 /**
  * The last turns that consulted a model, newest first.
  */

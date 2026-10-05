@@ -1,8 +1,9 @@
 //! #722 / household channels — the Jev router tier (#689 leg 1): one WeChat
 //! thread, and each plain message finds the CHANNEL it belongs on. The
-//! decision model (TypeSafe's Jev, reached ONLY through the model gate's
-//! `/v1/systemone` relay — the contact gate holds a `gk_` relay key, never a
-//! vendor key) answers typed questions over the member's own channels: which
+//! decision model (Kev or TypeSafe's Jev — the same API — reached ONLY through
+//! the model gate's `/v1/systemone` relay; the contact gate holds a `gk_`
+//! relay key, never a vendor key) answers typed questions over the member's
+//! own channels: which
 //! channel (`destination`), whether it continues their last conversation
 //! (`continues`), and, on a channel several apps are bound to, which app
 //! (`addressee:<channel>`). The option set is built from the channel documents
@@ -37,14 +38,21 @@
 //!
 //! Harness + numbers: `docs/plan/issue-689-household-small-model.md` §9.
 //!
+//! The stack offers one or more models (`AGENTKEYS_WEIXIN_ROUTER_MODELS`, the
+//! default first); the household picks the one that routes in the console,
+//! and compare mode asks every other offered model the same request off the
+//! turn's path — recorded for the route tab, never acted on ([`active_models`],
+//! [`comparison_answer`]).
+//!
 //! Everything that decides is pure (unit-tested); only [`JevClient`] does I/O.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use agentkeys_protocol::{
-    ChannelDoc, ChannelEventKind, ContactRegistry, ContactTier, SystemOneQuestion,
-    SystemOneRequest, SystemOneResponse, JEV_PINNED_MODEL, SYSTEMONE_ROUTE,
+    ChannelDoc, ChannelEventKind, ContactRegistry, ContactTier, DecisionModelsReport, RouterAnswer,
+    RouterSettings, SystemOneQuestion, SystemOneRequest, SystemOneResponse, JEV_PINNED_MODEL,
+    SYSTEMONE_MODELS_ROUTE, SYSTEMONE_ROUTE,
 };
 use serde_json::{json, Value};
 
@@ -116,8 +124,13 @@ pub struct RouterConfig {
     /// — a STACK credential the host setup provisions; attribution = the
     /// household owner (the key record's `user_omni`).
     pub gate_key: Option<String>,
-    /// The versioned Jev id sent on every call (thresholds are tuned per version).
-    pub model: String,
+    /// The stack's default decision model (`AGENTKEYS_WEIXIN_ROUTER_MODEL`), a
+    /// versioned id (thresholds are tuned per version): it routes until the
+    /// household picks another offered one in the console.
+    pub default_model: String,
+    /// Every model the household may switch to (`AGENTKEYS_WEIXIN_ROUTER_MODELS`),
+    /// the default first; each id names its provider (`kev-*` / `jev-*`).
+    pub models: Vec<String>,
     /// Route the destination pick only when its probability is at least this
     /// AND strictly above the runner-up; otherwise ask.
     pub threshold: f64,
@@ -148,7 +161,8 @@ impl Default for RouterConfig {
             engine: RouterEngine::Auto,
             gate_url: None,
             gate_key: None,
-            model: JEV_PINNED_MODEL.to_string(),
+            default_model: JEV_PINNED_MODEL.to_string(),
+            models: vec![JEV_PINNED_MODEL.to_string()],
             threshold: 0.5,
             timeout_ms: 3000,
             ask_ttl_secs: 600,
@@ -178,6 +192,52 @@ impl RouterConfig {
         } else {
             "deterministic"
         }
+    }
+
+    /// Whether the household may switch the router to `model`.
+    pub fn offers(&self, model: &str) -> bool {
+        self.models.iter().any(|m| m == model.trim())
+    }
+}
+
+/// The models a turn consults: the one that routes, and — in compare mode —
+/// every other offered one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveModels {
+    /// The model whose answer routes.
+    pub model: String,
+    /// Asked the same request for comparison; never acted on.
+    pub compare: Vec<String>,
+    /// The household picked a model this gate no longer offers: the default
+    /// routes instead, and the route tab says so.
+    pub stale_choice: Option<String>,
+}
+
+/// The household's pick (the console's route tab) when the gate still offers
+/// it, else the stack's default — never a model outside `cfg.models`.
+pub fn active_models(cfg: &RouterConfig, choice: Option<&RouterSettings>) -> ActiveModels {
+    let picked = choice
+        .and_then(|c| c.model.as_deref())
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    let (model, stale_choice) = match picked {
+        Some(m) if cfg.offers(m) => (m.to_string(), None),
+        Some(m) => (cfg.default_model.clone(), Some(m.to_string())),
+        None => (cfg.default_model.clone(), None),
+    };
+    let compare = if choice.is_some_and(|c| c.compare) {
+        cfg.models
+            .iter()
+            .filter(|m| **m != model)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ActiveModels {
+        model,
+        compare,
+        stale_choice,
     }
 }
 
@@ -622,6 +682,74 @@ pub fn verdict_from(
     }
 }
 
+/// One compare-mode answer: what the router WOULD have done on `model`'s
+/// answer to the turn's request, at the turn's thresholds — or why there is
+/// no answer. Pure; the relay records it next to the acting model's.
+#[allow(clippy::too_many_arguments)]
+pub fn comparison_answer(
+    model: &str,
+    result: &Result<SystemOneResponse, JevError>,
+    keys: &[OptionKey],
+    threshold: f64,
+    last_channel: Option<&str>,
+    continue_threshold: f64,
+    decide_ms: u64,
+) -> RouterAnswer {
+    let resp = match result {
+        Ok(resp) => resp,
+        Err(e) => {
+            return RouterAnswer {
+                model: model.to_string(),
+                answered_by: String::new(),
+                probabilities: BTreeMap::new(),
+                continues: None,
+                verdict: "unavailable".into(),
+                routed_to: None,
+                addressee: None,
+                confidence: None,
+                decide_ms,
+                input_tokens: None,
+                output_tokens: None,
+                error: Some(e.to_string()),
+            }
+        }
+    };
+    let (verdict, routed_to, addressee, confidence, error) =
+        match verdict_from(resp, keys, threshold, last_channel, continue_threshold) {
+            JevVerdict::Route {
+                channel,
+                addressee,
+                confidence,
+                follow_up,
+            } => (
+                if follow_up { "follow_up" } else { "route" },
+                Some(channel),
+                addressee,
+                Some(confidence),
+                None,
+            ),
+            JevVerdict::Ask { confidence, .. } => ("ask", None, None, Some(confidence), None),
+            JevVerdict::Malformed(why) => ("malformed", None, None, None, Some(why)),
+        };
+    RouterAnswer {
+        model: model.to_string(),
+        answered_by: resp.model.clone(),
+        probabilities: resp
+            .choice(DESTINATION_QUESTION)
+            .map(|(_, p, _)| p.clone())
+            .unwrap_or_default(),
+        continues: resp.noul(CONTINUES_QUESTION),
+        verdict: verdict.into(),
+        routed_to,
+        addressee,
+        confidence,
+        decide_ms,
+        input_tokens: Some(resp.usage.input_tokens),
+        output_tokens: Some(resp.usage.output_tokens),
+        error,
+    }
+}
+
 /// A numbered ask waiting for its reply: the member's ORIGINAL message and
 /// the channels the ask named (ids, with the labels the member read and the
 /// app each pick addresses). Memory only, one queue per contact, expires —
@@ -916,32 +1044,30 @@ impl JevClient {
             http,
             url: format!("{base}{SYSTEMONE_ROUTE}"),
             chat_url: format!("{base}/v1/chat/completions"),
-            models_url: format!("{base}/v1/systemone/models"),
+            models_url: format!("{base}{SYSTEMONE_MODELS_ROUTE}"),
             key: key.to_string(),
         }
     }
 
-    /// The decision model's server as the model gate reports it (its base URL
-    /// and `/v1/models`), or `{ "error": … }` — for the router view, never a turn.
-    pub async fn upstream_info(&self) -> Value {
-        let resp = match self
+    /// Each decision-model provider's server as the model gate reports it
+    /// (whether it holds the key, the base URL, the server's `/v1/models`) —
+    /// for the router view, never a turn.
+    pub async fn decision_servers(&self) -> Result<DecisionModelsReport, String> {
+        let resp = self
             .http
             .get(&self.models_url)
             .timeout(Duration::from_secs(3))
             .bearer_auth(&self.key)
             .send()
             .await
-        {
-            Ok(r) => r,
-            Err(e) => return json!({ "error": e.to_string() }),
-        };
+            .map_err(|e| format!("model gate unreachable: {e}"))?;
         let status = resp.status().as_u16();
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        if (200..300).contains(&status) {
-            body
-        } else {
-            json!({ "error": format!("model gate HTTP {status}"), "detail": body })
+        if !(200..300).contains(&status) {
+            return Err(format!("model gate answered HTTP {status}"));
         }
+        resp.json::<DecisionModelsReport>()
+            .await
+            .map_err(|e| format!("model gate report unreadable: {e}"))
     }
 
     /// Describe a photo in one short line, through the model gate's chat relay
@@ -1522,5 +1648,103 @@ mod tests {
             Some(RouterEngine::Deterministic)
         );
         assert_eq!(RouterEngine::parse("bogus"), None);
+    }
+
+    fn two_models() -> RouterConfig {
+        RouterConfig {
+            default_model: "kev-9b@2629c06".into(),
+            models: vec!["kev-9b@2629c06".into(), "jev-1.13.0".into()],
+            ..Default::default()
+        }
+    }
+
+    fn picked(model: Option<&str>, compare: bool) -> RouterSettings {
+        RouterSettings {
+            model: model.map(str::to_string),
+            compare,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn the_households_pick_routes_only_while_the_gate_offers_it() {
+        let cfg = two_models();
+        let a = active_models(&cfg, None);
+        assert_eq!(
+            a.model, "kev-9b@2629c06",
+            "never chosen → the stack default"
+        );
+        assert!(a.compare.is_empty() && a.stale_choice.is_none());
+        let a = active_models(&cfg, Some(&picked(Some(" jev-1.13.0 "), false)));
+        assert_eq!(a.model, "jev-1.13.0");
+        assert!(a.compare.is_empty());
+        // A pick the gate stopped offering is reported, never followed.
+        let a = active_models(&cfg, Some(&picked(Some("jev-2.0.0"), false)));
+        assert_eq!(a.model, "kev-9b@2629c06");
+        assert_eq!(a.stale_choice.as_deref(), Some("jev-2.0.0"));
+        // Compare mode asks every OTHER offered model.
+        let a = active_models(&cfg, Some(&picked(Some("jev-1.13.0"), true)));
+        assert_eq!(a.compare, vec!["kev-9b@2629c06"]);
+        let a = active_models(&cfg, Some(&picked(None, true)));
+        assert_eq!(a.model, "kev-9b@2629c06");
+        assert_eq!(a.compare, vec!["jev-1.13.0"]);
+        // One offered model: compare has nothing to ask.
+        let a = active_models(&RouterConfig::default(), Some(&picked(None, true)));
+        assert!(a.compare.is_empty());
+    }
+
+    #[test]
+    fn a_compared_answer_is_what_the_router_would_have_done_at_the_same_thresholds() {
+        let o = keys(&options());
+        let r = Ok(response(
+            "family-chat/storyteller",
+            &[
+                ("family-chat/storyteller", 0.9),
+                ("family-chat/chef", 0.05),
+                ("unclear", 0.05),
+            ],
+            0.85,
+        ));
+        let a = comparison_answer("jev-1.13.0", &r, &o, 0.5, None, 0.7, 640);
+        assert_eq!(a.model, "jev-1.13.0");
+        assert_eq!(a.answered_by, "jev-1.13.0");
+        assert_eq!(a.verdict, "route");
+        assert_eq!(a.routed_to.as_deref(), Some("family-chat"));
+        assert_eq!(a.addressee.as_deref(), Some("storyteller"));
+        assert_eq!(a.confidence, Some(0.9));
+        assert_eq!(a.decide_ms, 640);
+        assert_eq!((a.input_tokens, a.output_tokens), (Some(300), Some(20)));
+        assert_eq!(a.probabilities["family-chat/chef"], 0.05);
+        // Below the threshold it would have asked.
+        let r = Ok(response(
+            "family-chat/chef",
+            &[
+                ("family-chat/chef", 0.45),
+                ("opchat-chef", 0.4),
+                ("unclear", 0.15),
+            ],
+            0.2,
+        ));
+        let a = comparison_answer("kev-9b", &r, &o, 0.5, None, 0.7, 200);
+        assert_eq!(a.verdict, "ask");
+        assert!(a.routed_to.is_none());
+        // An answer outside the options is malformed, with the reason.
+        let r = Ok(response("admin-room", &[("admin-room", 1.0)], 1.0));
+        let a = comparison_answer("kev-9b", &r, &o, 0.5, None, 0.7, 200);
+        assert_eq!(a.verdict, "malformed");
+        assert!(a.error.is_some());
+        // No answer at all.
+        let a = comparison_answer(
+            "jev-1.13.0",
+            &Err(JevError::Transport("timed out".into())),
+            &o,
+            0.5,
+            None,
+            0.7,
+            3000,
+        );
+        assert_eq!(a.verdict, "unavailable");
+        assert!(a.answered_by.is_empty() && a.probabilities.is_empty());
+        assert!(a.error.unwrap().contains("timed out"));
     }
 }

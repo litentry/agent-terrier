@@ -30,10 +30,14 @@ pub fn router(relay: Arc<Relay>) -> Router {
         // #653 — the web-search relay (SearXNG behind the gate; engine set
         // pinned by config — Bing by deployment default).
         .route("/v1/search", post(search))
-        // #722 — the System One (Jev) decision relay: the household router's
-        // typed pick through the gate-held TypeSafe key. 503 when unconfigured.
+        // #722 — the System One decision relay: the household router's typed
+        // pick through the gate-held key of the provider the model names (Jev
+        // or Kev). 503 for a provider this gate holds no key for.
         .route(agentkeys_protocol::SYSTEMONE_ROUTE, post(systemone))
-        .route("/v1/systemone/models", get(systemone_models))
+        .route(
+            agentkeys_protocol::SYSTEMONE_MODELS_ROUTE,
+            get(systemone_models),
+        )
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
         // #519 — the speech relay legs (same gk_ auth; gate-held Doubao app
@@ -279,18 +283,16 @@ fn authenticate_live(
     relay.keys.authenticate(token)
 }
 
-/// #722 — `GET /v1/systemone/models`: the decision model's server, for the
-/// contact gate's router view (a live relay key or the admin token).
+/// #722 — `GET /v1/systemone/models`: every decision-model provider's server,
+/// armed or not, for the contact gate's router view (a live relay key or the
+/// admin token).
 async fn systemone_models(State(relay): State<Arc<Relay>>, headers: HeaderMap) -> Response {
     if authenticate_live(&relay, &headers).is_err()
         && !auth::is_admin(&relay.config, auth_header(&headers))
     {
         return error_response(GateError::Unauthorized("unknown relay key".into()));
     }
-    match relay.systemone_models().await {
-        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-        Err(e) => error_response(e),
-    }
+    (StatusCode::OK, Json(relay.systemone_models().await)).into_response()
 }
 
 async fn models(State(relay): State<Arc<Relay>>, headers: HeaderMap) -> Response {

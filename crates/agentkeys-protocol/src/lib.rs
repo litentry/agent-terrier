@@ -1012,6 +1012,28 @@ pub struct ContactRegistry {
     /// invites); the gate reads them for every turn.
     #[serde(default)]
     pub channels: Vec<ChannelDoc>,
+    /// The household's choice of decision model for the router, made in the
+    /// console's route tab. `None` = never chosen: the stack's default routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterSettings>,
+}
+
+/// Which decision model routes this household's plain messages, and whether
+/// the others the contact gate offers answer every turn too, for comparison.
+/// Policy like the rest of the registry: written through the admin surface,
+/// synced to the master's Config doc with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterSettings {
+    /// The model that routes; `None` = the stack's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Every other offered model is asked the same question on every turn
+    /// the router consults a model; their answers are recorded, never acted on.
+    #[serde(default)]
+    pub compare: bool,
+    /// When the console last changed these (unix seconds).
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 /// One relayed app: the alias contacts address it by (its delegate label)
@@ -1791,17 +1813,36 @@ pub struct GatewayHistoryResponse {
 }
 
 /// #722 — `GET /v1/gateway/admin/router`: the contact gate's router as the
-/// decision model (Kev / Jev) sees it — its settings, the guidance each question
-/// carries, the options per bound contact, the model server, and the last turns
-/// that consulted a model. The turn log is RAM only: a restart empties it.
+/// decision model (Kev / Jev) sees it — its settings, the models the household
+/// may switch between, the guidance each question carries, the options per
+/// bound contact, and the last turns that consulted a model. The turn log is
+/// RAM only: a restart empties it.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct GatewayRouterView {
     pub ok: bool,
-    /// `jev` (a System One model routes plain messages) or `deterministic`.
+    /// `jev` (a System One model — Kev or Jev — routes plain messages) or
+    /// `deterministic`.
     pub engine: String,
-    /// The model name the contact gate asks for (and the audit records).
+    /// The model that routes now: the household's pick, else the stack's
+    /// default. The contact gate sends it; the audit records what answered.
     pub model: String,
+    /// The stack's default (`AGENTKEYS_WEIXIN_ROUTER_MODEL`).
+    pub default_model: String,
+    /// Every other offered model answers each turn too (never acted on).
+    pub compare: bool,
+    /// The models the household may switch between, with each one's server.
+    pub models: Vec<RouterModelView>,
+    /// When the household last changed the choice (unix seconds); absent =
+    /// never — the stack's default routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub chosen_at: Option<u64>,
+    /// Why the household's choice is not what routes (it names a model this
+    /// gate no longer offers), when it is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub notice: Option<String>,
     /// Where the contact gate reaches the model: the model gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1821,12 +1862,49 @@ pub struct GatewayRouterView {
     pub describe_prompt: String,
     pub guidance: RouterGuidance,
     pub contacts: Vec<RouterContactView>,
-    /// The model server behind the model gate (`base_url` + its `/v1/models`
-    /// answer), or `{ "error": … }` when it could not be asked.
-    #[ts(type = "unknown")]
-    pub upstream: Value,
     /// The last turns that consulted a model, newest first.
     pub recent: Vec<RouterExchange>,
+}
+
+/// One decision model the household may switch the router to.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterModelView {
+    /// The id the router sends (`kev-9b@2629c06`, `jev-1.13.0`).
+    pub model: String,
+    pub provider: DecisionProvider,
+    /// It routes now.
+    pub active: bool,
+    /// The stack's default.
+    pub stack_default: bool,
+    /// Its provider's server as the model gate reports it.
+    pub server: DecisionServerReport,
+}
+
+/// `POST /v1/gateway/admin/router/settings` — the household picks the model
+/// that routes (one the gate offers) and whether every other one answers too,
+/// for comparison. A field left out is unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayRouterSettingsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compare: Option<bool>,
+}
+
+/// The settings now in force.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayRouterSettingsResponse {
+    pub ok: bool,
+    /// The model that routes.
+    pub model: String,
+    pub compare: bool,
+    /// Whether this write changed anything.
+    pub changed: bool,
 }
 
 /// The guidance each System One question carries — the decision model has no
@@ -1894,10 +1972,14 @@ pub struct RouterAppView {
 }
 
 /// One turn that consulted a model: what was sent, what came back, how long
-/// each step took.
+/// each step took — and, in compare mode, what the other models answered.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct RouterExchange {
+    /// The turn's number in this gate's router log (restarts at 1).
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub id: u64,
     #[ts(type = "number")]
     pub ts_ms: u64,
     pub contact: String,
@@ -1939,11 +2021,61 @@ pub struct RouterExchange {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub decide_ms: Option<u64>,
+    /// The decision's token usage as the model reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub output_tokens: Option<u64>,
     /// From the gate receiving the turn to its reply, the delivery included.
     #[ts(type = "number")]
     pub total_ms: u64,
     /// Whether the turn landed on an app's feed.
     pub delivered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+    /// Compare mode: the other models' answers to the same request. They
+    /// arrive off the turn's path, so a fresh turn may not carry them yet.
+    #[serde(default)]
+    pub compared: Vec<RouterAnswer>,
+}
+
+/// Another model's answer to a turn's request, asked only to compare: what
+/// the router WOULD have done on it, at the same thresholds. It routed nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterAnswer {
+    /// The model asked.
+    pub model: String,
+    /// The version that answered (empty when none did).
+    pub answered_by: String,
+    /// The `destination` probabilities per option.
+    pub probabilities: std::collections::BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub continues: Option<f64>,
+    /// `route` / `follow_up` / `ask` / `malformed` / `unavailable`.
+    pub verdict: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub routed_to: Option<String>,
+    /// The app the pick named on a shared channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub addressee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub confidence: Option<f64>,
+    #[ts(type = "number")]
+    pub decide_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,

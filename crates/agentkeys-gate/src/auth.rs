@@ -68,7 +68,7 @@ mod tests {
             speech_asr: None,
             speech_tts: None,
             search: None,
-            systemone: None,
+            decision: Default::default(),
         }
     }
 

@@ -58,16 +58,36 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
-    // #722 System One relay arming — LOUD either way (a disarmed leg 503s and
-    // the contact gate's router runs its deterministic tier).
-    match &config.systemone {
-        Some(ts) => {
-            tracing::info!(base = %ts.base_url, "systemone (Jev) relay ARMED (typesafe family resolved)")
+    // #722 System One relay arming, per decision-model provider — LOUD either
+    // way (a disarmed provider 503s its models and the contact gate's router
+    // runs its deterministic tier).
+    for provider in agentkeys_protocol::DecisionProvider::ALL {
+        let family = agentkeys_gate::config::DecisionUpstreams::family(provider);
+        match config.decision.get(provider) {
+            Some(creds) => tracing::info!(
+                base = %creds.base_url,
+                "systemone relay ARMED for {} (`{family}` family resolved — {}-* models go here)",
+                provider.label(),
+                provider.id()
+            ),
+            None => tracing::warn!(
+                "systemone relay has NO {} key — {}-* models will 503 until the `{family}` \
+                 family is provisioned (rotate-inference-cred.sh {family})",
+                provider.label(),
+                provider.id()
+            ),
         }
-        None => tracing::warn!(
-            "systemone (Jev) relay NOT configured — /v1/systemone will 503 until the typesafe \
-             family is provisioned (rotate-inference-cred.sh typesafe, or TYPESAFE_API_KEY)"
-        ),
+    }
+    // A Kev server under the typesafe family is the pre-split posture: jev-*
+    // requests would reach Kev, which answers any model name it is sent.
+    if let Some(jev) = &config.decision.jev {
+        if jev.base_url != agentkeys_inference_creds::DEFAULT_TYPESAFE_BASE {
+            tracing::warn!(
+                base = %jev.base_url,
+                "TYPESAFE_BASE_URL is not TypeSafe's hosted API — jev-* requests go to that server. \
+                 A Kev server belongs in the `kev` family (KEV_BASE_URL + KEV_API_KEY)"
+            );
+        }
     }
 
     let listen = config.listen;

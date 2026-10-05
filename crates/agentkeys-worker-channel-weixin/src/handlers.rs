@@ -55,6 +55,12 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
         .route("/v1/gateway/admin/contacts", get(admin::admin_contacts))
         .route("/v1/gateway/admin/monitor", get(admin::monitor))
         .route("/v1/gateway/admin/router", get(admin::router_view))
+        // The household picks the decision model that routes (Kev / Jev) and
+        // turns compare mode on or off — stored in the registry, live.
+        .route(
+            "/v1/gateway/admin/router/settings",
+            post(admin::router_settings),
+        )
         .route("/v1/gateway/admin/history", get(admin::history))
         .route("/v1/gateway/admin/activity", get(admin::activity))
         .route(

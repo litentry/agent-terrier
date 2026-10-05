@@ -545,6 +545,7 @@ dependencies = [
  "aes",
  "agentkeys-backend-client",
  "agentkeys-core",
+ "agentkeys-inference-creds",
  "agentkeys-protocol",
  "agentkeys-worker-creds",
  "anyhow",

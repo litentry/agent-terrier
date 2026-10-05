@@ -1,8 +1,8 @@
 //! Household channels — the router eval: labeled household messages through
 //! the contact gate's OWN option rendering, request builder and decision
 //! (`jev::channel_options` + `jev::build_request` + `jev::verdict_from`),
-//! over channel documents exactly as the gate reads them, against any System
-//! One server — Kev, the hosted Jev, or the model gate.
+//! over channel documents exactly as the gate reads them, against one or more
+//! decision models — Kev, the hosted Jev, or both through the model gate.
 //!
 //! Every case without a last channel is also asked with a WRONG last channel
 //! (one of the sender's that is not a right answer): a new request must not
@@ -10,42 +10,58 @@
 //! channel — or, on a shared channel, to a wrong app — at the chosen
 //! thresholds; the grid shows the other thresholds from the same answers.
 //!
+//! Two or more `--model`s compare them on the same requests, asked one after
+//! the other for each case (so both see the same network minute): wrong
+//! routes, routed right, round trip, tokens, and every case they disagree on.
+//!
+//! Each model goes to its provider's server with that provider's key, resolved
+//! by the inference families the model gate reads (`kev-*`: `KEV_BASE_URL` +
+//! `KEV_API_KEY`; `jev-*`: `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` optional) —
+//! unless `--endpoint` names one server for every model (a Kev tunnel, or the
+//! model gate with its `gk_` relay key, which sends each model to its provider).
+//!
 //! ```text
+//! cargo run -p agentkeys-worker-channel-weixin --bin router-eval -- \
+//!     --model kev-9b@2629c06 --model jev-1.13.0
 //! cargo run -p agentkeys-worker-channel-weixin --bin router-eval -- \
 //!     --endpoint http://127.0.0.1:8009 --model kev-9b
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use agentkeys_inference_creds::Resolver;
 use agentkeys_protocol::{
-    ChannelApp, ChannelDoc, Contact, ContactRegistry, ContactTier, PresetSummary,
-    SystemOneResponse, JEV_PINNED_MODEL,
+    ChannelApp, ChannelDoc, Contact, ContactRegistry, ContactTier, DecisionProvider, PresetSummary,
+    SystemOneRequest, SystemOneResponse, JEV_PINNED_MODEL,
 };
 use agentkeys_worker_channel_weixin::jev::{
-    self, ChannelOption, JevClient, JevVerdict, RouterConfig,
+    self, ChannelOption, JevClient, JevError, JevVerdict, RouterConfig,
 };
 use anyhow::{bail, Context};
 use clap::Parser;
 use serde::Deserialize;
 
 #[derive(Parser)]
-#[command(about = "household channels router eval against a System One server")]
+#[command(about = "household channels router eval against one or more System One models")]
 struct Args {
-    /// The System One server base (`/v1/systemone` is appended).
-    #[arg(long, default_value = "http://127.0.0.1:8009")]
-    endpoint: String,
-    /// Bearer for the server (Kev behind an SSH tunnel accepts any).
+    /// One System One server for every model (`/v1/systemone` is appended):
+    /// a Kev tunnel, or the model gate. Unset = each model's own provider.
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Bearer for `--endpoint` (a Kev tunnel accepts any; the model gate takes
+    /// a `gk_` relay key). Never sent to a provider resolved from the families.
     #[arg(
         long,
-        env = "TYPESAFE_API_KEY",
+        env = "ROUTER_EVAL_ENDPOINT_KEY",
         default_value = "local",
         hide_env_values = true
     )]
     key: String,
-    #[arg(long, default_value = JEV_PINNED_MODEL)]
-    model: String,
+    /// The model to ask; repeat it (or comma-separate) to compare models.
+    #[arg(long = "model", value_delimiter = ',', default_value = JEV_PINNED_MODEL)]
+    models: Vec<String>,
     #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/eval/router-cases.json"))]
     cases: PathBuf,
     #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../presets"))]
@@ -99,10 +115,14 @@ struct Case {
     ok: BTreeSet<String>,
 }
 
-struct Asked {
+/// One request the eval asks every model: a case, with its real or wrong
+/// previous channel.
+struct Question {
     id: String,
     split: String,
     message: String,
+    sender: String,
+    sender_tier: String,
     options: Vec<ChannelOption>,
     /// The channels' default apps, by id (what an unaddressed pick goes to).
     defaults: BTreeMap<String, Option<String>>,
@@ -111,7 +131,24 @@ struct Asked {
     last_app: Option<String>,
     ok: BTreeSet<String>,
     counterfactual: bool,
+}
+
+struct Asked<'a> {
+    q: &'a Question,
     resp: SystemOneResponse,
+}
+
+/// One model's run over every question.
+struct Run<'a> {
+    model: String,
+    server: String,
+    client: JevClient,
+    answered_by: String,
+    asked: Vec<Asked<'a>>,
+    latencies_ms: Vec<u128>,
+    input_tokens: u64,
+    output_tokens: u64,
+    retries: u32,
 }
 
 #[derive(Default)]
@@ -193,123 +230,13 @@ fn registry_for(
     Ok(reg)
 }
 
-/// What the verdict amounts to: the channel and the app addressed there.
-fn outcome(a: &Asked, verdict: &JevVerdict) -> Option<(String, Option<String>)> {
-    match verdict {
-        JevVerdict::Route {
-            channel,
-            addressee: named,
-            follow_up,
-            ..
-        } => {
-            let option = a.options.iter().find(|o| &o.id == channel)?;
-            let previous = follow_up
-                .then(|| a.last_app.clone())
-                .flatten()
-                .filter(|p| option.apps.iter().any(|x| x.alias.eq_ignore_ascii_case(p)));
-            let addressee = if option.apps.len() >= 2 {
-                previous
-                    .or_else(|| named.clone())
-                    .or_else(|| a.defaults.get(channel).cloned().flatten())
-            } else {
-                option.apps.first().map(|x| x.alias.clone())
-            };
-            Some((channel.clone(), addressee))
-        }
-        JevVerdict::Ask { .. } => Some((jev::UNCLEAR_OPTION.to_string(), None)),
-        JevVerdict::Malformed(_) => None,
-    }
-}
-
-/// Whether `(channel, addressee)` is one of the case's right outcomes: an
-/// `ok` entry `x` matches the channel alone, `x/app` needs the app too.
-fn is_ok(ok: &BTreeSet<String>, channel: &str, addressee: Option<&str>) -> bool {
-    ok.iter().any(|o| match o.split_once('/') {
-        Some((ch, app)) => ch == channel && addressee == Some(app),
-        None => o == channel,
-    })
-}
-
-fn score(asked: &[Asked], split: &str, threshold: f64, continue_threshold: f64) -> Score {
-    let mut s = Score::default();
-    for a in asked.iter().filter(|a| a.split == split) {
-        let keys = jev::option_keys(&a.options);
-        let verdict = jev::verdict_from(
-            &a.resp,
-            &keys,
-            threshold,
-            a.last.as_deref(),
-            continue_threshold,
-        );
-        let Some((channel, addressee)) = outcome(a, &verdict) else {
-            s.malformed += 1;
-            continue;
-        };
-        let routed = channel != jev::UNCLEAR_OPTION;
-        let got = match addressee.as_deref() {
-            Some(app) if routed => format!("{channel}/{app}"),
-            _ => channel.clone(),
-        };
-        let right = is_ok(&a.ok, &channel, addressee.as_deref());
-        let label = format!(
-            "{}{} «{}»{} → {got}",
-            a.id,
-            if a.counterfactual { "*" } else { "" },
-            a.message,
-            a.last
-                .as_deref()
-                .map(|l| format!(" after {l}"))
-                .unwrap_or_default()
-        );
-        if routed && !right {
-            if a.counterfactual {
-                s.wrong_counterfactual += 1;
-            } else {
-                s.wrong_new += 1;
-            }
-            s.wrong.push(label.clone());
-        }
-        if a.counterfactual {
-            continue;
-        }
-        if a.ok.iter().any(|o| o != jev::UNCLEAR_OPTION) {
-            s.coverable += 1;
-            if routed && right {
-                s.covered += 1;
-            } else if !routed && !a.ok.contains(jev::UNCLEAR_OPTION) {
-                s.asked_instead.push(label.clone());
-            }
-        }
-        if a.last.is_some() {
-            s.after += 1;
-            s.after_right += usize::from(right);
-        }
-    }
-    s
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    let file: CaseFile = serde_json::from_str(
-        &std::fs::read_to_string(&args.cases)
-            .with_context(|| format!("read {}", args.cases.display()))?,
-    )?;
-    let splits: Vec<&str> = match args.split.as_str() {
-        "all" => vec!["dev", "test"],
-        "dev" => vec!["dev"],
-        "test" => vec!["test"],
-        other => bail!("--split must be dev, test or all (got `{other}`)"),
-    };
+/// Every request the eval asks, in case order.
+fn questions_for(file: &CaseFile, args: &Args, splits: &[&str]) -> anyhow::Result<Vec<Question>> {
     let mut registries: BTreeMap<String, ContactRegistry> = BTreeMap::new();
     for (name, h) in &file.households {
         registries.insert(name.clone(), registry_for(h, &args.presets, &file.apps)?);
     }
-
-    let client = JevClient::new(&args.endpoint, &args.key, 60_000);
-    let mut asked = Vec::new();
-    let mut latencies_ms = Vec::new();
-    let mut server_model = String::new();
+    let mut out = Vec::new();
     for case in file
         .cases
         .iter()
@@ -356,25 +283,12 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         for (last, counterfactual) in variants {
-            let req = jev::build_request(
-                &args.model,
-                &case.message,
-                &sender.display_name,
-                sender.tier.as_str(),
-                last.as_deref(),
-                &options,
-            );
-            let started = Instant::now();
-            let resp = client
-                .decide(&req)
-                .await
-                .map_err(|e| anyhow::anyhow!("{}: {e}", case.id))?;
-            latencies_ms.push(started.elapsed().as_millis());
-            server_model.clone_from(&resp.model);
-            asked.push(Asked {
+            out.push(Question {
                 id: case.id.clone(),
                 split: case.split.clone(),
                 message: case.message.clone(),
+                sender: sender.display_name.clone(),
+                sender_tier: sender.tier.as_str().to_string(),
                 options: options.clone(),
                 defaults: defaults.clone(),
                 last_app: if counterfactual {
@@ -385,26 +299,198 @@ async fn main() -> anyhow::Result<()> {
                 last,
                 ok: case.ok.clone(),
                 counterfactual,
-                resp,
             });
         }
     }
+    Ok(out)
+}
 
-    latencies_ms.sort_unstable();
+/// Where a model is asked and with which bearer: `--endpoint` for every model,
+/// else the model's provider resolved from its inference family.
+fn target_for(model: &str, args: &Args, families: &Resolver) -> anyhow::Result<(String, String)> {
+    if let Some(endpoint) = &args.endpoint {
+        return Ok((endpoint.clone(), args.key.clone()));
+    }
+    let provider = DecisionProvider::of_model(model).with_context(|| {
+        format!("model `{model}` names no provider (kev-* / jev-*) — pass --endpoint for it")
+    })?;
+    let creds = match provider {
+        DecisionProvider::Jev => families.typesafe(),
+        DecisionProvider::Kev => families.kev(),
+    }
+    .with_context(|| format!("no {} server for `{model}`", provider.label()))?;
+    Ok((creds.base_url, creds.api_key))
+}
+
+/// TypeSafe asks callers to retry a 429 or 529 with exponential backoff
+/// (<https://docs.typesafe.ai/api.md>); a dropped connection or a gateway 5xx
+/// is retried the same way. Returns the answer, the successful attempt's
+/// round trip, and how many retries it took.
+async fn decide_with_retry(
+    client: &JevClient,
+    req: &SystemOneRequest,
+) -> Result<(SystemOneResponse, u128, u32), JevError> {
+    const MAX_RETRIES: u32 = 4;
+    let mut retries = 0;
+    loop {
+        let started = Instant::now();
+        match client.decide(req).await {
+            Ok(resp) => return Ok((resp, started.elapsed().as_millis(), retries)),
+            Err(e)
+                if retries < MAX_RETRIES
+                    && matches!(
+                        e,
+                        JevError::Transport(_) | JevError::Status(429 | 500 | 502 | 504 | 529, _)
+                    ) =>
+            {
+                retries += 1;
+                tokio::time::sleep(Duration::from_millis(1000 << (retries - 1))).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// What a model's answer amounts to: the channel and the app addressed there,
+/// `unclear` for an ask, `None` for an unusable answer.
+fn outcome(a: &Asked, threshold: f64, continue_threshold: f64) -> Option<(String, Option<String>)> {
+    let keys = jev::option_keys(&a.q.options);
+    let verdict = jev::verdict_from(
+        &a.resp,
+        &keys,
+        threshold,
+        a.q.last.as_deref(),
+        continue_threshold,
+    );
+    match verdict {
+        JevVerdict::Route {
+            channel,
+            addressee: named,
+            follow_up,
+            ..
+        } => {
+            let option = a.q.options.iter().find(|o| o.id == channel)?;
+            let previous = follow_up
+                .then(|| a.q.last_app.clone())
+                .flatten()
+                .filter(|p| option.apps.iter().any(|x| x.alias.eq_ignore_ascii_case(p)));
+            let addressee = if option.apps.len() >= 2 {
+                previous
+                    .or_else(|| named.clone())
+                    .or_else(|| a.q.defaults.get(&channel).cloned().flatten())
+            } else {
+                option.apps.first().map(|x| x.alias.clone())
+            };
+            Some((channel, addressee))
+        }
+        JevVerdict::Ask { .. } => Some((jev::UNCLEAR_OPTION.to_string(), None)),
+        JevVerdict::Malformed(_) => None,
+    }
+}
+
+/// Whether `(channel, addressee)` is one of the case's right outcomes: an
+/// `ok` entry `x` matches the channel alone, `x/app` needs the app too.
+fn is_ok(ok: &BTreeSet<String>, channel: &str, addressee: Option<&str>) -> bool {
+    ok.iter().any(|o| match o.split_once('/') {
+        Some((ch, app)) => ch == channel && addressee == Some(app),
+        None => o == channel,
+    })
+}
+
+/// The outcome as one word: `channel`, `channel/app`, `unclear` (asked) or
+/// `malformed`.
+fn outcome_label(o: &Option<(String, Option<String>)>) -> String {
+    match o {
+        None => "malformed".into(),
+        Some((channel, Some(app))) if channel != jev::UNCLEAR_OPTION => format!("{channel}/{app}"),
+        Some((channel, _)) => channel.clone(),
+    }
+}
+
+fn question_label(q: &Question) -> String {
+    format!(
+        "{}{} «{}»{}",
+        q.id,
+        if q.counterfactual { "*" } else { "" },
+        q.message,
+        q.last
+            .as_deref()
+            .map(|l| format!(" after {l}"))
+            .unwrap_or_default()
+    )
+}
+
+fn score(asked: &[Asked], split: &str, threshold: f64, continue_threshold: f64) -> Score {
+    let mut s = Score::default();
+    for a in asked.iter().filter(|a| a.q.split == split) {
+        let Some((channel, addressee)) = outcome(a, threshold, continue_threshold) else {
+            s.malformed += 1;
+            continue;
+        };
+        let routed = channel != jev::UNCLEAR_OPTION;
+        let got = outcome_label(&Some((channel.clone(), addressee.clone())));
+        let right = is_ok(&a.q.ok, &channel, addressee.as_deref());
+        let label = format!("{} → {got}", question_label(a.q));
+        if routed && !right {
+            if a.q.counterfactual {
+                s.wrong_counterfactual += 1;
+            } else {
+                s.wrong_new += 1;
+            }
+            s.wrong.push(label.clone());
+        }
+        if a.q.counterfactual {
+            continue;
+        }
+        if a.q.ok.iter().any(|o| o != jev::UNCLEAR_OPTION) {
+            s.coverable += 1;
+            if routed && right {
+                s.covered += 1;
+            } else if !routed && !a.q.ok.contains(jev::UNCLEAR_OPTION) {
+                s.asked_instead.push(label.clone());
+            }
+        }
+        if a.q.last.is_some() {
+            s.after += 1;
+            s.after_right += usize::from(right);
+        }
+    }
+    s
+}
+
+fn percent(n: usize, d: usize) -> f64 {
+    100.0 * n as f64 / d.max(1) as f64
+}
+
+fn quantile(sorted: &[u128], q: f64) -> u128 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let i = ((sorted.len() - 1) as f64 * q).round() as usize;
+    sorted[i.min(sorted.len() - 1)]
+}
+
+/// One model's report: the round trips, then per split the wrong routes, the
+/// right routes, and the threshold grid. Returns whether anything routed wrong.
+fn print_run(run: &Run, splits: &[&str], args: &Args) -> bool {
+    let mut sorted = run.latencies_ms.clone();
+    sorted.sort_unstable();
     println!(
-        "router eval · {} · model `{}` · {} requests · round trip median {} ms, max {} ms",
-        args.endpoint,
-        server_model,
-        asked.len(),
-        latencies_ms
-            .get(latencies_ms.len() / 2)
-            .copied()
-            .unwrap_or(0),
-        latencies_ms.last().copied().unwrap_or(0),
+        "router eval · {} · model `{}` · {} requests · round trip median {} ms, max {} ms{}",
+        run.server,
+        run.answered_by,
+        run.asked.len(),
+        quantile(&sorted, 0.5),
+        sorted.last().copied().unwrap_or(0),
+        if run.retries > 0 {
+            format!(" · {} retried", run.retries)
+        } else {
+            String::new()
+        }
     );
     let mut any_wrong = false;
-    for split in &splits {
-        let s = score(&asked, split, args.threshold, args.continue_threshold);
+    for split in splits {
+        let s = score(&run.asked, split, args.threshold, args.continue_threshold);
         any_wrong |= !s.wrong.is_empty();
         println!(
             "\n[{split}] threshold {} · follow-up {}: wrong routes {} (new requests {}, after a wrong last channel {}) · routed right {}/{} ({:.0}%) · right after a previous channel {}/{} · malformed {}",
@@ -415,7 +501,7 @@ async fn main() -> anyhow::Result<()> {
             s.wrong_counterfactual,
             s.covered,
             s.coverable,
-            100.0 * s.covered as f64 / s.coverable.max(1) as f64,
+            percent(s.covered, s.coverable),
             s.after_right,
             s.after,
             s.malformed,
@@ -431,16 +517,238 @@ async fn main() -> anyhow::Result<()> {
             let cells: Vec<String> = [0.6, 0.7, 0.8, 0.9]
                 .iter()
                 .map(|&hi| {
-                    let g = score(&asked, split, t, hi);
+                    let g = score(&run.asked, split, t, hi);
                     format!(
                         "follow-up {hi}: {:>2} / {:>3.0}%",
                         g.wrong.len(),
-                        100.0 * g.covered as f64 / g.coverable.max(1) as f64
+                        percent(g.covered, g.coverable)
                     )
                 })
                 .collect();
             println!("    threshold {t:<4}  {}", cells.join("   "));
         }
+    }
+    any_wrong
+}
+
+/// The models side by side on the same requests: per split the headline
+/// numbers, how often they reached the same outcome, and every case they
+/// did not.
+fn print_comparison(runs: &[Run], splits: &[&str], args: &Args) {
+    const LABEL: usize = 34;
+    let width = runs
+        .iter()
+        .map(|r| r.model.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(16)
+        + 2;
+    let row = |label: &str, cells: Vec<String>| {
+        let cells: Vec<String> = cells.iter().map(|c| format!("{c:>width$}")).collect();
+        println!("  {label:<LABEL$}{}", cells.join(""));
+    };
+    println!(
+        "\n══ comparison · threshold {} · follow-up {} ══",
+        args.threshold, args.continue_threshold
+    );
+    row("", runs.iter().map(|r| r.model.clone()).collect());
+    row(
+        "answered by",
+        runs.iter().map(|r| r.answered_by.clone()).collect(),
+    );
+    let sorted: Vec<Vec<u128>> = runs
+        .iter()
+        .map(|r| {
+            let mut v = r.latencies_ms.clone();
+            v.sort_unstable();
+            v
+        })
+        .collect();
+    row(
+        "round trip median / p90 (ms)",
+        sorted
+            .iter()
+            .map(|v| format!("{} / {}", quantile(v, 0.5), quantile(v, 0.9)))
+            .collect(),
+    );
+    row(
+        "tokens per request (in / out)",
+        runs.iter()
+            .map(|r| {
+                let n = r.asked.len().max(1) as u64;
+                format!("{} / {}", r.input_tokens / n, r.output_tokens / n)
+            })
+            .collect(),
+    );
+    for split in splits {
+        let scores: Vec<Score> = runs
+            .iter()
+            .map(|r| score(&r.asked, split, args.threshold, args.continue_threshold))
+            .collect();
+        println!("\n  [{split}]");
+        row(
+            "wrong routes",
+            scores.iter().map(|s| s.wrong.len().to_string()).collect(),
+        );
+        row(
+            "  on a new request / wrong last",
+            scores
+                .iter()
+                .map(|s| format!("{} / {}", s.wrong_new, s.wrong_counterfactual))
+                .collect(),
+        );
+        row(
+            "routed right",
+            scores
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}/{} ({:.0}%)",
+                        s.covered,
+                        s.coverable,
+                        percent(s.covered, s.coverable)
+                    )
+                })
+                .collect(),
+        );
+        row(
+            "asked where an answer was right",
+            scores
+                .iter()
+                .map(|s| s.asked_instead.len().to_string())
+                .collect(),
+        );
+        row(
+            "right after a previous channel",
+            scores
+                .iter()
+                .map(|s| format!("{}/{}", s.after_right, s.after))
+                .collect(),
+        );
+        row(
+            "malformed",
+            scores.iter().map(|s| s.malformed.to_string()).collect(),
+        );
+        // The same request, every model's outcome.
+        let n = runs[0].asked.len();
+        let (mut same, mut total) = (0usize, 0usize);
+        let mut differ: Vec<String> = Vec::new();
+        for i in (0..n).filter(|i| runs[0].asked[*i].q.split == *split) {
+            let outcomes: Vec<Option<(String, Option<String>)>> = runs
+                .iter()
+                .map(|r| outcome(&r.asked[i], args.threshold, args.continue_threshold))
+                .collect();
+            total += 1;
+            if outcomes.windows(2).all(|w| w[0] == w[1]) {
+                same += 1;
+                continue;
+            }
+            let q = runs[0].asked[i].q;
+            let cells: Vec<String> = runs
+                .iter()
+                .zip(&outcomes)
+                .map(|(r, o)| {
+                    let mark = match o {
+                        Some((ch, app)) if ch != jev::UNCLEAR_OPTION => {
+                            if is_ok(&q.ok, ch, app.as_deref()) {
+                                " ✓"
+                            } else {
+                                " ✗"
+                            }
+                        }
+                        _ => "",
+                    };
+                    format!("{}: {}{mark}", r.model, outcome_label(o))
+                })
+                .collect();
+            differ.push(format!("{} → {}", question_label(q), cells.join(" · ")));
+        }
+        println!(
+            "  same outcome on {same}/{total} requests ({:.0}%)",
+            percent(same, total)
+        );
+        for d in &differ {
+            println!("    differ  {d}");
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    let file: CaseFile = serde_json::from_str(
+        &std::fs::read_to_string(&args.cases)
+            .with_context(|| format!("read {}", args.cases.display()))?,
+    )?;
+    let splits: Vec<&str> = match args.split.as_str() {
+        "all" => vec!["dev", "test"],
+        "dev" => vec!["dev"],
+        "test" => vec!["test"],
+        other => bail!("--split must be dev, test or all (got `{other}`)"),
+    };
+    let mut models: Vec<String> = Vec::new();
+    for m in args
+        .models
+        .iter()
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+    {
+        if !models.iter().any(|x| x == m) {
+            models.push(m.to_string());
+        }
+    }
+    if models.is_empty() {
+        bail!("--model needs at least one model id");
+    }
+    let questions = questions_for(&file, &args, &splits)?;
+
+    let families = Resolver::from_process();
+    let mut runs: Vec<Run> = Vec::new();
+    for model in &models {
+        let (server, key) = target_for(model, &args, &families)?;
+        runs.push(Run {
+            model: model.clone(),
+            client: JevClient::new(&server, &key, 60_000),
+            server,
+            answered_by: String::new(),
+            asked: Vec::new(),
+            latencies_ms: Vec::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            retries: 0,
+        });
+    }
+    for q in &questions {
+        for run in runs.iter_mut() {
+            let req = jev::build_request(
+                &run.model,
+                &q.message,
+                &q.sender,
+                &q.sender_tier,
+                q.last.as_deref(),
+                &q.options,
+            );
+            let (resp, took_ms, retries) = decide_with_retry(&run.client, &req)
+                .await
+                .map_err(|e| anyhow::anyhow!("{} · {}: {e}", run.model, q.id))?;
+            run.latencies_ms.push(took_ms);
+            run.retries += retries;
+            run.input_tokens += resp.usage.input_tokens;
+            run.output_tokens += resp.usage.output_tokens;
+            run.answered_by.clone_from(&resp.model);
+            run.asked.push(Asked { q, resp });
+        }
+    }
+
+    let mut any_wrong = false;
+    for (i, run) in runs.iter().enumerate() {
+        if i > 0 {
+            println!("\n────────────────────────────────────────────────────────────");
+        }
+        any_wrong |= print_run(run, &splits, &args);
+    }
+    if runs.len() > 1 {
+        print_comparison(&runs, &splits, &args);
     }
     if any_wrong {
         std::process::exit(1);

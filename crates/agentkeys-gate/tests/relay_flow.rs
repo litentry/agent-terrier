@@ -18,14 +18,16 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use agentkeys_gate::config::{GateConfig, RelayKey, UpstreamConfig};
+use agentkeys_gate::config::{DecisionUpstreams, GateConfig, RelayKey, UpstreamConfig};
 use agentkeys_gate::relay::Relay;
 use agentkeys_gate::server;
-use agentkeys_inference_creds::TypesafeCreds;
+use agentkeys_inference_creds::SystemOneCreds;
 
 const UPSTREAM_KEY: &str = "ark-vendor-secret";
 /// #722 — the gate-held TypeSafe key (a different vendor than Ark).
 const TYPESAFE_KEY: &str = "ts-vendor-secret";
+/// The gate-held key of the self-hosted Kev server (a third credential).
+const KEV_KEY: &str = "kev-server-secret";
 const RELAY_KEY_1: &str = "gk_device_one";
 const RELAY_KEY_2: &str = "gk_device_two";
 
@@ -143,8 +145,9 @@ async fn upstream_embeddings(
     .into_response()
 }
 
-/// #722 — the mock TypeSafe endpoint: one Choice answer in the documented
-/// shape (API reference "Choice answer") + the input/output token usage.
+/// #722 — the mock System One endpoint (TypeSafe, or a Kev server): one
+/// Choice answer in the documented shape (API reference "Choice answer") + the
+/// input/output token usage, answered as the model it was asked for.
 async fn upstream_systemone(
     State(state): State<UpstreamState>,
     headers: HeaderMap,
@@ -166,7 +169,7 @@ async fn upstream_systemone(
         .and_then(|q| q.keys().next().cloned())
         .unwrap_or_else(|| "q".to_string());
     Json(json!({
-        "model": "jev-1.13.0",
+        "model": body.get("model").cloned().unwrap_or_default(),
         "answers": {
             first_question: {
                 "type": "choice",
@@ -191,6 +194,9 @@ async fn spawn_upstream() -> (SocketAddr, UpstreamState) {
         .route("/v1/embeddings/multimodal", post(upstream_embeddings))
         .route("/v1/systemone", post(upstream_systemone))
         .route("/v1/models", get(upstream_models))
+        // The real Kev server sits under a path prefix (`…/kev/v1/…`).
+        .route("/kev/v1/systemone", post(upstream_systemone))
+        .route("/kev/v1/models", get(upstream_models))
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -247,11 +253,14 @@ fn relay_keys() -> Vec<RelayKey> {
 struct TestGate {
     base: String,
     upstream: UpstreamState,
+    /// The Kev server (its own host and key).
+    kev: UpstreamState,
     audit: AuditState,
 }
 
 async fn spawn_gate(budget: Option<u64>) -> TestGate {
     let (up_addr, upstream) = spawn_upstream().await;
+    let (kev_addr, kev) = spawn_upstream().await;
     let (audit_addr, audit) = spawn_audit().await;
     let config = GateConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -272,11 +281,18 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
         speech_asr: None,
         speech_tts: None,
         search: None,
-        // #722 — the mock upstream doubles as TypeSafe (same host, own key).
-        systemone: Some(TypesafeCreds {
-            api_key: TYPESAFE_KEY.into(),
-            base_url: format!("http://{up_addr}"),
-        }),
+        // #722 — the mock upstream doubles as TypeSafe (same host, own key);
+        // Kev is a second server with a third key.
+        decision: DecisionUpstreams {
+            jev: Some(SystemOneCreds {
+                api_key: TYPESAFE_KEY.into(),
+                base_url: format!("http://{up_addr}"),
+            }),
+            kev: Some(SystemOneCreds {
+                api_key: KEV_KEY.into(),
+                base_url: format!("http://{kev_addr}/kev"),
+            }),
+        },
     };
     let relay = Arc::new(Relay::new(config));
     let app = server::router(relay);
@@ -286,6 +302,7 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
     TestGate {
         base: format!("http://{addr}"),
         upstream,
+        kev,
         audit,
     }
 }
@@ -1014,7 +1031,7 @@ async fn search_call_pins_engines_maps_results_and_audits() {
             base_url: format!("http://{searx_addr}"),
             engines: "bing".into(),
         }),
-        systemone: None,
+        decision: DecisionUpstreams::default(),
     };
     let relay = Arc::new(Relay::new(config));
     let app = server::router(relay);
@@ -1151,10 +1168,10 @@ async fn systemone_call_custody_metering_audit() {
     );
 }
 
-/// #722 — the router view's model card: the gate names the System One server
-/// and relays its `/v1/models` to a live relay key; the vendor key stays here.
+/// #722 — the router view's model cards: the gate names each provider's
+/// server and relays its `/v1/models` to a live relay key; the keys stay here.
 #[tokio::test]
-async fn systemone_models_names_the_server_for_a_relay_key() {
+async fn systemone_models_names_each_providers_server_for_a_relay_key() {
     let gate = spawn_gate(None).await;
     let client = reqwest::Client::new();
     let resp = client
@@ -1165,15 +1182,23 @@ async fn systemone_models_names_the_server_for_a_relay_key() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], 200, "{body}");
-    assert!(
-        body["base_url"]
-            .as_str()
-            .is_some_and(|u| u.starts_with("http://127.0.0.1:")),
-        "{body}"
-    );
-    assert!(body["models"]["data"].is_array(), "{body}");
-    assert!(!body.to_string().contains(TYPESAFE_KEY));
+    for provider in ["jev", "kev"] {
+        let p = &body["providers"][provider];
+        assert_eq!(p["configured"], true, "{body}");
+        assert_eq!(p["status"], 200, "{body}");
+        assert!(
+            p["base_url"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("http://127.0.0.1:")),
+            "{body}"
+        );
+        assert!(p["models"]["data"].is_array(), "{body}");
+    }
+    assert!(body["providers"]["kev"]["base_url"]
+        .as_str()
+        .is_some_and(|u| u.ends_with("/kev")));
+    let raw = body.to_string();
+    assert!(!raw.contains(TYPESAFE_KEY) && !raw.contains(KEV_KEY));
     let seen = gate.upstream.requests.lock().unwrap().clone();
     assert!(seen.is_empty(), "a models read is not a metered decision");
     let status = client
@@ -1189,7 +1214,7 @@ async fn systemone_models_names_the_server_for_a_relay_key() {
 
 /// No typesafe family → 503, loud, and the vendor is never contacted (the
 /// contact gate's router reads this as "gate down" and runs its deterministic
-/// tier).
+/// tier). The models report still lists both providers, saying what is missing.
 #[tokio::test]
 async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
     let (up_addr, upstream) = spawn_upstream().await;
@@ -1212,7 +1237,7 @@ async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
         speech_asr: None,
         speech_tts: None,
         search: None,
-        systemone: None,
+        decision: DecisionUpstreams::default(),
     };
     let relay = Arc::new(Relay::new(config));
     let app = server::router(relay);
@@ -1220,7 +1245,8 @@ async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let resp = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let resp = client
         .post(format!("http://{addr}/v1/systemone"))
         .bearer_auth(RELAY_KEY_1)
         .json(&systemone_body())
@@ -1229,6 +1255,179 @@ async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 503);
     assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+    let report: Value = client
+        .get(format!("http://{addr}/v1/systemone/models"))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for (provider, family) in [("jev", "typesafe"), ("kev", "kev")] {
+        let p = &report["providers"][provider];
+        assert_eq!(p["configured"], false, "{report}");
+        assert!(
+            p["error"]
+                .as_str()
+                .is_some_and(|e| e.contains(&format!("rotate-inference-cred.sh {family}"))),
+            "{report}"
+        );
+    }
+}
+
+/// #722 — two providers behind one route: a `kev-*` model goes to the Kev
+/// server with Kev's key, a `jev-*` model to TypeSafe with TypeSafe's — each
+/// key reaches only its own server, and both decisions meter and audit alike.
+#[tokio::test]
+async fn systemone_sends_each_model_to_its_providers_server_with_its_key() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let mut kev_body = systemone_body();
+    kev_body["model"] = json!("kev-9b@2629c06");
+    let resp = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&kev_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["model"], "kev-9b@2629c06");
+    let resp = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let kev_seen = gate.kev.requests.lock().unwrap().clone();
+    assert_eq!(kev_seen.len(), 1, "only the kev-* decision reached Kev");
+    assert_eq!(
+        kev_seen[0].0.as_deref(),
+        Some(&format!("Bearer {KEV_KEY}")[..])
+    );
+    assert_eq!(kev_seen[0].1["model"], "kev-9b@2629c06");
+    let jev_seen = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(
+        jev_seen.len(),
+        1,
+        "only the jev-* decision reached TypeSafe"
+    );
+    assert_eq!(
+        jev_seen[0].0.as_deref(),
+        Some(&format!("Bearer {TYPESAFE_KEY}")[..])
+    );
+
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["totals"]["decide_turns"], 2);
+    wait_for(
+        || gate.audit.envelopes.lock().unwrap().len() >= 2,
+        "two GateDecide rows",
+    )
+    .await;
+    let models: Vec<Value> = gate
+        .audit
+        .envelopes
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e["op_body"]["model"].clone())
+        .collect();
+    assert!(models.contains(&json!("kev-9b@2629c06")), "{models:?}");
+    assert!(models.contains(&json!("jev-1.13.0")), "{models:?}");
+}
+
+/// A model no provider owns is refused before any egress (never guessed onto
+/// a server), and a provider this gate holds no key for is a 503 — even when
+/// the other provider is armed.
+#[tokio::test]
+async fn systemone_refuses_an_unknown_model_and_503s_an_unarmed_provider() {
+    let (up_addr, upstream) = spawn_upstream().await;
+    let config = GateConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        upstream: UpstreamConfig {
+            base_url: format!("http://{up_addr}/v1"),
+            api_key: UPSTREAM_KEY.into(),
+            model_override: None,
+            default_model: None,
+        },
+        keys: relay_keys(),
+        user_budgets: Default::default(),
+        default_budget_tokens: None,
+        admin_token: None,
+        keys_file: None,
+        audit_url: None,
+        require_audit: false,
+        aws_region: "us-east-1".into(),
+        speech_asr: None,
+        speech_tts: None,
+        search: None,
+        decision: DecisionUpstreams {
+            jev: Some(SystemOneCreds {
+                api_key: TYPESAFE_KEY.into(),
+                base_url: format!("http://{up_addr}"),
+            }),
+            kev: None,
+        },
+    };
+    let relay = Arc::new(Relay::new(config));
+    let app = server::router(relay);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+
+    let mut unknown = systemone_body();
+    unknown["model"] = json!("gpt-4o");
+    let resp = client
+        .post(format!("http://{addr}/v1/systemone"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&unknown)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    let mut kev = systemone_body();
+    kev["model"] = json!("kev-9b");
+    let resp = client
+        .post(format!("http://{addr}/v1/systemone"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&kev)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body.to_string().contains("`kev` inference family"),
+        "{body}"
+    );
+    assert_eq!(
+        upstream.calls.load(Ordering::SeqCst),
+        0,
+        "nothing left the gate"
+    );
+    // The armed provider still answers.
+    let resp = client
+        .post(format!("http://{addr}/v1/systemone"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
 }
 
 /// A body that is not the shared SystemOneRequest shape is refused here

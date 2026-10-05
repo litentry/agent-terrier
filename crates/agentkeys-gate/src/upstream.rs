@@ -10,6 +10,10 @@ use crate::error::{GateError, GateResult};
 /// The upstream paths the relay calls — also the `route` its refusal logs name.
 pub const CHAT_PATH: &str = "/chat/completions";
 
+/// How long one provider's `/v1/models` may take inside the models report
+/// (the contact gate gives the whole report 3 s).
+pub const SYSTEMONE_MODELS_TIMEOUT_MS: u64 = 2500;
+
 pub fn embeddings_path(multimodal: bool) -> &'static str {
     if multimodal {
         "/embeddings/multimodal"
@@ -89,10 +93,11 @@ impl UpstreamClient {
             .map_err(|e| GateError::Upstream(format!("search upstream transport: {e}")))
     }
 
-    /// #722 — POST a System One request to TypeSafe (`<base>/v1/systemone`).
-    /// The gate-held TypeSafe key rides here; the caller only ever presented
-    /// its `gk_` relay key. No retry, no fallback — the caller (the contact
-    /// gate's router) owns the deterministic fallback.
+    /// #722 — POST a System One request to a decision-model provider
+    /// (`<base>/v1/systemone` — TypeSafe for Jev, the Kev server for Kev). The
+    /// gate-held provider key rides here; the caller only ever presented its
+    /// `gk_` relay key. No retry, no fallback — the caller (the contact gate's
+    /// router) owns the deterministic fallback.
     pub async fn systemone_post(
         client: &reqwest::Client,
         base_url: &str,
@@ -112,8 +117,9 @@ impl UpstreamClient {
             .map_err(|e| GateError::Upstream(format!("systemone upstream transport: {e}")))
     }
 
-    /// #722 — GET `<base>/v1/models` on the System One server: Kev reports its
-    /// revision and sampling temperature there. The gate-held key rides here.
+    /// #722 — GET `<base>/v1/models` on a System One server: Kev reports its
+    /// revision and sampling temperature there, TypeSafe its model aliases.
+    /// The gate-held key rides here. Bounded: a report, never a turn.
     pub async fn systemone_models_get(
         client: &reqwest::Client,
         base_url: &str,
@@ -121,6 +127,9 @@ impl UpstreamClient {
     ) -> GateResult<reqwest::Response> {
         client
             .get(format!("{}/v1/models", base_url.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_millis(
+                SYSTEMONE_MODELS_TIMEOUT_MS,
+            ))
             .bearer_auth(api_key)
             .send()
             .await

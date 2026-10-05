@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use agentkeys_protocol::{BindInvite, Contact, ContactRegistry, ContactTier};
+use agentkeys_protocol::{BindInvite, Contact, ContactRegistry, ContactTier, RouterSettings};
 use agentkeys_worker_channel_weixin::{
     handlers, WeixinGatewayConfig, WeixinGatewayState, WeixinTransport,
 };
@@ -87,6 +87,13 @@ fn seeded_registry() -> ContactRegistry {
             legacy_reach: vec![],
         }],
         channels: vec![],
+        // The household's decision-model choice rides the registry, so it is
+        // as durable as the contacts.
+        router: Some(RouterSettings {
+            model: Some("jev-1.13.0".into()),
+            compare: true,
+            updated_at: 7,
+        }),
     }
 }
 
@@ -121,6 +128,7 @@ async fn export_is_admin_gated_and_returns_the_full_registry() {
     assert_eq!(exported.bound.len(), 1);
     assert_eq!(exported.bound[0].transport_id, "openid-grandma");
     assert_eq!(exported.invites.len(), 1);
+    assert_eq!(exported.router, seeded_registry().router);
     std::fs::remove_file(&registry_file).ok();
 }
 
@@ -149,6 +157,11 @@ async fn import_restores_an_empty_gateway_and_refuses_a_live_one() {
     let on_disk: ContactRegistry =
         serde_json::from_str(&std::fs::read_to_string(&registry_file).unwrap()).unwrap();
     assert_eq!(on_disk.bound[0].contact_id, "c-grandma");
+    assert_eq!(
+        on_disk.router.and_then(|r| r.model).as_deref(),
+        Some("jev-1.13.0"),
+        "the restored household keeps its decision model"
+    );
 
     // The gateway now has live contacts — a second import must 409 (never
     // silently clobber) unless force:true.

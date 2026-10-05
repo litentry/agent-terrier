@@ -9,6 +9,7 @@
 //! member's channel in and skips the router (see [`crate::transport`]). The
 //! L3 / registry / router / audit machinery never forks per transport.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha3::{Digest, Keccak256};
@@ -16,7 +17,7 @@ use sha3::{Digest, Keccak256};
 use agentkeys_core::audit::{envelope_for, AuditOpKind, AuditResult};
 use agentkeys_protocol::{
     parse_alias, ChannelDirection, ChannelEvent, ChannelEventKind, ChannelProducer, ContactStamp,
-    GatewayInbound, L3Decision,
+    GatewayInbound, L3Decision, SystemOneRequest,
 };
 
 use crate::jev::{self, ChannelOption, JevVerdict};
@@ -279,9 +280,11 @@ pub struct RouterTrace {
 }
 
 /// #722 — one model-consulting turn as the router view shows it; the turn's end
-/// fills in `total_ms` and `delivered`.
+/// fills in `total_ms` and `delivered`, compare mode adds the other models'
+/// answers under `id`.
 #[allow(clippy::too_many_arguments)]
 fn router_exchange(
+    id: u64,
     c: &agentkeys_protocol::Contact,
     text: &str,
     photo: bool,
@@ -295,6 +298,7 @@ fn router_exchange(
     error: Option<String>,
 ) -> agentkeys_protocol::RouterExchange {
     agentkeys_protocol::RouterExchange {
+        id,
         ts_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -317,10 +321,55 @@ fn router_exchange(
         answered_by: resp.map(|r| r.model.clone()).unwrap_or_default(),
         describe_ms,
         decide_ms: Some(decide_ms),
+        input_tokens: resp.map(|r| r.usage.input_tokens),
+        output_tokens: resp.map(|r| r.usage.output_tokens),
         total_ms: 0,
         delivered: false,
         error,
+        compared: Vec::new(),
     }
+}
+
+/// Compare mode: ask `model` the turn's request off the turn's path and file
+/// what the router would have done on its answer under the turn's number —
+/// the member's reply never waits for it, and nothing routes on it.
+#[allow(clippy::too_many_arguments)]
+fn spawn_comparison(
+    client: &Arc<jev::JevClient>,
+    log: &Arc<crate::state::RouterLog>,
+    id: u64,
+    req: &SystemOneRequest,
+    model: &str,
+    keys: &[jev::OptionKey],
+    cfg: &jev::RouterConfig,
+    last_channel: Option<&str>,
+) {
+    let client = Arc::clone(client);
+    let log = Arc::clone(log);
+    let req = SystemOneRequest {
+        model: model.to_string(),
+        ..req.clone()
+    };
+    let keys = keys.to_vec();
+    let (threshold, continue_threshold) = (cfg.threshold, cfg.continue_threshold);
+    let last = last_channel.map(str::to_string);
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let result = client.decide(&req).await;
+        let decide_ms = started.elapsed().as_millis() as u64;
+        log.attach(
+            id,
+            jev::comparison_answer(
+                &req.model,
+                &result,
+                &keys,
+                threshold,
+                last.as_deref(),
+                continue_threshold,
+                decide_ms,
+            ),
+        );
+    });
 }
 
 impl RouterTrace {
@@ -611,8 +660,11 @@ pub async fn process_turn(
                         .then(|| state.device.last_channel(transport, transport_id))
                         .flatten()
                         .filter(|l| turn_options.iter().any(|o| &o.id == l));
+                    // The household's pick routes (else the stack's default);
+                    // compare mode asks every other offered model too.
+                    let active = jev::active_models(&state.config.router, registry.router.as_ref());
                     let req = jev::build_request(
-                        &state.config.router.model,
+                        &active.model,
                         &routing_text,
                         &c.display_name,
                         c.tier.as_str(),
@@ -620,6 +672,19 @@ pub async fn process_turn(
                         &turn_options,
                     );
                     let option_keys = jev::option_keys(&turn_options);
+                    let exchange_id = state.router_log.next_id();
+                    for other in &active.compare {
+                        spawn_comparison(
+                            client,
+                            &state.router_log,
+                            exchange_id,
+                            &req,
+                            other,
+                            &option_keys,
+                            &state.config.router,
+                            last.as_deref(),
+                        );
+                    }
                     let decide_started = std::time::Instant::now();
                     let decided = client.decide(&req).await;
                     let decide_ms = decide_started.elapsed().as_millis() as u64;
@@ -630,6 +695,7 @@ pub async fn process_turn(
                                to_app: Option<&str>,
                                error: Option<String>| {
                         router_exchange(
+                            exchange_id,
                             c,
                             &routing_text,
                             photo,
@@ -736,8 +802,7 @@ pub async fn process_turn(
                                 contact = %c.contact_id,
                                 "#722 the model gate has no decision model yet (503) — the deterministic tier runs"
                             );
-                            let trace =
-                                RouterTrace::fallback(&state.config.router.model, "unavailable");
+                            let trace = RouterTrace::fallback(&active.model, "unavailable");
                             exchange = Some(log(
                                 None,
                                 &trace,
@@ -753,8 +818,7 @@ pub async fn process_turn(
                                 error = %e,
                                 "#722 the model gate did not answer — the deterministic tier runs"
                             );
-                            let trace =
-                                RouterTrace::fallback(&state.config.router.model, "unavailable");
+                            let trace = RouterTrace::fallback(&active.model, "unavailable");
                             exchange = Some(log(None, &trace, None, None, Some(e.to_string())));
                             router_trace = Some(trace);
                         }

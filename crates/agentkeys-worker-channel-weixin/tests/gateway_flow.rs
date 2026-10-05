@@ -758,6 +758,9 @@ type CapturedDecisions = StdArc<Mutex<Vec<(Option<String>, serde_json::Value)>>>
 #[derive(Clone, Default)]
 struct MockGate {
     mode: StdArc<Mutex<String>>,
+    /// How a `kev-*` model answers when it differs from `mode` (the Kev
+    /// server of a two-model stack); `None` = like `mode`.
+    kev_mode: StdArc<Mutex<Option<String>>>,
     requests: CapturedDecisions,
     /// #722 — what the chat relay answers a photo description with (empty =
     /// the vision call fails), and the chat bodies it received.
@@ -803,8 +806,13 @@ async fn mock_systemone(
         .as_str()
         .unwrap_or_default()
         .to_string();
+    // Kev answers as whatever model it is sent; TypeSafe as the version.
+    let asked = body["model"].as_str().unwrap_or_default().to_string();
     gate.requests.lock().unwrap().push((auth, body));
-    let mode = gate.mode.lock().unwrap().clone();
+    let mode = match gate.kev_mode.lock().unwrap().clone() {
+        Some(kev) if asked.starts_with("kev-") => kev,
+        _ => gate.mode.lock().unwrap().clone(),
+    };
     let continues = if ["2", "好的"].contains(&message.as_str()) {
         0.9
     } else {
@@ -818,7 +826,7 @@ async fn mock_systemone(
             answers["continues"] = serde_json::json!({"type": "noul", "noul": continues});
         }
         serde_json::json!({
-            "model": "jev-1.13.0",
+            "model": asked,
             "answers": answers,
             "usage": {"input_tokens": 300, "output_tokens": 20}
         })
@@ -865,6 +873,15 @@ async fn spawn_with_mock_gate(mode: &str) -> (String, MockGate) {
 }
 
 async fn spawn_with_mock_gate_on(mode: &str, household: &str) -> (String, MockGate) {
+    spawn_with_mock_gate_offering(mode, household, &[]).await
+}
+
+/// `extra` = models offered besides the default (`jev-1.13.0`).
+async fn spawn_with_mock_gate_offering(
+    mode: &str,
+    household: &str,
+    extra: &[&str],
+) -> (String, MockGate) {
     let gate = MockGate {
         mode: StdArc::new(Mutex::new(mode.to_string())),
         ..Default::default()
@@ -875,9 +892,12 @@ async fn spawn_with_mock_gate_on(mode: &str, household: &str) -> (String, MockGa
             "/v1/systemone/models",
             axum::routing::get(|| async {
                 axum::Json(serde_json::json!({
-                    "base_url": "https://kev.test/kev",
-                    "status": 200,
-                    "models": {"data": [{"id": "kev-9b", "revision": "2629c06", "temperature": 2.3}]}
+                    "providers": {
+                        "kev": {"configured": true, "base_url": "https://kev.test/kev", "status": 200,
+                                "models": {"data": [{"id": "kev-9b", "revision": "2629c06", "temperature": 2.3}]}},
+                        "jev": {"configured": false,
+                                "error": "this gate holds no Jev key — arm the `typesafe` inference family"}
+                    }
                 }))
             }),
         )
@@ -889,11 +909,24 @@ async fn spawn_with_mock_gate_on(mode: &str, household: &str) -> (String, MockGa
 
     let mut cfg = config(write_registry_json(household));
     arm_feed_hop(&mut cfg, &spawn_stack().await.0);
+    let defaults = agentkeys_worker_channel_weixin::jev::RouterConfig::default();
+    let mut models = defaults.models.clone();
+    models.extend(extra.iter().map(|m| m.to_string()));
     cfg.router = agentkeys_worker_channel_weixin::jev::RouterConfig {
         gate_url: Some(format!("http://{gate_addr}")),
         gate_key: Some("gk_contact_gate_test".into()),
-        ..Default::default()
+        models,
+        ..defaults
     };
+    if !extra.is_empty() {
+        let dir = std::env::temp_dir().join(format!(
+            "wx-router-{}-{}",
+            std::process::id(),
+            gate_addr.port()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        cfg.activity_file = dir.join("activity.jsonl").to_string_lossy().to_string();
+    }
     let state = Arc::new(WeixinGatewayState::build(cfg).unwrap());
     let app = handlers::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -930,8 +963,18 @@ async fn the_router_view_shows_what_the_model_was_sent_and_how_it_answered() {
     assert!(view["guidance"]["addressee"]
         .as_str()
         .is_some_and(|g| g.contains("assistants")));
-    assert_eq!(view["upstream"]["base_url"], "https://kev.test/kev");
-    assert_eq!(view["upstream"]["models"]["data"][0]["revision"], "2629c06");
+    // One offered model (the default Jev): its card says what the model gate
+    // reports for its provider — here, that the Jev key is not armed.
+    assert_eq!(view["model"], "jev-1.13.0");
+    assert_eq!(view["default_model"], "jev-1.13.0");
+    assert_eq!(view["compare"], false);
+    assert_eq!(view["models"].as_array().unwrap().len(), 1);
+    assert_eq!(view["models"][0]["provider"], "jev");
+    assert_eq!(view["models"][0]["active"], true);
+    assert_eq!(view["models"][0]["server"]["configured"], false);
+    assert!(view["models"][0]["server"]["error"]
+        .as_str()
+        .is_some_and(|e| e.contains("typesafe")));
     // What the owner's messages are routed among: exactly the channels they
     // speak on, each rendered from its document.
     let owner = view["contacts"]
@@ -987,6 +1030,181 @@ async fn the_router_view_shows_what_the_model_was_sent_and_how_it_answered() {
     let decide = x["decide_ms"].as_u64().expect("decide_ms");
     assert!(x["total_ms"].as_u64().expect("total_ms") >= decide);
     assert_eq!(x["delivered"], true);
+    assert_eq!(x["input_tokens"], 300);
+    assert!(
+        x["compared"].as_array().unwrap().is_empty(),
+        "compare is off"
+    );
+}
+
+/// The household switches the router between the offered models from the
+/// console, and compare mode asks the other one the same request off the
+/// turn's path: the chosen model routes, the other's would-be verdict is
+/// recorded next to it, and the switch lands in the activity trail.
+#[tokio::test]
+async fn the_household_switches_the_decision_model_and_compare_mode_records_the_other() {
+    let (base, gate) =
+        spawn_with_mock_gate_offering("confident_chef", DEFAULT_HOUSEHOLD, &["kev-9b@2629c06"])
+            .await;
+    *gate.kev_mode.lock().unwrap() = Some("confident_door".into());
+    let c = reqwest::Client::new();
+    let settings = format!("{base}/v1/gateway/admin/router/settings");
+    let status = c
+        .post(&settings)
+        .json(&serde_json::json!({"model": "kev-9b@2629c06"}))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 401, "the switch is admin-only");
+    let refused = c
+        .post(&settings)
+        .bearer_auth("admin-secret")
+        .json(&serde_json::json!({"model": "gpt-4o"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status().as_u16(), 400);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["reason"], "model_not_offered");
+
+    let set: serde_json::Value = c
+        .post(&settings)
+        .bearer_auth("admin-secret")
+        .json(&serde_json::json!({"model": "kev-9b@2629c06", "compare": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(set["ok"], true, "{set}");
+    assert_eq!(set["model"], "kev-9b@2629c06");
+    assert_eq!(set["compare"], true);
+    assert_eq!(set["changed"], true);
+    let again: serde_json::Value = c
+        .post(&settings)
+        .bearer_auth("admin-secret")
+        .json(&serde_json::json!({"model": "kev-9b@2629c06"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["changed"], false, "{again}");
+
+    // The chosen model (Kev) routes the turn: it picks the door.
+    let (_, body) = post_msg(&base, "openid-owner", "今晚吃什么").await;
+    assert_eq!(body["decision"]["channel_id"], "door", "{body}");
+    assert_eq!(body["router"]["model"], "kev-9b@2629c06");
+
+    // Both models were asked the same request; each answered as itself.
+    let mut view = serde_json::Value::Null;
+    for _ in 0..50 {
+        view = c
+            .get(format!("{base}/v1/gateway/admin/router"))
+            .bearer_auth("admin-secret")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if view["recent"][0]["compared"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let seen = gate.requests.lock().unwrap().clone();
+    let asked: Vec<&str> = seen
+        .iter()
+        .map(|(_, b)| b["model"].as_str().unwrap())
+        .collect();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(asked.contains(&"kev-9b@2629c06") && asked.contains(&"jev-1.13.0"));
+    assert_eq!(
+        seen[0].1["questions"], seen[1].1["questions"],
+        "the same request"
+    );
+    assert_eq!(view["model"], "kev-9b@2629c06");
+    assert_eq!(view["default_model"], "jev-1.13.0");
+    assert_eq!(view["compare"], true);
+    assert!(view["chosen_at"].as_u64().is_some());
+    let cards: Vec<(&str, bool)> = view["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["model"].as_str().unwrap(), m["active"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(cards, vec![("jev-1.13.0", false), ("kev-9b@2629c06", true)]);
+    assert_eq!(
+        view["models"][1]["server"]["models"]["data"][0]["revision"],
+        "2629c06"
+    );
+    let x = &view["recent"][0];
+    assert_eq!(x["answered_by"], "kev-9b@2629c06");
+    assert_eq!(x["routed_to"], "door");
+    let other = &x["compared"][0];
+    assert_eq!(other["model"], "jev-1.13.0", "{x}");
+    assert_eq!(other["verdict"], "route");
+    assert_eq!(
+        other["routed_to"], "family-chat",
+        "Jev would have picked the family chat"
+    );
+    assert!(other["decide_ms"].as_u64().is_some());
+
+    // The switch is in the durable activity trail.
+    let activity: serde_json::Value = c
+        .get(format!("{base}/v1/gateway/admin/activity"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let events = activity["events"].as_array().unwrap();
+    assert!(
+        events.iter().any(|e| e["action"] == "router_model"
+            && e["detail"] == "jev-1.13.0 → kev-9b@2629c06 · compare on"),
+        "{activity}"
+    );
+
+    // Compare off: the next turn asks Kev alone, and the pick stays.
+    let off: serde_json::Value = c
+        .post(&settings)
+        .bearer_auth("admin-secret")
+        .json(&serde_json::json!({"compare": false}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(off["compare"], false);
+    assert_eq!(off["model"], "kev-9b@2629c06");
+    post_msg(&base, "openid-owner", "门口有人吗").await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gate.requests.lock().unwrap().len(), 3);
+    // A compare-only change names the model once.
+    let activity: serde_json::Value = c
+        .get(format!("{base}/v1/gateway/admin/activity"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        activity["events"][0]["detail"], "kev-9b@2629c06 · compare off",
+        "{activity}"
+    );
 }
 
 #[tokio::test]

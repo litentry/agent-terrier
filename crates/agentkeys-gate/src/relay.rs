@@ -25,11 +25,14 @@ use tokio_stream::wrappers::ReceiverStream;
 use agentkeys_core::audit::{
     GateDecideBody, GateEmbedBody, GateSearchBody, GateTurnBody, SpeechAsrBody, SpeechTtsBody,
 };
-use agentkeys_protocol::{SystemOneRequest, SystemOneResponse};
+use agentkeys_protocol::{
+    DecisionModelsReport, DecisionProvider, DecisionServerReport, SystemOneRequest,
+    SystemOneResponse,
+};
 use base64::Engine;
 
 use crate::audit::Auditor;
-use crate::config::{GateConfig, RelayKey};
+use crate::config::{DecisionUpstreams, GateConfig, RelayKey};
 use crate::error::{GateError, GateResult};
 use crate::meter::Meter;
 use crate::openai::{extract_usage, SseUsageScanner, UsageCounters};
@@ -54,8 +57,8 @@ pub struct Relay {
     /// #653 — transport for the SearXNG relay (its base/engines live in
     /// `config.search`; `None` config = the leg 503s).
     search_http: reqwest::Client,
-    /// #722 — transport for the System One (Jev) relay; the TypeSafe key and
-    /// base live in `config.systemone` (`None` config = the leg 503s).
+    /// #722 — transport for the System One relay; each provider's key and
+    /// server live in `config.decision` (an unconfigured provider 503s).
     decide_http: reqwest::Client,
     auditor: Option<Arc<Auditor>>,
     /// The standing ACCOUNT-scoped upstream refusal, if the latest answer was
@@ -469,39 +472,66 @@ impl Relay {
         }
     }
 
-    /// #722 — the System One (Jev) decision relay: the household router's typed
-    /// pick through the gate-held TypeSafe key. The body is the shared
-    /// [`SystemOneRequest`] (one owner, D7) — anything else is a 400 here, never
-    /// a vendor 422 the caller has to interpret. Same custody, budget gates and
-    /// status triage as chat/embeddings; the answer body is returned verbatim
-    /// (the caller parses the typed answers). Nothing from `state` (a family
-    /// member's message) is logged or audited — counts only.
-    /// #722 — the System One server the router's decisions go to: its base URL
-    /// and its own `/v1/models` answer (not metered — no tokens are spent).
-    pub async fn systemone_models(&self) -> GateResult<Value> {
-        let Some(ts) = self.config.systemone.clone() else {
-            return Err(GateError::NotConfigured(
-                "systemone relay not configured on this gate (typesafe inference family)".into(),
-            ));
-        };
-        let resp =
-            UpstreamClient::systemone_models_get(&self.decide_http, &ts.base_url, &ts.api_key)
-                .await?;
-        let status = resp.status().as_u16();
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        Ok(serde_json::json!({
-            "base_url": ts.base_url,
-            "status": status,
-            "models": body,
-        }))
+    /// #722 — every decision-model provider's server, for the router view:
+    /// whether this gate holds its key, its base URL and its own `/v1/models`
+    /// answer (not metered — no tokens are spent). Both servers are asked at
+    /// once, each within its own budget, so a slow one never hides the other.
+    pub async fn systemone_models(&self) -> DecisionModelsReport {
+        let reports = futures_util::future::join_all(DecisionProvider::ALL.into_iter().map(
+            |provider| async move {
+                let report = match self.config.decision.get(provider) {
+                    None => {
+                        let family = DecisionUpstreams::family(provider);
+                        DecisionServerReport {
+                            configured: false,
+                            error: Some(format!(
+                                "this gate holds no {} key — arm the `{family}` inference family \
+                                 (rotate-inference-cred.sh {family})",
+                                provider.label()
+                            )),
+                            ..Default::default()
+                        }
+                    }
+                    Some(creds) => match UpstreamClient::systemone_models_get(
+                        &self.decide_http,
+                        &creds.base_url,
+                        &creds.api_key,
+                    )
+                    .await
+                    {
+                        Ok(resp) => DecisionServerReport {
+                            configured: true,
+                            base_url: Some(creds.base_url.clone()),
+                            status: Some(resp.status().as_u16()),
+                            models: resp.json::<Value>().await.ok(),
+                            error: None,
+                        },
+                        Err(e) => DecisionServerReport {
+                            configured: true,
+                            base_url: Some(creds.base_url.clone()),
+                            error: Some(e.to_string()),
+                            ..Default::default()
+                        },
+                    },
+                };
+                (provider.id().to_string(), report)
+            },
+        ))
+        .await;
+        DecisionModelsReport {
+            providers: reports.into_iter().collect(),
+        }
     }
 
+    /// #722 — the System One decision relay: the household router's typed
+    /// pick through the gate-held key of the provider the `model` names (Jev
+    /// or Kev). The body is the shared [`SystemOneRequest`] (one owner, D7) —
+    /// anything else is a 400 here, never a vendor 422 the caller has to
+    /// interpret. Same custody, budget gates and status triage as
+    /// chat/embeddings; the answer body is returned verbatim (the caller parses
+    /// the typed answers). Nothing from `state` (a family member's message) is
+    /// logged or audited — counts only.
     pub async fn handle_systemone(&self, caller: &RelayKey, raw: &[u8]) -> GateResult<TurnOutput> {
-        let Some(ts) = self.config.systemone.clone() else {
-            return Err(GateError::NotConfigured(
-                "systemone relay not configured on this gate (typesafe inference family)".into(),
-            ));
-        };
         let req: SystemOneRequest = serde_json::from_slice(raw)
             .map_err(|e| GateError::BadRequest(format!("invalid systemone body: {e}")))?;
         if req.model.trim().is_empty() {
@@ -514,6 +544,20 @@ impl Relay {
                 "systemone body needs at least one question".into(),
             ));
         }
+        let Some(provider) = DecisionProvider::of_model(&req.model) else {
+            return Err(GateError::BadRequest(format!(
+                "model `{}` names no decision-model provider — `jev-*` goes to TypeSafe, \
+                 `kev-*` to the Kev server",
+                req.model
+            )));
+        };
+        let Some(ts) = self.config.decision.get(provider).cloned() else {
+            let family = DecisionUpstreams::family(provider);
+            return Err(GateError::NotConfigured(format!(
+                "the {} decision model is not configured on this gate (`{family}` inference family)",
+                provider.label()
+            )));
+        };
         let model = req.model.clone();
         let question_count = req.questions.len() as u64;
 
@@ -566,7 +610,7 @@ impl Relay {
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::error!(key = %caller.key_id, error = %e, "systemone upstream unreachable");
+                tracing::error!(key = %caller.key_id, provider = provider.id(), error = %e, "systemone upstream unreachable");
                 let row = Self::decide_body(
                     caller,
                     &model,
@@ -599,7 +643,7 @@ impl Relay {
             if (400..500).contains(&code) {
                 // 401/422/429 carry what the caller needs (a rate limit is the
                 // caller's cue to fall back); the vendor's body has no state echo.
-                tracing::warn!(key = %caller.key_id, status = code, "systemone upstream 4xx forwarded");
+                tracing::warn!(key = %caller.key_id, provider = provider.id(), status = code, "systemone upstream 4xx forwarded");
                 return Ok(TurnOutput::Full {
                     status: code,
                     content_type,
@@ -608,6 +652,7 @@ impl Relay {
             }
             tracing::error!(
                 key = %caller.key_id,
+                provider = provider.id(),
                 status = code,
                 body = %String::from_utf8_lossy(&upstream_body[..upstream_body.len().min(400)]),
                 "systemone upstream 5xx — operator-logged, safe envelope returned"

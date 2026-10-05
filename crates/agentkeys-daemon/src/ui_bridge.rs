@@ -1537,6 +1537,12 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/master/gateway/monitor", get(gateway_monitor_proxy))
         // #722 — the Route page: what the router sends the decision model.
         .route("/v1/master/gateway/router", get(gateway_router_proxy))
+        // The household's pick of decision model (Kev / Jev) + compare mode:
+        // stored in the gate's registry, so it syncs to the Config doc.
+        .route(
+            "/v1/master/gateway/router/settings",
+            post(gateway_router_settings_proxy),
+        )
         // Household channels — the channel documents the router reads: the
         // Channels page reads and edits them here; every write is live.
         .route("/v1/master/gateway/channels", get(gateway_channels_proxy))
@@ -9752,6 +9758,16 @@ async fn gateway_router_proxy(
         None,
     )
     .await
+}
+
+/// The household picks the decision model that routes and turns compare mode
+/// on or off. A registry write on the gate, so it rides the same durable
+/// Config-doc sync as every contact mutation.
+async fn gateway_router_settings_proxy(
+    State(state): State<SharedUiBridgeState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    forward_gateway_mutation(&state, "/v1/gateway/admin/router/settings", body).await
 }
 
 async fn gateway_history_proxy(

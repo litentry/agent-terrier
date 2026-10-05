@@ -31,8 +31,10 @@ use agentkeys_protocol::{
     GatewayBindInviteRequest, GatewayBindInviteResponse, GatewayBindRejectRequest,
     GatewayContactRevokeRequest, GatewayContactUpdateRequest, GatewayContactsResponse,
     GatewayHistoryResponse, GatewayLoginStartResponse, GatewayLoginStatusResponse,
-    GatewayLoginVerifyRequest, GatewayMonitorResponse, GatewayPendingBindView, GatewayRouterView,
-    GatewayStatusView, PendingBind, RouterContactView, RouterOptionView, TierProposal,
+    GatewayLoginVerifyRequest, GatewayMonitorResponse, GatewayPendingBindView,
+    GatewayRouterSettingsRequest, GatewayRouterSettingsResponse, GatewayRouterView,
+    GatewayStatusView, PendingBind, RouterContactView, RouterModelView, RouterOptionView,
+    RouterSettings, TierProposal,
 };
 
 use crate::config::WeixinTransport;
@@ -992,10 +994,11 @@ pub(crate) async fn monitor(
 }
 
 /// #722 / household channels — `GET /v1/gateway/admin/router`: the router as
-/// the decision model sees it — settings, the guidance each question carries,
-/// the options per bound contact (their channels, rendered from the channel
-/// documents alone), the model server — and the last turns that consulted a
-/// model.
+/// the decision model sees it — settings, the models the household may switch
+/// between (each with its server as the model gate reports it), the guidance
+/// each question carries, the options per bound contact (their channels,
+/// rendered from the channel documents alone) — and the last turns that
+/// consulted a model, with the compared answers.
 pub(crate) async fn router_view(
     State(state): State<SharedWeixinGatewayState>,
     headers: HeaderMap,
@@ -1005,6 +1008,7 @@ pub(crate) async fn router_view(
     }
     let cfg = &state.config.router;
     let registry = state.registry.snapshot();
+    let active = crate::jev::active_models(cfg, registry.router.as_ref());
     let kind_name = |k: &agentkeys_protocol::ChannelEventKind| {
         serde_json::to_value(k)
             .ok()
@@ -1024,7 +1028,7 @@ pub(crate) async fn router_view(
                 contact: c.display_name.clone(),
                 tier: c.tier.as_str().to_string(),
                 request: serde_json::to_value(crate::jev::build_request(
-                    &cfg.model,
+                    &active.model,
                     crate::jev::PREVIEW_MESSAGE,
                     &c.display_name,
                     c.tier.as_str(),
@@ -1055,12 +1059,48 @@ pub(crate) async fn router_view(
             }
         })
         .collect();
-    let upstream = match state.jev.as_ref() {
-        Some(client) => client.upstream_info().await,
-        None => {
-            json!({ "error": "this contact gate routes without a model (no model gate configured)" })
-        }
+    let servers = match state.jev.as_ref() {
+        Some(client) => client.decision_servers().await,
+        None => Err("this contact gate routes without a model (no model gate configured)".into()),
     };
+    let models = cfg
+        .models
+        .iter()
+        .filter_map(|m| {
+            let provider = agentkeys_protocol::DecisionProvider::of_model(m)?;
+            let server = match &servers {
+                Ok(report) => report
+                    .providers
+                    .get(provider.id())
+                    .cloned()
+                    .unwrap_or_else(|| agentkeys_protocol::DecisionServerReport {
+                        error: Some(format!(
+                            "the model gate does not report {} (an older gate?)",
+                            provider.label()
+                        )),
+                        ..Default::default()
+                    }),
+                Err(e) => agentkeys_protocol::DecisionServerReport {
+                    error: Some(e.clone()),
+                    ..Default::default()
+                },
+            };
+            Some(RouterModelView {
+                model: m.clone(),
+                provider,
+                active: *m == active.model,
+                stack_default: *m == cfg.default_model,
+                server,
+            })
+        })
+        .collect();
+    let notice = active.stale_choice.as_ref().map(|m| {
+        format!(
+            "The household chose {m}, which this contact gate no longer offers — {} routes until \
+             another offered model is chosen.",
+            active.model
+        )
+    });
     (
         StatusCode::OK,
         Json(GatewayRouterView {
@@ -1071,7 +1111,16 @@ pub(crate) async fn router_view(
                 "deterministic"
             }
             .into(),
-            model: cfg.model.clone(),
+            model: active.model.clone(),
+            default_model: cfg.default_model.clone(),
+            compare: !active.compare.is_empty(),
+            models,
+            chosen_at: registry
+                .router
+                .as_ref()
+                .map(|r| r.updated_at)
+                .filter(|t| *t > 0),
+            notice,
             gate_url: cfg.gate_url.clone(),
             threshold: cfg.threshold,
             continue_threshold: cfg.continue_threshold,
@@ -1081,8 +1130,104 @@ pub(crate) async fn router_view(
             describe_prompt: crate::jev::DESCRIBE_PROMPT.to_string(),
             guidance: crate::jev::guidance(),
             contacts,
-            upstream,
             recent: state.router_log(),
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /v1/gateway/admin/router/settings` — the household picks which
+/// offered decision model routes, and whether every other one answers each
+/// turn too (compare mode). Stored in the registry — household policy, synced
+/// to the master's Config doc with it — and live from the next turn. Every
+/// change lands in the activity trail.
+pub(crate) async fn router_settings(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayRouterSettingsRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let cfg = &state.config.router;
+    let model = req.model.as_deref().map(str::trim);
+    if let Some(m) = model {
+        if !cfg.offers(m) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "ok": false,
+                    "reason": "model_not_offered",
+                    "detail": format!(
+                        "this contact gate offers {} (AGENTKEYS_WEIXIN_ROUTER_MODELS)",
+                        cfg.models.join(", ")
+                    ),
+                })),
+            )
+                .into_response();
+        }
+    }
+    if req.compare == Some(true) && cfg.models.len() < 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "reason": "nothing_to_compare",
+                "detail": "this contact gate offers one decision model — list another in \
+                           AGENTKEYS_WEIXIN_ROUTER_MODELS to compare",
+            })),
+        )
+            .into_response();
+    }
+    let before = crate::jev::active_models(cfg, state.registry.snapshot().router.as_ref());
+    let result = state.registry.mutate(|reg| {
+        let mut next = reg.router.clone().unwrap_or_default();
+        if let Some(m) = model {
+            next.model = Some(m.to_string());
+        }
+        if let Some(c) = req.compare {
+            next.compare = c;
+        }
+        let changed = reg.router.as_ref() != Some(&next)
+            && (reg.router.is_some() || next != RouterSettings::default());
+        if changed {
+            next.updated_at = crate::relay::unix_secs();
+            reg.router = Some(next);
+        }
+        Ok(changed)
+    });
+    let changed = match result {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "reason": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let after = crate::jev::active_models(cfg, state.registry.snapshot().router.as_ref());
+    let compare = !after.compare.is_empty();
+    if changed {
+        let switched = if before.model == after.model {
+            after.model.clone()
+        } else {
+            format!("{} → {}", before.model, after.model)
+        };
+        let detail = format!(
+            "{switched} · compare {}",
+            if compare { "on" } else { "off" }
+        );
+        info!(%detail, "router decision model set by operator");
+        state.push_activity("router_model", "—", &detail, false);
+    }
+    (
+        StatusCode::OK,
+        Json(GatewayRouterSettingsResponse {
+            ok: true,
+            model: after.model,
+            compare,
+            changed,
         }),
     )
         .into_response()

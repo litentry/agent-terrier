@@ -21,6 +21,8 @@ import type { GatewayMonitorResponse } from '@/lib/generated/GatewayMonitorRespo
 import type { GatewayHistoryResponse } from '@/lib/generated/GatewayHistoryResponse';
 import type { GatewayActivityResponse } from '@/lib/generated/GatewayActivityResponse';
 import type { GatewayRouterView } from '@/lib/generated/GatewayRouterView';
+import type { GatewayRouterSettingsRequest } from '@/lib/generated/GatewayRouterSettingsRequest';
+import type { GatewayRouterSettingsResponse } from '@/lib/generated/GatewayRouterSettingsResponse';
 import type { GatewayContactsResponse } from '@/lib/generated/GatewayContactsResponse';
 import type { GatewayChannelsResponse } from '@/lib/generated/GatewayChannelsResponse';
 import type { GatewayChannelUpdateRequest } from '@/lib/generated/GatewayChannelUpdateRequest';
@@ -197,8 +199,13 @@ export const gatewayClient = {
     call<GatewayMonitorResponse>('GET', `/v1/master/gateway/monitor?after=${after}`),
 
   // #722 — the Route page: what the router sends the decision model (Kev /
-  // Jev), the model server, and the last turns that consulted it.
+  // Jev), the models the household may switch between, and the last turns
+  // that consulted one.
   router: () => call<GatewayRouterView>('GET', '/v1/master/gateway/router'),
+  // The household picks the model that routes (one the gate offers) and turns
+  // compare mode on or off — a field left out is unchanged; live next turn.
+  routerSettings: (req: GatewayRouterSettingsRequest) =>
+    call<GatewayRouterSettingsResponse>('POST', '/v1/master/gateway/router/settings', req),
 
   // Durable message history (#419) — newest-first, backward-paginated. Omit
   // `before` for the newest page; pass the response's `next_before_ts` to page
