@@ -10,6 +10,7 @@
 // the model that routes here, and compare mode asks the other one too.
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { gatewayClient, gatewayNotConfigured } from '@/lib/gatewayClient';
+import { normalizeRouterView } from '@/lib/routerView';
 import type { DecisionProvider } from '@/lib/generated/DecisionProvider';
 import type { DecisionServerReport } from '@/lib/generated/DecisionServerReport';
 import type { GatewayRouterSettingsRequest } from '@/lib/generated/GatewayRouterSettingsRequest';
@@ -353,6 +354,7 @@ function ModelSwitch({
   busy: boolean;
   onSave: (req: GatewayRouterSettingsRequest) => void;
 }) {
+  if (view.models.length === 0) return null;
   const others = view.models.filter((m) => !m.active).map((m) => `${PROVIDER_LABEL[m.provider]} (${m.model})`);
   // Compare needs another model the model gate can reach; it can always be turned off.
   const canCompare = view.models.some((m) => !m.active && m.server.configured);
@@ -427,11 +429,17 @@ export function RoutePage({ embedded = false }: { embedded?: boolean } = {}) {
   const [open, setOpen] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The gate predates the Kev / Jev switch: it answers without a model list.
+  const [legacy, setLegacy] = useState(false);
+  const [legacyServer, setLegacyServer] = useState<DecisionServerReport | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     const r = await gatewayClient.router();
     if (r.ok) {
-      setView(r.value);
+      const read = normalizeRouterView(r.value);
+      setView(read.view);
+      setLegacy(read.legacy);
+      setLegacyServer(read.legacyServer);
       setError(null);
       setNotConfigured(false);
     } else {
@@ -504,6 +512,16 @@ export function RoutePage({ embedded = false }: { embedded?: boolean } = {}) {
       {view && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Panel title="decision model">
+            {legacy && (
+              <div className="banner warn" style={{ marginBottom: 12 }}>
+                <span className="lbl">older gate</span>
+                <span>
+                  This contact gate is older than the Kev / Jev switch: it routes every message with{' '}
+                  <span className="mono">{view.model}</span> and can&apos;t switch or compare models from here. Update the broker host
+                  (<span className="mono">setup-broker-host.sh --cloud ve</span>) to turn the switch on.
+                </span>
+              </div>
+            )}
             {view.notice && (
               <div className="banner warn" style={{ marginBottom: 12 }}>
                 <span className="lbl">model</span>
@@ -520,6 +538,12 @@ export function RoutePage({ embedded = false }: { embedded?: boolean } = {}) {
             <table className="tab">
               <tbody>
                 <tr><td>engine</td><td className="mono">{view.engine}</td></tr>
+                {legacyServer && (
+                  <tr>
+                    <td>server</td>
+                    <td className="mono">{serverLine(legacyServer).text}</td>
+                  </tr>
+                )}
                 <tr>
                   <td>routes now</td>
                   <td>

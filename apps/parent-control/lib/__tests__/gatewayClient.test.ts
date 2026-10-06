@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { gatewayClient, gatewayNotConfigured, isTerminalLoginStatus } from '../gatewayClient';
+import { normalizeRouterView } from '../routerView';
 
 // The gateway client is a thin typed forwarder to the daemon proxy; the tests
 // pin (a) the daemon paths + methods, (b) the error-envelope decoding the UI
@@ -168,9 +169,11 @@ describe('gatewayClient', () => {
     expect(seenMethod).toBe('GET');
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.value.contacts[0].options[0].channel_id).toBe('family-chat');
-      expect(r.value.recent[0].routed_to).toBe('family-chat');
-      expect(r.value.recent[0].addressee).toBe('chef');
+      const { view: read, legacy } = normalizeRouterView(r.value);
+      expect(legacy).toBe(false);
+      expect(read.contacts[0].options[0].channel_id).toBe('family-chat');
+      expect(read.recent[0].routed_to).toBe('family-chat');
+      expect(read.recent[0].addressee).toBe('chef');
     }
   });
 

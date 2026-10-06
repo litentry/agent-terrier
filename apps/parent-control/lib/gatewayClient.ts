@@ -20,13 +20,13 @@ import type { GatewayContactWelcomeResponse } from '@/lib/generated/GatewayConta
 import type { GatewayMonitorResponse } from '@/lib/generated/GatewayMonitorResponse';
 import type { GatewayHistoryResponse } from '@/lib/generated/GatewayHistoryResponse';
 import type { GatewayActivityResponse } from '@/lib/generated/GatewayActivityResponse';
-import type { GatewayRouterView } from '@/lib/generated/GatewayRouterView';
 import type { GatewayRouterSettingsRequest } from '@/lib/generated/GatewayRouterSettingsRequest';
 import type { GatewayRouterSettingsResponse } from '@/lib/generated/GatewayRouterSettingsResponse';
 import type { GatewayContactsResponse } from '@/lib/generated/GatewayContactsResponse';
 import type { GatewayChannelsResponse } from '@/lib/generated/GatewayChannelsResponse';
 import type { GatewayChannelUpdateRequest } from '@/lib/generated/GatewayChannelUpdateRequest';
 import type { ChannelDoc } from '@/lib/generated/ChannelDoc';
+import type { RouterViewWire } from '@/lib/routerView';
 
 const DEFAULT_BASE_URL = 'http://localhost:3114';
 
@@ -200,8 +200,9 @@ export const gatewayClient = {
 
   // #722 — the Route page: what the router sends the decision model (Kev /
   // Jev), the models the household may switch between, and the last turns
-  // that consulted one.
-  router: () => call<GatewayRouterView>('GET', '/v1/master/gateway/router'),
+  // that consulted one. A gate older than the switch omits its fields — read
+  // it through `normalizeRouterView` (lib/routerView.ts).
+  router: () => call<RouterViewWire>('GET', '/v1/master/gateway/router'),
   // The household picks the model that routes (one the gate offers) and turns
   // compare mode on or off — a field left out is unchanged; live next turn.
   routerSettings: (req: GatewayRouterSettingsRequest) =>
