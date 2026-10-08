@@ -75,9 +75,27 @@ The script auto-rebuilds the daemon if any `.rs` source under `crates/agentkeys-
 
 Overrides via env: `UI_PORT`, `DAEMON_PORT`, `DAEMON_ORIGIN`, `DAEMON_RP_ID`, `DAEMON_RP_NAME` — see the comment block at the top of `dev.sh`, the repo's local dev launcher (operator-internal; not in the OSS mirror).
 
-## Deploy (M1)
+## Deploy — the hosted console (epic #751)
 
-Vercel. Point the project at `apps/parent-control` and the build settles itself.
+The console is served as a **static export** from the VE host at
+`https://dashboard.<zone>` (`VE_DASHBOARD_HOST` in `scripts/operator-workstation.ve.env`):
+no server process, the master plane runs in the browser against the stack's broker
+(arch.md §22c.3). Owner: `scripts/operator/setup-broker-host.sh --cloud ve` step 9
+(the A record: `setup-cloud.sh --cloud ve` step 55). The build it runs:
+
+```sh
+AGENTKEYS_STATIC_EXPORT=1 \
+NEXT_PUBLIC_AGENTKEYS_BACKEND=core \
+NEXT_PUBLIC_AGENTKEYS_BROKER_URL=https://broker.<zone> \
+NEXT_PUBLIC_ICP_BEIAN=<备案号> \
+npm run build            # → out/ (the wasm core must sit in lib/wasm + public/wasm first)
+```
+
+`AGENTKEYS_STATIC_EXPORT=1` flips `output: 'export'`; Next drops the dev-only
+`/api/dev/*` route handlers from an export, and the deploy step prunes `out/dev`
+(developer previews). `NEXT_PUBLIC_ICP_BEIAN` renders the 备案号 footer the mainland
+host is required to carry. Step 1 of #751 ships honest empty states — the
+`CoreBackend` reads land in the epic's later steps.
 
 ## File layout
 

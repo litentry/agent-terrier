@@ -626,6 +626,8 @@ apps/{parent-control,website,mobile-mock,design-system}   front-ends; viz/ + cra
 
 nginx fronts every public hostname on :443 (broker / signer / per-worker hosts); services on loopback ports or Lambda; the host firewall drops everything else. Daemons reach broker + workers over public TLS — caller auth is the cap-token, never IP. The signer host is TEE-attested and pinned. Bring-up = the three idempotent entry points (AGENTS.ops.md); diagram: v2 §24.
 
+**The hosted console (epic #751, resumes #163)** is one more public hostname on the VE host — `dashboard.<zone>` — serving `apps/parent-control` as a **static export**: no process, no server-side session (D4), the §22c.3 phone-first master plane running in the browser against this stack's broker + workers (every call authenticated the same way a daemon's is — J1 + cap + chain). Its origin rides the broker/worker CORS allowlist. Step 1 = the hosting skeleton with honest empty states; the browser-side session, read and write paths and the second-signer ceremony follow in the epic's later steps.
+
 ## 25. Cross-references
 
 - **The channel decoupling design** — [`spec/agent-channel-decoupling.md`](spec/agent-channel-decoupling.md) (§22e)

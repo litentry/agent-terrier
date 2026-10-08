@@ -1164,3 +1164,9 @@ html[data-theme='github'] input, html[data-theme='github'] select, html[data-the
 /* The fixed chain badge used to ride the header's top-right corner, over the
    account row; the tab-row shell docks it bottom-right instead (under a toast). */
 html[data-theme='github'] .chain-badge { top: auto; bottom: 10px; right: 10px; z-index: 150; border-radius: 999px; }
+
+/* #751 — the 备案号 footer the mainland host must carry (bottom centre of every
+   page, 办法 第十三条). Rendered by the root layout only when NEXT_PUBLIC_ICP_BEIAN
+   is baked in (the hosted-console build); below the 100vh app shell. */
+.icp-footer { text-align: center; font-size: 12px; padding: 14px 16px 18px; color: var(--ds-text-faint); }
+.icp-footer a { color: inherit; text-decoration: none; }
