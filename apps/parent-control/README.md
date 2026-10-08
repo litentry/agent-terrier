@@ -94,8 +94,9 @@ npm run build            # → out/ (the wasm core must sit in lib/wasm + public
 `AGENTKEYS_STATIC_EXPORT=1` flips `output: 'export'`; Next drops the dev-only
 `/api/dev/*` route handlers from an export, and the deploy step prunes `out/dev`
 (developer previews). `NEXT_PUBLIC_ICP_BEIAN` renders the 备案号 footer the mainland
-host is required to carry. Step 1 of #751 ships honest empty states — the
-`CoreBackend` reads land in the epic's later steps.
+host is required to carry. Step 1 of #751 displays a non-interactive hosting
+preview: browser sign-in and account management are unavailable, and the local
+demo onboarding is never mounted. The `CoreBackend` session and read paths land in the epic's later steps.
 
 ## File layout
 

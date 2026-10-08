@@ -1170,3 +1170,15 @@ html[data-theme='github'] .chain-badge { top: auto; bottom: 10px; right: 10px; z
    is baked in (the hosted-console build); below the 100vh app shell. */
 .icp-footer { text-align: center; font-size: 12px; padding: 14px 16px 18px; color: var(--ds-text-faint); }
 .icp-footer a { color: inherit; text-decoration: none; }
+
+.hosted-console-preview {
+  min-height: 80vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  font-size: 16px;
+}
+.hosted-console-preview h1 { margin: 16px 0; font-size: 24px; line-height: 1.3; }
+.hosted-console-preview p { color: var(--ink-dim); }
+.hosted-console-preview .hosted-console-label { margin: 0; color: var(--ink); }

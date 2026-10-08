@@ -826,3 +826,7 @@ A shared screen (a kitchen tablet, an old phone on the fridge) shows your househ
 - Nothing on the tablet can read your memory, credentials or other feeds: its grants are exactly the two channel attachments you approved.
 - Use the browser's *Add to Home Screen* for a full-screen kiosk; the *Full screen* button hides the browser's own bars. A paired display asks the tablet to **keep the screen awake** by itself, for as long as the page is showing (the tablet's own sleep setting still wins if the browser refuses; most kiosk tablets let you disable sleep).
 - **Pictures.** An app can put a picture on the screen as well as a card (the Painter does: the children's drawing). The screen shows whatever the app published last: a card newer than the picture is drawn beside it with its buttons; a picture newer than the card fills the whole screen by itself and stays until the next picture — a finished drawing stays up for the child to copy. Tap the picture to show the menu (settings, full screen); it hides again after a few seconds.
+
+## Hosted console preview
+
+The hosted console currently shows “Browser sign-in is not available yet.” It does not verify email, register a master, connect a passkey, or provide account access. Keep using the local console for those actions until browser sessions and account management are available. An old browser onboarding flag does not unlock this preview.

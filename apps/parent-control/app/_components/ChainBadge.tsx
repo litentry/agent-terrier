@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
+import { CoreBackend } from '@/lib/client/core';
 import type { ChainInfo } from '@/lib/client/types';
 
 /**
@@ -14,6 +15,11 @@ import type { ChainInfo } from '@/lib/client/types';
  * daemon is unreachable it shows "daemon offline" rather than any baked-in default.
  */
 export function ChainBadge() {
+  const client = useClient();
+  return client instanceof CoreBackend ? null : <DaemonChainBadge />;
+}
+
+function DaemonChainBadge() {
   const client = useClient();
   const status = useConnectionStatus();
   const [info, setInfo] = useState<ChainInfo | null>(null);
