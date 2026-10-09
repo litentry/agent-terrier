@@ -550,6 +550,11 @@ export interface DecodedAuditEvent {
   tx: DecodedTx | null;
 }
 
+export interface AuditPage {
+  events: AuditEvent[];
+  nextCursor: string | null;
+}
+
 export interface AgentKeysClient {
   status(): Promise<ConnectionStatus>;
 
@@ -569,6 +574,7 @@ export interface AgentKeysClient {
   getActor(id: string): Promise<Result<Actor | null>>;
   listCapTokens(actorId: string): Promise<Result<CapToken[]>>;
   listRecentAuditEvents(opts?: { actorId?: string; limit?: number }): Promise<Result<AuditEvent[]>>;
+  listAuditPage(opts?: { actorId?: string; limit?: number; cursor?: string }): Promise<Result<AuditPage>>;
   streamAudit(onEvent: (e: AuditEvent) => void, onStatusChange: (s: ConnectionStatus) => void): () => void;
 
   listWorkers(): Promise<Result<Worker[]>>;
@@ -649,12 +655,12 @@ export interface AgentKeysClient {
     delegateOmni: string,
     version: number,
   ): Promise<Result<ApiPersonaEditResponse>>;
-  restartAgent(): Promise<Result<{ restarted: boolean }>>;
+  restartAgent(actorOmni?: string): Promise<Result<{ restarted: boolean }>>;
   /** Write the delegate's preset (persona + skills) into its live sandbox again. */
   presetReapply(
     actorOmni: string,
   ): Promise<Result<{ ok: boolean; preset_id: string; sandbox_id: string | null; detail: string }>>;
-  getAgentContext(): Promise<Result<AgentContextView>>;
+  getAgentContext(actorOmni?: string): Promise<Result<AgentContextView>>;
 
   // §1A onboarding — config-init entry point A (default-preset bootstrap, #207
   // item 1A). `listConfigPresets` returns the bundled default taxonomies + the

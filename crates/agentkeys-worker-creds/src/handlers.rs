@@ -33,12 +33,14 @@ use crate::state::SharedWorkerState;
 use crate::verify::{self, CapOp, CapPayload, CapToken, DataClass};
 
 pub fn build_router(state: SharedWorkerState) -> Router {
+    let browser_origins = std::env::var("AGENTKEYS_BROWSER_ORIGINS").unwrap_or_default();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/cred/store", post(cred_store))
         .route("/v1/cred/fetch", post(cred_fetch))
         .route("/v1/cred/list", post(cred_list))
         .route("/v1/cred/teardown", post(cred_teardown))
+        .layer(crate::cors::browser_cors_layer(&browser_origins))
         .with_state(state)
 }
 
@@ -376,6 +378,11 @@ async fn cred_fetch_inner(
         .send()
         .await
         .map_err(|e| {
+            if e.as_service_error()
+                .is_some_and(|error| error.is_no_such_key())
+            {
+                return crate::errors::err_404("credential is not stored", "s3_no_such_key");
+            }
             // The 502 names the S3 error code (#284): NoSuchKey (service never
             // vaulted by the master) vs AccessDenied (caller relayed
             // non-operator-tagged STS) vs expired-STS — distinguishable from

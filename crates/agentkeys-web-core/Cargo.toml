@@ -10,6 +10,7 @@ description = "Host-agnostic master-plane core (broker client + ceremony logic) 
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+agentkeys-catalog = { path = "../agentkeys-catalog" }
 # The shared, wasm-safe broker/worker wire shapes (the cap-mint body). Pure
 # serde, no transport — so the browser shares the cap-mint request type with the
 # native client (agentkeys-backend-client) instead of re-declaring it, which is
@@ -20,6 +21,15 @@ agentkeys-protocol = { workspace = true }
 # daemon and the ESP32 link (anti-drift, #367): PoP bytes identical across device kinds.
 agentkeys-device-core = { workspace = true }
 hex = "0.4"
+futures-util = "0.3"
+url = "2"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+pdf-extract = "0.12"
+aes-gcm = "0.10"
+sha2 = "0.10"
+sha3 = "0.10"
+ciborium = "0.2"
+getrandom = { version = "0.2", features = ["js"] }
 base64 = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }

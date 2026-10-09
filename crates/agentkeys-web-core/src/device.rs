@@ -103,7 +103,7 @@ impl DeviceIdentity {
         ))
     }
 
-    fn sign(&self, message: &[u8]) -> Result<String, DeviceError> {
+    pub(crate) fn sign(&self, message: &[u8]) -> Result<String, DeviceError> {
         let sk = signing_key_from_bytes(&self.secret)
             .map_err(|e| DeviceError::Crypto(format!("{e:?}")))?;
         eip191_sign(&sk, message).map_err(|e| DeviceError::Crypto(format!("{e:?}")))

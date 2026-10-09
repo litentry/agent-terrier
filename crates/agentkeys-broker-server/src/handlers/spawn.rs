@@ -180,6 +180,7 @@ pub struct PendingArchive {
 
 #[derive(Default)]
 pub struct PendingCeremonyStore {
+    pub(crate) hosted_signers: super::hosted_signer_pending::HostedSignerRequestStore,
     spawns: RwLock<HashMap<String, PendingSpawn>>,
     archives: RwLock<HashMap<String, PendingArchive>>,
 }
@@ -1081,6 +1082,27 @@ async fn finalize_spawn(
     actor_omni: &str,
 ) -> serde_json::Value {
     let row = state.pending_ceremonies.take_spawn(device_key_hash);
+    if row.is_none() {
+        match state.spawn_context_store.get(device_key_hash) {
+            Ok(Some(context)) => {
+                let sandbox = crate::handlers::sandbox::ensure_for_delegate(
+                    state,
+                    device_key_hash,
+                    actor_omni,
+                    &format!("0x{}", hex::encode(session_omni)),
+                )
+                .await;
+                return serde_json::json!({"device_key_hash":device_key_hash,"actor_omni":actor_omni,"label":context.label,"preset_id":context.preset_id,"memory_ns":context.memory_ns,"chat_channel_id":context.chat_channel_id,"context_recovered":true,"gate":{"status":"recovered","error":null},"sandbox":sandbox.as_ref().map(|sandbox|sandbox.to_json()),"replayed":true});
+            }
+            Ok(None) => {
+                return serde_json::json!({"device_key_hash":device_key_hash,"actor_omni":actor_omni,"context_recovered":false,"error":"confirmed delegate context is missing; restore its sealed context before resuming"})
+            }
+            Err(error) => {
+                return serde_json::json!({"device_key_hash":device_key_hash,"actor_omni":actor_omni,"context_recovered":false,"error":format!("spawn context read failed: {error}")})
+            }
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     let (label, preset_id, memory_ns, memory_inherited, chat_channel_id, k10_secret, k10_address) =
         match &row {

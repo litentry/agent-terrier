@@ -810,6 +810,7 @@ mod tests {
             ilink_cdn_base_url: None,
             media_max_bytes: 1024,
             outbound_enabled: true,
+            ..Default::default()
         }
     }
 

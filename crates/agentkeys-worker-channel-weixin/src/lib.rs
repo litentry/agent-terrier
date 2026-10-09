@@ -57,3 +57,5 @@ pub mod transport;
 
 pub use config::{WeixinGatewayConfig, WeixinTransport};
 pub use state::WeixinGatewayState;
+
+pub mod hosted_gateway;

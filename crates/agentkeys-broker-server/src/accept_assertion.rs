@@ -1,33 +1,11 @@
-//! #225 / #164 E7 — decode a browser WebAuthn assertion into the P256Account
-//! UserOp signature (the accept-submit "final mile").
-//!
-//! Mirrors the mainnet-proven CLI path
-//! (`agentkeys-cli::k11_webauthn::extract_chain_assertion`) +
-//! `e2e/scripts/erc4337-register-master.sh`'s
-//! `cast abi-encode "x(bytes32,bytes,bytes,uint256,uint256,uint256)"`, reusing the
-//! golden-tested `agentkeys_core::erc4337::{encode_webauthn_signature,
-//! master_cred_id_hash}`. The `p256` DER decode lives here (the broker carries the
-//! `p256` dep; core does not), so this is the broker-side wrapper around core's
-//! ABI encoder.
+//! Decode browser WebAuthn assertions for account UserOp signatures.
+//! The caller resolves the signer hash against the authenticated operator's account.
 
-use agentkeys_core::erc4337::{encode_webauthn_signature, master_cred_id_hash};
+use agentkeys_core::erc4337::encode_webauthn_signature;
+pub use agentkeys_protocol::hosted_signer::BrowserAssertion;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use p256::ecdsa::Signature;
-use serde::{Deserialize, Serialize};
-
-/// The raw browser WebAuthn assertion (base64url, exactly as
-/// `apps/parent-control/lib/webauthn.ts::getAssertionOverHash` emits it) over an
-/// accept `userOpHash`. The `credential_id` is kept for cross-checks/audit — it
-/// is **not** the signer key; the master's `P256Account` signer is keyed by the
-/// operator-derived [`master_cred_id_hash`], not `keccak(rawId)`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserAssertion {
-    pub authenticator_data: String, // base64url
-    pub client_data_json: String,   // base64url
-    pub signature: String,          // base64url DER ECDSA (P-256)
-    pub credential_id: String,      // base64url rawId
-}
 
 fn b64u(field: &str, s: &str) -> Result<Vec<u8>, String> {
     URL_SAFE_NO_PAD
@@ -89,21 +67,15 @@ pub fn decode_assertion_parts(a: &BrowserAssertion) -> Result<AssertionParts, St
     })
 }
 
-/// Decode + ABI-encode the browser assertion into the P256Account UserOp
-/// signature, binding the master's operator-derived `credIdHash`:
-///   1. `cred_id_hash = master_cred_id_hash(operator_omni)` (NOT `keccak(rawId)`).
-///   2. [`decode_assertion_parts`] for the raw blobs + `(r, s)` + challenge offset.
-///   3. `encode_webauthn_signature(cred_id_hash, authData, clientDataJSON, loc, r, s)`.
+/// Encode an assertion for the signer hash verified against the session-bound account.
 pub fn encode_browser_assertion_signature(
     a: &BrowserAssertion,
-    operator_omni: &[u8; 32],
+    cred_id_hash: &[u8; 32],
 ) -> Result<Vec<u8>, String> {
-    // The signer key is operator-derived (the value the account was created with).
-    let cred_id_hash = master_cred_id_hash(operator_omni);
     let parts = decode_assertion_parts(a)?;
 
     Ok(encode_webauthn_signature(
-        &cred_id_hash,
+        cred_id_hash,
         &parts.authenticator_data,
         &parts.client_data_json,
         parts.challenge_location as u128,
@@ -115,6 +87,7 @@ pub fn encode_browser_assertion_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentkeys_core::erc4337::master_cred_id_hash;
     use p256::ecdsa::{signature::Signer, SigningKey};
 
     fn b64(b: &[u8]) -> String {
@@ -148,10 +121,17 @@ mod tests {
             signature: b64(der.as_bytes()),
             credential_id: b64(b"raw-credential-id"),
         };
-        let out = encode_browser_assertion_signature(&a, &omni).unwrap();
+        let hash = agentkeys_core::erc4337::credential_id_hash(b"raw-credential-id");
+        let out = encode_browser_assertion_signature(&a, &hash).unwrap();
 
+        assert_eq!(
+            &out[0..32],
+            &agentkeys_core::device_crypto::keccak256(b"raw-credential-id")
+        );
         // Head layout (each 32-byte word): credIdHash | offAuth | offCdj | loc | r | s.
-        assert_eq!(&out[0..32], &master_cred_id_hash(&omni));
+        assert_eq!(&out[0..32], &hash);
+        let original = encode_browser_assertion_signature(&a, &master_cred_id_hash(&omni)).unwrap();
+        assert_eq!(&original[0..32], &master_cred_id_hash(&omni));
         let word_u128 = |n: u128| {
             let mut w = [0u8; 32];
             w[16..].copy_from_slice(&n.to_be_bytes());

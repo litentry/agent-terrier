@@ -351,762 +351,20 @@ pub use agentkeys_backend_client::protocol::{
     normalize_omni_0x, persona_soul_key, ContextKind, PERSONA_NAMESPACE,
 };
 
-/// Content hash over (ns ‖ key ‖ body) — the dedup key for plant idempotency
-/// AND the durable-merge identity (codex finding 1). A free function so the
-/// merge can recompute it for durable `StoredMemoryEntry`s (which don't carry
-/// the hash) using the same scheme as `ApiMemoryEntry::compute_hash`.
-pub(crate) fn content_hash_for(ns: &str, key: &str, body: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(ns.as_bytes());
-    h.update(b"\x1f");
-    h.update(key.as_bytes());
-    h.update(b"\x1f");
-    h.update(body.as_bytes());
-    hex::encode(h.finalize())
-}
+pub(crate) use agentkeys_web_core::document_helpers::{
+    blob_hash, content_hash_for, gating_for, label_for_ns, merge_categories, merge_stored_entries,
+    normalize_data_class, parse_stored_blob, service_for, valid_history_coords,
+    validate_delegate_omni, ApiMemoryEntryExt,
+};
 
-/// Daemon-side helpers on the SHARED wire type: inherent impls are only legal
-/// in the defining crate (`agentkeys-protocol`), and these touch daemon-local
-/// concerns (the sha256 dedup scheme + the private on-disk
-/// [`StoredMemoryEntry`] form), so they ride an extension trait here — call
-/// sites read exactly as before.
-trait ApiMemoryEntryExt: Sized {
-    fn compute_hash(&self) -> String;
-    /// The on-disk form stored inside the per-namespace JSON array (#201 Phase 4).
-    fn to_stored(&self) -> StoredMemoryEntry;
-    /// Rehydrate a UI entry from a stored array element decrypted out of
-    /// `knowledge:<ns>.enc`. `version`/`preview` are derived (not stored) and
-    /// `content_hash` is left empty (the read path doesn't dedup).
-    fn from_stored(ns: &str, s: StoredMemoryEntry) -> Self;
-}
-
-impl ApiMemoryEntryExt for ApiMemoryEntry {
-    fn compute_hash(&self) -> String {
-        content_hash_for(&self.ns, &self.key, &self.body)
-    }
-
-    fn to_stored(&self) -> StoredMemoryEntry {
-        StoredMemoryEntry {
-            key: self.key.clone(),
-            title: self.title.clone(),
-            body: self.body.clone(),
-            updated: self.updated.clone(),
-            bytes: self.bytes,
-            version: self.version.clone(),
-            kind: self.kind,
-        }
-    }
-
-    fn from_stored(ns: &str, s: StoredMemoryEntry) -> Self {
-        let preview = s.body.chars().take(80).collect();
-        ApiMemoryEntry {
-            ns: ns.to_string(),
-            key: s.key,
-            title: s.title,
-            bytes: s.bytes,
-            version: s.version,
-            updated: s.updated,
-            preview,
-            body: s.body,
-            content_hash: String::new(),
-            kind: s.kind,
-        }
-    }
-}
-
-fn default_stored_version() -> String {
-    "v1".to_string()
-}
-
-/// One element of the per-namespace JSON array `knowledge:<ns>.enc` (#201 Phase 4).
-/// Fixes the lossy single-body overwrite: a namespace with several memories
-/// round-trips as one array. The agent reads the same blobs (W4 inheritance
-/// defers the agent WRITE path; the inject already renders this shape).
-/// `version` + `kind` (#390) are serde-defaulted so pre-#390 blobs decode
-/// unchanged (`v1` / `knowledge`); the persona namespace relies on both for
-/// its durable version history.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct StoredMemoryEntry {
-    pub(crate) key: String,
-    pub(crate) title: String,
-    pub(crate) body: String,
-    pub(crate) updated: String,
-    pub(crate) bytes: u64,
-    #[serde(default = "default_stored_version")]
-    pub(crate) version: String,
-    #[serde(default)]
-    pub(crate) kind: ContextKind,
-}
-
-/// The `config/memory-taxonomy.enc` object (#178 §7 / #201): the master-only
-/// category set the web list resolves WITHOUT decrypting any memory blob. The
-/// categories are the namespaces the operator has planted; labels are derived.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct MemoryTaxonomy {
-    #[serde(default)]
-    version: u32,
-    #[serde(default)]
-    categories: Vec<MemoryCategory>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct MemoryCategory {
-    pub ns: String,
-    pub label: String,
-}
-
-/// The signed `service` of the Config-class taxonomy object (→ S3 key
-/// `bots/<O_master>/config/memory-taxonomy.enc`). Config is master-only, so the
-/// broker + worker skip the on-chain scope check for `operator == actor` (#195).
-const TAXONOMY_SERVICE: &str = "memory-taxonomy";
-
-/// The signed `service` of the Config-class CHANNEL REGISTRY object (→ S3 key
-/// `bots/<O_master>/config/channel-registry.enc`) — the master-curated catalog
-/// of channel definitions (#404). This is the "registry-from-config-data-class
-/// sync" the channel worker crate docs deferred: the worker/broker stay
-/// grant-anchored (a channel id is free-form at the chain layer); the registry
-/// is the MASTER's bookkeeping — which ids exist, their display names — so the
-/// web app can offer selection instead of silent free-text creation, and the
-/// daemon can re-name on-chain grant hashes after a restart.
-const CHANNEL_REGISTRY_SERVICE: &str = "channel-registry";
-
-/// One channel DEFINITION in the master's registry (#404). `id` is the
-/// IMMUTABLE anchor — it is the exact string hashed into the on-chain
-/// `channel-pub:<id>` / `channel-sub:<id>` service ids, so it can never be
-/// renamed (rename = a different channel). `name`/`note` are display-only and
-/// freely editable.
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiChannel {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub note: Option<String>,
-    #[ts(type = "number")]
-    pub created_at: u64,
-    /// #664 — the channel's endpoint KIND (the closed vocabulary an app slot
-    /// binds by: messaging · chat · display · camera · …). Additive; absent on
-    /// pre-#664 rows (the wizard then offers the row for any kind).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub kind: Option<agentkeys_backend_client::protocol::ChannelEndpointKind>,
-    /// #664 — the endpoint's OWN device actor when it has one (`0x`-omni): the
-    /// gateway behind a messaging row, a paired display. An install grants that
-    /// actor the feed's mirror direction in the same Touch ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub endpoint_actor_omni: Option<String>,
-}
-
-/// The receipt of `POST /v1/channels/clear-orphaned`: `removed` = the registry
-/// rows dropped (no actor held a grant on them, by name or on-chain hash),
-/// `kept` = the rows still in use, `storage` = the registry's durability flag
-/// (`"ok"` durable Config-class doc · `"cached"` dev-only in-memory).
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiChannelsClearOrphaned {
-    pub removed: Vec<String>,
-    pub kept: Vec<String>,
-    pub storage: String,
-}
-
-/// The durable registry doc (config-class, master-only). Version field for
-/// forward evolution; the vec is small (a household's channel count).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ChannelRegistry {
-    #[serde(default)]
-    pub(crate) version: u32,
-    #[serde(default)]
-    pub(crate) channels: Vec<ApiChannel>,
-}
-
-/// The signed `service` of the Config-class BINDING MANIFEST object (→ S3 key
-/// `bots/<O_master>/config/binding-manifest.enc`) — #424 §1. Per bound actor it
-/// records what the chain deliberately does NOT (no PII, no per-edit gas):
-/// label, delegate-vs-device kind, and the granted service NAMES. On-chain both
-/// kinds bind as `TIER_AGENT` rows (`registerAgentDevice`) and scope is keccak
-/// hashes, so after a daemon restart the kind + names are unrecoverable from
-/// chain alone; the manifest is the deterministic off-chain dictionary the #233
-/// reconcile hydrates from (the channel-registry hash-match stays as SECONDARY
-/// enrichment for grants the manifest predates).
-const BINDING_MANIFEST_SERVICE: &str = "binding-manifest";
-
-/// The signed `service` of the Config-class GATEWAY CONTACT REGISTRY object
-/// (→ S3 key `bots/<O_master>/config/gateway-contact-registry.enc`) — #424 §2.
-/// The durable, master-only copy of the WeChat gateway's contact registry; the
-/// gateway-host file stays the working cache. The daemon write-throughs it on
-/// every mutating gateway admin proxy and restores it to an EMPTY (rebuilt)
-/// gateway on the first contacts read.
-const GATEWAY_CONTACTS_SERVICE: &str = "gateway-contact-registry";
-
-/// One bound actor's readable pairing metadata (#424 §1). `actor_omni` +
-/// `device_key_hash` anchor the entry to the on-chain `SidecarRegistry` row;
-/// everything else is the readable layer the chain never stores.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct BindingManifestEntry {
-    /// `0x`+64-hex actor omni (normalized lowercase) — the join key against
-    /// `DeviceEntry.actorOmni` at reconcile time.
-    pub actor_omni: String,
-    /// `0x`+64-hex on-chain device key hash (secondary join key).
-    #[serde(default)]
-    pub device_key_hash: String,
-    /// The pairing label the accept card showed (`ApiActor.label`).
-    pub label: String,
-    /// `"device"` (channel-endpoint, §14.10) or `"delegate"` (sandbox-resident).
-    pub kind: String,
-    /// The service NAMES the operator actually granted (`channel-pub:<id>`,
-    /// `knowledge:<ns>`, `cred:<service>`, …) — the readable twin of the on-chain
-    /// keccak scope set.
-    #[serde(default)]
-    pub granted_service_names: Vec<String>,
-    /// Unix seconds of the last upsert (accept or scope commit).
-    #[serde(default)]
-    pub updated_at: u64,
-    /// #427 — the preset the delegate was spawned from (`""`/absent = blank
-    /// spawn or a pre-#427 binding). Readable-layer only, like `label`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_id: Option<String>,
-    /// The delegate's bridge base (`sandbox.agent_url` of the spawn / #577
-    /// update response — the veFaaS gateway, routed per instance by header),
-    /// so the preset can be re-applied later without a spawn response in
-    /// hand. Absent on a row that predates 2026-09-17 until its next update.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_url: Option<String>,
-    /// #427 — the delegate's `knowledge:<ns>` namespace name (the #425 O2
-    /// inheritance-discovery key; grants on-chain are keccak ids).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_ns: Option<String>,
-    /// #427 — set when the delegate was ARCHIVED. The row is retained (epic
-    /// acceptance: manifest + audit rows survive the archive) so a kept
-    /// namespace stays discoverable for a successor spawn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived_at: Option<u64>,
-    /// #427/#425 O4 — the operator's keep-vs-delete choice at archive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources_kept: Option<bool>,
-    /// #543 — the spawn ceremony's runtime/metering outcome, persisted so the
-    /// #233 reconcile can answer "is this delegate metered / why is its chat
-    /// silent" after a daemon restart.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<ApiRuntimeStatus>,
-}
-
-/// The durable manifest doc (config-class, master-only). Small: one entry per
-/// bound actor in the household fleet.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BindingManifest {
-    #[serde(default)]
-    version: u32,
-    #[serde(default)]
-    bindings: Vec<BindingManifestEntry>,
-}
-
-/// Bare-hex lowercase form for manifest joins — lowercase FIRST so `0X` strips
-/// too (`normalize_omni_0x` only guarantees a prefix, not case).
-fn manifest_norm(s: &str) -> String {
-    let lower = s.trim().to_lowercase();
-    lower.trim_start_matches("0x").to_string()
-}
-
-impl BindingManifest {
-    /// Look up an entry by actor omni (primary) or device key hash (secondary),
-    /// both compared 0x-normalized lowercase.
-    pub fn entry_for(
-        &self,
-        actor_omni: &str,
-        device_key_hash: &str,
-    ) -> Option<&BindingManifestEntry> {
-        let (a, d) = (manifest_norm(actor_omni), manifest_norm(device_key_hash));
-        self.bindings
-            .iter()
-            .find(|e| manifest_norm(&e.actor_omni) == a)
-            .or_else(|| {
-                if d.is_empty() {
-                    return None;
-                }
-                self.bindings.iter().find(|e| {
-                    !e.device_key_hash.is_empty() && manifest_norm(&e.device_key_hash) == d
-                })
-            })
-    }
-
-    /// Every manifest row (read view — #429 inheritance bookkeeping etc.).
-    pub fn entries(&self) -> &[BindingManifestEntry] {
-        &self.bindings
-    }
-
-    /// Upsert by actor omni (0x-normalized). An existing entry keeps its `kind`
-    /// unless the incoming entry states one explicitly — a scope re-grant must
-    /// never silently flip a device into a delegate.
-    pub fn upsert(&mut self, mut entry: BindingManifestEntry) {
-        entry.actor_omni = format!("0x{}", manifest_norm(&entry.actor_omni));
-        if !entry.device_key_hash.is_empty() {
-            entry.device_key_hash = format!("0x{}", manifest_norm(&entry.device_key_hash));
-        }
-        match self
-            .bindings
-            .iter_mut()
-            .find(|e| manifest_norm(&e.actor_omni) == manifest_norm(&entry.actor_omni))
-        {
-            Some(existing) => {
-                if entry.kind.is_empty() {
-                    entry.kind = existing.kind.clone();
-                }
-                if entry.label.is_empty() {
-                    entry.label = existing.label.clone();
-                }
-                if entry.device_key_hash.is_empty() {
-                    entry.device_key_hash = existing.device_key_hash.clone();
-                }
-                // #427 readable-layer fields survive an upsert that doesn't
-                // state them (a scope re-grant must not wipe the spawn record).
-                if entry.preset_id.is_none() {
-                    entry.preset_id = existing.preset_id.clone();
-                }
-                if entry.agent_url.is_none() {
-                    entry.agent_url = existing.agent_url.clone();
-                }
-                if entry.memory_ns.is_none() {
-                    entry.memory_ns = existing.memory_ns.clone();
-                }
-                if entry.archived_at.is_none() {
-                    entry.archived_at = existing.archived_at;
-                }
-                if entry.resources_kept.is_none() {
-                    entry.resources_kept = existing.resources_kept;
-                }
-                if entry.runtime.is_none() {
-                    entry.runtime = existing.runtime.clone();
-                }
-                *existing = entry;
-            }
-            None => {
-                if entry.kind.is_empty() {
-                    // A scope commit on an actor the manifest never saw — derive
-                    // the kind with the SAME predicate the accept card / D9
-                    // spawn gate use (all-channel grants = device).
-                    let joined = entry.granted_service_names.join(" ");
-                    entry.kind =
-                        if agentkeys_backend_client::protocol::scope_is_device_only(&joined) {
-                            "device".into()
-                        } else {
-                            "delegate".into()
-                        };
-                }
-                self.bindings.push(entry);
-            }
-        }
-    }
-}
-
-/// Channel-id shape: the on-chain anchor must be stable + lowercase (service
-/// ids are keccak'd over the LOWERCASED string on every path), and short enough
-/// to read on a device card. Mirrors the label discipline elsewhere.
-pub(crate) fn valid_channel_id(id: &str) -> bool {
-    let n = id.len();
-    (1..=48).contains(&n)
-        && id
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !id.starts_with('-')
-        && !id.ends_with('-')
-}
-
-/// Title-case a namespace for its display label (`travel` → `Travel`). The
-/// taxonomy object is the durable label home; this is the derivation used when
-/// minting a fresh taxonomy from planted namespaces.
-fn label_for_ns(ns: &str) -> String {
-    let mut chars = ns.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-/// Union `incoming` categories INTO `existing`, keyed by namespace, preserving
-/// every existing entry (its label is kept — an authored label or a user edit is
-/// never clobbered) and appending only namespaces not already present. Sorted by
-/// ns for a stable on-disk blob.
-///
-/// This is what makes an **authored** taxonomy (#207 item 1A) durable against the
-/// test-only `plant`: re-running `init` is an idempotent no-op, and a later plant
-/// (cache-derived categories) ADDS its namespaces but can never drop the authored
-/// ones — the same read-modify-write discipline already applied to memory blobs
-/// (#201 codex finding 1), now applied to the category index.
-fn merge_categories(
-    existing: Vec<MemoryCategory>,
-    incoming: &[MemoryCategory],
-) -> Vec<MemoryCategory> {
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut out: Vec<MemoryCategory> = Vec::new();
-    for c in existing {
-        if seen.insert(c.ns.clone()) {
-            out.push(c);
-        }
-    }
-    for c in incoming {
-        if seen.insert(c.ns.clone()) {
-            out.push(c.clone());
-        }
-    }
-    out.sort_by(|a, b| a.ns.cmp(&b.ns));
-    out
-}
-
-/// Parse a decrypted `knowledge:<ns>` blob into its entries, tolerating BOTH the
-/// new per-namespace JSON array (#201 Phase 4) and a legacy single-body blob
-/// (pre-#201 / agent-written) — the latter becomes a one-element array keyed by
-/// the namespace, so the read path never breaks on an old blob.
-fn parse_stored_blob(plaintext: &str, ns: &str) -> Vec<StoredMemoryEntry> {
-    let trimmed = plaintext.trim_start();
-    if trimmed.starts_with('[') {
-        if let Ok(entries) = serde_json::from_str::<Vec<StoredMemoryEntry>>(plaintext) {
-            return entries;
-        }
-    }
-    vec![StoredMemoryEntry {
-        key: ns.to_string(),
-        title: ns.to_string(),
-        body: plaintext.to_string(),
-        updated: String::new(),
-        bytes: plaintext.len() as u64,
-        version: default_stored_version(),
-        kind: ContextKind::Knowledge,
-    }]
-}
-
-/// Merge the DURABLE entries already stored in a namespace with the newly
-/// planted entries, deduped by content hash (ns‖key‖body). Durable entries are
-/// ALWAYS preserved (codex finding 1 — a plant must never drop already-stored
-/// memory); a new entry whose content matches an existing one is a no-op,
-/// otherwise it is appended. Sorted by key for a stable on-disk blob. Returns
-/// the merged array plus the count of entries that were genuinely new to the
-/// durable set (for the plant's `planted`/`skipped` accounting).
-fn merge_stored_entries(
-    ns: &str,
-    durable: Vec<StoredMemoryEntry>,
-    incoming: &[ApiMemoryEntry],
-) -> (Vec<StoredMemoryEntry>, usize) {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out: Vec<StoredMemoryEntry> = Vec::new();
-    for d in durable {
-        if seen.insert(content_hash_for(ns, &d.key, &d.body)) {
-            out.push(d);
-        }
-    }
-    // D-K5 (`plan/knowledge-repository.md` §6) — identity = key: the same
-    // content under a key is a no-op (an idempotent re-plant); a DIFFERENT body
-    // under an existing key REPLACES it — a file has one current version.
-    let mut newly_added = 0usize;
-    for e in incoming {
-        let hash = content_hash_for(ns, &e.key, &e.body);
-        if seen.contains(&hash) {
-            continue;
-        }
-        let (keep, replaced): (Vec<StoredMemoryEntry>, Vec<StoredMemoryEntry>) =
-            out.drain(..).partition(|d| d.key != e.key);
-        out = keep;
-        for d in replaced {
-            seen.remove(&content_hash_for(ns, &d.key, &d.body));
-        }
-        seen.insert(hash);
-        out.push(e.to_stored());
-        newly_added += 1;
-    }
-    out.sort_by(|a, b| a.key.cmp(&b.key));
-    (out, newly_added)
-}
-
-/// The first `<key>-N` (N ≥ 2) no durable entry uses — a "keep both" merge.
-fn free_key(durable: &[StoredMemoryEntry], key: &str) -> String {
-    (2..)
-        .map(|n| format!("{key}-{n}"))
-        .find(|k| !durable.iter().any(|d| &d.key == k))
-        .unwrap_or_else(|| format!("{key}-2"))
-}
-
-/// The compare-and-swap base of a namespace blob (D-K5): the keccak-256 of the
-/// plaintext exactly as the worker returned it.
-fn blob_hash(bytes: &[u8]) -> String {
-    format!(
-        "0x{}",
-        hex::encode(agentkeys_core::device_crypto::keccak256(bytes))
-    )
-}
+#[cfg(test)]
+use agentkeys_web_core::document_helpers::free_key;
 
 pub type SharedUiBridgeState = Arc<UiBridgeState>;
 
 const AUDIT_BUFFER_CAP: usize = 200;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiScopeBits {
-    /// `knowledge:<ns>` granted — the delegate may READ the master's shared canonical
-    /// memory for this namespace (#295 distribution). The delegate's OWN local
-    /// memory is its own and is not represented here.
-    pub read: bool,
-    /// `proposal:<ns>` granted — the delegate may WRITE/suggest into the master's
-    /// absorption inbox for this namespace (#339), which the master curates. A
-    /// DISTINCT on-chain grant (`keccak("proposal:<ns>") != keccak("knowledge:<ns>")`), so
-    /// granting read never grants write — and the delegate NEVER writes the master's
-    /// shared memory directly (the only contribution path is the curated inbox).
-    pub write: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiPaymentCap {
-    pub per_tx: f64,
-    pub daily: f64,
-    pub currency: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiTimeWindow {
-    pub start: String,
-    pub end: String,
-    pub tz: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiActor {
-    pub id: String,
-    pub omni: String,
-    pub omni_hex: String,
-    pub label: String,
-    pub role: String,
-    pub parent: Option<String>,
-    pub derivation: String,
-    pub device: String,
-    pub device_pubkey: String,
-    pub last_active: String,
-    pub status: String,
-    pub vendor: String,
-    pub k11: bool,
-    /// #233/#243: the on-chain `SidecarRegistry` device key hash (`0x` + 64 hex)
-    /// when known — set for chain-reconstructed actors and fresh pairings. Lets
-    /// the master-reset fleet teardown revoke by hash even when the per-label
-    /// `~/.agentkeys/agents/<label>.json` record never existed on this machine.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub device_key_hash: Option<String>,
-    /// What this actor IS — `"device"` (channel endpoint, §14.10) or
-    /// `"delegate"` (sandbox-resident) — from the binding manifest, which
-    /// records it at accept/scope-commit time.
-    ///
-    /// `None` = genuinely unknown (no manifest entry — e.g. an actor rebuilt
-    /// from chain), NOT "delegate". The UI must not guess from the scope: it
-    /// used to infer device-ness from "all grants are channel grants", so
-    /// revoking a device's grants silently demoted it to a delegate and a real
-    /// device showed up under Delegates with its identity unrecognizable. An
-    /// actor's TYPE is a property of its binding, never of its current
-    /// permissions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub scope: Option<HashMap<String, ApiScopeBits>>,
-    /// #248: on-chain scope service ids (0x-hex keccak) that aren't a known
-    /// `knowledge:<ns>` — e.g. `cred:<service>` granted at accept. The panel's
-    /// set-replace commit echoes these back so a memory toggle can't wipe them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub scope_unknown_service_ids: Option<Vec<String>>,
-    /// #541: the SUBSET of `scope_unknown_service_ids` this daemon resolved to
-    /// `channel-pub:<id>`/`channel-sub:<id>` via the channel registry.
-    ///
-    /// Why it must be exposed separately: `scope_unknown_service_ids`
-    /// deliberately keeps the channel hashes (a MEMORY commit has to echo them
-    /// so it cannot wipe channels). But a CHANNEL commit needs the opposite —
-    /// blind-echoing them would silently re-add the very grant the operator
-    /// just removed. The channel editor computes `preserve = unknown − channel`
-    /// and re-sends the channel NAMES it wants, so removal actually takes.
-    /// Only the daemon can supply this: the hash→name direction needs keccak.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub scope_channel_service_ids: Option<Vec<String>>,
-    /// #614: the SUBSET of `scope_unknown_service_ids` this daemon resolved to a
-    /// capability service (`tool:<class>` — enumerable candidates; `plugin:<id>`
-    /// names ride the binding-manifest path into `services` instead). Same
-    /// preserve semantics as `scope_channel_service_ids` (#541): the hashes stay
-    /// in `scope_unknown_service_ids` so a memory commit echoes them, and a
-    /// future capability editor subtracts exactly this subset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub scope_capability_service_ids: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub payment_cap: Option<ApiPaymentCap>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub time_window: Option<ApiTimeWindow>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub services: Option<Vec<String>>,
-    /// #225 E7 actor page: the actor's on-chain account. master → its passkey
-    /// P256Account when bound (absent when unbound); agent → its K10 device
-    /// omni. Set by `enrich_actor_account` on the actors read path — struct
-    /// fields (not ad-hoc JSON inserts) so the generated TS contract carries
-    /// them (B2 rung 3).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub account_address: Option<String>,
-    /// "p256account" (bound master) | "none" (unbound master → register CTA) |
-    /// "device" (agent).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub account_type: Option<String>,
-    /// #429 — the preset the delegate was spawned from (#424 manifest
-    /// readable layer). Absent for devices/masters/pre-#427 bindings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub preset_id: Option<String>,
-    /// #429 — the delegate's `knowledge:<ns>` namespace name (manifest layer).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub memory_ns: Option<String>,
-    /// #543 — the delegate's spawn-ceremony runtime/metering outcome (manifest
-    /// layer). Absent for devices/masters/pre-#543 spawns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub runtime: Option<ApiRuntimeStatus>,
-}
-
-/// #543 — a delegate's spawn-ceremony runtime/metering outcome, persisted in
-/// the binding manifest and surfaced as `ApiActor.runtime`. Answers, without
-/// broker logs: did the sandbox spawn, and is its LLM path gate-metered?
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiRuntimeStatus {
-    /// Gate provisioning outcome: `provisioned` (metered per-delegate relay-key
-    /// path) | `not-configured` | `misconfigured` | `failed`. Anything but
-    /// `provisioned` means the delegate's LLM turns are UNMETERED (opt-in
-    /// stacks) or refused (#543 fail-closed).
-    pub gate_status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub gate_error: Option<String>,
-    /// The spawn ceremony's sandbox-ensure error (absent = the runtime spawned
-    /// clean) — the "why is this delegate's chat silent" answer (#541 gap).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub spawn_error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiCapToken {
-    pub id: String,
-    pub cap: String,
-    pub scope: String,
-    pub ttl: String,
-    pub minted: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub danger: Option<bool>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiAuditEvent {
-    pub id: String,
-    pub ts: String,
-    pub actor_id: String,
-    pub actor: String,
-    pub kind: String,
-    pub detail: String,
-    pub chip: String,
-    pub sev: String,
-    /// #97: the confirmed on-chain tx for control-plane ops (accept / scope /
-    /// revoke submits). `None` for synthesized / local events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub tx_hash: Option<String>,
-    /// #97: the `AuditEnvelope v1` receipt hashes the broker emitted for this
-    /// op — the decode view fetches the REAL envelopes by these instead of
-    /// synthesizing a preview.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub audit_envelope_hashes: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiWorkerActorShare {
-    pub actor: String,
-    #[ts(type = "number")]
-    pub count: u64,
-    pub share: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiWorker {
-    pub id: String,
-    pub title: String,
-    pub host: String,
-    pub desc: String,
-    #[ts(type = "number")]
-    pub calls_today: u64,
-    #[ts(type = "number")]
-    pub calls_hour: u64,
-    #[ts(type = "number")]
-    pub p50: u64,
-    #[ts(type = "number")]
-    pub p95: u64,
-    pub cap: String,
-    pub by_actor: Vec<ApiWorkerActorShare>,
-}
-
-/// #339 P2 — one absorption-inbox proposal in the master's curate queue. The
-/// frontend-facing view of `agentkeys_protocol::InboxItemMeta`; `source_delegate_omni`
-/// + `ns` are worker-stamped (the delegate cannot forge its own attribution).
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiInboxItem {
-    pub s3_key: String,
-    pub source_delegate_omni: String,
-    pub ns: String,
-    pub key: String,
-    pub content_hash: String,
-    #[ts(type = "number")]
-    pub bytes: u64,
-    #[ts(type = "number")]
-    pub ts: u64,
-    /// #390 — the delegate-labeled, worker-stamped context kind; drives the
-    /// per-kind curate gate in the UI (skill = view-before-accept, persona =
-    /// never adoptable). Absent on pre-#390 items = `knowledge`.
-    #[serde(default)]
-    pub kind: ContextKind,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiAnchorBatch {
-    pub ts: String,
-    pub root: String,
-    #[ts(type = "number")]
-    pub count: u64,
-    pub txn: String,
-    #[ts(type = "number")]
-    pub conf: u64,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiAnchorStatus {
-    #[ts(type = "number")]
-    pub last_anchor_at: u64,
-    #[ts(type = "number")]
-    pub next_anchor_in: u64,
-    pub recent: Vec<ApiAnchorBatch>,
-}
+pub use agentkeys_backend_client::protocol::console::*;
 
 #[derive(Debug, Deserialize)]
 pub struct EnrollBeginRequest {
@@ -1315,6 +573,26 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/k11/enroll/begin", post(enroll_begin))
         .route("/v1/k11/enroll/finish", post(enroll_finish))
         .route("/v1/master/register/submit", post(master_register_submit))
+        .route(
+            "/v1/master/hosted-signer/prepare",
+            post(crate::hosted_signer::prepare),
+        )
+        .route(
+            "/v1/master/hosted-signer/pending",
+            get(crate::hosted_signer::pending),
+        )
+        .route(
+            "/v1/master/hosted-signer/dismiss",
+            post(crate::hosted_signer::dismiss),
+        )
+        .route(
+            "/v1/master/hosted-signer/build",
+            post(crate::hosted_signer::build),
+        )
+        .route(
+            "/v1/master/hosted-signer/submit",
+            post(crate::hosted_signer::submit),
+        )
         // #435 — the fresh on-chain bound-probe onboarding consults BEFORE
         // minting a passkey (register-if-first / skip-if-bound):
         .route("/v1/master/register/state", get(master_register_state))
@@ -3816,19 +3094,9 @@ fn ts_hms_utc(unix_secs: u64) -> String {
 // reflect on-chain truth, not whatever this process happened to witness.
 
 /// One `SidecarRegistry.DeviceEntry` row, reduced to what the actor tree needs.
-#[derive(Clone, Debug)]
-struct ChainDevice {
-    device_key_hash: String,
-    operator_omni: String,
-    actor_omni: String,
-    /// SidecarRegistry constants (the #427 on-chain kind split):
-    /// `TIER_MASTER = 1` · `TIER_AGENT = 2` (a sandbox-resident DELEGATE) ·
-    /// `TIER_DEVICE = 3` (a channel-endpoint DEVICE). 0 = a pre-#427 row that
-    /// predates the split. This is the AUTHORITATIVE answer to "what is this
-    /// actor" — see `tier_kind`.
-    tier: u8,
-    revoked: bool,
-}
+use agentkeys_web_core::chain::{
+    chain_selector, fetch_chain_fleet, parse_device_entry, parse_scope_return,
+};
 
 /// SidecarRegistry `TIER_AGENT` — a sandbox-resident delegate.
 const TIER_AGENT: u8 = 2;
@@ -3852,23 +3120,6 @@ fn tier_kind(tier: u8) -> Option<&'static str> {
         TIER_DEVICE => Some("device"),
         _ => None,
     }
-}
-
-fn chain_word(raw: &[u8], i: usize) -> Result<[u8; 32], String> {
-    let (start, end) = (i * 32, i * 32 + 32);
-    if raw.len() < end {
-        return Err(format!(
-            "short ABI return: need word {i} ({end} bytes), got {}",
-            raw.len()
-        ));
-    }
-    let mut w = [0u8; 32];
-    w.copy_from_slice(&raw[start..end]);
-    Ok(w)
-}
-
-fn chain_selector(sig: &str) -> String {
-    hex::encode(&agentkeys_core::device_crypto::keccak256(sig.as_bytes())[..4])
 }
 
 /// Minimal JSON-RPC `eth_call` against the chain profile's HTTP RPC.
@@ -3920,24 +3171,6 @@ async fn daemon_eth_address_has_code(rpc: &str, addr_0x: &str) -> Result<bool, S
 }
 
 /// Parse a `getOperatorDevices(bytes32) -> bytes32[]` return (offset, len, items).
-fn parse_device_hashes(raw: &[u8]) -> Result<Vec<[u8; 32]>, String> {
-    let len = u64::from_be_bytes(chain_word(raw, 1)?[24..32].try_into().unwrap()) as usize;
-    (0..len).map(|i| chain_word(raw, 2 + i)).collect()
-}
-
-/// Parse a `getDevice(bytes32) -> DeviceEntry` return (11 static words:
-/// operatorOmni, actorOmni, k11CredId, k11RpIdHash, k11PubX, k11PubY, tier,
-/// roles, registeredAt, lastSignCount, revoked).
-fn parse_device_entry(raw: &[u8], device_key_hash: &[u8; 32]) -> Result<ChainDevice, String> {
-    Ok(ChainDevice {
-        device_key_hash: format!("0x{}", hex::encode(device_key_hash)),
-        operator_omni: format!("0x{}", hex::encode(chain_word(raw, 0)?)),
-        actor_omni: format!("0x{}", hex::encode(chain_word(raw, 1)?)),
-        tier: chain_word(raw, 6)?[31],
-        revoked: chain_word(raw, 10)?[31] != 0,
-    })
-}
-
 /// The SidecarRegistry address from the compiled-in chain profile.
 fn registry_address(state: &UiBridgeState) -> Option<String> {
     state
@@ -4658,21 +3891,6 @@ fn scope_contract_address(state: &UiBridgeState) -> Option<String> {
 /// 8-word head holds (services_offset, readOnly, …, exists); the services
 /// array (len + items) sits at `struct + services_offset`. Returns
 /// `(service_hashes, read_only, exists)`.
-fn parse_scope_return(raw: &[u8]) -> Result<(Vec<[u8; 32]>, bool, bool), String> {
-    let struct_off =
-        u64::from_be_bytes(chain_word(raw, 0)?[24..32].try_into().unwrap()) as usize / 32;
-    let services_off =
-        u64::from_be_bytes(chain_word(raw, struct_off)?[24..32].try_into().unwrap()) as usize / 32;
-    let read_only = chain_word(raw, struct_off + 1)?[31] != 0;
-    let exists = chain_word(raw, struct_off + 7)?[31] != 0;
-    let len_idx = struct_off + services_off;
-    let len = u64::from_be_bytes(chain_word(raw, len_idx)?[24..32].try_into().unwrap()) as usize;
-    let services = (0..len)
-        .map(|i| chain_word(raw, len_idx + 1 + i))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((services, read_only, exists))
-}
-
 /// The web UI's core memory namespaces (`apps/parent-control` Namespace type).
 /// Scope hashes are `keccak256("knowledge:<ns>")` — the SAME encoding the broker
 /// accept + `heima-scope-set.sh` write (the terminology rule at the byte level).
@@ -4790,34 +4008,6 @@ async fn held_operator_omni(state: &UiBridgeState) -> Option<String> {
 }
 
 /// Fetch the operator's full device fleet from chain.
-async fn fetch_chain_fleet(
-    rpc: &str,
-    registry: &str,
-    operator_omni_0x: &str,
-) -> Result<Vec<ChainDevice>, String> {
-    let omni_bare = operator_omni_0x.trim_start_matches("0x").to_lowercase();
-    if omni_bare.len() != 64 {
-        return Err(format!("bad operator omni: {operator_omni_0x}"));
-    }
-    let data = format!(
-        "0x{}{omni_bare}",
-        chain_selector("getOperatorDevices(bytes32)")
-    );
-    let raw = daemon_eth_call(rpc, registry, &data).await?;
-    let hashes = parse_device_hashes(&raw)?;
-    let mut fleet = Vec::with_capacity(hashes.len());
-    for h in hashes {
-        let data = format!(
-            "0x{}{}",
-            chain_selector("getDevice(bytes32)"),
-            hex::encode(h)
-        );
-        let raw = daemon_eth_call(rpc, registry, &data).await?;
-        fleet.push(parse_device_entry(&raw, &h)?);
-    }
-    Ok(fleet)
-}
-
 /// Evict every NON-master actor row whose device the canon has DISOWNED —
 /// hash in `revoked` (the chain fleet) or `archived` (the binding manifest).
 /// Pure over the map + pre-normalized hash sets so the ghost rules stay
@@ -5003,7 +4193,9 @@ async fn reconcile_actors_from_chain(
         let chain_kind = tier_kind(d.tier);
         let is_device = match chain_kind {
             Some(k) => k == "device",
-            None => entry.as_ref().is_some_and(|e| e.kind == "device"),
+            None => entry
+                .as_ref()
+                .is_some_and(|e| matches!(e.kind.as_str(), "device" | "console")),
         };
         let services = entry
             .as_ref()
@@ -5205,7 +4397,9 @@ async fn reconcile_actors_from_chain(
                             {
                                 a.services = Some(e.granted_service_names.clone());
                             }
-                            if e.kind == "device" && a.vendor.is_empty() {
+                            if matches!(e.kind.as_str(), "device" | "console")
+                                && a.vendor.is_empty()
+                            {
                                 a.vendor = "device".into();
                                 a.device = "channel-endpoint device (§10.2)".into();
                             }
@@ -5947,7 +5141,10 @@ async fn list_recent_audit(
     // pass rows and is a safety belt for ties).
     events.sort_by(|a, b| b.ts.cmp(&a.ts));
     events.truncate(limit);
-    Json(serde_json::json!({ "events": events }))
+    Json(agentkeys_protocol::console_audit::ApiAuditPage {
+        events,
+        next_cursor: None,
+    })
 }
 
 async fn audit_stream(
@@ -6764,101 +5961,7 @@ async fn list_pairing_requests(
 /// the device, `requestedAt` carries the broker `created_at` unix seconds, and
 /// (#224) `expiresAt` carries the broker `expires_at` — the SAME value the agent
 /// printed — so the card renders a live countdown (a stale card reads as expired).
-fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
-    let field = |k: &str| {
-        b.get(k)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    let request_id = field("request_id");
-    let label = field("label");
-    let device_pubkey = field("device_pubkey");
-    let device_key_hash = field("device_key_hash");
-    let pop_sig = field("pop_sig");
-    let requested_scope = field("requested_scope");
-    let pairing_code = field("pairing_code");
-    // created_at: broker unix seconds (the agent's /request). The UI formats it.
-    let created_at = b
-        .get("created_at")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0);
-    // #224 expires_at: broker unix seconds the request expires — the SAME value the
-    // agent's `--request-pairing` prints. The UI renders a live countdown so a stale
-    // card (already past expiry / an old start) is visibly the one to refuse.
-    let expires_at = b
-        .get("expires_at")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0);
-    // char-safe head…tail elision for long hex handles.
-    let short = |v: &str| -> String {
-        let n = v.chars().count();
-        if n > 18 {
-            let head: String = v.chars().take(10).collect();
-            let tail: String = v.chars().skip(n - 6).collect();
-            format!("{head}…{tail}")
-        } else {
-            v.to_string()
-        }
-    };
-    // requested_scope: comma-separated "<service>:<ns>" tokens → RequestedPerm[].
-    let requested: Vec<serde_json::Value> = requested_scope
-        .split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(|tok| {
-            let (cap, ns) = match tok.split_once(':') {
-                Some((c, n)) => (
-                    c.to_string(),
-                    vec![serde_json::Value::String(n.to_string())],
-                ),
-                None => (tok.to_string(), Vec::new()),
-            };
-            serde_json::json!({ "cap": cap, "ns": ns, "reason": "requested at pairing" })
-        })
-        .collect();
-    // #408 D6 — a claim whose scope is ONLY channel-pub/sub grants is a channel-
-    // endpoint DEVICE bind (same predicate the broker's poll uses for the D9
-    // no-spawn). The web app routes device claims to the channel section and
-    // sandbox-delegate claims to the pairing section on this flag.
-    let is_device = agentkeys_backend_client::protocol::scope_is_device_only(&requested_scope);
-    // The declared column is self-reported placeholder context either way
-    // (never a basis for approval) — but the sandbox wording is WRONG for a
-    // device claim, so vary it by the derived kind.
-    let (device_lbl, machine_lbl, runtime_lbl) = if is_device {
-        (
-            "channel-endpoint device (K10)",
-            "device",
-            "none — channel endpoint (no runtime)",
-        )
-    } else {
-        ("sandbox device (K10)", "aiosandbox", "hermes")
-    };
-    serde_json::json!({
-        "id": request_id,
-        "agent": label,
-        "vendor": if is_device { "device" } else { "agent" },
-        "device": device_lbl,
-        "machine": machine_lbl,
-        "runtime": runtime_lbl,
-        "isDevice": is_device,
-        "dpub": short(&device_pubkey),
-        "dpubFull": device_pubkey,
-        // #224: the operator cross-checks `deviceKeyHash` (+ `dpubFull`, both printed
-        // by the agent's `--request-pairing`) before `accept · Touch ID`. `id` is the
-        // full request_id (the master-side handle). `pairCode` is now the agent's REAL
-        // one-time code (the master claimed by it) — shown so the operator can confirm
-        // it matches the code on the agent device.
-        "deviceKeyHash": device_key_hash.clone(),
-        "deviceKeyHashShort": short(&device_key_hash),
-        "pairCode": pairing_code,
-        "derivation": format!("//{label}"),
-        "requested": requested,
-        "requestedAt": created_at,
-        "expiresAt": expires_at,
-        "attestation": format!("PoP verified · {}", short(&pop_sig)),
-    })
-}
+use agentkeys_web_core::console::pending_binding_to_request;
 
 #[derive(Debug, Deserialize)]
 struct ClaimPairingRequest {
@@ -7644,75 +6747,6 @@ pub(crate) async fn mark_binding_archived(
 
 // ─── #577 — one-click delegate image update + staleness, parent-control face ─
 
-/// `POST /v1/agent/update` body from the web app.
-#[derive(Debug, Deserialize)]
-pub struct DaemonAgentUpdateRequest {
-    pub device_key_hash: String,
-    #[serde(default)]
-    pub force: bool,
-}
-
-/// One delegate's update outcome, typed for the generated TS contract (#215
-/// B2 — the frontend never hand-declares a wire interface).
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiAgentUpdateResult {
-    pub device_key_hash: String,
-    pub old_sandbox_ids: Vec<String>,
-    pub sandbox_id: Option<String>,
-    pub sandbox_status: Option<String>,
-    pub sandbox_error: Option<String>,
-    /// Whether the runtime-home hand-off landed in the replacement.
-    pub session_migrated: bool,
-    /// Always-present human-readable hand-off outcome (what migrated, or why
-    /// nothing could — pre-#577 image, unsupported backend, oversized home).
-    pub session_detail: String,
-}
-
-/// `POST /v1/agent/image-status` body from the web app.
-#[derive(Debug, Deserialize)]
-pub struct DaemonImageStatusRequest {
-    pub device_key_hashes: Vec<String>,
-}
-
-/// The fleet image-staleness answer (#577): which delegates run older bits
-/// than the current pre-cache registration.
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiImageStatus {
-    pub image: Option<String>,
-    pub current_registration_id: Option<String>,
-    pub precache_status: Option<String>,
-    pub delegates: Vec<ApiDelegateImageStatus>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiDelegateImageStatus {
-    pub device_key_hash: String,
-    pub sandbox_id: Option<String>,
-    pub sandbox_status: Option<String>,
-    /// The instance's veFaaS lease deadline, verbatim (`null` on backends
-    /// without one).
-    pub expire_at: Option<String>,
-    pub booted_registration_id: Option<String>,
-    /// The frozen registration's source image ref — the VERSIONED tag the
-    /// instance actually booted (#598 `…:vYYYYMMDD-HHMMSS-g<sha8>`), the
-    /// human "which build is this delegate on" answer next to the fleet's
-    /// current `image` above.
-    pub booted_image_url: Option<String>,
-    /// The LIVE agent identity the instance's bridge reports (#577 follow-up):
-    /// agent name the bridge reports (`dsh` since #621), its running version (the bump
-    /// ground truth), and the LLM endpoint id.
-    pub agent_engine: Option<String>,
-    pub agent_version: Option<String>,
-    pub model: Option<String>,
-    /// `true` = stale, `false` = current, `null` = unknowable (no live
-    /// instance / app-default image / no registration to compare).
-    pub stale: Option<bool>,
-    pub error: Option<String>,
-}
-
 /// `POST /v1/agent/update` — forward to the broker's #577 in-place update
 /// (kill + re-create on the durable spawn context; NO chain write, NO Touch
 /// ID). On success, refresh the manifest row's runtime verdict so a healed
@@ -7924,39 +6958,10 @@ async fn list_inheritable_namespaces(
                 .into_response()
         }
     };
-    let live_held: std::collections::HashSet<String> = manifest
-        .entries()
-        .iter()
-        .filter(|e| e.kind == "delegate" && e.archived_at.is_none())
-        .filter_map(|e| e.memory_ns.clone())
-        .collect();
-    // Latest archive wins per namespace (a ns can cycle through delegates).
-    let mut by_ns: std::collections::HashMap<String, (String, u64)> =
-        std::collections::HashMap::new();
-    for e in manifest.entries() {
-        let (Some(at), Some(true), Some(ns)) =
-            (e.archived_at, e.resources_kept, e.memory_ns.clone())
-        else {
-            continue;
-        };
-        if live_held.contains(&ns) {
-            continue;
-        }
-        match by_ns.get(&ns) {
-            Some((_, prev)) if *prev >= at => {}
-            _ => {
-                by_ns.insert(ns, (e.label.clone(), at));
-            }
-        }
-    }
-    let mut namespaces: Vec<serde_json::Value> = by_ns
-        .into_iter()
-        .map(|(ns, (from_label, archived_at))| {
-            serde_json::json!({ "ns": ns, "from_label": from_label, "archived_at": archived_at })
-        })
-        .collect();
-    namespaces.sort_by(|a, b| b["archived_at"].as_u64().cmp(&a["archived_at"].as_u64()));
-    Json(serde_json::json!({ "namespaces": namespaces })).into_response()
+    Json(agentkeys_web_core::console_apps::inheritable_namespaces(
+        &manifest,
+    ))
+    .into_response()
 }
 
 /// #430 — auto-register a feed's channel id with a display name and a note
@@ -8118,40 +7123,9 @@ pub struct ApiChatEvent {
     pub kind: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ChatSendRequest {
-    pub channel_id: String,
-    pub text: String,
-    /// #693 — `"command"` publishes the text as a command event (`sync` = pull
-    /// the knowledge now); absent / anything else = a text turn.
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// #519/#522 — an optional reply voice (Doubao speaker id) + speech rate
-    /// (语速 [-50,100]) the operator picked in fleet's converse pane. When a
-    /// voice is set, the turn carries `ChannelAudioParams` so the delegate
-    /// speaks its reply. Absent = a plain text turn (backward-compatible; the
-    /// parent-control web app sends neither).
-    #[serde(default)]
-    pub voice: Option<String>,
-    #[serde(default)]
-    pub speech_rate: Option<i32>,
-    /// #563 — "I render partials: stream the reply." Forwarded onto the
-    /// published turn as the `stream` hint; a delegate that predates #563
-    /// ignores it and answers single-shot. Absent (every pre-#563 caller,
-    /// incl. the fleet TUI) = today's behavior, so partial events can never
-    /// reach a UI that does not merge them.
-    #[serde(default)]
-    pub stream: Option<bool>,
-}
+pub use agentkeys_protocol::console_apps::ChatSendRequest;
 
-#[derive(Debug, Deserialize)]
-pub struct ChatPollRequest {
-    pub channel_id: String,
-    #[serde(default)]
-    pub after: String,
-    #[serde(default)]
-    pub wait_seconds: u64,
-}
+pub use agentkeys_protocol::console_apps::ChatPollRequest;
 
 fn env_u32(name: &str, default: u32, range: std::ops::RangeInclusive<u32>) -> u32 {
     std::env::var(name)
@@ -8168,14 +7142,26 @@ fn env_u32(name: &str, default: u32, range: std::ops::RangeInclusive<u32>) -> u3
 /// daemon and overran its own budget).
 pub(crate) fn chat_history_tail() -> u32 {
     static TAIL: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *TAIL.get_or_init(|| env_u32("AGENTKEYS_CHAT_HISTORY_TAIL", 200, 1..=5000))
+    *TAIL.get_or_init(|| {
+        env_u32(
+            "AGENTKEYS_CHAT_HISTORY_TAIL",
+            agentkeys_protocol::console_apps::CHAT_HISTORY_TAIL_DEFAULT,
+            1..=5000,
+        )
+    })
 }
 
 /// How many events a display-feed read (the latest card + the recent
 /// commands) asks for (`AGENTKEYS_DISPLAY_FEED_TAIL`, default 120, 1..=5000).
 pub(crate) fn display_feed_tail() -> u32 {
     static TAIL: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *TAIL.get_or_init(|| env_u32("AGENTKEYS_DISPLAY_FEED_TAIL", 120, 1..=5000))
+    *TAIL.get_or_init(|| {
+        env_u32(
+            "AGENTKEYS_DISPLAY_FEED_TAIL",
+            agentkeys_protocol::console_apps::DISPLAY_FEED_TAIL_DEFAULT,
+            1..=5000,
+        )
+    })
 }
 
 /// The worker's own work per poll on top of the long-poll window it may hold:
@@ -8433,31 +7419,6 @@ fn send_event_kind(req: &ChatSendRequest) -> &'static str {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct HistoryQuery {
-    pub ns: String,
-    pub key: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HistoryVersionQuery {
-    pub ns: String,
-    pub key: String,
-    pub n: u32,
-}
-
-/// A namespace is `[a-z0-9_-]`, an item key `[a-z0-9._-]` (the registry's id
-/// rule plus a legacy note key) — both short.
-fn valid_history_coords(ns: &str, key: &str) -> bool {
-    let ok = |s: &str, extra: &str| {
-        !s.is_empty()
-            && s.len() <= 64
-            && s.chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(c))
-    };
-    ok(ns, "-_") && ok(key, "-_.")
-}
-
 /// `GET /v1/master/knowledge/history?ns=&key=` — an item's stored previous
 /// versions (#695 step G), newest first. Without a durable memory plane the
 /// list is empty and `storage` = `ram` says why.
@@ -8649,7 +7610,13 @@ async fn master_agent_lifecycle(
         )
             .into_response();
     }
-    let events = match master_feed_tail(&state, &q.channel_id, 40).await {
+    let events = match master_feed_tail(
+        &state,
+        &q.channel_id,
+        agentkeys_protocol::console_apps::LIFECYCLE_FEED_TAIL,
+    )
+    .await
+    {
         Ok(events) => events,
         Err(resp) => return resp,
     };
@@ -10000,6 +8967,26 @@ fn gateway_registry_is_empty(reg: &serde_json::Value) -> bool {
 /// Best-effort at every call site (the gateway mutation already landed): a
 /// failure WARNS loudly; the next successful mutation re-syncs the snapshot.
 pub(crate) async fn sync_gateway_registry_to_config(state: &UiBridgeState) {
+    let baseline = match real_config_ctx(state).await {
+        Ok(Some(ctx)) => {
+            match config_fetch_doc(&reqwest::Client::new(), &ctx, GATEWAY_CONTACTS_SERVICE).await {
+                Ok(document) => document
+                    .map(|document| document.revision)
+                    .unwrap_or_default(),
+                Err(error) => {
+                    tracing::warn!(
+                        "contact registry baseline unavailable; refusing overwrite: {error}"
+                    );
+                    return;
+                }
+            }
+        }
+        Ok(None) => String::new(),
+        Err(error) => {
+            tracing::warn!("contact registry config unavailable: {error}");
+            return;
+        }
+    };
     let reg = match gateway_admin_call(
         state,
         reqwest::Method::GET,
@@ -10031,7 +9018,8 @@ pub(crate) async fn sync_gateway_registry_to_config(state: &UiBridgeState) {
                 }
             };
             let client = reqwest::Client::new();
-            match config_store_doc(&client, &ctx, GATEWAY_CONTACTS_SERVICE, &bytes).await {
+            match config_store_doc(&client, &ctx, GATEWAY_CONTACTS_SERVICE, &bytes, &baseline).await
+            {
                 Ok(()) => tracing::info!(
                     target: "agentkeys.daemon.ui_bridge",
                     "contact gate contact registry synced to the durable config doc"
@@ -10642,7 +9630,7 @@ async fn resolve_categories(state: &SharedUiBridgeState) -> Result<Vec<MemoryCat
         Ok(Some(ctx)) => {
             let client = reqwest::Client::new();
             match config_fetch_taxonomy(&client, &ctx).await {
-                Ok(Some(tax)) if !tax.categories.is_empty() => Ok(tax.categories),
+                Ok(Some(tax)) if !tax.categories.is_empty() => Ok(tax.document.categories),
                 // Present-but-empty (unusual) or confirmed-missing taxonomy →
                 // fallback is legitimate (nothing durable to list).
                 Ok(_) => Ok(fallback_categories(state).await),
@@ -10691,13 +9679,6 @@ async fn categories_from_cache(state: &SharedUiBridgeState) -> Vec<MemoryCategor
             ns,
         })
         .collect()
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MemoryEntryQuery {
-    pub ns: String,
-    #[serde(default)]
-    pub key: Option<String>,
 }
 
 /// `GET /v1/master/memory/entry?ns=<ns>[&key=<key>]` → the entries in one
@@ -11262,6 +10243,7 @@ async fn memory_put_object_real(
     ns: &str,
     object_key: &str,
     bytes: &[u8],
+    expected_content_hash: Option<&str>,
 ) -> Result<(), String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
@@ -11283,7 +10265,7 @@ async fn memory_put_object_real(
             plaintext_b64: STANDARD.encode(bytes),
             namespace: ns.to_string(),
             object_key: Some(object_key.to_string()),
-            expected_content_hash: None,
+            expected_content_hash: expected_content_hash.map(str::to_owned),
         })
         .send()
         .await
@@ -11328,12 +10310,16 @@ async fn memory_get_object_real(
         .send()
         .await
         .map_err(|e| format!("worker object get transport: {e}"))?;
-    if get_resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
     if !get_resp.status().is_success() {
         let status = get_resp.status();
         let body = get_resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND
+            && serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .is_some_and(|value| value["reason"] == "s3_no_such_key")
+        {
+            return Ok(None);
+        }
         return Err(format!("worker object get {status}: {body}"));
     }
     let parsed: serde_json::Value = get_resp
@@ -11358,6 +10344,18 @@ async fn history_index_read(
     ns: &str,
     key: &str,
 ) -> Result<crate::knowledge_history::VersionIndex, String> {
+    history_index_read_versioned(client, ctx, creds, ns, key)
+        .await
+        .map(|document| document.document)
+}
+
+async fn history_index_read_versioned(
+    client: &reqwest::Client,
+    ctx: &RealMemoryCtx,
+    creds: &DataCreds,
+    ns: &str,
+    key: &str,
+) -> Result<VersionedConfig<crate::knowledge_history::VersionIndex>, String> {
     match memory_get_object_real(
         client,
         ctx,
@@ -11367,8 +10365,9 @@ async fn history_index_read(
     )
     .await?
     {
-        None => Ok(crate::knowledge_history::VersionIndex::default()),
+        None => Ok(VersionedConfig::default()),
         Some(bytes) => serde_json::from_slice(&bytes)
+            .map(|document| VersionedConfig::new(document, blob_hash(&bytes)))
             .map_err(|e| format!("history index of {ns}/{key} parse: {e}")),
     }
 }
@@ -11389,7 +10388,7 @@ async fn history_stash(
     by: &str,
 ) -> Result<Option<crate::knowledge_history::KnowledgeVersion>, String> {
     let keep = crate::knowledge_history::history_keep();
-    let mut index = history_index_read(client, ctx, creds, ns, &old.key).await?;
+    let mut index = history_index_read_versioned(client, ctx, creds, ns, &old.key).await?;
     let hash = content_hash_for(ns, &old.key, &old.body);
     if index
         .newest()
@@ -11406,13 +10405,20 @@ async fn history_stash(
         by,
         &old.version,
     );
+    let slot_key = crate::knowledge_history::slot_key(&old.key, meta.slot);
+    let slot_base = memory_get_object_real(client, ctx, creds, ns, &slot_key)
+        .await?
+        .as_deref()
+        .map(blob_hash)
+        .unwrap_or_default();
     memory_put_object_real(
         client,
         ctx,
         creds,
         ns,
-        &crate::knowledge_history::slot_key(&old.key, meta.slot),
+        &slot_key,
         old.body.as_bytes(),
+        Some(&slot_base),
     )
     .await?;
     let json = serde_json::to_vec(&index).map_err(|e| format!("history index serialize: {e}"))?;
@@ -11423,6 +10429,7 @@ async fn history_stash(
         ns,
         &crate::knowledge_history::index_key(&old.key),
         &json,
+        Some(&index.revision),
     )
     .await?;
     Ok(Some(meta))
@@ -11518,7 +10525,7 @@ pub(crate) async fn resource_object_put(
     let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["put"])
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
-    memory_put_object_real(&client, &ctx, &creds, ns, object_key, bytes)
+    memory_put_object_real(&client, &ctx, &creds, ns, object_key, bytes, None)
         .await
         .map_err(|e| {
             (
@@ -11596,6 +10603,8 @@ async fn memory_get_ns_hashed_real(
     Ok(Some((parse_stored_blob(&plaintext, ns), base)))
 }
 
+pub(crate) use agentkeys_web_core::data::VersionedConfig;
+
 /// Config-store the master-only memory-types taxonomy (#201): cap-mint
 /// (`config-store`, service `memory-taxonomy`) → config worker `/v1/config/put`.
 /// Mints its own STS creds under the CONFIG role (distinct from the memory role
@@ -11604,9 +10613,10 @@ async fn config_store_taxonomy(
     client: &reqwest::Client,
     ctx: &RealConfigCtx,
     taxonomy: &MemoryTaxonomy,
+    expected_revision: &str,
 ) -> Result<(), String> {
     let plaintext = serde_json::to_vec(taxonomy).map_err(|e| format!("taxonomy serialize: {e}"))?;
-    config_store_doc(client, ctx, TAXONOMY_SERVICE, &plaintext).await
+    config_store_doc(client, ctx, TAXONOMY_SERVICE, &plaintext, expected_revision).await
 }
 
 /// Generic Config-class doc STORE (#201/#372 shape, service-parameterized):
@@ -11619,6 +10629,7 @@ pub(crate) async fn config_store_doc(
     ctx: &RealConfigCtx,
     service: &str,
     plaintext: &[u8],
+    expected_revision: &str,
 ) -> Result<(), String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
@@ -11646,6 +10657,7 @@ pub(crate) async fn config_store_doc(
         // Crate-owned body shape (issue #203) — config worker put body.
         .json(&agentkeys_backend_client::ConfigPutBody {
             cap,
+            expected_revision: Some(expected_revision.into()),
             plaintext_b64: None,
             envelope_b64: Some(STANDARD.encode(&envelope)),
         })
@@ -11656,6 +10668,13 @@ pub(crate) async fn config_store_doc(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("config put {status}: {body}"));
+    }
+    let receipt: agentkeys_backend_client::MemoryPutResp = resp
+        .json()
+        .await
+        .map_err(|error| format!("config put receipt: {error}"))?;
+    if !receipt.ok {
+        return Err("config worker did not confirm write".into());
     }
     Ok(())
 }
@@ -11670,13 +10689,13 @@ pub(crate) async fn config_store_doc(
 async fn config_fetch_taxonomy(
     client: &reqwest::Client,
     ctx: &RealConfigCtx,
-) -> Result<Option<MemoryTaxonomy>, String> {
+) -> Result<Option<VersionedConfig<MemoryTaxonomy>>, String> {
     let Some(bytes) = config_fetch_doc(client, ctx, TAXONOMY_SERVICE).await? else {
         return Ok(None);
     };
     let taxonomy: MemoryTaxonomy =
         serde_json::from_slice(&bytes).map_err(|e| format!("taxonomy parse: {e}"))?;
-    Ok(Some(taxonomy))
+    Ok(Some(bytes.map(|_| taxonomy)))
 }
 
 /// Generic Config-class doc FETCH (service-parameterized twin of
@@ -11686,7 +10705,7 @@ pub(crate) async fn config_fetch_doc(
     client: &reqwest::Client,
     ctx: &RealConfigCtx,
     service: &str,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<VersionedConfig<Vec<u8>>>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let cap = mint_master_cap(
         &ctx.broker,
@@ -11709,8 +10728,21 @@ pub(crate) async fn config_fetch_doc(
         .await
         .map_err(|e| format!("config get transport: {e}"))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        // Confirmed missing — nothing planted yet. The ONLY legitimate fallback.
-        return Ok(None);
+        let body = resp.text().await.map_err(|error| error.to_string())?;
+        if serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("reason")
+                    .and_then(|reason| reason.as_str())
+                    .map(str::to_owned)
+            })
+            .as_deref()
+            == Some("s3_no_such_key")
+        {
+            return Ok(None);
+        }
+        return Err(format!("config get unexpected 404: {body}"));
     }
     if !resp.status().is_success() {
         let status = resp.status();
@@ -11724,6 +10756,10 @@ pub(crate) async fn config_fetch_doc(
         .json()
         .await
         .map_err(|e| format!("config get parse: {e}"))?;
+    let revision = parsed
+        .revision
+        .filter(|revision| !revision.is_empty())
+        .ok_or("config worker omitted storage revision; refusing unsafe writes")?;
     let bytes = match (parsed.envelope_b64, parsed.plaintext_b64) {
         (Some(env_b64), _) => {
             let envelope = STANDARD
@@ -11743,7 +10779,7 @@ pub(crate) async fn config_fetch_doc(
                 .into())
         }
     };
-    Ok(Some(bytes))
+    Ok(Some(VersionedConfig::new(bytes, revision)))
 }
 
 // ── #404 channel registry — master-curated channel definitions ──────────────
@@ -11761,23 +10797,27 @@ pub(crate) async fn config_fetch_doc(
 /// UNCONFIGURED (dev / no-infra) — an empty cached-only registry.
 pub(crate) async fn ensure_channel_registry(
     state: &UiBridgeState,
-) -> Result<ChannelRegistry, String> {
-    if let Some(r) = state.channel_registry.read().await.clone() {
-        return Ok(r);
-    }
-    let loaded = match real_config_ctx(state).await? {
-        Some(ctx) => {
-            let client = reqwest::Client::new();
-            match config_fetch_doc(&client, &ctx, CHANNEL_REGISTRY_SERVICE).await? {
-                Some(bytes) => serde_json::from_slice::<ChannelRegistry>(&bytes)
-                    .map_err(|e| format!("channel-registry parse: {e}"))?,
-                None => ChannelRegistry::default(),
+) -> Result<VersionedConfig<ChannelRegistry>, String> {
+    if let Some(ctx) = real_config_ctx(state).await? {
+        let client = reqwest::Client::new();
+        return match config_fetch_doc(&client, &ctx, CHANNEL_REGISTRY_SERVICE).await? {
+            Some(bytes) => {
+                let document = serde_json::from_slice::<ChannelRegistry>(&bytes)
+                    .map_err(|error| format!("channel_registry parse: {error}"))?;
+                Ok(bytes.map(|_| document))
             }
-        }
-        None => ChannelRegistry::default(),
-    };
-    *state.channel_registry.write().await = Some(loaded.clone());
-    Ok(loaded)
+            None => Ok(VersionedConfig::default()),
+        };
+    }
+    Ok(VersionedConfig::new(
+        state
+            .channel_registry
+            .read()
+            .await
+            .clone()
+            .unwrap_or_default(),
+        String::new(),
+    ))
 }
 
 /// Persist + cache a mutated registry. Durable when Config is configured
@@ -11787,19 +10827,26 @@ pub(crate) async fn ensure_channel_registry(
 /// divergence).
 async fn persist_channel_registry(
     state: &UiBridgeState,
-    next: ChannelRegistry,
+    next: VersionedConfig<ChannelRegistry>,
 ) -> Result<&'static str, String> {
     let storage = match real_config_ctx(state).await? {
         Some(ctx) => {
             let client = reqwest::Client::new();
             let bytes =
                 serde_json::to_vec(&next).map_err(|e| format!("registry serialize: {e}"))?;
-            config_store_doc(&client, &ctx, CHANNEL_REGISTRY_SERVICE, &bytes).await?;
+            config_store_doc(
+                &client,
+                &ctx,
+                CHANNEL_REGISTRY_SERVICE,
+                &bytes,
+                &next.revision,
+            )
+            .await?;
             "ok"
         }
         None => "cached",
     };
-    *state.channel_registry.write().await = Some(next);
+    *state.channel_registry.write().await = Some(next.document);
     Ok(storage)
 }
 
@@ -11810,23 +10857,27 @@ async fn persist_channel_registry(
 /// Config UNCONFIGURED (dev / no-infra) — an empty cached-only manifest.
 pub(crate) async fn ensure_binding_manifest(
     state: &UiBridgeState,
-) -> Result<BindingManifest, String> {
-    if let Some(m) = state.binding_manifest.read().await.clone() {
-        return Ok(m);
-    }
-    let loaded = match real_config_ctx(state).await? {
-        Some(ctx) => {
-            let client = reqwest::Client::new();
-            match config_fetch_doc(&client, &ctx, BINDING_MANIFEST_SERVICE).await? {
-                Some(bytes) => serde_json::from_slice::<BindingManifest>(&bytes)
-                    .map_err(|e| format!("binding-manifest parse: {e}"))?,
-                None => BindingManifest::default(),
+) -> Result<VersionedConfig<BindingManifest>, String> {
+    if let Some(ctx) = real_config_ctx(state).await? {
+        let client = reqwest::Client::new();
+        return match config_fetch_doc(&client, &ctx, BINDING_MANIFEST_SERVICE).await? {
+            Some(bytes) => {
+                let document = serde_json::from_slice::<BindingManifest>(&bytes)
+                    .map_err(|error| format!("binding_manifest parse: {error}"))?;
+                Ok(bytes.map(|_| document))
             }
-        }
-        None => BindingManifest::default(),
-    };
-    *state.binding_manifest.write().await = Some(loaded.clone());
-    Ok(loaded)
+            None => Ok(VersionedConfig::default()),
+        };
+    }
+    Ok(VersionedConfig::new(
+        state
+            .binding_manifest
+            .read()
+            .await
+            .clone()
+            .unwrap_or_default(),
+        String::new(),
+    ))
 }
 
 /// Persist + cache a mutated manifest (channel-registry posture: durable when
@@ -11834,19 +10885,26 @@ pub(crate) async fn ensure_binding_manifest(
 /// returns `Err` without touching the cache).
 async fn persist_binding_manifest(
     state: &UiBridgeState,
-    next: BindingManifest,
+    next: VersionedConfig<BindingManifest>,
 ) -> Result<&'static str, String> {
     let storage = match real_config_ctx(state).await? {
         Some(ctx) => {
             let client = reqwest::Client::new();
             let bytes =
                 serde_json::to_vec(&next).map_err(|e| format!("manifest serialize: {e}"))?;
-            config_store_doc(&client, &ctx, BINDING_MANIFEST_SERVICE, &bytes).await?;
+            config_store_doc(
+                &client,
+                &ctx,
+                BINDING_MANIFEST_SERVICE,
+                &bytes,
+                &next.revision,
+            )
+            .await?;
             "ok"
         }
         None => "cached",
     };
-    *state.binding_manifest.write().await = Some(next);
+    *state.binding_manifest.write().await = Some(next.document);
     Ok(storage)
 }
 
@@ -11999,18 +11057,6 @@ async fn list_channels(State(state): State<SharedUiBridgeState>) -> axum::respon
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateChannelRequest {
-    id: String,
-    name: String,
-    #[serde(default)]
-    note: Option<String>,
-    #[serde(default)]
-    kind: Option<agentkeys_backend_client::protocol::ChannelEndpointKind>,
-    #[serde(default)]
-    endpoint_actor_omni: Option<String>,
-}
-
 /// POST /v1/channels — create a channel definition. The id is validated +
 /// IMMUTABLE from here on (it is the on-chain anchor); duplicates 409.
 async fn create_channel(
@@ -12071,18 +11117,6 @@ async fn create_channel(
             &format!("channel registry store failed — nothing created: {e}"),
         ),
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateChannelRequest {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    note: Option<String>,
-    #[serde(default)]
-    kind: Option<agentkeys_backend_client::protocol::ChannelEndpointKind>,
-    #[serde(default)]
-    endpoint_actor_omni: Option<String>,
 }
 
 /// POST /v1/channels/:id — edit DISPLAY fields (name/note). The id is the
@@ -12284,9 +11318,9 @@ async fn reconcile_taxonomy(
     cfg: &RealConfigCtx,
     new_categories: &[MemoryCategory],
 ) -> Result<Vec<MemoryCategory>, String> {
-    let existing = match config_fetch_taxonomy(client, cfg).await {
-        Ok(Some(tax)) => tax.categories,
-        Ok(None) => Vec::new(),
+    let (existing, revision) = match config_fetch_taxonomy(client, cfg).await {
+        Ok(Some(tax)) => (tax.document.categories, tax.revision),
+        Ok(None) => (Vec::new(), String::new()),
         Err(e) => return Err(e),
     };
     let merged = merge_categories(existing, new_categories);
@@ -12294,36 +11328,14 @@ async fn reconcile_taxonomy(
         version: 1,
         categories: merged.clone(),
     };
-    config_store_taxonomy(client, cfg, &taxonomy).await?;
+    config_store_taxonomy(client, cfg, &taxonomy, &revision).await?;
     Ok(merged)
 }
 
-/// Idempotent plant: each entry's content_hash is the dedup key. Re-planting
-/// the same content is a no-op (skipped++), so "prevent duplicate plant" is
-/// enforced server-side, not just in the UI. Returns planted/skipped counts +
-/// the resulting total. An audit row records the plant.
 // ── #339 P2 — absorption-inbox curate (the master-hub "push" landing) ─────────
 
-#[derive(Debug, serde::Deserialize)]
-struct InboxCurateRequest {
-    s3_key: String,
-    /// #390 §16.2 — the viewed-body watermark for `skill` proposals: the item's
-    /// `content_hash` as returned by `/v1/master/inbox/entry`. A skill accept
-    /// WITHOUT a matching hash is rejected (the gate can't prove the master saw
-    /// the body). Ignored for `knowledge`; `persona` is never adoptable.
-    #[serde(default)]
-    confirm_content_hash: Option<String>,
-    /// D-K5 — when the proposal's key already exists with a different body:
-    /// `"replace"` (the entry becomes the proposal) or `"keep-both"` (the
-    /// proposal lands under the first free `<key>-N`). Absent = refuse with
-    /// 409 `entry_exists` so the console shows the diff first.
-    #[serde(default)]
-    on_conflict: Option<String>,
-}
-
-/// #390 §16.2 — the per-kind skill size cap enforced at the curate gate
-/// (near-executable content ⇒ higher injection/behavior risk than knowledge).
-const SKILL_MAX_BYTES: usize = 64 * 1024;
+#[cfg(test)]
+use agentkeys_web_core::console_inbox::SKILL_MAX_BYTES;
 
 /// Mint a master-self inbox cap (Fetch op, `service = "inbox"`,
 /// `operator == actor == O_master` so the broker skips the on-chain scope check)
@@ -12530,64 +11542,25 @@ async fn get_master_inbox_entry(
 /// == the item's worker-stamped hash — proof the body was reviewed) and the
 /// [`SKILL_MAX_BYTES`] cap; `persona` is NEVER inbox-adoptable (master-authored
 /// only — edited in parent-control, its gate is simply closed to delegates).
+#[cfg(test)]
 fn curate_gate(
     kind: ContextKind,
     body_bytes: usize,
     confirm_content_hash: Option<&str>,
     item_content_hash: &str,
 ) -> Result<(), (axum::http::StatusCode, String)> {
-    match kind {
-        ContextKind::Knowledge => Ok(()),
-        ContextKind::Persona => Err((
-            axum::http::StatusCode::FORBIDDEN,
-            "persona_not_inbox_adoptable: persona is master-authored only — reject this \
-             proposal and edit the delegate's persona in parent-control (#390)"
-                .to_string(),
-        )),
-        // #666 — a resource item is master-curated only: an app reads it under a
-        // read-only grant and proposes corrections as KNOWLEDGE through its own
-        // inbox; the item itself never enters canonical from a delegate.
-        ContextKind::Resource => Err((
-            axum::http::StatusCode::FORBIDDEN,
-            "resource_not_inbox_adoptable: a resource item is master-curated only — reject \
-             this proposal and edit the item via `agentkeys resource add` (#666)"
-                .to_string(),
-        )),
-        // The sealed context document is the delegate's anchor — written by
-        // the install / rebind ceremony only, never by a delegate proposal.
-        ContextKind::Context => Err((
-            axum::http::StatusCode::FORBIDDEN,
-            "context_not_inbox_adoptable: the context document is sealed by the install / \
-             rebind ceremony — reject this proposal"
-                .to_string(),
-        )),
-        ContextKind::Skill => {
-            if body_bytes > SKILL_MAX_BYTES {
-                return Err((
-                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-                    format!(
-                        "skill_too_large: {body_bytes} bytes exceeds the {SKILL_MAX_BYTES}-byte \
-                         skill cap"
-                    ),
-                ));
-            }
-            match confirm_content_hash {
-                Some(h) if h == item_content_hash => Ok(()),
-                Some(_) => Err((
-                    axum::http::StatusCode::CONFLICT,
-                    "skill_review_stale: confirm_content_hash does not match the proposal — \
-                     re-view the body and retry with the hash it prints"
-                        .to_string(),
-                )),
-                None => Err((
-                    axum::http::StatusCode::PRECONDITION_REQUIRED,
-                    "skill_review_required: a skill accept must carry confirm_content_hash \
-                     (view the body first; the hash proves it was reviewed)"
-                        .to_string(),
-                )),
-            }
-        }
-    }
+    agentkeys_web_core::console_inbox::curate_gate(
+        kind,
+        body_bytes,
+        confirm_content_hash,
+        item_content_hash,
+    )
+    .map_err(|(status, reason)| {
+        (
+            axum::http::StatusCode::from_u16(status).expect("known status"),
+            reason,
+        )
+    })
 }
 
 /// `POST /v1/master/inbox/accept` — curate one proposal INTO canonical memory
@@ -12645,140 +11618,96 @@ async fn accept_master_inbox(
             return (status, Json(serde_json::json!({ "error": reason }))).into_response()
         }
     };
-    let ns = item
-        .get("ns")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let mut key = item
-        .get("key")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let body_b64 = item
-        .get("body_b64")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let body = {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        match STANDARD.decode(body_b64) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-            Err(e) => {
-                return (
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({ "error": format!("inbox item body decode: {e}") })),
-                )
-                    .into_response()
-            }
-        }
-    };
-    if ns.is_empty() || key.is_empty() {
-        return (
-            axum::http::StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": "inbox item missing ns/key" })),
-        )
-            .into_response();
-    }
-
-    // 1b. #390 §16.2 — the PER-KIND adoption gate (direction is a gate-policy
-    // outcome, not a class property): knowledge = today's accept; skill =
-    // viewed-body watermark + size cap; persona = never inbox-adoptable.
-    let kind: ContextKind = item
-        .get("kind")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let item_hash = item
-        .get("content_hash")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    if let Err((status, reason)) = curate_gate(
-        kind,
-        body.len(),
-        req.confirm_content_hash.as_deref(),
-        item_hash,
-    ) {
-        return (status, Json(serde_json::json!({ "error": reason }))).into_response();
-    }
-
-    // D-K5 — identity = key: a proposal under a key that already exists with a
-    // different body would REPLACE it, so the owner chooses after seeing the
-    // diff (`on_conflict`); without a choice the accept is refused with both
-    // hashes and the current body.
-    if let Ok(Some((durable, _))) = memory_get_ns_hashed_real(&http, &ctx, &creds, &ns).await {
-        if let Some(cur) = durable.iter().find(|d| d.key == key) {
-            if cur.body != body {
-                match req.on_conflict.as_deref() {
-                    Some("replace") => {}
-                    Some("keep-both") => key = free_key(&durable, &key),
-                    _ => {
-                        use base64::{engine::general_purpose::STANDARD, Engine};
-                        return (
-                            axum::http::StatusCode::CONFLICT,
-                            Json(serde_json::json!({
-                                "error": "entry_exists",
-                                "ns": ns,
-                                "key": key,
-                                "current_content_hash": content_hash_for(&ns, &key, &cur.body),
-                                "current_body_b64": STANDARD.encode(&cur.body),
-                                "proposed_content_hash": item_hash,
-                            })),
-                        )
-                            .into_response();
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. Curate INTO canonical via the existing plant (merge + taxonomy).
-    let preview: String = body.chars().take(120).collect();
-    let entry = ApiMemoryEntry {
-        ns: ns.clone(),
-        key: key.clone(),
-        title: key.clone(),
-        bytes: body.len() as u64,
-        version: "1".to_string(),
-        updated: String::new(),
-        preview,
-        body,
-        content_hash: String::new(),
-        kind,
-    };
-    let merge_by = {
-        let o = item
-            .get("source_delegate_omni")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .trim_start_matches("0x");
-        if o.len() > 12 {
-            format!("merge:0x{}…{}", &o[..6], &o[o.len() - 4..])
-        } else {
-            format!("merge:{o}")
-        }
-    };
-    let plant = match plant_master_memory_with_history(
-        &state,
-        MasterMemoryPlantRequest {
-            entries: vec![entry.clone()],
-        },
-        &merge_by,
-    )
-    .await
-    {
-        Ok(resp) => resp,
-        Err((status, reason)) => {
+    let item: agentkeys_backend_client::protocol::InboxItem = match serde_json::from_value(item) {
+        Ok(item) => item,
+        Err(error) => {
             return (
-                status,
-                Json(serde_json::json!({ "error": format!("curate plant failed: {reason}") })),
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error":format!("invalid inbox item: {error}")})),
             )
                 .into_response()
         }
     };
-
+    let durable = match memory_get_ns_hashed_real(&http, &ctx, &creds, &item.ns).await {
+        Ok(Some((entries, revision))) => VersionedConfig::new(entries, revision),
+        Ok(None) => VersionedConfig::default(),
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error":format!("canonical read failed: {error}")})),
+            )
+                .into_response()
+        }
+    };
+    let prepared = match agentkeys_web_core::console_inbox::prepare_accept(&item, &req, durable) {
+        Ok(prepared) => prepared,
+        Err(agentkeys_web_core::data::DataError::Http { status, body }) => {
+            return (
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error":error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let ns = item.ns;
+    let key = prepared.entry.key.clone();
+    let entry = prepared.entry;
+    if prepared.document.revision.is_empty() {
+        match crate::apps::ensure_resource_registry(&state).await {
+            Ok(registry) if registry.items.iter().any(|row|row.ns==ns && row.id!=key)=>return (StatusCode::CONFLICT,Json(serde_json::json!({"error":"namespace data is missing while resource rows still exist","ns":ns}))).into_response(),
+            Err(error)=>return (StatusCode::BAD_GATEWAY,Json(serde_json::json!({"error":format!("resource registry read failed: {error}")}))).into_response(),
+            _=>{},
+        }
+    }
+    for old in &prepared.replaced {
+        if let Err(error) = history_stash(&http, &ctx, &creds, &ns, old, &prepared.history_by).await
+        {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error":format!("history write failed: {error}")})),
+            )
+                .into_response();
+        }
+    }
+    if prepared.planted > 0 {
+        if let Err(error) = memory_put_ns_real(
+            &http,
+            &ctx,
+            &creds,
+            &ns,
+            &prepared.document,
+            Some(&prepared.document.revision),
+        )
+        .await
+        {
+            let status = if error.contains("stale_base") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            return (status, Json(serde_json::json!({"error":error}))).into_response();
+        }
+    }
+    match real_config_ctx(&state).await {
+        Ok(Some(config))=>if let Err(error)=reconcile_taxonomy(&http,&config,&[MemoryCategory{ns:ns.clone(),label:label_for_ns(&ns)}]).await {
+            return (StatusCode::BAD_GATEWAY,Json(serde_json::json!({"ok":false,"planted":prepared.planted,"ns":ns,"key":key,"error":format!("curated into canonical but taxonomy failed: {error}")}))).into_response();
+        },
+        Err(error)=>return (StatusCode::BAD_GATEWAY,Json(serde_json::json!({"ok":false,"planted":prepared.planted,"ns":ns,"key":key,"error":format!("curated into canonical but config is unavailable: {error}")}))).into_response(),
+        Ok(None)=>{},
+    }
+    let planted = prepared.planted;
     // D-K2 — a merged plain proposal becomes a typed `note` item (skills and
     // persona stay outside the registry — their own adoption gates).
     if let Err(e) = crate::apps::register_note_rows(&state, std::slice::from_ref(&entry)).await {
-        tracing::warn!(error = %e, ns = %ns, key = %key, "merge: note row not registered");
+        return (StatusCode::BAD_GATEWAY,Json(serde_json::json!({"ok":false,"planted":planted,"ns":ns,"key":key,"error":format!("curated into canonical but note registry failed: {e}")}))).into_response();
     }
 
     // 3. GC the inbox object (delete-on-accept).
@@ -12796,7 +11725,7 @@ async fn accept_master_inbox(
             status,
             Json(serde_json::json!({
                 "ok": false,
-                "planted": plant.planted,
+                "planted": planted,
                 "ns": ns,
                 "key": key,
                 "error": format!("curated into canonical but inbox GC failed: {reason}"),
@@ -12807,7 +11736,7 @@ async fn accept_master_inbox(
 
     (
         axum::http::StatusCode::OK,
-        Json(serde_json::json!({ "ok": true, "planted": plant.planted, "ns": ns, "key": key })),
+        Json(serde_json::json!({ "ok": true, "planted": planted, "ns": ns, "key": key })),
     )
         .into_response()
 }
@@ -12880,81 +11809,10 @@ async fn reject_master_inbox(
 // (real worker or in-memory fallback) but writes the array WHOLESALE under the
 // plant lock — rotation is not a merge.
 
-/// The daemon-facing persona state for one delegate (the editor's GET).
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiPersonaState {
-    pub delegate_omni: String,
-    /// The live persona document (`soul:<omni>`), if one was ever authored.
-    pub current: Option<ApiMemoryEntry>,
-    /// Superseded versions, newest first (rollback targets, max 5 kept).
-    pub versions: Vec<ApiMemoryEntry>,
-    /// Whether a sandbox bridge is configured (edits apply live vs store-only).
-    pub sandbox_configured: bool,
-}
-
-/// Outcome of a persona edit/rollback. `applied` is the sandbox leg — `false`
-/// with a reason in `apply_detail` when the sandbox is unconfigured/unreachable
-/// (the canonical store SUCCEEDED either way; never a silent partial success).
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ApiPersonaEditResponse {
-    pub ok: bool,
-    pub version: u32,
-    pub applied: bool,
-    pub apply_detail: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PersonaQuery {
-    delegate: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PersonaEditRequest {
-    delegate_omni: String,
-    body: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PersonaRollbackRequest {
-    delegate_omni: String,
-    version: u32,
-}
-
-/// A delegate omni for persona keying: `0x` + ≥8 hex chars (an actor omni is
-/// 20 bytes, but the dev/harness fixtures use shorter ids — the key derivation
-/// only needs a stable, hex-shaped identifier), lowercased by
-/// [`persona_soul_key`].
-fn validate_delegate_omni(omni: &str) -> Result<(), String> {
-    let hex = omni
-        .strip_prefix("0x")
-        .or_else(|| omni.strip_prefix("0X"))
-        .unwrap_or(omni);
-    if hex.len() >= 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(format!(
-            "delegate_omni must be a 0x-hex actor omni (≥8 hex chars), got `{omni}`"
-        ))
-    }
-}
-
 /// UTC calendar date (`YYYY-MM-DD`) for persona `updated` stamps — civil-date
 /// math from unix days (no chrono dep; Hinnant's algorithm).
 fn now_date_utc() -> String {
-    let days = (now_unix() / 86_400) as i64;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+    agentkeys_web_core::document_helpers::date_utc(now_unix())
 }
 
 /// The persona storage backend: the real per-ns worker chain when configured,
@@ -12989,13 +11847,17 @@ async fn persona_backend(
 async fn persona_load(
     state: &SharedUiBridgeState,
     backend: &PersonaBackend,
-) -> Result<Vec<StoredMemoryEntry>, (axum::http::StatusCode, String)> {
+) -> Result<VersionedConfig<Vec<StoredMemoryEntry>>, (axum::http::StatusCode, String)> {
     match backend {
         PersonaBackend::Real(ctx, creds) => {
             let client = reqwest::Client::new();
-            memory_get_ns_real(&client, ctx, creds, PERSONA_NAMESPACE)
+            memory_get_ns_hashed_real(&client, ctx, creds, PERSONA_NAMESPACE)
                 .await
-                .map(|opt| opt.unwrap_or_default())
+                .map(|document| {
+                    document
+                        .map(|(entries, revision)| VersionedConfig::new(entries, revision))
+                        .unwrap_or_default()
+                })
                 .map_err(|e| {
                     (
                         axum::http::StatusCode::BAD_GATEWAY,
@@ -13005,11 +11867,14 @@ async fn persona_load(
         }
         PersonaBackend::Cache => {
             let cache = state.master_memory.read().await;
-            Ok(cache
-                .values()
-                .filter(|e| e.ns == PERSONA_NAMESPACE)
-                .map(|e| e.to_stored())
-                .collect())
+            Ok(VersionedConfig::new(
+                cache
+                    .values()
+                    .filter(|e| e.ns == PERSONA_NAMESPACE)
+                    .map(|e| e.to_stored())
+                    .collect(),
+                String::new(),
+            ))
         }
     }
 }
@@ -13021,19 +11886,27 @@ async fn persona_store(
     state: &SharedUiBridgeState,
     backend: &PersonaBackend,
     entries: &[StoredMemoryEntry],
+    expected_hash: &str,
 ) -> Result<(), (axum::http::StatusCode, String)> {
     match backend {
         PersonaBackend::Real(ctx, creds) => {
             let client = reqwest::Client::new();
-            memory_put_ns_real(&client, ctx, creds, PERSONA_NAMESPACE, entries, None)
-                .await
-                .map(|_| ())
-                .map_err(|e| {
-                    (
-                        axum::http::StatusCode::BAD_GATEWAY,
-                        format!("persona write of knowledge:{PERSONA_NAMESPACE} failed: {e}"),
-                    )
-                })
+            memory_put_ns_real(
+                &client,
+                ctx,
+                creds,
+                PERSONA_NAMESPACE,
+                entries,
+                Some(expected_hash),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("persona write of knowledge:{PERSONA_NAMESPACE} failed: {e}"),
+                )
+            })
         }
         PersonaBackend::Cache => {
             let mut cache = state.master_memory.write().await;
@@ -13375,7 +12248,7 @@ async fn get_master_persona(
         }
     };
     let soul_key = persona_soul_key(&q.delegate);
-    let (current, versions) = crate::persona::persona_view(entries, &soul_key);
+    let (current, versions) = crate::persona::persona_view(entries.document, &soul_key);
     let view = ApiPersonaState {
         delegate_omni: normalize_omni_0x(&q.delegate).to_lowercase(),
         current: current.map(|s| ApiMemoryEntry::from_stored(PERSONA_NAMESPACE, s)),
@@ -13408,8 +12281,8 @@ async fn persona_commit(
         let _guard = state.plant_lock.lock().await;
         let entries = persona_load(state, &backend).await?;
         let (rotated, v) =
-            crate::persona::rotate_persona(entries, &soul_key, new_body, &now_date_utc());
-        persona_store(state, &backend, &rotated).await?;
+            crate::persona::rotate_persona(entries.document, &soul_key, new_body, &now_date_utc());
+        persona_store(state, &backend, &rotated, &entries.revision).await?;
         version = v;
     }
     let (applied, apply_detail) =
@@ -13573,12 +12446,15 @@ async fn delete_master_persona(
         };
         let before = entries.len();
         let kept: Vec<StoredMemoryEntry> = entries
+            .document
             .into_iter()
             .filter(|e| e.key != soul_key && !e.key.starts_with(&prefix))
             .collect();
         removed = before - kept.len();
         if removed > 0 {
-            if let Err((status, reason)) = persona_store(&state, &backend, &kept).await {
+            if let Err((status, reason)) =
+                persona_store(&state, &backend, &kept, &entries.revision).await
+            {
                 return (status, Json(serde_json::json!({ "error": reason }))).into_response();
             }
         }
@@ -13606,11 +12482,6 @@ async fn delete_master_persona(
         Json(serde_json::json!({ "ok": true, "removed": removed })),
     )
         .into_response()
-}
-
-#[derive(Debug, Deserialize)]
-struct PersonaQueryBody {
-    delegate_omni: String,
 }
 
 /// `POST /v1/master/agent/restart` — the explicit re-source verb (#390 issue
@@ -14013,24 +12884,6 @@ async fn list_config_presets() -> axum::response::Response {
         .into_response()
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct InitConfigRequest {
-    /// Preset id to author; empty ⇒ the shipped default (rich adult-household).
-    #[serde(default)]
-    pub preset_id: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct InitConfigResponse {
-    /// The preset actually authored (echoes the resolved default for an empty id).
-    pub preset_id: String,
-    /// `"ok"` (durable `config/memory-taxonomy.enc` written) or `"cached"` (Config
-    /// unconfigured — authored into the in-memory mirror only, dev/no-infra).
-    pub taxonomy_status: String,
-    /// The merged category set now in effect (authored ∪ any pre-existing).
-    pub categories: Vec<MemoryCategory>,
-}
-
 /// `POST /v1/master/config/init` → author the memory-types taxonomy from a
 /// bundled default preset (#207 item 1A, config-init entry point A). This writes
 /// the category INDEX, not scope grants — it is master-self (operator == actor;
@@ -14159,34 +13012,6 @@ fn bundled_catalog() -> &'static agentkeys_catalog::Catalog {
 
 /// Normalize/validate a data-class string to the cap's snake_case set. Defaults
 /// to `credentials` (the common cred-categorize case) for an empty value.
-fn normalize_data_class(s: &str) -> Result<&'static str, String> {
-    match s.trim().to_lowercase().as_str() {
-        "" | "credentials" | "cred" => Ok("credentials"),
-        "memory" => Ok("memory"),
-        "config" => Ok("config"),
-        other => Err(format!("unknown data_class: {other}")),
-    }
-}
-
-/// The auto-distribute gating tier for a category's sensitivity (#207 §3 inv. 2):
-/// Safe → `auto` (auto-confirm + daily review); Sensitive → `k11` (explicit confirm).
-/// The tier comes from the CATALOG floor, so a vendor/telemetry prior can't downgrade it.
-fn gating_for(s: agentkeys_catalog::Sensitivity) -> ScopeGating {
-    match s {
-        agentkeys_catalog::Sensitivity::Safe => ScopeGating::Auto,
-        agentkeys_catalog::Sensitivity::Sensitive => ScopeGating::K11,
-    }
-}
-
-/// The signed `service` string a scope grant would be over: memory → `knowledge:<ns>`,
-/// credentials/other → the lowercased entity (service id). Matches the cap layer.
-fn service_for(data_class: &str, entity: &str) -> String {
-    match data_class {
-        "memory" => format!("knowledge:{}", entity.trim().to_lowercase()),
-        _ => entity.trim().to_lowercase(),
-    }
-}
-
 /// Mint a master-self `Classify` cap for `(data_class, entity)` via the broker.
 async fn mint_master_classify_cap(
     client: &reqwest::Client,
@@ -14289,13 +13114,6 @@ async fn classify_entity(
     bundled_catalog().tag(entity)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ClassifyTagRequest {
-    #[serde(default)]
-    pub data_class: String,
-    pub entity: String,
-}
-
 /// `POST /v1/master/classify/tag` (#207 item 7 — cred auto-categorize). Classify a
 /// minted credential's service (or any entity) → its category + sensitivity, so the
 /// master can confirm a `cred:<service>` grant. Read-only; never writes scope.
@@ -14332,46 +13150,6 @@ async fn classify_tag(
         })),
     )
         .into_response()
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SurfaceItem {
-    #[serde(default)]
-    pub data_class: String,
-    pub entity: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ProposeRequest {
-    #[serde(default)]
-    pub actor_id: String,
-    pub surface: Vec<SurfaceItem>,
-}
-
-/// One proposed scope grant. `gating` is the sensitivity tier from the CATALOG:
-/// `auto` (Safe → auto-confirm + surface in the daily review) | `k11` (Sensitive →
-/// explicit per-grant K11 confirm). NEVER granted here — `propose` only proposes.
-#[derive(Debug, Serialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub struct ProposedScope {
-    pub data_class: String,
-    pub entity: String,
-    pub service: String,
-    pub category: String,
-    pub sensitivity: agentkeys_catalog::Sensitivity,
-    pub gating: ScopeGating,
-    pub confidence: f32,
-}
-
-/// The #207 §3 grant-gating tier for a proposed scope: `auto` (Safe →
-/// auto-confirm + daily review) | `k11` (Sensitive → explicit per-grant K11
-/// confirm). An enum (not a bare str) so the generated TS carries the union.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
-pub enum ScopeGating {
-    Auto,
-    K11,
 }
 
 /// `POST /v1/master/classify/propose` (#207 item 5 — connect-time auto-distribute).
@@ -14472,16 +13250,6 @@ async fn real_cred_ctx(state: &UiBridgeState) -> Result<Option<RealCredCtx>, Str
     }))
 }
 
-/// A categorized credential service — the cred parallel to `MemoryCategory`:
-/// the service id + its catalog category + sensitivity (so the UI groups creds
-/// by category exactly like memory namespaces).
-#[derive(Debug, Serialize)]
-pub struct CredService {
-    pub service: String,
-    pub category: String,
-    pub sensitivity: agentkeys_catalog::Sensitivity,
-}
-
 /// `GET /v1/master/credentials` — list the master's stored credential services
 /// (cred worker `/v1/cred/list`), each categorized via the catalog. The
 /// per-data-class parallel to `GET /v1/master/memory`. Unconfigured (no cred
@@ -14570,12 +13338,6 @@ async fn list_master_credentials_inner(
         (a.category.clone(), a.service.clone()).cmp(&(b.category.clone(), b.service.clone()))
     });
     Ok(out)
-}
-
-#[derive(Debug, Deserialize)]
-pub struct StoreCredRequest {
-    pub service: String,
-    pub secret: String,
 }
 
 /// `POST /v1/master/credentials/store` — vault a master credential (mint a
@@ -14752,6 +13514,79 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn config_store_requires_a_confirmed_worker_receipt() {
+        let responses = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+            serde_json::json!({"ok":false,"s3_key":"fixture","envelope_size":0}),
+            serde_json::json!({}),
+            serde_json::json!({"ok":true,"s3_key":"fixture","envelope_size":32}),
+        ])));
+        let replies = responses.clone();
+        let router = Router::new()
+            .route("/v1/cap/config-store", post(|| async { Json(serde_json::json!({"fixture":"cap"})) }))
+            .route("/v1/mint-oidc-jwt", post(|| async { Json(serde_json::json!({"jwt":"fixture","wallet":"fixture","expiration":9999999999_i64})) }))
+            .route("/dev/sign-sts", post(|| async { Json(serde_json::json!({"access_key_id":"fixture","secret_access_key":"fixture","session_token":"fixture","expiration_unix":9999999999_i64})) }))
+            .route("/dev/sign-message", post(|| async { Json(serde_json::json!({"address":"fixture","signature":hex::encode([7u8;65]),"key_version":1})) }))
+            .route("/v1/config/put", post(move |Json(body): Json<agentkeys_backend_client::ConfigPutBody>| {
+                let replies = replies.clone();
+                async move {
+                    assert_eq!(body.expected_revision.as_deref(), Some("revision-before-edit"));
+                    assert!(body.envelope_b64.is_some());
+                    Json(replies.lock().unwrap().pop_front().unwrap())
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let context = RealConfigCtx {
+            broker: endpoint.clone(),
+            config_url: endpoint.clone(),
+            role_arn: String::new(),
+            region: String::new(),
+            j1: "fixture".into(),
+            omni: "0xab".into(),
+            device_key_hash: "fixture".into(),
+            signer_url: Some(endpoint),
+            sts_provider: Some("ve".into()),
+        };
+        let client = reqwest::Client::new();
+        let rejected = config_store_doc(
+            &client,
+            &context,
+            BINDING_MANIFEST_SERVICE,
+            b"{}",
+            "revision-before-edit",
+        )
+        .await;
+        assert!(
+            rejected.is_err(),
+            "HTTP 200 with ok=false must not report durable success"
+        );
+        let malformed = config_store_doc(
+            &client,
+            &context,
+            CHANNEL_REGISTRY_SERVICE,
+            b"{}",
+            "revision-before-edit",
+        )
+        .await;
+        assert!(
+            malformed.is_err(),
+            "HTTP 200 without a canonical receipt must fail"
+        );
+        config_store_doc(
+            &client,
+            &context,
+            agentkeys_protocol::APP_REGISTRY_SERVICE,
+            b"{}",
+            "revision-before-edit",
+        )
+        .await
+        .unwrap();
+        assert!(responses.lock().unwrap().is_empty());
+        server.abort();
+    }
 
     #[test]
     fn the_bridge_healthz_body_counts_as_reachable_at_any_status() {
@@ -19630,20 +18465,24 @@ pub(crate) async fn context_doc_store(
 ) -> Result<&'static str, String> {
     let key = agentkeys_backend_client::protocol::CONTEXT_ENTRY_KEY;
     let backend = persona_backend(state).await.map_err(|(_, e)| e)?;
-    let mut entries: Vec<StoredMemoryEntry> = match &backend {
+    let mut entries: VersionedConfig<Vec<StoredMemoryEntry>> = match &backend {
         PersonaBackend::Real(ctx, creds) => {
             let client = reqwest::Client::new();
-            memory_get_ns_real(&client, ctx, creds, memory_ns)
+            memory_get_ns_hashed_real(&client, ctx, creds, memory_ns)
                 .await?
+                .map(|(entries, revision)| VersionedConfig::new(entries, revision))
                 .unwrap_or_default()
         }
         PersonaBackend::Cache => {
             let cache = state.master_memory.read().await;
-            cache
-                .values()
-                .filter(|e| e.ns == memory_ns)
-                .map(|e| e.to_stored())
-                .collect()
+            VersionedConfig::new(
+                cache
+                    .values()
+                    .filter(|e| e.ns == memory_ns)
+                    .map(|e| e.to_stored())
+                    .collect(),
+                String::new(),
+            )
         }
     };
     entries.retain(|e| e.key != key);
@@ -19660,9 +18499,16 @@ pub(crate) async fn context_doc_store(
     match &backend {
         PersonaBackend::Real(ctx, creds) => {
             let client = reqwest::Client::new();
-            memory_put_ns_real(&client, ctx, creds, memory_ns, &entries, None)
-                .await
-                .map(|_| "durable")
+            memory_put_ns_real(
+                &client,
+                ctx,
+                creds,
+                memory_ns,
+                &entries,
+                Some(&entries.revision),
+            )
+            .await
+            .map(|_| "durable")
         }
         PersonaBackend::Cache => {
             let mut cache = state.master_memory.write().await;

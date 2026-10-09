@@ -13,6 +13,7 @@ name = "agentkeys_worker_creds"
 path = "src/lib.rs"
 
 [dependencies]
+tower-http = { version = "0.5", features = ["cors"] }
 agentkeys-types = { workspace = true }
 # K10 cap-PoP verification (issue #76): ecrecover + cap_pop_payload + device_key_hash.
 agentkeys-core = { workspace = true }
@@ -46,6 +47,7 @@ aws-sdk-s3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 tokio = { workspace = true }
 # In-process audit worker for the #229 durable-audit integration test.
 agentkeys-worker-audit = { path = "../agentkeys-worker-audit" }

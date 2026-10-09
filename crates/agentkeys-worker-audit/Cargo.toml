@@ -13,6 +13,8 @@ name = "agentkeys_worker_audit"
 path = "src/lib.rs"
 
 [dependencies]
+agentkeys-protocol = { workspace = true }
+tower-http = { version = "0.5", features = ["cors"] }
 agentkeys-core = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }

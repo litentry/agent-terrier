@@ -317,7 +317,7 @@ pub(crate) async fn finish_console_enrollment(
             actor_omni: dev.actor_omni.clone(),
             device_key_hash: dev.device_key_hash.clone(),
             label: dev.label.clone(),
-            kind: "device".into(),
+            kind: "console".into(),
             granted_service_names: Vec::new(),
             updated_at: now_unix(),
             preset_id: None,
@@ -504,11 +504,7 @@ pub async fn console_device_status(
         .into_response()
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub struct ConsoleEnrollRequest {
-    #[serde(default)]
-    pub label: Option<String>,
-}
+pub use agentkeys_protocol::console_apps::ConsoleEnrollRequest;
 
 /// POST /v1/master/console/device/enroll/build — the standalone ceremony
 /// (an app install that binds a display slot enrolls the console in ITS

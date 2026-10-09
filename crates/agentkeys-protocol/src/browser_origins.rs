@@ -10,3 +10,11 @@ pub fn parse_browser_origins(spec: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
+pub const WORKER_CORS_HEADERS: &[&str] = &[
+    "content-type",
+    "authorization",
+    "x-aws-access-key-id",
+    "x-aws-secret-access-key",
+    "x-aws-session-token",
+];

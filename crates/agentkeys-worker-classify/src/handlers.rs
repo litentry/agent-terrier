@@ -9,17 +9,20 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::Classification;
 use crate::classify::{self, CompileResult};
 use crate::state::SharedClassifyWorkerState;
 use agentkeys_worker_creds::errors::{err_403, err_502, ApiError};
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
 
 pub fn build_router(state: SharedClassifyWorkerState) -> Router {
+    let browser_origins = std::env::var("AGENTKEYS_BROWSER_ORIGINS").unwrap_or_default();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/classify/tag", post(classify_tag))
         .route("/v1/classify/compile", post(classify_compile))
+        .layer(agentkeys_worker_creds::cors::browser_cors_layer(
+            &browser_origins,
+        ))
         .with_state(state)
 }
 
@@ -40,20 +43,8 @@ async fn healthz(State(state): State<SharedClassifyWorkerState>) -> Json<HealthB
     })
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TagRequest {
-    pub cap: CapToken,
-    /// The data class of the entity being classified — asserted to match the
-    /// cap's signed `data_class` (a Memory-classify cap can't TAG a credential).
-    pub data_class: DataClass,
-    pub entity: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TagResponse {
-    pub ok: bool,
-    pub classification: Classification,
-}
+pub type TagRequest = agentkeys_protocol::classify::ClassifyTagBody<CapToken, DataClass>;
+pub use agentkeys_protocol::classify::ClassifyTagResponse as TagResponse;
 
 async fn classify_tag(
     State(state): State<SharedClassifyWorkerState>,

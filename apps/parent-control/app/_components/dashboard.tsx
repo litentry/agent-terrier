@@ -422,7 +422,9 @@ export function AuditFeed({
   actorFilter,
   onActorFilter,
   actorRows,
+  source = 'daemon',
 }: {
+  source?: 'chain' | 'daemon';
   events: AuditEvent[];
   status: ConnectionStatus;
   onPick: (e: AuditEvent) => void;
@@ -446,14 +448,14 @@ export function AuditFeed({
     return (
       <>
         <PageHead
-          crumb="tier-1 · sse · audit-service · decodable on click"
+          crumb={source === 'chain' ? 'account activity · confirmed' : 'tier-1 · sse · audit-service · decodable on click'}
           title="audit feed"
-          desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction."
+          desc={source === 'chain' ? 'Confirmed activity from your account. Load older activity to continue through your history, or select a row for its receipt.' : 'Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction.'}
         />
         <EmptyState
           status={status}
-          title="no audit events"
-          hint="The feed streams from the daemon (GET /v1/audit + SSE). Events appear here once a daemon is connected and actors are active."
+          title={source === 'chain' ? 'no activity in this page' : 'no audit events'}
+          hint={source === 'chain' ? 'Use Load older activity when available to continue through your account history.' : 'The feed streams from the daemon (GET /v1/audit + SSE). Events appear here once a daemon is connected and actors are active.'}
         />
       </>
     );
@@ -462,9 +464,9 @@ export function AuditFeed({
   return (
     <>
       <PageHead
-        crumb="tier-1 · sse · audit-service · decodable on click"
+        crumb={source === 'chain' ? 'account activity · confirmed' : 'tier-1 · sse · audit-service · decodable on click'}
         title="audit feed"
-        desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction."
+        desc={source === 'chain' ? 'Confirmed activity from your account. Load older activity to continue through your history, or select a row for its receipt.' : 'Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction.'}
         actions={<button className="btn sm" onClick={onPause}>{paused ? '▶ resume' : '❚❚ pause'}</button>}
       />
       <Panel

@@ -10,7 +10,7 @@
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use agentkeys_protocol::{BoundChannel, EndpointEnrollment, EndpointScope};
 
@@ -24,26 +24,7 @@ use crate::handlers::update::{auth_session, mgmt_request, probe_owned_delegate};
 use crate::sponsored_accept::{AcceptUserOpParams, BuildAcceptResponse};
 use crate::state::SharedState;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RebindBuildRequest {
-    pub operator_omni: String,
-    pub device_key_hash: String,
-    /// The delegate's FULL new grant set (the compiler's `services`).
-    pub services: Vec<String>,
-    #[serde(default)]
-    pub preserve_service_ids: Vec<String>,
-    /// The endpoint actors' FULL resulting sets (the gate that relays the new
-    /// channel, the console on a display feed).
-    #[serde(default)]
-    pub endpoint_scopes: Vec<EndpointScope>,
-    /// An endpoint the new channel needs that is not enrolled yet.
-    #[serde(default)]
-    pub endpoint_enrollments: Vec<EndpointEnrollment>,
-    /// The compiled bound channels after the change — what the sealed
-    /// context document carries.
-    #[serde(default)]
-    pub bound_channels: Vec<BoundChannel>,
-}
+pub use agentkeys_protocol::console_apps::RebindBuildRequest;
 
 /// Same shape as the spawn / archive builds: the UserOp envelope FLATTENED
 /// (`user_op`, `user_op_hash`, … at the top level — what the daemon, the CLI
@@ -221,18 +202,7 @@ pub async fn rebind_build(
 
 // ─── /v1/agent/spawn/context/update ──────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SpawnContextUpdateRequest {
-    pub operator_omni: String,
-    pub device_key_hash: String,
-    #[serde(default)]
-    pub bound_channels: Vec<BoundChannel>,
-    /// The seal that confirmed with this change (the row caches it).
-    #[serde(default)]
-    pub context_version: Option<u64>,
-    #[serde(default)]
-    pub context_hash: Option<String>,
-}
+pub use agentkeys_protocol::console_apps::SpawnContextUpdateRequest;
 
 /// What happened to the RUNNING runtime, if any.
 #[derive(Debug, Serialize)]

@@ -27,6 +27,8 @@ import type { GatewayChannelsResponse } from '@/lib/generated/GatewayChannelsRes
 import type { GatewayChannelUpdateRequest } from '@/lib/generated/GatewayChannelUpdateRequest';
 import type { ChannelDoc } from '@/lib/generated/ChannelDoc';
 import type { RouterViewWire } from '@/lib/routerView';
+import type { HostedGatewayRequest } from '@/lib/generated/HostedGatewayRequest';
+import type { GatewayLoginVerifyRequest } from '@/lib/generated/GatewayLoginVerifyRequest';
 
 const DEFAULT_BASE_URL = 'http://localhost:3114';
 
@@ -83,7 +85,10 @@ async function call<T>(
   body?: unknown,
 ): Promise<GatewayResult<T>> {
   if (process.env.NEXT_PUBLIC_AGENTKEYS_BACKEND === 'core') {
-    return { ok: false, reason: 'hosted_gateway_unavailable', detail: 'Transport and contact management are not connected in this hosted version yet.', status: 501 };
+    const request = hostedRequest(method, path, body);
+    return request
+      ? callHosted<T>(request)
+      : { ok: false, reason: 'gateway_operation_not_supported', status: 400 };
   }
   gwlog('→', method, path, body ?? '');
   let resp: Response;
@@ -123,6 +128,164 @@ async function call<T>(
     };
   }
   return { ok: true, value: json as T };
+}
+
+export interface HostedGatewayAccess {
+  sessionKey(): string | null;
+  request(request: HostedGatewayRequest): Promise<GatewayResult<unknown>>;
+  readRegistry(): Promise<{ value: unknown; revision: string } | null>;
+  writeRegistry(value: unknown, expectedRevision: string): Promise<void>;
+  afterMutation?(request: HostedGatewayRequest): Promise<void>;
+}
+
+let hostedGatewayAccess: HostedGatewayAccess | null = null;
+let hostedRegistrySession: string | null = null;
+let hostedGatewayQueue: Promise<void> = Promise.resolve();
+
+export function setHostedGatewayAccess(access: HostedGatewayAccess | null): void {
+  hostedGatewayAccess = access;
+  hostedRegistrySession = null;
+  hostedGatewayQueue = Promise.resolve();
+}
+
+function hostedRequest(method: 'GET' | 'POST', path: string, body: unknown): HostedGatewayRequest | null {
+  const [route, query] = path.split('?');
+  const params = new URLSearchParams(query);
+  const payload = body ?? {};
+  if (method === 'GET') {
+    switch (route) {
+      case '/v1/master/gateway/status': return { operation: 'status' };
+      case '/v1/master/gateway/contacts': return { operation: 'contacts' };
+      case '/v1/master/gateway/channels': return { operation: 'channels' };
+      case '/v1/master/gateway/bind/pending': return { operation: 'bind_pending' };
+      case '/v1/master/gateway/router': return { operation: 'router' };
+      case '/v1/master/gateway/monitor': return { operation: 'monitor', payload: { after: Number(params.get('after') ?? 0) } };
+      case '/v1/master/gateway/login/status': return { operation: 'login_status', payload: { login_id: params.get('login_id') ?? '' } };
+      case '/v1/master/gateway/history':
+      case '/v1/master/gateway/activity': return {
+        operation: route.endsWith('/history') ? 'history' : 'activity',
+        payload: { before: params.has('before') ? Number(params.get('before')) : null, limit: params.has('limit') ? Number(params.get('limit')) : null },
+      };
+      default: return null;
+    }
+  }
+  switch (route) {
+    case '/v1/master/gateway/login/start': return { operation: 'login_start', payload: { contact_id: (payload as { contact_id?: string }).contact_id ?? null } };
+    case '/v1/master/gateway/login/verify': return { operation: 'login_verify', payload: payload as GatewayLoginVerifyRequest };
+    case '/v1/master/gateway/login/disconnect': return { operation: 'login_disconnect' };
+    case '/v1/master/gateway/bind/invite': return { operation: 'bind_invite', payload: payload as GatewayBindInviteRequest };
+    case '/v1/master/gateway/bind/approve': return { operation: 'bind_approve', payload: payload as GatewayApproveRequest };
+    case '/v1/master/gateway/bind/reject': return { operation: 'bind_reject', payload: payload as GatewayBindRejectRequest };
+    case '/v1/master/gateway/contacts/update': return { operation: 'contacts_update', payload: payload as GatewayContactUpdateRequest };
+    case '/v1/master/gateway/contacts/revoke': return { operation: 'contacts_revoke', payload: payload as GatewayContactRevokeRequest };
+    case '/v1/master/gateway/contacts/welcome': return { operation: 'contacts_welcome', payload: payload as GatewayContactWelcomeRequest };
+    case '/v1/master/gateway/channels/update': return { operation: 'channels_update', payload: payload as GatewayChannelUpdateRequest };
+    case '/v1/master/gateway/router/settings': return { operation: 'router_settings', payload: payload as GatewayRouterSettingsRequest };
+    default: return null;
+  }
+}
+
+function registryIsEmpty(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Contact registry is not a valid document.');
+  const registry = value as Record<string, unknown>;
+  let empty = true;
+  for (const field of ['bound', 'invites', 'pending', 'channels', 'apps']) {
+    if (registry[field] !== undefined && !Array.isArray(registry[field])) throw new Error('Contact registry is not a valid document.');
+    if (Array.isArray(registry[field]) && registry[field].length > 0) empty = false;
+  }
+  return empty && registry.router == null;
+}
+
+class HostedGatewayFailure extends Error {
+  constructor(readonly result: Extract<GatewayResult<never>, { ok: false }>) {
+    super(result.detail ?? result.reason);
+  }
+}
+
+function checkHostedSession(access: HostedGatewayAccess, sessionKey: string): void {
+  if (hostedGatewayAccess !== access || access.sessionKey() !== sessionKey) {
+    throw new HostedGatewayFailure({ ok: false, reason: 'master_session_required', detail: 'Please sign in again.', status: 401 });
+  }
+}
+
+async function requestHosted<T>(access: HostedGatewayAccess, sessionKey: string, request: HostedGatewayRequest): Promise<T> {
+  checkHostedSession(access, sessionKey);
+  const response = await access.request(request);
+  checkHostedSession(access, sessionKey);
+  if (!response.ok) throw new HostedGatewayFailure(response);
+  return response.value as T;
+}
+
+async function reconcileHostedRegistry(access: HostedGatewayAccess, sessionKey: string): Promise<void> {
+  if (hostedRegistrySession === sessionKey) return;
+  const registry = await requestHosted<unknown>(access, sessionKey, { operation: 'registry_export' });
+  checkHostedSession(access, sessionKey);
+  const durable = await access.readRegistry();
+  checkHostedSession(access, sessionKey);
+  if (!registryIsEmpty(registry)) {
+    await access.writeRegistry(registry, durable?.revision ?? '');
+  } else if (durable && !registryIsEmpty(durable.value)) {
+    await requestHosted(access, sessionKey, { operation: 'registry_restore', payload: { registry: durable.value } });
+  }
+  checkHostedSession(access, sessionKey);
+  hostedRegistrySession = sessionKey;
+}
+
+const REGISTRY_MUTATIONS = new Set<HostedGatewayRequest['operation']>([
+  'bind_invite', 'bind_approve', 'bind_reject', 'contacts_update', 'contacts_revoke',
+  'contacts_welcome', 'channels_update', 'router_settings',
+]);
+
+async function executeHosted<T>(access: HostedGatewayAccess, sessionKey: string, request: HostedGatewayRequest): Promise<GatewayResult<T>> {
+  let applied = false;
+  let backedUp = false;
+  try {
+    checkHostedSession(access, sessionKey);
+    const mutation = REGISTRY_MUTATIONS.has(request.operation);
+    const couldBind = request.operation === 'login_status';
+    if (mutation || couldBind || request.operation === 'contacts' || request.operation === 'channels') {
+      await reconcileHostedRegistry(access, sessionKey);
+    }
+    const baseline = mutation || couldBind ? await access.readRegistry() : null;
+    checkHostedSession(access, sessionKey);
+    const value = await requestHosted<T>(access, sessionKey, request);
+    applied = mutation || (couldBind && (value as { status?: string })?.status === 'connected');
+    if (applied) {
+      const registry = await requestHosted<unknown>(access, sessionKey, { operation: 'registry_export' });
+      registryIsEmpty(registry);
+      checkHostedSession(access, sessionKey);
+      await access.writeRegistry(registry, baseline?.revision ?? '');
+      checkHostedSession(access, sessionKey);
+      backedUp = true;
+      await access.afterMutation?.(request);
+      checkHostedSession(access, sessionKey);
+    }
+    return { ok: true, value };
+  } catch (error) {
+    hostedRegistrySession = null;
+    if (error instanceof HostedGatewayFailure && !applied) return error.result;
+    return {
+      ok: false,
+      reason: backedUp ? 'gateway_followthrough_failed' : applied ? 'gateway_backup_failed' : 'gateway_registry_unavailable',
+      detail: backedUp
+        ? `The change and its backup were saved, but the running apps could not be refreshed. Retry the channel update to synchronize the apps. ${String(error)}`
+        : applied
+        ? `The change was applied to the contact gate, but its durable backup failed. Refresh Contacts to retry the backup before making another change. ${String(error)}`
+        : `Contact registry could not be synchronized. ${String(error)}`,
+      status: applied ? 502 : 503,
+    };
+  }
+}
+
+function callHosted<T>(request: HostedGatewayRequest): Promise<GatewayResult<T>> {
+  const access = hostedGatewayAccess;
+  const sessionKey = access?.sessionKey();
+  if (!access || !sessionKey) return Promise.resolve({ ok: false, reason: 'master_session_required', detail: 'Please sign in again.', status: 401 });
+  const serialized = REGISTRY_MUTATIONS.has(request.operation) || ['contacts', 'channels', 'login_status'].includes(request.operation);
+  if (!serialized) return executeHosted<T>(access, sessionKey, request);
+  const pending = hostedGatewayQueue.then(() => executeHosted<T>(access, sessionKey, request));
+  hostedGatewayQueue = pending.then(() => undefined, () => undefined);
+  return pending;
 }
 
 /** True when a failure means the gateway simply isn't wired to this daemon yet —

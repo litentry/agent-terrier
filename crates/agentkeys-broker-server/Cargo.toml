@@ -12,6 +12,7 @@ name = "agentkeys_broker_server"
 path = "src/lib.rs"
 
 [dependencies]
+futures-util = "0.3"
 agentkeys-types = { workspace = true }
 # Issue #144 — shared device_crypto (EIP-191 ecrecover for link-code redeem
 # pop_sig verify) + HDKD child_omni derivation. One source of truth across
@@ -20,6 +21,7 @@ agentkeys-core = { workspace = true }
 # #369 — the shared DelegationPath wire type echoed into the minted cap-token
 # (one owner; the worker deserializes the SAME type).
 agentkeys-protocol = { workspace = true }
+agentkeys-web-core = { workspace = true }
 # #295 P1 §7a: the broker mints an operator-tagged OIDC internally + AssumeRoles
 # with a read-only exact-object session policy for delegated canonical-memory
 # reads, reusing assume_role_with_jwt — so the delegate never holds the operator
@@ -119,6 +121,3 @@ tempfile = "3"
 # tests/ses_email_flow.rs. Not needed at runtime.
 aws-sdk-s3 = "1"
 uuid = { version = "1", features = ["v4"] }
-# FutureExt::catch_unwind on async — used by tests/ses_email_flow.rs to
-# guarantee cleanup runs in async context regardless of test panic.
-futures-util = "0.3"

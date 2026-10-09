@@ -12,21 +12,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_config::BehaviorVersion;
 use aws_sdk_sts::config::Region;
-use serde::Deserialize;
 
 use crate::error::{ProvisionError, ProvisionResult};
 
 /// Broker `POST /v1/mint-oidc-jwt` response shape. Mirrors
 /// `crates/agentkeys-broker-server/src/handlers/oidc.rs::MintOidcJwtResponse`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct OidcJwtResponse {
-    pub jwt: String,
-    pub wallet: String,
-    /// Unix-epoch-seconds expiration of the JWT itself, NOT the assumed-role
-    /// session. JWT TTL is short (~5 min default); the assumed-role session
-    /// has its own (1h-default) TTL set at AssumeRoleWithWebIdentity time.
-    pub expiration: i64,
-}
+pub use agentkeys_protocol::auth::OidcJwtResponse;
 
 /// Final temp-cred shape passed to the scraper subprocess. The struct fields
 /// match the response shape of the legacy `/v1/mint-aws-creds` route (deleted

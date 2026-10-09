@@ -123,6 +123,10 @@ export class EmptyBackend implements AgentKeysClient {
     return this.disconnected();
   }
 
+  async listAuditPage(): Promise<Result<import('./types').AuditPage>> {
+    return this.disconnected();
+  }
+
   async listRecentAuditEvents(): Promise<Result<AuditEvent[]>> {
     return this.disconnected();
   }

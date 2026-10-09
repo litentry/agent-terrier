@@ -40,8 +40,8 @@ export function AgentPanel({ actor }: { actor: Actor }) {
     } else {
       setError(errText(r));
     }
-    const c = await api.getAgentContext();
-    if (c.ok) setContext(c.data);
+    const c = await api.getAgentContext(delegate);
+    if (c.ok) setContext(c.data); else setError(errText(c));
   }, [api, delegate]);
 
   useEffect(() => {
@@ -90,7 +90,7 @@ export function AgentPanel({ actor }: { actor: Actor }) {
     }
     setConfirmRestart(false);
     setBusy(true);
-    const r = await api.restartAgent();
+    const r = await api.restartAgent(delegate);
     if (r.ok) {
       setNotice('agent re-sourced — context files re-read; open conversations continue (New session in the chat starts fresh)');
       setError(null);

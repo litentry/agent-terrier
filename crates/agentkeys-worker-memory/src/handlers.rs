@@ -34,6 +34,7 @@ use agentkeys_worker_creds::verify::{self, CapOp, CapPayload, CapToken, DataClas
 const MEMORY_BODY_LIMIT_BYTES: usize = 48 * 1024 * 1024;
 
 pub fn build_router(state: SharedMemoryWorkerState) -> Router {
+    let browser_origins = std::env::var("AGENTKEYS_BROWSER_ORIGINS").unwrap_or_default();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/memory/put", post(memory_put))
@@ -51,6 +52,9 @@ pub fn build_router(state: SharedMemoryWorkerState) -> Router {
         .route("/v1/memory/teardown", post(memory_teardown))
         .layer(axum::extract::DefaultBodyLimit::max(
             MEMORY_BODY_LIMIT_BYTES,
+        ))
+        .layer(agentkeys_worker_creds::cors::browser_cors_layer(
+            &browser_origins,
         ))
         .with_state(state)
 }
@@ -206,11 +210,7 @@ async fn memory_put_inner(
         req.object_key.as_deref(),
     );
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
-    // D-K5 compare-and-swap: the writer names the plaintext it read (`""` =
-    // must not exist yet); a different stored plaintext is 409 `stale_base` —
-    // the caller re-reads and re-applies (git's non-fast-forward). One extra
-    // GetObject per guarded put; the window between the check and the put is
-    // the worker's own, never across callers' reads.
+    let mut expected_revision = None;
     if let Some(expected) = req.expected_content_hash.as_deref() {
         let current = match s3
             .get_object()
@@ -220,6 +220,17 @@ async fn memory_put_inner(
             .await
         {
             Ok(resp) => {
+                expected_revision = Some(
+                    resp.e_tag()
+                        .filter(|etag| !etag.is_empty())
+                        .ok_or_else(|| {
+                            err_502(
+                                "storage omitted memory revision",
+                                "storage_revision_missing",
+                            )
+                        })?
+                        .to_owned(),
+                );
                 let body = resp
                     .body
                     .collect()
@@ -236,19 +247,38 @@ async fn memory_put_inner(
                     .map(|se| se.is_no_such_key())
                     .unwrap_or(false) =>
             {
+                expected_revision = Some(String::new());
                 None
             }
             Err(e) => return Err(err_502(e.to_string(), "s3_get_for_cas")),
         };
         check_expected_hash(expected, current.as_deref())?;
     }
-    s3.put_object()
-        .bucket(&state.config.memory_bucket)
-        .key(&key)
-        .body(env_bytes.clone().into())
-        .send()
-        .await
-        .map_err(|e| err_502(format!("s3 PutObject: {}", s3_error_summary(&e)), "s3_put"))?;
+    agentkeys_worker_creds::conditional::conditional_put(
+        s3.put_object()
+            .bucket(&state.config.memory_bucket)
+            .key(&key)
+            .body(env_bytes.clone().into()),
+        expected_revision.as_deref(),
+    )?
+    .send()
+    .await
+    .map_err(|error| {
+        if error
+            .raw_response()
+            .is_some_and(|response| matches!(response.status().as_u16(), 409 | 412))
+        {
+            err_409(
+                "memory changed since it was read; reload before saving",
+                "stale_base",
+            )
+        } else {
+            err_502(
+                format!("s3 PutObject: {}", s3_error_summary(&error)),
+                "s3_put",
+            )
+        }
+    })?;
     Ok((key, env_bytes))
 }
 

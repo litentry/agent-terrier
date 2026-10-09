@@ -392,6 +392,9 @@ pub struct ConfigPutBody {
     pub plaintext_b64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_b64: Option<String>,
+    /// Empty means create-only; otherwise the exact revision returned by get.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<String>,
 }
 
 /// Config-worker `/v1/config/get` request body. Mirrors
@@ -416,6 +419,8 @@ pub struct ConfigGetResp {
     /// emit failed in best-effort mode).
     #[serde(default)]
     pub audit_envelope_hash: Option<String>,
+    #[serde(default)]
+    pub revision: Option<String>,
 }
 
 // ── channel worker (`/v1/channel/{publish,poll,teardown}`) — #406 channels ───
@@ -2168,6 +2173,12 @@ pub struct L3Decision {
     pub routed_by: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredListResp {
+    pub ok: bool,
+    pub services: Vec<String>,
+}
+
 // ── cred worker (`/v1/cred/fetch`) — #216 agent-side vaulted-key fetch ────────
 
 /// Cred-worker `/v1/cred/fetch` request body. Mirrors
@@ -2779,25 +2790,15 @@ pub struct BuildAcceptUserOpResponse {
     pub chain_id: u64,
 }
 
-/// The raw browser WebAuthn assertion (base64url) over the accept `user_op_hash`,
-/// as `apps/parent-control/lib/webauthn.ts::getAssertionOverHash` emits it. The
-/// broker encodes it into the P256Account UserOp signature; it derives the
-/// master's `credIdHash` from `operator_omni`, so the raw `credential_id` here is
-/// for cross-checks/audit, not the signer key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcceptAssertion {
-    pub authenticator_data: String,
-    pub client_data_json: String,
-    pub signature: String,
-    pub credential_id: String,
-}
+pub use hosted_signer::BrowserAssertion as AcceptAssertion;
 
 /// Daemon → broker `POST /v1/accept/submit` — the op from `build` + the master's
 /// browser WebAuthn `assertion` over `user_op_hash`. The broker encodes the
-/// assertion into `user_op.signature` (binding the `credIdHash` it derives from
-/// the verified J1 session omni, not a body field), then relays to
+/// assertion into `user_op.signature` using the live signer on the account
+/// bound to the verified J1 session, then relays to
 /// `EntryPoint.handleOps` (Stage B).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct SubmitAcceptUserOpRequest {
     pub user_op: WireUserOp,
     pub assertion: AcceptAssertion,
@@ -4195,3 +4196,21 @@ mod tests {
         assert_eq!(present["ttl_seconds"], 900);
     }
 }
+
+pub mod hosted_signer;
+
+pub mod hosted_gateway;
+
+pub mod console;
+
+pub mod console_chain;
+
+pub mod knowledge_history;
+
+pub mod presets;
+
+pub mod classify;
+
+pub mod console_apps;
+
+pub mod console_audit;

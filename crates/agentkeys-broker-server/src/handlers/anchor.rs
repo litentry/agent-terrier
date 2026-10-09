@@ -8,7 +8,7 @@
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use agentkeys_core::erc4337::TrailingCall;
 use agentkeys_protocol::{BoundChannel, ContextSeal, DelegateContextDoc, CONTEXT_DOC_SCHEMA};
@@ -27,25 +27,32 @@ use crate::state::SharedState;
 /// registry is the one this broker accepts against (a test stack on an
 /// overridden contract set must never seal into the prod audit contract).
 pub fn audit_contract(cfg: &AcceptConfig) -> Option<[u8; 20]> {
+    audit_contract_for_registry(&cfg.registry)
+}
+
+pub(crate) fn audit_contract_for_registry(registry: &[u8; 20]) -> Option<[u8; 20]> {
+    let override_address = env_profile("CREDENTIAL_AUDIT_ADDRESS").ok();
+    let profile = super::console::profile().ok();
+    resolve_audit_contract(override_address.as_deref(), profile.as_ref(), registry)
+}
+
+fn resolve_audit_contract(
+    override_address: Option<&str>,
+    profile: Option<&agentkeys_core::chain_profile::ChainProfile>,
+    current_registry: &[u8; 20],
+) -> Option<[u8; 20]> {
     let parse = |s: &str| -> Option<[u8; 20]> {
         let b = hex::decode(s.trim().trim_start_matches("0x")).ok()?;
         b.try_into().ok()
     };
-    if let Ok(v) = env_profile("CREDENTIAL_AUDIT_ADDRESS") {
-        return parse(&v);
+    if let Some(address) = override_address {
+        return parse(address);
     }
-    let (profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
-        None,
-        std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
-        std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
-            .ok()
-            .as_deref(),
-    )
-    .ok()?;
+    let profile = profile?;
     let registry = profile
         .contract("SidecarRegistry")
         .and_then(|c| parse(&c.address))?;
-    if registry != cfg.registry {
+    if registry != *current_registry {
         return None;
     }
     profile
@@ -209,12 +216,7 @@ fn omni32(hex_str: &str) -> Result<[u8; 32], String> {
 
 // ─── /v1/agent/anchors/build — seal existing apps ───────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct AnchorsBuildRequest {
-    pub operator_omni: String,
-    /// The delegates to seal (each must be this master's, with a row).
-    pub device_key_hashes: Vec<String>,
-}
+pub use agentkeys_protocol::console_apps::AnchorsBuildRequest;
 
 #[derive(Debug, Serialize)]
 pub struct AnchorsBuildResponse {
@@ -362,12 +364,7 @@ pub async fn anchors_build(
 
 // ─── /v1/agent/spawn/context/rehydrate ──────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RehydrateRequest {
-    pub operator_omni: String,
-    /// The context document's exact JSON (the entry body on the memory plane).
-    pub context_doc: String,
-}
+pub use agentkeys_protocol::console_apps::RehydrateRequest;
 
 #[derive(Debug, Serialize)]
 pub struct RehydrateResponse {
@@ -528,4 +525,53 @@ pub async fn rehydrate(
         context_hash: format!("0x{}", hex::encode(hash)),
         row: row_state.to_string(),
     }))
+}
+
+#[cfg(test)]
+mod contract_resolution_tests {
+    use super::*;
+    #[test]
+    fn audit_reads_and_seals_use_the_stack_contract_without_cross_stack_fallback() {
+        let profile =
+            agentkeys_core::chain_profile::ChainProfile::resolve(Some("heima"), None, None)
+                .unwrap()
+                .0;
+        let registry: [u8; 20] = hex::decode(
+            profile
+                .contract("SidecarRegistry")
+                .unwrap()
+                .address
+                .trim_start_matches("0x"),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let expected: [u8; 20] = hex::decode(
+            profile
+                .contract("CredentialAudit")
+                .unwrap()
+                .address
+                .trim_start_matches("0x"),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert_eq!(
+            resolve_audit_contract(None, Some(&profile), &registry),
+            Some(expected)
+        );
+        assert_eq!(resolve_audit_contract(None, Some(&profile), &[7; 20]), None);
+        assert_eq!(
+            resolve_audit_contract(
+                Some(&format!("0x{}", "08".repeat(20))),
+                Some(&profile),
+                &[7; 20]
+            ),
+            Some([8; 20])
+        );
+        assert_eq!(
+            resolve_audit_contract(Some("invalid"), Some(&profile), &registry),
+            None
+        );
+    }
 }

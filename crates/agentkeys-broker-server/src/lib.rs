@@ -59,6 +59,41 @@ pub fn create_router(state: SharedState) -> Router {
             get(handlers::auth::session::session_info),
         )
         .route("/healthz", get(handlers::broker_status::healthz))
+        .route("/v1/console/config", get(handlers::console::config))
+        .route("/v1/console/fleet", get(handlers::console::fleet))
+        .route("/v1/console/audit", get(handlers::console_audit::recent))
+        .route(
+            "/v1/hosted/signer/start",
+            post(handlers::hosted_signer::start),
+        )
+        .route(
+            "/v1/hosted/signer/prepare",
+            post(handlers::hosted_signer::prepare),
+        )
+        .route(
+            "/v1/hosted/signer/publish",
+            post(handlers::hosted_signer::publish),
+        )
+        .route(
+            "/v1/hosted/signer/pending",
+            get(handlers::hosted_signer::pending),
+        )
+        .route(
+            "/v1/hosted/signer/dismiss",
+            post(handlers::hosted_signer::dismiss),
+        )
+        .route(
+            "/v1/hosted/signer/build",
+            post(handlers::hosted_signer::build),
+        )
+        .route(
+            "/v1/hosted/signer/status",
+            post(handlers::hosted_signer::status),
+        )
+        .route(
+            agentkeys_protocol::hosted_gateway::BROKER_GATEWAY_ROUTE,
+            post(handlers::hosted_gateway::gateway),
+        )
         .route("/readyz", get(handlers::broker_status::readyz))
         .route("/metrics", get(handlers::metrics::metrics_handler))
         .route(
@@ -155,6 +190,10 @@ pub fn create_router(state: SharedState) -> Router {
         // executeBatch([registerAgentDevice, setScope]) UserOp + return the userOpHash.
         .route("/v1/accept/build", post(handlers::accept::accept_build))
         .route("/v1/accept/submit", post(handlers::accept::accept_submit))
+        .route(
+            "/v1/accept/receipt",
+            post(handlers::accept_receipt::receipt),
+        )
         // #248 — Touch-ID-gated scope re-grant for an ALREADY-bound agent:
         // executeBatch([setScope]) only (set-replace; empty services = revoke all).
         // Submit reuses the accept relay — the assertion→signature→bundler hop
@@ -421,3 +460,5 @@ impl<T> Pipe for T {
         f(self)
     }
 }
+
+pub mod account_signer;

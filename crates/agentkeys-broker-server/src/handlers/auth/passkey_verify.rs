@@ -5,9 +5,10 @@
 //! uses — zero broker-side WebAuthn/P-256 crypto, so the verb can never drift
 //! from what the chain itself accepts:
 //!
-//!   1. `operatorMasterWallet(omni)` → the master P256Account, RE-read at
+//!   1. `operatorMasterWallet(omni)` → the challenge-bound P256Account, RE-read at
 //!      verify time (a reset-master between start and verify fails closed);
-//!   2. `account.signers(master_cred_id_hash(omni))` + `signerGeneration()` →
+//!   2. `account.signers(credential_id_hash(rawId))`, or the original synthetic
+//!      signer when that row is absent, plus `signerGeneration()` →
 //!      the live signer's `(pubX, pubY, rpIdHash)` — generation-checked, so a
 //!      social-recovery rotation (#164 E5) instantly invalidates old passkeys
 //!      here exactly as it does on chain;
@@ -30,11 +31,9 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::accept_assertion::{decode_assertion_parts, AssertionParts, BrowserAssertion};
+use crate::accept_assertion::BrowserAssertion;
 use crate::error::BrokerError;
-use crate::handlers::accept::{
-    call_operator_master_wallet, eth_call, load_chain_read_config, selector,
-};
+use crate::handlers::accept::{call_operator_master_wallet, load_chain_read_config};
 use crate::handlers::auth::passkey_start::{now_unix_i64, parse_omni_0x64, PASSKEY_NONCE_PREFIX};
 use crate::jwt::issue::mint_session_jwt;
 use crate::state::SharedState;
@@ -46,166 +45,15 @@ pub struct PasskeyVerifyRequest {
     pub assertion: BrowserAssertion,
 }
 
-/// One live signer row from `P256Account.signers(credIdHash)` +
-/// `signerGeneration()` — everything `verifyAssertion` needs.
-struct LiveSigner {
-    pub_x: [u8; 32],
-    pub_y: [u8; 32],
-    rp_id_hash: [u8; 32],
-}
-
-/// Decoded `signers(bytes32)` return. The deployed fleet has TWO layouts
-/// (verified live on Heima prod, 2026-06-10): the current 5-word struct
-/// `(pubX, pubY, rpIdHash, active, generation)` and the legacy pre-recovery
-/// 4-word struct without `generation` — the live factory was deployed from a
-/// pre-final #164 revision and never redeployed (VERSION stayed 0.3, so the
-/// by-VERSION idempotency skipped it). Legacy accounts also have NO
-/// `signerGeneration()` selector (the call reverts), so `generation: None`
-/// means the caller must skip that cross-check entirely — `active` is the
-/// whole liveness story on those accounts.
-#[derive(Debug)]
-struct SignerRow {
-    pub_x: [u8; 32],
-    pub_y: [u8; 32],
-    rp_id_hash: [u8; 32],
-    active: bool,
-    generation: Option<u64>,
-}
-
-fn decode_signer_row(raw: &[u8]) -> Result<SignerRow, String> {
-    let generation = match raw.len() {
-        160 => Some(u64::from_be_bytes(
-            word_at(raw, 4)?[24..32].try_into().unwrap(),
-        )),
-        128 => None,
-        n => {
-            return Err(format!(
-                "signers() returned {n} bytes — expected 160 (current 5-field Signer) or 128 \
-                 (legacy pre-recovery 4-field Signer)"
-            ))
-        }
-    };
-    Ok(SignerRow {
-        pub_x: word_at(raw, 0)?,
-        pub_y: word_at(raw, 1)?,
-        rp_id_hash: word_at(raw, 2)?,
-        active: word_at(raw, 3)?[31] != 0,
-        generation,
-    })
-}
-
-fn word_at(raw: &[u8], i: usize) -> Result<[u8; 32], String> {
-    let start = i * 32;
-    let end = start + 32;
-    if raw.len() < end {
-        return Err(format!(
-            "short ABI return: need word {i} ({end} bytes), got {}",
-            raw.len()
-        ));
-    }
-    let mut w = [0u8; 32];
-    w.copy_from_slice(&raw[start..end]);
-    Ok(w)
-}
-
-fn decode_hex_result(raw: &str) -> Result<Vec<u8>, String> {
-    hex::decode(raw.trim_start_matches("0x")).map_err(|e| format!("eth_call result hex: {e}"))
-}
-
-/// ABI-encode the `verifyAssertion(bytes32,bytes32,bytes,bytes,uint256,
-/// uint256,uint256,uint256,uint256)` calldata. Head = 9 words; the two `bytes`
-/// params are offset-referenced into the tail (each: length word + 32-padded
-/// data) — the standard dynamic-type layout.
-fn encode_verify_assertion_call(
-    challenge: &[u8; 32],
-    rp_id_hash: &[u8; 32],
-    parts: &AssertionParts,
-    pub_x: &[u8; 32],
-    pub_y: &[u8; 32],
-) -> String {
-    const HEAD_WORDS: usize = 9;
-    let pad32 = |len: usize| len.div_ceil(32) * 32;
-    let word_usize = |n: usize| {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&(n as u64).to_be_bytes());
-        w
-    };
-
-    let auth = &parts.authenticator_data;
-    let cdj = &parts.client_data_json;
-    let off_auth = HEAD_WORDS * 32;
-    let off_cdj = off_auth + 32 + pad32(auth.len());
-
-    let mut data: Vec<u8> = Vec::with_capacity(off_cdj + 32 + pad32(cdj.len()));
-    data.extend_from_slice(challenge);
-    data.extend_from_slice(rp_id_hash);
-    data.extend_from_slice(&word_usize(off_auth));
-    data.extend_from_slice(&word_usize(off_cdj));
-    data.extend_from_slice(&word_usize(parts.challenge_location));
-    data.extend_from_slice(&parts.r);
-    data.extend_from_slice(&parts.s);
-    data.extend_from_slice(pub_x);
-    data.extend_from_slice(pub_y);
-    for blob in [auth.as_slice(), cdj.as_slice()] {
-        data.extend_from_slice(&word_usize(blob.len()));
-        data.extend_from_slice(blob);
-        data.resize(data.len() + (pad32(blob.len()) - blob.len()), 0);
-    }
-
-    format!(
-        "0x{}{}",
-        selector(
-            "verifyAssertion(bytes32,bytes32,bytes,bytes,uint256,uint256,uint256,uint256,uint256)"
-        ),
-        hex::encode(data)
-    )
-}
-
-/// Read the LIVE signer for `cred_id_hash` from the account: `signers(bytes32)`
-/// decoded layout-tolerantly ([`decode_signer_row`]), cross-checked against
-/// `signerGeneration()` when the account HAS generations (current layout only —
-/// the legacy 4-field accounts have neither the field nor the selector). `Err`
-/// carries the precise rejection.
-async fn read_live_signer(
-    http: &reqwest::Client,
-    rpc: &str,
-    account: &[u8; 20],
-    cred_id_hash: &[u8; 32],
-) -> Result<Result<LiveSigner, String>, String> {
-    let data = format!(
-        "0x{}{}",
-        selector("signers(bytes32)"),
-        hex::encode(cred_id_hash)
-    );
-    let raw = decode_hex_result(&eth_call(http, rpc, account, &data).await?)?;
-    let row = decode_signer_row(&raw)?;
-
-    if !row.active {
-        return Ok(Err("master passkey is not an active signer".into()));
-    }
-    if let Some(generation) = row.generation {
-        let gen_raw = decode_hex_result(
-            &eth_call(
-                http,
-                rpc,
-                account,
-                &format!("0x{}", selector("signerGeneration()")),
-            )
-            .await?,
-        )?;
-        let current_gen = u64::from_be_bytes(word_at(&gen_raw, 0)?[24..32].try_into().unwrap());
-        if generation != current_gen {
-            return Ok(Err(format!(
-                "master passkey is from signer generation {generation}, account is at \
-                 {current_gen} (rotated via recovery) — re-onboard"
-            )));
-        }
-    }
-    Ok(Ok(LiveSigner {
-        pub_x: row.pub_x,
-        pub_y: row.pub_y,
-        rp_id_hash: row.rp_id_hash,
-    }))
+fn parse_challenge_binding(binding: &str) -> Result<(String, [u8; 20]), BrokerError> {
+    let (omni, account) = binding.split_once(':').ok_or_else(|| {
+        BrokerError::Unauthorized(
+            "challenge predates account binding; restart passkey sign-in".into(),
+        )
+    })?;
+    let account = crate::handlers::accept::addr20(account, "challenge account")
+        .map_err(BrokerError::Unauthorized)?;
+    Ok((parse_omni_0x64(omni)?, account))
 }
 
 pub async fn passkey_verify(
@@ -243,7 +91,7 @@ pub async fn passkey_verify(
             ));
         }
     };
-    let omni = parse_omni_0x64(&omni)?;
+    let (omni, challenge_account) = parse_challenge_binding(&omni)?;
     state
         .config
         .login_access
@@ -260,62 +108,20 @@ pub async fn passkey_verify(
     let account = call_operator_master_wallet(&state.http, &rpc_url, &registry, &omni)
         .await
         .map_err(BrokerError::BackendUnreachable)?;
-    if account == [0u8; 20] {
+    if account == [0u8; 20] || account != challenge_account {
         return Err(BrokerError::Unauthorized(
-            "master was unbound on chain since the challenge was issued".into(),
+            "master account changed or was unbound since the challenge was issued".into(),
         ));
     }
-    let cred_id_hash = agentkeys_core::erc4337::master_cred_id_hash(&omni32);
-    let signer = read_live_signer(&state.http, &rpc_url, &account, &cred_id_hash)
-        .await
-        .map_err(BrokerError::BackendUnreachable)?
-        .map_err(BrokerError::Unauthorized)?;
-
-    // 3. The on-chain verifier, as a view call. A revert (malformed assertion,
-    //    wrong challenge/RP, missing UP/UV) surfaces as an eth_call error —
-    //    mapped to Unauthorized, NOT to a transport failure.
-    let parts = decode_assertion_parts(&body.assertion).map_err(BrokerError::BadRequest)?;
-    let k11_raw = decode_hex_result(
-        &eth_call(
-            &state.http,
-            &rpc_url,
-            &account,
-            &format!("0x{}", selector("k11Verifier()")),
-        )
-        .await
-        .map_err(BrokerError::BackendUnreachable)?,
-    )
-    .map_err(BrokerError::BackendUnreachable)?;
-    let k11_verifier: [u8; 20] = word_at(&k11_raw, 0).map_err(BrokerError::BackendUnreachable)?
-        [12..32]
-        .try_into()
-        .map_err(|_| BrokerError::Internal("k11Verifier address slice".into()))?;
-
-    let calldata = encode_verify_assertion_call(
+    crate::account_signer::resolve_assertion_signer(
+        &state.http,
+        &rpc_url,
+        &account,
+        &omni32,
         &challenge,
-        &signer.rp_id_hash,
-        &parts,
-        &signer.pub_x,
-        &signer.pub_y,
-    );
-    let verified = match eth_call(&state.http, &rpc_url, &k11_verifier, &calldata).await {
-        Ok(raw) => {
-            let words = decode_hex_result(&raw).map_err(BrokerError::BackendUnreachable)?;
-            !words.is_empty() && words[words.len() - 1] == 1
-        }
-        // K11Verifier REVERTS on malformed/mismatched assertions — eth_call then
-        // returns a JSON-RPC error ("no result"). Treat as a failed verification;
-        // only transport-level failures stay BackendUnreachable.
-        Err(e) if e.contains("no result") => false,
-        Err(e) => return Err(BrokerError::BackendUnreachable(e)),
-    };
-    if !verified {
-        return Err(BrokerError::Unauthorized(
-            "assertion rejected by the on-chain K11 verifier (wrong passkey, wrong rpId, or \
-             stale challenge)"
-                .into(),
-        ));
-    }
+        &body.assertion,
+    )
+    .await?;
 
     // 4. Mint the session JWT for the chain-verified omni — with the omni claim
     //    in the BARE lowercase 64-hex form, byte-identical to the email-flow J1s.
@@ -359,9 +165,26 @@ pub async fn passkey_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accept_assertion::{decode_assertion_parts, AssertionParts};
+    use crate::account_signer::{
+        decode_hex_result, decode_signer_row, encode_verify_assertion_call, word_at,
+    };
+    use crate::handlers::accept::selector;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     use p256::ecdsa::{signature::Signer as _, Signature, SigningKey};
+
+    #[test]
+    fn challenge_binding_requires_both_operator_and_original_account() {
+        let omni = format!("0x{}", "11".repeat(32));
+        let account = format!("0x{}", "22".repeat(20));
+        assert_eq!(
+            parse_challenge_binding(&format!("{omni}:{account}")).unwrap(),
+            (omni.clone(), [0x22; 20])
+        );
+        assert!(parse_challenge_binding(&omni).is_err());
+        assert!(parse_challenge_binding(&format!("{omni}:0x1234")).is_err());
+    }
 
     fn sample_parts() -> AssertionParts {
         let sk = SigningKey::random(&mut rand_core::OsRng);

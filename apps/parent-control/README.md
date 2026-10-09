@@ -94,16 +94,19 @@ npm run build            # → out/ (the wasm core must sit in lib/wasm + public
 `AGENTKEYS_STATIC_EXPORT=1` flips `output: 'export'`; Next drops the dev-only
 `/api/dev/*` route handlers from an export, and the deploy step prunes `out/dev`
 (developer previews). `NEXT_PUBLIC_ICP_BEIAN` renders the 备案号 footer the mainland
-host is required to carry. Hosted email sign-in uses the same onboarding screen
-and parent-control interface as the local app. `CoreBackend` implements the shared
-email, session-state, and logout methods through the allowlisted broker + WASM
-flow. A verified hosted session opens the app directly without registration or
-passkey creation; a rejected request never enters the offline demo ceremony.
+host is required to carry. Hosted sign-in uses the same onboarding screen and
+parent-control interface as the local app. `CoreBackend` shares its view mappings
+with `DaemonBackend` and runs the portable console service in WASM. An allowlisted
+email unlocks the original account's browser approval; a domain-bound passkey is
+approved once by the existing console, then Touch ID signs back in. No new account
+or master reset is part of hosted login.
 
-The hosted read/write backend remains incomplete under #751. Restored navigation
-is not evidence that agents, stored data, or hosted passkeys work. The app marks
-those operations unavailable and never falls back to a local daemon. The local
-`DaemonBackend` enrollment and data paths are unchanged.
+The browser uses real data workers, chain-backed permissions, application
+operations, inbox curation, and the enrolled contact gate. User credentials remain
+in memory; only public PRF/passkey metadata persists. Conditional writes reject
+stale edits. See the [user manual](../../docs/user-manual.md#hosted-console-email-sign-in)
+for first-browser approval and supported-authenticator requirements. It never
+falls back to a daemon on the visiting machine.
 
 Local, from this checkout, run the UI regression checks:
 

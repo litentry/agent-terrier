@@ -85,6 +85,8 @@ const DEFAULT_RATE_WINDOW_SECS: u64 = 60;
 /// fills the deployed defaults.
 #[derive(Debug, Clone, Default)]
 pub struct DeviceConfig {
+    pub chain_rpc_http: Option<String>,
+    pub registry_contract: Option<String>,
     /// The broker to enroll against + mint channel caps at (`AGENTKEYS_BROKER_URL`).
     pub broker_url: Option<String>,
     /// This host's K10 (`AGENTKEYS_WEIXIN_DEVICE_KEY_FILE`, 0600, generated on
@@ -442,7 +444,18 @@ impl WeixinGatewayConfig {
             return Err(anyhow!("AGENTKEYS_WEIXIN_TOKEN must be non-empty"));
         }
 
+        let chain_profile = var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+        let registry_variable = format!(
+            "SIDECAR_REGISTRY_ADDRESS_{}",
+            chain_profile.to_uppercase().replace('-', "_")
+        );
         let device = DeviceConfig {
+            chain_rpc_http: var("AGENTKEYS_CHAIN_RPC_HTTP")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            registry_contract: var(&registry_variable)
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             broker_url: var("AGENTKEYS_BROKER_URL")
                 .ok()
                 .map(|v| v.trim().to_string())

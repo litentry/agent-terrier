@@ -5,6 +5,7 @@ import {
   clearMasterIdentity,
   ensureActiveStack,
   getMasterCredId,
+  setMasterCredId,
   getOnboardedFlag,
   setActiveStack,
   setOnboardedFlag,
@@ -39,7 +40,11 @@ import { getAssertionOverHash } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
-import { CoreBackend, HOSTED_FEATURES_UNAVAILABLE } from '@/lib/client/core';
+import { CoreBackend } from '@/lib/client/core';
+import { MappedBackend } from '@/lib/client/daemon';
+import { PendingTransactions } from './PendingTransactions';
+import { HostedAuditHistory } from './HostedAuditHistory';
+import { HostedEnrollmentApproval } from './HostedEnrollmentApproval';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import type { ChainInfo, ChainListEntry, ChannelDef, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
 import type { Actor, AuditEvent, PairingRequest, PreservedMemory } from './types';
@@ -189,7 +194,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       // Hosted sessions must be live; a saved UI flag never grants admission.
       const r = await client.getOnboardingState();
       let on = false;
-      if (r.ok && r.data.identity === 'verified') {
+      if (r.ok && r.data.identity === 'verified' && (!hosted || r.data.chain === 'master-registered')) {
         on = true;
         if (!cancelled) setIdentity({ email: r.data.email, omni: r.data.omni });
       } else if (!hosted) {
@@ -269,6 +274,18 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   const reauthenticate = async () => {
     if (reauthBusy) return;
     setReauthBusy(true);
+    if (client instanceof CoreBackend) {
+      try {
+        const identity = await client.signInWithPasskey();
+        setMasterCredId(identity.credentialId);
+        setSessionExpired(false);
+        setReloadKey((key) => key + 1);
+        showToast('Session restored.');
+      } catch (error) {
+        showToast(`Sign-in failed — ${(error as Error).message}`);
+      } finally { setReauthBusy(false); }
+      return;
+    }
     const start = await client.reloginStart();
     if (!start.ok) {
       setReauthBusy(false);
@@ -456,7 +473,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   // #693 — filtered to one actor, the feed reads that actor's rows from the
   // daemon; for a delegate that includes one row per pull pass from its feed.
   useEffect(() => {
-    if (page !== 'audit' || auditActor === 'all') return;
+    if (hosted || page !== 'audit' || auditActor === 'all') return;
     let alive = true;
     const read = async () => {
       const r = await client.listRecentAuditEvents({ actorId: auditActor, limit: 100 });
@@ -469,7 +486,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       alive = false;
       clearInterval(t);
     };
-  }, [client, page, auditActor]);
+  }, [client, page, auditActor, hosted]);
 
   const showToast = (msg: string, sticky = false, action?: { label: string; fn: () => void }) => {
     setToast({ msg, sticky, action });
@@ -484,6 +501,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   // is what actually lets the fresh passkey re-bind. Cannot delete the OS passkey
   // (WebAuthn) — the toast tells the operator to do that manually.
   const resetMaster = async () => {
+    if (hosted) { showToast('This console uses your existing account. Sign in with an approved passkey; browser access never requires a master reset.'); return; }
     if (status.kind !== 'connected') { showToast('Connect a daemon first.'); return; }
     // 2026-07-16 guard — NEVER start a reset the stack can't finish: the fleet
     // revoke below mutates chain state and the unbind is first-master-final, so
@@ -684,25 +702,18 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       showToast(`Classify failed — ${m ? m[1] : r.status.detail ?? 'connect a daemon, then onboard first'}.`);
     }
   };
-  const confirmProposal = async (actor: Actor, p: ProposedScope) => {
-    const r = await client.grantScope(actor.id, p);
-    if (r.ok) {
-      setActors((prev) => prev.map((a) => (a.id === r.data.id ? r.data : a)));
-      setProposals((prev) => (prev ? prev.filter((x) => x.service !== p.service) : prev));
-      showToast(`${p.gating === 'k11' ? 'Touch ID confirmed · ' : ''}granted ${p.service} (${p.category})`);
-    } else {
-      const m = (r.status.detail ?? '').match(/\{"error":"([^"]+)"\}/);
-      showToast(`Grant failed — ${m ? m[1] : r.status.detail ?? 'reload the page'}.`);
+  const confirmProposal = async (actor: Actor, proposal: ProposedScope) => {
+    const services = [...new Set([...(actor.services ?? []), proposal.service])];
+    if (await commitScope(actor, services, false)) {
+      setProposals((previous) => previous?.filter((item) => item.service !== proposal.service) ?? null);
     }
   };
-  const confirmSafeSet = async (actor: Actor, ps: ProposedScope[]) => {
-    let granted = 0;
-    for (const p of ps) {
-      const r = await client.grantScope(actor.id, p);
-      if (r.ok) { granted += 1; setActors((prev) => prev.map((a) => (a.id === r.data.id ? r.data : a))); }
+  const confirmSafeSet = async (actor: Actor, proposals: ProposedScope[]) => {
+    const services = [...new Set([...(actor.services ?? []), ...proposals.map((proposal) => proposal.service)])];
+    if (await commitScope(actor, services, false)) {
+      const granted = new Set(proposals.map((proposal) => proposal.service));
+      setProposals((previous) => previous?.filter((item) => !granted.has(item.service)) ?? null);
     }
-    setProposals((prev) => (prev ? prev.filter((x) => x.gating !== 'auto') : prev));
-    showToast(`Confirmed ${granted} safe ${granted === 1 ? 'scope' : 'scopes'} into your daily review`);
   };
 
   // Log out: clear the local session flag and reset all in-memory view state so
@@ -759,7 +770,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   // keep the #248 preserve behavior.
   const commitScope = async (actor: Actor, services: string[], readOnly: boolean, preserveOverride?: string[]): Promise<boolean> => {
     if (status.kind !== 'connected') {
-      showToast('Connect a daemon to commit scope changes.');
+      showToast('Reconnect before committing scope changes.');
       return false;
     }
     if (services.length === 0) {
@@ -808,7 +819,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
     if (!submitted.ok) {
       const detail = submitted.status?.detail ?? 'handleOps error';
       akLog('scope: submit FAILED ❌', { actor: actor.id, detail });
-      if (/SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+      if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
         showToast(
           `Scope commit failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
           true,
@@ -1007,6 +1018,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
     } catch {
       // Either the operator cancelled, OR the bound master passkey was deleted in the
       // OS password manager (the picker then has nothing to sign with).
+      if (hosted) { showToast('Touch ID cancelled. Your account and grants are unchanged. Try again when you are ready.', true); return; }
       showToast(
         'Touch ID cancelled — or your master passkey was deleted. If you deleted it, reset + re-onboard once.',
         true,
@@ -1026,7 +1038,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       // passkey ≠ the one bound to the master account — typically a stale binding after a
       // passkey was deleted/regenerated. The reset path now unbinds on-chain (owner-gated
       // resetMaster) so a fresh enroll CAN re-bind. Offer the reset + re-onboard path.
-      if (/SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+      if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
         showToast(
           `Accept failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
           true,
@@ -1322,7 +1334,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         if (!submitted.ok) {
           const detail = submitted.status?.detail ?? 'handleOps error';
           akLog('revoke: submit FAILED ❌', { actor: actor.id, detail });
-          if (/SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+          if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
             showToast(
               `Revoke failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
               true,
@@ -1386,7 +1398,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         onComplete={async (summary) => {
           if (hosted) {
             const result = await client.getOnboardingState();
-            if (!result.ok || result.data.identity !== 'verified') { onSessionEnd(); return; }
+            if (!result.ok || result.data.identity !== 'verified' || result.data.chain !== 'master-registered') { onSessionEnd(); return; }
             setIdentity({ email: result.data.email, omni: result.data.omni });
           } else {
             setOnboardedFlag(true);
@@ -1454,7 +1466,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
             <summary className="btn sm" title="account · session">⋯</summary>
             <div className="menu-body">
               <button className="menu-item" onClick={() => go('logo')}>logo &amp; brand</button>
-              <button
+              {!hosted && <button
                 className="menu-item"
                 style={{ color: 'var(--danger)' }}
                 title="Unbind the master (local + on-chain) so you can re-onboard a fresh passkey — e.g. after the master passkey was deleted in your OS password manager, or an accept fails with SIG_VALIDATION."
@@ -1466,7 +1478,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
                 }}
               >
                 reset master · re-onboard passkey
-              </button>
+              </button>}
               <div className="menu-info">
                 K6 · session JWT<br />{hosted ? 'browser · session in this tab' : status.kind === 'connected' ? `daemon · ${status.via}` : 'daemon · offline'}<br />K11 · master device
               </div>
@@ -1474,6 +1486,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           </details>
         </div>
       </header>
+      {client instanceof CoreBackend && <PendingTransactions client={client} onConfirmed={() => setReloadKey((key) => key + 1)} />} 
 
       {/* The sections as one tab row under the header (the GitHub shape, #695
           §9): counters ride as pills, the pending pairing claims tint their tab,
@@ -1482,13 +1495,13 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           the Actors page itself. */}
       <nav className="app-nav" aria-label="sections">
         <button className={`app-nav-item ${page === 'actors' ? 'active' : ''}`} onClick={() => go('actors')}>
-          actors<span className="count">{hosted ? '—' : actors.length}</span>
+          actors<span className="count">{actors.length}</span>
         </button>
         <button className={`app-nav-item ${page === 'knowledge' ? 'active' : ''}`} onClick={() => go('knowledge')}>
-          knowledge<span className="count">{hosted ? '—' : categories.length || '∅'}</span>
+          knowledge<span className="count">{categories.length || '∅'}</span>
         </button>
         <button className={`app-nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
-          credentials<span className="count">{hosted ? '—' : credentials.length || '∅'}</span>
+          credentials<span className="count">{credentials.length || '∅'}</span>
         </button>
         <span className="app-nav-sep" aria-hidden="true" />
         <button className={`app-nav-item ${page === 'delegates' ? 'active' : ''}`} onClick={() => go('delegates')}>
@@ -1500,7 +1513,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           {pairingRequests.filter((r) => r.isDevice).length > 0 && <span className="count attention">{pairingRequests.filter((r) => r.isDevice).length}</span>}
         </button>
         <button className={`app-nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
-          channels<span className="count">{hosted ? '—' : channels.length || '∅'}</span>
+          channels<span className="count">{channels.length || '∅'}</span>
         </button>
         <button className={`app-nav-item ${page === 'transport' ? 'active' : ''}`} onClick={() => go('transport')}>
           transport
@@ -1513,7 +1526,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         </button>
         <span className="app-nav-sep" aria-hidden="true" />
         <button className={`app-nav-item ${page === 'audit' || page === 'decode' ? 'active' : ''}`} onClick={() => go('audit')}>
-          audit feed<span className="count">{hosted ? '—' : events.length}</span>
+          audit feed<span className="count">{events.length}</span>
         </button>
         <button className={`app-nav-item ${page === 'chain' ? 'active' : ''}`} onClick={() => go('chain')}>
           chain
@@ -1536,7 +1549,6 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       </nav>
 
       <main className="app-main" data-section={sectionAttr}>
-        {hosted && <div className="banner" role="status">Your session is active. {HOSTED_FEATURES_UNAVAILABLE}</div>}
         {/* #242 — the master J1 lapsed but the coords are still held: ONE Touch ID
             restores it (no re-onboarding). Only SESSION-GATED, encrypted reads
             (memory / credentials / inbox — cap-mint → STS → worker → decrypt) are
@@ -1562,7 +1574,15 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         )}
         {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {page === 'detail' && currentActor && (
-          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={resetMaster} onOpenAudit={(id) => { setAuditActor(id); go('audit'); }} />
+          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={hosted ? undefined : resetMaster} onOpenAudit={(id) => { setAuditActor(id); go('audit'); }} />
+        )}
+        {client instanceof MappedBackend && !(client instanceof CoreBackend) && (
+          <HostedEnrollmentApproval credentialId={getMasterCredId() ?? ''}
+            pending={async () => { const result = await client.hostedApprovalPending(); if (!result.ok) throw new Error(result.status.detail); return result.data; }}
+            dismiss={async (id) => { const result = await client.hostedApprovalDismiss(id); if (!result.ok) throw new Error(result.status.detail); }}
+            prepare={async (request) => { const result = await client.hostedApprovalPrepare(request); if (!result.ok) throw new Error(result.status.detail); return result.data; }}
+            build={async (request) => { const result = await client.hostedApprovalBuild(request); if (!result.ok) throw new Error(result.status.detail); return result.data; }}
+            submit={async (request) => { const result = await client.hostedApprovalSubmit(request); if (!result.ok) throw new Error(result.status.detail); return result.data; }} />
         )}
         {page === 'knowledge' && (
           // 2026-09-13 — ONE page over canonical memory + the curated, bindable items
@@ -1626,7 +1646,21 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           // (epic #660 stage 1). Channels feed the wizard's slot options.
           <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} />
         )}
-        {page === 'audit' && (
+        {page === 'audit' && hosted && (
+          <HostedAuditHistory
+            client={client}
+            events={events}
+            status={status}
+            onPick={(e) => { setEventDetail(e); go('decode'); }}
+            paused={paused}
+            onPause={() => setPaused((p) => !p)}
+            actorOptions={auditActorOptions(actors, events)}
+            actorFilter={auditActor}
+            onActorFilter={setAuditActor}
+            actorRows={auditActorRows && actorAuditRows(auditActorRows, events, auditActor)}
+          />
+        )}
+        {page === 'audit' && !hosted && (
           <AuditFeed
             events={events}
             status={status}

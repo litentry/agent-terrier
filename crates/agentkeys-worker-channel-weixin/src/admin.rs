@@ -250,25 +250,25 @@ pub(crate) async fn login_start(
     if let Err(resp) = admin_gate(&state, &headers) {
         return resp;
     }
-    // #502 (plan T9): the daemon proxy fills the connecting master's omni from
-    // the authenticated session — captured here, recorded on `connected`. A
-    // malformed value is dropped LOUDLY (the env-stamp path then still applies).
     let (session_omni, member_contact_id) = match body {
-        Some(Json(b)) => (
-            b.operator_omni,
-            b.contact_id
-                .map(|c| c.trim().to_string())
-                .filter(|c| !c.is_empty()),
+        Some(Json(body)) => (
+            body.operator_omni,
+            body.contact_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
         ),
         None => (None, None),
     };
-    let session_omni = session_omni.filter(|omni| match crate::relay::decode_omni_32(omni) {
-        Some(_) => true,
-        None => {
-            warn!(omni = %omni, "login/start carried a NON-0x64hex operator omni — ignored");
-            false
+    if let Some(session_omni) = session_omni.as_deref() {
+        if let Err(reason) = state.validate_connect_operator(session_omni) {
+            let status = if reason == "invalid_operator_omni" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            return (status, Json(json!({"ok":false,"reason":reason}))).into_response();
         }
-    });
+    }
     if state.config.transport != WeixinTransport::Ilink {
         return (
             StatusCode::CONFLICT,
@@ -473,6 +473,11 @@ pub(crate) async fn login_status(
                 .unwrap_or_else(|| login.base_url.clone());
             let scanned_by = status.ilink_user_id.clone().unwrap_or_default();
 
+            if let Some(owner) = login.operator_omni.as_deref() {
+                if let Err(reason) = state.set_runtime_operator_omni(owner) {
+                    return reply("failed", None, None, Some(reason.into()));
+                }
+            }
             // #384 custody: the worker persists its OWN secrets file in place.
             let outcome = LoginOutcome {
                 bot_token: bot_token.clone(),
@@ -483,7 +488,6 @@ pub(crate) async fn login_status(
             if let Some(cid) = login.contact_id.clone() {
                 // Member login: bind by scan, custody the member's own bot.
                 if let Some(omni) = login.operator_omni.clone() {
-                    state.set_runtime_operator_omni(&omni);
                     if let Err(e) = ilink_login::upsert_operator_omni(
                         std::path::Path::new(&state.config.secrets_file),
                         &omni,
@@ -533,11 +537,9 @@ pub(crate) async fn login_status(
 
             // #502 (plan T9): record the connecting master's omni — runtime
             // (audit emits key on it immediately) + persisted into the same
-            // secrets file (restarts keep it). The env stamp becomes a legacy
-            // fallback; a differing armed value is overridden LOUDLY in
-            // `set_runtime_operator_omni`.
+            // secrets file (restarts keep it). An armed household owner was
+            // checked above before any credential or registry mutation.
             if let Some(omni) = login.operator_omni.clone() {
-                state.set_runtime_operator_omni(&omni);
                 match ilink_login::upsert_operator_omni(secrets_path, &omni) {
                     Ok(_) => {
                         info!(omni = %omni, "operator omni recorded at connect (session-sourced)")
@@ -1561,24 +1563,6 @@ pub(crate) async fn registry_import(
     if let Err(resp) = admin_gate(&state, &headers) {
         return resp;
     }
-    let local = state.registry.snapshot();
-    let local_empty =
-        local.bound.is_empty() && local.invites.is_empty() && local.pending.is_empty();
-    if !local_empty && !req.force {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "ok": false,
-                "reason": "registry_not_empty",
-                "detail": "this contact gate already has contacts/invites — import only restores an \
-                           EMPTY (rebuilt) contact gate; pass force:true to overwrite deliberately",
-                "bound": local.bound.len(),
-                "invites": local.invites.len(),
-                "pending": local.pending.len(),
-            })),
-        )
-            .into_response();
-    }
     let mut incoming = req.registry;
     incoming.migrate_legacy(crate::relay::unix_secs());
     let (bound, invites, pending) = (
@@ -1587,6 +1571,16 @@ pub(crate) async fn registry_import(
         incoming.pending.len(),
     );
     match state.registry.mutate(|reg| {
+        if !req.force
+            && (!reg.bound.is_empty()
+                || !reg.invites.is_empty()
+                || !reg.pending.is_empty()
+                || !reg.apps.is_empty()
+                || !reg.channels.is_empty()
+                || reg.router.is_some())
+        {
+            anyhow::bail!("registry_not_empty");
+        }
         *reg = incoming;
         Ok(())
     }) {
@@ -1614,7 +1608,11 @@ pub(crate) async fn registry_import(
                 .into_response()
         }
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            if e.to_string() == "registry_not_empty" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             Json(json!({"ok": false, "reason": e.to_string()})),
         )
             .into_response(),

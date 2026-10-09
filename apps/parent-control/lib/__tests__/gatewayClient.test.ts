@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { gatewayClient, gatewayNotConfigured, isTerminalLoginStatus } from '../gatewayClient';
+import { gatewayClient, gatewayNotConfigured, isTerminalLoginStatus, setHostedGatewayAccess, type HostedGatewayAccess, type GatewayResult } from '../gatewayClient';
+import type { HostedGatewayRequest } from '../generated/HostedGatewayRequest';
 import { normalizeRouterView } from '../routerView';
 
 // The gateway client is a thin typed forwarder to the daemon proxy; the tests
@@ -18,6 +19,7 @@ function mockFetch(status: number, body: unknown, capture?: (url: string, init?:
 }
 
 afterEach(() => {
+  setHostedGatewayAccess(null);
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
@@ -28,7 +30,7 @@ describe('gatewayClient', () => {
     vi.stubEnv('NEXT_PUBLIC_AGENTKEYS_BACKEND', 'core');
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
-    expect(await gatewayClient.status()).toMatchObject({ ok: false, reason: 'hosted_gateway_unavailable' });
+    expect(await gatewayClient.status()).toMatchObject({ ok: false, reason: 'master_session_required' });
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -279,5 +281,144 @@ describe('gatewayClient', () => {
     expect(gatewayNotConfigured({ reason: 'gateway-not-configured — set X', status: 503 })).toBe(true);
     expect(gatewayNotConfigured({ reason: 'daemon_unreachable', status: 0 })).toBe(false);
     expect(gatewayNotConfigured({ reason: 'bind_not_claimed', status: 409 })).toBe(false);
+  });
+});
+
+function hostedAccess(registry: unknown = { bound: [], pending: [], invites: [], channels: [] }, durable: unknown = null) {
+  let durableValue = durable;
+  let revision = 1;
+  const operations: HostedGatewayRequest[] = [];
+  const writes: { value: unknown; expectedRevision: string }[] = [];
+  const access: HostedGatewayAccess = {
+    sessionKey: () => 'fixture-session',
+    request: vi.fn(async (request: HostedGatewayRequest): Promise<GatewayResult<unknown>> => {
+      operations.push(request);
+      return { ok: true, value: (request.operation === 'registry_export' ? registry : { ok: true, transport: 'ilink', contacts: [], channels: [] }) };
+    }),
+    readRegistry: vi.fn(async () => durableValue === null ? null : { value: durableValue, revision: `revision-${revision}` }),
+    writeRegistry: vi.fn(async (value: unknown, expectedRevision: string) => {
+      writes.push({ value, expectedRevision });
+      durableValue = value;
+      revision += 1;
+    }),
+  };
+  setHostedGatewayAccess(access);
+  vi.stubEnv('NEXT_PUBLIC_AGENTKEYS_BACKEND', 'core');
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  return { access, operations, writes, fetch };
+}
+
+describe('hosted gateway management', () => {
+  it('uses the typed broker operation and never opens the laptop daemon', async () => {
+    const fixture = hostedAccess();
+    expect(await gatewayClient.status()).toMatchObject({ ok: true, value: { transport: 'ilink' } });
+    expect(fixture.operations).toEqual([{ operation: 'status' }]);
+    expect(fixture.fetch).not.toHaveBeenCalled();
+  });
+
+  it('preserves login identifiers as typed fields and never sends an operator identity', async () => {
+    const fixture = hostedAccess();
+    await gatewayClient.loginStart('owner-contact');
+    await gatewayClient.loginStatus('login abc/1');
+    expect(fixture.operations).toContainEqual({ operation: 'login_start', payload: { contact_id: 'owner-contact' } });
+    expect(fixture.operations).toContainEqual({ operation: 'login_status', payload: { login_id: 'login abc/1' } });
+    expect(JSON.stringify(fixture.operations)).not.toContain('operator_omni');
+  });
+
+  it('restores a missing local registry from the durable Config document before reading contacts', async () => {
+    const durable = { bound: [{ contact_id: 'existing-contact' }], invites: [], pending: [], channels: [] };
+    const fixture = hostedAccess(undefined, durable);
+    expect((await gatewayClient.contacts()).ok).toBe(true);
+    expect(fixture.operations.map(request => request.operation)).toEqual(['registry_export', 'registry_restore', 'contacts']);
+    expect(fixture.operations[1]).toEqual({ operation: 'registry_restore', payload: { registry: durable } });
+    expect(fixture.writes).toEqual([]);
+  });
+
+  it('treats channel-only state as existing data and never replaces it with an older backup', async () => {
+    const registry = { bound: [], invites: [], pending: [], channels: [{ id: 'existing-channel' }] };
+    const fixture = hostedAccess(registry, { bound: [{ contact_id: 'old' }] });
+    expect((await gatewayClient.channels()).ok).toBe(true);
+    expect(fixture.operations.some(request => request.operation === 'registry_restore')).toBe(false);
+    expect(fixture.writes).toEqual([{ value: registry, expectedRevision: 'revision-1' }]);
+  });
+
+  it('writes a conditional durable snapshot after the gate confirms a contact mutation', async () => {
+    const registry = { bound: [{ contact_id: 'kid' }], invites: [], pending: [], channels: [] };
+    const fixture = hostedAccess(registry, registry);
+    expect((await gatewayClient.contactsUpdate({ contact_id: 'kid', tier: 'guest', channels: null })).ok).toBe(true);
+    expect(fixture.operations.map(request => request.operation)).toEqual(['registry_export', 'contacts_update', 'registry_export']);
+    expect(fixture.writes.map(write => write.expectedRevision)).toEqual(['revision-1', 'revision-2']);
+  });
+
+  it('surfaces Config conflicts after a landed change without retrying the mutation', async () => {
+    const fixture = hostedAccess();
+    vi.mocked(fixture.access.writeRegistry).mockRejectedValueOnce(new Error('409 revision_conflict'));
+    const result = await gatewayClient.contactsRevoke('kid');
+    expect(result).toMatchObject({ ok: false, reason: 'gateway_backup_failed' });
+    if (!result.ok) expect(result.detail).toContain('change was applied');
+    expect(fixture.operations.filter(request => request.operation === 'contacts_revoke')).toHaveLength(1);
+    expect((await gatewayClient.contacts()).ok).toBe(true);
+    expect(fixture.operations.filter(request => request.operation === 'registry_export')).toHaveLength(3);
+  });
+
+  it('refreshes apps only after the channel mutation has a durable backup', async () => {
+    const fixture = hostedAccess();
+    fixture.access.afterMutation = vi.fn(async request => {
+      expect(fixture.writes).toHaveLength(1);
+      expect(request).toMatchObject({ operation: 'channels_update', payload: { channel_id: 'family-chat' } });
+    });
+    expect((await gatewayClient.channelUpdate({ channel_id: 'family-chat', default_app: 'chef' })).ok).toBe(true);
+    expect(fixture.access.afterMutation).toHaveBeenCalledTimes(1);
+  });
+
+  it('never refreshes apps when backup failed', async () => {
+    const fixture = hostedAccess();
+    fixture.access.afterMutation = vi.fn();
+    vi.mocked(fixture.access.writeRegistry).mockRejectedValueOnce(new Error('409 revision_conflict'));
+    expect(await gatewayClient.channelUpdate({ channel_id: 'family-chat', default_app: 'chef' })).toMatchObject({ ok: false, reason: 'gateway_backup_failed' });
+    expect(fixture.access.afterMutation).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes runtime refresh failure from backup failure without replaying the mutation', async () => {
+    const fixture = hostedAccess();
+    fixture.access.afterMutation = vi.fn(async () => { throw new Error('runtime offline'); });
+    expect(await gatewayClient.channelUpdate({ channel_id: 'family-chat', default_app: 'chef' })).toMatchObject({ ok: false, reason: 'gateway_followthrough_failed' });
+    expect(fixture.writes).toHaveLength(1);
+    expect(fixture.operations.filter(request => request.operation === 'channels_update')).toHaveLength(1);
+  });
+
+  it('rejects malformed later registry fields even when contacts are present', async () => {
+    const fixture = hostedAccess({ bound: [{}], channels: 'invalid' });
+    expect(await gatewayClient.contacts()).toMatchObject({ ok: false, reason: 'gateway_registry_unavailable' });
+    expect(fixture.writes).toHaveLength(0);
+  });
+
+  it('does not mutate when the Config baseline cannot be read', async () => {
+    const fixture = hostedAccess();
+    vi.mocked(fixture.access.readRegistry).mockRejectedValue(new Error('Config unavailable'));
+    expect(await gatewayClient.contactsRevoke('kid')).toMatchObject({ ok: false, reason: 'gateway_registry_unavailable' });
+    expect(fixture.operations.some(request => request.operation === 'contacts_revoke')).toBe(false);
+  });
+
+  it('returns owner-denied errors unchanged without reading or writing another registry', async () => {
+    const fixture = hostedAccess();
+    vi.mocked(fixture.access.request).mockResolvedValue({ ok: false, reason: 'gateway_operator_mismatch', status: 403 });
+    expect(await gatewayClient.contacts()).toEqual({ ok: false, reason: 'gateway_operator_mismatch', status: 403 });
+    expect(fixture.access.readRegistry).not.toHaveBeenCalled();
+    expect(fixture.access.writeRegistry).not.toHaveBeenCalled();
+  });
+
+  it('discards responses after logout and never writes their registry into a new session', async () => {
+    const fixture = hostedAccess();
+    let resolveRequest!: (value: GatewayResult<unknown>) => void;
+    vi.mocked(fixture.access.request).mockImplementationOnce(() => new Promise(resolve => { resolveRequest = resolve; }));
+    const pending = gatewayClient.contacts();
+    await Promise.resolve();
+    setHostedGatewayAccess(null);
+    resolveRequest({ ok: true, value: { bound: [{ contact_id: 'old-owner' }] } });
+    expect(await pending).toMatchObject({ ok: false, reason: 'master_session_required' });
+    expect(fixture.access.readRegistry).not.toHaveBeenCalled();
+    expect(fixture.access.writeRegistry).not.toHaveBeenCalled();
   });
 });

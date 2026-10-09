@@ -56,3 +56,15 @@ pub(crate) fn require_session_jwt(
         })?;
     verify_session_jwt(&state.session_keypair, &state.config.oidc_issuer, bearer)
 }
+
+pub mod hosted_signer;
+
+pub mod hosted_gateway;
+
+pub mod console;
+
+pub mod console_audit;
+
+pub mod hosted_signer_pending;
+
+pub mod accept_receipt;

@@ -89,6 +89,26 @@ pub fn assemble_accept_userop(
     assemble_userop_with_calldata(p, call_data, Vec::new(), broker_sk)
 }
 
+pub fn assemble_hosted_signer_userop(
+    params: &AcceptUserOpParams<'_>,
+    master: &agentkeys_core::erc4337::AdditionalMaster<'_>,
+    broker_sk: &SigningKey,
+) -> Result<AssembledAcceptUserOp> {
+    let signer_call = agentkeys_core::erc4337::add_signer_calldata(
+        master.credential_hash,
+        master.pub_x,
+        master.pub_y,
+        master.rp_id_hash,
+    );
+    let device_call = agentkeys_core::erc4337::additional_master_calldata(master);
+    let call_data = agentkeys_core::erc4337::execute_batch_calldata(
+        &[params.master_account, params.registry],
+        &[0, 0],
+        &[signer_call, device_call],
+    );
+    assemble_userop_with_calldata(params, call_data, Vec::new(), broker_sk)
+}
+
 /// **The #278 D6 sibling** — assemble the ONE sponsored master-register UserOp:
 /// `initCode` (counterfactual `P256AccountFactory.createAccount` deploy) +
 /// `executeBatch([registerFirstMasterDevice])`. Unlike accept/scope/revoke the
@@ -372,36 +392,19 @@ fn assemble_userop_with_calldata(
     })
 }
 
-/// Broker-side mirror of `agentkeys_backend_client::protocol::WireUserOp` — the
-/// hex-encoded ERC-4337 `PackedUserOperation` on the `/v1/accept/*` wire. The
-/// broker doesn't depend on `backend-client`; the frozen key-set test there + the
-/// one below pin the two shapes together (same discipline as `BrokerCapRequest`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireUserOp {
-    pub sender: String,
-    pub nonce: String,
-    pub init_code: String,
-    pub call_data: String,
-    pub account_gas_limits: String,
-    pub pre_verification_gas: String,
-    pub gas_fees: String,
-    pub paymaster_and_data: String,
-    pub signature: String,
-}
+pub use agentkeys_protocol::WireUserOp;
 
-impl WireUserOp {
-    pub fn from_packed(op: &PackedUserOp) -> Self {
-        Self {
-            sender: hex0x(&op.sender),
-            nonce: hex0x(&op.nonce),
-            init_code: hex0x(&op.init_code),
-            call_data: hex0x(&op.call_data),
-            account_gas_limits: hex0x(&op.account_gas_limits),
-            pre_verification_gas: hex0x(&op.pre_verification_gas),
-            gas_fees: hex0x(&op.gas_fees),
-            paymaster_and_data: hex0x(&op.paymaster_and_data),
-            signature: hex0x(&op.signature),
-        }
+pub fn wire_user_op_from_packed(op: &PackedUserOp) -> WireUserOp {
+    WireUserOp {
+        sender: hex0x(&op.sender),
+        nonce: hex0x(&op.nonce),
+        init_code: hex0x(&op.init_code),
+        call_data: hex0x(&op.call_data),
+        account_gas_limits: hex0x(&op.account_gas_limits),
+        pre_verification_gas: hex0x(&op.pre_verification_gas),
+        gas_fees: hex0x(&op.gas_fees),
+        paymaster_and_data: hex0x(&op.paymaster_and_data),
+        signature: hex0x(&op.signature),
     }
 }
 
@@ -424,7 +427,7 @@ impl AssembledAcceptUserOp {
         chain_id: u64,
     ) -> BuildAcceptResponse {
         BuildAcceptResponse {
-            user_op: WireUserOp::from_packed(&self.user_op),
+            user_op: wire_user_op_from_packed(&self.user_op),
             user_op_hash: hex0x(&self.user_op_hash),
             entry_point: hex0x(entry_point),
             chain_id,
@@ -749,7 +752,7 @@ mod tests {
     #[test]
     fn wire_user_op_round_trips_every_field() {
         let (out, _, _, _) = assembled();
-        let w = WireUserOp::from_packed(&out.user_op);
+        let w = wire_user_op_from_packed(&out.user_op);
         assert_eq!(unhex(&w.sender), out.user_op.sender);
         assert_eq!(unhex(&w.nonce), out.user_op.nonce);
         assert_eq!(unhex(&w.init_code), out.user_op.init_code);
@@ -779,7 +782,7 @@ mod tests {
         // Server-side half of the #204 pin: a broker-side rename trips here, the
         // backend-client `wire_user_op_keys_frozen` test catches the client side.
         let (out, _, _, _) = assembled();
-        let v = serde_json::to_value(WireUserOp::from_packed(&out.user_op)).unwrap();
+        let v = serde_json::to_value(wire_user_op_from_packed(&out.user_op)).unwrap();
         let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
         keys.sort();
         assert_eq!(

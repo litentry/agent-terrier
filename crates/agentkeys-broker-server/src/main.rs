@@ -346,6 +346,7 @@ async fn main() -> anyhow::Result<()> {
         pairing_request_store: boot_artifacts.pairing_request_store,
         agent_delegation_store: boot_artifacts.agent_delegation_store,
         sandbox,
+        accept_receipts: Default::default(),
         pending_ceremonies: Arc::new(
             agentkeys_broker_server::handlers::spawn::PendingCeremonyStore::new(),
         ),

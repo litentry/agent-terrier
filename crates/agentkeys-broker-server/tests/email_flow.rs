@@ -195,6 +195,7 @@ async fn spawn_broker_fixture(
             agentkeys_broker_server::storage::AgentDelegationStore::open_in_memory().unwrap(),
         ),
         sandbox: None,
+        accept_receipts: Default::default(),
         pending_ceremonies: Arc::new(
             agentkeys_broker_server::handlers::spawn::PendingCeremonyStore::new(),
         ),

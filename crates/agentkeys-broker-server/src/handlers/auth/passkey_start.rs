@@ -104,7 +104,7 @@ pub async fn passkey_start(
         .nonce_store
         .issue(
             &challenge_hex,
-            &format!("{PASSKEY_NONCE_PREFIX}{omni}"),
+            &format!("{PASSKEY_NONCE_PREFIX}{omni}:0x{}", hex::encode(account)),
             now,
             now + PASSKEY_CHALLENGE_TTL_SECS,
         )

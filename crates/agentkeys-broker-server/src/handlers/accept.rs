@@ -730,7 +730,7 @@ const RECEIPT_POLL_INTERVAL_SECS: u64 = 2;
 /// failure is never steered toward a passkey reset (the real 2026-06-10 AA31
 /// incident). `None` (3rd-party bundler / replay no longer reverts) falls back
 /// to the old best-guess list — explicitly labeled as a guess.
-fn handle_ops_revert_message(reason: Option<&str>, tx_hash: &str) -> String {
+pub(crate) fn handle_ops_revert_message(reason: Option<&str>, tx_hash: &str) -> String {
     let Some(reason) = reason else {
         return format!(
             "handleOps reverted on-chain (tx {tx_hash}) — revert reason not recoverable; \
@@ -778,8 +778,8 @@ fn handle_ops_revert_message(reason: Option<&str>, tx_hash: &str) -> String {
 }
 
 /// Parse a `WireUserOp` (0x-hex packed fields) into the typed `PackedUserOp` —
-/// the inverse of `WireUserOp::from_packed`. Pure.
-fn wire_to_packed(op: &WireUserOp) -> Result<crate::sponsor::PackedUserOp, String> {
+/// the inverse of `crate::sponsored_accept::wire_user_op_from_packed`. Pure.
+pub(crate) fn wire_to_packed(op: &WireUserOp) -> Result<crate::sponsor::PackedUserOp, String> {
     let raw = |s: &str, name: &str| -> Result<Vec<u8>, String> {
         hex::decode(s.trim().trim_start_matches("0x")).map_err(|e| format!("{name} hex: {e}"))
     };
@@ -804,7 +804,7 @@ fn wire_to_packed(op: &WireUserOp) -> Result<crate::sponsor::PackedUserOp, Strin
 }
 
 /// JSON-RPC call to the bundler (`AGENTKEYS_BUNDLER_URL`). Returns `result`.
-async fn bundler_rpc(
+pub(crate) async fn bundler_rpc(
     http: &reqwest::Client,
     bundler_url: &str,
     method: &str,
@@ -830,6 +830,159 @@ async fn bundler_rpc(
     resp.get("result")
         .cloned()
         .ok_or_else(|| format!("bundler {method}: no result"))
+}
+
+fn validate_initial_registration(
+    packed: &crate::sponsor::PackedUserOp,
+    operator_omni: &[u8; 32],
+    registry: &[u8; 20],
+    factory: &[u8; 20],
+) -> Result<agentkeys_core::erc4337::RegisterFirstMaster, String> {
+    use agentkeys_core::erc4337::{
+        decode_execute_batch, master_account_salt, master_cred_id_hash, master_device_key_hash,
+        p256_account_factory_init_code, register_batch_calldata, RegisterFirstMaster,
+    };
+    let calls = decode_execute_batch(&packed.call_data)?;
+    if calls.len() != 1
+        || calls[0].dest != *registry
+        || calls[0].value != 0
+        || calls[0].calldata.len() != 4 + 8 * 32
+    {
+        return Err("unbound operator may submit only its deterministic first registration".into());
+    }
+    let args = &calls[0].calldata[4..];
+    let word =
+        |index: usize| -> [u8; 32] { args[index * 32..(index + 1) * 32].try_into().unwrap() };
+    let register = RegisterFirstMaster {
+        device_key_hash: master_device_key_hash(operator_omni),
+        operator_omni: *operator_omni,
+        actor_omni: *operator_omni,
+        cred_id_hash: master_cred_id_hash(operator_omni),
+        rpid_hash: word(4),
+        pub_x: word(5),
+        pub_y: word(6),
+        roles: word(7)[31],
+    };
+    if packed.call_data != register_batch_calldata(registry, &register) {
+        return Err(
+            "first registration must bind the authenticated operator and canonical master device"
+                .into(),
+        );
+    }
+    let expected_init = p256_account_factory_init_code(
+        factory,
+        &register.cred_id_hash,
+        &register.pub_x,
+        &register.pub_y,
+        &register.rpid_hash,
+        &master_account_salt(operator_omni),
+    );
+    if !packed.init_code.is_empty() && packed.init_code != expected_init {
+        return Err("first registration initCode is not the canonical operator account".into());
+    }
+    Ok(register)
+}
+
+fn require_bound_sender(
+    packed: &crate::sponsor::PackedUserOp,
+    account: &[u8; 20],
+) -> Result<(), crate::error::BrokerError> {
+    if packed.sender != *account || !packed.init_code.is_empty() {
+        return Err(crate::error::BrokerError::Forbidden(
+            "UserOp sender must be the authenticated operator's current master account".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn resolve_submit_signer(
+    state: &SharedState,
+    cfg: &AcceptConfig,
+    operator_omni: &[u8; 32],
+    packed: &crate::sponsor::PackedUserOp,
+    assertion: &BrowserAssertion,
+) -> Result<[u8; 32], crate::error::BrokerError> {
+    use crate::error::BrokerError;
+    let account = call_operator_master_wallet(
+        &state.http,
+        &cfg.rpc_url,
+        &cfg.registry,
+        &format!("0x{}", hex::encode(operator_omni)),
+    )
+    .await
+    .map_err(BrokerError::BackendUnreachable)?;
+    let challenge = packed.user_op_hash(&cfg.entry_point, cfg.chain_id);
+    if account != [0; 20] {
+        require_bound_sender(packed, &account)?;
+        return crate::account_signer::resolve_assertion_signer(
+            &state.http,
+            &cfg.rpc_url,
+            &account,
+            operator_omni,
+            &challenge,
+            assertion,
+        )
+        .await;
+    }
+    let factory = addr20(
+        &env_profile("P256_ACCOUNT_FACTORY_ADDRESS").map_err(BrokerError::BackendUnreachable)?,
+        "P256_ACCOUNT_FACTORY_ADDRESS",
+    )
+    .map_err(BrokerError::BackendUnreachable)?;
+    let register = validate_initial_registration(packed, operator_omni, &cfg.registry, &factory)
+        .map_err(BrokerError::Forbidden)?;
+    let predicted = crate::handlers::register::call_factory_get_address(
+        &state.http,
+        &cfg.rpc_url,
+        &factory,
+        &register.cred_id_hash,
+        &register.pub_x,
+        &register.pub_y,
+        &register.rpid_hash,
+        &agentkeys_core::erc4337::master_account_salt(operator_omni),
+    )
+    .await
+    .map_err(BrokerError::BackendUnreachable)?;
+    if packed.sender != predicted {
+        return Err(BrokerError::Forbidden(
+            "first registration sender differs from the canonical factory account".into(),
+        ));
+    }
+    if packed.init_code.is_empty() {
+        if !eth_address_has_code(&state.http, &cfg.rpc_url, &predicted)
+            .await
+            .map_err(BrokerError::BackendUnreachable)?
+        {
+            return Err(BrokerError::Forbidden(
+                "undeployed first registration requires canonical initCode".into(),
+            ));
+        }
+        return crate::account_signer::resolve_assertion_signer(
+            &state.http,
+            &cfg.rpc_url,
+            &predicted,
+            operator_omni,
+            &challenge,
+            assertion,
+        )
+        .await;
+    }
+    let signer = crate::account_signer::LiveSigner {
+        credential_hash: register.cred_id_hash,
+        pub_x: register.pub_x,
+        pub_y: register.pub_y,
+        rp_id_hash: register.rpid_hash,
+    };
+    crate::account_signer::verify_assertion(
+        &state.http,
+        &cfg.rpc_url,
+        &cfg.registry,
+        &challenge,
+        &signer,
+        assertion,
+    )
+    .await?;
+    Ok(signer.credential_hash)
 }
 
 /// `POST /v1/accept/submit` (J1_master) — relay the K11-signed op to the
@@ -861,20 +1014,28 @@ pub async fn accept_submit(
         )
     })?;
 
-    // Encode the browser WebAuthn assertion into the account UserOp signature
-    // (the master's K11 proof over user_op_hash) — the daemon forwards the raw
-    // assertion; the broker binds the operator-derived credIdHash here.
-    // operator_omni IS the verified J1 session omni (authoritative master id).
-    let operator_omni: [u8; 32] = {
-        let b = hex::decode(norm_omni(&claims.agentkeys.omni_account))
-            .map_err(|e| aerr(StatusCode::BAD_REQUEST, format!("session omni hex: {e}")))?;
-        b.try_into()
-            .map_err(|_| aerr(StatusCode::BAD_REQUEST, "session omni must be 32 bytes"))?
-    };
-    let sig = encode_browser_assertion_signature(&req.assertion, &operator_omni)
-        .map_err(|e| aerr(StatusCode::BAD_REQUEST, format!("assertion: {e}")))?;
-    let mut packed = wire_to_packed(&req.user_op).map_err(|e| aerr(StatusCode::BAD_REQUEST, e))?;
-    packed.signature = sig;
+    if claims.agentkeys.parent_omni.is_some() {
+        return Err(aerr(StatusCode::FORBIDDEN, "master session required"));
+    }
+    let operator_omni: [u8; 32] = hex::decode(norm_omni(&claims.agentkeys.omni_account))
+        .map_err(|error| aerr(StatusCode::BAD_REQUEST, format!("session omni: {error}")))?
+        .try_into()
+        .map_err(|_| aerr(StatusCode::BAD_REQUEST, "session omni must be 32 bytes"))?;
+    let mut packed =
+        wire_to_packed(&req.user_op).map_err(|error| aerr(StatusCode::BAD_REQUEST, error))?;
+    let signer_hash = resolve_submit_signer(&state, &cfg, &operator_omni, &packed, &req.assertion)
+        .await
+        .map_err(|error| {
+            let status = match &error {
+                crate::error::BrokerError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+                crate::error::BrokerError::Forbidden(_) => StatusCode::FORBIDDEN,
+                crate::error::BrokerError::BadRequest(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            aerr(status, error.to_string())
+        })?;
+    packed.signature = encode_browser_assertion_signature(&req.assertion, &signer_hash)
+        .map_err(|error| aerr(StatusCode::BAD_REQUEST, error))?;
 
     // Relay in the CANONICAL unpacked v0.7 JSON shape (what every bundler speaks)
     // so swapping self-hosted ↔ 3rd-party needs no broker code change.
@@ -911,6 +1072,17 @@ pub async fn accept_submit(
     })?
     .to_string();
 
+    let expected_hash = format!(
+        "0x{}",
+        hex::encode(packed.user_op_hash(&cfg.entry_point, cfg.chain_id))
+    );
+    if !user_op_hash.eq_ignore_ascii_case(&expected_hash) {
+        return Err(aerr(
+            StatusCode::BAD_GATEWAY,
+            "bundler returned a different user operation hash",
+        ));
+    }
+
     // Poll the bundler for the UserOperation receipt until mined or timeout.
     let timeout_secs = std::env::var("AGENTKEYS_BUNDLER_RECEIPT_TIMEOUT_SECS")
         .ok()
@@ -928,77 +1100,17 @@ pub async fn accept_submit(
         {
             Ok(serde_json::Value::Null) => {} // not mined yet — keep polling
             Ok(receipt) => {
-                let success = receipt
-                    .get("success")
-                    .and_then(|s| s.as_bool())
-                    .unwrap_or(false);
-                let tx_hash = receipt
-                    .pointer("/receipt/transactionHash")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let block_number = receipt
-                    .pointer("/receipt/blockNumber")
-                    .and_then(|b| b.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !success {
-                    // #247: the in-house bundler replays the failed calldata via
-                    // eth_call and attaches the decoded FailedOp reason ("AA31
-                    // paymaster deposit too low") — map it to operator guidance
-                    // instead of guessing "wrong passkey".
-                    let reason = receipt.get("reason").and_then(|r| r.as_str());
-                    tracing::warn!(
-                        target: "agentkeys.broker.accept",
-                        tx = %tx_hash,
-                        reason = reason.unwrap_or("(none)"),
-                        "submit relay: handleOps reverted on-chain"
-                    );
-                    return Err(aerr(
-                        StatusCode::BAD_GATEWAY,
-                        handle_ops_revert_message(reason, &tx_hash),
-                    ));
-                }
-                // #97 phase F: the receipt confirms the executeBatch landed —
-                // decode what landed and emit the control-plane audit
-                // envelopes (DeviceAdd / ScopeGrant / ScopeRevoke /
-                // DeviceRevoke). Best-effort: the chain tx is already final.
-                let audit_envelope_hashes = crate::handlers::audit_emit::emit_for_confirmed_batch(
-                    operator_omni,
-                    &packed.call_data,
-                )
-                .await;
-                // #377: an unpair also tears down the revoked devices'
-                // sandboxes (KillSandbox + SandboxTeardown envelopes). Same
-                // decode source, same best-effort posture; a non-revoke batch
-                // is a no-op.
-                crate::handlers::sandbox::teardown_for_confirmed_batch(
+                return crate::handlers::accept_receipt::verified_finalization(
                     &state,
+                    &cfg,
                     operator_omni,
-                    &packed.call_data,
+                    &packed,
+                    &user_op_hash,
+                    &receipt,
+                    None,
                 )
-                .await;
-                // #427: a spawn/archive ceremony finalizes here — gate
-                // provision/deprovision, sandbox spawn with identity envs,
-                // DelegateSpawn/DelegateArchive anchors. Same decode source,
-                // same best-effort posture; a non-ceremony batch yields None.
-                let ceremony = crate::handlers::spawn::finalize_for_confirmed_batch(
-                    &state,
-                    operator_omni,
-                    &packed.call_data,
-                )
-                .await;
-                let mut resp = serde_json::json!({
-                    "ok": true, "tx_hash": tx_hash, "block_number": block_number,
-                    "user_op_hash": user_op_hash,
-                    "audit_envelope_hashes": audit_envelope_hashes,
-                });
-                // Key present only on ceremony batches — mirrors the protocol
-                // type's skip_serializing_if (frozen key-set discipline).
-                if let Some(ceremony) = ceremony {
-                    resp["ceremony"] = ceremony;
-                }
-                return Ok(Json(resp));
+                .await
+                .map(Json);
             }
             // Transient bundler/RPC hiccup mid-poll: tolerate until the deadline.
             Err(_) => {}
@@ -1025,6 +1137,64 @@ pub async fn accept_submit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn initial_registration() -> (crate::sponsor::PackedUserOp, [u8; 32], [u8; 20], [u8; 20]) {
+        use agentkeys_core::erc4337::*;
+        let omni = [1; 32];
+        let registry = [2; 20];
+        let factory = [3; 20];
+        let registration = RegisterFirstMaster {
+            device_key_hash: master_device_key_hash(&omni),
+            operator_omni: omni,
+            actor_omni: omni,
+            cred_id_hash: master_cred_id_hash(&omni),
+            rpid_hash: [4; 32],
+            pub_x: [5; 32],
+            pub_y: [6; 32],
+            roles: 7,
+        };
+        let op = PackedUserOp {
+            sender: [8; 20],
+            nonce: [0; 32],
+            init_code: p256_account_factory_init_code(
+                &factory,
+                &registration.cred_id_hash,
+                &registration.pub_x,
+                &registration.pub_y,
+                &registration.rpid_hash,
+                &master_account_salt(&omni),
+            ),
+            call_data: register_batch_calldata(&registry, &registration),
+            account_gas_limits: [0; 32],
+            pre_verification_gas: [0; 32],
+            gas_fees: [0; 32],
+            paymaster_and_data: Vec::new(),
+            signature: Vec::new(),
+        };
+        (op, omni, registry, factory)
+    }
+    #[test]
+    fn submit_checks_bound_sender_and_refuses_initcode_for_bound_accounts() {
+        let (mut op, _, _, _) = initial_registration();
+        assert!(require_bound_sender(&op, &op.sender).is_err());
+        op.init_code.clear();
+        assert!(require_bound_sender(&op, &op.sender).is_ok());
+        assert!(require_bound_sender(&op, &[9; 20]).is_err());
+    }
+    #[test]
+    fn initial_submit_accepts_only_the_authenticated_operators_canonical_registration() {
+        let (mut op, omni, registry, factory) = initial_registration();
+        assert!(validate_initial_registration(&op, &omni, &registry, &factory).is_ok());
+        assert!(validate_initial_registration(&op, &[9; 32], &registry, &factory).is_err());
+        assert!(validate_initial_registration(&op, &omni, &[9; 20], &factory).is_err());
+        assert!(validate_initial_registration(&op, &omni, &registry, &[9; 20]).is_err());
+        op.init_code[183] ^= 1;
+        assert!(validate_initial_registration(&op, &omni, &registry, &factory).is_err());
+        op.init_code.clear();
+        assert!(validate_initial_registration(&op, &omni, &registry, &factory).is_ok());
+        op.call_data.push(0);
+        assert!(validate_initial_registration(&op, &omni, &registry, &factory).is_err());
+    }
 
     fn sample() -> BuildAcceptRequest {
         BuildAcceptRequest {

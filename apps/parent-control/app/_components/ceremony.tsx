@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
 import { CoreBackend } from '@/lib/client/core';
+import { HostedBrowserEnrollment } from './HostedBrowserEnrollment';
 import type { AgentKeysClient, ConfigPreset, ReloginInfo } from '@/lib/client/types';
 import { credentialToFinishPayload, getAssertionOverHash, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
 import type { AcceptAssertion } from '@/lib/webauthn';
@@ -514,7 +515,7 @@ export function OnboardingScreen({
   const hosted = client instanceof CoreBackend;
   // email → verify → ceremony (passkey) → setup (#207 1A: author the taxonomy)
   // → onComplete. `setup` is the last onboarding step before connecting agents.
-  const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony' | 'setup'>('email');
+  const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony' | 'setup' | 'browser'>('email');
   // 'blocked' = the enroll cannot proceed and retrying will not help (a master is
   // bound on chain that this browser has no passkey for). Distinct from 'demo',
   // which means "no backend, narrate it" — conflating them told the operator
@@ -562,6 +563,7 @@ export function OnboardingScreen({
       });
       const st = await client.getOnboardingState();
       if (cancelled || !st.ok || !st.data.relogin) return;
+      if (client instanceof CoreBackend) { setRelogin(st.data.relogin); return; }
       const cred = getMasterCredId();
       if (!cred) return; // no local passkey pointer — nothing to auto-select
       const pointerOmni = getMasterOmni();
@@ -578,6 +580,16 @@ export function OnboardingScreen({
     if (reloginBusy) return;
     setReloginBusy(true);
     setNote('');
+    if (client instanceof CoreBackend) {
+      try {
+        const identity = await client.signInWithPasskey(relogin?.omni);
+        setMasterCredId(identity.credentialId);
+        setMasterOmni(identity.omni);
+        onComplete();
+      } catch (error) { setNote(String(error)); }
+      finally { setReloginBusy(false); }
+      return;
+    }
     const start = await client.reloginStart();
     if (!start.ok) {
       setReloginBusy(false);
@@ -669,7 +681,7 @@ export function OnboardingScreen({
         setPresets(r.data.presets);
         setSelectedPreset(r.data.defaultId);
       } else {
-        setSetupNote('Categories are set up once a daemon is connected — you can do this later from the memory page.');
+        setSetupNote(existing.ok ? (r.status.detail ?? 'Could not load category presets. Retry from the knowledge page.') : (existing.status.detail ?? 'Could not read your existing categories. No data was replaced.'));
       }
       setSetupStage('pick');
     })();
@@ -800,7 +812,7 @@ export function OnboardingScreen({
       if (r.data.status === 'verified') {
         settled = true;
         setOmni(r.data.omniAccount ?? '');
-        if (hosted) onComplete();
+        if (hosted) setPhase('browser');
         else setPhase('ceremony');
       } else if (r.data.status.startsWith('failed')) {
         setNote(`Email verification ${r.data.status} — start over with a fresh link.`);
@@ -1011,6 +1023,19 @@ export function OnboardingScreen({
               ← use a different email
             </button>
           </div>
+        )}
+
+        {phase === 'browser' && client instanceof CoreBackend && (
+          <HostedBrowserEnrollment brokerUrl={client.brokerUrl} omni={omni}
+            start={(request) => client.hostedSignerStart(request)}
+            publish={(request) => client.hostedSignerPublish(request)}
+            status={(request) => client.hostedSignerStatus(request)}
+            onReady={async (identity) => {
+              await client.activateHostedIdentity(identity);
+              setMasterCredId(identity.credentialId);
+              setMasterOmni(identity.omni);
+              setPhase('setup');
+            }} />
         )}
 
         {phase === 'ceremony' && (

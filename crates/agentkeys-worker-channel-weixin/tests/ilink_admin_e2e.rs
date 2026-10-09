@@ -263,7 +263,7 @@ async fn parent_control_flow_login_hotswap_bind_approve_relay() {
         .json()
         .await
         .unwrap();
-    assert_eq!(start["ok"], true);
+    assert_eq!(start["ok"], true, "first native connect: {start}");
     let login_id = start["login_id"].as_str().unwrap().to_string();
     assert!(start["qrcode_url"]
         .as_str()
@@ -589,6 +589,7 @@ async fn member_login_by_scan_binds_and_routes_on_its_own_bot() {
         .json()
         .await
         .unwrap();
+    assert_eq!(start["ok"], true, "owner native connect: {start}");
     let owner = poll_login(start["login_id"].as_str().unwrap().to_string()).await;
     assert_eq!(owner["status"], "connected", "{owner}");
 

@@ -86,6 +86,7 @@ pub struct AppState {
     /// #427 spawn/archive ceremony context, build → submit (IN-MEMORY by
     /// design — the pending-spawn row carries the delegate K10 secret, which
     /// must never sit at rest; see `handlers::spawn`).
+    pub accept_receipts: Arc<crate::handlers::accept_receipt::ReceiptCache>,
     pub pending_ceremonies: Arc<crate::handlers::spawn::PendingCeremonyStore>,
     /// Atomic counters surfaced via /metrics (Phase D-rest, US-036).
     pub metrics: Arc<Metrics>,

@@ -16,17 +16,21 @@ use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::{
-    err_400, err_403, err_404, err_500, err_502, err_502_s3_get, s3_error_summary, ApiError,
-    S3FetchAttempt,
+    err_400, err_403, err_404, err_409, err_500, err_502, err_502_s3_get, s3_error_summary,
+    ApiError, S3FetchAttempt,
 };
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
 
 pub fn build_router(state: SharedConfigWorkerState) -> Router {
+    let browser_origins = std::env::var("AGENTKEYS_BROWSER_ORIGINS").unwrap_or_default();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/config/put", post(config_put))
         .route("/v1/config/get", post(config_get))
         .route("/v1/config/teardown", post(config_teardown))
+        .layer(agentkeys_worker_creds::cors::browser_cors_layer(
+            &browser_origins,
+        ))
         .with_state(state)
 }
 
@@ -56,6 +60,8 @@ pub struct PutRequest {
     pub plaintext_b64: Option<String>,
     #[serde(default)]
     pub envelope_b64: Option<String>,
+    #[serde(default)]
+    pub expected_revision: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +93,7 @@ pub struct GetResponse {
     pub envelope_b64: Option<String>,
     /// Durable-audit receipt (#229) — see [`PutResponse::audit_envelope_hash`].
     pub audit_envelope_hash: Option<String>,
+    pub revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,13 +228,31 @@ async fn config_put_inner(
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
-    s3.put_object()
-        .bucket(&state.config.config_bucket)
-        .key(&key)
-        .body(env_bytes.clone().into())
-        .send()
-        .await
-        .map_err(|e| err_502(format!("s3 PutObject: {}", s3_error_summary(&e)), "s3_put"))?;
+    agentkeys_worker_creds::conditional::conditional_put(
+        s3.put_object()
+            .bucket(&state.config.config_bucket)
+            .key(&key)
+            .body(env_bytes.clone().into()),
+        req.expected_revision.as_deref(),
+    )?
+    .send()
+    .await
+    .map_err(|error| {
+        if error
+            .raw_response()
+            .is_some_and(|response| matches!(response.status().as_u16(), 409 | 412))
+        {
+            err_409(
+                "config changed since it was read; reload before saving",
+                "stale_base",
+            )
+        } else {
+            err_502(
+                format!("s3 PutObject: {}", s3_error_summary(&error)),
+                "s3_put",
+            )
+        }
+    })?;
     Ok((key, env_bytes))
 }
 
@@ -255,7 +280,7 @@ async fn config_get(
         .audit
         .emit(&req.cap, AuditOpKind::ConfigGet, audit_body, audit_result)
         .await;
-    let fetched = outcome?;
+    let (fetched, revision) = outcome?;
     let audit_envelope_hash = audited?;
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -268,6 +293,7 @@ async fn config_get(
         plaintext_b64,
         envelope_b64,
         audit_envelope_hash,
+        revision,
     }))
 }
 
@@ -284,7 +310,7 @@ async fn config_get_inner(
     state: &SharedConfigWorkerState,
     creds: Option<&StsCreds>,
     req: &GetRequest,
-) -> Result<ConfigFetched, ApiError> {
+) -> Result<(ConfigFetched, String), ApiError> {
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
     let s3 = s3_for_request(&state.s3, &state.config.region, creds).await;
     let resp = s3
@@ -318,6 +344,16 @@ async fn config_get_inner(
                 err_502_s3_get(&state.config.config_bucket, vec![attempt])
             }
         })?;
+    let revision = resp
+        .e_tag()
+        .filter(|etag| !etag.is_empty())
+        .ok_or_else(|| {
+            err_502(
+                "storage omitted config revision",
+                "storage_revision_missing",
+            )
+        })?
+        .to_owned();
     let body = resp
         .body
         .collect()
@@ -328,7 +364,7 @@ async fn config_get_inner(
     // v3 (#372 item 2): return the client-encrypted envelope verbatim —
     // decrypt happens caller-side under the signer-derived per-actor KEK.
     if envelope::version(&body) == Some(envelope::ENVELOPE_VERSION_V3) {
-        return Ok(ConfigFetched::V3Envelope(body.to_vec()));
+        return Ok((ConfigFetched::V3Envelope(body.to_vec()), revision));
     }
 
     // Legacy v2 blob: worker-side decrypt under the static stage-1 KEK.
@@ -347,7 +383,7 @@ async fn config_get_inner(
         req.cap.payload.k3_epoch,
     );
     envelope::decrypt(kek_hex, &body, &aad)
-        .map(ConfigFetched::LegacyPlaintext)
+        .map(|plaintext| (ConfigFetched::LegacyPlaintext(plaintext), revision))
         .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
 }
 

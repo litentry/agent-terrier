@@ -47,6 +47,88 @@ pub fn master_cred_id_hash(operator_omni: &[u8; 32]) -> [u8; 32] {
     keccak256(preimage.as_bytes())
 }
 
+/// Additional browser credentials are indexed by the hash of WebAuthn rawId bytes.
+pub fn credential_id_hash(raw_id: &[u8]) -> [u8; 32] {
+    keccak256(raw_id)
+}
+
+pub fn add_signer_calldata(
+    credential_hash: &[u8; 32],
+    pub_x: &[u8; 32],
+    pub_y: &[u8; 32],
+    rp_id_hash: &[u8; 32],
+) -> Vec<u8> {
+    let mut calldata = selector("addSigner(bytes32,uint256,uint256,bytes32)").to_vec();
+    for word in [credential_hash, pub_x, pub_y, rp_id_hash] {
+        calldata.extend_from_slice(word);
+    }
+    calldata
+}
+
+pub fn additional_master_challenge(
+    operator_omni: &[u8; 32],
+    device_key_hash: &[u8; 32],
+    roles: u8,
+    chain_id: u64,
+    nonce: &[u8; 32],
+) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(6 * WORD);
+    preimage.extend_from_slice(&keccak256(b"agentkeys:v1:register-master"));
+    preimage.extend_from_slice(operator_omni);
+    preimage.extend_from_slice(device_key_hash);
+    preimage.extend_from_slice(&word_u128(roles as u128));
+    preimage.extend_from_slice(&word_u128(chain_id as u128));
+    preimage.extend_from_slice(nonce);
+    keccak256(&preimage)
+}
+
+pub struct AdditionalMaster<'a> {
+    pub device_key_hash: &'a [u8; 32],
+    pub operator_omni: &'a [u8; 32],
+    pub credential_hash: &'a [u8; 32],
+    pub rp_id_hash: &'a [u8; 32],
+    pub pub_x: &'a [u8; 32],
+    pub pub_y: &'a [u8; 32],
+    pub roles: u8,
+    pub attesting_device_key_hash: &'a [u8; 32],
+    pub authenticator_data: &'a [u8],
+    pub client_data_json: &'a [u8],
+    pub challenge_location: usize,
+    pub r: &'a [u8; 32],
+    pub s: &'a [u8; 32],
+}
+
+pub fn additional_master_calldata(master: &AdditionalMaster<'_>) -> Vec<u8> {
+    let mut assertion = Vec::new();
+    assertion.extend_from_slice(master.attesting_device_key_hash);
+    assertion.extend_from_slice(&word_u128((6 * WORD) as u128));
+    let auth = enc_bytes(master.authenticator_data);
+    assertion.extend_from_slice(&word_u128((6 * WORD + auth.len()) as u128));
+    assertion.extend_from_slice(&word_u128(master.challenge_location as u128));
+    assertion.extend_from_slice(master.r);
+    assertion.extend_from_slice(master.s);
+    assertion.extend_from_slice(&auth);
+    assertion.extend_from_slice(&enc_bytes(master.client_data_json));
+    let mut calldata = selector("registerAdditionalMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8,(bytes32,bytes,bytes,uint256,uint256,uint256))").to_vec();
+    for word in [
+        master.device_key_hash,
+        master.operator_omni,
+        master.operator_omni,
+        master.credential_hash,
+        master.rp_id_hash,
+        master.pub_x,
+        master.pub_y,
+    ] {
+        calldata.extend_from_slice(word);
+    }
+    calldata.extend_from_slice(&word_u128((10 * WORD) as u128));
+    calldata.extend_from_slice(&word_u128(master.roles as u128));
+    calldata.extend_from_slice(&word_u128((11 * WORD) as u128));
+    calldata.extend_from_slice(&word_u128(0));
+    calldata.extend_from_slice(&assertion);
+    calldata
+}
+
 /// Prefix of the master-account CREATE2-salt preimage (see [`master_account_salt`]).
 /// **Terminology source-of-truth:** the bash literal in
 /// `e2e/scripts/_erc4337_lib.sh` (`cast keccak
@@ -1257,6 +1339,59 @@ mod tests {
     const GOLDEN_REGISTER_FIRST_MASTER: &str =
         include_str!("testdata/erc4337_register_first_master.hex");
     const GOLDEN_CREATE_ACCOUNT: &str = include_str!("testdata/erc4337_create_account.hex");
+
+    #[test]
+    fn additional_master_calldata_matches_cast() {
+        let mut r = [0; 32];
+        r[31] = 19;
+        let mut signature_s = [0; 32];
+        signature_s[31] = 23;
+        let master = AdditionalMaster {
+            device_key_hash: &[0x11; 32],
+            operator_omni: &[0x22; 32],
+            credential_hash: &[0x33; 32],
+            rp_id_hash: &[0x44; 32],
+            pub_x: &[0x55; 32],
+            pub_y: &[0x66; 32],
+            roles: 1,
+            attesting_device_key_hash: &[0x77; 32],
+            authenticator_data: &[0xaa, 0xbb],
+            client_data_json: b"cdj",
+            challenge_location: 17,
+            r: &r,
+            s: &signature_s,
+        };
+        let expected = include_str!("testdata/erc4337_additional_master.hex")
+            .trim()
+            .trim_start_matches("0x");
+        assert_eq!(hex::encode(additional_master_calldata(&master)), expected);
+        let signer = add_signer_calldata(
+            master.credential_hash,
+            master.pub_x,
+            master.pub_y,
+            master.rp_id_hash,
+        );
+        assert_eq!(
+            &signer[..4],
+            &selector("addSigner(bytes32,uint256,uint256,bytes32)")
+        );
+        assert_eq!(&signer[4..36], master.credential_hash);
+        assert_eq!(&signer[100..132], master.rp_id_hash);
+    }
+
+    #[test]
+    fn additional_master_challenge_binds_operator_device_role_chain_and_nonce() {
+        let original = additional_master_challenge(&[1; 32], &[2; 32], 1, 42, &[3; 32]);
+        for modified in [
+            additional_master_challenge(&[4; 32], &[2; 32], 1, 42, &[3; 32]),
+            additional_master_challenge(&[1; 32], &[4; 32], 1, 42, &[3; 32]),
+            additional_master_challenge(&[1; 32], &[2; 32], 2, 42, &[3; 32]),
+            additional_master_challenge(&[1; 32], &[2; 32], 1, 43, &[3; 32]),
+            additional_master_challenge(&[1; 32], &[2; 32], 1, 42, &[4; 32]),
+        ] {
+            assert_ne!(original, modified);
+        }
+    }
 
     #[test]
     fn register_agent_device_matches_cast() {

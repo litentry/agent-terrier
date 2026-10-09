@@ -82,12 +82,17 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         object_key: Some(agentkeys_protocol::CHECKPOINT_OBJECT_KEY.into()),
     };
     let config_put = ConfigPutBody {
+        expected_revision: None,
         cap: json!("<cap-token>"),
         // Canonical shape = the v3 client-encrypted envelope (#372 item 2);
         // the deprecated legacy plaintext_b64 is None + skip_serializing_if,
         // so it stays out of the fixture and its frozen key set.
         plaintext_b64: None,
         envelope_b64: Some("<base64-v3-envelope>".into()),
+    };
+    let config_put_cas = ConfigPutBody {
+        expected_revision: Some("<storage-revision>".into()),
+        ..config_put.clone()
     };
     let config_get = ConfigGetBody {
         cap: json!("<cap-token>"),
@@ -261,6 +266,10 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
             body: serde_json::to_value(&config_put).expect("config_put serializes"),
         },
         Fixture {
+            name: "config_put_body_cas",
+            body: serde_json::to_value(&config_put_cas).expect("config_put_cas serializes"),
+        },
+        Fixture {
             name: "cred_store_body",
             body: serde_json::to_value(&cred_store).expect("cred_store serializes"),
         },
@@ -397,6 +406,14 @@ mod tests {
     #[test]
     fn config_put_body_keys_frozen() {
         assert_eq!(keys_of("config_put_body"), vec!["cap", "envelope_b64"]);
+    }
+
+    #[test]
+    fn config_put_cas_body_keys_frozen() {
+        assert_eq!(
+            keys_of("config_put_body_cas"),
+            vec!["cap", "envelope_b64", "expected_revision"]
+        );
     }
 
     #[test]

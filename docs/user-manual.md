@@ -829,31 +829,53 @@ A shared screen (a kitchen tablet, an old phone on the fridge) shows your househ
 
 ## Hosted console email sign-in
 
-The hosted console is private access. An administrator must put your email on
-the deployment's allowlist before you can request a sign-in link. Verify the link
-in your inbox and leave the original console tab open to finish signing in.
-A chain registration is not required for admission. An existing email uses its
-same identity and wallet; signing in does not register a new on-chain account.
-Unlisted addresses are rejected before an email is sent. Removing an address
-and applying the deployment configuration blocks further broker access,
-including previously issued sessions.
+The hosted console uses the same parent-control screens: sign in, authenticate,
+then manage your existing account. There is no separate “You are signed in” page.
+The deployment's email allowlist controls admission only. It does not create an
+account or grant permissions. Unlisted addresses are rejected before mail is sent;
+removing an address and applying the deployment configuration also blocks its
+existing sessions.
 
-The hosted console uses the original parent-control email screen. After the
-broker verifies the link and session, the same tab opens the parent-control
-interface automatically. There is no separate signed-in confirmation page and
-no new account, passkey enrollment, master reset, or chain registration during
-this login. The allowlist only restricts admission; the local app's enrollment
-and existing-passkey sign-in flows are unchanged.
+On your first visit, enter your approved email and verify the inbox link, leaving
+the console tab open. Your existing account must already be registered on chain.
+A passkey created for the original local console cannot authenticate a different
+website address. Enable this browser with Touch ID, then review its request in
+your original console. Check the account, website address, and device shown before
+approving. The original passkey authorizes the new browser on the **same account**;
+your account, grants, agents, and stored data remain in place. The waiting browser
+continues automatically once both its passkey and device binding are confirmed.
+Expired or rejected requests never grant access. Do not reset the master or
+register another account to complete this step.
 
-**The hosted backend is still incomplete.** Opening the interface does not mean
-its data operations are available: actors, knowledge, credentials, channels,
-applications, transport, contacts, and hosted-domain passkey operations still
-need the remaining #751 work. The interface identifies that limitation; unavailable
-counts are shown as a dash, not as proof of an empty account. Transport and
-contact pages never try a daemon on the visiting machine. Do not reset your
-master or register again to fix unavailable hosted data.
+After that one-time approval, **Sign back in with Touch ID** unlocks this browser
+and opens parent control. Email login remains available. Existing categories are
+loaded; the original category setup appears only when none have been authored.
+Knowledge, credentials, inbox review, channels, applications, agent operations,
+and the enrolled contact gate use the real broker and workers. Permission and
+binding changes still show their original Touch ID approval; opening a page does
+not grant anything. A new contact gate must be enrolled through its existing
+operator setup before hosted management can use it. Enrolling the browser console
+in **applications → endpoints** includes access to your existing apps in that
+same Touch ID approval. New hosted app bindings update your enrolled consoles;
+ordinary household devices keep their own grants.
 
-Sessions remain in tab memory, never browser persistent storage; reloading or
-closing the tab requires signing in again. Logout clears the session and view
-state. Expired or revoked sessions return to login on the periodic session
-check. Backend errors remain visible and never fall back to demo verification.
+Browser access requires a passkey authenticator that supports WebAuthn PRF. If it
+does not, setup reports that limitation and leaves the original console usable.
+Only public passkey metadata and a random browser salt are saved. Device keys,
+session tokens, and temporary storage credentials remain in memory and are
+cleared on logout; reloading requires authentication again. Clearing browser
+storage removes its public identity pointer and requires enabling that browser
+again, without replacing the account.
+
+The audit screen loads confirmed activity in pages. **Load older activity** continues
+through earlier history, including pages with no events. Filtering by actor starts
+at that actor's recent history. A failed read is shown explicitly and can be retried;
+it does not erase activity already loaded. Pausing refresh keeps the loaded history.
+
+Concurrent edits are checked against the version that was read. If another
+window changes the document, reload it before retrying. A confirmed transaction
+and a failed follow-up save are reported separately. Use **Check confirmation**
+and keep the tab open until the change and its follow-up save finish; signing
+out or reloading clears that tab's pending-work details. A persona can be saved while
+its running agent is unreachable; the editor says whether it was applied.
+Backend errors remain visible and never switch to demo data or a local daemon.

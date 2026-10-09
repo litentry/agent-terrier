@@ -1,5 +1,7 @@
+import type { ApiAuditPage } from "@/lib/generated/ApiAuditPage";
 import type {
   AgentKeysClient,
+  AuditPage,
   AnchorStatus,
   CapToken,
   ChainInfo,
@@ -120,14 +122,14 @@ function unreachable(detail: string): DisconnectedStatus {
   return { kind: 'disconnected', reason: 'unreachable', detail };
 }
 
-export class DaemonBackend implements AgentKeysClient {
-  private baseUrl: string;
+export class MappedBackend implements AgentKeysClient {
+  protected baseUrl: string;
 
   constructor(baseUrl?: string) {
     this.baseUrl = (baseUrl ?? process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
   }
 
-  private async getJson<T>(path: string): Promise<Result<T>> {
+  protected async getJson<T>(path: string): Promise<Result<T>> {
     try {
       const resp = await fetch(`${this.baseUrl}${path}`, { method: 'GET', cache: 'no-store' });
       if (!resp.ok) {
@@ -143,7 +145,7 @@ export class DaemonBackend implements AgentKeysClient {
   // Like postJson, but the body is ALREADY serialized JSON (the wasm plant
   // builder returns serde_json's exact bytes — re-stringifying would launder
   // them through JS). #275 tier-3.
-  private async postJsonBody<T>(path: string, jsonBody: string): Promise<Result<T>> {
+  protected async postJsonBody<T>(path: string, jsonBody: string): Promise<Result<T>> {
     try {
       const resp = await fetch(`${this.baseUrl}${path}`, {
         method: 'POST',
@@ -160,7 +162,7 @@ export class DaemonBackend implements AgentKeysClient {
     }
   }
 
-  private async postJson<T>(path: string, body: unknown): Promise<Result<T>> {
+  protected async postJson<T>(path: string, body: unknown): Promise<Result<T>> {
     try {
       const resp = await fetch(`${this.baseUrl}${path}`, {
         method: 'POST',
@@ -175,6 +177,22 @@ export class DaemonBackend implements AgentKeysClient {
     } catch (e) {
       return { ok: false, status: unreachable(`POST ${path}: ${(e as Error).message}`) };
     }
+  }
+
+  async hostedApprovalPending() {
+    return this.getJson<import('../generated/HostedSignerPending').HostedSignerPending>('/v1/master/hosted-signer/pending');
+  }
+  async hostedApprovalDismiss(id: string) {
+    return this.postJson<{ ok: boolean }>('/v1/master/hosted-signer/dismiss', { id });
+  }
+  async hostedApprovalPrepare(request: import('../generated/HostedSignerApproval').HostedSignerApproval) {
+    return this.postJson<import('../generated/HostedSignerChallenge').HostedSignerChallenge>('/v1/master/hosted-signer/prepare', request);
+  }
+  async hostedApprovalBuild(request: import('../generated/HostedSignerBuildRequest').HostedSignerBuildRequest) {
+    return this.postJson<BuildAcceptUserOpResponse>('/v1/master/hosted-signer/build', request);
+  }
+  async hostedApprovalSubmit(request: import('../generated/SubmitAcceptUserOpRequest').SubmitAcceptUserOpRequest) {
+    return this.postJson<SubmitAcceptUserOpResponse>('/v1/master/hosted-signer/submit', request);
   }
 
   async status(): Promise<ConnectionStatus> {
@@ -228,15 +246,19 @@ export class DaemonBackend implements AgentKeysClient {
   }
 
   async listRecentAuditEvents(opts?: { actorId?: string; limit?: number }): Promise<Result<AuditEvent[]>> {
+    const result = await this.listAuditPage(opts);
+    return result.ok ? { ok: true, data: result.data.events } : result;
+  }
+
+  async listAuditPage(opts?: { actorId?: string; limit?: number; cursor?: string }): Promise<Result<AuditPage>> {
     const params = new URLSearchParams();
     if (opts?.actorId) params.set('actor_id', opts.actorId);
     if (opts?.limit) params.set('limit', String(opts.limit));
-    const qs = params.toString();
-    const r = await this.getJson<{ events: ApiAuditEvent[] }>(
-      `/v1/audit/recent${qs ? `?${qs}` : ''}`,
-    );
-    if (!r.ok) return r;
-    return { ok: true, data: r.data.events.map(apiToAuditEvent) };
+    if (opts?.cursor) params.set('cursor', opts.cursor);
+    const query = params.toString();
+    const result = await this.getJson<ApiAuditPage>(`/v1/audit/recent${query ? `?${query}` : ''}`);
+    if (!result.ok) return result;
+    return { ok: true, data: { events: result.data.events.map(apiToAuditEvent), nextCursor: result.data.next_cursor ?? null } };
   }
 
   streamAudit(
@@ -734,8 +756,8 @@ export class DaemonBackend implements AgentKeysClient {
     });
   }
 
-  async restartAgent(): Promise<Result<{ restarted: boolean }>> {
-    return this.postJson<{ restarted: boolean }>('/v1/master/agent/restart', {});
+  async restartAgent(actorOmni?: string): Promise<Result<{ restarted: boolean }>> {
+    return this.postJson<{ restarted: boolean }>('/v1/master/agent/restart', actorOmni ? { actor_omni: actorOmni } : {} );
   }
 
   /** Write the delegate's preset (persona + skills) into its live sandbox
@@ -747,8 +769,8 @@ export class DaemonBackend implements AgentKeysClient {
     return this.postJson('/v1/master/agent/preset/reapply', { actor_omni: actorOmni });
   }
 
-  async getAgentContext(): Promise<Result<AgentContextView>> {
-    return this.getJson<AgentContextView>('/v1/master/agent/context');
+  async getAgentContext(actorOmni?: string): Promise<Result<AgentContextView>> {
+    return this.getJson<AgentContextView>(`/v1/master/agent/context${actorOmni ? `?actor=${encodeURIComponent(actorOmni)}` : ''}`);
   }
 
   async listConfigPresets(): Promise<Result<ConfigPresetList>> {
@@ -1255,3 +1277,5 @@ function apiToMemoryEntry(m: ApiMemoryEntry): MasterMemoryEntry {
     kind: m.kind,
   };
 }
+
+export class DaemonBackend extends MappedBackend {}

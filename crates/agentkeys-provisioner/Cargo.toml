@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+agentkeys-protocol = { workspace = true }
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
 serde = { workspace = true }

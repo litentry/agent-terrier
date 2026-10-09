@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
-use axum::routing::{get, post};
-use axum::Router;
 use clap::Parser;
 use tracing::info;
 
-use agentkeys_worker_audit::handlers;
 use agentkeys_worker_audit::state::State;
 
 /// Audit-service worker — tier-A Merkle relay (arch.md §15.3).
@@ -96,20 +93,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/v1/audit/append", post(handlers::append))
-        .route("/v1/audit/flush/:operator_omni", post(handlers::flush_one))
-        .route("/v1/audit/flush-all", post(handlers::flush_all))
-        .route(
-            "/v1/audit/queue-size/:operator_omni",
-            get(handlers::queue_size),
-        )
-        // V2 endpoints (arch.md §15.3a, issue #97 phase B). V1 stays so
-        // existing callers keep working during the migration cycle.
-        .route("/v1/audit/append/v2", post(handlers::append_v2))
-        .route("/v1/audit/envelope/:hash", get(handlers::get_envelope))
-        .with_state(state);
+    let app = agentkeys_worker_audit::create_router(state);
 
     let listener = tokio::net::TcpListener::bind(&args.bind).await?;
     info!(bind = %args.bind, "agentkeys-worker-audit listening");

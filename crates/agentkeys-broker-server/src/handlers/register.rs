@@ -150,7 +150,7 @@ fn parse_register(req: &BuildRegisterRequest) -> Result<ParsedRegister, String> 
 /// `handleOps` will deploy from the `initCode`). Never recompute the CREATE2 in
 /// Rust: an off-by-a-byte preimage would bind the master to the wrong address.
 #[allow(clippy::too_many_arguments)] // the 5 getAddress inputs + (http, rpc, factory) — a builder hides nothing
-async fn call_factory_get_address(
+pub(crate) async fn call_factory_get_address(
     http: &reqwest::Client,
     rpc: &str,
     factory: &[u8; 20],

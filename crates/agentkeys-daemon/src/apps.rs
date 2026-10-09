@@ -15,7 +15,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use agentkeys_backend_client::protocol::{
     compile_app, opchat_channel_id, opchat_display_name, opchat_purpose, seed_binding_description,
@@ -35,96 +35,99 @@ use crate::ui_bridge::{
     now_unix, pairing_err, plant_master_memory_inner, real_config_ctx, registry_err,
     registry_storage_label, resource_entry_remove, resource_object_put,
     sync_gateway_registry_to_config, valid_channel_id, SharedUiBridgeState, UiBridgeState,
+    VersionedConfig,
 };
 
 // ── registry docs ───────────────────────────────────────────────────────────
 
-pub(crate) async fn ensure_app_registry(state: &UiBridgeState) -> Result<AppRegistryDoc, String> {
-    if let Some(r) = state.app_registry.read().await.clone() {
-        return Ok(r);
-    }
-    let loaded = match real_config_ctx(state).await? {
-        Some(ctx) => {
-            let client = reqwest::Client::new();
-            match config_fetch_doc(&client, &ctx, APP_REGISTRY_SERVICE).await? {
-                Some(bytes) => serde_json::from_slice::<AppRegistryDoc>(&bytes)
-                    .map_err(|e| format!("app-registry parse: {e}"))?,
-                None => AppRegistryDoc::default(),
+pub(crate) async fn ensure_app_registry(
+    state: &UiBridgeState,
+) -> Result<VersionedConfig<AppRegistryDoc>, String> {
+    if let Some(ctx) = real_config_ctx(state).await? {
+        let client = reqwest::Client::new();
+        return match config_fetch_doc(&client, &ctx, APP_REGISTRY_SERVICE).await? {
+            Some(bytes) => {
+                let document = serde_json::from_slice::<AppRegistryDoc>(&bytes)
+                    .map_err(|error| format!("app_registry parse: {error}"))?;
+                Ok(bytes.map(|_| document))
             }
-        }
-        None => AppRegistryDoc::default(),
-    };
-    *state.app_registry.write().await = Some(loaded.clone());
-    Ok(loaded)
+            None => Ok(VersionedConfig::default()),
+        };
+    }
+    Ok(VersionedConfig::new(
+        state.app_registry.read().await.clone().unwrap_or_default(),
+        String::new(),
+    ))
 }
 
 pub(crate) async fn persist_app_registry(
     state: &UiBridgeState,
-    next: AppRegistryDoc,
+    next: VersionedConfig<AppRegistryDoc>,
 ) -> Result<&'static str, String> {
     let storage = match real_config_ctx(state).await? {
         Some(ctx) => {
             let client = reqwest::Client::new();
             let bytes =
                 serde_json::to_vec(&next).map_err(|e| format!("app-registry serialize: {e}"))?;
-            config_store_doc(&client, &ctx, APP_REGISTRY_SERVICE, &bytes).await?;
+            config_store_doc(&client, &ctx, APP_REGISTRY_SERVICE, &bytes, &next.revision).await?;
             "ok"
         }
         None => "cached",
     };
-    *state.app_registry.write().await = Some(next);
+    *state.app_registry.write().await = Some(next.document);
     Ok(storage)
 }
 
 pub(crate) async fn ensure_resource_registry(
     state: &UiBridgeState,
-) -> Result<ResourceRegistryDoc, String> {
-    if let Some(r) = state.resource_registry.read().await.clone() {
-        return Ok(r);
-    }
-    let loaded = match real_config_ctx(state).await? {
-        Some(ctx) => {
-            let client = reqwest::Client::new();
-            match config_fetch_doc(&client, &ctx, RESOURCE_REGISTRY_SERVICE).await? {
-                Some(bytes) => {
-                    // Row by row: a row this build cannot read is kept opaque and
-                    // written back, never dropped and never a 502 for every
-                    // resource operation (a newer build may have minted it).
-                    let (doc, skipped) = ResourceRegistryDoc::from_slice_lenient(&bytes)
-                        .map_err(|e| format!("resource-registry parse: {e}"))?;
-                    if skipped > 0 {
-                        tracing::warn!(
-                            skipped,
-                            kept = doc.items.len(),
-                            "resource-registry: rows this build cannot read were kept opaque"
-                        );
-                    }
-                    doc
+) -> Result<VersionedConfig<ResourceRegistryDoc>, String> {
+    if let Some(ctx) = real_config_ctx(state).await? {
+        let client = reqwest::Client::new();
+        return match config_fetch_doc(&client, &ctx, RESOURCE_REGISTRY_SERVICE).await? {
+            Some(bytes) => {
+                let (document, skipped) = ResourceRegistryDoc::from_slice_lenient(&bytes)
+                    .map_err(|error| format!("resource registry parse: {error}"))?;
+                if skipped > 0 {
+                    tracing::warn!(skipped, "resource registry retained unreadable rows");
                 }
-                None => ResourceRegistryDoc::default(),
+                Ok(bytes.map(|_| document))
             }
-        }
-        None => ResourceRegistryDoc::default(),
-    };
-    *state.resource_registry.write().await = Some(loaded.clone());
-    Ok(loaded)
+            None => Ok(VersionedConfig::default()),
+        };
+    }
+    Ok(VersionedConfig::new(
+        state
+            .resource_registry
+            .read()
+            .await
+            .clone()
+            .unwrap_or_default(),
+        String::new(),
+    ))
 }
 
 pub(crate) async fn persist_resource_registry(
     state: &UiBridgeState,
-    next: ResourceRegistryDoc,
+    next: VersionedConfig<ResourceRegistryDoc>,
 ) -> Result<&'static str, String> {
     let storage = match real_config_ctx(state).await? {
         Some(ctx) => {
             let client = reqwest::Client::new();
             let bytes = serde_json::to_vec(&next)
                 .map_err(|e| format!("resource-registry serialize: {e}"))?;
-            config_store_doc(&client, &ctx, RESOURCE_REGISTRY_SERVICE, &bytes).await?;
+            config_store_doc(
+                &client,
+                &ctx,
+                RESOURCE_REGISTRY_SERVICE,
+                &bytes,
+                &next.revision,
+            )
+            .await?;
             "ok"
         }
         None => "cached",
     };
-    *state.resource_registry.write().await = Some(next);
+    *state.resource_registry.write().await = Some(next.document);
     Ok(storage)
 }
 
@@ -185,27 +188,7 @@ pub(crate) struct AppUninstallStash {
     pub resources_kept: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AppInstallBuildRequest {
-    pub template_id: String,
-    pub label: String,
-    #[serde(default)]
-    pub bindings: AppInstallBindings,
-    #[serde(default)]
-    pub memory_ns: Option<String>,
-    #[serde(default)]
-    pub memory_inherited: bool,
-    /// #663 — fold the not-yet-enrolled endpoint actors the bindings need (the
-    /// channel gateway for a messaging slot, this console for a display slot)
-    /// into the SAME batch, so the first install is still ONE Touch ID. Off
-    /// for headless CI installs (a throwaway runner must not register itself).
-    #[serde(default = "default_true")]
-    pub enroll_endpoints: bool,
-}
+pub use agentkeys_protocol::console_apps::AppInstallBuildRequest;
 
 /// The daemon's install/build response: the broker's build envelope (what the
 /// sheet renders + what the master signs) plus the compiled endpoint scopes.
@@ -1253,11 +1236,7 @@ pub(crate) async fn push_default_app_flags(state: &UiBridgeState, channel_id: &s
 
 // ── the uninstall ceremony ──────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct AppUninstallBuildRequest {
-    #[serde(default)]
-    pub resources_kept: bool,
-}
+pub use agentkeys_protocol::console_apps::AppUninstallBuildRequest;
 
 /// POST /v1/master/apps/:label/uninstall/build — the archive ceremony, build
 /// half, with the endpoint actors' grants minus this app's feeds.
@@ -1509,70 +1488,7 @@ pub(crate) async fn master_feed_events(
 /// NOT cards plus the head of the newest one. An app that publishes free-form
 /// JSON instead of the card contract (chef without its skills, 2026-09-19)
 /// used to leave the page on a stale card with no trace of the newer docs.
-#[derive(Debug, Default)]
-pub(crate) struct DisplayFeedView {
-    pub card: Option<(CardDocument, String)>,
-    pub commands: Vec<serde_json::Value>,
-    pub non_card_docs: u32,
-    pub last_doc_preview: Option<String>,
-    pub non_card_reason: Option<String>,
-}
-
-/// Fold a display feed's events (oldest first) into a [`DisplayFeedView`] —
-/// pure, so the card / non-card accounting is testable.
-pub(crate) fn fold_display_feed(events: &[serde_json::Value]) -> DisplayFeedView {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    let mut view = DisplayFeedView::default();
-    let mut commands = Vec::new();
-    for ev in events {
-        let kind = ev.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-        match kind {
-            "doc" => {
-                let bytes = ev
-                    .get("body")
-                    .and_then(|b| b.as_str())
-                    .and_then(|b64| STANDARD.decode(b64).ok())
-                    .unwrap_or_default();
-                match agentkeys_backend_client::protocol::parse_card(&bytes) {
-                    Ok(c) => {
-                        let id = ev
-                            .get("event_id")
-                            .and_then(|e| e.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        view.card = Some((c, id));
-                        view.non_card_docs = 0;
-                        view.last_doc_preview = None;
-                        view.non_card_reason = None;
-                    }
-                    Err(reason) => {
-                        view.non_card_docs += 1;
-                        view.non_card_reason = Some(reason);
-                        let text = String::from_utf8_lossy(&bytes);
-                        view.last_doc_preview = Some(text.chars().take(160).collect::<String>());
-                    }
-                }
-            }
-            "command" => {
-                let mut row = ev.clone();
-                if let Some(b64) = ev.get("body").and_then(|b| b.as_str()) {
-                    if let Ok(bytes) = STANDARD.decode(b64) {
-                        if let Ok(cmd) =
-                            agentkeys_backend_client::protocol::parse_card_command(&bytes)
-                        {
-                            row["command"] = serde_json::to_value(cmd).unwrap_or_default();
-                        }
-                    }
-                }
-                commands.push(row);
-            }
-            _ => {}
-        }
-    }
-    let keep = commands.len().saturating_sub(20);
-    view.commands = commands.split_off(keep);
-    view
-}
+pub(crate) use agentkeys_web_core::console_apps::{fold_display_feed, DisplayFeedView};
 
 /// The latest card on a display feed + the recent command events — read as a
 /// bounded TAIL of the feed (the worker decrypts only that much).
@@ -1713,68 +1629,11 @@ pub async fn app_dashboard(
 /// Re-derive the sheet annotations for an installed row from its services +
 /// bindings (the broker's build response carried them; the row stores the
 /// facts they derive from).
-fn annotations_for(row: &AppInstanceRow) -> Vec<ServiceAnnotation> {
-    row.services
-        .iter()
-        .map(|s| {
-            let lower = s.to_ascii_lowercase();
-            let (role, slot, resource, sensitivity) =
-                if lower.contains(&format!(":{}", row.chat_channel_id)) {
-                    ("opchat", None, None, None)
-                } else if let Some(b) = row
-                    .bound_channels
-                    .iter()
-                    .find(|b| lower.ends_with(&format!(":{}", b.channel_id)))
-                {
-                    ("slot", Some(b.slot.clone()), None, None)
-                } else if lower == format!("knowledge:{}", row.memory_ns) {
-                    ("own-knowledge", None, None, None)
-                } else if lower == format!("proposal:{}", row.memory_ns) {
-                    ("own-proposals", None, None, None)
-                } else if let Some(rb) = row
-                    .bindings
-                    .resources
-                    .iter()
-                    .find(|rb| lower == format!("knowledge:{}", rb.ns))
-                {
-                    (
-                        "resource",
-                        None,
-                        Some(rb.name.clone()),
-                        Some(rb.sensitivity),
-                    )
-                } else if lower.starts_with("tool:") {
-                    ("tool", None, None, None)
-                } else if lower.starts_with("plugin:") {
-                    ("plugin", None, None, None)
-                } else {
-                    ("other", None, None, None)
-                };
-            ServiceAnnotation {
-                service: s.clone(),
-                role: role.to_string(),
-                slot,
-                resource,
-                sensitivity,
-            }
-        })
-        .collect()
-}
+use agentkeys_web_core::console_apps::annotations_for;
 
 // ── the card-action command ─────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct AppCommandRequest {
-    /// The display feed (defaults to the app's first display slot).
-    #[serde(default)]
-    pub channel_id: Option<String>,
-    pub action: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: serde_json::Value,
-    #[serde(default)]
-    pub card_updated_at: u64,
-}
+pub use agentkeys_protocol::console_apps::AppCommandRequest;
 
 /// POST /v1/master/apps/:label/command — a card-action tap from the console:
 /// a `command` event on the app's display feed, published by the console's
@@ -1859,25 +1718,7 @@ pub async fn list_resources(State(state): State<SharedUiBridgeState>) -> axum::r
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ResourceAddRequest {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub name_zh: String,
-    pub kind: ResourceKind,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub sensitivity: Sensitivity,
-    pub ns: String,
-    /// The item's content (UTF-8 text / markdown / JSON).
-    pub body: String,
-    /// D-K5 — the `content_hash` of the row this edit started from; a
-    /// different current row is refused with 409 `stale_base` (a diff, never
-    /// a silent overwrite). Absent for a new item or a deliberate overwrite.
-    #[serde(default)]
-    pub base_content_hash: Option<String>,
-}
+pub use agentkeys_protocol::console_apps::ResourceAddRequest;
 
 /// Upload caps: 5 MiB of file bytes (a curated profile / document / dataset —
 /// the text an app reads is EXTRACTED from it), 8 MiB of JSON body (base64 ×4/3
@@ -1891,26 +1732,7 @@ pub(crate) const RESOURCE_UPLOAD_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 /// raw bytes are kept as the keyed object `files/<id>` in the same namespace
 /// (durable planes only). Re-uploading an id bumps its version and REPLACES the
 /// previous text.
-#[derive(Debug, Deserialize)]
-pub struct ResourceUploadRequest {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub name_zh: String,
-    pub kind: ResourceKind,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub sensitivity: Sensitivity,
-    pub ns: String,
-    pub filename: String,
-    #[serde(default)]
-    pub content_type: String,
-    /// The file bytes, standard base64.
-    pub content_b64: String,
-    /// D-K5 — see `ResourceAddRequest::base_content_hash`.
-    #[serde(default)]
-    pub base_content_hash: Option<String>,
-}
+pub use agentkeys_protocol::console_apps::ResourceUploadRequest;
 
 /// What an app can read out of an uploaded file: its TEXT. Plain text, markdown,
 /// CSV, TSV, JSON and YAML are the bytes as UTF-8; a PDF goes through
@@ -2234,14 +2056,7 @@ pub async fn upload_resource(
     .await
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ResourceRemoveRequest {
-    pub id: String,
-    /// Remove even while a live app is bound to the item (its `knowledge:<ns>`
-    /// grant stays; the entry it read is gone).
-    #[serde(default)]
-    pub force: bool,
-}
+pub use agentkeys_protocol::console_apps::ResourceRemoveRequest;
 
 /// POST /v1/master/resources/remove — unregister a curated item and drop its
 /// entry from `knowledge:<ns>`. Refused (409 `resource_in_use`) while a live app
@@ -2395,15 +2210,7 @@ mod tests {
 /// `POST /v1/master/resources/retype` body (D-K2, `plan/knowledge-repository.md`
 /// §5): the type is metadata, so a retype changes the registry row and nothing
 /// else — no new version, no re-plant. Tags and the tier are optional.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResourceRetypeRequest {
-    pub id: String,
-    pub kind: ResourceKind,
-    #[serde(default)]
-    pub tags: Option<Vec<String>>,
-    #[serde(default)]
-    pub sensitivity: Option<Sensitivity>,
-}
+pub use agentkeys_protocol::console_apps::ResourceRetypeRequest;
 
 pub async fn retype_resource(
     State(state): State<SharedUiBridgeState>,
@@ -2456,57 +2263,12 @@ pub(crate) async fn register_note_rows(
     entries: &[crate::ui_bridge::ApiMemoryEntry],
 ) -> Result<usize, String> {
     let mut reg = ensure_resource_registry(state).await?;
-    let mut added = 0usize;
-    let mut refreshed = 0usize;
-    for e in entries {
-        if e.kind != agentkeys_backend_client::protocol::ContextKind::Knowledge
-            || !agentkeys_backend_client::protocol::is_valid_resource_id(&e.key)
-        {
-            continue;
-        }
-        let hash = crate::ui_bridge::content_hash_for(&e.ns, &e.key, &e.body);
-        if let Some(row) = reg.items.iter_mut().find(|r| r.id == e.key) {
-            // D-K5 — identity = key: the plant REPLACED this row's entry; the
-            // row keeps its type and follows the content (next version).
-            if row.ns == e.ns && row.content_hash != hash {
-                row.content_hash = hash;
-                row.bytes = e.body.len() as u64;
-                row.updated_at = now_unix();
-                row.version += 1;
-                refreshed += 1;
-            }
-            continue;
-        }
-        let now = now_unix();
-        reg.upsert(ResourceItemRow {
-            id: e.key.clone(),
-            name: if e.title.trim().is_empty() {
-                e.key.clone()
-            } else {
-                e.title.clone()
-            },
-            name_zh: String::new(),
-            ns: e.ns.clone(),
-            object_key: e.key.clone(),
-            kind: ResourceKind::Note,
-            tags: Vec::new(),
-            sensitivity: Sensitivity::Safe,
-            version: 0,
-            content_hash: hash,
-            bytes: e.body.len() as u64,
-            created_at: now,
-            updated_at: now,
-            filename: String::new(),
-            content_type: String::new(),
-            raw_object_key: String::new(),
-            raw_bytes: 0,
-        });
-        added += 1;
-    }
-    if added + refreshed > 0 {
+    let changed =
+        agentkeys_web_core::document_helpers::register_note_entries(&mut reg, entries, now_unix());
+    if changed > 0 {
         persist_resource_registry(state, reg).await?;
     }
-    Ok(added + refreshed)
+    Ok(changed)
 }
 
 #[cfg(test)]
@@ -3565,18 +3327,7 @@ async fn apply_channel_rows(
 // No uninstall, no slot consumed, no re-create while the instance has the
 // live-rebind surface.
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct AppRebindBuildRequest {
-    /// `slot → channel_id` for the slots to change; unlisted slots keep their
-    /// binding, resources and the audience are untouched. EMPTY = a template
-    /// upgrade: the catalog's current version is applied to the installed
-    /// app — its grants and slot directions recompiled over the unchanged
-    /// bindings.
-    #[serde(default)]
-    pub slots: Vec<SlotBinding>,
-    #[serde(default = "default_true")]
-    pub enroll_endpoints: bool,
-}
+pub use agentkeys_protocol::console_apps::AppRebindBuildRequest;
 
 /// What the daemon keeps between rebind/build and rebind/submit (keyed by the
 /// app label), RAM only like the install stash.
@@ -4196,11 +3947,7 @@ pub async fn app_rebind_submit(
 /// anchor existed (no `anchor` on their row) get their context document
 /// sealed on chain in ONE batch (one Touch ID); the broker composes each
 /// document from its row. `labels` narrows the set.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AppAnchorsSealRequest {
-    #[serde(default)]
-    pub labels: Vec<String>,
-}
+pub use agentkeys_protocol::console_apps::AppAnchorsSealRequest;
 
 pub async fn app_anchors_seal_build(
     State(state): State<SharedUiBridgeState>,

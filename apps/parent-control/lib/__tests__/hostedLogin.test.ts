@@ -92,10 +92,10 @@ describe('hosted login session', () => {
     expect(await client.hostedSessionInfo()).toEqual(info);
   });
 
-  it('reports unsupported reads without claiming an empty account or contacting localhost', async () => {
+  it('requires authenticated browser keys before data reads', async () => {
     const client = new CoreBackend('https://browser-only.example.test');
-    expect(await client.listActors()).toMatchObject({ ok: false, status: { reason: 'unsupported' } });
-    expect(await client.listMemoryCategories()).toMatchObject({ ok: false, status: { reason: 'unsupported' } });
+    expect(await client.listActors()).toMatchObject({ ok: false, status: { reason: 'unauthorized' } });
+    expect(await client.listMemoryCategories()).toMatchObject({ ok: false, status: { reason: 'unauthorized' } });
   });
 
 });

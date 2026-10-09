@@ -521,25 +521,49 @@ impl WeixinGatewayState {
             .unwrap_or_else(|| self.config.operator_omni.clone())
     }
 
-    /// Record the connecting master's omni (#502). The session value WINS —
-    /// a differing armed value is exactly the stale-stamp hazard class (#464:
-    /// an env omni baked from a retired namespace) — but never silently:
-    /// the override is WARN-logged naming both values.
-    pub fn set_runtime_operator_omni(&self, omni: &str) {
-        let prior = self.effective_operator_omni();
-        if crate::relay::decode_omni_32(&prior).is_some() && prior != omni {
-            warn!(
-                prior = %prior,
-                session = %omni,
-                "operator omni OVERRIDDEN at connect — the authenticated session's omni \
-                 replaces the previously armed value (stale env stamp?); audit rows now \
-                 key on the session omni"
-            );
+    pub fn validate_connect_operator(&self, omni: &str) -> Result<(), &'static str> {
+        let runtime_owner = self
+            .runtime_operator_omni
+            .read()
+            .expect("operator omni lock");
+        self.check_connect_operator(runtime_owner.as_deref(), omni)
+    }
+
+    fn check_connect_operator(
+        &self,
+        runtime_owner: Option<&str>,
+        omni: &str,
+    ) -> Result<(), &'static str> {
+        let owner = crate::relay::decode_omni_32(omni).ok_or("invalid_operator_omni")?;
+        let established = self.device.enrolled()
+            || !self.bots.read().expect("bots lock").is_empty()
+            || !self.registry.snapshot().bound.is_empty();
+        let prior =
+            runtime_owner.or_else(|| established.then_some(self.config.operator_omni.as_str()));
+        if prior
+            .and_then(crate::relay::decode_omni_32)
+            .is_some_and(|prior| prior != owner)
+        {
+            return Err("gateway_operator_mismatch");
         }
-        *self
+        Ok(())
+    }
+
+    /// A first native connect repairs the legacy stamp; established ownership cannot change.
+    pub fn set_runtime_operator_omni(&self, omni: &str) -> Result<(), &'static str> {
+        let mut runtime_owner = self
             .runtime_operator_omni
             .write()
-            .expect("operator omni lock") = Some(omni.to_string());
+            .expect("operator omni lock");
+        self.check_connect_operator(runtime_owner.as_deref(), omni)?;
+        if runtime_owner.is_none()
+            && crate::relay::decode_omni_32(&self.config.operator_omni)
+                != crate::relay::decode_omni_32(omni)
+        {
+            tracing::warn!("first native connect replaced the unarmed legacy operator stamp");
+        }
+        *runtime_owner = Some(omni.to_string());
+        Ok(())
     }
 
     /// Read up to `limit` durable turns, newest first, strictly older than

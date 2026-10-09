@@ -6,18 +6,19 @@ import { App } from '../../app/_components/App';
 import { CoreBackend } from '../client/core';
 import { resetActiveStackForTests } from '../identityStore';
 
-const mocks = vi.hoisted(() => ({ emailRequest: vi.fn(), finishEmailLogin: vi.fn(), sessionInfo: vi.fn() }));
+const mocks = vi.hoisted(() => ({ emailRequest: vi.fn(), finishEmailLogin: vi.fn(), sessionInfo: vi.fn(), createIdentity: vi.fn(), signerStatus: vi.fn(), request: vi.fn() }));
+vi.mock('../hostedIdentity', () => ({ listHostedIdentities: () => [], loadHostedIdentity: () => null, createHostedIdentity: mocks.createIdentity, signHostedEnrollment: vi.fn() }));
 vi.mock('../client/wasm-module', () => ({ loadWasmModule: async () => ({ WebCore: class {
   emailRequest = mocks.emailRequest;
   finishEmailLogin = mocks.finishEmailLogin;
   sessionInfo = mocks.sessionInfo;
-} }) }));
+}, HostedSignerClient: class { status = mocks.signerStatus; free() {} }, ConsoleClient: class { request = mocks.request; free() {} }, consoleConfiguration: async () => ({ chain: { name: 'test', display: 'Test', chainId: 1, rpc: '', wss: '', explorer: '', tokenSymbol: 'T', tokenDecimals: 18, finality: 'latest', contracts: [], daemonChain: 'test', daemonBroker: 'https://broker.example.test' } }) }) }));
 let client: CoreBackend;
 vi.mock('../ClientProvider', () => ({
   useClient: () => client,
   useConnectionStatus: () => ({ kind: 'connected', via: 'broker', endpoint: 'https://broker.example.test' }),
 }));
-const session = { session_jwt: 'test-session', omni_account: 'existing-omni', wallet_address: 'existing-wallet', expires_at: Math.floor(Date.now() / 1000) + 600 };
+const session = { session_jwt: 'test-session', omni_account: '11'.repeat(32), wallet_address: 'existing-wallet', expires_at: Math.floor(Date.now() / 1000) + 600 };
 const { session_jwt: _token, ...info } = session;
 let container: HTMLDivElement;
 let root: Root;
@@ -59,6 +60,20 @@ describe('hosted parent-control flow', () => {
     mocks.emailRequest.mockResolvedValue({ request_id: 'approved-request', expires_in_seconds: 300 });
     mocks.finishEmailLogin.mockResolvedValue(null);
     mocks.sessionInfo.mockResolvedValue(info);
+    mocks.createIdentity.mockResolvedValue({ brokerUrl: 'https://broker.example.test', omni: session.omni_account, credentialId: 'public-credential', deviceKeyHash: `0x${'22'.repeat(32)}`, secretHex: 'ram-only-master-secret', consoleSecretHex: 'ram-only-console-secret' });
+    mocks.signerStatus.mockResolvedValue({ active: true, device_active: true, account: session.wallet_address });
+    mocks.request.mockImplementation(async (_bearer, _omni, _master, _console, _now, _method, path) => {
+      if (path === '/v1/master/memory') return { categories: [{ ns: 'existing', label: 'Existing' }] };
+      if (path === '/v1/actors') return { actors: [] };
+      if (path.startsWith('/v1/audit/recent')) return { events: [] };
+      if (path === '/v1/channels') return { channels: [], storage: 'ok' };
+      if (path === '/v1/master/inbox') return { items: [] };
+      if (path === '/v1/master/credentials') return { credentials: [] };
+      if (path === '/v1/agent/pairing/pending') return { requests: [] };
+      if (path === '/v1/master/hosted-signer/pending') return { requests: [] };
+      if (path === '/v1/master/config/presets') return { default_id: '', presets: [] };
+      throw new Error(`Unexpected console request ${path}`);
+    });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -76,6 +91,10 @@ describe('hosted parent-control flow', () => {
     expect(container.querySelector('nav[aria-label="sections"]')).toBeNull();
     mocks.finishEmailLogin.mockResolvedValue(session);
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(container.querySelector('nav[aria-label="sections"]')).toBeNull();
+    expect(container.textContent).toContain('Enable this browser');
+    await click('Set up browser access');
+    expect(mocks.createIdentity).toHaveBeenCalledWith('https://broker.example.test', session.omni_account);
     expect(container.querySelector('nav[aria-label="sections"]')).not.toBeNull();
     expect(container.textContent).toContain('parent control');
     expect(container.textContent).not.toContain('You are signed in.');
@@ -87,6 +106,17 @@ describe('hosted parent-control flow', () => {
     expect(container.querySelector('nav')).toBeNull();
     expect(await client.hostedSessionInfo()).toBeNull();
     expect(JSON.stringify(localStorage)).not.toContain('test-session');
+    expect(JSON.stringify(localStorage)).not.toContain('ram-only');
+  });
+  it('stays at authentication when Touch ID is cancelled', async () => {
+    mocks.finishEmailLogin.mockResolvedValue(session);
+    mocks.createIdentity.mockRejectedValue(new Error('Touch ID was cancelled.'));
+    await mount();
+    await startLogin();
+    await click('Set up browser access');
+    expect(container.textContent).toContain('Touch ID was cancelled');
+    expect(container.querySelector('nav')).toBeNull();
+    expect(mocks.request).not.toHaveBeenCalled();
   });
   it('never uses a stale onboarding flag as a hosted session', async () => {
     localStorage.setItem('ak_onboarded', '1');
@@ -116,6 +146,7 @@ describe('hosted parent-control flow', () => {
     mocks.finishEmailLogin.mockResolvedValue(session);
     await mount();
     await startLogin();
+    await click('Set up browser access');
     expect(container.querySelector('nav')).not.toBeNull();
     mocks.sessionInfo.mockRejectedValue(new Error('403 removed'));
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });

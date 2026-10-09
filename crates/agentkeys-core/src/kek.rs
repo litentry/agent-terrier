@@ -22,16 +22,13 @@
 //! - config (v3 envelopes): the lowercase `0x`-prefixed ACTOR omni — the
 //!   same identity the S3 key + AAD bind.
 
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::signer_client::{SignerClient, SignerClientError};
 
-/// Domain tag prefixed to the signed message.
-pub const KEK_DOMAIN_TAG: &str = "agentkeys.kek.v1";
-/// Domain tag prefixed to the signature before hashing into the KEK.
-pub const KEK_DERIVE_TAG: &[u8] = b"agentkeys.kek-derive.v1";
-
+pub use agentkeys_web_core::crypto::{KEK_DERIVE_TAG, KEK_DOMAIN_TAG};
 #[derive(Debug, Error)]
 pub enum KekDeriveError {
     #[error("signer: {0}")]
@@ -53,24 +50,15 @@ pub async fn derive_kek_via_signer(
     identity: &str,
     service: &str,
 ) -> Result<[u8; 32], KekDeriveError> {
-    let msg = format!("{KEK_DOMAIN_TAG}:{identity}:{service}");
-    let signed = signer.sign_eip191(omni_account, msg.as_bytes()).await?;
-
-    // signed.signature is "0x" + 130 hex chars (65 bytes: r || s || v).
-    let sig_hex = signed.signature.trim_start_matches("0x");
-    let sig_bytes =
-        hex::decode(sig_hex).map_err(|e| KekDeriveError::InvalidSignatureHex(e.to_string()))?;
-    if sig_bytes.len() != 65 {
-        return Err(KekDeriveError::BadSignatureLength(sig_bytes.len()));
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(KEK_DERIVE_TAG);
-    hasher.update(&sig_bytes);
-    let out = hasher.finalize();
-    let mut kek = [0u8; 32];
-    kek.copy_from_slice(&out);
-    Ok(kek)
+    use agentkeys_web_core::crypto::{kek_from_signature, kek_message, KekMaterialError};
+    let message = kek_message(identity, service);
+    let signed = signer.sign_eip191(omni_account, &message).await?;
+    kek_from_signature(&signed.signature).map_err(|error| match error {
+        KekMaterialError::InvalidSignatureHex(message) => {
+            KekDeriveError::InvalidSignatureHex(message)
+        }
+        KekMaterialError::BadSignatureLength(length) => KekDeriveError::BadSignatureLength(length),
+    })
 }
 
 #[cfg(test)]

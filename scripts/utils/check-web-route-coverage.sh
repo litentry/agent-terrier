@@ -61,11 +61,9 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/actors/:id/revoke	master-gated revoke (gas) — covered at CLI level by heima-device-revoke.sh; web submit needs signed UserOp e2e
 /v1/actors/:id/caps/revoke	cap revoke — broker cap.rs unit-tests the revoked-deny; web path needs a live cap fixture (former MCP-tool coverage retired, #560)
 /v1/audit/stream	SSE — curl smoke would hang a step; needs a timeout-bounded SSE reader helper
-/v1/master/inbox	#297/#339 inbox — needs a planted inbox fixture (agent append) in the test env
 /v1/master/inbox/entry	same inbox fixture dependency
 /v1/master/inbox/accept	inbox mutation — same fixture dependency
 /v1/master/inbox/reject	inbox mutation — same fixture dependency
-/v1/master/config/presets	#201/#207 config — test env has config worker only when provisioned; suite-3 steps 19-21 cover worker-level
 /v1/master/config/init	config write — same provisioning dependency
 /v1/master/classify/tag	#207 classify worker — suite-3 step 22 covers the worker gate; daemon proxy needs the worker deployed in test env
 /v1/master/classify/propose	same classify worker dependency
@@ -75,9 +73,7 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/accept/submit	needs a browser/software-signed UserOp for a FRESH omni (gas) — pair with the accept/build fixture
 /v1/scope/submit	needs a signed UserOp (gas); build half covered (suite-6 step 7); headless submit = sign userOpHash with the software passkey — planned
 /v1/revoke/build	revoke build proxy — needs a revocable throwaway device fixture
-/v1/revoke/submit	same throwaway-device fixture + signed UserOp
 /v1/agent/spawn/build	#427 spawn build proxy — allowance pre-check + broker K10 gen; needs the 0.5 registry live in the test env; ceremony proven headlessly by `agentkeys agent spawn` (CLI twin) + suite-1 step-12 allowance positive/negative
-/v1/agent/spawn/submit	same 0.5-registry dependency + signed UserOp (gas) — the broker relay/finalize path is unit-tested; retire with a suite-6 headless-spawn step post-redeploy
 /v1/agent/archive/build	#427 archive build proxy — needs a spawned throwaway delegate fixture (pair with the spawn waiver)
 /v1/master/agent/preset/reapply	2026-09-17 preset re-apply (persona + skills into the LIVE sandbox) — needs a spawned delegate with a reachable bridge (pair with the spawn waiver); the readiness gate + non-JSON decode are unit-tested. Retire when a suite-6 step drives a live delegate's context apply.
 /v1/agent/archive/submit	same throwaway-delegate fixture + signed UserOp; manifest archive-mark covered by the daemon unit layer
@@ -102,7 +98,6 @@ read -r -d '' WAIVERS <<'EOF' || true
 /v1/master/gateway/monitor	same gateway-admin forward — live message monitor; behavior proven by the crate's gateway_flow tests; live daemon-side coverage needs a deployed gateway + admin token (same as gateway/status)
 /v1/master/gateway/history	same gateway-admin forward — durable message history; append/read proven by gateway_flow::durable_history; same deployed-gateway limitation
 /v1/master/gateway/activity	same gateway-admin forward — durable contact-audit trail; append/read proven by gateway_flow::durable_activity; same deployed-gateway limitation
-/v1/master/apps/install/submit	#664 the install ceremony's SUBMIT half (ONE Touch ID → registerDelegate + setScope batch) — phase 8 runs it only with a software passkey (`--allow-skip=app-install-needs-passkey` in CI); the build half + registries are live gates in suite-8 steps 4-6
 /v1/master/apps/:label/uninstall/build	#664 uninstall build — needs an INSTALLED app (the ceremony above); phase 8 runs the whole install→inspect→uninstall cycle under the same passkey gate
 /v1/master/apps/:label/uninstall/submit	#664 uninstall submit — same passkey gate as the install submit
 /v1/master/apps/:label/command	#670 a card-action tap publishes a `command` event from the console's device actor — needs an installed app with a display slot + a granted console actor; the card contract is pinned by the protocol + CardView golden tests, the publish path by the channel demo; retire with the passkey-gated phase-8 cycle running in CI

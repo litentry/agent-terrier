@@ -29,6 +29,10 @@ pub fn build_router(state: SharedWeixinGatewayState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route(
+            agentkeys_protocol::hosted_gateway::GATEWAY_CONSOLE_ROUTE,
+            post(crate::hosted_gateway::console),
+        )
+        .route(
             "/wechat/callback",
             get(callback_verify).post(callback_relay),
         )

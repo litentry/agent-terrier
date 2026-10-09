@@ -48,12 +48,7 @@ pub async fn jwks(State(state): State<SharedState>) -> impl IntoResponse {
     Json(state.oidc.jwks_json())
 }
 
-#[derive(serde::Serialize)]
-pub struct MintOidcJwtResponse {
-    pub jwt: String,
-    pub wallet: String,
-    pub expiration: i64,
-}
+pub use agentkeys_protocol::auth::OidcJwtResponse as MintOidcJwtResponse;
 
 /// `POST /v1/mint-oidc-jwt` — session-JWT in, short-lived ES256 OIDC JWT out,
 /// suitable for `sts:AssumeRoleWithWebIdentity`.

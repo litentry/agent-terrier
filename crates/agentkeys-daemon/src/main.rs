@@ -19,6 +19,7 @@ mod companion;
 mod console_device;
 mod gateway_device;
 mod hardening;
+mod hosted_signer;
 mod knowledge_history;
 mod lifecycle;
 mod master_session;

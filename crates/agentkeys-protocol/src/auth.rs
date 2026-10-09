@@ -93,3 +93,10 @@ pub struct WalletLink {
     pub identity_type: String,
     pub identity_value: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcJwtResponse {
+    pub jwt: String,
+    pub wallet: String,
+    pub expiration: i64,
+}

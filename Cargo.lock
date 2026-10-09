@@ -252,8 +252,10 @@ dependencies = [
  "agentkeys-core",
  "agentkeys-memory-openviking",
  "agentkeys-mock-server",
+ "agentkeys-protocol",
  "agentkeys-provisioner",
  "agentkeys-types",
+ "agentkeys-web-core",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -422,6 +424,7 @@ name = "agentkeys-provisioner"
 version = "0.1.0"
 dependencies = [
  "agentkeys-core",
+ "agentkeys-protocol",
  "agentkeys-types",
  "anyhow",
  "async-trait",
@@ -478,17 +481,27 @@ dependencies = [
 name = "agentkeys-web-core"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "agentkeys-catalog",
  "agentkeys-device-core",
  "agentkeys-protocol",
  "axum",
  "base64 0.22.1",
+ "chrono",
+ "ciborium",
+ "futures-util",
+ "getrandom 0.2.17",
  "hex",
+ "pdf-extract",
  "reqwest",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "sha2 0.10.9",
+ "sha3",
  "thiserror 2.0.18",
  "tokio",
+ "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]
@@ -498,6 +511,7 @@ name = "agentkeys-worker-audit"
 version = "0.1.0"
 dependencies = [
  "agentkeys-core",
+ "agentkeys-protocol",
  "anyhow",
  "axum",
  "ciborium",
@@ -511,6 +525,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower 0.4.13",
+ "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
 ]
@@ -574,6 +589,7 @@ name = "agentkeys-worker-classify"
 version = "0.1.0"
 dependencies = [
  "agentkeys-catalog",
+ "agentkeys-protocol",
  "agentkeys-worker-creds",
  "anyhow",
  "axum",
@@ -636,6 +652,8 @@ dependencies = [
  "sha3",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.5.3",
+ "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
 ]
