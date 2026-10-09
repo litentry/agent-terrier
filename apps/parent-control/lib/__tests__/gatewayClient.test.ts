@@ -19,9 +19,19 @@ function mockFetch(status: number, body: unknown, capture?: (url: string, init?:
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe('gatewayClient', () => {
+  it('never contacts a local daemon from the hosted console', async () => {
+    vi.stubEnv('NEXT_PUBLIC_AGENTKEYS_BACKEND', 'core');
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    expect(await gatewayClient.status()).toMatchObject({ ok: false, reason: 'hosted_gateway_unavailable' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('GET status hits the daemon proxy path and unwraps the typed body', async () => {
     let seenUrl = '';
     let seenMethod = '';

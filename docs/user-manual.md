@@ -838,9 +838,22 @@ Unlisted addresses are rejected before an email is sent. Removing an address
 and applying the deployment configuration blocks further broker access,
 including previously issued sessions.
 
-The hosted console currently confirms your signed-in identity and supports
-logout. Agent management and hosted-domain passkey sign-in are not implemented
-in this slice. Your localhost passkey is not automatically usable on the hosted
-domain. Sessions remain in tab memory, never browser persistent storage;
-reloading or closing the tab requires signing in again. Backend errors remain
-visible and never fall back to demo verification.
+The hosted console uses the original parent-control email screen. After the
+broker verifies the link and session, the same tab opens the parent-control
+interface automatically. There is no separate signed-in confirmation page and
+no new account, passkey enrollment, master reset, or chain registration during
+this login. The allowlist only restricts admission; the local app's enrollment
+and existing-passkey sign-in flows are unchanged.
+
+**The hosted backend is still incomplete.** Opening the interface does not mean
+its data operations are available: actors, knowledge, credentials, channels,
+applications, transport, contacts, and hosted-domain passkey operations still
+need the remaining #751 work. The interface identifies that limitation; unavailable
+counts are shown as a dash, not as proof of an empty account. Transport and
+contact pages never try a daemon on the visiting machine. Do not reset your
+master or register again to fix unavailable hosted data.
+
+Sessions remain in tab memory, never browser persistent storage; reloading or
+closing the tab requires signing in again. Logout clears the session and view
+state. Expired or revoked sessions return to login on the periodic session
+check. Backend errors remain visible and never fall back to demo verification.

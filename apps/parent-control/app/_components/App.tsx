@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   clearMasterIdentity,
   ensureActiveStack,
@@ -39,8 +39,7 @@ import { getAssertionOverHash } from '@/lib/webauthn';
 import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
-import { CoreBackend } from '@/lib/client/core';
-import { HostedConsoleLogin } from './HostedConsoleLogin';
+import { CoreBackend, HOSTED_FEATURES_UNAVAILABLE } from '@/lib/client/core';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import type { ChainInfo, ChainListEntry, ChannelDef, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
 import type { Actor, AuditEvent, PairingRequest, PreservedMemory } from './types';
@@ -71,12 +70,16 @@ function toPreserved(e: MasterMemoryEntry): PreservedMemory {
   return { ns: e.ns, key: e.key, title: e.title, bytes: e.bytes, version: e.version, updated: e.updated, preview: e.preview, body: e.body, kind: e.kind };
 }
 
+const HOSTED_SESSION_CHECK_INTERVAL_MS = 60_000;
+
 export function App() {
   const client = useClient();
-  return client instanceof CoreBackend ? <HostedConsoleLogin client={client} /> : <InteractiveApp />;
+  const [sessionGeneration, setSessionGeneration] = useState(0);
+  const endSession = useCallback(() => setSessionGeneration(generation => generation + 1), []);
+  return <InteractiveApp key={sessionGeneration} hosted={client instanceof CoreBackend} onSessionEnd={endSession} />;
 }
 
-function InteractiveApp() {
+function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEnd: () => void }) {
   const client = useClient();
   const status = useConnectionStatus();
   const [actors, setActors] = useState<Actor[]>([]);
@@ -183,14 +186,13 @@ function InteractiveApp() {
           ? { chain: c.data.daemonChain, brokerUrl: c.data.daemonBroker ?? null }
           : { chain: null, brokerUrl: null };
       });
-      // Real "logged in" = the daemon holds a verified session (W1). Fall back to
-      // the local flag only for the offline/demo path (no daemon to ask).
+      // Hosted sessions must be live; a saved UI flag never grants admission.
       const r = await client.getOnboardingState();
       let on = false;
       if (r.ok && r.data.identity === 'verified') {
         on = true;
         if (!cancelled) setIdentity({ email: r.data.email, omni: r.data.omni });
-      } else {
+      } else if (!hosted) {
         on = getOnboardedFlag();
       }
       if (!cancelled) setOnboarded(on);
@@ -199,6 +201,21 @@ function InteractiveApp() {
   }, [client]);
 
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
+
+  useEffect(() => {
+    if (!hosted || !onboarded) return;
+    let cancelled = false;
+    let checking = false;
+    const validate = async () => {
+      if (checking) return;
+      checking = true;
+      const result = await client.getOnboardingState();
+      checking = false;
+      if (!cancelled && (!result.ok || result.data.identity !== 'verified')) onSessionEnd();
+    };
+    const timer = setInterval(validate, HOSTED_SESSION_CHECK_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [client, hosted, onboarded, onSessionEnd]);
 
   // §2: list the master's memory CATEGORIES once onboarded (from the durable
   // taxonomy, no decrypt) + load the bundled config-init presets (#207 item 1A)
@@ -224,7 +241,7 @@ function InteractiveApp() {
         // #242: the J1 lapsed (coords still persisted) — surface the Touch ID
         // re-auth banner, NOT a dead-end toast. ONE passkey prompt restores it.
         setSessionExpired(true);
-      } else if (cats.status.reason !== 'no-backend-configured') {
+      } else if (cats.status.reason !== 'no-backend-configured' && cats.status.reason !== 'unsupported') {
         // #201 codex finding 2: a configured-but-broken Config 502s here instead
         // of reporting an empty store — surface it rather than show a bare list.
         showToast(`Knowledge categories unavailable — ${cats.status.detail ?? 'config worker error'}.`);
@@ -691,7 +708,8 @@ function InteractiveApp() {
   // Log out: clear the local session flag and reset all in-memory view state so
   // the next login starts clean. Returns to the §9 onboarding (email) screen.
   const logout = () => {
-    void client.logout(); // W1: clear the daemon-held session (the real re-test reset)
+    void client.logout();
+    if (hosted) { onSessionEnd(); return; }
     setOnboardedFlag(false);
     setOnboarded(false);
     setIdentity(null);
@@ -1365,8 +1383,14 @@ function InteractiveApp() {
   if (!onboarded) {
     return (
       <OnboardingScreen
-        onComplete={(summary) => {
-          setOnboardedFlag(true);
+        onComplete={async (summary) => {
+          if (hosted) {
+            const result = await client.getOnboardingState();
+            if (!result.ok || result.data.identity !== 'verified') { onSessionEnd(); return; }
+            setIdentity({ email: result.data.email, omni: result.data.omni });
+          } else {
+            setOnboardedFlag(true);
+          }
           setOnboarded(true);
           go('actors');
           // Jump straight into the app; a STICKY toast (no auto-dismiss) carries
@@ -1387,7 +1411,7 @@ function InteractiveApp() {
   // Privacy-preserving identity for the header: a public omni hash is truncated
   // (full value in the title/hover), and we prefer the on-chain actor omni
   // (`master.omni`) once it exists, falling back to the email-identity omni held
-  // after login. No secret (J1/K10/K11) is ever in the browser to show.
+  // after login. Never render the hosted session bearer or device keys.
   const shortOmni = (o?: string) => {
     if (!o) return '';
     const h = o.startsWith('0x') ? o.slice(2) : o;
@@ -1408,7 +1432,7 @@ function InteractiveApp() {
           <HeaderSearch entries={searchIndex} onPick={pickSearch} />
         </div>
         <div className="head-right">
-          <span className="head-status" style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{(daemonChain ?? CHAIN_PROFILE.name)} · {status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
+          <span className="head-status" style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{hosted ? 'console' : (daemonChain ?? CHAIN_PROFILE.name)} · {hosted ? (status.kind === 'connected' ? 'browser · broker connected' : 'broker unavailable') : status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
           <button
             className={`bell ${pairingRequests.length ? 'has-req' : ''}`}
             // Route to where the pending claims actually are: delegate claims →
@@ -1444,7 +1468,7 @@ function InteractiveApp() {
                 reset master · re-onboard passkey
               </button>
               <div className="menu-info">
-                K6 · session JWT<br />{status.kind === 'connected' ? `daemon · ${status.via}` : 'daemon · offline'}<br />K11 · master device
+                K6 · session JWT<br />{hosted ? 'browser · session in this tab' : status.kind === 'connected' ? `daemon · ${status.via}` : 'daemon · offline'}<br />K11 · master device
               </div>
             </div>
           </details>
@@ -1458,13 +1482,13 @@ function InteractiveApp() {
           the Actors page itself. */}
       <nav className="app-nav" aria-label="sections">
         <button className={`app-nav-item ${page === 'actors' ? 'active' : ''}`} onClick={() => go('actors')}>
-          actors<span className="count">{actors.length}</span>
+          actors<span className="count">{hosted ? '—' : actors.length}</span>
         </button>
         <button className={`app-nav-item ${page === 'knowledge' ? 'active' : ''}`} onClick={() => go('knowledge')}>
-          knowledge<span className="count">{categories.length || '∅'}</span>
+          knowledge<span className="count">{hosted ? '—' : categories.length || '∅'}</span>
         </button>
         <button className={`app-nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
-          credentials<span className="count">{credentials.length || '∅'}</span>
+          credentials<span className="count">{hosted ? '—' : credentials.length || '∅'}</span>
         </button>
         <span className="app-nav-sep" aria-hidden="true" />
         <button className={`app-nav-item ${page === 'delegates' ? 'active' : ''}`} onClick={() => go('delegates')}>
@@ -1476,7 +1500,7 @@ function InteractiveApp() {
           {pairingRequests.filter((r) => r.isDevice).length > 0 && <span className="count attention">{pairingRequests.filter((r) => r.isDevice).length}</span>}
         </button>
         <button className={`app-nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
-          channels<span className="count">{channels.length || '∅'}</span>
+          channels<span className="count">{hosted ? '—' : channels.length || '∅'}</span>
         </button>
         <button className={`app-nav-item ${page === 'transport' ? 'active' : ''}`} onClick={() => go('transport')}>
           transport
@@ -1489,7 +1513,7 @@ function InteractiveApp() {
         </button>
         <span className="app-nav-sep" aria-hidden="true" />
         <button className={`app-nav-item ${page === 'audit' || page === 'decode' ? 'active' : ''}`} onClick={() => go('audit')}>
-          audit feed<span className="count">{events.length}</span>
+          audit feed<span className="count">{hosted ? '—' : events.length}</span>
         </button>
         <button className={`app-nav-item ${page === 'chain' ? 'active' : ''}`} onClick={() => go('chain')}>
           chain
@@ -1512,6 +1536,7 @@ function InteractiveApp() {
       </nav>
 
       <main className="app-main" data-section={sectionAttr}>
+        {hosted && <div className="banner" role="status">Your session is active. {HOSTED_FEATURES_UNAVAILABLE}</div>}
         {/* #242 — the master J1 lapsed but the coords are still held: ONE Touch ID
             restores it (no re-onboarding). Only SESSION-GATED, encrypted reads
             (memory / credentials / inbox — cap-mint → STS → worker → decrypt) are

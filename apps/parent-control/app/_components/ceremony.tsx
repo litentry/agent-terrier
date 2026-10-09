@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
+import { CoreBackend } from '@/lib/client/core';
 import type { AgentKeysClient, ConfigPreset, ReloginInfo } from '@/lib/client/types';
 import { credentialToFinishPayload, getAssertionOverHash, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
 import type { AcceptAssertion } from '@/lib/webauthn';
@@ -510,6 +511,7 @@ export function OnboardingScreen({
   onComplete: (summary?: { categories?: number; already?: boolean; dev?: boolean }) => void;
 }) {
   const client = useClient();
+  const hosted = client instanceof CoreBackend;
   // email → verify → ceremony (passkey) → setup (#207 1A: author the taxonomy)
   // → onComplete. `setup` is the last onboarding step before connecting agents.
   const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony' | 'setup'>('email');
@@ -764,6 +766,11 @@ export function OnboardingScreen({
     // VE stack shipped. Ask the daemon directly instead of inferring from the
     // failed call: postJson reports an HTTP error and a dead socket with the
     // same `unreachable` reason, so r.status cannot tell them apart.
+    if (hosted) {
+      setBusy(false);
+      setNote(r.status.detail ?? 'Sign-in failed. Please try again.');
+      return;
+    }
     const conn = await client.status();
     setBusy(false);
     if (conn.kind === 'connected') {
@@ -781,12 +788,20 @@ export function OnboardingScreen({
   useEffect(() => {
     if (phase !== 'verify' || !requestId) return;
     let cancelled = false;
+    let polling = false;
+    let settled = false;
     const tick = async () => {
+      if (polling || settled) return;
+      polling = true;
       const r = await client.pollEmailVerify(requestId);
-      if (cancelled || !r.ok) return;
+      polling = false;
+      if (cancelled) return;
+      if (!r.ok) { setNote(r.status.detail ?? 'Unable to check sign-in. Please try again.'); settled = hosted; return; }
       if (r.data.status === 'verified') {
+        settled = true;
         setOmni(r.data.omniAccount ?? '');
-        setPhase('ceremony');
+        if (hosted) onComplete();
+        else setPhase('ceremony');
       } else if (r.data.status.startsWith('failed')) {
         setNote(`Email verification ${r.data.status} — start over with a fresh link.`);
       }
@@ -907,7 +922,7 @@ export function OnboardingScreen({
         {phase === 'email' && (
           <div className="onboard-login">
             <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>
-              {relogin ? 'Welcome back.' : 'Set up your master identity.'}
+              {hosted || relogin ? 'Welcome back.' : 'Set up your master identity.'}
             </h1>
             {relogin && (
               <>
@@ -932,6 +947,7 @@ export function OnboardingScreen({
               Enter the email you&apos;ll use as your account. We send a one-time magic link there to verify it&apos;s
               yours — your master identity is anchored to it. No password, no seed phrase.
             </p>
+            {hosted && <p style={{ fontSize: 12.5 }}>Access is limited to approved email addresses. Sign in to continue to parent control with your existing identity.</p>}
             <label
               htmlFor="ak-email"
               style={{ display: 'block', fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}
@@ -964,14 +980,14 @@ export function OnboardingScreen({
             <button
               className="btn primary"
               style={{ width: '100%', justifyContent: 'center', padding: '12px' }}
-              disabled={!emailValid}
+              disabled={!emailValid || busy}
               onClick={submitEmail}
             >
               Continue →
             </button>
             {note && <div style={{ fontSize: 11.5, color: '#b00', marginTop: 12 }}>{note}</div>}
             <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginTop: 14, textAlign: 'center' }}>
-              first login creates O_master · HDKD root at /
+              {hosted ? 'Signing in does not create another account.' : 'first login creates O_master · HDKD root at /'}
             </div>
           </div>
         )}
@@ -990,7 +1006,7 @@ export function OnboardingScreen({
             <button
               className="btn"
               style={{ marginTop: 18, padding: '8px 14px' }}
-              onClick={() => { setPhase('email'); setRequestId(''); setNote(''); }}
+              onClick={() => { if (hosted) void client.logout(); setPhase('email'); setRequestId(''); setNote(''); }}
             >
               ← use a different email
             </button>

@@ -94,9 +94,27 @@ npm run build            # → out/ (the wasm core must sit in lib/wasm + public
 `AGENTKEYS_STATIC_EXPORT=1` flips `output: 'export'`; Next drops the dev-only
 `/api/dev/*` route handlers from an export, and the deploy step prunes `out/dev`
 (developer previews). `NEXT_PUBLIC_ICP_BEIAN` renders the 备案号 footer the mainland
-host is required to carry. Step 1 of #751 displays a non-interactive hosting
-preview: browser sign-in and account management are unavailable, and the local
-demo onboarding is never mounted. The `CoreBackend` session and read paths land in the epic's later steps.
+host is required to carry. Hosted email sign-in uses the same onboarding screen
+and parent-control interface as the local app. `CoreBackend` implements the shared
+email, session-state, and logout methods through the allowlisted broker + WASM
+flow. A verified hosted session opens the app directly without registration or
+passkey creation; a rejected request never enters the offline demo ceremony.
+
+The hosted read/write backend remains incomplete under #751. Restored navigation
+is not evidence that agents, stored data, or hosted passkeys work. The app marks
+those operations unavailable and never falls back to a local daemon. The local
+`DaemonBackend` enrollment and data paths are unchanged.
+
+Local, from this checkout, run the UI regression checks:
+
+```sh
+npm --prefix apps/parent-control test -- lib/__tests__/hostedFlow.test.tsx lib/__tests__/hostedLogin.test.ts
+```
+
+These drive the actual shared React app through pending, verified, denied,
+revoked, and logged-out sessions. The broker/signer integration fixture in
+`crates/agentkeys-broker-server/tests/email_flow.rs` separately checks admission
+and reuse of the same wallet without chain registration.
 
 ## File layout
 

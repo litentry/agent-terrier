@@ -20,9 +20,9 @@ describe('hosted console admission', () => {
 
   it('offers email sign-in without exposing demo registration', () => {
     const markup = renderToStaticMarkup(<App />);
-    expect(markup).toContain('Sign in with your email');
+    expect(markup).toContain('Welcome back.');
     expect(markup).toContain('Access is limited to approved email addresses');
-    expect(markup).toContain('id="hosted-email"');
+    expect(markup).toContain('id="ak-email"');
     expect(markup).not.toContain('Set up your master identity.');
     expect(markup).not.toContain('Email verified');
   });
@@ -36,7 +36,7 @@ describe('hosted console admission', () => {
     const markup = renderToStaticMarkup(<App />);
     expect(markup).toContain('Set up your master identity.');
     expect(markup).toContain('id="ak-email"');
-    expect(markup).not.toContain('Sign in with your email');
+    expect(markup).not.toContain('Welcome back.');
     expect(renderToStaticMarkup(<ChainBadge />)).toContain('daemon offline');
   });
 });

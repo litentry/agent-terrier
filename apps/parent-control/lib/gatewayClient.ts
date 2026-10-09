@@ -82,6 +82,9 @@ async function call<T>(
   path: string,
   body?: unknown,
 ): Promise<GatewayResult<T>> {
+  if (process.env.NEXT_PUBLIC_AGENTKEYS_BACKEND === 'core') {
+    return { ok: false, reason: 'hosted_gateway_unavailable', detail: 'Transport and contact management are not connected in this hosted version yet.', status: 501 };
+  }
   gwlog('→', method, path, body ?? '');
   let resp: Response;
   try {

@@ -71,7 +71,7 @@ export interface AgentContextView {
 }
 
 export type ConnectionStatus =
-  | { kind: 'disconnected'; reason: 'no-backend-configured' | 'unreachable' | 'unauthorized'; detail?: string }
+  | { kind: 'disconnected'; reason: 'no-backend-configured' | 'unreachable' | 'unauthorized' | 'unsupported'; detail?: string }
   | { kind: 'connected'; via: 'daemon' | 'broker' | 'mock'; endpoint: string };
 
 export type DisconnectedStatus = Extract<ConnectionStatus, { kind: 'disconnected' }>;
