@@ -109,6 +109,7 @@ audit-solana         = []                          # v1; deferred
 test-stub            = []                          # existing — stubs STS/SES/RPC for offline tests
 
 [dev-dependencies]
+agentkeys-web-core = { workspace = true }
 agentkeys-broker-server = { path = ".", features = ["test-stub", "auth-email-link"] }
 agentkeys-mock-server = { path = "../agentkeys-mock-server" }
 tower = { version = "0.4", features = ["util"] }

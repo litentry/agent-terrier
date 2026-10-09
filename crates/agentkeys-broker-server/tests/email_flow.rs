@@ -52,6 +52,19 @@ fn stub_creds() -> AssumedCredentials {
 }
 
 async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
+    spawn_broker_with_access(Default::default()).await
+}
+
+async fn spawn_broker_with_access(
+    login_access: agentkeys_broker_server::login_access::LoginAccess,
+) -> (String, Arc<AppState>, Arc<StubEmailSender>) {
+    spawn_broker_fixture(login_access, None).await
+}
+
+async fn spawn_broker_fixture(
+    login_access: agentkeys_broker_server::login_access::LoginAccess,
+    browser_origin: Option<&str>,
+) -> (String, Arc<AppState>, Arc<StubEmailSender>) {
     let tmp = Box::leak(Box::new(TempDir::new().unwrap()));
     let oidc = OidcKeypair::generate_and_persist(&tmp.path().join("oidc.json")).unwrap();
     let session_kp =
@@ -85,6 +98,14 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
     let nonce_store = Arc::new(AuthNonceStore::open_in_memory().unwrap());
     let sqlite_anchor: Arc<dyn AuditAnchor> = Arc::new(SqliteAnchor::open_in_memory().unwrap());
 
+    auth_map.insert(
+        "wallet_sig".into(),
+        Arc::new(agentkeys_broker_server::plugins::auth::SiweWalletAuth::new(
+            nonce_store.clone(),
+            "broker.email.test",
+            TEST_ISSUER,
+        )),
+    );
     let registry = Arc::new(PluginRegistry {
         auth: auth_map,
         wallet: Arc::new(ClientSideKeystoreProvisioner::new(Arc::clone(
@@ -95,7 +116,37 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
 
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
 
+    let signer_service =
+        agentkeys_mock_server::dev_key_service::DevKeyService::from_master_secret([0x42; 32]);
+    let signer_state = Arc::new(
+        agentkeys_mock_server::state::AppState::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )
+        .with_dev_signer(Some(signer_service))
+        .with_broker_session_pubkey(Some(
+            jsonwebtoken::DecodingKey::from_ec_components(
+                &session_kp.public_x_b64,
+                &session_kp.public_y_b64,
+            )
+            .unwrap(),
+        )),
+    );
+    let signer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let signer_url = format!("http://{}", signer_listener.local_addr().unwrap());
+    let signer_router = agentkeys_mock_server::signer_browser_cors(
+        agentkeys_mock_server::create_signer_router(signer_state),
+        browser_origin.unwrap_or_default(),
+    );
+    tokio::spawn(async move {
+        axum::serve(signer_listener, signer_router).await.unwrap();
+    });
     let config = BrokerConfig {
+        login_config: Some(agentkeys_protocol::auth::LoginConfig {
+            chain_id: "212013".into(),
+            signer_url,
+            email_allowlist_enabled: login_access.is_restricted(),
+        }),
+        login_access,
         data_role_arn: "arn:aws:iam::000:role/test".into(),
         memory_role_arn: String::new(),
         speech_role_arn: String::new(),
@@ -155,6 +206,12 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
     });
 
     let app = create_router(state.clone());
+    let app =
+        match agentkeys_broker_server::cors::browser_cors_layer(browser_origin.unwrap_or_default())
+        {
+            Some(layer) => app.layer(layer),
+            None => app,
+        };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -377,4 +434,286 @@ async fn unknown_request_id_returns_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
+}
+
+fn allowlist(spec: &str) -> agentkeys_broker_server::login_access::LoginAccess {
+    agentkeys_broker_server::login_access::LoginAccess::restricted(spec).unwrap()
+}
+
+#[tokio::test]
+async fn allowlist_rejects_unapproved_email_before_sending() {
+    let (url, _, sender) = spawn_broker_with_access(allowlist("alice@example.com")).await;
+    let response = reqwest::Client::new()
+        .post(format!("{url}/v1/auth/email/request"))
+        .json(&serde_json::json!({"email":"mallory@example.com"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    assert!(sender.last_sent().is_none());
+}
+
+#[tokio::test]
+async fn allowlist_email_login_uses_same_wallet_without_chain_or_registration() {
+    let (url, state, sender) = spawn_broker_with_access(allowlist("alice@example.com")).await;
+    let client = agentkeys_web_core::broker::BrokerClient::new(&url);
+    let mut previous_omni = None;
+    for _ in 0..2 {
+        let challenge = client
+            .hosted_email_request(" Alice@Example.com ")
+            .await
+            .unwrap();
+        assert!(client
+            .finish_email_login(&challenge.request_id)
+            .await
+            .unwrap()
+            .is_none());
+        let (_, landing) = sender.last_sent().unwrap();
+        let token = landing.split_once("#t=").unwrap().1;
+        let response = reqwest::Client::new()
+            .post(format!("{url}/v1/auth/email/verify"))
+            .json(&serde_json::json!({"token":token}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let session = client
+            .finish_email_login(&challenge.request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let info = client.session_info(&session.session_jwt).await.unwrap();
+        assert_eq!(info.omni_account, session.omni_account);
+        assert_eq!(info.wallet_address, session.wallet_address);
+        if let Some(previous) = &previous_omni {
+            assert_eq!(previous, &info.omni_account);
+        }
+        previous_omni = Some(info.omni_account);
+    }
+    let identity = agentkeys_broker_server::identity::derive_with_client_id(
+        &state.config.client_id,
+        "email",
+        "alice@example.com",
+    );
+    assert_eq!(
+        state
+            .identity_link_store
+            .list_for_master(identity.as_str())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn allowlist_denies_staged_tokens_from_a_removed_email() {
+    use agentkeys_broker_server::plugins::auth::{ChallengeParams, UserAuthMethod};
+    let (url, state, sender) = spawn_broker_with_access(allowlist("")).await;
+    let plugin = state.email_link.as_ref().unwrap();
+    let challenge = plugin
+        .challenge(ChallengeParams {
+            source_ip: None,
+            extras: serde_json::json!({"email":"removed@example.com"}),
+        })
+        .await
+        .unwrap();
+    let (_, landing) = sender.last_sent().unwrap();
+    let token = landing.split_once("#t=").unwrap().1;
+    let response = reqwest::Client::new()
+        .post(format!("{url}/v1/auth/email/verify"))
+        .json(&serde_json::json!({"token":token}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    let jwt = agentkeys_broker_server::jwt::issue::mint_session_jwt(
+        &state.session_keypair,
+        TEST_ISSUER,
+        "removed-omni",
+        "",
+        "email",
+        "removed@example.com",
+        300,
+    )
+    .unwrap();
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 300;
+    plugin
+        .mark_verified(&challenge.request_id, &jwt, "removed-omni", expires_at)
+        .unwrap();
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{url}/v1/auth/email/status/{}",
+            challenge.request_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn allowlist_blocks_alternate_login_and_old_master_sessions() {
+    let (url, state, _) = spawn_broker_with_access(allowlist("alice@example.com")).await;
+    let client = reqwest::Client::new();
+    let omni = "ab".repeat(32);
+    let jwt = agentkeys_broker_server::jwt::issue::mint_session_jwt(
+        &state.session_keypair,
+        TEST_ISSUER,
+        &omni,
+        "0x1111111111111111111111111111111111111111",
+        "evm",
+        "0x1111111111111111111111111111111111111111",
+        300,
+    )
+    .unwrap();
+    for path in ["/v1/auth/session", "/v1/wallet/links"] {
+        let response = client
+            .get(format!("{url}{path}"))
+            .bearer_auth(&jwt)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403, "{path}");
+    }
+    for path in [
+        "/v1/register/build",
+        "/v1/register/submit",
+        "/v1/accept/submit",
+    ] {
+        let response = client
+            .post(format!("{url}{path}"))
+            .bearer_auth(&jwt)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403, "{path}");
+    }
+    let response = client
+        .post(format!("{url}/v1/auth/passkey/start"))
+        .json(&serde_json::json!({"omni_account":omni}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    let response = client
+        .post(format!("{url}/v1/auth/oauth2/start"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    let response = client
+        .get(format!("{url}/v1/auth/session"))
+        .bearer_auth("forged")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401);
+}
+
+#[tokio::test]
+async fn allowlist_hosted_client_refuses_an_unrestricted_broker_before_email() {
+    let (url, _, sender) = spawn_broker().await;
+    let client = agentkeys_web_core::broker::BrokerClient::new(url);
+    assert!(client
+        .hosted_email_request("alice@example.com")
+        .await
+        .is_err());
+    assert!(sender.last_sent().is_none());
+}
+
+#[tokio::test]
+async fn allowlist_verified_email_cannot_link_someone_elses_wallet() {
+    let (url, state, _) = spawn_broker_with_access(allowlist("alice@example.com")).await;
+    let identity = agentkeys_broker_server::identity::derive_with_client_id(
+        &state.config.client_id,
+        "email",
+        "alice@example.com",
+    );
+    let token = agentkeys_broker_server::jwt::issue::mint_session_jwt(
+        &state.session_keypair,
+        TEST_ISSUER,
+        identity.as_str(),
+        "",
+        "email",
+        "alice@example.com",
+        300,
+    )
+    .unwrap();
+    let response = reqwest::Client::new().post(format!("{url}/v1/wallet/link")).bearer_auth(token)
+        .json(&serde_json::json!({"identity_type":"evm", "identity_value":"0x1111111111111111111111111111111111111111"})).send().await.unwrap();
+    assert_eq!(response.status(), 403);
+    assert!(state
+        .identity_link_store
+        .list_for_master(identity.as_str())
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+#[ignore = "interactive browser fixture; loopback servers and stub email only"]
+async fn hosted_browser_fixture() {
+    let origin =
+        std::env::var("AGENTKEYS_BROWSER_TEST_ORIGIN").expect("set browser fixture origin");
+    let output = std::env::var("AGENTKEYS_BROWSER_TEST_OUTPUT").expect("set fixture output path");
+    let (broker_url, _, sender) =
+        spawn_broker_fixture(allowlist("alice@example.com"), Some(&origin)).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+    while tokio::time::Instant::now() < deadline {
+        let link = sender
+            .last_sent()
+            .map(|(_, link)| link.replace(TEST_ISSUER, &broker_url));
+        std::fs::write(
+            &output,
+            serde_json::to_vec(
+                &serde_json::json!({"broker_url":broker_url,"verification_link":link}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+#[tokio::test]
+async fn allowlist_valid_wallet_signature_cannot_bypass_email_approval() {
+    let (url, _, _) = spawn_broker_with_access(allowlist("alice@example.com")).await;
+    let signer =
+        agentkeys_mock_server::dev_key_service::DevKeyService::from_master_secret([0x43; 32]);
+    let omni = "cd".repeat(32);
+    let address = signer.derive_address(&omni).unwrap();
+    let client = reqwest::Client::new();
+    let challenge: agentkeys_protocol::auth::WalletChallenge = client
+        .post(format!("{url}/v1/auth/wallet/start"))
+        .json(&agentkeys_protocol::auth::WalletStart {
+            address,
+            chain_id: 212013,
+            source_ip: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (signature, _) = signer
+        .sign_eip191(&omni, challenge.siwe_message.as_bytes())
+        .unwrap();
+    let response = client
+        .post(format!("{url}/v1/auth/wallet/verify"))
+        .json(&agentkeys_protocol::auth::WalletVerify {
+            request_id: challenge.request_id,
+            signature,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    let body: Value = response.json().await.unwrap();
+    assert!(body.get("session_jwt").is_none());
 }

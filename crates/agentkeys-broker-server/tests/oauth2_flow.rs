@@ -102,6 +102,8 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
 
     let config = BrokerConfig {
+        login_config: None,
+        login_access: Default::default(),
         data_role_arn: "arn:aws:iam::000:role/test".into(),
         memory_role_arn: String::new(),
         speech_role_arn: String::new(),

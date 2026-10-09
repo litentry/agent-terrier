@@ -25,3 +25,5 @@ pub mod wallet_start;
 pub mod wallet_verify;
 
 pub(super) use wallet_start::map_auth_err as wallet_start_map_auth_err;
+
+pub mod session;

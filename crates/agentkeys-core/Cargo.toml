@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+agentkeys-web-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
 agentkeys-types = { workspace = true }
 # The no_std K10 crypto core (secp256k1/EIP-191/keccak), shared byte-for-byte
 # with the ESP32 firmware. device_crypto re-exports it (issue #367 anti-drift).

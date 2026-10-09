@@ -81,6 +81,8 @@ pub async fn email_verify(
             }
         }
 
+        state.config.login_access.require_email(&email)?;
+
         // 2. Mint session JWT.
         let omni = derive_with_client_id(
             &state.config.client_id,

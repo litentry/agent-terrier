@@ -804,6 +804,8 @@ mod tests {
 
     fn config_with(audit_db: PathBuf, oidc_issuer: &str, oidc_kp_path: PathBuf) -> BrokerConfig {
         BrokerConfig {
+            login_config: None,
+            login_access: Default::default(),
             data_role_arn: "arn:aws:iam::000:role/test".into(),
             memory_role_arn: String::new(),
             speech_role_arn: String::new(),

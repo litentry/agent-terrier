@@ -60,6 +60,36 @@ impl WebCore {
         }
     }
 
+    #[wasm_bindgen(js_name = emailRequest)]
+    pub async fn email_request(&self, email: String) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(
+            &self
+                .broker
+                .hosted_email_request(&email)
+                .await
+                .map_err(to_js)?,
+        )
+        .map_err(to_js)
+    }
+
+    #[wasm_bindgen(js_name = finishEmailLogin)]
+    pub async fn finish_email_login(&self, request_id: String) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(
+            &self
+                .broker
+                .finish_email_login(&request_id)
+                .await
+                .map_err(to_js)?,
+        )
+        .map_err(to_js)
+    }
+
+    #[wasm_bindgen(js_name = sessionInfo)]
+    pub async fn session_info(&self, bearer: String) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&self.broker.session_info(&bearer).await.map_err(to_js)?)
+            .map_err(to_js)
+    }
+
     // ── cap-mint (one method per route; `req` is a CapRequest-shaped object) ──
 
     #[wasm_bindgen(js_name = capMemoryPut)]

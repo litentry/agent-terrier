@@ -153,3 +153,65 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }
+
+pub fn signer_browser_cors(router: Router, origins: &str) -> Router {
+    use axum::http::{header, HeaderValue, Method};
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+    let origins: Vec<HeaderValue> =
+        agentkeys_protocol::browser_origins::parse_browser_origins(origins)
+            .iter()
+            .filter_map(|origin| origin.parse().ok())
+            .collect();
+    if origins.is_empty() {
+        return router;
+    }
+    router.layer(
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods([Method::POST, Method::OPTIONS])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
+    )
+}
+
+#[cfg(test)]
+mod browser_login_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn signer_cors_allows_only_the_configured_console() {
+        for (origin, expected) in [
+            ("https://dashboard.example.test", true),
+            ("https://evil.example.test", false),
+        ] {
+            let router = signer_browser_cors(
+                Router::new().route("/dev/derive-address", post(|| async { "ok" })),
+                "https://dashboard.example.test",
+            );
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("OPTIONS")
+                        .uri("/dev/derive-address")
+                        .header("origin", origin)
+                        .header("access-control-request-method", "POST")
+                        .header(
+                            "access-control-request-headers",
+                            "authorization,content-type",
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get("access-control-allow-origin")
+                    .is_some(),
+                expected
+            );
+        }
+    }
+}

@@ -12,22 +12,12 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::BrokerError;
 use crate::state::SharedState;
 
-#[derive(Debug, Deserialize)]
-pub struct WalletLinkBody {
-    /// Canonical identity-type string (`"email"`, `"oauth2_google"`,
-    /// `"evm"`, etc.). Must be one of the IdentityType::canonical()
-    /// values; future-proof, the broker accepts unknown types as long
-    /// as they non-empty.
-    pub identity_type: String,
-    /// The identity value (email address, google sub, EVM address …).
-    pub identity_value: String,
-}
+pub use agentkeys_protocol::auth::WalletLink as WalletLinkBody;
 
 pub async fn wallet_link(
     State(state): State<SharedState>,
@@ -35,6 +25,28 @@ pub async fn wallet_link(
     Json(body): Json<WalletLinkBody>,
 ) -> Result<impl IntoResponse, BrokerError> {
     let session = super::require_master_session(&headers, &state)?;
+    if state.config.login_access.is_restricted() {
+        if session.agentkeys.identity_type != "email" || body.identity_type != "evm" {
+            return Err(crate::login_access::denied());
+        }
+        use agentkeys_core::signer_client::{HttpSignerClient, SignerClient};
+        let bearer = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(crate::auth::extract_bearer_token)
+            .ok_or_else(crate::login_access::denied)?;
+        let signer = HttpSignerClient::new(&crate::handlers::auth::session::signer_url(&state)?)
+            .with_session_jwt(bearer.into());
+        let expected = signer
+            .derive_address(&session.agentkeys.omni_account)
+            .await
+            .map_err(|_| {
+                BrokerError::BackendUnreachable("cannot verify the existing identity wallet".into())
+            })?;
+        if !expected.address.eq_ignore_ascii_case(&body.identity_value) {
+            return Err(crate::login_access::denied());
+        }
+    }
     let master = session.agentkeys.omni_account;
 
     if body.identity_type.trim().is_empty() || body.identity_value.trim().is_empty() {

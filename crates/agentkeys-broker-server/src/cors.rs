@@ -11,18 +11,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// The origins an operator listed: trimmed, trailing slash dropped, only
 /// absolute `http(s)://` origins kept, `*` refused (an allowlist, by design).
-pub fn parse_browser_origins(spec: &str) -> Vec<String> {
-    spec.split(',')
-        .map(|s| s.trim().trim_end_matches('/'))
-        .filter(|s| {
-            !s.is_empty()
-                && (s.starts_with("http://") || s.starts_with("https://"))
-                && !s.contains('*')
-                && !s[s.find("://").unwrap_or(0) + 3..].contains('/')
-        })
-        .map(str::to_string)
-        .collect()
-}
+pub use agentkeys_protocol::browser_origins::parse_browser_origins;
 
 /// The layer for `spec`, or `None` when nothing is listed (= no CORS headers,
 /// the pre-#675 behaviour). GET/POST/OPTIONS with `content-type` +

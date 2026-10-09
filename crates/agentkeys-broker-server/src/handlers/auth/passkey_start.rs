@@ -65,6 +65,11 @@ pub async fn passkey_start(
     Json(body): Json<PasskeyStartRequest>,
 ) -> Result<impl IntoResponse, BrokerError> {
     let omni = parse_omni_0x64(&body.omni_account)?;
+    state
+        .config
+        .login_access
+        .require_omni(&state, &omni)
+        .await?;
 
     // Chain probe: the omni must have a DEPLOYED P256Account master (mirrors
     // accept_build's guard — an EOA master predates the passkey model and has

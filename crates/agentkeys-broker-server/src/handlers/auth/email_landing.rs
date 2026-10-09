@@ -2,7 +2,7 @@
 //!
 //! Broker-hosted static HTML page. Reads `window.location.hash`
 //! (`#t=<token>`), POSTs the token to `/v1/auth/email/verify`, and
-//! shows "Verified — return to your terminal" on success.
+//! asks the user to return to the requesting app or tab on success.
 //!
 //! Headers: `Cache-Control: no-store`, `Referrer-Policy: no-referrer`
 //! per plan §3.5.3. The token NEVER appears in the server log because
@@ -38,7 +38,7 @@ const LANDING_HTML: &str = r#"<!doctype html>
   const hash = window.location.hash || '';
   const m = hash.match(/^#t=([A-Za-z0-9_-]+)$/);
   if (!m) {
-    msg.textContent = 'Magic link is malformed. Re-request from your terminal.';
+    msg.textContent = 'Magic link is malformed. Request a new link from the app or tab where you started sign-in.';
     msg.className = 'err';
     return;
   }
@@ -52,7 +52,7 @@ const LANDING_HTML: &str = r#"<!doctype html>
       body: JSON.stringify({ token })
     });
     if (r.ok) {
-      msg.innerHTML = 'Verified — <strong>return to your terminal</strong>.';
+      msg.innerHTML = 'Verified — <strong>return to the app or tab where you started sign-in</strong>.';
       msg.className = 'ok';
     } else {
       const body = await r.json().catch(() => ({}));

@@ -4,22 +4,13 @@
 //! Returns: `{ "request_id", "siwe_message", "nonce", "expires_at_iso" }`.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::BrokerError;
 use crate::plugins::auth::{ChallengeParams, UserAuthMethod};
 use crate::state::SharedState;
 
-#[derive(Debug, Deserialize)]
-pub struct WalletStartRequest {
-    pub address: String,
-    pub chain_id: u64,
-    /// Optional client-supplied IP for rate-limit bookkeeping. Real
-    /// production source IP comes from the X-Forwarded-For chain plumbed
-    /// through axum middleware (out of scope for Phase 0).
-    pub source_ip: Option<String>,
-}
+pub use agentkeys_protocol::auth::WalletStart as WalletStartRequest;
 
 pub async fn wallet_start(
     State(state): State<SharedState>,

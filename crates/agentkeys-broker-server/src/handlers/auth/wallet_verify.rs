@@ -9,7 +9,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::BrokerError;
@@ -19,11 +18,7 @@ use crate::plugins::auth::AuthResponse;
 use crate::plugins::wallet::{WalletAddress, WalletRole};
 use crate::state::SharedState;
 
-#[derive(Debug, Deserialize)]
-pub struct WalletVerifyRequest {
-    pub request_id: String,
-    pub signature: String,
-}
+pub use agentkeys_protocol::auth::WalletVerify as WalletVerifyRequest;
 
 pub async fn wallet_verify(
     State(state): State<SharedState>,
@@ -51,6 +46,12 @@ pub async fn wallet_verify(
         identity.identity_type.canonical(),
         &identity.identity_value,
     );
+
+    state
+        .config
+        .login_access
+        .require_omni(&state, omni.as_str())
+        .await?;
 
     // Bind the wallet (idempotent in WalletStore — same role/parent
     // returns the existing row). For wallet-sig auth the binding role
@@ -106,5 +107,9 @@ pub async fn wallet_verify(
         "identity_type":    identity.identity_type.canonical(),
         "identity_value":   identity.identity_value,
     });
-    Ok((StatusCode::OK, Json(response)))
+    Ok((
+        StatusCode::OK,
+        [("cache-control", "no-store")],
+        Json(response),
+    ))
 }

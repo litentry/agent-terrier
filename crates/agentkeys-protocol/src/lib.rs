@@ -29,6 +29,9 @@
 //! is now in ONE place, exercised end-to-end in the MCP server's
 //! `tests/three_acts.rs` and pinned by the backend-client fixtures.
 
+pub mod auth;
+pub mod browser_origins;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

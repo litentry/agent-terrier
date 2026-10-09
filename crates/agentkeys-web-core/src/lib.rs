@@ -16,3 +16,5 @@ pub mod device;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
+
+pub mod session;

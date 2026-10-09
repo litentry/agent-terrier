@@ -186,7 +186,9 @@ impl SignerClient for HttpSignerClient {
         let mut req = self
             .http
             .post(&url)
-            .json(&serde_json::json!({ "omni_account": omni_account }));
+            .json(&agentkeys_protocol::auth::DeriveAddressRequest {
+                omni_account: omni_account.into(),
+            });
         if let Some(jwt) = &self.session_jwt {
             req = req.header("Authorization", format!("Bearer {jwt}"));
         }
@@ -224,10 +226,13 @@ impl SignerClient for HttpSignerClient {
         message_bytes: &[u8],
     ) -> Result<SignedMessage, SignerClientError> {
         let url = format!("{}/dev/sign-message", self.base_url);
-        let mut req = self.http.post(&url).json(&serde_json::json!({
-            "omni_account": omni_account,
-            "message_hex":  hex::encode(message_bytes),
-        }));
+        let mut req = self
+            .http
+            .post(&url)
+            .json(&agentkeys_protocol::auth::SignMessageRequest {
+                omni_account: omni_account.into(),
+                message_hex: hex::encode(message_bytes),
+            });
         if let Some(jwt) = &self.session_jwt {
             req = req.header("Authorization", format!("Bearer {jwt}"));
         }

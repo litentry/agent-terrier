@@ -136,7 +136,7 @@ impl BrokerClient {
 
     // ── internals ──
 
-    async fn post_json<B: Serialize + ?Sized, T: DeserializeOwned>(
+    pub(crate) async fn post_json<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,
         bearer: Option<&str>,
@@ -145,7 +145,11 @@ impl BrokerClient {
         post_json_at(&self.http, &self.base_url, path, bearer, body).await
     }
 
-    async fn get_json<T: DeserializeOwned>(&self, path: &str, bearer: Option<&str>) -> R<T> {
+    pub(crate) async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        bearer: Option<&str>,
+    ) -> R<T> {
         let url = format!("{}{}", self.base_url, path);
         let mut rb = self.http.get(&url);
         if let Some(b) = bearer {

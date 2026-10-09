@@ -15,7 +15,7 @@ export function loadWasmModule(): Promise<WasmModule> {
   if (!modulePromise) {
     modulePromise = (async () => {
       const wasm = await import('@/lib/wasm/agentkeys-web-core/agentkeys_web_core.js');
-      await wasm.default('/wasm/agentkeys_web_core_bg.wasm');
+      await wasm.default({ module_or_path: '/wasm/agentkeys_web_core_bg.wasm' });
       return wasm;
     })();
     void modulePromise.catch(() => {

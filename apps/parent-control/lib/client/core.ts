@@ -2,6 +2,9 @@
 
 import { EmptyBackend } from './empty';
 import type { ConnectionStatus } from './types';
+import type { EmailChallenge } from '../generated/EmailChallenge';
+import type { MasterSession } from '../generated/MasterSession';
+import type { MasterSessionInfo } from '../generated/MasterSessionInfo';
 
 // Lazy, client-only WebCore instances, memoized per broker URL on top of the
 // shared module loader (lib/client/wasm-module.ts — also used by the
@@ -36,6 +39,46 @@ function loadCore(brokerUrl: string): Promise<LoadedCore> {
  */
 export class CoreBackend extends EmptyBackend {
   private brokerUrl: string;
+  private masterSession: MasterSession | null = null;
+  private loginGeneration = 0;
+
+  async requestEmailLogin(email: string): Promise<EmailChallenge> {
+    this.masterSession = null;
+    this.loginGeneration += 1;
+    return (await loadCore(this.brokerUrl)).emailRequest(email);
+  }
+
+  async pollEmailLogin(requestId: string): Promise<MasterSessionInfo | null> {
+    const generation = this.loginGeneration;
+    const core = await loadCore(this.brokerUrl);
+    const session: MasterSession | null | undefined = await core.finishEmailLogin(requestId);
+    if (!session) return null;
+    const info: MasterSessionInfo = await core.sessionInfo(session.session_jwt);
+    if (generation !== this.loginGeneration) throw new Error('Sign-in was cancelled.');
+    if (info.expires_at * 1000 <= Date.now()) throw new Error('The sign-in link expired. Please try again.');
+    this.masterSession = session;
+    return info;
+  }
+
+  clearHostedSession(): void {
+    this.loginGeneration += 1;
+    this.masterSession = null;
+  }
+
+  async hostedSessionInfo(): Promise<MasterSessionInfo | null> {
+    if (!this.masterSession) return null;
+    if (this.masterSession.expires_at * 1000 <= Date.now()) {
+      this.clearHostedSession();
+      return null;
+    }
+    try {
+      return await (await loadCore(this.brokerUrl)).sessionInfo(this.masterSession.session_jwt);
+    } catch (error) {
+      this.clearHostedSession();
+      throw error;
+    }
+  }
+
 
   constructor(brokerUrl: string) {
     super();

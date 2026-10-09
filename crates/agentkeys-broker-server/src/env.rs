@@ -148,6 +148,9 @@ pub const BROKER_DELEGATE_SESSION_JWT_TTL_SECONDS: &str = "BROKER_DELEGATE_SESSI
 /// migration.
 pub const AGENTKEYS_CLIENT_ID: &str = "AGENTKEYS_CLIENT_ID";
 
+/// Optional exact email allowlist. Unset preserves development access; empty denies all.
+pub const BROKER_MASTER_LOGIN_ALLOWLIST: &str = "BROKER_MASTER_LOGIN_ALLOWLIST";
+
 /// Optional. Comma-separated list of enabled auth methods. Default `wallet_sig`.
 /// Supported names: `wallet_sig`, `email_link`, `oauth2_google`.
 pub const BROKER_AUTH_METHODS: &str = "BROKER_AUTH_METHODS";
@@ -367,6 +370,11 @@ pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
             Group::Core,
         ),
         (
+            BROKER_MASTER_LOGIN_ALLOWLIST,
+            "Exact email admission allowlist; unset preserves unrestricted development, empty denies all.",
+            Group::Auth,
+        ),
+        (
             BROKER_AUTH_METHODS,
             "Comma list of enabled auth methods.",
             Group::Auth,
@@ -558,6 +566,7 @@ mod tests {
             BROKER_OIDC_ISSUER,
             BROKER_OIDC_KEYPAIR_PATH,
             BROKER_SESSION_KEYPAIR_PATH,
+            BROKER_MASTER_LOGIN_ALLOWLIST,
             BROKER_AUTH_METHODS,
             BROKER_AUDIT_ANCHORS,
         ] {

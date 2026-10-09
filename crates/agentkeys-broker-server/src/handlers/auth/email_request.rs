@@ -8,26 +8,19 @@
 //! once the user clicks.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::BrokerError;
 use crate::plugins::auth::ChallengeParams;
 use crate::state::SharedState;
 
-#[derive(Debug, Deserialize)]
-pub struct EmailRequestBody {
-    pub email: String,
-    /// Optional client-supplied IP for rate-limit bookkeeping. Phase D
-    /// adds X-Forwarded-For-aware extraction; Phase A.1 trusts the
-    /// caller's hint.
-    pub source_ip: Option<String>,
-}
+pub use agentkeys_protocol::auth::EmailRequest as EmailRequestBody;
 
 pub async fn email_request(
     State(state): State<SharedState>,
     Json(body): Json<EmailRequestBody>,
 ) -> Result<impl IntoResponse, BrokerError> {
+    state.config.login_access.require_email(&body.email)?;
     let plugin = state
         .registry
         .auth

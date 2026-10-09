@@ -342,8 +342,7 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
     // Finalize chain_id: explicit env wins, else the compiled profile's id, else a
     // loud-warned heima fallback (only reachable on a custom chain with no env + no
     // built-in profile — exactly the case the old silent 212013 default mis-signed).
-    let chain_id: u64 = chain_id_env
-        .or_else(|| resolved_profile.as_ref().map(|p| p.chain_id))
+    let chain_id: u64 = crate::config::configured_chain_id(chain_id_env, resolved_profile.as_ref())
         .unwrap_or_else(|| {
             tracing::warn!(
                 "AGENTKEYS_CHAIN_ID unset and no chain profile resolved — defaulting to heima 212013; \

@@ -38,13 +38,24 @@ pub async fn email_status(
                 session_jwt,
                 omni_account,
                 expires_at,
-            } => json!({
-                "status":            "verified",
-                "session_jwt":       session_jwt,
-                "session_jwt_kid":   state.session_keypair.kid,
-                "expires_at":        expires_at,
-                "omni_account":      omni_account,
-            }),
+            } => {
+                let claims = crate::jwt::verify::verify_session_jwt(
+                    &state.session_keypair,
+                    &state.config.oidc_issuer,
+                    &session_jwt,
+                )?;
+                state
+                    .config
+                    .login_access
+                    .require_email(&claims.agentkeys.identity_value)?;
+                json!({
+                    "status":            "verified",
+                    "session_jwt":       session_jwt,
+                    "session_jwt_kid":   state.session_keypair.kid,
+                    "expires_at":        expires_at,
+                    "omni_account":      omni_account,
+                })
+            }
             EmailRequestStatus::Failed { reason } => json!({
                 "status": "failed",
                 "reason": reason,
@@ -56,7 +67,7 @@ pub async fn email_status(
                 )));
             }
         };
-        Ok((StatusCode::OK, Json(body)))
+        Ok((StatusCode::OK, [("cache-control", "no-store")], Json(body)))
     }
     #[cfg(not(feature = "auth-email-link"))]
     {

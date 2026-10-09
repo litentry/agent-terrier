@@ -13,20 +13,21 @@ vi.mock('../ClientProvider', () => ({
   useConnectionStatus: () => ({ kind: 'disconnected', reason: 'no-backend-configured' }),
 }));
 
-describe('hosted console preview', () => {
+describe('hosted console admission', () => {
   beforeEach(() => {
     selectedClient = new CoreBackend('https://broker.example.test');
   });
 
-  it('stops before onboarding instead of offering a simulated identity ceremony', () => {
+  it('offers email sign-in without exposing demo registration', () => {
     const markup = renderToStaticMarkup(<App />);
-    expect(markup).toContain('Browser sign-in is not available yet.');
-    expect(markup).not.toMatch(/<(?:input|form|button)\b/);
+    expect(markup).toContain('Sign in with your email');
+    expect(markup).toContain('Access is limited to approved email addresses');
+    expect(markup).toContain('id="hosted-email"');
     expect(markup).not.toContain('Set up your master identity.');
     expect(markup).not.toContain('Email verified');
   });
 
-  it('does not describe a browser-only preview as a broken local daemon', () => {
+  it('does not describe a hosted login as a broken local daemon', () => {
     expect(renderToStaticMarkup(<ChainBadge />)).toBe('');
   });
 
@@ -35,7 +36,7 @@ describe('hosted console preview', () => {
     const markup = renderToStaticMarkup(<App />);
     expect(markup).toContain('Set up your master identity.');
     expect(markup).toContain('id="ak-email"');
-    expect(markup).not.toContain('Browser sign-in is not available yet.');
+    expect(markup).not.toContain('Sign in with your email');
     expect(renderToStaticMarkup(<ChainBadge />)).toContain('daemon offline');
   });
 });

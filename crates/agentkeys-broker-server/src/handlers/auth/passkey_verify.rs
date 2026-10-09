@@ -244,6 +244,11 @@ pub async fn passkey_verify(
         }
     };
     let omni = parse_omni_0x64(&omni)?;
+    state
+        .config
+        .login_access
+        .require_omni(&state, &omni)
+        .await?;
     let mut omni32 = [0u8; 32];
     omni32.copy_from_slice(
         &hex::decode(omni.trim_start_matches("0x"))

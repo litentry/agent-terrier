@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod identity;
 pub mod jwt;
 pub mod lease_sweeper;
+pub mod login_access;
 pub mod metrics;
 pub mod oidc;
 pub mod plugins;
@@ -49,6 +50,14 @@ pub fn create_router(state: SharedState) -> Router {
     // #675 — browser device origins: an opt-in allowlist; unset = no CORS headers.
     let browser_origins = std::env::var(env::BROKER_BROWSER_ORIGINS).unwrap_or_default();
     let router = Router::new()
+        .route(
+            "/v1/auth/config",
+            get(handlers::auth::session::login_config),
+        )
+        .route(
+            "/v1/auth/session",
+            get(handlers::auth::session::session_info),
+        )
         .route("/healthz", get(handlers::broker_status::healthz))
         .route("/readyz", get(handlers::broker_status::readyz))
         .route("/metrics", get(handlers::metrics::metrics_handler))
@@ -330,7 +339,11 @@ pub fn create_router(state: SharedState) -> Router {
         .pipe(register_oauth2_routes)
         // Phase D-rest US-037: enforce request body size limit per
         // BROKER_REQUEST_BODY_LIMIT_BYTES (Codex P2 R2-F18).
-        .layer(DefaultBodyLimit::max(body_limit));
+        .layer(DefaultBodyLimit::max(body_limit))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            login_access::enforce,
+        ));
     let router = match cors::browser_cors_layer(&browser_origins) {
         Some(layer) => router.layer(layer),
         None => router,

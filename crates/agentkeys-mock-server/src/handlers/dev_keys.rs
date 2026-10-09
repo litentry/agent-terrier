@@ -19,16 +19,7 @@ use serde_json::{json, Value};
 use crate::dev_key_service::{SignerError, KEY_VERSION};
 use crate::state::SharedState;
 
-#[derive(Deserialize)]
-pub struct DeriveAddressRequest {
-    pub omni_account: String,
-}
-
-#[derive(Deserialize)]
-pub struct SignMessageRequest {
-    pub omni_account: String,
-    pub message_hex: String,
-}
+pub use agentkeys_protocol::auth::{DeriveAddressRequest, SignMessageRequest};
 
 /// Issue #82 — typed-data sign request. `typed_data` carries the canonical
 /// EIP-712 v4 JSON shape (matches MetaMask `eth_signTypedData_v4`).

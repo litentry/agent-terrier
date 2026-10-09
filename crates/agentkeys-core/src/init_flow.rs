@@ -22,7 +22,7 @@ use agentkeys_types::{Session, WalletAddress};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::signer_client::{HttpSignerClient, SignerClient, SignerClientError};
+use crate::signer_client::SignerClientError;
 
 /// Result of a successful first-time init flow.
 #[derive(Debug, Clone)]
@@ -160,6 +160,8 @@ pub async fn auth_status_once(
         .send()
         .await
         .map_err(|e| InitFlowError::Transport(format!("GET {url}: {e}")))?
+        .error_for_status()
+        .map_err(|error| InitFlowError::Transport(error.to_string()))?
         .json()
         .await
         .map_err(|e| InitFlowError::Transport(format!("parse JSON: {e}")))?;
@@ -168,7 +170,7 @@ pub async fn auth_status_once(
             session_jwt: string_field(&body, "/v1/auth/status", "session_jwt")?,
             identity_omni: string_field(&body, "/v1/auth/status", "omni_account")?,
         }),
-        Some("expired") | Some("rejected") => Ok(AuthStatus::Failed(
+        Some("failed") | Some("expired") | Some("rejected") => Ok(AuthStatus::Failed(
             body["status"].as_str().unwrap_or("?").to_string(),
         )),
         _ => Ok(AuthStatus::Pending),
@@ -340,24 +342,15 @@ async fn finish_init(
     identity_type: &str,
     identity_value: &str,
 ) -> FlowResult<InitResult> {
-    let derived = derive_via_signer(signer_url, identity_omni, identity_session_jwt).await?;
-    link_wallet_at_broker(http, broker, identity_session_jwt, "evm", &derived).await?;
-    let (evm_session_jwt, evm_omni, wallet_addr) = siwe_round_trip(
-        http,
-        broker,
-        signer_url,
-        identity_omni,
-        &derived,
-        chain_id,
-        identity_session_jwt,
-    )
-    .await?;
-    let session = build_session_from_jwt(&evm_session_jwt, &wallet_addr);
+    let verified = agentkeys_web_core::broker::BrokerClient::with_client(http.clone(), broker)
+        .finish_identity_session(signer_url, identity_session_jwt, identity_omni, chain_id)
+        .await
+        .map_err(|error| InitFlowError::AuthFailed(error.to_string()))?;
     Ok(InitResult {
-        session,
+        session: build_session_from_jwt(&verified.session_jwt, &verified.wallet_address),
         identity_omni: identity_omni.to_string(),
-        evm_omni,
-        derived_wallet: derived,
+        evm_omni: verified.omni_account,
+        derived_wallet: verified.wallet_address,
         identity_type: identity_type.to_string(),
         identity_value: identity_value.to_string(),
     })
@@ -379,6 +372,8 @@ async fn poll_auth_status(
             .await
             .map_err(|e| InitFlowError::Transport(format!("GET {url}: {e}")))?;
         let body: serde_json::Value = resp
+            .error_for_status()
+            .map_err(|error| InitFlowError::Transport(error.to_string()))?
             .json()
             .await
             .map_err(|e| InitFlowError::Transport(format!("parse JSON: {e}")))?;
@@ -388,7 +383,7 @@ async fn poll_auth_status(
                 let omni = string_field(&body, "/v1/auth/{provider}/status", "omni_account")?;
                 return Ok((session_jwt, omni));
             }
-            Some("expired") | Some("rejected") => {
+            Some("failed") | Some("expired") | Some("rejected") => {
                 return Err(InitFlowError::AuthFailed(
                     body["status"].as_str().unwrap_or("?").to_string(),
                 ));
@@ -414,102 +409,12 @@ async fn identity_value_from_status(
         .send()
         .await
         .map_err(|e| InitFlowError::Transport(format!("GET {url}: {e}")))?
+        .error_for_status()
+        .map_err(|error| InitFlowError::Transport(error.to_string()))?
         .json()
         .await
         .map_err(|e| InitFlowError::Transport(format!("parse JSON: {e}")))?;
     string_field(&body, "/v1/auth/{provider}/status", "identity_value")
-}
-
-async fn derive_via_signer(
-    signer_url: &str,
-    omni_account: &str,
-    session_jwt: &str,
-) -> FlowResult<String> {
-    // Signer (post-issue-#74 step 1b) requires the broker's session JWT
-    // as a Bearer token on every /dev/* request. Standalone commands
-    // (cli::cmd_signer_derive) chain .with_session_jwt() from the
-    // keychain; the in-flow init_via_email_link path also has the
-    // identity-session JWT in hand (just minted by the broker after
-    // the magic-link click), so chain it here too.
-    let client = HttpSignerClient::new(signer_url).with_session_jwt(session_jwt.to_string());
-    let derived = client.derive_address(omni_account).await?;
-    Ok(derived.address)
-}
-
-async fn link_wallet_at_broker(
-    http: &reqwest::Client,
-    broker: &str,
-    session_jwt: &str,
-    identity_type: &str,
-    identity_value: &str,
-) -> FlowResult<()> {
-    let url = format!("{broker}/v1/wallet/link");
-    let resp = http
-        .post(&url)
-        .header("authorization", format!("Bearer {session_jwt}"))
-        .json(&json!({
-            "identity_type":  identity_type,
-            "identity_value": identity_value,
-        }))
-        .send()
-        .await
-        .map_err(|e| InitFlowError::Transport(format!("POST {url}: {e}")))?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(InitFlowError::BrokerRejected {
-            endpoint: "/v1/wallet/link".into(),
-            status,
-            body,
-        });
-    }
-    Ok(())
-}
-
-async fn siwe_round_trip(
-    http: &reqwest::Client,
-    broker: &str,
-    signer_url: &str,
-    identity_omni: &str,
-    derived_addr: &str,
-    chain_id: u64,
-    session_jwt: &str,
-) -> FlowResult<(String, String, String)> {
-    let start = post_json(
-        http,
-        &format!("{broker}/v1/auth/wallet/start"),
-        json!({ "address": derived_addr, "chain_id": chain_id }),
-    )
-    .await?;
-    let request_id = string_field(&start, "/v1/auth/wallet/start", "request_id")?;
-    let siwe_message = string_field(&start, "/v1/auth/wallet/start", "siwe_message")?;
-
-    // Signer requires the broker's session JWT (same one threaded
-    // through derive_via_signer above) for the SIWE-message sign call.
-    let signer = HttpSignerClient::new(signer_url).with_session_jwt(session_jwt.to_string());
-    let signed = signer
-        .sign_eip191(identity_omni, siwe_message.as_bytes())
-        .await?;
-    if signed.address.to_lowercase() != derived_addr.to_lowercase() {
-        return Err(InitFlowError::AddressMismatch {
-            derived: derived_addr.to_string(),
-            signed: signed.address,
-        });
-    }
-
-    let verify = post_json(
-        http,
-        &format!("{broker}/v1/auth/wallet/verify"),
-        json!({ "request_id": request_id, "signature": signed.signature }),
-    )
-    .await?;
-    let evm_session_jwt = string_field(&verify, "/v1/auth/wallet/verify", "session_jwt")?;
-    let evm_omni = string_field(&verify, "/v1/auth/wallet/verify", "omni_account")?;
-    let wallet_addr = verify["wallet_address"]
-        .as_str()
-        .unwrap_or(derived_addr)
-        .to_string();
-    Ok((evm_session_jwt, evm_omni, wallet_addr))
 }
 
 async fn post_json(

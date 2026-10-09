@@ -4,6 +4,8 @@ use crate::env;
 
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
+    pub login_config: Option<agentkeys_protocol::auth::LoginConfig>,
+    pub login_access: crate::login_access::LoginAccess,
     pub data_role_arn: String,
     /// #295 P1 §7a — the per-data-class MEMORY IAM role the broker AssumeRoles
     /// (with a read-only, exact-object inline session policy) to issue delegated
@@ -161,7 +163,42 @@ impl BrokerConfig {
         let sts_audience = std::env::var(env::BROKER_STS_AUDIENCE)
             .unwrap_or_else(|_| "sts.amazonaws.com".to_string());
 
+        let login_access = match std::env::var(env::BROKER_MASTER_LOGIN_ALLOWLIST) {
+            Ok(spec) => {
+                crate::login_access::LoginAccess::restricted(&spec).map_err(anyhow::Error::msg)?
+            }
+            Err(std::env::VarError::NotPresent) => Default::default(),
+            Err(error) => return Err(error.into()),
+        };
+        let chain_id_override = crate::handlers::accept::env_profile("AGENTKEYS_CHAIN_ID")
+            .ok()
+            .map(|value| value.parse::<u64>())
+            .transpose()?;
+        let profile = agentkeys_core::chain_profile::ChainProfile::resolve(
+            None,
+            std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
+            std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
+                .ok()
+                .as_deref(),
+        )
+        .ok()
+        .map(|(profile, _)| profile);
+        let signer_url = std::env::var("AGENTKEYS_SIGNER_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+            .or_else(|| agentkeys_protocol::derive_worker_url(&oidc_issuer, "signer"));
+        let login_config = configured_chain_id(chain_id_override, profile.as_ref())
+            .zip(signer_url)
+            .map(
+                |(chain_id, signer_url)| agentkeys_protocol::auth::LoginConfig {
+                    chain_id: chain_id.to_string(),
+                    signer_url,
+                    email_allowlist_enabled: login_access.is_restricted(),
+                },
+            );
         Ok(Self {
+            login_config,
+            login_access,
             data_role_arn,
             memory_role_arn,
             speech_role_arn,
@@ -284,5 +321,27 @@ mod tests {
         assert!(parse_client_id(Some("agent terrier".into())).is_err());
         assert!(parse_client_id(Some("\"agentterrier\"".into())).is_err());
         assert!(parse_client_id(Some(" agentterrier".into())).is_err());
+    }
+}
+
+pub(crate) fn configured_chain_id(
+    override_id: Option<u64>,
+    profile: Option<&agentkeys_core::chain_profile::ChainProfile>,
+) -> Option<u64> {
+    override_id.or_else(|| profile.map(|profile| profile.chain_id))
+}
+
+#[cfg(test)]
+mod login_chain_tests {
+    use super::*;
+    #[test]
+    fn hosted_login_uses_the_deployed_profile_without_a_duplicate_chain_id_env() {
+        let profile = agentkeys_core::chain_profile::ChainProfile::load_builtin("heima").unwrap();
+        assert_eq!(
+            configured_chain_id(None, Some(&profile)),
+            Some(profile.chain_id)
+        );
+        assert_eq!(configured_chain_id(Some(123), Some(&profile)), Some(123));
+        assert_eq!(configured_chain_id(None, None), None);
     }
 }

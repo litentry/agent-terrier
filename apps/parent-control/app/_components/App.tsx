@@ -40,7 +40,7 @@ import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { CoreBackend } from '@/lib/client/core';
-import { HostedConsolePreview } from './HostedConsolePreview';
+import { HostedConsoleLogin } from './HostedConsoleLogin';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import type { ChainInfo, ChainListEntry, ChannelDef, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
 import type { Actor, AuditEvent, PairingRequest, PreservedMemory } from './types';
@@ -73,7 +73,7 @@ function toPreserved(e: MasterMemoryEntry): PreservedMemory {
 
 export function App() {
   const client = useClient();
-  return client instanceof CoreBackend ? <HostedConsolePreview /> : <InteractiveApp />;
+  return client instanceof CoreBackend ? <HostedConsoleLogin client={client} /> : <InteractiveApp />;
 }
 
 function InteractiveApp() {

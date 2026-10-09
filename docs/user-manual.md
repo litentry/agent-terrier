@@ -827,6 +827,20 @@ A shared screen (a kitchen tablet, an old phone on the fridge) shows your househ
 - Use the browser's *Add to Home Screen* for a full-screen kiosk; the *Full screen* button hides the browser's own bars. A paired display asks the tablet to **keep the screen awake** by itself, for as long as the page is showing (the tablet's own sleep setting still wins if the browser refuses; most kiosk tablets let you disable sleep).
 - **Pictures.** An app can put a picture on the screen as well as a card (the Painter does: the children's drawing). The screen shows whatever the app published last: a card newer than the picture is drawn beside it with its buttons; a picture newer than the card fills the whole screen by itself and stays until the next picture — a finished drawing stays up for the child to copy. Tap the picture to show the menu (settings, full screen); it hides again after a few seconds.
 
-## Hosted console preview
+## Hosted console email sign-in
 
-The hosted console currently shows “Browser sign-in is not available yet.” It does not verify email, register a master, connect a passkey, or provide account access. Keep using the local console for those actions until browser sessions and account management are available. An old browser onboarding flag does not unlock this preview.
+The hosted console is private access. An administrator must put your email on
+the deployment's allowlist before you can request a sign-in link. Verify the link
+in your inbox and leave the original console tab open to finish signing in.
+A chain registration is not required for admission. An existing email uses its
+same identity and wallet; signing in does not register a new on-chain account.
+Unlisted addresses are rejected before an email is sent. Removing an address
+and applying the deployment configuration blocks further broker access,
+including previously issued sessions.
+
+The hosted console currently confirms your signed-in identity and supports
+logout. Agent management and hosted-domain passkey sign-in are not implemented
+in this slice. Your localhost passkey is not automatically usable on the hosted
+domain. Sessions remain in tab memory, never browser persistent storage;
+reloading or closing the tab requires signing in again. Backend errors remain
+visible and never fall back to demo verification.

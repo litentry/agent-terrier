@@ -133,7 +133,10 @@ async fn main() {
             "[mock-server] signer-only mode: serving /dev/* + /healthz on {}",
             bind_addr
         );
-        create_signer_router(state)
+        agentkeys_mock_server::signer_browser_cors(
+            create_signer_router(state),
+            &std::env::var("AGENTKEYS_BROWSER_ORIGINS").unwrap_or_default(),
+        )
     } else {
         create_router(state)
     };
