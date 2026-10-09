@@ -80,7 +80,7 @@ Overrides via env: `UI_PORT`, `DAEMON_PORT`, `DAEMON_ORIGIN`, `DAEMON_RP_ID`, `D
 The console is served as a **static export** from the VE host at
 `https://dashboard.<zone>` (`VE_DASHBOARD_HOST` in `scripts/operator-workstation.ve.env`):
 no server process, the master plane runs in the browser against the stack's broker
-(arch.md §22c.3). Owner: `scripts/operator/setup-broker-host.sh --cloud ve` step 9
+(arch.md §22c.3). Owner: `scripts/operator/broker-web-setup.sh`
 (the A record: `setup-cloud.sh --cloud ve` step 55). The build it runs:
 
 ```sh
