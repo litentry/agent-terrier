@@ -847,6 +847,11 @@ continues automatically once both its passkey and device binding are confirmed.
 Expired or rejected requests never grant access. Do not reset the master or
 register another account to complete this step.
 
+The original local console checks for these browser-access requests through its
+local daemon; this does not switch it to the hosted frontend. If its master
+session expires, approval polling pauses. Use **re-authenticate (Touch ID)** to
+restore the session and resume checking requests.
+
 After that one-time approval, **Sign back in with Touch ID** unlocks this browser
 and opens parent control. Email login remains available. Existing categories are
 loaded; the original category setup appears only when none have been authored.

@@ -1309,20 +1309,18 @@ async fn onboarding_state(
         (Some(_), _) => "master-registered",
         (None, _) => "none",
     };
-    // Issue #220 durable-session signal: a live, non-empty J1 ⇒ "active"; else
-    // persisted-but-lapsed coords ⇒ "expired" (drives one passkey re-auth); else
-    // "none" (full onboarding). The web `lib/client` reads this to decide whether
-    // a restart needs zero / one / a full ceremony.
-    let session = if live_session
+    let session = match live_session
         .as_ref()
-        .map(|s| !s.j1.is_empty())
-        .unwrap_or(false)
+        .filter(|session| !session.j1.is_empty())
     {
-        "active"
-    } else if state.master_session.read().await.is_some() {
-        "expired"
-    } else {
-        "none"
+        Some(session)
+            if master_session::jwt_expired_at(&session.j1, master_session::now_unix()) =>
+        {
+            "expired"
+        }
+        Some(_) => "active",
+        None if state.master_session.read().await.is_some() => "expired",
+        None => "none",
     };
     // Issue #242: the logout-surviving identity hint for the re-login button.
     // Coords present (valid OR expired J1) ⇒ the daemon knows who the master is;
@@ -14726,6 +14724,34 @@ mod tests {
             identity_only_reason: None,
         });
         assert_eq!(onboarding_state(State(state)).await.0.session, "active");
+    }
+
+    #[tokio::test]
+    async fn expired_live_session_reports_expiry_and_stops_hosted_approval_relay() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let state = make_state_real(None);
+        let omni = format!("0x{}", "22".repeat(32));
+        let payload =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({"exp": 1})).unwrap());
+        *state.master_session.write().await = Some(persisted_record(&omni, 1));
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "master@example.test".into(),
+            omni,
+            j1: format!("header.{payload}.signature"),
+            wallet: "0xW".into(),
+            identity_only_reason: None,
+        });
+        let status = onboarding_state(State(state.clone())).await.0;
+        assert_eq!(status.session, "expired");
+        assert_eq!(status.identity, "verified");
+        assert!(status.relogin.is_some());
+        let response = crate::hosted_signer::pending(State(state)).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("re-authenticate"));
     }
 
     #[tokio::test]

@@ -122,6 +122,11 @@ function unreachable(detail: string): DisconnectedStatus {
   return { kind: 'disconnected', reason: 'unreachable', detail };
 }
 
+async function rejectedResponse(method: string, path: string, response: Response): Promise<DisconnectedStatus> {
+  const detail = `${method} ${path} → ${response.status}: ${await response.text()}`;
+  return { kind: 'disconnected', reason: response.status === 401 ? 'unauthorized' : 'unreachable', detail };
+}
+
 export class MappedBackend implements AgentKeysClient {
   protected baseUrl: string;
 
@@ -133,8 +138,7 @@ export class MappedBackend implements AgentKeysClient {
     try {
       const resp = await fetch(`${this.baseUrl}${path}`, { method: 'GET', cache: 'no-store' });
       if (!resp.ok) {
-        const text = await resp.text();
-        return { ok: false, status: unreachable(`GET ${path} → ${resp.status}: ${text}`) };
+        return { ok: false, status: await rejectedResponse('GET', path, resp) };
       }
       return { ok: true, data: (await resp.json()) as T };
     } catch (e) {
@@ -153,8 +157,7 @@ export class MappedBackend implements AgentKeysClient {
         body: jsonBody,
       });
       if (!resp.ok) {
-        const text = await resp.text();
-        return { ok: false, status: unreachable(`POST ${path} → ${resp.status}: ${text}`) };
+        return { ok: false, status: await rejectedResponse('POST', path, resp) };
       }
       return { ok: true, data: (await resp.json()) as T };
     } catch (e) {
@@ -170,8 +173,7 @@ export class MappedBackend implements AgentKeysClient {
         body: JSON.stringify(body),
       });
       if (!resp.ok) {
-        const text = await resp.text();
-        return { ok: false, status: unreachable(`POST ${path} → ${resp.status}: ${text}`) };
+        return { ok: false, status: await rejectedResponse('POST', path, resp) };
       }
       return { ok: true, data: (await resp.json()) as T };
     } catch (e) {

@@ -34,6 +34,33 @@ beforeEach(async () => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
 
+it('pauses approval polling while the master session is expired and resumes after sign-in', async () => {
+  vi.useFakeTimers();
+  try {
+    await act(async () => root.render(<HostedEnrollmentApproval credentialId="" pending={pending} dismiss={dismiss} prepare={prepare} build={build} submit={submit} />));
+    pending.mockClear();
+    await act(async () => root.render(<HostedEnrollmentApproval active={false} credentialId="existing-key" pending={pending} dismiss={dismiss} prepare={prepare} build={build} submit={submit} />));
+    await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+    expect(pending).not.toHaveBeenCalled();
+    await act(async () => root.render(<HostedEnrollmentApproval active credentialId="existing-key" pending={pending} dismiss={dismiss} prepare={prepare} build={build} submit={submit} />));
+    expect(pending).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(pending).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
+});
+
+it('clears a prior polling failure after a successful retry', async () => {
+  vi.useFakeTimers();
+  try {
+    await act(async () => root.render(<HostedEnrollmentApproval credentialId="" pending={pending} dismiss={dismiss} prepare={prepare} build={build} submit={submit} />));
+    pending.mockRejectedValueOnce(new Error('master session expired'));
+    await act(async () => root.render(<HostedEnrollmentApproval credentialId="existing-key" pending={pending} dismiss={dismiss} prepare={prepare} build={build} submit={submit} />));
+    expect(container.textContent).toContain('master session expired');
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(container.textContent).not.toContain('master session expired');
+  } finally { vi.useRealTimers(); }
+});
+
 it('verifies the transferred request before prompting, then signs exactly the recovery and built operation', async () => {
   await review();
   expect(mocks.assertion).not.toHaveBeenCalled();

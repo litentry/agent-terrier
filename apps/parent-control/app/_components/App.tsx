@@ -75,7 +75,7 @@ function toPreserved(e: MasterMemoryEntry): PreservedMemory {
   return { ns: e.ns, key: e.key, title: e.title, bytes: e.bytes, version: e.version, updated: e.updated, preview: e.preview, body: e.body, kind: e.kind };
 }
 
-const HOSTED_SESSION_CHECK_INTERVAL_MS = 60_000;
+const SESSION_CHECK_INTERVAL_MS = 60_000;
 
 export function App() {
   const client = useClient();
@@ -120,11 +120,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   // a curate action is in flight.
   const [inbox, setInbox] = useState<ApiInboxItem[]>([]);
   const [inboxBusy, setInboxBusy] = useState(false);
-  // #242 — the master J1 can lapse while the user stays "logged in" (coords are
-  // persisted). When a chain read 502s with "master session expired", surface a
-  // Touch ID re-auth banner instead of a dead-end toast; ONE passkey prompt
-  // restores the session (NO re-onboarding). `reloadKey` re-runs the data loads
-  // after a successful re-auth.
+  // Touch ID restores an expired master J1 without re-onboarding.
   const [sessionExpired, setSessionExpired] = useState(false);
   const [reauthBusy, setReauthBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -200,7 +196,10 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       } else if (!hosted) {
         on = getOnboardedFlag();
       }
-      if (!cancelled) setOnboarded(on);
+      if (!cancelled) {
+        setSessionExpired(r.ok && r.data.session === 'expired');
+        setOnboarded(on);
+      }
     })();
     return () => { cancelled = true; };
   }, [client]);
@@ -208,7 +207,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
 
   useEffect(() => {
-    if (!hosted || !onboarded) return;
+    if (!onboarded) return;
     let cancelled = false;
     let checking = false;
     const validate = async () => {
@@ -216,9 +215,11 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       checking = true;
       const result = await client.getOnboardingState();
       checking = false;
-      if (!cancelled && (!result.ok || result.data.identity !== 'verified')) onSessionEnd();
+      if (cancelled) return;
+      if (hosted && (!result.ok || result.data.identity !== 'verified')) onSessionEnd();
+      else if (result.ok && result.data.session === 'expired') setSessionExpired(true);
     };
-    const timer = setInterval(validate, HOSTED_SESSION_CHECK_INTERVAL_MS);
+    const timer = setInterval(validate, SESSION_CHECK_INTERVAL_MS);
     return () => { cancelled = true; clearInterval(timer); };
   }, [client, hosted, onboarded, onSessionEnd]);
 
@@ -241,7 +242,6 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       if (res?.ok) setResourceNamespaces(Array.from(new Set(res.data.items.map((it) => it.ns))).sort());
       if (cats.ok) {
         setCategories(cats.data);
-        setSessionExpired(false); // a successful chain read proves the J1 is live
       } else if (looksSessionExpired(cats.status.detail)) {
         // #242: the J1 lapsed (coords still persisted) — surface the Touch ID
         // re-auth banner, NOT a dead-end toast. ONE passkey prompt restores it.
@@ -1577,8 +1577,15 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={hosted ? undefined : resetMaster} onOpenAudit={(id) => { setAuditActor(id); go('audit'); }} />
         )}
         {client instanceof MappedBackend && !(client instanceof CoreBackend) && (
-          <HostedEnrollmentApproval credentialId={getMasterCredId() ?? ''}
-            pending={async () => { const result = await client.hostedApprovalPending(); if (!result.ok) throw new Error(result.status.detail); return result.data; }}
+          <HostedEnrollmentApproval active={!sessionExpired} credentialId={getMasterCredId() ?? ''}
+            pending={async () => {
+              const result = await client.hostedApprovalPending();
+              if (!result.ok) {
+                if (result.status.reason === 'unauthorized' || looksSessionExpired(result.status.detail)) setSessionExpired(true);
+                throw new Error(result.status.detail);
+              }
+              return result.data;
+            }}
             dismiss={async (id) => { const result = await client.hostedApprovalDismiss(id); if (!result.ok) throw new Error(result.status.detail); }}
             prepare={async (request) => { const result = await client.hostedApprovalPrepare(request); if (!result.ok) throw new Error(result.status.detail); return result.data; }}
             build={async (request) => { const result = await client.hostedApprovalBuild(request); if (!result.ok) throw new Error(result.status.detail); return result.data; }}

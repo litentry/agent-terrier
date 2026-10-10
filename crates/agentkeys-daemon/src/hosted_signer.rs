@@ -39,6 +39,12 @@ async fn context(state: &SharedUiBridgeState) -> Result<(BrokerClient, String), 
             )
                 .into_response()
         })?;
+    if crate::master_session::jwt_expired_at(&session.j1, crate::master_session::now_unix()) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error":"Master session expired — re-authenticate (one passkey prompt)."})),
+        ).into_response());
+    }
     Ok((BrokerClient::new(broker), session.j1.clone()))
 }
 pub async fn prepare(

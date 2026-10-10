@@ -292,6 +292,10 @@ pub fn jwt_exp_unix(token: &str) -> Option<u64> {
     claims.get("exp").and_then(|v| v.as_u64())
 }
 
+pub fn jwt_expired_at(token: &str, now_unix: u64) -> bool {
+    jwt_exp_unix(token).is_some_and(|expiry| expiry <= now_unix.saturating_add(J1_EXPIRY_SKEW_SECS))
+}
+
 /// Compute the J1 expiry to persist: the JWT `exp` when present, else
 /// `created_at + DEFAULT_J1_TTL_SECS` (matches the managed-wallet session TTL).
 pub fn j1_expiry_for(j1: &str, created_at_unix: u64) -> u64 {
@@ -445,6 +449,18 @@ mod tests {
         assert_eq!(jwt_exp_unix("not-a-jwt"), None);
         assert_eq!(jwt_exp_unix(""), None);
         assert_eq!(jwt_exp_unix("a.b.c"), None);
+    }
+
+    #[test]
+    fn jwt_expired_at_uses_the_same_skew_window_as_persisted_sessions() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":1000}"#);
+        let token = format!("header.{payload}.signature");
+        assert!(!jwt_expired_at(&token, 900));
+        assert!(jwt_expired_at(&token, 970));
+        assert!(jwt_expired_at(&token, 1000));
+        assert!(!jwt_expired_at("opaque-test-bearer", 1000));
     }
 
     #[test]

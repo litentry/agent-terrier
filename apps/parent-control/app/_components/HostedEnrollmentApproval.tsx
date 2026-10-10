@@ -12,6 +12,7 @@ import type { SubmitAcceptUserOpRequest } from '@/lib/generated/SubmitAcceptUser
 import type { SubmitAcceptUserOpResponse } from '@/lib/generated/SubmitAcceptUserOpResponse';
 
 export interface HostedEnrollmentApprovalProps {
+  active?: boolean;
   credentialId: string;
   pending: () => Promise<HostedSignerPending>;
   dismiss: (id: string) => Promise<void>;
@@ -20,7 +21,7 @@ export interface HostedEnrollmentApprovalProps {
   submit: (request: SubmitAcceptUserOpRequest) => Promise<SubmitAcceptUserOpResponse>;
 }
 
-export function HostedEnrollmentApproval({ credentialId, pending, dismiss, prepare, build, submit }: HostedEnrollmentApprovalProps) {
+export function HostedEnrollmentApproval({ active = true, credentialId, pending, dismiss, prepare, build, submit }: HostedEnrollmentApprovalProps) {
   const [requests, setRequests] = useState<HostedSignerRequest[]>([]);
   const [requestId, setRequestId] = useState('');
   const pendingCallback = useRef(pending);
@@ -30,17 +31,17 @@ export function HostedEnrollmentApproval({ credentialId, pending, dismiss, prepa
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   useEffect(() => {
-    if (!credentialId) return;
+    if (!active || !credentialId) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
-      try { const result = await pendingCallback.current(); if (!cancelled) setRequests(result.requests); }
+      try { const result = await pendingCallback.current(); if (!cancelled) { setRequests(result.requests); setError(''); } }
       catch (failure) { if (!cancelled) setError(String(failure)); }
       if (!cancelled) timer = setTimeout(() => void refresh(), 5000);
     }
     void refresh();
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [credentialId]);
+  }, [active, credentialId]);
   async function inspect(row: HostedSignerRequest) {
     setBusy(true); setError(''); setApproved(null); setMessage('');
     try {
@@ -71,7 +72,7 @@ export function HostedEnrollmentApproval({ credentialId, pending, dismiss, prepa
       setRequests((rows) => rows.filter((row) => row.id !== requestId));
     } catch (failure) { setError(String(failure)); } finally { setBusy(false); }
   }
-  if (!credentialId || (!requests.length && !approved && !message && !error)) return null;
+  if (!active || !credentialId || (!requests.length && !approved && !message && !error)) return null;
   return <section className="panel" aria-label="Browser access">
     <h2>Browser access</h2>
     <p>A new browser is requesting access to your existing account. Review the website and account, then approve with your current passkey.</p>

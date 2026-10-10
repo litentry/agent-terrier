@@ -19,6 +19,13 @@ const client = () => new DaemonBackend('http://daemon.test');
 afterEach(() => vi.unstubAllGlobals());
 
 describe('existing console hosted-browser approval transport', () => {
+  it('classifies an expired approval session as unauthorized rather than unreachable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'ExpiredSignature' }), { status: 401 })));
+    const result = await client().hostedApprovalPending();
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status.reason).toBe('unauthorized');
+  });
+
   it.each([
     { path: '/v1/master/hosted-signer/prepare', body: approval, call: () => client().hostedApprovalPrepare(approval), response: approval.enrollment },
     { path: '/v1/master/hosted-signer/build', body: build, call: () => client().hostedApprovalBuild(build), response: { user_op: submit.user_op, user_op_hash: 'actual-signed-hash', chain_id: 42 } },
