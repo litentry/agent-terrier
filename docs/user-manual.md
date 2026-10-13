@@ -872,6 +872,18 @@ cleared on logout; reloading requires authentication again. Clearing browser
 storage removes its public identity pointer and requires enabling that browser
 again, without replacing the account.
 
+Both the local and hosted consoles check the live session and master binding
+before opening protected pages. A remembered login never substitutes for that
+check. **Restoring session…** means the check is still running; an expired session
+returns to sign-in, where the existing passkey restores access with Touch ID.
+Returning to the browser tab checks the session again and reloads page data after
+recovery. Data from a previous session is discarded.
+
+Knowledge, credentials and channels load when their page needs them. **Loading**
+is separate from an empty store. If a read fails, the page shows the failure and
+**Retry**; waiting or changing tabs does not turn a failed read into an empty
+result. A retry reads the current data again.
+
 The audit screen loads confirmed activity in pages. **Load older activity** continues
 through earlier history, including pages with no events. Filtering by actor starts
 at that actor's recent history. A failed read is shown explicitly and can be retried;

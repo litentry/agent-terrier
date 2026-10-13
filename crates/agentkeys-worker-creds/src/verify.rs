@@ -556,7 +556,8 @@ pub async fn check_chain_k3_epoch(
 /// timeout, and the console read the poll as a transport error.
 pub const ETH_CALL_ATTEMPT_TIMEOUT_SECS: u64 = 10;
 
-async fn eth_call(
+/// Read-only chain call with bounded transport retries; deterministic RPC errors fail closed.
+pub async fn eth_call(
     http: &reqwest::Client,
     rpc_url: &str,
     to: &str,

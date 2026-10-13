@@ -64,7 +64,7 @@ Static `slot = PR# % N + 1` wasted capacity: PR and issue numbers share one coun
 
 **Correctness still lives in the concurrency group, not the claim.** Two runs racing the same free slot inside the claim window both claim it — and then serialize on that slot's group, the same guarantee as the static design; balancing only improves placement. A re-run of a failed run reuses the completed claim's outputs (slot sticky per run id); a new commit is a NEW run that re-balances after the ref-level group cancels the old one — a PR may move between slots across pushes, which is safe because every slot-tied resource (deployer key, omni keyspace, buckets, EC2) is per-SLOT and each run cleans up after itself.
 
-Queue semantics at saturation: a run claiming a busy slot waits on the slot's group. GHA holds one running + one pending job per group, and a third same-slot contender displaces the older pending run — with balancing, reaching that takes more than two concurrent runs per slot (> 2N fleet-wide), versus any three same-parity PRs under the static hash.
+Queue semantics at saturation: a run claiming a busy slot waits on the slot's group. Shared test-stack jobs use `queue: max` with `cancel-in-progress: false`, preserving multiple pending jobs while one owns the stack. Ref-level superseding remains enabled for newer commits of the same PR. The default single-pending mode cancelled PR #762 before its VE runner was assigned; see [GitHub's concurrency contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
 ## 5. Delivery phases
 

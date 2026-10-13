@@ -34,7 +34,8 @@ beforeEach(() => {
   setMasterCredId('existing-passkey');
   client = new DaemonBackend('http://daemon.example.test');
   vi.spyOn(client, 'getChainList').mockResolvedValue({ ok: true, data: { chains: [], daemonChain: 'test', daemonBroker: 'https://broker.example.test' } });
-  vi.spyOn(client, 'getOnboardingState').mockResolvedValue({ ok: true, data: { identity: 'verified', chain: 'master-registered', session: 'active', k11: 'enrolled' } });
+  vi.spyOn(client, 'getOnboardingState').mockResolvedValue({ ok: true, data: { identity: 'verified', omni: 'existing-omni', chain: 'master-registered', session: 'active', k11: 'enrolled', relogin: { email: 'master@example.test', omni: 'existing-omni' } } });
+  vi.spyOn(client, 'getRegisterState').mockResolvedValue({ ok: true, data: { operator_omni: 'existing-omni', bound: true, probe: 'chain' } });
   vi.spyOn(client, 'listMemoryCategories').mockResolvedValue({ ok: true, data: [] });
   vi.spyOn(client, 'listConfigPresets').mockResolvedValue({ ok: true, data: { presets: [], defaultId: '' } });
   vi.spyOn(client, 'listCredentials').mockResolvedValue({ ok: true, data: [] });
@@ -61,7 +62,7 @@ afterEach(async () => {
 
 it('turns one approval 401 into Touch ID re-authentication and resumes polling after success', async () => {
   await act(async () => root.render(<App />));
-  expect(container.textContent).toContain('session expired');
+  expect(container.textContent).toMatch(/session expired/i);
   expect(approvalFetch).toHaveBeenCalledTimes(1);
   await act(async () => { await vi.advanceTimersByTimeAsync(65000); });
   expect(approvalFetch).toHaveBeenCalledTimes(1);
@@ -71,19 +72,19 @@ it('turns one approval 401 into Touch ID re-authentication and resumes polling a
   vi.spyOn(client, 'reloginStart').mockResolvedValue({ ok: true, data: { challenge, account: 'existing-account', email: 'master@example.test', omni: 'existing-omni' } });
   vi.spyOn(client, 'reloginFinish').mockResolvedValue({ ok: true, data: { omni: 'existing-omni' } });
   approvalFetch.mockImplementation(async () => new Response(JSON.stringify({ requests: [] }), { status: 200 }));
-  const button = [...container.querySelectorAll('button')].find((candidate) => candidate.textContent?.includes('re-authenticate'));
+  const button = [...container.querySelectorAll('button')].find((candidate) => candidate.textContent?.includes('Sign back in with Touch ID'));
   expect(button).toBeDefined();
   await act(async () => button!.click());
   expect(mocks.assertion).toHaveBeenCalledWith(challenge, ['existing-passkey']);
   expect(client.reloginFinish).toHaveBeenCalledWith(challenge, assertion);
-  expect(container.textContent).not.toContain('session expired');
+  expect(container.textContent).not.toMatch(/session expired/i);
   expect(approvalFetch).toHaveBeenCalledTimes(2);
 });
 
 it('does not poll browser approvals when the daemon already reports an expired session', async () => {
   vi.mocked(client.getOnboardingState).mockResolvedValue({ ok: true, data: { identity: 'verified', chain: 'master-registered', session: 'expired', k11: 'enrolled' } });
   await act(async () => root.render(<App />));
-  expect(container.textContent).toContain('session expired');
+  expect(container.textContent).toMatch(/session expired/i);
   await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
   expect(approvalFetch).not.toHaveBeenCalled();
 });

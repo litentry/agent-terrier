@@ -3,10 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   clearMasterIdentity,
-  ensureActiveStack,
   getMasterCredId,
-  setMasterCredId,
-  getOnboardedFlag,
   setActiveStack,
   setOnboardedFlag,
 } from '@/lib/identityStore';
@@ -41,6 +38,8 @@ import { akLog } from '@/lib/debug';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { CoreBackend } from '@/lib/client/core';
+import { useConsoleSession } from '@/lib/useConsoleSession';
+import { useConsoleRead } from '@/lib/useConsoleRead';
 import { MappedBackend } from '@/lib/client/daemon';
 import { PendingTransactions } from './PendingTransactions';
 import { HostedAuditHistory } from './HostedAuditHistory';
@@ -75,8 +74,6 @@ function toPreserved(e: MasterMemoryEntry): PreservedMemory {
   return { ns: e.ns, key: e.key, title: e.title, bytes: e.bytes, version: e.version, updated: e.updated, preview: e.preview, body: e.body, kind: e.kind };
 }
 
-const SESSION_CHECK_INTERVAL_MS = 60_000;
-
 export function App() {
   const client = useClient();
   const [sessionGeneration, setSessionGeneration] = useState(0);
@@ -102,8 +99,9 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   const [eventDetail, setEventDetail] = useState<AuditEvent | null>(null);
   const [toast, setToast] = useState<{ msg: string; sticky?: boolean; action?: { label: string; fn: () => void } } | null>(null);
 
-  const [onboarded, setOnboarded] = useState(false);
-  const [identity, setIdentity] = useState<{ email?: string; omni?: string } | null>(null);
+  const readiness = useConsoleSession(client);
+  const onboarded = readiness.phase === 'ready';
+  const identity = readiness.identity;
   // #404 — the channel registry (id-anchored definitions; channels page = CRUD,
   // device pairing = selection). "cached" storage = dev-only (no config worker).
   const [channels, setChannels] = useState<ChannelDef[]>([]);
@@ -120,9 +118,6 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   // a curate action is in flight.
   const [inbox, setInbox] = useState<ApiInboxItem[]>([]);
   const [inboxBusy, setInboxBusy] = useState(false);
-  // Touch ID restores an expired master J1 without re-onboarding.
-  const [sessionExpired, setSessionExpired] = useState(false);
-  const [reauthBusy, setReauthBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   // True while the actor tree is being (re)read — the channels page says
   // "checking grants…" instead of "orphaned" until the fleet the daemon
@@ -175,139 +170,65 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
     return () => { cancelled = true; };
   }, [client, status.kind]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // Bind the identity store to the daemon's stack before the offline-flag
-      // read below, so the per-stack `ak_onboarded` resolves to THIS
-      // (chain, broker).
-      await ensureActiveStack(async () => {
-        const c = await client.getChainList();
-        return c.ok
-          ? { chain: c.data.daemonChain, brokerUrl: c.data.daemonBroker ?? null }
-          : { chain: null, brokerUrl: null };
-      });
-      // Hosted sessions must be live; a saved UI flag never grants admission.
-      const r = await client.getOnboardingState();
-      let on = false;
-      if (r.ok && r.data.identity === 'verified' && (!hosted || r.data.chain === 'master-registered')) {
-        on = true;
-        if (!cancelled) setIdentity({ email: r.data.email, omni: r.data.omni });
-      } else if (!hosted) {
-        on = getOnboardedFlag();
-      }
-      if (!cancelled) {
-        setSessionExpired(r.ok && r.data.session === 'expired');
-        setOnboarded(on);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [client]);
-
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
 
   useEffect(() => {
-    if (!onboarded) return;
-    let cancelled = false;
-    let checking = false;
-    const validate = async () => {
-      if (checking) return;
-      checking = true;
-      const result = await client.getOnboardingState();
-      checking = false;
-      if (cancelled) return;
-      if (hosted && (!result.ok || result.data.identity !== 'verified')) onSessionEnd();
-      else if (result.ok && result.data.session === 'expired') setSessionExpired(true);
-    };
-    const timer = setInterval(validate, SESSION_CHECK_INTERVAL_MS);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [client, hosted, onboarded, onSessionEnd]);
+    setActors([]);
+    setEvents([]);
+    setCategories([]);
+    setEntriesByNs({});
+    setCredentials([]);
+    setInbox([]);
+    setChannels([]);
+    setResourceNamespaces([]);
+    setSpawnOpen(false);
+    setArchiveActor(null);
+    setPendingAction(null);
+  }, [readiness.key]);
 
-  // §2: list the master's memory CATEGORIES once onboarded (from the durable
-  // taxonomy, no decrypt) + load the bundled config-init presets (#207 item 1A)
-  // for the empty-state setup screen. EmptyBackend returns disconnected → stays
-  // empty → the memory page renders its setup/empty state.
-  useEffect(() => {
-    if (!onboarded) return;
-    let cancelled = false;
-    (async () => {
-      const [cats, pre, creds, inb, res] = await Promise.all([
-        client.listMemoryCategories(),
-        client.listConfigPresets(),
-        client.listCredentials(),
-        client.listInbox(),
-        client.listResources ? client.listResources() : Promise.resolve(null),
-      ]);
-      if (cancelled) return;
-      if (res?.ok) setResourceNamespaces(Array.from(new Set(res.data.items.map((it) => it.ns))).sort());
-      if (cats.ok) {
-        setCategories(cats.data);
-      } else if (looksSessionExpired(cats.status.detail)) {
-        // #242: the J1 lapsed (coords still persisted) — surface the Touch ID
-        // re-auth banner, NOT a dead-end toast. ONE passkey prompt restores it.
-        setSessionExpired(true);
-      } else if (cats.status.reason !== 'no-backend-configured' && cats.status.reason !== 'unsupported') {
-        // #201 codex finding 2: a configured-but-broken Config 502s here instead
-        // of reporting an empty store — surface it rather than show a bare list.
-        showToast(`Knowledge categories unavailable — ${cats.status.detail ?? 'config worker error'}.`);
-      }
-      if (pre.ok) {
-        setPresets(pre.data.presets);
-        setDefaultPresetId(pre.data.defaultId);
-      }
-      if (creds.ok) setCredentials(creds.data);
-      if (inb.ok) setInbox(inb.data);
-    })();
-    return () => { cancelled = true; };
-  }, [onboarded, client, reloadKey]);
+  const loadActors = useCallback(() => client.listActors(), [client]);
+  const loadAudit = useCallback(() => client.listRecentAuditEvents({ limit: 80 }), [client]);
+  const loadCategories = useCallback(() => client.listMemoryCategories(), [client]);
+  const loadPresets = useCallback(() => client.listConfigPresets(), [client]);
+  const loadCredentials = useCallback(() => client.listCredentials(), [client]);
+  const loadInbox = useCallback(() => client.listInbox(), [client]);
+  const loadChannels = useCallback(() => client.listChannels!(), [client]);
+  const resourcesLoaded = useCallback((items: { ns: string }[]) => {
+    setResourceNamespaces(Array.from(new Set(items.map((item) => item.ns))).sort());
+  }, []);
+  const pauseExpiredSession = useCallback(() => readiness.pause(true), [readiness.pause]);
+  const liveReads = onboarded && !readiness.demo;
+  const needsKnowledge = ['knowledge', 'detail', 'delegates', 'devices'].includes(page);
+  const needsChannels = ['channels', 'devices', 'applications', 'detail'].includes(page);
+  const actorsRead = useConsoleRead(readiness.key, liveReads, reloadKey, loadActors, setActors, pauseExpiredSession);
+  const auditRead = useConsoleRead(readiness.key, liveReads && ['audit', 'decode', 'detail'].includes(page), reloadKey, loadAudit, setEvents, pauseExpiredSession);
+  const categoriesRead = useConsoleRead(readiness.key, liveReads && needsKnowledge, reloadKey, loadCategories, setCategories, pauseExpiredSession);
+  const presetsRead = useConsoleRead(readiness.key, liveReads && page === 'knowledge', reloadKey, loadPresets, (data) => {
+    setPresets(data.presets);
+    setDefaultPresetId(data.defaultId);
+  }, pauseExpiredSession);
+  const credentialsRead = useConsoleRead(readiness.key, liveReads && ['credentials', 'detail'].includes(page), reloadKey, loadCredentials, setCredentials, pauseExpiredSession);
+  const inboxRead = useConsoleRead(readiness.key, liveReads && page === 'knowledge', reloadKey, loadInbox, setInbox, pauseExpiredSession);
+  const channelsRead = useConsoleRead(readiness.key, liveReads && needsChannels && !!client.listChannels, reloadKey, loadChannels, (data) => {
+    setChannels(data.channels);
+    setChannelStorage(data.storage);
+  }, pauseExpiredSession);
+  const pageReads = [actorsRead,
+    ...(needsKnowledge ? [categoriesRead] : []),
+    ...(page === 'knowledge' ? [presetsRead, inboxRead] : []),
+    ...(['credentials', 'detail'].includes(page) ? [credentialsRead] : []),
+    ...(['audit', 'decode', 'detail'].includes(page) ? [auditRead] : []),
+    ...(needsChannels && client.listChannels ? [channelsRead] : []),
+  ];
+  const pageLoading = !readiness.demo && pageReads.some((read) => read.kind === 'loading' || read.kind === 'idle');
+  const pageError = !readiness.demo && pageReads.find((read) => read.kind === 'error');
+  const readCount = (read: { kind: string }, count: number) =>
+    read.kind === 'loaded' || readiness.demo ? count || '∅' : read.kind === 'error' ? '!' : '…';
 
   // #339 P2 — re-fetch the curate queue (after an accept/reject, or on demand).
   const refreshInbox = async () => {
     const r = await client.listInbox();
     if (r.ok) setInbox(r.data);
-  };
-
-  // #242 — restore an expired master session with ONE Touch ID (no re-onboarding).
-  // Mirrors the login screen's relogin ceremony: reloginStart mints a chain-bound
-  // broker challenge, the BOUND passkey signs it, reloginFinish verifies on chain +
-  // restores the daemon session; then re-run the data loads that 502'd while expired.
-  const reauthenticate = async () => {
-    if (reauthBusy) return;
-    setReauthBusy(true);
-    if (client instanceof CoreBackend) {
-      try {
-        const identity = await client.signInWithPasskey();
-        setMasterCredId(identity.credentialId);
-        setSessionExpired(false);
-        setReloadKey((key) => key + 1);
-        showToast('Session restored.');
-      } catch (error) {
-        showToast(`Sign-in failed — ${(error as Error).message}`);
-      } finally { setReauthBusy(false); }
-      return;
-    }
-    const start = await client.reloginStart();
-    if (!start.ok) {
-      setReauthBusy(false);
-      showToast(`Re-authentication couldn't start — ${start.status.detail ?? 'daemon unreachable'}.`);
-      return;
-    }
-    try {
-      const assertion = await getAssertionOverHash(start.data.challenge, [getMasterCredId()]);
-      const fin = await client.reloginFinish(start.data.challenge, assertion);
-      if (fin.ok) {
-        setSessionExpired(false);
-        setReloadKey((k) => k + 1); // re-run the loads that failed while expired
-        showToast('Session restored — no re-onboarding needed.');
-      } else {
-        showToast(
-          `Re-authentication failed — ${fin.status.detail ?? 'rejected'}. If your master passkey was deleted, reset the master and re-onboard.`,
-        );
-      }
-    } catch (e) {
-      showToast(`Touch ID cancelled or failed — ${(e as Error)?.message ?? ''}.`);
-    }
-    setReauthBusy(false);
   };
 
   // #339 P2 — fetch one proposal's full body for the curate review (lazy: the
@@ -411,31 +332,6 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
     await reloadCategory(ns);
   };
 
-  // Actor tree + recent audit history from the client seam. Real daemon data;
-  // empty with EmptyBackend → the pages render their empty states.
-  useEffect(() => {
-    if (!onboarded) return;
-    let cancelled = false;
-    setActorsSyncing(true);
-    (async () => {
-      const [a, e, ch] = await Promise.all([
-        client.listActors(),
-        client.listRecentAuditEvents({ limit: 80 }),
-        // #404 — the channel registry (optional: daemon backend only).
-        client.listChannels ? client.listChannels() : Promise.resolve(null),
-      ]);
-      if (cancelled) return;
-      setActorsSyncing(false);
-      if (a.ok) setActors(a.data);
-      if (e.ok) setEvents(e.data.map((x) => ({ ...x })));
-      if (ch?.ok) {
-        setChannels(ch.data.channels);
-        setChannelStorage(ch.data.storage);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [onboarded, client]);
-
   // #432 (epic #425 O5) — the onboarding DEFAULT delegate rides the SAME spawn
   // path as every other agent: once the master is bound on chain and the
   // household has no delegate yet, auto-open the New-agent modal ONCE (Default
@@ -468,12 +364,12 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       () => {},
     );
     return stop;
-  }, [onboarded, paused, client]);
+  }, [onboarded, paused, client, readiness.key]);
 
   // #693 — filtered to one actor, the feed reads that actor's rows from the
   // daemon; for a delegate that includes one row per pull pass from its feed.
   useEffect(() => {
-    if (hosted || page !== 'audit' || auditActor === 'all') return;
+    if (!onboarded || hosted || page !== 'audit' || auditActor === 'all') return;
     let alive = true;
     const read = async () => {
       const r = await client.listRecentAuditEvents({ actorId: auditActor, limit: 100 });
@@ -486,7 +382,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       alive = false;
       clearInterval(t);
     };
-  }, [client, page, auditActor, hosted]);
+  }, [client, page, auditActor, hosted, onboarded, readiness.key]);
 
   const showToast = (msg: string, sticky = false, action?: { label: string; fn: () => void }) => {
     setToast({ msg, sticky, action });
@@ -716,35 +612,11 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
     }
   };
 
-  // Log out: clear the local session flag and reset all in-memory view state so
-  // the next login starts clean. Returns to the §9 onboarding (email) screen.
-  const logout = () => {
-    void client.logout();
-    if (hosted) { onSessionEnd(); return; }
+  const logout = async () => {
+    readiness.pause();
     setOnboardedFlag(false);
-    setOnboarded(false);
-    setIdentity(null);
-    setActors([]);
-    setEvents([]);
-    setCategories([]);
-    setEntriesByNs({});
-    setPlanting(false);
-    setPresets([]);
-    setDefaultPresetId('');
-    setInitializing(false);
-    setPendingPreset('');
-    setProposals(null);
-    setProposing(false);
-    setCredentials([]);
-    setStoringCred(false);
-    setPairingRequests([]);
-    setPairingCeremony(null);
-    setJustPaired(null);
-    setMemoryView(null);
-    setPendingAction(null);
-    setEventDetail(null);
-    setActorId(null);
-    setPage('actors');
+    await client.logout();
+    onSessionEnd();
   };
 
   const updateActor = (id: string, patch: Partial<Actor>) => {
@@ -1391,19 +1263,21 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
     : page === 'transport' ? 'contacts'
     : ((['audit', 'knowledge', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
 
-  // ─── Onboarding gate (workflow 1) ──────────────────────────────
+  if (readiness.phase === 'checking' || readiness.phase === 'error') {
+    return <main className="app-main">
+      <div className="banner" role={readiness.phase === 'error' ? 'alert' : 'status'}>
+        {readiness.phase === 'checking' ? 'Restoring session…' : readiness.detail}
+        {readiness.phase === 'error' && <button className="btn sm" onClick={() => void readiness.refresh(true)}>Retry</button>}
+      </div>
+    </main>;
+  }
   if (!onboarded) {
-    return (
+    return <>
+      {readiness.expired && <div className="banner" role="status">Session expired. Sign back in with Touch ID to restore access.</div>}
       <OnboardingScreen
         onComplete={async (summary) => {
-          if (hosted) {
-            const result = await client.getOnboardingState();
-            if (!result.ok || result.data.identity !== 'verified' || result.data.chain !== 'master-registered') { onSessionEnd(); return; }
-            setIdentity({ email: result.data.email, omni: result.data.omni });
-          } else {
-            setOnboardedFlag(true);
-          }
-          setOnboarded(true);
+          if (readiness.demo) setOnboardedFlag(true);
+          if (!await readiness.refresh(true)) return;
           go('actors');
           // Jump straight into the app; a STICKY toast (no auto-dismiss) carries
           // the next step so it isn't a wall the user has to click through.
@@ -1417,7 +1291,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           }
         }}
       />
-    );
+    </>;
   }
 
   // Privacy-preserving identity for the header: a public omni hash is truncated
@@ -1495,13 +1369,13 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           the Actors page itself. */}
       <nav className="app-nav" aria-label="sections">
         <button className={`app-nav-item ${page === 'actors' ? 'active' : ''}`} onClick={() => go('actors')}>
-          actors<span className="count">{actors.length}</span>
+          actors<span className="count">{readCount(actorsRead, actors.length)}</span>
         </button>
         <button className={`app-nav-item ${page === 'knowledge' ? 'active' : ''}`} onClick={() => go('knowledge')}>
-          knowledge<span className="count">{categories.length || '∅'}</span>
+          knowledge<span className="count">{readCount(categoriesRead, categories.length)}</span>
         </button>
         <button className={`app-nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
-          credentials<span className="count">{credentials.length || '∅'}</span>
+          credentials<span className="count">{readCount(credentialsRead, credentials.length)}</span>
         </button>
         <span className="app-nav-sep" aria-hidden="true" />
         <button className={`app-nav-item ${page === 'delegates' ? 'active' : ''}`} onClick={() => go('delegates')}>
@@ -1513,7 +1387,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           {pairingRequests.filter((r) => r.isDevice).length > 0 && <span className="count attention">{pairingRequests.filter((r) => r.isDevice).length}</span>}
         </button>
         <button className={`app-nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
-          channels<span className="count">{channels.length || '∅'}</span>
+          channels<span className="count">{readCount(channelsRead, channels.length)}</span>
         </button>
         <button className={`app-nav-item ${page === 'transport' ? 'active' : ''}`} onClick={() => go('transport')}>
           transport
@@ -1549,39 +1423,22 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       </nav>
 
       <main className="app-main" data-section={sectionAttr}>
-        {/* #242 — the master J1 lapsed but the coords are still held: ONE Touch ID
-            restores it (no re-onboarding). Only SESSION-GATED, encrypted reads
-            (memory / credentials / inbox — cap-mint → STS → worker → decrypt) are
-            paused; the actor tree + audit are PUBLIC on-chain reads (eth_call) and
-            still load without the J1 — so the banner must NOT claim "chain reads". */}
-        {sessionExpired && (
-          <div className="banner" role="alert" style={{ marginBottom: 14, borderColor: 'var(--danger, #b3261e)' }}>
-            <span className="lbl">⚠ session expired</span>
-            <span>
-              Your master session lapsed — reading your encrypted knowledge + credentials is paused (the actor tree
-              still loads, since it&apos;s read from chain). You&apos;re still bound, so this is
-              <strong> one Touch ID</strong>, not a re-onboarding.
-              <button
-                className="btn primary sm"
-                style={{ marginLeft: 10 }}
-                disabled={reauthBusy}
-                onClick={reauthenticate}
-              >
-                {reauthBusy ? 'authenticating…' : '⊕ re-authenticate (Touch ID)'}
-              </button>
-            </span>
-          </div>
-        )}
+        {pageError && <div className="banner" role="alert">
+          Couldn&apos;t load this page. {pageError.detail}
+          <button className="btn sm" onClick={() => setReloadKey((key) => key + 1)}>Retry</button>
+        </div>}
+        {!pageError && pageLoading && <div className="banner" role="status">Loading {page}…</div>}
+        {!pageLoading && !pageError && <>
         {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {page === 'detail' && currentActor && (
           <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={hosted ? undefined : resetMaster} onOpenAudit={(id) => { setAuditActor(id); go('audit'); }} />
         )}
         {client instanceof MappedBackend && !(client instanceof CoreBackend) && (
-          <HostedEnrollmentApproval active={!sessionExpired} credentialId={getMasterCredId() ?? ''}
+          <HostedEnrollmentApproval active={onboarded} credentialId={getMasterCredId() ?? ''}
             pending={async () => {
               const result = await client.hostedApprovalPending();
               if (!result.ok) {
-                if (result.status.reason === 'unauthorized' || looksSessionExpired(result.status.detail)) setSessionExpired(true);
+                if (result.status.reason === 'unauthorized' || looksSessionExpired(result.status.detail)) readiness.pause(true);
                 throw new Error(result.status.detail);
               }
               return result.data;
@@ -1594,7 +1451,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         {page === 'knowledge' && (
           // 2026-09-13 — ONE page over canonical memory + the curated, bindable items
           // (the former memory + resources pages); it reads the app registry itself.
-          <KnowledgePage client={client} showToast={showToast} reloadKey={reloadKey} categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} inbox={inbox} inboxBusy={inboxBusy} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onReloadNamespace={reloadCategory} onView={setMemoryView} onAcceptInbox={acceptInboxItem} onRejectInbox={rejectInboxItem} onRefreshInbox={refreshInbox} onViewInboxBody={viewInboxBody} onOpenActor={(id) => go('detail', id)} onOpenApps={() => go('applications')} focusNs={knowledgeFocus} onCommitScope={commitScope} />
+          <KnowledgePage onResourcesLoaded={resourcesLoaded} client={client} showToast={showToast} reloadKey={reloadKey} categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} inbox={inbox} inboxBusy={inboxBusy} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onReloadNamespace={reloadCategory} onView={setMemoryView} onAcceptInbox={acceptInboxItem} onRejectInbox={rejectInboxItem} onRefreshInbox={refreshInbox} onViewInboxBody={viewInboxBody} onOpenActor={(id) => go('detail', id)} onOpenApps={() => go('applications')} focusNs={knowledgeFocus} onCommitScope={commitScope} />
         )}
         {page === 'credentials' && (
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
@@ -1627,7 +1484,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
               channels,
               storage: channelStorage,
               actors,
-              actorsSyncing,
+              actorsSyncing: actorsSyncing || actorsRead.kind === 'loading',
               onCreate: createChannel,
               onUpdate: updateChannel,
               onDelete: deleteChannel,
@@ -1683,6 +1540,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
         {page === 'chain' && <ChainPage />}
         {page === 'logo' && <LogoPage />}
+        </>}
       </main>
       {spawnOpen && (
         <SpawnAgentModal

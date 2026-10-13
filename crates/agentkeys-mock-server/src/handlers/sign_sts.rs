@@ -491,8 +491,8 @@ fn grant_refused(actor: &str, class: &str, reason: &str) -> ApiErr {
     )
 }
 
-/// `operatorMasterWallet(bytes32)` — bare JSON-RPC eth_call (the broker
-/// cap.rs precedent for this view). Returns the 40-hex wallet (no 0x);
+/// `operatorMasterWallet(bytes32)` through the worker's bounded chain reader.
+/// Returns the 40-hex wallet (no 0x);
 /// all-zeros = no master registered for the omni.
 async fn call_operator_master_wallet(
     http: &reqwest::Client,
@@ -510,27 +510,15 @@ async fn call_operator_master_wallet(
         h.update(b"operatorMasterWallet(bytes32)");
         hex::encode(&h.finalize()[..4])
     };
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "eth_call",
-        "params": [{"to": registry, "data": format!("0x{selector}{omni}")}, "latest"],
-        "id": 1,
-    });
-    let resp = http
-        .post(rpc_url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("rpc send: {e}"))?;
-    let v: Value = resp.json().await.map_err(|e| format!("rpc body: {e}"))?;
-    if let Some(err) = v.get("error") {
-        return Err(format!("rpc error: {err}"));
-    }
-    let word = v["result"]
-        .as_str()
-        .ok_or_else(|| format!("no result in rpc response: {v}"))?
-        .trim_start_matches("0x")
-        .to_lowercase();
+    let raw = agentkeys_worker_creds::verify::eth_call(
+        http,
+        rpc_url,
+        registry,
+        &format!("0x{selector}{omni}"),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let word = raw.trim_start_matches("0x").to_lowercase();
     if word.len() < 40 {
         return Err(format!("result too short for an address word: {word:?}"));
     }
@@ -816,6 +804,115 @@ mod tests {
         );
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    async fn rpc_sequence_stub(
+        responses: Vec<(StatusCode, String)>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::clone(&requests);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let responses = Arc::new(responses);
+        let router = axum::Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let request_count = Arc::clone(&request_count);
+                let responses = Arc::clone(&responses);
+                async move {
+                    let index = request_count.fetch_add(1, Ordering::SeqCst);
+                    responses[index.min(responses.len() - 1)].clone()
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{address}"), requests)
+    }
+
+    #[tokio::test]
+    async fn master_chain_gate_retries_transport_failures_without_bypassing_registration() {
+        use std::sync::atomic::Ordering;
+        for (word, expected_status) in [
+            (
+                "0x0000000000000000000000001111111111111111111111111111111111111111",
+                None,
+            ),
+            (
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+                Some(StatusCode::FORBIDDEN),
+            ),
+        ] {
+            let (rpc, requests) = rpc_sequence_stub(vec![
+                (StatusCode::BAD_GATEWAY, "upstream unavailable".into()),
+                (StatusCode::OK, "<html>upstream unavailable</html>".into()),
+                (
+                    StatusCode::OK,
+                    json!({"jsonrpc":"2.0", "id":1, "result":word}).to_string(),
+                ),
+            ])
+            .await;
+            let mut cfg = config(None);
+            cfg.chain_rpc_url = Some(rpc);
+            cfg.registry_address = Some("0x0000000000000000000000000000000000000001".into());
+            let session = VerifiedSession {
+                omni_account: "ab".repeat(32),
+                parent_omni: None,
+                device_pubkey: None,
+            };
+            let result =
+                chain_grant_gate(&cfg, Some(&session), &session.omni_account, "config").await;
+            match expected_status {
+                None => assert!(result.is_ok(), "{result:?}"),
+                Some(status) => {
+                    let (actual, body) = result.unwrap_err();
+                    assert_eq!(actual, status);
+                    assert_eq!(body.0["error"], "grant_not_found");
+                }
+            }
+            assert_eq!(requests.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn master_chain_read_rejects_reverts_without_retrying() {
+        use std::sync::atomic::Ordering;
+        let (rpc, requests) = rpc_sequence_stub(vec![(
+            StatusCode::OK,
+            json!({"jsonrpc":"2.0", "id":1, "error":{"code":3,"message":"execution reverted"}})
+                .to_string(),
+        )])
+        .await;
+        let error = call_operator_master_wallet(
+            &reqwest::Client::new(),
+            &rpc,
+            "registry",
+            &"ab".repeat(32),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("execution reverted"), "{error}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn master_chain_read_exhausts_transport_retries_and_fails_closed() {
+        use std::sync::atomic::Ordering;
+        let (rpc, requests) = rpc_sequence_stub(vec![(
+            StatusCode::BAD_GATEWAY,
+            "upstream unavailable".into(),
+        )])
+        .await;
+        let error = call_operator_master_wallet(
+            &reqwest::Client::new(),
+            &rpc,
+            "registry",
+            &"ab".repeat(32),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("failed after 5 attempts"), "{error}");
+        assert_eq!(requests.load(Ordering::SeqCst), 5);
     }
 
     async fn post_auth(

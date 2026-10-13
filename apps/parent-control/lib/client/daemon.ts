@@ -129,12 +129,29 @@ async function rejectedResponse(method: string, path: string, response: Response
 
 export class MappedBackend implements AgentKeysClient {
   protected baseUrl: string;
+  private pendingReads = new Map<string, Promise<Result<unknown>>>();
 
   constructor(baseUrl?: string) {
     this.baseUrl = (baseUrl ?? process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
   }
 
-  protected async getJson<T>(path: string): Promise<Result<T>> {
+  protected coalesceRead<T>(path: string, read: () => Promise<Result<T>>): Promise<Result<T>> {
+    const existing = this.pendingReads.get(path);
+    if (existing) return existing as Promise<Result<T>>;
+    const pending = read().finally(() => {
+      if (this.pendingReads.get(path) === pending) this.pendingReads.delete(path);
+    });
+    this.pendingReads.set(path, pending);
+    return pending;
+  }
+
+  protected clearPendingReads(): void { this.pendingReads.clear(); }
+
+  protected getJson<T>(path: string): Promise<Result<T>> {
+    return this.coalesceRead(path, () => this.fetchJson<T>(path));
+  }
+
+  private async fetchJson<T>(path: string): Promise<Result<T>> {
     try {
       const resp = await fetch(`${this.baseUrl}${path}`, { method: 'GET', cache: 'no-store' });
       if (!resp.ok) {
@@ -162,6 +179,8 @@ export class MappedBackend implements AgentKeysClient {
       return { ok: true, data: (await resp.json()) as T };
     } catch (e) {
       return { ok: false, status: unreachable(`POST ${path}: ${(e as Error).message}`) };
+    } finally {
+      this.clearPendingReads();
     }
   }
 
@@ -178,6 +197,8 @@ export class MappedBackend implements AgentKeysClient {
       return { ok: true, data: (await resp.json()) as T };
     } catch (e) {
       return { ok: false, status: unreachable(`POST ${path}: ${(e as Error).message}`) };
+    } finally {
+      this.clearPendingReads();
     }
   }
 
@@ -496,6 +517,7 @@ export class MappedBackend implements AgentKeysClient {
     const r = await this.getJson<{ status: string; omni_account?: string }>(
       `/v1/auth/email/status?request_id=${encodeURIComponent(requestId)}`,
     );
+    if (r.ok && r.data.status === 'verified') this.clearPendingReads();
     return r.ok ? { ok: true, data: { status: r.data.status, omniAccount: r.data.omni_account } } : r;
   }
 
@@ -508,7 +530,9 @@ export class MappedBackend implements AgentKeysClient {
   }
 
   async logout(): Promise<Result<void>> {
+    this.clearPendingReads();
     const r = await this.postJson<{ ok: boolean }>('/v1/auth/logout', {});
+    this.clearPendingReads();
     return r.ok ? { ok: true, data: undefined } : r;
   }
 
@@ -518,6 +542,7 @@ export class MappedBackend implements AgentKeysClient {
   }
 
   async reloginFinish(challenge: string, assertion: RegisterMasterAssertion): Promise<Result<ReloginResult>> {
+    this.clearPendingReads();
     return this.postJson<ReloginResult>('/v1/auth/relogin/finish', { challenge, assertion });
   }
 

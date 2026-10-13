@@ -121,10 +121,13 @@ export class CoreBackend extends MappedBackend {
     return this.request('POST', pending.path, pending.body);
   }
 
-  protected async getJson<T>(path: string): Promise<Result<T>> { return this.request('GET', path, null); }
-  protected async postJson<T>(path: string, body: unknown): Promise<Result<T>> { return this.request('POST', path, body); }
+  protected getJson<T>(path: string): Promise<Result<T>> { return this.coalesceRead(path, () => this.request<T>('GET', path, null)); }
+  protected async postJson<T>(path: string, body: unknown): Promise<Result<T>> {
+    try { return await this.request<T>('POST', path, body); }
+    finally { this.clearPendingReads(); }
+  }
   protected async postJsonBody<T>(path: string, body: string): Promise<Result<T>> {
-    try { return this.request('POST', path, JSON.parse(body)); } catch (error) { return consoleFailure(error); }
+    try { return this.postJson<T>(path, JSON.parse(body)); } catch (error) { return consoleFailure(error); }
   }
 
   async getChainInfo(chain?: string): Promise<Result<import('./types').ChainInfo>> {
@@ -321,6 +324,7 @@ export class CoreBackend extends MappedBackend {
   }
 
   clearHostedSession(): void {
+    this.clearPendingReads();
     this.loginGeneration += 1;
     this.masterSession = null;
     this.browserIdentity = null;

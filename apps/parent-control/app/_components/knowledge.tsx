@@ -15,7 +15,7 @@
 // unchanged: entries live in `knowledge:<ns>`, an app reads a namespace only
 // through the read-only grant its install minted.
 
-import { Fragment, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
 import type { AppInstanceRow } from '@/lib/generated/AppInstanceRow';
 import type { KnowledgeHistory } from '@/lib/generated/KnowledgeHistory';
@@ -134,11 +134,13 @@ export function KnowledgePage({
   onOpenApps,
   focusNs,
   onCommitScope,
+  onResourcesLoaded,
 }: {
   client: AgentKeysClient;
   showToast: (msg: string, sticky?: boolean) => void;
   /** Bumped by the shell after an install / uninstall — the reader chips re-read the app registry. */
   reloadKey?: number;
+  onResourcesLoaded?: (items: ResourceItemRow[]) => void;
   categories: MemoryCategory[];
   entriesByNs: Record<string, NsEntries>;
   /** All actors — which delegates can READ each namespace (a delegate's `knowledge:<ns>` grant). */
@@ -180,6 +182,8 @@ export function KnowledgePage({
   const [resources, setResources] = useState<ResourceItemRow[]>([]);
   const [apps, setApps] = useState<AppInstanceRow[]>([]);
   const [registry, setRegistry] = useState('ok');
+  const [registryRead, setRegistryRead] = useState<{ loading: boolean; error?: string }>({ loading: connected });
+  const refreshGeneration = useRef(0);
   const [view, setView] = useState<View>({ kind: 'list', tab: 'repositories' });
   const [groupBy, setGroupBy] = useState<KnowledgeGroupBy>('type');
   const [query, setQuery] = useState('');
@@ -191,22 +195,31 @@ export function KnowledgePage({
   const [modal, setModal] = useState<null | ModalState>(null);
 
   const refresh = useCallback(async () => {
-    if (client.listResources) {
-      const r = await client.listResources();
-      if (r.ok) {
-        setResources(r.data.items);
-        setRegistry(r.data.storage);
+    const generation = ++refreshGeneration.current;
+    setRegistryRead({ loading: true });
+    try {
+      const [resourceResult, appResult] = await Promise.all([
+        client.listResources?.(), client.listApps?.(),
+      ]);
+      if (generation !== refreshGeneration.current) return;
+      if (resourceResult && !resourceResult.ok) throw new Error(resourceResult.status.detail ?? 'Knowledge items could not be loaded.');
+      if (appResult && !appResult.ok) throw new Error(appResult.status.detail ?? 'Knowledge readers could not be loaded.');
+      if (resourceResult?.ok) {
+        setResources(resourceResult.data.items);
+        setRegistry(resourceResult.data.storage);
+        onResourcesLoaded?.(resourceResult.data.items);
       }
+      if (appResult?.ok) setApps(appResult.data.apps);
+      setRegistryRead({ loading: false });
+    } catch (error) {
+      if (generation === refreshGeneration.current) setRegistryRead({ loading: false, error: (error as Error).message });
     }
-    if (client.listApps) {
-      const a = await client.listApps();
-      if (a.ok) setApps(a.data.apps);
-    }
-  }, [client]);
+  }, [client, onResourcesLoaded]);
   // Re-read the registry on connect, after an install / uninstall, and after a
   // plant (D-K2: a plant registers note rows for what it planted).
   useEffect(() => {
     if (connected && !planting) void refresh();
+    return () => { refreshGeneration.current += 1; };
   }, [connected, planting, refresh, reloadKey]);
 
   const namespaces = useMemo(() => knowledgeNamespaces(categories, resources, entriesByNs, apps, actors), [categories, resources, entriesByNs, apps, actors]);
@@ -308,6 +321,16 @@ export function KnowledgePage({
     else if (it.entry) setModal({ curate: it.entry, restore });
   };
 
+  if (connected && (registryRead.loading || registryRead.error)) {
+    return <>
+      <PageHead crumb="household · knowledge" title="Knowledge" desc="Your knowledge repositories and their readers." />
+      <div className="banner" role={registryRead.error ? 'alert' : 'status'}>
+        {registryRead.error ?? 'Loading knowledge items…'}
+        {registryRead.error && <button className="btn sm" onClick={() => void refresh()}>Retry</button>}
+      </div>
+    </>;
+  }
+
   const filterBox = (
     <span style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
       <input style={{ ...INPUT, width: 180, padding: '4px 8px' }} placeholder="filter items…" value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -338,7 +361,7 @@ export function KnowledgePage({
         </div>
       )}
 
-      {!hasAnything && !busy && (
+      {!hasAnything && !busy && !registryRead.loading && !registryRead.error && (
         connected ? (
           <TaxonomySetup
             presets={presets}

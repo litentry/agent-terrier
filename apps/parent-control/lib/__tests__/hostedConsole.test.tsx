@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { App } from '../../app/_components/App';
 import { ChainBadge } from '../../app/_components/ChainBadge';
+import { OnboardingScreen } from '../../app/_components/ceremony';
 import { CoreBackend } from '../client/core';
 import { EmptyBackend } from '../client/empty';
 import type { AgentKeysClient } from '../client/types';
@@ -19,7 +20,8 @@ describe('hosted console admission', () => {
   });
 
   it('offers email sign-in without exposing demo registration', () => {
-    const markup = renderToStaticMarkup(<App />);
+    expect(renderToStaticMarkup(<App />)).toContain('Restoring session…');
+    const markup = renderToStaticMarkup(<OnboardingScreen onComplete={() => {}} />);
     expect(markup).toContain('Welcome back.');
     expect(markup).toContain('Access is limited to approved email addresses');
     expect(markup).toContain('id="ak-email"');
