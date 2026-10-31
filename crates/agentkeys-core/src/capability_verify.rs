@@ -10,6 +10,38 @@ pub use agentkeys_protocol::capability::{CapOp, CapPayload, CapToken, DataClass}
 
 pub const ROLE_CAP_MINT: u8 = 1;
 
+#[derive(Clone)]
+pub struct AuthorityConfig {
+    pub broker_public_key: String,
+    pub rpc_url: String,
+    pub registry: String,
+    pub scope: String,
+    pub epoch: String,
+}
+
+impl AuthorityConfig {
+    pub fn from_profile(
+        profile: &crate::chain_profile::ChainProfile,
+        broker_public_key: String,
+    ) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        validate_broker_public_key(&broker_public_key)?;
+        let contract = |name| {
+            profile
+                .contract(name)
+                .map(|item| item.address.clone())
+                .with_context(|| format!("profile is missing {name}"))
+        };
+        Ok(Self {
+            broker_public_key,
+            rpc_url: profile.rpc.http.clone(),
+            registry: contract("SidecarRegistry")?,
+            scope: contract("AgentKeysScope")?,
+            epoch: contract("K3EpochCounter")?,
+        })
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum VerifyError {
     #[error("broker public key parse: {0}")]

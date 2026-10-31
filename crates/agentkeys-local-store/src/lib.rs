@@ -23,14 +23,7 @@ use sha2::{Digest, Sha256};
 const APPLICATION_ID: u32 = 0x41544f53;
 const SCHEMA_VERSION: u32 = 1;
 
-#[derive(Clone)]
-pub struct AuthorityConfig {
-    pub broker_public_key: String,
-    pub rpc_url: String,
-    pub registry: String,
-    pub scope: String,
-    pub epoch: String,
-}
+pub use agentkeys_core::capability_verify::AuthorityConfig;
 
 pub struct LocalStore {
     connection: Mutex<Connection>,
@@ -49,7 +42,13 @@ pub struct StoreError {
 
 impl IntoResponse for StoreError {
     fn into_response(self) -> Response {
-        (self.status, Json(serde_json::json!({"code": self.code}))).into_response()
+        (
+            self.status,
+            Json(object_store::ObjectErrorBody {
+                code: self.code.into(),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -217,7 +216,7 @@ impl LocalStore {
                     .map_err(|_| failed("storage_read_failed"))?;
                 let (value, revision) = found.ok_or(StoreError {
                     status: StatusCode::NOT_FOUND,
-                    code: "object_not_found",
+                    code: object_store::OBJECT_NOT_FOUND,
                 })?;
                 Ok(ObjectResponse {
                     value_b64: Some(STANDARD.encode(value)),
@@ -293,7 +292,7 @@ impl LocalStore {
                 if expected.is_some_and(|expected| current.as_deref().unwrap_or("") != expected) {
                     return Err(StoreError {
                         status: StatusCode::CONFLICT,
-                        code: "object_revision_conflict",
+                        code: object_store::OBJECT_REVISION_CONFLICT,
                     });
                 }
                 let revision = if let Some(value) = value {
@@ -334,7 +333,7 @@ fn chain_error(error: VerifyError) -> StoreError {
 pub fn router(store: Arc<LocalStore>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { Json(serde_json::json!({"ready":true})) }))
-        .route("/v1/objects", post(|State(store): State<Arc<LocalStore>>, Json(request): Json<ObjectRequest>| async move {
+        .route(object_store::OBJECT_ROUTE, post(|State(store): State<Arc<LocalStore>>, Json(request): Json<ObjectRequest>| async move {
             store.execute(request).await.map(Json)
         }))
         .layer(DefaultBodyLimit::max(object_store::MAX_OBJECT_BYTES * 2))

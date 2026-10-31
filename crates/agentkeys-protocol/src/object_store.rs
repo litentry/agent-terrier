@@ -1,6 +1,27 @@
 use crate::capability::{CapOp, CapPayload, CapToken, DataClass};
 use serde::{Deserialize, Serialize};
 
+pub const OBJECT_ROUTE: &str = "/v1/objects";
+pub const OBJECT_NOT_FOUND: &str = "object_not_found";
+pub const OBJECT_REVISION_CONFLICT: &str = "object_revision_conflict";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectErrorBody {
+    pub code: String,
+}
+
+pub fn worker_object_missing(status: u16, body: &str) -> bool {
+    status == 404
+        && serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.get("reason").and_then(|reason| reason.as_str()),
+                    Some(OBJECT_NOT_FOUND | "s3_no_such_key")
+                )
+            })
+}
 pub const MAX_OBJECT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_OBJECT_KEY_BYTES: usize = 1024;
 pub const MAX_LIST_KEYS: usize = 500;
@@ -145,7 +166,7 @@ fn omni(value: &str) -> Result<String, &'static str> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn validate_key(value: &str, prefix: bool) -> Result<(), &'static str> {
+pub fn validate_key(value: &str, prefix: bool) -> Result<(), &'static str> {
     let path = if prefix {
         value.strip_suffix('/').unwrap_or(value)
     } else {
@@ -170,6 +191,25 @@ fn validate_key(value: &str, prefix: bool) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_requires_exact_status_and_known_worker_reason() {
+        for reason in [OBJECT_NOT_FOUND, "s3_no_such_key"] {
+            let body = serde_json::json!({"reason":reason}).to_string();
+            assert!(worker_object_missing(404, &body));
+            for status in [200, 400, 403, 409, 502] {
+                assert!(!worker_object_missing(status, &body));
+            }
+        }
+        for body in [
+            "route missing",
+            "{}",
+            r#"{"reason":"unavailable"}"#,
+            r#"{"code":"object_not_found"}"#,
+        ] {
+            assert!(!worker_object_missing(404, body));
+        }
+    }
 
     fn payload(class: DataClass, op: CapOp, service: &str) -> CapPayload {
         CapPayload {

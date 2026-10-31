@@ -3,7 +3,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use agentkeys_core::chain_profile::ChainProfile;
 use agentkeys_local_store::{AuthorityConfig, LocalStore};
 use agentkeys_protocol::capability::DataClass;
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use clap::Parser;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:0";
@@ -35,19 +35,10 @@ async fn main() -> Result<()> {
     profile.require_local_development(options.development, None)?;
     let data_class: DataClass =
         serde_json::from_value(serde_json::Value::String(options.data_class))?;
-    let contract = |name: &str| {
-        profile
-            .contract(name)
-            .map(|item| item.address.clone())
-            .with_context(|| format!("profile is missing {name}"))
-    };
-    let authority = AuthorityConfig {
-        broker_public_key: std::fs::read_to_string(&options.broker_public_key)?,
-        rpc_url: profile.rpc.http.clone(),
-        registry: contract("SidecarRegistry")?,
-        scope: contract("AgentKeysScope")?,
-        epoch: contract("K3EpochCounter")?,
-    };
+    let authority = AuthorityConfig::from_profile(
+        &profile,
+        std::fs::read_to_string(&options.broker_public_key)?,
+    )?;
     let store = Arc::new(LocalStore::open(&options.database, data_class, authority)?);
     let listener = tokio::net::TcpListener::bind(options.listen).await?;
     println!(
