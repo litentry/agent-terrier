@@ -1,0 +1,41 @@
+{
+  "name": "@agentkeys/design-system",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared Agent Terrier design tokens and React components.",
+  "type": "module",
+  "scripts": {
+    "generate": "node scripts/generate-tokens.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "exports": {
+    ".": "./tokens.ts",
+    "./react": "./react/index.tsx",
+    "./tokens.json": "./tokens.json",
+    "./css": "./css/index.css",
+    "./css/tokens.css": "./css/tokens.css",
+    "./css/fonts.css": "./css/fonts.css",
+    "./css/components.css": "./css/components.css",
+    "./assets/terrier.svg": "./assets/terrier.svg"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "18.3.3",
+    "react": "18.3.1",
+    "typescript": "5.5.3"
+  },
+  "files": [
+    "css",
+    "assets",
+    "react",
+    "tokens.ts",
+    "tokens.json"
+  ]
+}

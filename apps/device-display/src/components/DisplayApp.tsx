@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { CardView, LangSwitcher, ThemeSwitcher } from '@agentkeys/design-system/react';
+import { Button, CardView, LangSwitcher, ThemeSwitcher } from '@agentkeys/design-system/react';
 import type { CardViewAction, CardViewDocument } from '@agentkeys/design-system/react';
 import { DEFAULT_SETTINGS, loadSettings, normalizeBrokerUrl, normalizeId, saveSettings } from '../lib/settings';
 import type { Settings } from '../lib/settings';
@@ -385,8 +385,8 @@ export function DisplayApp() {
         <StatusPill phase={phase} label={t.bound} />
         <span style={{ flex: 1 }} />
         <LangSwitcher value={settings.locale} onChange={(l) => { const s = { ...settings, locale: l }; setSettings(s); saveSettings(storage(), s); }} />
-        <button className="btn secondary" onClick={goFullscreen}>{t.fullscreen}</button>
-        <button className="btn secondary" onClick={() => setEditing(true)}>{t.settings}</button>
+        <Button onClick={goFullscreen}>{t.fullscreen}</Button>
+        <Button onClick={() => setEditing(true)}>{t.settings}</Button>
       </header>
 
       {editing || phase.kind === 'unconfigured' ? (
@@ -429,8 +429,8 @@ export function DisplayApp() {
         <section style={{ display: 'grid', gap: 10, maxWidth: 640 }}>
           <p style={{ margin: 0, color: '#ffb4a2' }}>{phase.message}</p>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn primary" onClick={() => setTick((n) => n + 1)}>{t.retry}</button>
-            <button className="btn secondary" onClick={forget}>{t.forget}</button>
+            <Button variant="primary" onClick={() => setTick((n) => n + 1)}>{t.retry}</Button>
+            <Button onClick={forget}>{t.forget}</Button>
           </div>
         </section>
       )}
@@ -517,8 +517,8 @@ function SettingsForm({
       </label>
       <ThemeSwitcher value={theme} onChange={setTheme} />
       <div style={{ display: 'flex', gap: 8 }}>
-        <button className="btn primary" type="submit" disabled={!valid}>{t.save}</button>
-        {settings.brokerUrl && <button className="btn secondary" type="button" onClick={onCancel}>{t.cancel}</button>}
+        <Button variant="primary" type="submit" disabled={!valid}>{t.save}</Button>
+        {settings.brokerUrl && <Button type="button" onClick={onCancel}>{t.cancel}</Button>}
       </div>
     </form>
   );

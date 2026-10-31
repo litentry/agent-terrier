@@ -5,7 +5,6 @@
 //! client-side. The JWT authenticates the STS call, so neither the broker
 //! nor the daemon needs an IAM principal at runtime.
 //!
-//! Issue: <https://github.com/litentry/agentKeys/issues/71> (Option A).
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

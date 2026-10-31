@@ -1,0 +1,21 @@
+name: public source
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  public-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate public contents
+        run: python3 scripts/check-public.py
+      - name: Test publication checks
+        run: python3 -m unittest discover -s scripts/tests
+      - name: Test local web server isolation
+        run: node --test scripts/tests/web-ssr-server.test.mjs
+      - name: Check workspace dependency closure
+        run: cargo metadata --locked --no-deps --format-version 1 > /dev/null

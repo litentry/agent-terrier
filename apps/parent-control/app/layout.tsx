@@ -16,35 +16,14 @@ export const viewport: Viewport = {
   themeColor: '#ffffff',
 };
 
-// #751 — the 备案号 the 办法 第十三条 requires at the bottom centre of every page
-// served from the mainland host (the website's footer carries the same line).
-// Build-time: NEXT_PUBLIC_ICP_BEIAN, set by the VE host converge from ICP_BEIAN
-// in operator-workstation.ve.env; empty on every other build = no footer.
-const ICP_BEIAN = (process.env.NEXT_PUBLIC_ICP_BEIAN ?? '').trim();
-
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" data-theme="github">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Hanken+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap"
-          rel="stylesheet"
-        />
-      </head>
       <body>
         <ClientProvider>
           <ChainBadge />
           {children}
         </ClientProvider>
-        {ICP_BEIAN && (
-          <footer className="icp-footer">
-            <a href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">
-              {ICP_BEIAN}
-            </a>
-          </footer>
-        )}
       </body>
     </html>
   );
