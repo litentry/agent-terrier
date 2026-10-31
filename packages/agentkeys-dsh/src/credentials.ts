@@ -15,7 +15,7 @@
  * `undefined` = unconfigured). The fallthrough is load-bearing, not a
  * convenience: dsh consults ONLY the mounted credentials service when one
  * exists (`resolveApiKey` is a ternary, not a chain — #631), and the sandbox
- * env contract (spec §3.2) delivers the gate LLM key AS env (`ARK_API_KEY`).
+ * env contract (spec §3.2) delivers the gate LLM key AS env (`AGENTKEYS_MODEL_API_KEY`).
  * Without the fallthrough, mounting this provider makes the gate route
  * unresolvable on every pod. Mapped refs never consult env — vault-owned.
  * Writes are rejected: vault stores are master ceremonies, never a

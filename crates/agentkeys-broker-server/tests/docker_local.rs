@@ -52,7 +52,7 @@ fn environment(actor: &str, count: Arc<AtomicUsize>) -> CreateEnvProvider {
     Box::new(move || {
         Box::pin(async move {
             count.fetch_add(1, Ordering::SeqCst);
-            vec![
+            let mut environment = vec![
                 (
                     sandbox_env::BROKER_URL.into(),
                     "http://host.docker.internal:8080".into(),
@@ -72,7 +72,12 @@ fn environment(actor: &str, count: Arc<AtomicUsize>) -> CreateEnvProvider {
                     sandbox_env::BRIDGE_TOKEN.into(),
                     "synthetic-local-bridge".into(),
                 ),
-            ]
+            ];
+            environment.extend(agentkeys_protocol::model_runtime::relay_environment(
+                "http://host.docker.internal:8077/v1",
+                "synthetic-local-model".into(),
+            ));
+            environment
         })
     })
 }
@@ -138,6 +143,7 @@ async fn real_docker_lifecycle_and_isolation() -> Result<()> {
         ensure!(metadata["HostConfig"]["CapDrop"].as_array().is_some_and(|items| items.iter().any(|item| item == "ALL")), "capabilities not dropped");
         ensure!(metadata["Mounts"].as_array().is_some_and(|items| items.iter().all(|item| item["Type"] == "tmpfs")), "unexpected host mount");
         let configuration = metadata["Config"]["Env"].as_array().context("environment missing")?;
+        ensure!(configuration.iter().filter_map(Value::as_str).any(|value| value == "AGENTKEYS_MODEL_API_KEY=synthetic-local-model"), "model relay configuration missing");
         ensure!(!configuration.iter().filter_map(Value::as_str).any(|value| value.starts_with("AWS_") || value.starts_with("DOCKER_")), "host credentials inherited");
         let response = engine.run(&["exec", &first.sandbox_id, "sh", "-c", &format!("test \"$(id -u)\" = 1000 && touch /tmp/writable && ! touch /forbidden 2>/dev/null && wget -qO- http://127.0.0.1:{bridge_port}")]).await?;
         ensure!(response == b"local-runtime-ok\n", "positive local HTTP control failed");

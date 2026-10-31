@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Context } from '@deepseek-ai/cordis';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as webSearch from '../src/web-search.js';
+import { API_KEY, BASE_URL } from '../src/generated/model-runtime.js';
 
 // The plugin registers through the REAL ctx.web seam contract; a fake web
 // service captures the provider so available()/search() run under test.
@@ -57,6 +60,10 @@ describe('web_search provider (#653 — the ctx.web seam, never a second tool)',
   it('reports unavailable (never crashes) when the spawn carries no gate pair', async () => {
     const provider = await boot({ searchUrl: '', apiKey: '' });
     expect(provider.available()).toBe(false);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(provider.search({ query: 'test' })).rejects.toThrow('not configured');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('POSTs the gate leg with the gk_ bearer and maps to the seam result shape', async () => {
@@ -68,6 +75,7 @@ describe('web_search provider (#653 — the ctx.web seam, never a second tool)',
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('http://gate.test/v1/search');
     expect((init.headers as Record<string, string>).authorization).toBe('Bearer gk_test');
+    expect(init.redirect).toBe('error');
     expect(JSON.parse(String(init.body))).toEqual({ q: 'hangzhou weather', count: 3 });
     expect(result.content).toBe('31°C and sunny');
     expect(result.sources).toEqual([
@@ -83,9 +91,10 @@ describe('web_search provider (#653 — the ctx.web seam, never a second tool)',
     const provider = await boot();
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response('{"error":"budget exceeded"}', { status: 429 })),
+      vi.fn(async () => new Response('{"error":"synthetic-private-detail"}', { status: 429 })),
     );
     await expect(provider.search({ query: 'x' })).rejects.toThrow(/HTTP 429/);
+    await expect(provider.search({ query: 'x' })).rejects.not.toThrow(/synthetic-private-detail/);
   });
 
   it('toSeamResult: empty answers → no content field; alien shapes → empty sources', () => {
@@ -94,10 +103,44 @@ describe('web_search provider (#653 — the ctx.web seam, never a second tool)',
     expect(webSearch.toSeamResult(null)).toEqual({ sources: [], truncated: false });
   });
 
-  it('searchEndpoint derives from ARK_BASE_URL and is empty-safe', () => {
-    expect(webSearch.searchEndpoint({ ARK_BASE_URL: 'https://gate.z/v1/' })).toBe(
-      'https://gate.z/v1/search',
+  it('searchEndpoint derives from the shared model base and is empty-safe', () => {
+    expect(webSearch.searchEndpoint({ [BASE_URL]: 'http://localhost:8077/v1/' })).toBe(
+      'http://localhost:8077/v1/search',
     );
     expect(webSearch.searchEndpoint({})).toBe('');
+  });
+
+  it('never combines a partial explicit endpoint with an inherited credential', () => {
+    const environment = { [BASE_URL]: 'http://localhost:8077/v1', [API_KEY]: 'synthetic-key' };
+    expect(webSearch.searchConfiguration({}, environment)).toEqual({
+      endpoint: 'http://localhost:8077/v1/search', apiKey: 'synthetic-key',
+    });
+    for (const config of [{ searchUrl: 'http://other.example/search' }, { apiKey: 'explicit-key' }]) {
+      expect(() => webSearch.searchConfiguration(config, environment)).toThrow('supplied together');
+    }
+    for (const endpoint of ['file:///tmp/search', 'http://synthetic-key@localhost/search', 'http://localhost/search?key=synthetic-key']) {
+      expect(() => webSearch.searchConfiguration({ searchUrl: endpoint, apiKey: 'synthetic-key' }, {})).toThrow('invalid search endpoint');
+    }
+  });
+
+  it('refuses a real redirect without delivering the credential to its target', async () => {
+    let targetCalls = 0;
+    const target = createServer((_request, response) => { targetCalls++; response.end('{}'); });
+    const redirect = createServer((_request, response) => {
+      response.writeHead(307, { location: `http://127.0.0.1:${(target.address() as AddressInfo).port}/capture` });
+      response.end();
+    });
+    try {
+      await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve));
+      await new Promise<void>((resolve) => redirect.listen(0, '127.0.0.1', resolve));
+      const provider = await boot({ searchUrl: `http://127.0.0.1:${(redirect.address() as AddressInfo).port}/search` });
+      await expect(provider.search({ query: 'test' })).rejects.toThrow();
+      expect(targetCalls).toBe(0);
+    } finally {
+      for (const server of [redirect, target]) {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
   });
 });
