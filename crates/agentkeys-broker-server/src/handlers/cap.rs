@@ -821,50 +821,16 @@ pub(crate) async fn call_get_device(
     parse_device_entry(&result)
 }
 
-/// Decode the ABI-encoded DeviceEntry struct return from getDevice. The
-/// struct layout (per SidecarRegistry.sol):
-///   bytes32 operatorOmni    (word 0)
-///   bytes32 actorOmni       (word 1)
-///   bytes32 k11CredId       (word 2)
-///   uint8   tier            (word 3, right-aligned)
-///   uint8   roles           (word 4, right-aligned)
-///   uint64  registeredAt    (word 5, right-aligned)
-///   bool    revoked         (word 6, right-aligned)
+/// Project the canonical registry record into capability authorization fields.
 fn parse_device_entry(raw: &str) -> Result<DeviceEntry, CapError> {
-    let hex = raw.trim_start_matches("0x");
-    // DeviceEntry post codex H1 (SidecarRegistry.sol) has 11 ABI words:
-    //   word 0  operatorOmni     bytes32
-    //   word 1  actorOmni        bytes32
-    //   word 2  k11CredId        bytes32
-    //   word 3  k11RpIdHash      bytes32  (NEW, codex H1)
-    //   word 4  k11PubX          uint256  (NEW, codex H1)
-    //   word 5  k11PubY          uint256  (NEW, codex H1)
-    //   word 6  tier             uint8 (padded)
-    //   word 7  roles            uint8 (padded)
-    //   word 8  registeredAt     uint64 (padded)
-    //   word 9  lastSignCount    uint32 (padded)
-    //   word 10 revoked          bool (padded)
-    if hex.len() < 11 * 64 {
-        return Err(CapError::ChainRpc(format!(
-            "getDevice returned {} bytes; expected ≥ 11×32 (post codex H1 struct)",
-            hex.len() / 2
-        )));
-    }
-    let operator_omni = hex[0..64].to_lowercase();
-    let actor_omni = hex[64..128].to_lowercase();
-    let roles_hex = &hex[7 * 64..8 * 64];
-    let registered_hex = &hex[8 * 64..9 * 64];
-    let revoked_hex = &hex[10 * 64..11 * 64];
-    // Take last 2 hex chars (uint8) of the roles word.
-    let roles = u8::from_str_radix(&roles_hex[62..64], 16).unwrap_or(0);
-    let registered_at = u64::from_str_radix(&registered_hex[48..64], 16).unwrap_or(0);
-    let revoked = revoked_hex.trim_start_matches('0').ends_with('1');
+    let record = agentkeys_core::registry::parse_device_probe(raw)
+        .map_err(|error| CapError::ChainRpc(error.to_string()))?;
     Ok(DeviceEntry {
-        operator_omni,
-        actor_omni,
-        roles,
-        registered_at,
-        revoked,
+        operator_omni: hex::encode(record.operator_omni),
+        actor_omni: hex::encode(record.actor_omni),
+        roles: record.roles,
+        registered_at: record.registered_at,
+        revoked: record.revoked,
     })
 }
 
@@ -882,7 +848,7 @@ async fn call_is_service_in_scope(
     let c = strip_0x_pad32(service_hash, "service_hash")?;
     let data = format!("0x{selector}{a}{b}{c}");
     let result = eth_call(http, rpc, scope, &data).await?;
-    Ok(parse_bool_result(&result))
+    parse_bool_result(&result)
 }
 
 async fn call_current_epoch(
@@ -944,16 +910,12 @@ fn strip_0x_lc(s: &str) -> String {
     s.strip_prefix("0x").unwrap_or(s).to_lowercase()
 }
 
-fn parse_bool_result(s: &str) -> bool {
-    s.trim_start_matches("0x")
-        .trim_start_matches('0')
-        .ends_with('1')
+fn parse_bool_result(raw: &str) -> Result<bool, CapError> {
+    agentkeys_core::registry::parse_bool(raw).map_err(|error| CapError::ChainRpc(error.to_string()))
 }
 
-fn parse_u64_result(s: &str) -> Result<u64, CapError> {
-    let stripped = s.trim_start_matches("0x");
-    u64::from_str_radix(stripped, 16)
-        .map_err(|e| CapError::ChainRpc(format!("epoch parse: {e} (raw: {s})")))
+fn parse_u64_result(raw: &str) -> Result<u64, CapError> {
+    agentkeys_core::registry::parse_u64(raw).map_err(|error| CapError::ChainRpc(error.to_string()))
 }
 
 fn function_selector(sig: &str) -> String {
@@ -1410,10 +1372,12 @@ mod tests {
     fn parse_bool_result_handles_padded() {
         assert!(parse_bool_result(
             "0x0000000000000000000000000000000000000000000000000000000000000001"
-        ));
+        )
+        .unwrap());
         assert!(!parse_bool_result(
             "0x0000000000000000000000000000000000000000000000000000000000000000"
-        ));
+        )
+        .unwrap());
     }
 
     #[test]
@@ -1423,6 +1387,15 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn malformed_registry_revocation_is_not_an_active_device() {
+        let mut words = vec![0; 11 * 32];
+        words[8 * 32 + 31] = 1;
+        assert!(!parse_device_entry(&hex::encode(&words)).unwrap().revoked);
+        words[10 * 32 + 31] = 2;
+        assert!(parse_device_entry(&hex::encode(&words)).is_err());
     }
 
     #[test]

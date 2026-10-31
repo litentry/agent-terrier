@@ -912,7 +912,7 @@ pub async fn archive_build(
         .ok()
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| aerr(StatusCode::BAD_REQUEST, "session omni must be 32 bytes"))?;
-    if !probe.registered || probe.revoked {
+    if !probe.is_registered() || probe.revoked {
         return Err(aerr(
             StatusCode::CONFLICT,
             "nothing to archive — the binding is already revoked or was never registered",

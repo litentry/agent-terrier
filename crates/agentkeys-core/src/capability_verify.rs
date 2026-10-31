@@ -273,7 +273,7 @@ pub async fn check_chain_scope(
     let c = pad32(&service_hash)?;
     let data = format!("0x{selector}{a}{b}{c}");
     let raw = eth_call(http, rpc_url, scope_contract, &data).await?;
-    if !parse_bool(&raw) {
+    if !parse_bool(&raw)? {
         return Err(VerifyError::NotInScope);
     }
     Ok(())
@@ -382,36 +382,23 @@ fn is_rate_limit_error(err: &serde_json::Value) -> bool {
 }
 
 fn parse_device_entry(raw: &str) -> Result<OnChainDevice, VerifyError> {
-    let hex = raw.trim_start_matches("0x");
-    if hex.len() < 11 * 64 {
-        return Err(VerifyError::ChainRpc(format!(
-            "getDevice returned {} bytes; expected ≥ 11×32 (post codex H1 struct)",
-            hex.len() / 2
-        )));
-    }
-    let operator_omni = hex[0..64].to_lowercase();
-    let actor_omni = hex[64..128].to_lowercase();
-    let roles = u8::from_str_radix(&hex[(7 * 64 + 62)..(7 * 64 + 64)], 16).unwrap_or(0);
-    let registered_at = u64::from_str_radix(&hex[(8 * 64 + 48)..(8 * 64 + 64)], 16).unwrap_or(0);
-    let revoked = hex[10 * 64..11 * 64].trim_start_matches('0').ends_with('1');
+    let record = crate::registry::parse_device_probe(raw)
+        .map_err(|error| VerifyError::ChainRpc(error.to_string()))?;
     Ok(OnChainDevice {
-        operator_omni,
-        actor_omni,
-        roles,
-        registered_at,
-        revoked,
+        operator_omni: hex::encode(record.operator_omni),
+        actor_omni: hex::encode(record.actor_omni),
+        roles: record.roles,
+        registered_at: record.registered_at,
+        revoked: record.revoked,
     })
 }
 
-fn parse_bool(raw: &str) -> bool {
-    raw.trim_start_matches("0x")
-        .trim_start_matches('0')
-        .ends_with('1')
+fn parse_bool(raw: &str) -> Result<bool, VerifyError> {
+    crate::registry::parse_bool(raw).map_err(|error| VerifyError::ChainRpc(error.to_string()))
 }
 
 fn parse_u64(raw: &str) -> Result<u64, VerifyError> {
-    let stripped = raw.trim_start_matches("0x");
-    u64::from_str_radix(stripped, 16).map_err(|e| VerifyError::ChainRpc(format!("u64 parse: {e}")))
+    crate::registry::parse_u64(raw).map_err(|error| VerifyError::ChainRpc(error.to_string()))
 }
 
 fn parse_p256_pubkey_pem(pem: &str) -> Result<VerifyingKey, VerifyError> {
@@ -509,7 +496,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
+            for stream in listener.incoming().take(1) {
                 let Ok(mut s) = stream else { return };
                 let mut buf = [0u8; 4096];
                 let _ = s.read(&mut buf); // drain the request; we don't parse it
@@ -547,6 +534,45 @@ mod tests {
             matches!(r, Err(VerifyError::NotInScope)),
             "ungranted cross-actor scope must be NotInScope (got {r:?})"
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_scope_response_is_a_chain_error() {
+        let url =
+            spawn_mock_rpc("0x0000000000000000000000000000000000000000000000000000000000000011");
+        let result = check_chain_scope(
+            &reqwest::Client::new(),
+            &url,
+            "0xscope",
+            &sample_token(CapOp::Fetch),
+        )
+        .await;
+        assert!(matches!(result, Err(VerifyError::ChainRpc(_))));
+    }
+
+    #[tokio::test]
+    async fn epoch_requires_a_canonical_value_and_current_authority() {
+        let client = reqwest::Client::new();
+        let token = sample_token(CapOp::Fetch);
+        let valid =
+            spawn_mock_rpc("0x0000000000000000000000000000000000000000000000000000000000000001");
+        assert!(check_chain_k3_epoch(&client, &valid, "0xepoch", &token)
+            .await
+            .is_ok());
+        let rotated =
+            spawn_mock_rpc("0x0000000000000000000000000000000000000000000000000000000000000002");
+        assert!(matches!(
+            check_chain_k3_epoch(&client, &rotated, "0xepoch", &token).await,
+            Err(VerifyError::K3Mismatch {
+                expected: 2,
+                got: 1
+            })
+        ));
+        let malformed = spawn_mock_rpc("0x1");
+        assert!(matches!(
+            check_chain_k3_epoch(&client, &malformed, "0xepoch", &token).await,
+            Err(VerifyError::ChainRpc(_))
+        ));
     }
 
     #[test]
@@ -715,6 +741,15 @@ mod tests {
     fn check_op_accepts_match() {
         let t = sample_token(CapOp::Store);
         assert!(check_op(&t, CapOp::Store).is_ok());
+    }
+
+    #[test]
+    fn malformed_registry_revocation_is_not_an_active_device() {
+        let mut words = vec![0; 11 * 32];
+        words[8 * 32 + 31] = 1;
+        assert!(!parse_device_entry(&hex::encode(&words)).unwrap().revoked);
+        words[10 * 32 + 31] = 2;
+        assert!(parse_device_entry(&hex::encode(&words)).is_err());
     }
 
     #[test]

@@ -110,7 +110,7 @@ pub fn filter_revocable(
     let mut included = Vec::with_capacity(probed.len());
     let mut skipped = Vec::new();
     for (hash, probe) in probed {
-        if !probe.registered || probe.revoked {
+        if !probe.is_registered() || probe.revoked {
             skipped.push(format!(
                 "0x{}: already revoked or never registered",
                 hex::encode(hash)
@@ -329,8 +329,9 @@ mod tests {
             operator_omni: [operator; 32],
             actor_omni: [0u8; 32],
             tier,
-            registered,
+            registered_at: u64::from(registered),
             revoked,
+            ..Default::default()
         }
     }
 
@@ -413,13 +414,13 @@ mod tests {
         assert_eq!(p.operator_omni, [0x22; 32]);
         assert_eq!(p.actor_omni, [0x33; 32]);
         assert_eq!(p.tier, 2);
-        assert!(p.registered);
+        assert!(p.is_registered());
         assert!(p.revoked);
 
         // an all-zero entry (unknown hash) parses as never-registered.
         let zeroed = format!("0x{}", "0".repeat(64 * 11));
         let p = parse_device_probe(&zeroed).unwrap();
-        assert!(!p.registered && !p.revoked);
+        assert!(!p.is_registered() && !p.revoked);
 
         assert!(parse_device_probe("0x1234").is_err());
     }

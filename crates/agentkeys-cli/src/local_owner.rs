@@ -393,7 +393,7 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
                 TIER_DEVICE
             };
             if options.action == OwnerAction::Bind {
-                ensure!(!current.registered, "device key was already bound; use grant for active scope changes or a fresh actor key after revocation");
+                ensure!(!current.is_registered(), "device key was already bound; use grant for active scope changes or a fresh actor key after revocation");
                 let registration = AgentRegister {
                     device_key_hash: hash,
                     operator_omni: operator,
@@ -408,7 +408,7 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
                 }
             } else {
                 ensure!(
-                    current.registered
+                    current.is_registered()
                         && current.operator_omni == operator
                         && current.actor_omni == actor
                         && current.tier == tier,
