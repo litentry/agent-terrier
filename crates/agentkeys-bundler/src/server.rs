@@ -223,6 +223,7 @@ impl BundlerBoot {
 struct SubmittedTx {
     tx_hash: String,
     call_data: Vec<u8>,
+    operation: agentkeys_core::erc4337::PackedUserOp,
 }
 
 pub struct BundlerState {
@@ -486,7 +487,7 @@ async fn rpc_handler(
         "eth_getUserOperationReceipt" => {
             match get_user_operation_receipt(&state, cfg, &params).await {
                 Ok(v) => rpc_ok(id, v),
-                Err(e) => rpc_error(id, -32601, format!("{e:#}")),
+                Err(e) => rpc_error(id, -32603, format!("{e:#}")),
             }
         }
         other => rpc_error(id, -32601, format!("method {other} not found")),
@@ -523,7 +524,7 @@ async fn send_user_operation(
         hex::encode(packed.user_op_hash(&cfg.entry_point, cfg.chain_id))
     );
 
-    let call_data = handle_ops_calldata(&[packed], &cfg.beneficiary);
+    let call_data = handle_ops_calldata(std::slice::from_ref(&packed), &cfg.beneficiary);
 
     // One submit at a time: the EOA nonce read + broadcast must not interleave.
     let _guard = state.submit_lock.lock().await;
@@ -578,6 +579,7 @@ async fn send_user_operation(
         SubmittedTx {
             tx_hash,
             call_data: tx.data,
+            operation: packed,
         },
     );
     Ok(user_op_hash)
@@ -599,22 +601,33 @@ async fn get_user_operation_receipt(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("missing userOpHash param"))?
         .to_lowercase();
-    let (tx_hash, call_data) = match state.submitted.lock().await.get(&hash) {
-        Some(t) => (t.tx_hash.clone(), t.call_data.clone()),
+    let (tx_hash, call_data, operation) = match state.submitted.lock().await.get(&hash) {
+        Some(t) => (t.tx_hash.clone(), t.call_data.clone(), t.operation.clone()),
         None => return Ok(Value::Null),
     };
     let receipt = chain_rpc(state, cfg, "eth_getTransactionReceipt", json!([tx_hash])).await?;
     if receipt.is_null() {
         return Ok(Value::Null);
     }
-    let success = receipt.get("status").and_then(|s| s.as_str()) == Some("0x1");
+    anyhow::ensure!(
+        receipt["transactionHash"].as_str() == Some(tx_hash.as_str()),
+        "receipt transaction identity mismatch"
+    );
+    let success = agentkeys_core::user_operation_receipt::execution_succeeded(
+        &receipt,
+        &cfg.entry_point,
+        &operation,
+        &hash,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let outer_reverted = receipt["status"] == "0x0";
     let mut out = json!({
         "userOpHash": hash,
         "entryPoint": format!("0x{}", hex::encode(cfg.entry_point)),
         "success": success,
         "receipt": receipt,
     });
-    if !success {
+    if outer_reverted {
         if let Some(reason) = replay_revert_reason(state, cfg, &call_data, &out["receipt"]).await {
             warn!(
                 user_op_hash = hash,
@@ -622,6 +635,8 @@ async fn get_user_operation_receipt(
             );
             out["reason"] = json!(reason);
         }
+    } else if !success {
+        out["reason"] = json!("UserOperation execution reverted");
     }
     Ok(out)
 }
@@ -722,22 +737,40 @@ mod tests {
     /// Mock chain node: receipts come back with the given `status`; every
     /// `eth_call` reverts with the `FailedOp(0, "AA31 ...")` blob.
     async fn spawn_mock_chain(status: &'static str) -> String {
+        spawn_mock_chain_with_operation(status, None).await
+    }
+
+    async fn spawn_mock_chain_with_operation(
+        status: &'static str,
+        operation_success: Option<bool>,
+    ) -> String {
         use axum::routing::post;
+        let logs = operation_success.map(|success| {
+            let mut data = [0u8; 128];
+            data[63] = u8::from(success);
+            let topic = agentkeys_core::device_crypto::keccak256(b"UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)");
+            vec![json!({"address":format!("0x{}", "66".repeat(20)),
+                "topics":[format!("0x{}", hex::encode(topic)), format!("0x{}", "ab".repeat(32)), format!("0x{}", "00".repeat(32)), format!("0x{}", "00".repeat(32))],
+                "data":format!("0x{}", hex::encode(data)), "removed":false,
+                "transactionHash":"0xfeed", "blockHash":"0xblock", "blockNumber":"0x10"})]
+        }).unwrap_or_default();
+        let receipt = json!({"transactionHash":"0xfeed","blockHash":"0xblock","blockNumber":"0x10","status":status,"logs":logs});
         async fn handle(
-            axum::extract::State(status): axum::extract::State<&'static str>,
+            axum::extract::State(receipt): axum::extract::State<Value>,
             Json(req): Json<Value>,
         ) -> Json<Value> {
             let id = req.get("id").cloned().unwrap_or(Value::Null);
             match req.get("method").and_then(|m| m.as_str()).unwrap_or("") {
-                "eth_getTransactionReceipt" => Json(json!({"jsonrpc":"2.0","id":id,"result":{
-                    "transactionHash":"0xfeed","blockNumber":"0x10","status":status}})),
+                "eth_getTransactionReceipt" => {
+                    Json(json!({"jsonrpc":"2.0","id":id,"result":receipt}))
+                }
                 "eth_call" => Json(json!({"jsonrpc":"2.0","id":id,"error":{
                     "code":3,"message":"execution reverted","data":FAILED_OP_AA31_BLOB}})),
                 m => Json(json!({"jsonrpc":"2.0","id":id,"error":{
                     "code":-32601,"message":format!("unexpected {m}")}})),
             }
         }
-        let app = Router::new().route("/", post(handle)).with_state(status);
+        let app = Router::new().route("/", post(handle)).with_state(receipt);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -761,6 +794,17 @@ mod tests {
             SubmittedTx {
                 tx_hash: "0xfeed".into(),
                 call_data: vec![0xde, 0xad],
+                operation: agentkeys_core::erc4337::PackedUserOp {
+                    sender: [0; 20],
+                    nonce: [0; 32],
+                    init_code: Vec::new(),
+                    call_data: Vec::new(),
+                    account_gas_limits: [0; 32],
+                    pre_verification_gas: [0; 32],
+                    gas_fees: [0; 32],
+                    paymaster_and_data: Vec::new(),
+                    signature: Vec::new(),
+                },
             },
         );
         st
@@ -785,7 +829,8 @@ mod tests {
 
     #[tokio::test]
     async fn successful_receipt_has_no_reason_and_skips_the_replay() {
-        let st = state_with_submitted(spawn_mock_chain("0x1").await).await;
+        let st =
+            state_with_submitted(spawn_mock_chain_with_operation("0x1", Some(true)).await).await;
         let resp = rpc_handler(
             State(st),
             Json(
@@ -797,6 +842,45 @@ mod tests {
         let r = &resp.0["result"];
         assert_eq!(r["success"], true);
         assert!(r.get("reason").is_none(), "{r}");
+    }
+
+    #[tokio::test]
+    async fn mined_transaction_without_operation_event_is_not_success() {
+        let state = state_with_submitted(spawn_mock_chain("0x1").await).await;
+        let response = rpc_handler(
+            State(state),
+            Json(
+                json!({"jsonrpc":"2.0","id":10,"method":"eth_getUserOperationReceipt",
+                "params":[format!("0x{}", "ab".repeat(32))]}),
+            ),
+        )
+        .await;
+        assert!(
+            response.0["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("UserOperationEvent"),
+            "{}",
+            response.0
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_operation_inside_mined_transaction_is_reported_as_failure() {
+        let state =
+            state_with_submitted(spawn_mock_chain_with_operation("0x1", Some(false)).await).await;
+        let response = rpc_handler(
+            State(state),
+            Json(json!({"jsonrpc":"2.0","id":11,
+            "method":"eth_getUserOperationReceipt","params":[format!("0x{}", "ab".repeat(32))]})),
+        )
+        .await;
+        assert_eq!(response.0["result"]["success"], false);
+        assert_eq!(
+            response.0["result"]["reason"],
+            "UserOperation execution reverted"
+        );
+        assert_eq!(response.0["result"]["receipt"]["status"], "0x1");
     }
 
     #[tokio::test]
