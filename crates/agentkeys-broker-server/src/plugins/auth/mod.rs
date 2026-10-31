@@ -12,6 +12,8 @@ use super::Readiness;
 
 #[cfg(feature = "auth-email-link")]
 pub mod email_link;
+#[cfg(feature = "auth-email-link")]
+pub mod local_outbox;
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth2;
 #[cfg(feature = "auth-wallet-sig")]
@@ -19,7 +21,7 @@ pub mod wallet_sig;
 
 #[cfg(feature = "auth-email-link")]
 pub use email_link::{
-    EmailLinkAuth, EmailSendError, EmailSender, SesEmailSender, SesVerifyCache, StubEmailSender,
+    EmailLinkAuth, EmailSendError, EmailSender, SenderVerificationCache, StubEmailSender,
 };
 #[cfg(feature = "auth-oauth2")]
 pub use oauth2::{

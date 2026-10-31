@@ -26,7 +26,7 @@ use agentkeys_broker_server::{
     oidc::OidcKeypair,
     plugins::{
         audit::{sqlite::SqliteAnchor, AuditAnchor, AuditPolicy},
-        auth::{EmailLinkAuth, StubEmailSender},
+        auth::{local_outbox::LocalEmailOutbox, EmailLinkAuth, EmailSender, StubEmailSender},
         wallet::keystore::ClientSideKeystoreProvisioner,
         PluginRegistry,
     },
@@ -58,12 +58,13 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
 async fn spawn_broker_with_access(
     login_access: agentkeys_broker_server::login_access::LoginAccess,
 ) -> (String, Arc<AppState>, Arc<StubEmailSender>) {
-    spawn_broker_fixture(login_access, None).await
+    spawn_broker_fixture(login_access, None, None).await
 }
 
 async fn spawn_broker_fixture(
     login_access: agentkeys_broker_server::login_access::LoginAccess,
     browser_origin: Option<&str>,
+    delivery: Option<Arc<dyn EmailSender>>,
 ) -> (String, Arc<AppState>, Arc<StubEmailSender>) {
     let tmp = Box::leak(Box::new(TempDir::new().unwrap()));
     let oidc = OidcKeypair::generate_and_persist(&tmp.path().join("oidc.json")).unwrap();
@@ -76,12 +77,12 @@ async fn spawn_broker_fixture(
 
     let plugin = Arc::new(
         EmailLinkAuth::new(
-            sender.clone(),
+            delivery.unwrap_or_else(|| sender.clone()),
             Arc::clone(&token_store),
             Arc::clone(&rl_store),
             "broker@example.test",
             format!("{}/auth/email/landing", TEST_ISSUER),
-            tmp.path().join("ses-verify.json"),
+            tmp.path().join("sender-verify.json"),
             5,
             30,
         )
@@ -261,7 +262,12 @@ async fn email_request_returns_request_id_and_polls_pending() {
 
 #[tokio::test]
 async fn full_flow_browser_verify_then_cli_poll_returns_session_jwt() {
-    let (broker_url, _state, sender) = spawn_broker().await;
+    let temporary = TempDir::new().unwrap();
+    let directory = temporary.path().join("outbox");
+    let delivery =
+        Arc::new(LocalEmailOutbox::from_configuration(true, None, directory.to_str()).unwrap());
+    let (broker_url, _state, _sender) =
+        spawn_broker_fixture(Default::default(), None, Some(delivery)).await;
     let client = reqwest::Client::new();
 
     // CLI initiates
@@ -275,7 +281,16 @@ async fn full_flow_browser_verify_then_cli_poll_returns_session_jwt() {
     let body: Value = resp.json().await.unwrap();
     let request_id = body["request_id"].as_str().unwrap().to_string();
 
-    let (_, landing) = sender.last_sent().unwrap();
+    let message_path = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| !path.file_name().unwrap().to_str().unwrap().starts_with('.'))
+        .unwrap();
+    let original =
+        agentkeys_core::protected_file::read_text(message_path.to_str().unwrap()).unwrap();
+    let message: Value = serde_json::from_str(&original).unwrap();
+    assert_eq!(message["recipient"], "alice@example.com");
+    let landing = message["landing_url"].as_str().unwrap();
     let token = landing.split_once("#t=").unwrap().1.to_string();
 
     // Browser verifies
@@ -317,6 +332,16 @@ async fn full_flow_browser_verify_then_cli_poll_returns_session_jwt() {
     assert_eq!(st_body["status"], "verified");
     assert!(st_body["session_jwt"].as_str().unwrap().starts_with("eyJ"));
     assert!(st_body["omni_account"].is_string());
+    let replay = client
+        .post(format!("{broker_url}/v1/auth/email/verify"))
+        .json(&serde_json::json!({"token":token}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), 401);
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+    let after = agentkeys_core::protected_file::read_text(message_path.to_str().unwrap()).unwrap();
+    assert_eq!(original.as_str(), after.as_str());
 }
 
 #[tokio::test]
@@ -663,7 +688,7 @@ async fn hosted_browser_fixture() {
         std::env::var("AGENTKEYS_BROWSER_TEST_ORIGIN").expect("set browser fixture origin");
     let output = std::env::var("AGENTKEYS_BROWSER_TEST_OUTPUT").expect("set fixture output path");
     let (broker_url, _, sender) =
-        spawn_broker_fixture(allowlist("alice@example.com"), Some(&origin)).await;
+        spawn_broker_fixture(allowlist("alice@example.com"), Some(&origin), None).await;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
     while tokio::time::Instant::now() < deadline {
         let link = sender
