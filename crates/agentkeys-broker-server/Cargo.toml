@@ -20,6 +20,7 @@ agentkeys-types = { workspace = true }
 # daemon/CLI/broker.
 agentkeys-core = { workspace = true }
 zeroize = { workspace = true }
+httparse = "1"
 # #369 — the shared DelegationPath wire type echoed into the minted cap-token
 # (one owner; the worker deserializes the SAME type).
 agentkeys-protocol = { workspace = true }

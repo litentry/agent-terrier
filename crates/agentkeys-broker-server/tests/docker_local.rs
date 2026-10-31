@@ -141,16 +141,20 @@ async fn real_docker_lifecycle_and_isolation() -> Result<()> {
         ensure!(!configuration.iter().filter_map(Value::as_str).any(|value| value.starts_with("AWS_") || value.starts_with("DOCKER_")), "host credentials inherited");
         let response = engine.run(&["exec", &first.sandbox_id, "sh", "-c", &format!("test \"$(id -u)\" = 1000 && touch /tmp/writable && ! touch /forbidden 2>/dev/null && wget -qO- http://127.0.0.1:{bridge_port}")]).await?;
         ensure!(response == b"local-runtime-ok\n", "positive local HTTP control failed");
-        let endpoint = runtime.instance_mgmt_endpoint(&first.sandbox_id).context("missing published endpoint")?.0;
+        ensure!(metadata["NetworkSettings"]["Ports"].as_object().is_some_and(|ports| ports.values().all(|value| value.is_null() || value.as_array().is_some_and(Vec::is_empty))), "container ports must not be published");
+        let (endpoint, headers) = runtime.instance_mgmt_endpoint(&first.sandbox_id).context("missing host management endpoint")?;
         let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
-            if let Ok(response) = client.get(&endpoint).send().await {
+            let mut request = client.get(&endpoint);
+            for (name, value) in &headers { request = request.header(name, value); }
+            if let Ok(response) = request.send().await {
                 if response.status().is_success() && response.text().await? == "local-runtime-ok\n" { break; }
             }
-            ensure!(tokio::time::Instant::now() < deadline, "published loopback HTTP endpoint is unavailable");
+            ensure!(tokio::time::Instant::now() < deadline, "authorized host management endpoint is unavailable");
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+        ensure!(client.get(&endpoint).send().await?.status() == 403, "missing forwarding proof was accepted");
         ensure!(runtime.ensure_for_delegate_with_envs(&first_device, &second_actor, &[], environment(&second_actor, count.clone())).await.is_err(), "foreign actor reused the runtime");
         ensure!(count.load(Ordering::SeqCst) == 1, "denial minted a credential");
         let foreign = DockerRuntime::connect(DockerConfig { namespace: format!("foreign-{}", uuid::Uuid::new_v4().simple()), ..config.clone() }).await?;
@@ -164,6 +168,16 @@ async fn real_docker_lifecycle_and_isolation() -> Result<()> {
         let network = format!("{namespace}-{second_device}");
         let second_ip = second_metadata["NetworkSettings"]["Networks"][&network]["IPAddress"].as_str().context("second runtime address missing")?;
         ensure!(engine.run(&["exec", &first.sandbox_id, "wget", "-T", "1", "-qO-", &format!("http://{second_ip}:{bridge_port}")]).await.is_err(), "cross-runtime network access succeeded");
+        let (second_endpoint, second_headers) = runtime.instance_mgmt_endpoint(&second.sandbox_id).context("second management endpoint missing")?;
+        let mut wrong_proof = client.get(&second_endpoint);
+        for (name, value) in &headers { wrong_proof = wrong_proof.header(name, value); }
+        ensure!(wrong_proof.send().await?.status() == 403, "another runtime forwarding proof was accepted");
+        let mut authorized = client.get(&second_endpoint);
+        for (name, value) in &second_headers { authorized = authorized.header(name, value); }
+        ensure!(authorized.send().await?.text().await? == "local-runtime-ok\n", "second host positive control failed");
+        let host_port = reqwest::Url::parse(&second_endpoint)?.port().context("host management port missing")?;
+        let denied = engine.run(&["exec", &first.sandbox_id, "sh", "-c", &format!("! wget -T 2 -S -O- http://host.docker.internal:{host_port} 2>&1")]).await?;
+        ensure!(std::str::from_utf8(&denied)?.contains("403 Forbidden"), "host forwarding did not refuse the other actor");
         ensure!(engine.inspect(&second.sandbox_id).await?["State"]["Running"] == true, "cross-runtime probe changed the target");
         engine.run(&["container", "stop", "--time", "1", &first.sandbox_id]).await?;
         let restarted = runtime.ensure_for_delegate_with_envs(&first_device, &first_actor, &[], environment(&first_actor, count.clone())).await?;
