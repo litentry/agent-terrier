@@ -5,6 +5,7 @@ pub mod auth;
 pub mod browser_origins;
 pub mod capability;
 pub mod chain_abi;
+pub mod object_store;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

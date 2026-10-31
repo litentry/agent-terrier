@@ -67,6 +67,10 @@ pub enum VerifyError {
     DelegationInvalid(String),
 }
 
+pub fn validate_broker_public_key(pem: &str) -> Result<(), VerifyError> {
+    parse_p256_pubkey_pem(pem).map(|_| ())
+}
+
 pub fn verify_signature(pubkey_pem: &str, token: &CapToken) -> Result<(), VerifyError> {
     let canonical =
         serde_json::to_vec(&token.payload).map_err(|e| VerifyError::Encode(e.to_string()))?;

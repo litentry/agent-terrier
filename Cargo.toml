@@ -4,6 +4,7 @@ members = [
     "crates/agentkeys-types",
     "crates/agentkeys-device-core",
     "crates/agentkeys-core",
+    "crates/agentkeys-local-store",
     "crates/agentkeys-memory-engine",
     "crates/agentkeys-memory-openviking",
     "crates/agentkeys-web-core",
