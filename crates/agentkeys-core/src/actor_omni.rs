@@ -11,8 +11,7 @@
 //! when the master wallet rotates, never changes when devices come or go.
 //! It is the stable identifier used everywhere v2 keys identity off:
 //!
-//! - S3 path: `bots/<actor_omni_hex>/credentials/<service>.enc`
-//! - AWS PrincipalTag: `agentkeys_actor_omni = <actor_omni_hex>`
+//! - Object path: `bots/<actor_omni_hex>/credentials/<service>.enc`
 //! - On-chain scope index in `ScopeContract`
 //! - AEAD AAD binding in v2 envelopes
 //!
@@ -25,10 +24,6 @@
 //! - `actor_omni_from_wallet` — the v2 derivation used by stage 1+. Output
 //!   is 32 bytes (the SHA-256 digest) or lower-hex (`actor_omni_hex`) for
 //!   path-shaped consumers.
-//! - In v1 (today's `S3CredentialBackend`), the path keys off
-//!   `lower(wallet)` directly. The migration plan (issue v2-stage-1)
-//!   reads from BOTH paths during the transition, with v2 winning on
-//!   conflict.
 
 use sha2::{Digest, Sha256};
 
@@ -36,14 +31,13 @@ use agentkeys_types::WalletAddress;
 
 /// Domain-tag bytes spliced before the wallet inside the SHA-256 input.
 /// MUST match arch.md §14.1 / §14.4 exactly — never adjust without bumping
-/// every consumer at once (S3 path, PrincipalTag, AEAD AAD, scope key).
+/// every consumer at once (object path, AEAD AAD, scope key).
 const DOMAIN: &[u8] = b"agentkeys";
 const CHAIN_LABEL: &[u8] = b"evm";
 
 /// Compute the 32-byte `actor_omni` for an operator's initial master wallet
 /// per arch.md §14.1. Wallet bytes are lowercased to match the JWT claim
-/// shape and the bucket-policy PrincipalTag (`agentkeys_actor_omni` is
-/// always lowercase hex).
+/// shape (`agentkeys_actor_omni` is always lowercase hex).
 pub fn actor_omni_from_wallet(wallet: &WalletAddress) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN);

@@ -30,8 +30,7 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 
-# Issue #85 — convert broker-minted AwsTempCreds into the SDK's canonical
-# Credentials type so we can plug them directly into S3CredentialBackend.
+# Explicit credentials for the remaining speech adapter.
 aws-credential-types = "1"
 
 # K11 stub helpers (deterministic — for CI / no-authenticator environments).

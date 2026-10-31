@@ -1,11 +1,7 @@
 //! Signer-anchored per-actor KEK derivation — the ONE implementation
 //! (#372 item 2 / #91 stage 2).
 //!
-//! The vault has always derived its AES-256 KEK by asking the signer to
-//! EIP-191-sign a deterministic domain-tagged message and hashing the
-//! signature (`s3_backend.rs::derive_kek`); the config data class now uses
-//! the same construction client-side (daemon `ui_bridge`), so the derivation
-//! lives here instead of being re-typed per caller:
+//! Native clients share this signer-based construction with browser clients:
 //!
 //!   msg = "agentkeys.kek.v1:<identity_lowercase>:<service>"
 //!   sig = signer.sign_eip191(omni_account, msg)     // RFC 6979 → deterministic
@@ -20,7 +16,7 @@
 //!   bytes vs the pre-refactor `derive_kek`, so every existing vault blob
 //!   keeps its KEK.
 //! - config (v3 envelopes): the lowercase `0x`-prefixed ACTOR omni — the
-//!   same identity the S3 key + AAD bind.
+//!   same identity the object key and associated data bind.
 
 #[cfg(test)]
 use sha2::{Digest, Sha256};

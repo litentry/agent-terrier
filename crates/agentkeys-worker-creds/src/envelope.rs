@@ -1,19 +1,4 @@
-//! AES-256-GCM envelope v2 — **byte-for-byte identical to the CLI's
-//! existing `agentkeys-core/src/s3_backend.rs` envelope**.
-//!
-//! Envelope layout (binary):
-//!   version (1 byte = 0x02)
-//!   nonce   (12 bytes)
-//!   ciphertext || auth_tag (16 bytes appended by AES-GCM)
-//!
-//! AAD = `agentkeys.cred.aad.v2|<actor_omni_hex>|<service>` (NO trailing
-//! NUL, NO hash). This matches `aad_for_v2` in s3_backend.rs so a blob
-//! the CLI wrote can be read by the worker and vice versa.
-//!
-//! The stage-1 codex review (finding #5) flagged a prior mismatch
-//! (worker was hashing AAD, CLI was using raw); this module is the
-//! canonical reference and is now covered by a cross-crate test vector
-//! (`tests/envelope_cross_compat.rs`).
+//! Development worker AES-256-GCM envelopes: version byte, nonce, ciphertext and tag.
 
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
@@ -51,13 +36,7 @@ pub enum EnvelopeError {
     V3RequiresDerivedKek,
 }
 
-/// AAD for v2 envelopes. MUST match `agentkeys-core::s3_backend::aad_for_v2`
-/// byte-for-byte. Format:
-///   `agentkeys.cred.aad.v2|<lowercase_actor_omni_hex>|<service>`
-///
-/// `actor_omni` is the 64-char hex without `0x` (lowercase); `service` is
-/// passed through as-is (the CLI does not lowercase it before AAD; we
-/// match that exactly for round-trip compatibility).
+/// V2 associated data binds the normalized actor and exact service spelling.
 pub fn aad(_operator_omni: &str, actor_omni: &str, service: &str, _k3_epoch: u64) -> Vec<u8> {
     let actor = actor_omni
         .strip_prefix("0x")
@@ -143,8 +122,6 @@ mod tests {
 
     #[test]
     fn aad_matches_cli_format() {
-        // CLI's s3_backend.rs aad_for_v2: "agentkeys.cred.aad.v2|" + actor + "|" + service
-        // (no hash, no trailing NUL, no k3_epoch).
         let actor = "0xABCDEF12".to_string() + &"0".repeat(56);
         let a = aad("ignored", &actor, "openrouter", 999);
         assert_eq!(

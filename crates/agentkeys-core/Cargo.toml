@@ -28,14 +28,6 @@ anyhow = { workspace = true }
 libc = "0.2"
 zeroize = "1"
 
-# Issue #85 — S3CredentialBackend (client-side AES-256-GCM, OIDC-scoped writes
-# to s3://$BUCKET/bots/<wallet>/credentials/<service>.enc). Anonymous SDK
-# config: the daemon-injected AWS_* env vars carry the temp creds minted via
-# the broker (same path as agentkeys-provisioner::aws_creds).
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
-aws-credential-types = "1"
-aes-gcm = "0.10"
 rand = "0.8"
 # Issue #82 — ERC-7730 clear-signing + EIP-712 typed-data hashing live in
 # `clear_signing/`. k256 is needed for the optional in-process signing path

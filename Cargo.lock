@@ -206,7 +206,6 @@ dependencies = [
 name = "agentkeys-core"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "agentkeys-catalog",
  "agentkeys-device-core",
  "agentkeys-mock-server",
@@ -215,9 +214,6 @@ dependencies = [
  "agentkeys-web-core",
  "anyhow",
  "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-s3",
  "axum",
  "base64 0.22.1",
  "ciborium",
