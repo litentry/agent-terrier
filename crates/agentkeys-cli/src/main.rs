@@ -1374,6 +1374,7 @@ async fn cmd_k11(ctx: &CommandContext, action: &K11Action) -> anyhow::Result<Str
             derive_from,
         } => {
             let (x, y, h) = agentkeys_cli::k11_webauthn::software_webauthn_keygen_with_derive(
+                &ctx.development_signing()?,
                 key_file,
                 rp_id,
                 derive_from.as_deref(),
@@ -1386,9 +1387,13 @@ async fn cmd_k11(ctx: &CommandContext, action: &K11Action) -> anyhow::Result<Str
             userop_hash,
             rp_id,
         } => {
-            let (ad, cdj, loc, r, s) =
-                agentkeys_cli::k11_webauthn::software_webauthn_sign(key_file, userop_hash, rp_id)
-                    .map_err(|e| anyhow::anyhow!("software-sign: {e}"))?;
+            let (ad, cdj, loc, r, s) = agentkeys_cli::k11_webauthn::software_webauthn_sign(
+                &ctx.development_signing()?,
+                key_file,
+                userop_hash,
+                rp_id,
+            )
+            .map_err(|e| anyhow::anyhow!("software-sign: {e}"))?;
             return Ok(format!(
                 "AUTHDATA=0x{ad}\nCDJ=0x{cdj}\nCHALLENGE_LOC={loc}\nR=0x{r}\nS=0x{s}"
             ));
@@ -1946,16 +1951,20 @@ async fn main() {
                      — CI / headless / throwaway-TEST masters ONLY. A real operator master \
                      accepts in parent-control (Touch ID). See arch.md §9 / §22b.1."
                 );
-                agentkeys_cli::agent_admin::agent_accept(
-                    broker_url,
-                    request_id,
-                    services,
-                    *is_device,
-                    k11_key_file,
-                    rp_id,
-                    operator_omni,
-                    session_bearer,
-                )
+                async {
+                    agentkeys_cli::agent_admin::agent_accept(
+                        &ctx.development_signing()?,
+                        broker_url,
+                        request_id,
+                        services,
+                        *is_device,
+                        k11_key_file,
+                        rp_id,
+                        operator_omni,
+                        session_bearer,
+                    )
+                    .await
+                }
                 .await
             }
             AgentAction::Spawn {
@@ -1973,16 +1982,20 @@ async fn main() {
                      — CI / headless / throwaway-TEST masters ONLY. A real operator master \
                      spawns in parent-control (Touch ID). See arch.md §9 / §22b.1."
                 );
-                agentkeys_cli::agent_admin::agent_spawn(
-                    broker_url,
-                    label,
-                    preset,
-                    memory_ns,
-                    *memory_inherited,
-                    k11_key_file,
-                    rp_id,
-                    session_bearer,
-                )
+                async {
+                    agentkeys_cli::agent_admin::agent_spawn(
+                        &ctx.development_signing()?,
+                        broker_url,
+                        label,
+                        preset,
+                        memory_ns,
+                        *memory_inherited,
+                        k11_key_file,
+                        rp_id,
+                        session_bearer,
+                    )
+                    .await
+                }
                 .await
             }
             AgentAction::Archive {
@@ -1998,15 +2011,19 @@ async fn main() {
                     "==> ⚠️  WARN: headless archive signs with the SOFTWARE P-256 passkey on \
                      disk — CI / headless / throwaway-TEST masters ONLY."
                 );
-                agentkeys_cli::agent_admin::agent_archive(
-                    broker_url,
-                    device_key_hash,
-                    *keep_resources,
-                    memory_ns,
-                    k11_key_file,
-                    rp_id,
-                    session_bearer,
-                )
+                async {
+                    agentkeys_cli::agent_admin::agent_archive(
+                        &ctx.development_signing()?,
+                        broker_url,
+                        device_key_hash,
+                        *keep_resources,
+                        memory_ns,
+                        k11_key_file,
+                        rp_id,
+                        session_bearer,
+                    )
+                    .await
+                }
                 .await
             }
         },
@@ -2029,18 +2046,22 @@ async fn main() {
                      from parent-control (Touch ID)."
                 );
                 let label = label.clone().unwrap_or_else(|| template.clone());
-                agentkeys_cli::app_admin::app_install(
-                    daemon_url,
-                    template,
-                    &label,
-                    bind,
-                    resource,
-                    audience,
-                    *tz_offset_minutes,
-                    !*skip_endpoint_enrollment,
-                    k11_key_file,
-                    rp_id,
-                )
+                async {
+                    agentkeys_cli::app_admin::app_install(
+                        &ctx.development_signing()?,
+                        daemon_url,
+                        template,
+                        &label,
+                        bind,
+                        resource,
+                        audience,
+                        *tz_offset_minutes,
+                        !*skip_endpoint_enrollment,
+                        k11_key_file,
+                        rp_id,
+                    )
+                    .await
+                }
                 .await
             }
             AppAction::List { daemon_url } => agentkeys_cli::app_admin::app_list(daemon_url).await,
@@ -2058,13 +2079,17 @@ async fn main() {
                     "==> ⚠️  WARN: headless app uninstall signs with the SOFTWARE P-256 passkey \
                      on disk — CI / headless / throwaway-TEST masters ONLY."
                 );
-                agentkeys_cli::app_admin::app_uninstall(
-                    daemon_url,
-                    label,
-                    *keep_memory,
-                    k11_key_file,
-                    rp_id,
-                )
+                async {
+                    agentkeys_cli::app_admin::app_uninstall(
+                        &ctx.development_signing()?,
+                        daemon_url,
+                        label,
+                        *keep_memory,
+                        k11_key_file,
+                        rp_id,
+                    )
+                    .await
+                }
                 .await
             }
             AppAction::Rebind {
@@ -2080,14 +2105,18 @@ async fn main() {
                      disk — CI / headless / throwaway-TEST masters ONLY. A real owner rebinds \
                      from parent-control (Touch ID)."
                 );
-                agentkeys_cli::app_admin::app_rebind(
-                    daemon_url,
-                    label,
-                    bind,
-                    !*skip_endpoint_enrollment,
-                    k11_key_file,
-                    rp_id,
-                )
+                async {
+                    agentkeys_cli::app_admin::app_rebind(
+                        &ctx.development_signing()?,
+                        daemon_url,
+                        label,
+                        bind,
+                        !*skip_endpoint_enrollment,
+                        k11_key_file,
+                        rp_id,
+                    )
+                    .await
+                }
                 .await
             }
             AppAction::Command {

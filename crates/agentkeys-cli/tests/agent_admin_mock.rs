@@ -3,6 +3,9 @@
 //! P-256 passkey signing the UserOps the way headless CI does. No chain, no
 //! deployed broker — the wire shapes are the protocol crate's typed responses.
 
+mod common;
+use common::development_signing;
+
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -15,25 +18,59 @@ use agentkeys_cli::agent_admin;
 const DKH: &str = "0xabababababababababababababababababababababababababababababababab";
 const CHILD: &str = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 const OPERATOR: &str = "0x1212121212121212121212121212121212121212121212121212121212121212";
-const HASH: &str = "0x9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b";
 
 #[derive(Default)]
 struct Seen {
     posts: Mutex<Vec<(String, Value)>>,
+    bad_chain: std::sync::atomic::AtomicBool,
+    bad_hash: std::sync::atomic::AtomicBool,
+    bad_entry_point: std::sync::atomic::AtomicBool,
+}
+
+fn packed_user_op() -> agentkeys_core::erc4337::PackedUserOp {
+    let mut sender = [0; 20];
+    sender[19] = 1;
+    agentkeys_core::erc4337::PackedUserOp {
+        sender,
+        nonce: [0; 32],
+        init_code: Vec::new(),
+        call_data: Vec::new(),
+        account_gas_limits: [0; 32],
+        pre_verification_gas: [0; 32],
+        gas_fees: [0; 32],
+        paymaster_and_data: Vec::new(),
+        signature: Vec::new(),
+    }
 }
 
 fn user_op() -> Value {
-    json!({
-        "sender": "0x0000000000000000000000000000000000000001",
-        "nonce": "0x0",
-        "init_code": "0x",
-        "call_data": "0x",
-        "account_gas_limits": "0x",
-        "pre_verification_gas": "0x0",
-        "gas_fees": "0x",
-        "paymaster_and_data": "0x",
-        "signature": "0x"
-    })
+    serde_json::to_value(agentkeys_core::erc4337::wire_user_op_from_packed(
+        &packed_user_op(),
+    ))
+    .unwrap()
+}
+
+fn local_chain_id() -> u64 {
+    agentkeys_core::chain_profile::ChainProfile::load_builtin("anvil")
+        .unwrap()
+        .chain_id
+}
+
+fn operation_hash() -> String {
+    let mut entry_point = [0; 20];
+    entry_point[19] = 2;
+    format!(
+        "0x{}",
+        hex::encode(packed_user_op().user_op_hash(&entry_point, local_chain_id()))
+    )
+}
+
+fn claimed_hash(seen: &Seen) -> String {
+    if seen.bad_hash.load(std::sync::atomic::Ordering::SeqCst) {
+        format!("0x{}", "ab".repeat(32))
+    } else {
+        operation_hash()
+    }
 }
 
 async fn record(State(seen): State<Arc<Seen>>, path: &'static str, body: Value) -> Value {
@@ -46,7 +83,7 @@ async fn mock_broker(seen: Arc<Seen>) -> String {
         .route(
             "/v1/agent/pairing/claim",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
-                record(State(s), "claim", b.clone()).await;
+                record(State(s.clone()), "claim", b.clone()).await;
                 Json(json!({ "ok": true, "child_omni": CHILD, "label": b["label"], "request_id": "req-1" }))
             }),
         )
@@ -62,17 +99,17 @@ async fn mock_broker(seen: Arc<Seen>) -> String {
         .route(
             "/v1/agent/pending-bindings/ack",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
-                record(State(s), "ack", b).await;
+                record(State(s.clone()), "ack", b).await;
                 Json(json!({ "ok": true }))
             }),
         )
         .route(
             "/v1/agent/spawn/build",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
-                record(State(s), "spawn/build", b.clone()).await;
+                record(State(s.clone()), "spawn/build", b.clone()).await;
                 Json(json!({
-                    "user_op": user_op(), "user_op_hash": HASH, "entry_point": "0x0000000000000000000000000000000000000002",
-                    "chain_id": 212013, "actor_omni": CHILD, "device_key_hash": DKH,
+                    "user_op": user_op(), "user_op_hash": claimed_hash(&s), "entry_point": format!("0x{:040x}", if s.bad_entry_point.load(std::sync::atomic::Ordering::SeqCst) { 3 } else { 2 }),
+                    "chain_id": if s.bad_chain.load(std::sync::atomic::Ordering::SeqCst) { 1 } else { local_chain_id() }, "actor_omni": CHILD, "device_key_hash": DKH,
                     "chat_channel_id": "opchat-probe", "memory_ns": "app-probe", "memory_inherited": false,
                     "services": ["channel-pub:opchat-probe", "channel-sub:opchat-probe", "knowledge:app-probe"],
                     "slots_used": 1, "slots_total": 3
@@ -82,39 +119,39 @@ async fn mock_broker(seen: Arc<Seen>) -> String {
         .route(
             "/v1/agent/spawn/submit",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
-                record(State(s), "spawn/submit", b).await;
-                Json(json!({ "ok": true, "user_op_hash": HASH, "tx_hash": "0x9b10", "block_number": "0x1" }))
+                record(State(s.clone()), "spawn/submit", b).await;
+                Json(json!({ "ok": true, "user_op_hash": claimed_hash(&s), "tx_hash": "0x9b10", "block_number": "0x1" }))
             }),
         )
         .route(
             "/v1/agent/archive/build",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
-                record(State(s), "archive/build", b).await;
+                record(State(s.clone()), "archive/build", b).await;
                 Json(json!({
-                    "user_op": user_op(), "user_op_hash": HASH, "entry_point": "0x0000000000000000000000000000000000000002",
-                    "chain_id": 212013, "device_key_hash": DKH, "resources_kept": true
+                    "user_op": user_op(), "user_op_hash": claimed_hash(&s), "entry_point": format!("0x{:040x}", if s.bad_entry_point.load(std::sync::atomic::Ordering::SeqCst) { 3 } else { 2 }),
+                    "chain_id": if s.bad_chain.load(std::sync::atomic::Ordering::SeqCst) { 1 } else { local_chain_id() }, "device_key_hash": DKH, "resources_kept": true
                 }))
             }),
         )
         .route(
             "/v1/agent/archive/submit",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
-                record(State(s), "archive/submit", b).await;
-                Json(json!({ "ok": true, "user_op_hash": HASH, "tx_hash": "0x9b11", "block_number": "0x2" }))
+                record(State(s.clone()), "archive/submit", b).await;
+                Json(json!({ "ok": true, "user_op_hash": claimed_hash(&s), "tx_hash": "0x9b11", "block_number": "0x2" }))
             }),
         )
         .route(
             "/v1/accept/build",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
-                record(State(s), "accept/build", b).await;
-                Json(json!({ "user_op": user_op(), "user_op_hash": HASH, "entry_point": "0x0000000000000000000000000000000000000002", "chain_id": 212013 }))
+                record(State(s.clone()), "accept/build", b).await;
+                Json(json!({ "user_op": user_op(), "user_op_hash": claimed_hash(&s), "entry_point": format!("0x{:040x}", if s.bad_entry_point.load(std::sync::atomic::Ordering::SeqCst) { 3 } else { 2 }), "chain_id": if s.bad_chain.load(std::sync::atomic::Ordering::SeqCst) { 1 } else { local_chain_id() } }))
             }),
         )
         .route(
             "/v1/accept/submit",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
-                record(State(s), "accept/submit", b).await;
-                Json(json!({ "ok": true, "tx_hash": "0x9b12", "block_number": "0x3", "user_op_hash": HASH }))
+                record(State(s.clone()), "accept/submit", b).await;
+                Json(json!({ "ok": true, "tx_hash": "0x9b12", "block_number": "0x3", "user_op_hash": claimed_hash(&s) }))
             }),
         )
         .with_state(seen);
@@ -140,8 +177,12 @@ fn software_key(dir: &tempfile::TempDir) -> String {
         .join("k11-software.pem")
         .to_string_lossy()
         .to_string();
-    agentkeys_cli::k11_webauthn::software_webauthn_keygen(&path, "localhost")
-        .expect("software passkey");
+    agentkeys_cli::k11_webauthn::software_webauthn_keygen(
+        &development_signing(),
+        &path,
+        "localhost",
+    )
+    .expect("software passkey");
     path
 }
 
@@ -196,6 +237,7 @@ async fn spawn_and_archive_sign_with_the_software_passkey_and_submit() {
     let dir = tempfile::tempdir().unwrap();
     let key = software_key(&dir);
     let out = agent_admin::agent_spawn(
+        &development_signing(),
         &base,
         "probe",
         "chef",
@@ -212,11 +254,19 @@ async fn spawn_and_archive_sign_with_the_software_passkey_and_submit() {
     assert_eq!(v["label"], "probe");
     assert_eq!(v["actor_omni"], CHILD);
     assert_eq!(v["device_key_hash"], DKH);
-    assert_eq!(v["user_op_hash"], HASH);
-    let out =
-        agent_admin::agent_archive(&base, DKH, true, "app-probe", &key, "localhost", &bearer())
-            .await
-            .expect("archive");
+    assert_eq!(v["user_op_hash"], operation_hash());
+    let out = agent_admin::agent_archive(
+        &development_signing(),
+        &base,
+        DKH,
+        true,
+        "app-probe",
+        &key,
+        "localhost",
+        &bearer(),
+    )
+    .await
+    .expect("archive");
     assert!(out.contains(DKH), "{out}");
     let posts = seen.posts.lock().unwrap();
     let build = posts
@@ -260,6 +310,7 @@ async fn accept_signs_the_pending_binding_and_refuses_a_device_without_channels(
     let key = software_key(&dir);
     // A device claim must carry ≥ 1 channel grant (D9): refused before any request.
     let err = agent_admin::agent_accept(
+        &development_signing(),
         &base,
         "req-1",
         "memory",
@@ -277,6 +328,7 @@ async fn accept_signs_the_pending_binding_and_refuses_a_device_without_channels(
     );
     // An unknown request id is refused after the pending read.
     let err = agent_admin::agent_accept(
+        &development_signing(),
         &base,
         "req-404",
         "channel-sub:kitchen",
@@ -291,6 +343,7 @@ async fn accept_signs_the_pending_binding_and_refuses_a_device_without_channels(
     assert!(format!("{err:#}").contains("req-404"), "{err:#}");
     // The happy path: build → software assertion → submit.
     let out = agent_admin::agent_accept(
+        &development_signing(),
         &base,
         "req-1",
         "channel-sub:kitchen",
@@ -322,4 +375,63 @@ async fn accept_signs_the_pending_binding_and_refuses_a_device_without_channels(
         .map(|(_, b)| b.clone())
         .unwrap();
     assert!(submit["assertion"]["authenticator_data"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn software_signing_rejects_foreign_chain_and_tampered_hash_before_key_access_or_submit() {
+    let seen = Arc::new(Seen::default());
+    let base = mock_broker(seen.clone()).await;
+    for (wrong_chain, wrong_hash, wrong_entry_point, expected) in [
+        (true, false, false, "different chain"),
+        (false, true, false, "hash does not match"),
+        (false, false, true, "different chain or EntryPoint"),
+    ] {
+        seen.bad_chain
+            .store(wrong_chain, std::sync::atomic::Ordering::SeqCst);
+        seen.bad_hash
+            .store(wrong_hash, std::sync::atomic::Ordering::SeqCst);
+        seen.bad_entry_point
+            .store(wrong_entry_point, std::sync::atomic::Ordering::SeqCst);
+        let error = agent_admin::agent_spawn(
+            &development_signing(),
+            &base,
+            "probe",
+            "chef",
+            "",
+            false,
+            "must-not-be-read.pem",
+            "localhost",
+            &bearer(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        assert!(seen
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(route, _)| !route.ends_with("submit")));
+    }
+}
+
+#[tokio::test]
+async fn software_signing_rejects_remote_service_before_network_or_key_access() {
+    let error = agent_admin::agent_spawn(
+        &development_signing(),
+        "https://example.test",
+        "probe",
+        "chef",
+        "",
+        false,
+        "must-not-be-read.pem",
+        "localhost",
+        &bearer(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("loopback HTTP service"),
+        "{error}"
+    );
 }

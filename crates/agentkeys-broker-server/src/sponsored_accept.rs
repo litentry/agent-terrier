@@ -394,19 +394,7 @@ fn assemble_userop_with_calldata(
 
 pub use agentkeys_protocol::WireUserOp;
 
-pub fn wire_user_op_from_packed(op: &PackedUserOp) -> WireUserOp {
-    WireUserOp {
-        sender: hex0x(&op.sender),
-        nonce: hex0x(&op.nonce),
-        init_code: hex0x(&op.init_code),
-        call_data: hex0x(&op.call_data),
-        account_gas_limits: hex0x(&op.account_gas_limits),
-        pre_verification_gas: hex0x(&op.pre_verification_gas),
-        gas_fees: hex0x(&op.gas_fees),
-        paymaster_and_data: hex0x(&op.paymaster_and_data),
-        signature: hex0x(&op.signature),
-    }
-}
+pub use agentkeys_core::erc4337::wire_user_op_from_packed;
 
 /// Broker-side mirror of `BuildAcceptUserOpResponse` — the `/v1/accept/build` body
 /// the daemon receives, then K11-signs `user_op_hash` and returns the filled

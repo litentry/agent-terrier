@@ -754,31 +754,7 @@ pub(crate) fn handle_ops_revert_message(reason: Option<&str>, tx_hash: &str) -> 
     }
 }
 
-/// Parse a `WireUserOp` (0x-hex packed fields) into the typed `PackedUserOp` —
-/// the inverse of `crate::sponsored_accept::wire_user_op_from_packed`. Pure.
-pub(crate) fn wire_to_packed(op: &WireUserOp) -> Result<crate::sponsor::PackedUserOp, String> {
-    let raw = |s: &str, name: &str| -> Result<Vec<u8>, String> {
-        hex::decode(s.trim().trim_start_matches("0x")).map_err(|e| format!("{name} hex: {e}"))
-    };
-    let w32 = |s: &str, name: &str| -> Result<[u8; 32], String> {
-        raw(s, name)?
-            .try_into()
-            .map_err(|_| format!("{name} must be 32 bytes"))
-    };
-    Ok(crate::sponsor::PackedUserOp {
-        sender: raw(&op.sender, "sender")?
-            .try_into()
-            .map_err(|_| "sender must be a 20-byte address".to_string())?,
-        nonce: w32(&op.nonce, "nonce")?,
-        init_code: raw(&op.init_code, "init_code")?,
-        call_data: raw(&op.call_data, "call_data")?,
-        account_gas_limits: w32(&op.account_gas_limits, "account_gas_limits")?,
-        pre_verification_gas: w32(&op.pre_verification_gas, "pre_verification_gas")?,
-        gas_fees: w32(&op.gas_fees, "gas_fees")?,
-        paymaster_and_data: raw(&op.paymaster_and_data, "paymaster_and_data")?,
-        signature: raw(&op.signature, "signature")?,
-    })
-}
+pub(crate) use agentkeys_core::erc4337::wire_to_packed;
 
 /// JSON-RPC call to the bundler (`AGENTKEYS_BUNDLER_URL`). Returns `result`.
 pub(crate) async fn bundler_rpc(

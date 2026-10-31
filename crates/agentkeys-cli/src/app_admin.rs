@@ -18,6 +18,7 @@ pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:3114";
 
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(180))
         .build()
         .context("build http client")
@@ -108,6 +109,7 @@ pub fn parse_audience(spec: &str) -> Result<Vec<SlotAudience>> {
 /// `agentkeys app install` — build → software-sign → submit against the daemon.
 #[allow(clippy::too_many_arguments)]
 pub async fn app_install(
+    development: &crate::development_signing::DevelopmentSigning,
     daemon_url: &str,
     template: &str,
     label: &str,
@@ -119,6 +121,7 @@ pub async fn app_install(
     k11_key_file: &str,
     rp_id: &str,
 ) -> Result<String> {
+    development.require_local_service(daemon_url)?;
     let bindings = AppInstallBindings {
         slots: parse_slot_bindings(bind)?,
         resources: parse_resource_bindings(resources)?,
@@ -142,7 +145,9 @@ pub async fn app_install(
         .get("user_op_hash")
         .and_then(|h| h.as_str())
         .ok_or_else(|| anyhow!("install/build carried no user_op_hash"))?;
-    let assertion = crate::agent_admin::software_assertion(k11_key_file, user_op_hash, rp_id)?;
+    development.verify_build_value(&build)?;
+    let assertion =
+        crate::agent_admin::software_assertion(development, k11_key_file, user_op_hash, rp_id)?;
     let submit_body = json!({ "user_op": build.get("user_op"), "assertion": assertion });
     let submitted = daemon_json(
         &client,
@@ -179,6 +184,7 @@ pub async fn app_install(
 /// registry row, the gate's `alias → channel`, the broker's spawn context and
 /// re-sources the live runtime.
 pub async fn app_rebind(
+    development: &crate::development_signing::DevelopmentSigning,
     daemon_url: &str,
     label: &str,
     bind: &str,
@@ -186,6 +192,7 @@ pub async fn app_rebind(
     k11_key_file: &str,
     rp_id: &str,
 ) -> Result<String> {
+    development.require_local_service(daemon_url)?;
     let slots = parse_slot_bindings(bind)?;
     if slots.is_empty() {
         anyhow::bail!("--bind names no slot (slot=channel-id[,slot=channel-id…])");
@@ -207,7 +214,9 @@ pub async fn app_rebind(
         .get("user_op_hash")
         .and_then(|h| h.as_str())
         .ok_or_else(|| anyhow!("rebind/build carried no user_op_hash"))?;
-    let assertion = crate::agent_admin::software_assertion(k11_key_file, user_op_hash, rp_id)?;
+    development.verify_build_value(&build)?;
+    let assertion =
+        crate::agent_admin::software_assertion(development, k11_key_file, user_op_hash, rp_id)?;
     let submit_body = json!({ "user_op": build.get("user_op"), "assertion": assertion });
     let submitted = daemon_json(
         &client,
@@ -260,12 +269,14 @@ pub async fn app_show(daemon_url: &str, label: &str) -> Result<String> {
 
 /// `agentkeys app uninstall` — build → software-sign → submit.
 pub async fn app_uninstall(
+    development: &crate::development_signing::DevelopmentSigning,
     daemon_url: &str,
     label: &str,
     keep_memory: bool,
     k11_key_file: &str,
     rp_id: &str,
 ) -> Result<String> {
+    development.require_local_service(daemon_url)?;
     let client = client()?;
     let built = daemon_json(
         &client,
@@ -279,7 +290,9 @@ pub async fn app_uninstall(
         .get("user_op_hash")
         .and_then(|h| h.as_str())
         .ok_or_else(|| anyhow!("uninstall/build carried no user_op_hash: {built}"))?;
-    let assertion = crate::agent_admin::software_assertion(k11_key_file, user_op_hash, rp_id)?;
+    development.verify_build_value(&built)?;
+    let assertion =
+        crate::agent_admin::software_assertion(development, k11_key_file, user_op_hash, rp_id)?;
     let submitted = daemon_json(
         &client,
         reqwest::Method::POST,

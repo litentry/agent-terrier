@@ -5,6 +5,7 @@ pub mod agent_admin;
 pub mod app_admin;
 pub mod cred_admin;
 pub mod delegation_admin;
+pub mod development_signing;
 pub mod device_session;
 pub mod inbox_curate;
 pub mod k11;
@@ -273,13 +274,16 @@ impl CommandContext {
     }
 
     pub fn require_local_development(&self) -> Result<()> {
+        self.development_signing().map(|_| ())
+    }
+
+    pub fn development_signing(&self) -> Result<development_signing::DevelopmentSigning> {
         let enabled = std::env::var("AGENT_TERRIER_LOCAL_DEV").as_deref() == Ok("1");
         let profile = self.chain_profile()?;
         let rpc_override = agentkeys_core::chain_profile::rpc_http_override(&profile.name, |key| {
             std::env::var(key).ok()
         });
-        profile.require_local_development(enabled, rpc_override.as_deref())?;
-        Ok(())
+        development_signing::DevelopmentSigning::new(profile, enabled, rpc_override.as_deref())
     }
 
     pub fn with_broker_url(mut self, broker_url: Option<String>) -> Self {
