@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import selectors
 import shutil
 import signal
 import socket
@@ -65,26 +66,54 @@ def qualify_runtime_image(image, docker_socket, endpoint, environment, state):
     metadata = json.loads(execute(["image", "inspect", image]))[0]
     identity = metadata["Id"]
     namespace = "terrier-model-check-" + uuid.uuid4().hex
-    execute(["network", "create", "--internal", "--label", "org.agent-terrier.qualification=" + namespace, namespace])
+    transport = None
+    transport_log = (state / "service-transport.log").open("wb")
     try:
-        network = json.loads(execute(["network", "inspect", namespace]))[0]
-        if not network["Internal"]:
-            raise RuntimeError("Qualification network is not internal")
-        report = execute(["run", "--pull=never", "--name", namespace,
-            "--label", "org.agent-terrier.qualification=" + namespace, "--network", namespace,
-            "--add-host", "host.docker.internal:host-gateway", "--read-only", "--cap-drop=ALL",
+        container = execute(["run", "--detach", "--pull=never", "--name", namespace,
+            "--label", "org.agent-terrier.qualification=" + namespace, "--network=none",
+            "--read-only", "--cap-drop=ALL",
             "--security-opt=no-new-privileges", "--user=1000:1000", "--pids-limit=256",
             "--memory=512m", "--cpus=1", "--tmpfs=/tmp:rw,nosuid,nodev,size=128m",
-            "--entrypoint", "node", identity, "packages/agent-terrier-runtime/qualify-model.mjs",
-            "--model-endpoint", endpoint.replace(LOOPBACK_HOST, "host.docker.internal") + "/v1"], timeout=180)
+            "--entrypoint", "node", identity, "-e", "setInterval(() => {}, 2147483647)"]).strip()
+        inspected = json.loads(execute(["container", "inspect", container]))[0]
+        if (inspected["HostConfig"]["NetworkMode"] != "none" or inspected["NetworkSettings"]["Ports"]
+                or inspected["HostConfig"]["Binds"] or not inspected["HostConfig"]["ReadonlyRootfs"]):
+            raise RuntimeError("Qualification container isolation differs from the requested configuration")
+        denial = json.loads(execute(["exec", container, "node", "--input-type=module", "-e",
+            "import net from 'node:net';const socket=net.connect(443,process.argv[1]);"
+            "socket.setTimeout(3000,()=>{socket.destroy();process.exitCode=2});"
+            "socket.on('connect',()=>{socket.destroy();process.exitCode=3});"
+            "socket.on('error',error=>{console.log(JSON.stringify({code:error.code}));"
+            "if(!['ENETUNREACH','ENETDOWN'].includes(error.code))process.exitCode=4});", TEST_NETWORK_ADDRESS]))
+        transport = subprocess.Popen(["node", str(REPOSITORY / "packages/agent-terrier-runtime/service-transport.mjs"),
+            "host", "--socket", str(docker_socket), "--container", container,
+            "--targets", json.dumps({"model": endpoint + "/v1"})], env=docker_environment,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=transport_log)
+        with selectors.DefaultSelector() as selector:
+            selector.register(transport.stdout, selectors.EVENT_READ)
+            if not selector.select(timeout=15):
+                raise RuntimeError("Local service transport readiness timed out")
+        ready = json.loads(transport.stdout.readline(4097))
+        if ready.get("protocol") != 1 or set(ready.get("endpoints", {})) != {"model"}:
+            raise RuntimeError("Invalid local service transport readiness")
+        report = execute(["exec", container, "node", "packages/agent-terrier-runtime/qualify-model.mjs",
+            "--model-endpoint", ready["endpoints"]["model"]], timeout=180)
         return dict(json.loads(report), image_id=identity, image_platform=metadata["Os"] + "/" + metadata["Architecture"],
-            container_network_internal=True, published_ports=False, host_mounts=False)
+            container_network="none", external_connection_error=denial["code"], published_ports=False, host_mounts=False)
     finally:
+        if transport:
+            transport.stdin.close()
+            try:
+                transport.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                transport.kill()
+                transport.wait(timeout=5)
+            transport.stdout.close()
+        transport_log.close()
         containers = execute(["container", "ls", "--all", "--quiet", "--filter",
             "label=org.agent-terrier.qualification=" + namespace]).split()
         for container in containers:
             execute(["container", "rm", "--force", container])
-        execute(["network", "rm", namespace])
 
 
 def qualify(model_directory, binary, gate=False, agent_runtime=False, runtime_image=None, docker_socket=None):
